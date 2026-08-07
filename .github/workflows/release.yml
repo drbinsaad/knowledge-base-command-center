@@ -59,4 +59,5 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: gh release create "$GITHUB_REF_NAME" main.js manifest.json styles.css --verify-tag --title "Knowledge Base Command Center $GITHUB_REF_NAME" --notes-file release-notes.md
