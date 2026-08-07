@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.4
+
+- Prevented versionless modern plugin data from being misclassified as legacy ENT data; recognizable generic settings, collections, pins, and hierarchy now migrate safely, while unrecognized data opens read-only and is never overwritten.
+- Preserved every plugin-owned descendant reference across file and folder renames, including memberships, visual parents and order, pins, hidden/manual index entries, snapshots, undo/redo history, selection, and collapsed nodes.
+- Replaced quadratic index diagnostics, visual-placement checks, related-note resolution, and backlink scans with cached maps and sets; added 10,000-note performance regressions and deferred diagnostics until its tab is opened.
+- Bounded undo and snapshot history by serialized size as well as count, reduced unnecessary record rescans, and restricted metadata-property suggestions to a capped indexed-note sample.
+- Added iPhone/iPad-native workspace and organization JSON export/import through the vault, persistent collapse state, 44-point touch controls, safe-area spacing, and menu-based visual hierarchy movement without relying on drag-and-drop.
+- Fixed template replacement strings containing `$`, Unicode/diacritic search, control and bidirectional filename characters, case-insensitive protected-folder validation, prototype-key imports, non-Markdown current-file handling, drag cleanup, duplicate DOM IDs, filter-chip focus loss, and generic-profile source-folder assumptions.
+- Added an in-memory Obsidian runtime test boundary, destructive-migration regressions, full-repository lint/JSON validation, Community-policy verification, exact Obsidian dependency pinning, and reproducible release-note extraction.
+- Pinned every GitHub Action to a full commit SHA, separated read-only build permissions from release permissions, and retained signed build-provenance attestations.
+- Documented BRAT installation and updates, mobile portability, manual updates, uninstall data behavior, troubleshooting, exact commands and filters, and the stable legacy plugin ID retained for upgrade continuity.
+
 ## 0.7.3
 
 - Adopted Obsidian 1.13's declarative settings API so every setting is available to Settings search on desktop and mobile.

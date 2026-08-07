@@ -4,7 +4,6 @@ import {
   applyTemplateTokens,
   applyCanonicalFrontmatter,
   asUnknownRecord,
-  buildCurriculumLayout,
   buildCurriculumTree,
   buildIndexDiagnostics,
   buildCanonicalMarkdown,
@@ -19,6 +18,8 @@ import {
   expectedParentCurriculumId,
   genericNotePath,
   isExtensionCurriculumId,
+  isRecognizedPluginData,
+  limitSnapshotStack,
   matchesQuery,
   metadataHasGap,
   migrateData,
@@ -30,13 +31,16 @@ import {
   replaceCurriculumVisualPath,
   replacePathMapKey,
   reconcileCurriculumVisual,
+  rewritePluginDataPathPrefix,
   resetCurriculumVisualPath,
   restoreSnapshot,
   shouldHandleRowShortcut,
+  sanitizeFileName,
   snapshotPersonal,
   storedDataVersion,
   unknownQueryTokens,
   validateWritableFolderPath,
+  visualPlacementPathSet,
   type VaultRecord,
 } from "../src/model.ts";
 
@@ -84,7 +88,7 @@ test("migrates only custom v1 headings and keeps a recovery backup", () => {
       { id: "my-airway", title: "My Airway", kind: "custom", subjects: ["topic.md"], subheadings: [] },
     ],
   });
-  assert.equal(data.version, 8);
+  assert.equal(data.version, 9);
   assert.deepEqual(data.collections.map((item) => item.title), ["My Airway"]);
   assert.equal(data.migrationBackup?.headings.length, 2);
   assert.equal(data.selectedPath, "topic.md");
@@ -104,29 +108,6 @@ test("structured tokens and fuzzy text can be combined", () => {
   assert.equal(matchesQuery(cleft, "lary clef domain:pediatric priority:P1 source:traced safety:true"), true);
   assert.equal(matchesQuery(cleft, "domain:otology"), false);
   assert.equal(matchesQuery(cleft, "source:gap"), false);
-});
-
-test("curriculum layout groups topics without changing their paths", () => {
-  const parent = record({ path: "03 Clinical Topics/01 Pediatric/ENT-PED-003 - Congenital Laryngeal Anomalies.md", title: "Congenital Laryngeal Anomalies", curriculumId: "ENT-PED-003" });
-  const supporting = record({ path: "03 Clinical Topics/01 Pediatric/Laryngeal Cleft - Feeding.md", title: "Laryngeal Cleft - Feeding", curriculumId: "", role: "supporting", parentTopic: "[[ENT-PED-003.05 - Laryngeal Cleft|Laryngeal Cleft]]" });
-  const layout = buildCurriculumLayout([record(), parent, supporting]);
-  assert.equal(layout[0]?.title, "Pediatric");
-  assert.equal(layout[0]?.subheadings[0]?.title, "Congenital Laryngeal Anomalies");
-  assert.ok(layout[0]?.subheadings[0]?.subjects.includes(record().path));
-  assert.equal(layout.flatMap((heading) => heading.subheadings).flatMap((subheading) => subheading.subjects).filter((path) => path === supporting.path).length, 1);
-  assert.equal([record(), parent, supporting].filter((item) => item.role === "canonical").length, 2);
-});
-
-test("curriculum layout keeps canonical extension topics", () => {
-  const extension = record({
-    path: "03 Clinical Topics/03 Laryngology/ENT-LAR-EXT-001 - Extension Topic.md",
-    title: "Extension Topic",
-    curriculumId: "ENT-LAR-EXT-001",
-    domain: "Laryngology",
-    folderOrder: "03 Laryngology",
-  });
-  const layout = buildCurriculumLayout([extension]);
-  assert.deepEqual(layout[0]?.subheadings[0]?.subjects, [extension.path]);
 });
 
 test("recursive curriculum tree nests canonical children and supporting notes", () => {
@@ -196,13 +177,13 @@ test("personal organization snapshots restore collections, pins, queues, and sav
   assert.deepEqual(data.indexGroupOrder, ["Airway", "Research"]);
 });
 
-test("v2 data migrates to v8 with the ENT clinical preset and safe settings", () => {
+test("v2 data migrates to v9 with the ENT clinical preset and safe settings", () => {
   const data = migrateData({
     version: 2,
     collections: [], pinnedPaths: [], nextStudyPaths: [], savedViews: [],
     settings: { defaultTab: "collections", recentLimit: 25, enableHoverPreview: true, showSafetyBadges: true },
   });
-  assert.equal(data.version, 8);
+  assert.equal(data.version, 9);
   assert.equal(data.settings.workspaceMode, "ent-clinical");
   assert.equal(data.settings.setupComplete, true);
   assert.equal(data.settings.proposalFolder, "01 Inbox/ENT Topic Proposals");
@@ -220,7 +201,7 @@ test("future plugin data is interpreted as the latest compatible shape, never as
     settings: { defaultTab: "collections", openNoteBehavior: "split" },
   });
   assert.equal(storedDataVersion({ version: 99 }), 99);
-  assert.equal(data.version, 8);
+  assert.equal(data.version, 9);
   assert.equal(data.collections[0]?.title, "Future collection");
   assert.equal(data.settings.openNoteBehavior, "split");
   assert.equal(data.migrationBackup, undefined);
@@ -228,14 +209,14 @@ test("future plugin data is interpreted as the latest compatible shape, never as
 
 test("v4 data gains an empty visual curriculum overlay", () => {
   const data = migrateData({ version: 4, collections: [], settings: {} });
-  assert.equal(data.version, 8);
+  assert.equal(data.version, 9);
   assert.equal(data.settings.workspaceMode, "ent-clinical");
   assert.deepEqual(data.curriculumVisual, { parentByPath: {}, orderByContainer: {} });
 });
 
 test("fresh installs start as a configurable generic knowledge base", () => {
   const data = migrateData(null);
-  assert.equal(data.version, 8);
+  assert.equal(data.version, 9);
   assert.equal(data.settings.workspaceMode, "generic");
   assert.equal(data.settings.setupComplete, false);
   assert.equal(data.settings.workspaceName, "Knowledge Base Command Center");
@@ -256,7 +237,7 @@ test("v7 generic organization migrates with manual index controls intact", () =>
     indexGroupOrder: ["Research", "Projects"],
     settings: { workspaceMode: "generic", setupComplete: true, workspaceName: "My KB" },
   });
-  assert.equal(data.version, 8);
+  assert.equal(data.version, 9);
   assert.equal(data.settings.workspaceMode, "generic");
   assert.equal(data.settings.workspaceName, "My KB");
   assert.deepEqual(data.manualIndexPaths, ["Research/Outside.md"]);
@@ -507,4 +488,110 @@ test("row keyboard shortcuts only run from the row itself", () => {
   assert.equal(shouldHandleRowShortcut(false, "Enter"), false);
   assert.equal(shouldHandleRowShortcut(false, "m"), false);
   assert.equal(shouldHandleRowShortcut(true, "Escape"), false);
+});
+
+test("versionless modern data is preserved instead of being mistaken for legacy ENT data", () => {
+  for (const version of [undefined, 0, -1, Number.NaN]) {
+    const data = migrateData({
+      version,
+      collections: [{ id: "research", title: "Research", collapsed: false, subjects: ["Notes/Paper.md"], subheadings: [] }],
+      pinnedPaths: ["Notes/Paper.md"],
+      settings: { workspaceMode: "generic", workspaceName: "My research KB", setupComplete: true },
+    });
+    assert.equal(data.version, 9);
+    assert.equal(data.settings.workspaceMode, "generic");
+    assert.equal(data.settings.workspaceName, "My research KB");
+    assert.equal(data.collections[0]?.title, "Research");
+    assert.deepEqual(data.pinnedPaths, ["Notes/Paper.md"]);
+  }
+  assert.equal(isRecognizedPluginData({ unrelated: true }), false);
+  assert.equal(isRecognizedPluginData({ settings: { workspaceMode: "generic" } }), true);
+});
+
+test("folder renames rewrite every descendant reference, including snapshots and collapse state", () => {
+  const data = migrateData(null);
+  data.collections = [{ id: "c", title: "C", collapsed: false, subjects: ["Old/One.md"], subheadings: [{ id: "s", title: "S", collapsed: false, subjects: ["Old/Nested/Two.md"] }] }];
+  data.pinnedPaths = ["Old/One.md"];
+  data.nextStudyPaths = ["Old/Nested/Two.md"];
+  data.manualIndexPaths = ["Old/One.md"];
+  data.excludedIndexPaths = ["Old/Nested/Two.md"];
+  data.indexGroupByPath = { "Old/One.md": "Research" };
+  data.curriculumVisual = { parentByPath: { "Old/Nested/Two.md": "Old/One.md" }, orderByContainer: { "parent:Old/One.md": ["Old/Nested/Two.md"] } };
+  data.selectedPath = "Old/Nested/Two.md";
+  data.collapsed.curriculumNodes = ["Old/One.md"];
+  data.undoStack = [snapshotPersonal(data, "Before")];
+  assert.equal(rewritePluginDataPathPrefix(data, "Old", "New"), true);
+  assert.deepEqual(data.collections[0]?.subjects, ["New/One.md"]);
+  assert.deepEqual(data.collections[0]?.subheadings[0]?.subjects, ["New/Nested/Two.md"]);
+  assert.equal(data.curriculumVisual.parentByPath["New/Nested/Two.md"], "New/One.md");
+  assert.deepEqual(data.curriculumVisual.orderByContainer["parent:New/One.md"], ["New/Nested/Two.md"]);
+  assert.equal(data.selectedPath, "New/Nested/Two.md");
+  assert.deepEqual(data.collapsed.curriculumNodes, ["New/One.md"]);
+  assert.deepEqual(data.undoStack[0]?.pinnedPaths, ["New/One.md"]);
+});
+
+test("search, templates, filenames, and protected folders handle international and hostile input", () => {
+  assert.equal(matchesQuery(record({ title: "Café airway", aliases: ["مجرى الهواء", "喉頭裂"] }), "cafe"), true);
+  assert.equal(matchesQuery(record({ title: "Café airway", aliases: ["مجرى الهواء", "喉頭裂"] }), "مجرى"), true);
+  assert.equal(matchesQuery(record({ title: "Café airway", aliases: ["مجرى الهواء", "喉頭裂"] }), "喉頭"), true);
+  assert.equal(applyTemplateTokens("# {{title}}", "$& $` $' $$", "2026-01-01", "12:00"), "# $& $` $' $$");
+  assert.equal(sanitizeFileName("safe\u202E\u200B\u0000:name"), "safe-name");
+  for (const path of [".OBSIDIAN/plugins", ".obsidian /plugins", ".trash", ".TRASH/archive"]) {
+    assert.notEqual(validateWritableFolderPath(path, ".obsidian"), null, path);
+  }
+  assert.notEqual(validateWritableFolderPath("Projects/ .. /Archive", ".obsidian"), null);
+});
+
+test("imported path maps discard prototype keys", () => {
+  const data = migrateData({
+    collections: [],
+    settings: { workspaceMode: "generic" },
+    indexGroupByPath: JSON.parse('{"__proto__":"x","constructor":"y","prototype":"z","safe.md":"Research"}') as unknown,
+    curriculumVisual: {
+      parentByPath: JSON.parse('{"__proto__":"x","safe.md":null}') as unknown,
+      orderByContainer: JSON.parse('{"constructor":["bad.md"],"root:Research":["safe.md"]}') as unknown,
+    },
+  });
+  assert.deepEqual(Object.keys(data.indexGroupByPath), ["safe.md"]);
+  assert.deepEqual(Object.keys(data.curriculumVisual.parentByPath), ["safe.md"]);
+  assert.deepEqual(Object.keys(data.curriculumVisual.orderByContainer), ["root:Research"]);
+});
+
+test("diagnostics and visual-placement indexes remain linear at large-vault scale", () => {
+  const data = migrateData(null);
+  const records = Array.from({ length: 10_000 }, (_, index) => record({
+    path: `Knowledge Base/Topic ${index}.md`,
+    title: `Topic ${index}`,
+    curriculumId: "",
+    role: "supporting",
+    parentTopic: index === 0 ? "" : `[[Topic ${index - 1}]]`,
+  }));
+  const paths = new Set(records.map((item) => item.path));
+  const start = performance.now();
+  const diagnostics = buildIndexDiagnostics(data, records, paths);
+  const diagnosticMs = performance.now() - start;
+  assert.equal(diagnostics.length, 0);
+  assert.ok(diagnosticMs < 1_000, `diagnostics took ${diagnosticMs.toFixed(1)} ms`);
+
+  const state = { parentByPath: {} as Record<string, string | null>, orderByContainer: { "root:Research": records.map((item) => item.path) } };
+  for (let index = 1; index < records.length; index += 1) state.parentByPath[records[index]?.path ?? ""] = records[index - 1]?.path ?? null;
+  const placementStart = performance.now();
+  const placed = visualPlacementPathSet(state, Object.fromEntries(records.map((item) => [item.path, "Research"])));
+  const placementMs = performance.now() - placementStart;
+  assert.equal(placed.size, records.length);
+  assert.ok(placementMs < 500, `visual placement index took ${placementMs.toFixed(1)} ms`);
+});
+
+test("snapshot history is bounded by count and serialized size", () => {
+  const data = migrateData(null);
+  const snapshots = Array.from({ length: 50 }, (_, index) => snapshotPersonal(data, `Snapshot ${index}`));
+  const limited = limitSnapshotStack(snapshots, 10, 8_000);
+  assert.ok(limited.length <= 10);
+  assert.ok(JSON.stringify(limited).length <= 8_000);
+  assert.equal(limited.at(-1)?.label, "Snapshot 49");
+  const oversized = snapshotPersonal(data, "Oversized");
+  oversized.pinnedPaths = ["x".repeat(20_000)];
+  const preserved = limitSnapshotStack([...limited, oversized], 10, 8_000);
+  assert.equal(preserved.includes(oversized), false);
+  assert.equal(preserved.at(-1)?.label, "Snapshot 49");
 });

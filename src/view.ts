@@ -1,4 +1,4 @@
-import { ItemView, Menu, Notice, setIcon, TFile, WorkspaceLeaf } from "obsidian";
+import { ItemView, Menu, Notice, Platform, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
 import { IndexManagerModal } from "./index-manager";
 import {
@@ -17,6 +17,7 @@ import {
   isExtensionCurriculumId,
   LayoutHeading,
   LayoutSubheading,
+  limitSnapshotStack,
   MainTab,
   makeId,
   matchesQuery,
@@ -35,6 +36,7 @@ import {
   unknownQueryTokens,
   validateWritableFolderPath,
   VaultRecord,
+  visualPlacementPathSet,
 } from "./model";
 import {
   AddActionModal,
@@ -145,14 +147,18 @@ export class EntVaultCommandCenterView extends ItemView {
   private inspectorEl: HTMLElement | null = null;
   private countEl: HTMLElement | null = null;
   private searchStatusEl: HTMLElement | null = null;
-  private collapsedQueues = new Set<string>(["p1", "gaps", "procedure-review", "medication-dose-absent", "medication-source-traced", "medication-source-gaps", "syndrome-image-gaps", "syndrome-source-gaps"]);
+  private collapsedQueues = new Set<string>();
   private collapsedCurriculumDomains = new Set<string>();
   private collapsedCurriculumNodes = new Set<string>();
-  private curriculumCollapseInitialized = false;
+  private visualPlacementPaths = new Set<string>();
+  private readonly viewInstanceId = makeId("view");
   private setupPromptShown = false;
 
   constructor(leaf: WorkspaceLeaf, private readonly plugin: EntVaultCommandCenterPlugin) {
     super(leaf);
+    this.collapsedQueues = new Set(plugin.data.collapsed.queues);
+    this.collapsedCurriculumDomains = new Set(plugin.data.collapsed.curriculumDomains);
+    this.collapsedCurriculumNodes = new Set(plugin.data.collapsed.curriculumNodes);
   }
 
   getViewType(): string { return VIEW_TYPE; }
@@ -172,21 +178,16 @@ export class EntVaultCommandCenterView extends ItemView {
     this.recordByPath = new Map(this.records.map((record) => [record.path, record]));
     await this.plugin.reconcileRecords(this.records);
     this.curriculum = buildCurriculumTree(this.records, this.plugin.data.curriculumVisual);
-    this.initializeCurriculumCollapse();
     this.render();
   }
 
-  private initializeCurriculumCollapse(): void {
-    if (this.curriculumCollapseInitialized) return;
-    this.curriculumCollapseInitialized = true;
-    const visit = (node: CurriculumTreeNode): void => {
-      if (node.children.length > 0 && (!this.plugin.isClinicalMode() || node.record.curriculumId !== "ENT-PED-003")) this.collapsedCurriculumNodes.add(node.record.path);
-      node.children.forEach(visit);
+  private persistCollapseState(): void {
+    this.plugin.data.collapsed = {
+      curriculumDomains: [...this.collapsedCurriculumDomains],
+      curriculumNodes: [...this.collapsedCurriculumNodes],
+      queues: [...this.collapsedQueues],
     };
-    for (const domain of this.curriculum.domains) {
-      if (this.plugin.isClinicalMode() && domain.domain.toLowerCase() !== "pediatric") this.collapsedCurriculumDomains.add(domain.domain);
-      domain.roots.forEach(visit);
-    }
+    void this.plugin.savePluginData();
   }
 
   public openAddActions(): void {
@@ -239,14 +240,18 @@ export class EntVaultCommandCenterView extends ItemView {
       onSubmit: async (value) => {
         const file = await this.plugin.createKnowledgeNote(value);
         if (indexAfterCreate && !this.plugin.isClinicalMode()) {
-          this.plugin.data.excludedIndexPaths = this.plugin.data.excludedIndexPaths.filter((path) => path !== file.path);
-          if (!pathIsInsideFolder(file.path, settings.primaryFolder) && !this.plugin.data.manualIndexPaths.includes(file.path)) {
-            this.plugin.data.manualIndexPaths.push(file.path);
-          }
+          await this.plugin.mutate(`Add created ${settings.itemSingular} to ${settings.indexLabel}`, () => {
+            this.plugin.data.excludedIndexPaths = this.plugin.data.excludedIndexPaths.filter((path) => path !== file.path);
+            if (!pathIsInsideFolder(file.path, settings.primaryFolder) && !this.plugin.data.manualIndexPaths.includes(file.path)) {
+              this.plugin.data.manualIndexPaths.push(file.path);
+            }
+            this.plugin.data.selectedPath = file.path;
+          });
+        } else {
+          this.plugin.data.selectedPath = file.path;
+          await this.plugin.savePluginData();
+          await this.reload();
         }
-        this.plugin.data.selectedPath = file.path;
-        await this.plugin.savePluginData();
-        await this.reload();
         new Notice(`${settings.itemSingular[0]?.toUpperCase() ?? "N"}${settings.itemSingular.slice(1)} created${indexAfterCreate && !this.plugin.isClinicalMode() ? ` and added to ${settings.indexLabel}` : ""}. Existing notes were not changed.`);
         if (value.addToCollection) this.openCollectionPicker(file.path);
         await this.plugin.openFile(file);
@@ -257,6 +262,7 @@ export class EntVaultCommandCenterView extends ItemView {
   public openSetupWizard(): void {
     const settings = this.plugin.data.settings;
     new WorkspaceSetupModal(this.app, settings, async (value) => {
+      this.plugin.assertDataWritable();
       for (const folder of [value.primaryFolder, value.defaultNoteFolder, value.templatesFolder, value.proposalFolder]) {
         const error = validateWritableFolderPath(folder, this.app.vault.configDir);
         if (error) throw new Error(error);
@@ -327,6 +333,10 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     if (!file) {
       new Notice("Open a Markdown note first, then run add current note.");
+      return;
+    }
+    if (!(file instanceof TFile) || file.extension.toLocaleLowerCase() !== "md") {
+      new Notice("Only Markdown notes can be added to collections. Open a .md note first.");
       return;
     }
     this.openCollectionPicker(file.path);
@@ -552,9 +562,10 @@ export class EntVaultCommandCenterView extends ItemView {
     this.renderSearch(shell);
 
     const workspace = shell.createDiv({ cls: "ent-cc-workspace" });
+    const panelId = `ent-cc-record-panel-${this.viewInstanceId}`;
     this.treeEl = workspace.createDiv({
       cls: "ent-cc-tree-panel",
-      attr: { id: "ent-cc-record-panel", role: "tabpanel", "aria-labelledby": `ent-cc-tab-${this.plugin.data.activeTab}`, tabindex: "0" },
+      attr: { id: panelId, role: "tabpanel", "aria-labelledby": this.tabElementId(this.plugin.data.activeTab), tabindex: "0" },
     });
     this.inspectorEl = workspace.createEl("aside", { cls: "ent-cc-inspector" });
     this.renderTree();
@@ -574,11 +585,11 @@ export class EntVaultCommandCenterView extends ItemView {
       const button = bar.createEl("button", {
         cls: `ent-cc-tab ${this.plugin.data.activeTab === tab.id ? "is-active" : ""}`,
         attr: {
-          id: `ent-cc-tab-${tab.id}`,
+          id: this.tabElementId(tab.id),
           role: "tab",
           "data-tab": tab.id,
           "aria-selected": String(this.plugin.data.activeTab === tab.id),
-          "aria-controls": "ent-cc-record-panel",
+          "aria-controls": `ent-cc-record-panel-${this.viewInstanceId}`,
           tabindex: this.plugin.data.activeTab === tab.id ? "0" : "-1",
         },
       });
@@ -599,6 +610,10 @@ export class EntVaultCommandCenterView extends ItemView {
         if (nextTab) void this.changeTab(nextTab.id, true);
       });
     }
+  }
+
+  private tabElementId(tab: MainTab): string {
+    return `ent-cc-tab-${tab}-${this.viewInstanceId}`;
   }
 
   private async changeTab(tab: MainTab, focusTab = false): Promise<void> {
@@ -662,7 +677,14 @@ export class EntVaultCommandCenterView extends ItemView {
       for (const [token, label] of definitions) {
         const active = this.query.toLowerCase().split(/\s+/).includes(token.toLowerCase());
         const chip = chips.createEl("button", { cls: `ent-cc-filter-chip ${active ? "is-active" : ""}`, text: label });
-        chip.addEventListener("click", () => { this.toggleToken(token); this.render(); });
+        chip.addEventListener("click", () => {
+          this.toggleToken(token);
+          const search = this.contentEl.querySelector<HTMLInputElement>('.ent-cc-search-box input[type="search"]');
+          if (search) search.value = this.query;
+          chip.toggleClass("is-active", this.query.toLowerCase().split(/\s+/).includes(token.toLowerCase()));
+          this.renderTree();
+          chip.focus();
+        });
       }
       chips.createSpan({ text: "Tip: combine tokens with fuzzy text", cls: "ent-cc-filter-hint" });
     } else {
@@ -705,10 +727,11 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private renderTree(): void {
     if (!this.treeEl) return;
+    this.visualPlacementPaths = visualPlacementPathSet(this.plugin.data.curriculumVisual, this.plugin.data.indexGroupByPath);
     this.treeEl.empty();
     const unknownTokens = unknownQueryTokens(this.query);
     this.searchStatusEl?.setText(unknownTokens.length > 0
-      ? `Unknown filter${unknownTokens.length === 1 ? "" : "s"}: ${unknownTokens.join(", ")}. Supported filters: domain, priority, type, status, safety, source, dose, image.`
+      ? `Unknown filter${unknownTokens.length === 1 ? "" : "s"}: ${unknownTokens.join(", ")}. Supported filters: domain, priority, kind, type, status, review, safety, source, dose, image.`
       : "");
     this.searchStatusEl?.toggleClass("is-error", unknownTokens.length > 0);
     const header = this.treeEl.createDiv({ cls: "ent-cc-tree-header" });
@@ -824,6 +847,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const disclosure = iconButton(row, collapsed ? "chevron-right" : "chevron-down", `${collapsed ? "Expand" : "Collapse"} ${domain.domain}`, "ent-cc-disclosure");
     disclosure.addEventListener("click", () => {
       if (collapsed) this.collapsedCurriculumDomains.delete(domain.domain); else this.collapsedCurriculumDomains.add(domain.domain);
+      this.persistCollapseState();
       this.renderTree();
     });
     const leading = row.createSpan({ cls: "ent-cc-leading-icon" });
@@ -831,9 +855,11 @@ export class EntVaultCommandCenterView extends ItemView {
     const title = row.createEl("button", { cls: "ent-cc-row-title", text: domain.domain });
     title.addEventListener("click", () => {
       if (collapsed) this.collapsedCurriculumDomains.delete(domain.domain); else this.collapsedCurriculumDomains.add(domain.domain);
+      this.persistCollapseState();
       this.renderTree();
     });
     row.createSpan({ text: String(domain.roots.reduce((sum, node) => sum + this.curriculumNodeCount(node), 0)), cls: "ent-cc-row-count" });
+    if (this.curriculumArrangeMode) this.applyCurriculumDomainDrop(row, domain);
     if (collapsed) return;
     const content = section.createDiv({ cls: "ent-cc-heading-body ent-cc-curriculum-domain-body" });
     if (this.curriculumArrangeMode) this.applyCurriculumDomainDrop(content, domain);
@@ -853,12 +879,13 @@ export class EntVaultCommandCenterView extends ItemView {
       const disclosure = iconButton(row, collapsed ? "chevron-right" : "chevron-down", `${collapsed ? "Expand" : "Collapse"} ${record.title}`, "ent-cc-disclosure");
       disclosure.addEventListener("click", () => {
         if (collapsed) this.collapsedCurriculumNodes.delete(record.path); else this.collapsedCurriculumNodes.add(record.path);
+        this.persistCollapseState();
         this.renderTree();
       });
     } else {
       row.createSpan({ cls: "ent-cc-disclosure ent-cc-disclosure-spacer" });
     }
-    if (this.curriculumArrangeMode) {
+    if (this.curriculumArrangeMode && !Platform.isMobile) {
       const handle = iconButton(row, "grip-vertical", `Drag ${record.title}`, "ent-cc-drag-handle");
       handle.draggable = true;
       handle.addEventListener("dragstart", (event) => this.writeCurriculumDrag(event, { kind: "curriculum-record", path: record.path }));
@@ -906,9 +933,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private hasCurriculumVisualPlacement(path: string): boolean {
-    return Object.keys(this.plugin.data.curriculumVisual.parentByPath).includes(path)
-      || Object.values(this.plugin.data.curriculumVisual.orderByContainer).some((paths) => paths.includes(path))
-      || Object.keys(this.plugin.data.indexGroupByPath).includes(path);
+    return this.visualPlacementPaths.has(path);
   }
 
   private renderHeading(parent: HTMLElement, heading: LayoutHeading, mutable: boolean): number {
@@ -938,6 +963,7 @@ export class EntVaultCommandCenterView extends ItemView {
     })());
     row.createSpan({ text: String(countHeading(heading)), cls: "ent-cc-row-count" });
     if (mutable) iconButton(row, "ellipsis", `Actions for ${heading.title}`, "ent-cc-row-more").addEventListener("click", (event) => this.showHeadingMenu(event, heading));
+    if (mutable && this.editMode) this.applyDrop(row, { headingId: heading.id });
 
     if (heading.collapsed && !this.query) return total;
     const content = section.createDiv({ cls: "ent-cc-heading-body" });
@@ -969,6 +995,7 @@ export class EntVaultCommandCenterView extends ItemView {
     })());
     row.createSpan({ text: String(subheading.subjects.length), cls: "ent-cc-row-count" });
     if (mutable) iconButton(row, "ellipsis", `Actions for ${subheading.title}`, "ent-cc-row-more").addEventListener("click", (event) => this.showSubheadingMenu(event, heading, subheading));
+    if (mutable && this.editMode) this.applyDrop(row, { headingId: heading.id, subheadingId: subheading.id });
     if (subheading.collapsed && !this.query) return;
     const content = section.createDiv({ cls: "ent-cc-subheading-body" });
     if (mutable && this.editMode) this.applyDrop(content, { headingId: heading.id, subheadingId: subheading.id });
@@ -987,6 +1014,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const disclosure = iconButton(row, collapsed ? "chevron-right" : "chevron-down", `${collapsed ? "Expand" : "Collapse"} ${queue.title}`, "ent-cc-disclosure");
     disclosure.addEventListener("click", () => {
       if (collapsed) this.collapsedQueues.delete(queue.id); else this.collapsedQueues.add(queue.id);
+      this.persistCollapseState();
       this.renderTree();
     });
     const leading = row.createSpan({ cls: "ent-cc-leading-icon" });
@@ -994,6 +1022,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const title = row.createEl("button", { cls: "ent-cc-row-title", text: queue.title, attr: { title: queue.description } });
     title.addEventListener("click", () => {
       if (collapsed) this.collapsedQueues.delete(queue.id); else this.collapsedQueues.add(queue.id);
+      this.persistCollapseState();
       this.renderTree();
     });
     row.createSpan({ text: String(queue.records.length), cls: "ent-cc-row-count" });
@@ -1039,10 +1068,12 @@ export class EntVaultCommandCenterView extends ItemView {
     const row = parent.createDiv({
       cls: `ent-cc-row ent-cc-subject-row ent-cc-level-${level} ${this.plugin.data.selectedPath === record.path ? "is-selected" : ""}`,
     });
-    if (membership && this.editMode) {
+    if (membership && this.editMode && !Platform.isMobile) {
       const handle = iconButton(row, "grip-vertical", `Drag ${record.title}`, "ent-cc-drag-handle");
       handle.draggable = true;
       handle.addEventListener("dragstart", (event) => this.writeDrag(event, { kind: "membership", path: record.path, ...membership }));
+      handle.addEventListener("dragstart", () => row.addClass("is-dragging"));
+      handle.addEventListener("dragend", () => row.removeClass("is-dragging", "is-drop-before", "is-drop-after"));
       this.applyRowDrop(row, membership, record.path);
     } else {
       const icon = row.createSpan({ cls: "ent-cc-leading-icon ent-cc-record-icon" });
@@ -1215,7 +1246,9 @@ export class EntVaultCommandCenterView extends ItemView {
       await clipboard.writeText(text);
       new Notice(`${label} copied.`);
     } catch {
-      new Notice("Clipboard access was unavailable. Open the note and use the command manually.");
+      new Notice(this.plugin.isClinicalMode()
+        ? "Clipboard access was unavailable. Open the note and use the command manually."
+        : "Clipboard access was unavailable. Open the note and copy its wikilink or path manually.");
     }
   }
 
@@ -1648,6 +1681,7 @@ export class EntVaultCommandCenterView extends ItemView {
     });
     this.collapsedCurriculumDomains.delete(cleanGroup);
     if (parentPath) this.collapsedCurriculumNodes.delete(parentPath);
+    this.persistCollapseState();
     new Notice(`Moved visually to ${cleanGroup}. Note paths and metadata were not changed.`);
   }
 
@@ -1735,6 +1769,7 @@ export class EntVaultCommandCenterView extends ItemView {
         this.plugin.data.collections.forEach((heading) => { heading.collapsed = false; heading.subheadings.forEach((sub) => { sub.collapsed = false; }); });
       }
       if (this.plugin.data.activeTab === "collections") await this.plugin.savePluginData();
+      else this.persistCollapseState();
       this.renderTree();
     }));
     menu.addItem((item) => item.setTitle("Collapse all visible groups").setIcon("chevrons-up").onClick(async () => {
@@ -1747,6 +1782,7 @@ export class EntVaultCommandCenterView extends ItemView {
         this.plugin.data.collections.forEach((heading) => { heading.collapsed = true; heading.subheadings.forEach((sub) => { sub.collapsed = true; }); });
       }
       if (this.plugin.data.activeTab === "collections") await this.plugin.savePluginData();
+      else this.persistCollapseState();
       this.renderTree();
     }));
     if (this.plugin.isClinicalMode()) {
@@ -1782,7 +1818,7 @@ export class EntVaultCommandCenterView extends ItemView {
       menu.addItem((item) => item.setTitle("Restore organization snapshot…").setIcon("history").onClick(() => this.showOrganizationSnapshots(event)));
     }
     menu.addSeparator();
-    menu.addItem((item) => item.setTitle("Export organization backup").setIcon("download").onClick(() => this.exportOrganizationBackup()));
+    menu.addItem((item) => item.setTitle("Export organization backup").setIcon("download").onClick(() => void this.exportOrganizationBackup()));
     menu.addItem((item) => item.setTitle("Import organization backup…").setIcon("upload").onClick(() => this.importOrganizationBackup()));
     menu.showAtMouseEvent(event);
   }
@@ -1793,8 +1829,16 @@ export class EntVaultCommandCenterView extends ItemView {
       placeholder: this.plugin.isClinicalMode() ? "e.g. Before airway exam block" : "e.g. Before reorganizing projects",
       submitLabel: "Save snapshot",
       onSubmit: async (name) => {
-        this.plugin.data.layoutSnapshots.push(snapshotPersonal(this.plugin.data, name));
-        this.plugin.data.layoutSnapshots = this.plugin.data.layoutSnapshots.slice(-10);
+        const snapshot = snapshotPersonal(this.plugin.data, name);
+        const next = limitSnapshotStack(
+          [...this.plugin.data.layoutSnapshots, snapshot],
+          10,
+        );
+        if (!next.includes(snapshot)) {
+          new Notice("This organization is too large for an in-plugin snapshot. Export an organization backup instead.", 8000);
+          return;
+        }
+        this.plugin.data.layoutSnapshots = next;
         await this.plugin.savePluginData();
         new Notice(`Saved organization snapshot “${name}”.`);
       },
@@ -1815,10 +1859,15 @@ export class EntVaultCommandCenterView extends ItemView {
     menu.showAtMouseEvent(event);
   }
 
-  private exportOrganizationBackup(): void {
+  private async exportOrganizationBackup(): Promise<void> {
     try {
       const now = new Date();
       const backup = createPersonalBackup(this.plugin.data, now.toISOString());
+      if (Platform.isMobile) {
+        await this.plugin.writePortableJson("backup", backup);
+        new Notice("Organization backup saved inside the vault for mobile sharing. Source notes were not included.");
+        return;
+      }
       const viewWindow = this.contentEl.ownerDocument.defaultView ?? window;
       const url = viewWindow.URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" }));
       const link = createEl("a");
@@ -1834,6 +1883,21 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private importOrganizationBackup(): void {
+    if (Platform.isMobile) {
+      const files = this.plugin.getPortableJsonFiles();
+      if (files.length === 0) {
+        new Notice("No JSON files were found in the vault. Copy a backup JSON into the vault, then try again.");
+        return;
+      }
+      new VaultFilePickerModal(this.app, files, "Choose an organization backup JSON", async (file) => {
+        try {
+          this.confirmOrganizationImport(this.plugin.readPortableJson(file));
+        } catch (error) {
+          new Notice(error instanceof Error ? error.message : String(error));
+        }
+      }).open();
+      return;
+    }
     const input = createEl("input");
     input.type = "file";
     input.accept = "application/json,.json";
@@ -1841,31 +1905,37 @@ export class EntVaultCommandCenterView extends ItemView {
       const file = input.files?.[0];
       if (!file) return;
       void file.text().then((raw) => {
-        const backup = parsePersonalBackup(JSON.parse(raw) as unknown);
-        new ConfirmModal(
-          this.app,
-          "Import organization backup?",
-          `Replace current personal collections, index membership and visual groups, pins, next list, saved views, and snapshots with the backup from ${backup.exportedAt || "an unknown date"}? Source notes will not be changed.`,
-          "Import backup",
-          async () => {
-            await this.plugin.mutate("Import organization backup", () => {
-              this.plugin.data.collections = backup.collections;
-              this.plugin.data.pinnedPaths = backup.pinnedPaths;
-              this.plugin.data.nextStudyPaths = backup.nextStudyPaths;
-              this.plugin.data.savedViews = backup.savedViews;
-              this.plugin.data.curriculumVisual = backup.curriculumVisual;
-              this.plugin.data.manualIndexPaths = backup.manualIndexPaths;
-              this.plugin.data.excludedIndexPaths = backup.excludedIndexPaths;
-              this.plugin.data.indexGroupByPath = backup.indexGroupByPath;
-              this.plugin.data.indexGroupOrder = backup.indexGroupOrder;
-              this.plugin.data.layoutSnapshots = backup.layoutSnapshots;
-            });
-            new Notice("Organization backup imported. Undo is available.");
-          },
-        ).open();
+        this.confirmOrganizationImport(Promise.resolve(JSON.parse(raw) as unknown));
       }).catch((error) => new Notice(error instanceof Error ? error.message : String(error)));
     });
     input.click();
+  }
+
+  private confirmOrganizationImport(input: Promise<unknown>): void {
+    void input.then((value) => {
+      const backup = parsePersonalBackup(value);
+      new ConfirmModal(
+        this.app,
+        "Import organization backup?",
+        `Replace current personal collections, index membership and visual groups, pins, next list, saved views, and snapshots with the backup from ${backup.exportedAt || "an unknown date"}? Source notes will not be changed.`,
+        "Import backup",
+        async () => {
+          await this.plugin.mutate("Import organization backup", () => {
+            this.plugin.data.collections = backup.collections;
+            this.plugin.data.pinnedPaths = backup.pinnedPaths;
+            this.plugin.data.nextStudyPaths = backup.nextStudyPaths;
+            this.plugin.data.savedViews = backup.savedViews;
+            this.plugin.data.curriculumVisual = backup.curriculumVisual;
+            this.plugin.data.manualIndexPaths = backup.manualIndexPaths;
+            this.plugin.data.excludedIndexPaths = backup.excludedIndexPaths;
+            this.plugin.data.indexGroupByPath = backup.indexGroupByPath;
+            this.plugin.data.indexGroupOrder = backup.indexGroupOrder;
+            this.plugin.data.layoutSnapshots = limitSnapshotStack(backup.layoutSnapshots, 10);
+          });
+          new Notice("Organization backup imported. Undo is available.");
+        },
+      ).open();
+    }).catch((error) => new Notice(error instanceof Error ? error.message : String(error)));
   }
 
   private saveCurrentSearch(): void {
@@ -1961,7 +2031,9 @@ export class EntVaultCommandCenterView extends ItemView {
       row.toggleClass("is-drop-after", position > 0.7);
       if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
     });
-    row.addEventListener("dragleave", () => row.removeClass("is-drop-before", "is-drop-inside", "is-drop-after"));
+    row.addEventListener("dragleave", (event) => {
+      if (!row.contains(event.relatedTarget as Node | null)) row.removeClass("is-drop-before", "is-drop-inside", "is-drop-after");
+    });
     row.addEventListener("drop", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -1974,6 +2046,7 @@ export class EntVaultCommandCenterView extends ItemView {
       if (inside) {
         const children = this.curriculumChildrenPaths(target.path).filter((path) => path !== record.path);
         this.collapsedCurriculumNodes.delete(target.path);
+        this.persistCollapseState();
         if (this.plugin.canVisuallyMoveAcrossGroups() && record.domain !== target.domain) {
           void this.moveIndexRecordToGroup(record, target.domain, target.path, children, children.length, `Nest “${record.title}” under “${target.title}”`);
         } else {
@@ -2014,7 +2087,9 @@ export class EntVaultCommandCenterView extends ItemView {
       element.addClass("is-drop-target");
       if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
     });
-    element.addEventListener("dragleave", () => element.removeClass("is-drop-target"));
+    element.addEventListener("dragleave", (event) => {
+      if (!element.contains(event.relatedTarget as Node | null)) element.removeClass("is-drop-target");
+    });
     element.addEventListener("drop", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -2038,7 +2113,9 @@ export class EntVaultCommandCenterView extends ItemView {
       row.toggleClass("is-drop-after", after);
       if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
     });
-    row.addEventListener("dragleave", () => row.removeClass("is-drop-before", "is-drop-after"));
+    row.addEventListener("dragleave", (event) => {
+      if (!row.contains(event.relatedTarget as Node | null)) row.removeClass("is-drop-before", "is-drop-after");
+    });
     row.addEventListener("drop", (event) => {
       event.preventDefault();
       event.stopPropagation();

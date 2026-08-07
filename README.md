@@ -77,13 +77,15 @@ ENT visual groups follow canonical domains by default. An optional **Visual cros
 
 Use **Export workspace configuration** in the Index Manager to share the workspace name, labels, folders, property mappings, behavior settings, and visual group order. Importing that JSON configures another vault after validating its folders and template availability. It does not contain note text, note paths, collections, pins, queues, or other note-specific personal organization.
 
+On iPhone and iPad, Export saves JSON under `Knowledge Base Command Center Exports/` inside the vault so it can sync or be shared through the Files app. Import uses an in-vault JSON picker. Desktop also supports the standard download and file picker.
+
 ## Search
 
-Plain text uses fuzzy matching across titles, paths, configured IDs, and groups. Advanced filters remain available: `domain:`, `priority:`, `type:`, `source:`, `status:`, `safety:`, `dose:`, and `image:`. Saved views retain the current section and query.
+Plain text uses Unicode-aware fuzzy matching across titles, aliases, paths, configured IDs, and groups, including diacritic folding. Advanced filters are: `domain:`, `priority:`, `kind:`, `type:`, `status:`, `review:`, `source:`, `safety:`, `dose:`, and `image:`. Saved views retain the current section and query.
 
 ## Commands
 
-- Open command center
+- Open workspace
 - Manage index…
 - Add or create…
 - Create note from template or empty note…
@@ -98,6 +100,19 @@ The ENT profile additionally exposes proposal promotion and advanced canonical p
 
 The plugin is being submitted to the Obsidian Community Plugins directory. After it is listed, search for **Knowledge Base Command Center** under **Settings → Community plugins → Browse**.
 
+Community Plugin updates are delivered through Obsidian after approval. Obsidian keeps the stable internal ID `ent-vault-command-center`, so upgrading preserves the same plugin data file.
+
+### BRAT
+
+Until Community approval, install with [BRAT](https://github.com/TfTHacker/obsidian42-brat):
+
+1. Install and enable BRAT from Community Plugins.
+2. Open **BRAT: Add a beta plugin for testing**.
+3. Enter `https://github.com/drbinsaad/knowledge-base-command-center`.
+4. Choose **Latest version** when prompted.
+
+You can also open the [direct BRAT install link](obsidian://brat?plugin=https://github.com/drbinsaad/knowledge-base-command-center). BRAT reads the matching GitHub release assets and can install future tagged releases through **BRAT: Check for updates to all beta plugins and UPDATE**.
+
 ### Manual installation
 
 1. Download `main.js`, `manifest.json`, and `styles.css` from the matching [GitHub release](https://github.com/drbinsaad/knowledge-base-command-center/releases).
@@ -106,6 +121,21 @@ The plugin is being submitted to the Obsidian Community Plugins directory. After
 4. Reload Obsidian, then enable **Knowledge Base Command Center** under **Settings → Community plugins**.
 
 For iPhone or iPad, install and enable the plugin in a desktop-synced vault first, ensure the `.obsidian/plugins/ent-vault-command-center/` folder syncs to the device, then enable it in the mobile vault.
+
+For manual updates, download all three files from the same newer release and replace the existing copies while Obsidian is closed or the plugin is disabled. Do not mix asset versions.
+
+### Uninstall
+
+Before uninstalling, use **Export organization backup** if you may want the personal hierarchy later. Disable the plugin, then remove it through Community Plugins (or remove `.obsidian/plugins/ent-vault-command-center/` for a manual install). Removing the plugin folder also removes `data.json`, including settings, collections, pins, visual hierarchy, snapshots, and undo history. Markdown notes are not removed.
+
+### Troubleshooting
+
+- **The plugin does not appear:** confirm `main.js`, `manifest.json`, and `styles.css` are directly inside `.obsidian/plugins/ent-vault-command-center/`, then reload Obsidian.
+- **BRAT does not update:** run BRAT's update command and confirm the GitHub release contains all three matching assets. Remove and re-add the beta plugin only after exporting organization data.
+- **A note is missing from the index:** check the indexed folder, hidden notes in **Manage index…**, and any manual membership. Diagnostics reports stale references without deleting note files.
+- **Visual movement on iPhone:** enable **Arrange**, tap the row's **…** button, and choose Move under, Move to group, Indent, Outdent, Move up/down, or Make top-level. Desktop drag-and-drop is optional.
+- **Mobile JSON import:** copy the JSON file anywhere inside the vault, then choose it from the in-vault picker.
+- **Settings are read-only:** the plugin detected unrecognized or newer `data.json` content and intentionally refused to overwrite it. Preserve the file and report the version and error message without attaching private note content.
 
 ### Development installation
 
