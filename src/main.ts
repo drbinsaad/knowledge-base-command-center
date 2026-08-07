@@ -1,6 +1,7 @@
 import { normalizePath, Notice, Plugin, TFile, TFolder } from "obsidian";
 import { EntHierarchyBasesView } from "./bases-view";
 import {
+  asUnknownRecord,
   asStringList,
   asText,
   applyCanonicalFrontmatter,
@@ -60,13 +61,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     });
 
     this.addRibbonIcon("library-big", `Open ${this.data.settings.workspaceName}`, () => void this.activateView());
-    this.addCommand({ id: "open-ent-vault-command-center", name: "Open command center", callback: () => void this.activateView() });
-    this.addCommand({ id: "add-to-ent-command-center", name: "Add or create…", callback: () => void this.withView((view) => view.openAddActions()) });
+    this.addCommand({ id: "open-workspace", name: "Open workspace", callback: () => void this.activateView() });
+    this.addCommand({ id: "add-or-create", name: "Add or create…", callback: () => void this.withView((view) => view.openAddActions()) });
     this.addCommand({ id: "manage-knowledge-index", name: "Manage index…", callback: () => void this.withView((view) => view.openIndexManager()) });
     this.addCommand({ id: "create-knowledge-note", name: "Create note from template or empty note…", callback: () => void this.withView((view) => view.startCreateKnowledgeNote()) });
     this.addCommand({
       id: "create-topic-proposal",
-      name: "Create topic proposal in Inbox",
+      name: "Create topic proposal in inbox",
       checkCallback: (checking) => {
         if (!this.isClinicalMode()) return false;
         if (!checking) void this.withView((view) => view.startCreateProposal());
@@ -216,15 +217,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private referencedPaths(): Set<string> {
-    return new Set([
-      ...this.data.manualIndexPaths,
-      ...this.data.pinnedPaths,
-      ...this.data.nextStudyPaths,
-      ...this.data.collections.flatMap((heading) => [
-        ...heading.subjects,
-        ...heading.subheadings.flatMap((subheading) => subheading.subjects),
-      ]),
-    ]);
+    const paths = new Set([...this.data.manualIndexPaths, ...this.data.pinnedPaths, ...this.data.nextStudyPaths]);
+    for (const heading of this.data.collections) {
+      for (const path of heading.subjects) paths.add(path);
+      for (const subheading of heading.subheadings) {
+        for (const path of subheading.subjects) paths.add(path);
+      }
+    }
+    return paths;
   }
 
   getRecords(): VaultRecord[] {
@@ -234,10 +234,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const proposalFolder = normalizePath(this.data.settings.proposalFolder);
     const proposalRoot = proposalFolder ? `${proposalFolder}/` : "";
     const settings = this.data.settings;
-    const records = this.app.vault.getMarkdownFiles().flatMap((file): VaultRecord[] => {
-      const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter ?? {};
+    const records: VaultRecord[] = [];
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      const frontmatter = asUnknownRecord(this.app.metadataCache.getFileCache(file)?.frontmatter);
       const identity = this.identityForFile(file, frontmatter, referenced, proposalRoot);
-      if (!identity) return [];
+      if (!identity) continue;
       const { kind, role } = identity;
       const entDomains = asStringList(frontmatter.ent_domains);
       const titleFallback = file.basename.replace(/^(Procedure|Drug|Syndrome)\s*-\s*/i, "");
@@ -256,7 +257,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
               : kind === "syndrome"
                 ? entDomains[0] || asText(frontmatter.syndrome_group, "Syndromes")
                 : asText(frontmatter.domain, file.parent?.path || "Vault notes");
-      return [{
+      records.push({
         path: file.path,
         title: asText(frontmatter.title, asText(frontmatter.canonical_name, titleFallback)),
         kind,
@@ -281,8 +282,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         folderOrder: kind === "topic" ? this.indexGroupSortKey(domain, file.path) : role === "proposal" ? "00" : "99",
         mtime: file.stat.mtime,
         aiLock: frontmatter.ai_lock === true,
-      }];
-    }).sort((a, b) => a.role.localeCompare(b.role)
+      });
+    }
+    records.sort((a, b) => a.role.localeCompare(b.role)
       || (a.curriculumId || "ZZZ").localeCompare(b.curriculumId || "ZZZ", undefined, { numeric: true })
       || a.title.localeCompare(b.title));
     this.recordsCache = records;
@@ -325,7 +327,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   suggestedIndexGroup(file: TFile): string {
     const settings = this.data.settings;
-    const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter ?? {};
+    const frontmatter = asUnknownRecord(this.app.metadataCache.getFileCache(file)?.frontmatter);
     const configured = settings.groupProperty ? asStringList(frontmatter[settings.groupProperty])[0] ?? "" : "";
     if (configured) return configured;
     if (pathIsInsideFolder(file.path, settings.primaryFolder)) return configuredGroupFromPath(file.path, settings.primaryFolder);
@@ -402,7 +404,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return [...configuredRoots, proposalRoot, ...clinicalRoots].filter(Boolean).some((root) => path.startsWith(root))
       || this.referencedPaths().has(path)
       || this.data.excludedIndexPaths.includes(path)
-      || Object.prototype.hasOwnProperty.call(this.data.indexGroupByPath, path);
+      || Object.keys(this.data.indexGroupByPath).includes(path);
   }
 
   async reconcileRecords(records: VaultRecord[]): Promise<void> {
@@ -611,7 +613,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.assertDataWritable();
     const source = this.app.vault.getAbstractFileByPath(sourcePath);
     if (!(source instanceof TFile)) throw new Error("The proposal note could not be found.");
-    const frontmatter = this.app.metadataCache.getFileCache(source)?.frontmatter ?? {};
+    const frontmatter = asUnknownRecord(this.app.metadataCache.getFileCache(source)?.frontmatter);
     if (frontmatter.type !== "topic-proposal") throw new Error("Only a topic-proposal note can be promoted.");
     if (frontmatter.ai_lock === true) throw new Error("This proposal has ai_lock: true and cannot be changed.");
     const validation = this.validateCanonical(value, sourcePath);
@@ -627,7 +629,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (!(moved instanceof TFile)) throw new Error("The promoted note could not be found after it was moved.");
       current = moved;
       await this.app.fileManager.processFrontMatter(current, (metadata) => {
-        applyCanonicalFrontmatter(metadata, {
+        applyCanonicalFrontmatter(asUnknownRecord(metadata as unknown), {
           value,
           parentTopic: this.parentWikiLink(value.parentPath),
           date: this.today(),
@@ -659,7 +661,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.assertDataWritable();
     const source = this.app.vault.getAbstractFileByPath(sourcePath);
     if (!(source instanceof TFile)) throw new Error("The canonical note could not be found.");
-    const frontmatter = this.app.metadataCache.getFileCache(source)?.frontmatter ?? {};
+    const frontmatter = asUnknownRecord(this.app.metadataCache.getFileCache(source)?.frontmatter);
     if (frontmatter.ai_lock === true) throw new Error("This note has ai_lock: true and cannot be changed.");
     if (!asText(frontmatter.curriculum_id)) throw new Error("Only a canonical topic can use placement editing.");
     const validation = this.validateCanonical(value, sourcePath);
@@ -677,7 +679,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         current = moved;
       }
       await this.app.fileManager.processFrontMatter(current, (metadata) => {
-        applyCanonicalFrontmatter(metadata, {
+        applyCanonicalFrontmatter(asUnknownRecord(metadata as unknown), {
           value,
           parentTopic: this.parentWikiLink(value.parentPath),
           date: this.today(),

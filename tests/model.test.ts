@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   applyTemplateTokens,
   applyCanonicalFrontmatter,
+  asUnknownRecord,
   buildCurriculumLayout,
   buildCurriculumTree,
   buildIndexDiagnostics,
@@ -66,6 +67,13 @@ function record(overrides: Partial<VaultRecord> = {}): VaultRecord {
     ...overrides,
   };
 }
+
+test("unknown metadata is narrowed to a mutable record at one boundary", () => {
+  const metadata: Record<string, unknown> = { title: "Laryngeal Cleft" };
+  assert.equal(asUnknownRecord(metadata), metadata);
+  assert.deepEqual(asUnknownRecord(null), {});
+  assert.deepEqual(asUnknownRecord(["not", "frontmatter"]), {});
+});
 
 test("migrates only custom v1 headings and keeps a recovery backup", () => {
   const data = migrateData({
