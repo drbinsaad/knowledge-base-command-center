@@ -24,7 +24,11 @@ export class EntHierarchyBasesView extends BasesView {
     });
 
     const groups = new Map<string, typeof records>();
-    for (const record of records) groups.set(record.domain, [...(groups.get(record.domain) ?? []), record]);
+    for (const record of records) {
+      const bucket = groups.get(record.domain);
+      if (bucket) bucket.push(record);
+      else groups.set(record.domain, [record]);
+    }
 
     for (const [domain, grouped] of [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))) {
       const section = this.containerEl.createDiv({ cls: "ent-cc-base-group" });

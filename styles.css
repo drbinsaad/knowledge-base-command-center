@@ -1275,7 +1275,6 @@
   .ent-cc-heading-row .ent-cc-leading-icon,
   .ent-cc-subheading-row .ent-cc-leading-icon,
   .ent-cc-subject-id,
-  .ent-cc-row-badges,
   .ent-cc-row-count {
     display: none;
   }
@@ -1317,6 +1316,19 @@
     padding-right: 14px;
     padding-bottom: max(7px, env(safe-area-inset-bottom));
     padding-left: 14px;
+  }
+
+  /* Safety, AI-lock and pin state must stay visible on phones; only the
+     verbose id/priority chips are dropped for width. */
+  .ent-cc-row-badges {
+    display: flex;
+    gap: 2px;
+    flex: 0 0 auto;
+  }
+
+  .ent-cc-row-badges .ent-cc-priority,
+  .ent-cc-row-badges .ent-cc-visual-badge {
+    display: none;
   }
 }
 
@@ -1826,4 +1838,15 @@
     min-width: 0;
     margin-top: 8px;
   }
+}
+
+.ent-cc-row-missing {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: var(--text-muted);
+  background: var(--background-modifier-border);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
 }

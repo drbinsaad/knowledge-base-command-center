@@ -17,7 +17,7 @@
     "dev": "node esbuild.config.mjs",
     "typecheck": "tsc -noEmit -skipLibCheck",
     "build": "npm run typecheck && node esbuild.config.mjs production",
-    "lint": "eslint . && node scripts/validate-json.mjs",
+    "lint": "eslint . --max-warnings 0 && node scripts/validate-json.mjs",
     "test": "node --import tsx --import ./tests/support/register.mjs --test tests/model.test.ts tests/main.test.ts",
     "test:release": "node --experimental-strip-types --test tests/release.test.ts",
     "verify-release": "npm run test:release",

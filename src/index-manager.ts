@@ -26,6 +26,8 @@ export class IndexManagerModal extends Modal {
   private selected = new Set<string>();
   private diagnosticsCache: IndexDiagnostic[] | null = null;
   private searchTimer: number | null = null;
+  private selectionCountEl: HTMLElement | null = null;
+  private selectionButtons: Array<{ el: HTMLButtonElement; enabled: () => boolean }> = [];
 
   constructor(private readonly plugin: EntVaultCommandCenterPlugin) {
     super(plugin.app);
@@ -141,14 +143,15 @@ export class IndexManagerModal extends Modal {
     }, filtered.length === 0);
 
     const actions = this.contentEl.createDiv({ cls: "ent-cc-manager-bulk-actions" });
-    actions.createSpan({ text: `${this.selected.size} selected`, cls: "ent-cc-muted" });
+    this.selectionCountEl = actions.createSpan({ text: `${this.selected.size} selected`, cls: "ent-cc-muted", attr: { role: "status", "aria-live": "polite" } });
+    this.selectionButtons = [];
     if (this.tab === "indexed") {
-      this.actionButton(actions, "folder-input", `Move to ${this.plugin.data.settings.groupLabel.toLowerCase()}…`, () => this.chooseGroupForSelection("move"), this.selected.size === 0 || !this.plugin.canVisuallyMoveAcrossGroups());
-      if (!this.plugin.isClinicalMode()) this.actionButton(actions, "list-minus", "Remove from index…", () => this.removeSelectedFromIndex(), this.selected.size === 0, true);
+      this.selectionButtons.push({ el: this.actionButton(actions, "folder-input", `Move to ${this.plugin.data.settings.groupLabel.toLowerCase()}…`, () => this.chooseGroupForSelection("move"), this.selected.size === 0 || !this.plugin.canVisuallyMoveAcrossGroups()), enabled: () => this.selected.size > 0 && this.plugin.canVisuallyMoveAcrossGroups() });
+      if (!this.plugin.isClinicalMode()) this.selectionButtons.push({ el: this.actionButton(actions, "list-minus", "Remove from index…", () => this.removeSelectedFromIndex(), this.selected.size === 0, true), enabled: () => this.selected.size > 0 });
     } else if (this.tab === "available") {
-      this.actionButton(actions, "list-plus", "Add selected…", () => this.chooseGroupForSelection("add"), this.selected.size === 0);
+      this.selectionButtons.push({ el: this.actionButton(actions, "list-plus", "Add selected…", () => this.chooseGroupForSelection("add"), this.selected.size === 0), enabled: () => this.selected.size > 0 });
     } else {
-      this.actionButton(actions, "rotate-ccw", "Restore selected…", () => this.chooseGroupForSelection("restore"), this.selected.size === 0);
+      this.selectionButtons.push({ el: this.actionButton(actions, "rotate-ccw", "Restore selected…", () => this.chooseGroupForSelection("restore"), this.selected.size === 0), enabled: () => this.selected.size > 0 });
     }
 
     const list = this.contentEl.createDiv({ cls: "ent-cc-manager-list" });
@@ -156,6 +159,12 @@ export class IndexManagerModal extends Modal {
     for (const note of visible) this.renderNoteRow(list, note);
     if (filtered.length > visible.length) list.createDiv({ cls: "ent-cc-manager-limit", text: `Showing the first ${visible.length} matches. Narrow the search to reach the remaining ${filtered.length - visible.length}.` });
     if (filtered.length === 0) list.createDiv({ cls: "ent-cc-empty", text: this.query ? "No notes match this search." : "Nothing in this section." });
+  }
+
+  /** Updates only the controls that depend on the selection, preserving focus. */
+  private refreshSelectionState(): void {
+    this.selectionCountEl?.setText(`${this.selected.size} selected`);
+    for (const button of this.selectionButtons) button.el.disabled = !button.enabled();
   }
 
   private filterNotes(notes: ManagerNote[]): ManagerNote[] {
@@ -171,7 +180,9 @@ export class IndexManagerModal extends Modal {
     checkbox.checked = this.selected.has(note.path);
     checkbox.addEventListener("change", () => {
       if (checkbox.checked) this.selected.add(note.path); else this.selected.delete(note.path);
-      this.render();
+      // Re-rendering here would destroy the checkbox that has focus, making
+      // keyboard multi-selection impossible.
+      this.refreshSelectionState();
     });
     const text = selector.createDiv({ cls: "ent-cc-manager-note-text" });
     text.createDiv({ cls: "ent-cc-manager-note-title", text: note.title });
