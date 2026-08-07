@@ -107,7 +107,7 @@ export class IndexManagerModal extends Modal {
 
   private renderNoteManager(notes: ManagerNote[]): void {
     const toolbar = this.contentEl.createDiv({ cls: "ent-cc-manager-toolbar" });
-    const search = toolbar.createEl("input", { type: "search", placeholder: "Search note title or path…", attr: { "aria-label": "Search Index Manager notes" } });
+    const search = toolbar.createEl("input", { type: "search", placeholder: "Search note title or path…", attr: { "aria-label": "Search index manager notes" } });
     search.value = this.query;
     search.addEventListener("input", () => {
       const cursor = search.selectionStart ?? search.value.length;

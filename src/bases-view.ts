@@ -1,4 +1,5 @@
 import { BasesView, QueryController, setIcon } from "obsidian";
+import { asUnknownRecord } from "./model";
 
 export class EntHierarchyBasesView extends BasesView {
   type = "ent-hierarchy";
@@ -11,7 +12,7 @@ export class EntHierarchyBasesView extends BasesView {
     this.containerEl.empty();
     this.containerEl.addClass("ent-cc-bases-view");
     const records = this.data.data.map((entry) => {
-      const frontmatter = this.app.metadataCache.getFileCache(entry.file)?.frontmatter ?? {};
+      const frontmatter = asUnknownRecord(this.app.metadataCache.getFileCache(entry.file)?.frontmatter);
       const folder = entry.file.parent?.name.replace(/^\d+\s+/, "") || "Unassigned";
       return {
         file: entry.file,

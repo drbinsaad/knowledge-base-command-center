@@ -19,6 +19,8 @@ The internal plugin ID remains `ent-vault-command-center` so existing installati
 - Portable workspace configuration export/import without note contents or note-specific memberships.
 - Desktop, iPhone, and iPad support; no desktop-only APIs are used.
 
+Knowledge Base Command Center 0.7.3 and later requires Obsidian 1.13.0 or newer so its settings are searchable through Obsidian's current declarative settings interface.
+
 ## First-run setup
 
 The setup wizard opens the first time the command center is shown. Configure:
@@ -136,7 +138,8 @@ This creates a three-file install ZIP and SHA-256 checksum under `dist/`. The re
 ## Privacy and permissions
 
 - The plugin has no analytics, telemetry, advertising, accounts, payments, or network requests.
-- It reads Markdown files and metadata inside the current Obsidian vault to build the configured index.
+- It enumerates Markdown file paths and reads Markdown metadata inside the current vault to build the index, offer existing-note and template pickers, and repair missing plugin references.
+- Copy buttons write only the plugin-generated command, wikilink, or vault-relative path shown by that action to the clipboard after you click; the plugin never reads clipboard contents.
 - It stores settings and personal organization in Obsidian's plugin data file.
 - It writes only when you explicitly create a note, organize plugin state, promote an ENT proposal, or edit canonical placement through the protected advanced workflow.
 - It does not access files outside the vault.

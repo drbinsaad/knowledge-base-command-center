@@ -292,6 +292,12 @@ export function asStringList(value: unknown): string[] {
   return [];
 }
 
+export function asUnknownRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
 export function normalizeWikiLink(value: string): string {
   const clean = value.trim().replace(/^\[\[/, "").replace(/\]\]$/, "");
   return (clean.split("|")[0] ?? clean).replace(/\.md$/, "").trim();
@@ -326,9 +332,11 @@ export function cloneCollections(collections: LayoutHeading[]): LayoutHeading[] 
 }
 
 export function cloneCurriculumVisual(state: CurriculumVisualState): CurriculumVisualState {
+  const orderByContainer: Record<string, string[]> = {};
+  for (const [key, paths] of Object.entries(state.orderByContainer)) orderByContainer[key] = [...paths];
   return {
     parentByPath: { ...state.parentByPath },
-    orderByContainer: Object.fromEntries(Object.entries(state.orderByContainer).map(([key, paths]) => [key, [...paths]])),
+    orderByContainer,
   };
 }
 
@@ -373,30 +381,34 @@ export function restoreSnapshot(data: PluginData, snapshot: PersonalSnapshot): v
 
 function cleanLayout(input: unknown): LayoutHeading[] {
   if (!Array.isArray(input)) return [];
-  return input.flatMap((raw): LayoutHeading[] => {
-    if (!raw || typeof raw !== "object") return [];
-    const value = raw as Record<string, unknown>;
+  const headings: LayoutHeading[] = [];
+  for (const raw of input as unknown[]) {
+    const value = asUnknownRecord(raw);
     const title = asText(value.title);
-    if (!title) return [];
-    return [{
-      id: asText(value.id, makeId("collection")),
-      title,
-      collapsed: value.collapsed === true,
-      subjects: asStringList(value.subjects),
-      subheadings: Array.isArray(value.subheadings) ? value.subheadings.flatMap((rawSub): LayoutSubheading[] => {
-        if (!rawSub || typeof rawSub !== "object") return [];
-        const sub = rawSub as Record<string, unknown>;
+    if (!title) continue;
+    const subheadings: LayoutSubheading[] = [];
+    if (Array.isArray(value.subheadings)) {
+      for (const rawSub of value.subheadings as unknown[]) {
+        const sub = asUnknownRecord(rawSub);
         const subTitle = asText(sub.title);
-        if (!subTitle) return [];
-        return [{
+        if (!subTitle) continue;
+        subheadings.push({
           id: asText(sub.id, makeId("subheading")),
           title: subTitle,
           collapsed: sub.collapsed === true,
           subjects: asStringList(sub.subjects),
-        }];
-      }) : [],
-    }];
-  });
+        });
+      }
+    }
+    headings.push({
+      id: asText(value.id, makeId("collection")),
+      title,
+      collapsed: value.collapsed === true,
+      subjects: asStringList(value.subjects),
+      subheadings,
+    });
+  }
+  return headings;
 }
 
 function isMainTab(value: unknown): value is MainTab {
@@ -417,12 +429,14 @@ function isNewNoteMode(value: unknown): value is NewNoteMode {
 
 function cleanSavedViews(input: unknown): SavedView[] {
   if (!Array.isArray(input)) return [];
-  return input.flatMap((raw): SavedView[] => {
-    if (!raw || typeof raw !== "object") return [];
-    const view = raw as Record<string, unknown>;
-    if (!asText(view.name) || !isMainTab(view.tab)) return [];
-    return [{ id: asText(view.id, makeId("view")), name: asText(view.name), tab: view.tab, query: asText(view.query) }];
-  });
+  const views: SavedView[] = [];
+  for (const raw of input as unknown[]) {
+    const view = asUnknownRecord(raw);
+    const name = asText(view.name);
+    if (!name || !isMainTab(view.tab)) continue;
+    views.push({ id: asText(view.id, makeId("view")), name, tab: view.tab, query: asText(view.query) });
+  }
+  return views;
 }
 
 export function cleanCurriculumVisual(input: unknown): CurriculumVisualState {
@@ -458,10 +472,10 @@ function cleanPathMap(input: unknown): Record<string, string> {
 
 function cleanSnapshots(input: unknown): PersonalSnapshot[] {
   if (!Array.isArray(input)) return [];
-  return input.flatMap((raw): PersonalSnapshot[] => {
-    if (!raw || typeof raw !== "object") return [];
-    const snapshot = raw as Record<string, unknown>;
-    return [{
+  const snapshots: PersonalSnapshot[] = [];
+  for (const raw of input as unknown[]) {
+    const snapshot = asUnknownRecord(raw);
+    snapshots.push({
       label: asText(snapshot.label, "Saved organization"),
       at: Number(snapshot.at) || Date.now(),
       collections: cleanLayout(snapshot.collections),
@@ -473,8 +487,9 @@ function cleanSnapshots(input: unknown): PersonalSnapshot[] {
       excludedIndexPaths: asStringList(snapshot.excludedIndexPaths),
       indexGroupByPath: cleanPathMap(snapshot.indexGroupByPath),
       indexGroupOrder: [...new Set(asStringList(snapshot.indexGroupOrder))],
-    }];
-  });
+    });
+  }
+  return snapshots;
 }
 
 function cleanSettings(input: unknown, legacyEnt = false): PluginSettings {
@@ -584,7 +599,8 @@ export function migrateData(input: unknown): PluginData {
   const custom = oldHeadings.filter((raw) => {
     if (!raw || typeof raw !== "object") return false;
     const heading = raw as Record<string, unknown>;
-    return heading.kind === "custom" || (!String(heading.id ?? "").startsWith("auto-") && heading.id !== "ent-cc-inbox");
+    const id = asText(heading.id);
+    return heading.kind === "custom" || (!id.startsWith("auto-") && id !== "ent-cc-inbox");
   });
   return {
     ...structuredClone(DEFAULT_DATA),
@@ -638,7 +654,7 @@ export function buildCurriculumTree(records: VaultRecord[], state: CurriculumVis
   const byPath = new Map(topics.map((record) => [record.path, record]));
   const parentByPath = new Map<string, string | null>();
   for (const record of topics) {
-    const hasOverride = Object.prototype.hasOwnProperty.call(state.parentByPath, record.path);
+    const hasOverride = Object.keys(state.parentByPath).includes(record.path);
     const requested = hasOverride ? state.parentByPath[record.path] ?? null : defaultCurriculumParent(record, topics);
     const parent = requested ? byPath.get(requested) : undefined;
     parentByPath.set(record.path, parent && parent.path !== record.path && parent.domain === record.domain ? parent.path : null);
@@ -686,7 +702,9 @@ export function curriculumSiblingPaths(tree: CurriculumTreeResult, record: Vault
       }
       return undefined;
     };
-    return find(tree.domains.flatMap((domain) => domain.roots))?.children.map((node) => node.record.path) ?? [];
+    const roots: CurriculumTreeNode[] = [];
+    for (const domain of tree.domains) roots.push(...domain.roots);
+    return find(roots)?.children.map((node) => node.record.path) ?? [];
   }
   return tree.domains.find((domain) => domain.domain === record.domain)?.roots.map((node) => node.record.path) ?? [];
 }

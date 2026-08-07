@@ -113,6 +113,27 @@ function uniqueRecords(records: VaultRecord[]): VaultRecord[] {
   });
 }
 
+function collectionPaths(collections: LayoutHeading[]): string[] {
+  const paths: string[] = [];
+  for (const heading of collections) {
+    paths.push(...heading.subjects);
+    for (const subheading of heading.subheadings) paths.push(...subheading.subjects);
+  }
+  return paths;
+}
+
+function queueRecords(queues: QueueDefinition[]): VaultRecord[] {
+  const records: VaultRecord[] = [];
+  for (const queue of queues) records.push(...queue.records);
+  return records;
+}
+
+function curriculumRoots(curriculum: CurriculumTreeResult): CurriculumTreeNode[] {
+  const roots: CurriculumTreeNode[] = [];
+  for (const domain of curriculum.domains) roots.push(...domain.roots);
+  return roots;
+}
+
 export class EntVaultCommandCenterView extends ItemView {
   private records: VaultRecord[] = [];
   private recordByPath = new Map<string, VaultRecord>();
@@ -305,7 +326,7 @@ export class EntVaultCommandCenterView extends ItemView {
       return;
     }
     if (!file) {
-      new Notice("Open a Markdown note first, then run Add current note.");
+      new Notice("Open a Markdown note first, then run add current note.");
       return;
     }
     this.openCollectionPicker(file.path);
@@ -326,7 +347,7 @@ export class EntVaultCommandCenterView extends ItemView {
         this.plugin.data.selectedPath = file.path;
         await this.plugin.savePluginData();
         await this.reload();
-        new Notice("Topic proposal created as unverified in the Inbox.");
+        new Notice("Topic proposal created as unverified in the inbox.");
         if (value.addToCollection) this.openCollectionPicker(file.path);
       },
     }).open();
@@ -361,11 +382,11 @@ export class EntVaultCommandCenterView extends ItemView {
   public startPromoteProposal(input?: VaultRecord): void {
     const record = input ?? this.recordByPath.get(this.plugin.data.selectedPath);
     if (!record || record.role !== "proposal") {
-      new Notice("Select a Topic Inbox proposal first.");
+      new Notice("Select a topic inbox proposal first.");
       return;
     }
     if (record.aiLock) {
-      new Notice("This proposal has ai_lock: true and cannot be promoted.");
+      new Notice("This proposal has AI lock enabled and cannot be promoted.");
       return;
     }
     new TopicEditorModal(this.app, {
@@ -392,7 +413,7 @@ export class EntVaultCommandCenterView extends ItemView {
         this.plugin.data.selectedPath = file.path;
         await this.plugin.savePluginData();
         await this.reload();
-        new Notice("Proposal promoted. It remains unverified pending Dr. Ali’s review.");
+        new Notice("Proposal promoted. It remains unverified pending human review.");
       },
     }).open();
   }
@@ -408,7 +429,7 @@ export class EntVaultCommandCenterView extends ItemView {
       return;
     }
     if (record.aiLock) {
-      new Notice("This note has ai_lock: true and cannot be changed.");
+      new Notice("This note has AI lock enabled and cannot be changed.");
       return;
     }
     new TopicEditorModal(this.app, {
@@ -592,11 +613,8 @@ export class EntVaultCommandCenterView extends ItemView {
   private tabCount(tab: MainTab): number {
     if (tab === "curriculum") return this.records.filter((record) => record.kind === "topic" && (record.role === "canonical" || record.role === "supporting")).length;
     if (tab === "inbox") return this.records.filter((record) => record.role === "proposal").length;
-    if (tab === "collections") return new Set(this.plugin.data.collections.flatMap((heading) => [
-      ...heading.subjects,
-      ...heading.subheadings.flatMap((subheading) => subheading.subjects),
-    ])).size;
-    if (tab === "queues") return uniqueRecords(this.smartQueues().flatMap((queue) => queue.records)).length;
+    if (tab === "collections") return new Set(collectionPaths(this.plugin.data.collections)).size;
+    if (tab === "queues") return uniqueRecords(queueRecords(this.smartQueues())).length;
     return this.records.filter((record) => record.kind === tab.slice(0, -1)).length;
   }
 
@@ -676,7 +694,7 @@ export class EntVaultCommandCenterView extends ItemView {
     if (!this.countEl) return;
     this.countEl.empty();
     if (this.plugin.data.activeTab === "queues") {
-      const uniqueVisible = uniqueRecords(this.smartQueues().flatMap((queue) => queue.records)).filter((record) => matchesQuery(record, this.query)).length;
+      const uniqueVisible = uniqueRecords(queueRecords(this.smartQueues())).filter((record) => matchesQuery(record, this.query)).length;
       this.countEl.createSpan({ text: `${visible} queue entries · ${uniqueVisible} unique` });
     } else {
       const settings = this.plugin.data.settings;
@@ -888,9 +906,9 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private hasCurriculumVisualPlacement(path: string): boolean {
-    return Object.prototype.hasOwnProperty.call(this.plugin.data.curriculumVisual.parentByPath, path)
+    return Object.keys(this.plugin.data.curriculumVisual.parentByPath).includes(path)
       || Object.values(this.plugin.data.curriculumVisual.orderByContainer).some((paths) => paths.includes(path))
-      || Object.prototype.hasOwnProperty.call(this.plugin.data.indexGroupByPath, path);
+      || Object.keys(this.plugin.data.indexGroupByPath).includes(path);
   }
 
   private renderHeading(parent: HTMLElement, heading: LayoutHeading, mutable: boolean): number {
@@ -1308,7 +1326,7 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private matchingRecordsForCurrentView(): VaultRecord[] {
     const candidates = this.plugin.data.activeTab === "queues"
-      ? uniqueRecords(this.smartQueues().flatMap((queue) => queue.records))
+      ? uniqueRecords(queueRecords(this.smartQueues()))
       : this.recordsForActiveTab();
     return uniqueRecords(candidates.filter((record) => matchesQuery(record, this.query)));
   }
@@ -1512,7 +1530,7 @@ export class EntVaultCommandCenterView extends ItemView {
       }
       return undefined;
     };
-    return find(this.curriculum.domains.flatMap((domain) => domain.roots))?.children.map((node) => node.record.path) ?? [];
+    return find(curriculumRoots(this.curriculum))?.children.map((node) => node.record.path) ?? [];
   }
 
   private async moveCurriculumRecord(record: VaultRecord, parentPath: string | null, siblingPaths: string[], index: number, label: string): Promise<void> {
@@ -1733,14 +1751,14 @@ export class EntVaultCommandCenterView extends ItemView {
     }));
     if (this.plugin.isClinicalMode()) {
       menu.addSeparator();
-      menu.addItem((item) => item.setTitle("Open Clinical Review Queue Base").setIcon("layout-list").onClick(() => void this.openRecord("02 Maps of Content/Clinical Review Queue.base")));
-      menu.addItem((item) => item.setTitle("Open current library Base").setIcon("database").onClick(() => void this.openCurrentBase()));
+      menu.addItem((item) => item.setTitle("Open clinical review queue base").setIcon("layout-list").onClick(() => void this.openRecord("02 Maps of Content/Clinical Review Queue.base")));
+      menu.addItem((item) => item.setTitle("Open current library base").setIcon("database").onClick(() => void this.openCurrentBase()));
     }
     if (this.plugin.data.activeTab === "collections" && this.plugin.data.collections.length > 0) {
       menu.addSeparator();
-      menu.addItem((item) => item.setTitle("Clear My Collections").setIcon("rotate-ccw").onClick(() => {
-        new ConfirmModal(this.app, "Clear My Collections?", "All personal headings, subheadings, and memberships will be removed. Undo remains available. Source notes are untouched.", "Clear collections", async () => {
-          await this.plugin.mutate("Clear My Collections", () => { this.plugin.data.collections = []; });
+      menu.addItem((item) => item.setTitle("Clear my collections").setIcon("rotate-ccw").onClick(() => {
+        new ConfirmModal(this.app, "Clear my collections?", "All personal headings, subheadings, and memberships will be removed. Undo remains available. Source notes are untouched.", "Clear collections", async () => {
+          await this.plugin.mutate("Clear my collections", () => { this.plugin.data.collections = []; });
         }).open();
       }));
     }

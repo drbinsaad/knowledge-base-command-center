@@ -90,7 +90,7 @@ export class ConfirmModal extends Modal {
     this.contentEl.createEl("p", { text: this.message });
     new Setting(this.contentEl)
       .addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()))
-      .addButton((button) => button.setButtonText(this.confirmLabel).setWarning().onClick(async () => {
+      .addButton((button) => button.setButtonText(this.confirmLabel).setDestructive().onClick(async () => {
         try {
           await this.onConfirm();
           this.close();
@@ -108,14 +108,18 @@ export interface CollectionTarget {
 }
 
 export function collectionTargets(collections: LayoutHeading[]): CollectionTarget[] {
-  return collections.flatMap((heading) => [
-    { headingId: heading.id, label: heading.title },
-    ...heading.subheadings.map((subheading) => ({
-      headingId: heading.id,
-      subheadingId: subheading.id,
-      label: `${heading.title} / ${subheading.title}`,
-    })),
-  ]);
+  const targets: CollectionTarget[] = [];
+  for (const heading of collections) {
+    targets.push({ headingId: heading.id, label: heading.title });
+    for (const subheading of heading.subheadings) {
+      targets.push({
+        headingId: heading.id,
+        subheadingId: subheading.id,
+        label: `${heading.title} / ${subheading.title}`,
+      });
+    }
+  }
+  return targets;
 }
 
 export class CollectionPickerModal extends FuzzySuggestModal<CollectionTarget> {
@@ -550,7 +554,7 @@ export class WorkspaceSetupModal extends Modal {
     for (const key of ["idProperty", "groupProperty", "parentProperty"] as const) this.value[key] = this.value[key].trim();
     this.value.defaultTemplatePath = this.value.defaultTemplatePath.trim().replace(/^\/+/, "");
     if (this.value.defaultNewNoteMode === "template" && !this.value.defaultTemplatePath) {
-      this.errorEl?.setText("Choose a default template, or use Empty note as the default.");
+      this.errorEl?.setText("Choose a default template, or use empty note as the default.");
       return;
     }
     try {
@@ -630,7 +634,7 @@ export class TopicEditorModal extends Modal {
       .setName("Topic title")
       .setDesc("Used for the note title and filename.")
       .addText((text) => {
-        text.setPlaceholder("e.g. Velopharyngeal insufficiency").setValue(this.value.title).onChange((value) => {
+        text.setPlaceholder("Velopharyngeal insufficiency").setValue(this.value.title).onChange((value) => {
           this.value.title = value;
           this.updatePreview();
         });
@@ -638,7 +642,7 @@ export class TopicEditorModal extends Modal {
       });
 
     new Setting(this.contentEl)
-      .setName("ENT domain")
+      .setName("Clinical domain")
       .setDesc("Controls the canonical domain folder when promoted.")
       .addDropdown((dropdown) => {
         for (const definition of DOMAIN_DEFINITIONS) dropdown.addOption(definition.name, definition.name);
@@ -658,7 +662,7 @@ export class TopicEditorModal extends Modal {
         button.onClick(() => {
           const expectedId = expectedParentCurriculumId(this.value.curriculumId);
           if (this.options.mode !== "proposal" && this.value.curriculumId && !expectedId && !isExtensionCurriculumId(this.value.curriculumId)) {
-            new Notice("Root curriculum IDs cannot have a parent topic.");
+            new Notice("A root curriculum ID cannot have a parent topic.");
             return;
           }
           const expectedPath = this.options.resolveExpectedParentPath?.(this.value) ?? "";
@@ -700,8 +704,8 @@ export class TopicEditorModal extends Modal {
     if (this.options.mode !== "proposal") {
       new Setting(this.contentEl)
         .setName("Curriculum ID")
-        .setDesc("Must match the selected domain, e.g. ENT-LAR-010 or ENT-LAR-010.01.")
-        .addText((text) => text.setPlaceholder("ENT-LAR-###").setValue(this.value.curriculumId).onChange((value) => {
+        .setDesc("Must match the selected domain and use the configured curriculum format.")
+        .addText((text) => text.setPlaceholder("Curriculum identifier").setValue(this.value.curriculumId).onChange((value) => {
           this.value.curriculumId = value.toUpperCase();
           text.setValue(this.value.curriculumId);
           this.syncExpectedParent();

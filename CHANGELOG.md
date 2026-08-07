@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.3
+
+- Adopted Obsidian 1.13's declarative settings API so every setting is available to Settings search on desktop and mobile.
+- Added explicit type boundaries for Obsidian metadata and removed deprecated or scanner-unsafe source patterns.
+- Normalized the two legacy command identifiers and labels flagged by the Community Plugins review.
+- Clarified that whole-vault Markdown enumeration powers the index and that user-triggered copy actions only write plugin-generated text to the clipboard.
+
 ## 0.7.2
 
 - Preserved user-arranged workspace leaves when the plugin unloads.
