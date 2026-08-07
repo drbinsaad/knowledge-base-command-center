@@ -11,6 +11,7 @@ import {
   canonicalIdIsValid,
   canonicalHierarchyIssue,
   canonicalPath,
+  canonicalPathInputsUnchanged,
   cloneCollections,
   configuredGroupFromPath,
   createPersonalBackup,
@@ -24,6 +25,7 @@ import {
   matchesQuery,
   matchesParsedQuery,
   MAX_CURRICULUM_DEPTH,
+  MAX_UNDO_BYTES,
   metadataHasGap,
   migrateData,
   moveCurriculumVisual,
@@ -127,6 +129,22 @@ test("recursive curriculum tree nests canonical children and supporting notes", 
   assert.equal(tree.domains[0]?.roots[0]?.record.path, family.path);
   assert.equal(tree.domains[0]?.roots[0]?.children[0]?.record.path, cleft.path);
   assert.equal(tree.domains[0]?.roots[0]?.children[0]?.children[0]?.record.path, supporting.path);
+});
+
+test("indexed parent lookup cannot collide across spaced domain names and remains first-wins", () => {
+  const headAndNeck = record({ path: "KB/head-and-neck-x.md", title: "x", domain: "Head and Neck", curriculumId: "", role: "supporting" });
+  const misleadingHead = record({ path: "KB/head-and-neck-x-collision.md", title: "and Neck x", domain: "Head", curriculumId: "", role: "supporting" });
+  const duplicateAlias = record({ path: "KB/duplicate-alias.md", title: "Second", aliases: ["shared"], domain: "Head and Neck", curriculumId: "", role: "supporting" });
+  const firstAlias = record({ path: "KB/first-alias.md", title: "First", aliases: ["shared"], domain: "Head and Neck", curriculumId: "", role: "supporting" });
+  const childByTitle = record({ path: "KB/child-title.md", title: "Child title", domain: "Head and Neck", curriculumId: "", role: "supporting", parentTopic: "[[x]]" });
+  const childByAlias = record({ path: "KB/child-alias.md", title: "Child alias", domain: "Head and Neck", curriculumId: "", role: "supporting", parentTopic: "[[shared]]" });
+  const tree = buildCurriculumTree(
+    [headAndNeck, misleadingHead, firstAlias, duplicateAlias, childByTitle, childByAlias],
+    { parentByPath: {}, orderByContainer: {} },
+  );
+
+  assert.equal(tree.parentByPath.get(childByTitle.path), headAndNeck.path);
+  assert.equal(tree.parentByPath.get(childByAlias.path), firstAlias.path);
 });
 
 test("visual curriculum moves reorder and reparent without mutating records", () => {
@@ -579,7 +597,7 @@ test("diagnostics and visual-placement indexes remain linear at large-vault scal
   const start = performance.now();
   const diagnostics = buildIndexDiagnostics(data, records, paths);
   const diagnosticMs = performance.now() - start;
-  assert.equal(diagnostics.length, 0);
+  assert.deepEqual(diagnostics.map((item) => item.kind), ["depth-limit"]);
   assert.ok(diagnosticMs < 1_000, `diagnostics took ${diagnosticMs.toFixed(1)} ms`);
 
   const state = { parentByPath: {} as Record<string, string | null>, orderByContainer: { "root:Research": records.map((item) => item.path) } };
@@ -603,6 +621,19 @@ test("snapshot history is bounded by count and serialized size", () => {
   const preserved = limitSnapshotStack([...limited, oversized], 10, 8_000);
   assert.equal(preserved.includes(oversized), false);
   assert.equal(preserved.at(-1)?.label, "Snapshot 49");
+});
+
+test("renaming paths invalidates cached snapshot sizes and re-applies the byte budget", () => {
+  const data = migrateData(null);
+  data.pinnedPaths = ["Old/Note.md"];
+  const snapshot = snapshotPersonal(data, "Before rename");
+  data.undoStack = [snapshot];
+  assert.equal(limitSnapshotStack(data.undoStack).length, 1); // warm the WeakMap cache
+
+  const oversizedPrefix = `New-${"x".repeat(MAX_UNDO_BYTES)}`;
+  assert.equal(rewritePluginDataPathPrefix(data, "Old", oversizedPrefix), true);
+  assert.equal(data.undoStack.length, 0);
+  assert.ok(JSON.stringify(snapshot).length > MAX_UNDO_BYTES);
 });
 
 test("filenames drop characters that would break an Obsidian wikilink", () => {
@@ -794,6 +825,7 @@ test("a pathological parent chain degrades gracefully instead of exhausting the 
   }
   assert.ok(deepest > 1, "expected the chain to still nest below the cap");
   assert.ok(deepest <= MAX_CURRICULUM_DEPTH + 1);
+  assert.ok(tree.depthLimitedPaths.length > 0, "depth-limited records must be disclosed to the UI");
 
   // Descendant lookup over the capped tree also terminates.
   const descendants = curriculumDescendantPaths(tree, "Knowledge Base/Topic 0.md");
@@ -807,7 +839,21 @@ test("a normal shallow hierarchy is untouched by the depth cap", () => {
     record({ path: "KB/c.md", title: "C", curriculumId: "", role: "supporting", domain: "G", parentTopic: "[[b]]" }),
   ];
   const tree = buildCurriculumTree(records, { parentByPath: {}, orderByContainer: {} });
+  assert.deepEqual(tree.depthLimitedPaths, []);
   assert.equal(tree.parentByPath.get("KB/b.md"), "KB/a.md");
   assert.equal(tree.parentByPath.get("KB/c.md"), "KB/b.md");
   assert.deepEqual([...curriculumDescendantPaths(tree, "KB/a.md")].sort(), ["KB/b.md", "KB/c.md"]);
+});
+
+test("unchanged canonical path inputs preserve a legacy filename after sanitization rules evolve", () => {
+  const legacy = record({
+    path: "03 Clinical Topics/03 Laryngology/ENT-LAR-010 - VPI assessment surgery.md",
+    title: "VPI: assessment / surgery",
+    domain: "Laryngology",
+    curriculumId: "ENT-LAR-010",
+  });
+  const unchanged = { title: " VPI: assessment / surgery ", domain: "Laryngology", curriculumId: "ent-lar-010" };
+  assert.equal(canonicalPathInputsUnchanged(legacy, unchanged), true);
+  assert.notEqual(canonicalPath(unchanged), legacy.path);
+  assert.equal(canonicalPathInputsUnchanged(legacy, { ...unchanged, title: "VPI updated" }), false);
 });

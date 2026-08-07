@@ -1,4 +1,4 @@
-import { BasesView, QueryController, setIcon } from "obsidian";
+import { BasesView, Notice, QueryController, setIcon } from "obsidian";
 import { asUnknownRecord } from "./model";
 
 export class EntHierarchyBasesView extends BasesView {
@@ -41,7 +41,11 @@ export class EntHierarchyBasesView extends BasesView {
         row.createSpan({ text: record.title, cls: "ent-cc-base-record-title" });
         row.createSpan({ text: record.id, cls: "ent-cc-base-record-id" });
         if (record.priority) row.createSpan({ text: record.priority, cls: "ent-cc-priority" });
-        row.addEventListener("click", () => void this.app.workspace.getLeaf("tab").openFile(record.file));
+        row.addEventListener("click", () => {
+          void this.app.workspace.getLeaf("tab").openFile(record.file).catch((error) => {
+            new Notice(error instanceof Error ? error.message : String(error));
+          });
+        });
       }
     }
   }

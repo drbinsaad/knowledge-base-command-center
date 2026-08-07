@@ -135,10 +135,12 @@ export interface CurriculumTreeResult {
   /** Child order per parent path, built once so moves never rescan the tree. */
   childrenByPath: Map<string, string[]>;
   nodeByPath: Map<string, CurriculumTreeNode>;
+  /** Records re-rooted only because the rendered hierarchy exceeded the safety cap. */
+  depthLimitedPaths: string[];
 }
 
 export function emptyCurriculumTree(): CurriculumTreeResult {
-  return { domains: [], parentByPath: new Map(), childrenByPath: new Map(), nodeByPath: new Map() };
+  return { domains: [], parentByPath: new Map(), childrenByPath: new Map(), nodeByPath: new Map(), depthLimitedPaths: [] };
 }
 
 export interface SavedView {
@@ -369,8 +371,8 @@ export function clonePathMap(input: Record<string, string>): Record<string, stri
 }
 
 /**
- * Serialized snapshot sizes are stable for the lifetime of a snapshot object, so
- * they are measured once instead of on every bounded-history recalculation.
+ * Snapshot sizes are cached between bounded-history calculations. Helpers that
+ * mutate snapshots in place must invalidate the corresponding cache entry.
  */
 const snapshotByteCache = new WeakMap<PersonalSnapshot, number>();
 
@@ -494,6 +496,9 @@ function rewriteSnapshotPrefixes(snapshot: PersonalSnapshot, oldPath: string, ne
   }
   if (rewritePathMapPrefixes(snapshot.indexGroupByPath, oldPath, newPath)) changed = true;
   if (rewriteCurriculumVisualPrefixes(snapshot.curriculumVisual, oldPath, newPath)) changed = true;
+  // Renames mutate snapshots in place. Their cached serialized size is no
+  // longer valid once any path inside the snapshot changes.
+  if (changed) snapshotByteCache.delete(snapshot);
   return changed;
 }
 
@@ -515,6 +520,12 @@ export function rewritePluginDataPathPrefix(data: PluginData, oldPath: string, n
   for (const snapshot of [...data.layoutSnapshots, ...data.undoStack, ...data.redoStack]) {
     if (rewriteSnapshotPrefixes(snapshot, oldPath, newPath)) changed = true;
   }
+  const layoutSnapshots = limitSnapshotStack(data.layoutSnapshots, 10);
+  const undoStack = limitSnapshotStack(data.undoStack);
+  const redoStack = limitSnapshotStack(data.redoStack);
+  if (layoutSnapshots.length !== data.layoutSnapshots.length) { data.layoutSnapshots = layoutSnapshots; changed = true; }
+  if (undoStack.length !== data.undoStack.length) { data.undoStack = undoStack; changed = true; }
+  if (redoStack.length !== data.redoStack.length) { data.redoStack = redoStack; changed = true; }
   const selectedPath = replacePathPrefix(data.selectedPath, oldPath, newPath);
   if (selectedPath !== data.selectedPath) {
     data.selectedPath = selectedPath;
@@ -873,10 +884,9 @@ function defaultCurriculumParent(record: VaultRecord, lookup: CurriculumLookup):
 }
 
 /**
- * Deeper nesting than this is always the result of an accidental parent chain
- * (for example every note pointing at its predecessor). Anything beyond the cap
- * is re-rooted, the same way cycles are broken, so a pathological chain degrades
- * the layout instead of exhausting the call stack while the tree is walked.
+ * This is a rendering safety boundary, not a statement that deeper user data is
+ * invalid. Records projected to the root because of this cap are reported to the
+ * caller so the UI can disclose the altered visual hierarchy.
  */
 export const MAX_CURRICULUM_DEPTH = 64;
 
@@ -912,6 +922,7 @@ export function buildCurriculumTree(records: VaultRecord[], state: CurriculumVis
   const byPath = new Map(topics.map((record) => [record.path, record]));
   const lookup = buildCurriculumLookup(topics);
   const parentByPath = new Map<string, string | null>();
+  const depthLimitedPaths: string[] = [];
   for (const record of topics) {
     const hasOverride = Object.getOwnPropertyDescriptor(state.parentByPath, record.path) !== undefined;
     const requested = hasOverride ? state.parentByPath[record.path] ?? null : defaultCurriculumParent(record, lookup);
@@ -925,8 +936,13 @@ export function buildCurriculumTree(records: VaultRecord[], state: CurriculumVis
     const seen = new Set<string>([record.path]);
     let cursor = parentByPath.get(record.path) ?? null;
     while (cursor) {
-      if (seen.has(cursor) || seen.size > MAX_CURRICULUM_DEPTH) {
+      if (seen.has(cursor)) {
         parentByPath.set(record.path, null);
+        break;
+      }
+      if (seen.size > MAX_CURRICULUM_DEPTH) {
+        parentByPath.set(record.path, null);
+        depthLimitedPaths.push(record.path);
         break;
       }
       seen.add(cursor);
@@ -951,7 +967,7 @@ export function buildCurriculumTree(records: VaultRecord[], state: CurriculumVis
   // Built after sorting so cached child order matches what the tree renders.
   const childrenByPath = new Map<string, string[]>();
   for (const [path, node] of nodes) childrenByPath.set(path, node.children.map((child) => child.record.path));
-  return { domains: sorted, parentByPath, childrenByPath, nodeByPath: nodes };
+  return { domains: sorted, parentByPath, childrenByPath, nodeByPath: nodes, depthLimitedPaths };
 }
 
 export function curriculumChildPaths(tree: CurriculumTreeResult, path: string): string[] {
@@ -1264,6 +1280,17 @@ export function canonicalPath(value: Pick<TopicFormValue, "title" | "domain" | "
   return `${TOPIC_ROOT}${definition.folder}/${value.curriculumId.trim().toUpperCase()} - ${sanitizeFileName(value.title)}.md`;
 }
 
+/** Whether a placement edit leaves every filename-driving field unchanged. */
+export function canonicalPathInputsUnchanged(
+  record: Pick<VaultRecord, "title" | "domain" | "curriculumId"> | null,
+  value: Pick<TopicFormValue, "title" | "domain" | "curriculumId">,
+): boolean {
+  return record !== null
+    && record.title === value.title.trim()
+    && record.domain === value.domain
+    && record.curriculumId.toUpperCase() === value.curriculumId.trim().toUpperCase();
+}
+
 export function proposalPath(folder: string, title: string): string {
   return `${folder.replace(/^\/+|\/+$/g, "")}/${sanitizeFileName(title)}.md`;
 }
@@ -1567,7 +1594,7 @@ export function isRestrictedVaultPath(path: string, configDir: string): boolean 
 
 export interface IndexDiagnostic {
   id: string;
-  kind: "missing-note" | "duplicate-membership" | "broken-parent" | "orphaned-group" | "invalid-visual-parent";
+  kind: "missing-note" | "duplicate-membership" | "broken-parent" | "orphaned-group" | "invalid-visual-parent" | "depth-limit";
   title: string;
   detail: string;
   path?: string;
@@ -1632,6 +1659,16 @@ export function buildIndexDiagnostics(data: PluginData, records: VaultRecord[], 
     if (!record || !parent || recordGroup !== parentGroup || path === parentPath) {
       diagnostics.push({ id: `visual-parent:${path}`, kind: "invalid-visual-parent", title: "Invalid visual parent", detail: `The visual parent ${parentPath} is missing, self-referential, or in another group.`, path });
     }
+  }
+  const depthLimited = buildCurriculumTree(records, data.curriculumVisual).depthLimitedPaths;
+  if (depthLimited.length > 0) {
+    diagnostics.push({
+      id: "depth-limit",
+      kind: "depth-limit",
+      title: "Hierarchy rendering depth exceeded",
+      detail: `${depthLimited.length} ${depthLimited.length === 1 ? "record was" : "records were"} shown at the top level because the hierarchy exceeds ${MAX_CURRICULUM_DEPTH} rendered levels. Parent properties and notes were not changed.`,
+      path: depthLimited[0],
+    });
   }
   return diagnostics;
 }

@@ -1,9 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.7.5
 
 ### Fixed
 
+- Made bulk “add matching records” actions use the search text currently visible in the input, including during the 120 ms render debounce.
+- Re-measured and re-bounded snapshots after file or folder renames mutate stored paths, preventing stale cached sizes from letting organization history exceed its data budget.
+- Preserved existing canonical filenames when a placement edit changes only non-path metadata, so newer filename-sanitization rules cannot silently rename a legacy note.
+- Disclosed hierarchy depth limiting in both the curriculum view and Index Manager diagnostics without modifying note metadata, and kept this informational condition out of safe-repair actions.
+- Awaited pending and in-flight selection persistence when the view closes, cleared detached Index Manager controls, refreshed backlink-dependent UI after any Markdown link change, and surfaced remaining user-action failures as Obsidian notices.
 - Stopped `buildCurriculumTree` from exhausting the call stack on a long parent chain. Nesting deeper than `MAX_CURRICULUM_DEPTH` is now re-rooted the same way cycles are broken, and sibling sorting is iterative, so an accidental chain degrades the layout instead of leaving the view blank.
 - Indexed configured-parent resolution by group, title, basename, and alias. Building the tree for 10,000 notes that all use the parent property went from about 54.6 s to about 0.12 s.
 - Kept every record visible in the Procedures, Medications, and Syndromes sections. Grouping read one map key and wrote another, so all but the last record without a group value were dropped from the list while the count still reported them.
