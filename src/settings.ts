@@ -37,7 +37,6 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
     const { containerEl } = this;
     const settings = this.host.data.settings;
     containerEl.empty();
-    new Setting(containerEl).setName("Knowledge Base Command Center").setHeading();
     containerEl.createEl("p", {
       text: "Configure the command center for this vault. Organization and visual hierarchy remain in plugin data; source notes are never moved by index actions.",
       cls: "setting-item-description",

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.2
+
+- Preserved user-arranged workspace leaves when the plugin unloads.
+- Removed the redundant plugin-name heading from settings.
+- Adopted Obsidian element helpers, explicit configuration-directory validation, and review-compatible asynchronous event handling.
+- Added a tag-driven release workflow that publishes only supported assets with GitHub build-provenance attestations.
+
 ## 0.7.1
 
 - Added reproducible three-file release packaging with version, mobile-compatibility, privacy, archive-content, and checksum validation.

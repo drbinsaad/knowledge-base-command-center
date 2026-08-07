@@ -574,7 +574,8 @@ export class EntVaultCommandCenterView extends ItemView {
                 : -1;
         if (nextIndex < 0) return;
         event.preventDefault();
-        void this.changeTab(tabs[nextIndex]!.id, true);
+        const nextTab = tabs[nextIndex];
+        if (nextTab) void this.changeTab(nextTab.id, true);
       });
     }
   }
@@ -904,19 +905,19 @@ export class EntVaultCommandCenterView extends ItemView {
     const section = parent.createDiv({ cls: "ent-cc-heading" });
     const row = section.createDiv({ cls: "ent-cc-row ent-cc-heading-row" });
     const disclosure = iconButton(row, heading.collapsed && !this.query ? "chevron-right" : "chevron-down", `${heading.collapsed ? "Expand" : "Collapse"} ${heading.title}`, "ent-cc-disclosure");
-    disclosure.addEventListener("click", async () => {
+    disclosure.addEventListener("click", () => void (async () => {
       heading.collapsed = !heading.collapsed;
       if (mutable) await this.plugin.savePluginData();
       this.renderTree();
-    });
+    })());
     const leading = row.createSpan({ cls: "ent-cc-leading-icon" });
     setIcon(leading, mutable ? "folders" : "library");
     const title = row.createEl("button", { cls: "ent-cc-row-title", text: heading.title });
-    title.addEventListener("click", async () => {
+    title.addEventListener("click", () => void (async () => {
       heading.collapsed = !heading.collapsed;
       if (mutable) await this.plugin.savePluginData();
       this.renderTree();
-    });
+    })());
     row.createSpan({ text: String(countHeading(heading)), cls: "ent-cc-row-count" });
     if (mutable) iconButton(row, "ellipsis", `Actions for ${heading.title}`, "ent-cc-row-more").addEventListener("click", (event) => this.showHeadingMenu(event, heading));
 
@@ -935,19 +936,19 @@ export class EntVaultCommandCenterView extends ItemView {
     const section = parent.createDiv({ cls: "ent-cc-subheading" });
     const row = section.createDiv({ cls: "ent-cc-row ent-cc-subheading-row" });
     const disclosure = iconButton(row, subheading.collapsed && !this.query ? "chevron-right" : "chevron-down", `${subheading.collapsed ? "Expand" : "Collapse"} ${subheading.title}`, "ent-cc-disclosure");
-    disclosure.addEventListener("click", async () => {
+    disclosure.addEventListener("click", () => void (async () => {
       subheading.collapsed = !subheading.collapsed;
       if (mutable) await this.plugin.savePluginData();
       this.renderTree();
-    });
+    })());
     const leading = row.createSpan({ cls: "ent-cc-leading-icon" });
     setIcon(leading, "folder");
     const title = row.createEl("button", { cls: "ent-cc-row-title", text: subheading.title });
-    title.addEventListener("click", async () => {
+    title.addEventListener("click", () => void (async () => {
       subheading.collapsed = !subheading.collapsed;
       if (mutable) await this.plugin.savePluginData();
       this.renderTree();
-    });
+    })());
     row.createSpan({ text: String(subheading.subjects.length), cls: "ent-cc-row-count" });
     if (mutable) iconButton(row, "ellipsis", `Actions for ${subheading.title}`, "ent-cc-row-more").addEventListener("click", (event) => this.showSubheadingMenu(event, heading, subheading));
     if (subheading.collapsed && !this.query) return;
@@ -1802,7 +1803,7 @@ export class EntVaultCommandCenterView extends ItemView {
       const backup = createPersonalBackup(this.plugin.data, now.toISOString());
       const viewWindow = this.contentEl.ownerDocument.defaultView ?? window;
       const url = viewWindow.URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" }));
-      const link = this.contentEl.ownerDocument.createElement("a");
+      const link = createEl("a");
       link.href = url;
       const slug = this.plugin.data.settings.workspaceName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "knowledge-command-center";
       link.download = `${slug}-backup-${now.toISOString().slice(0, 10)}.json`;
@@ -1815,7 +1816,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private importOrganizationBackup(): void {
-    const input = this.contentEl.ownerDocument.createElement("input");
+    const input = createEl("input");
     input.type = "file";
     input.accept = "application/json,.json";
     input.addEventListener("change", () => {

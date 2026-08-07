@@ -989,7 +989,7 @@ export function applyTemplateTokens(content: string, title: string, date: string
     .replace(/{{\s*time\s*}}/gi, time);
 }
 
-export function validateWritableFolderPath(folder: string, configDir = ".obsidian"): string | null {
+export function validateWritableFolderPath(folder: string, configDir: string): string | null {
   const clean = folder.trim().replace(/^\/+|\/+$/g, "");
   const cleanConfig = configDir.trim().replace(/^\/+|\/+$/g, "");
   if (clean === cleanConfig || clean.startsWith(`${cleanConfig}/`)) return `The folder cannot be inside ${cleanConfig}.`;
@@ -997,7 +997,7 @@ export function validateWritableFolderPath(folder: string, configDir = ".obsidia
   return null;
 }
 
-export function validateProposalFolderPath(folder: string, configDir = ".obsidian"): string | null {
+export function validateProposalFolderPath(folder: string, configDir: string): string | null {
   const clean = folder.trim().replace(/^\/+|\/+$/g, "");
   if (!clean.startsWith("01 Inbox/")) return "The proposal folder must be a subfolder inside 01 Inbox.";
   if (isRestrictedVaultPath(`${clean}/`, configDir)) return "The proposal folder cannot use a restricted vault area.";
@@ -1252,7 +1252,7 @@ export function isImmutableSourcePath(path: string): boolean {
   return path.startsWith("05 Sources/_books/");
 }
 
-export function isRestrictedVaultPath(path: string, configDir = ".obsidian"): boolean {
+export function isRestrictedVaultPath(path: string, configDir: string): boolean {
   const cleanConfigDir = configDir.replace(/^\/+|\/+$/g, "");
   return [`${cleanConfigDir}/`, "05 Sources/", "90 Templates/", "91 Assets/", "99 Archive/"].some((root) => path.startsWith(root));
 }

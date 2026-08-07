@@ -38,7 +38,7 @@
 .ent-cc-title-block h1 {
   margin: 0;
   color: var(--text-normal);
-  font-family: ui-serif, Georgia, Cambria, "Times New Roman", serif;
+  font-family: var(--font-text), Georgia, Cambria, "Times New Roman", serif;
   font-size: clamp(23px, 2.1vw, 33px);
   font-weight: 600;
   line-height: 1.1;
@@ -79,7 +79,7 @@
 .ent-cc-title {
   margin: 0;
   color: var(--text-normal);
-  font-family: ui-serif, Georgia, Cambria, "Times New Roman", serif;
+  font-family: var(--font-text), Georgia, Cambria, "Times New Roman", serif;
   font-size: clamp(23px, 2.1vw, 33px);
   font-weight: 600;
   line-height: 1.1;
@@ -224,7 +224,7 @@
 .ent-cc-inspector-body > h3 {
   margin: 0 0 22px;
   color: var(--text-normal);
-  font-family: ui-serif, Georgia, Cambria, "Times New Roman", serif;
+  font-family: var(--font-text), Georgia, Cambria, "Times New Roman", serif;
   font-size: 25px;
   font-weight: 600;
   line-height: 1.15;
@@ -316,7 +316,7 @@
   min-height: 36px;
   padding: 3px 16px 3px 20px;
   border-left: 2px solid transparent;
-  column-gap: 6px;
+  gap: 6px;
 }
 
 .ent-cc-row:hover {
@@ -619,7 +619,7 @@
 .ent-cc-inspector-title {
   margin: 0 0 10px;
   color: var(--text-normal);
-  font-family: ui-serif, Georgia, Cambria, "Times New Roman", serif;
+  font-family: var(--font-text), Georgia, Cambria, "Times New Roman", serif;
   font-size: 25px;
   font-weight: 600;
   line-height: 1.15;
@@ -1006,7 +1006,7 @@
 
 .ent-cc-empty-action strong {
   color: var(--text-normal);
-  font-family: ui-serif, Georgia, Cambria, "Times New Roman", serif;
+  font-family: var(--font-text), Georgia, Cambria, "Times New Roman", serif;
   font-size: 17px;
 }
 

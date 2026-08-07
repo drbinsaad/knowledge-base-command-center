@@ -23,7 +23,6 @@ import {
   migrateData,
   normalizeWikiLink,
   pathIsInsideFolder,
-  PersonalSnapshot,
   PluginData,
   PROCEDURE_ROOT,
   proposalPath,
@@ -37,7 +36,6 @@ import {
   snapshotPersonal,
   storedDataVersion,
   SYNDROME_ROOT,
-  TOPIC_ROOT,
   TopicFormValue,
   validateProposalFolderPath,
   validateWritableFolderPath,
@@ -166,7 +164,6 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   onunload(): void {
     if (this.refreshTimer !== null) window.activeWindow.clearTimeout(this.refreshTimer);
-    this.app.workspace.detachLeavesOfType(VIEW_TYPE);
   }
 
   async activateView(): Promise<EntVaultCommandCenterView> {

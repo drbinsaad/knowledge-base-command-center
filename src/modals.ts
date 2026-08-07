@@ -134,7 +134,7 @@ export class CollectionPickerModal extends FuzzySuggestModal<CollectionTarget> {
   onChooseItem(item: CollectionTarget): void { void Promise.resolve(this.onChoose(item)).catch(reportAsyncError); }
 
   onOpen(): void {
-    super.onOpen();
+    void super.onOpen();
     this.modalEl.addClass("ent-cc-modal");
     this.titleEl.setText(`${this.action} to collection`);
   }
@@ -173,7 +173,7 @@ export class AddActionModal extends FuzzySuggestModal<AddAction> {
   }
 
   onOpen(): void {
-    super.onOpen();
+    void super.onOpen();
     this.modalEl.addClass("ent-cc-modal", "ent-cc-add-modal");
     this.titleEl.setText(this.heading);
   }
@@ -203,7 +203,7 @@ export class RecordPickerModal extends FuzzySuggestModal<VaultRecord> {
   }
 
   onOpen(): void {
-    super.onOpen();
+    void super.onOpen();
     this.modalEl.addClass("ent-cc-modal");
   }
 }
@@ -230,7 +230,7 @@ export class VaultFilePickerModal extends FuzzySuggestModal<TFile> {
   }
 
   onOpen(): void {
-    super.onOpen();
+    void super.onOpen();
     this.modalEl.addClass("ent-cc-modal");
     this.titleEl.setText(this.titleText);
   }
@@ -253,7 +253,7 @@ export class StringPickerModal extends FuzzySuggestModal<string> {
   onChooseItem(item: string): void { void Promise.resolve(this.onChoose(item)).catch(reportAsyncError); }
 
   onOpen(): void {
-    super.onOpen();
+    void super.onOpen();
     this.modalEl.addClass("ent-cc-modal");
     this.titleEl.setText(this.titleText);
   }
