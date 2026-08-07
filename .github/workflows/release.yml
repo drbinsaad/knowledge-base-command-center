@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Test and build
+        run: npm run check
+      - name: Verify release tag
+        run: node -e 'const manifest=require("./manifest.json"); if (manifest.version !== process.env.GITHUB_REF_NAME) throw new Error(`Tag ${process.env.GITHUB_REF_NAME} does not match manifest ${manifest.version}`)'
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" main.js manifest.json styles.css --verify-tag --title "Knowledge Base Command Center $GITHUB_REF_NAME" --notes "Obsidian Community review compatibility fixes with signed build provenance."

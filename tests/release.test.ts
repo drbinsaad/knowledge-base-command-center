@@ -39,3 +39,10 @@ test("release assets do not embed a local absolute workspace path", async () => 
     assert.doesNotMatch(content, /(?:\/Users\/|\/Volumes\/|(?:^|[\s"'(])[A-Za-z]:[\\/])/m);
   }
 });
+
+test("runtime source satisfies blocking Obsidian review rules", async () => {
+  const main = await readFile(path.join(root, "src/main.ts"), "utf8");
+  const settings = await readFile(path.join(root, "src/settings.ts"), "utf8");
+  assert.doesNotMatch(main, /detachLeavesOfType\(VIEW_TYPE\)/);
+  assert.doesNotMatch(settings, /setName\("Knowledge Base Command Center"\)\.setHeading\(\)/);
+});

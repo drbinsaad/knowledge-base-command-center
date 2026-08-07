@@ -341,7 +341,7 @@ export class IndexManagerModal extends Modal {
     const config = createWorkspaceConfig(this.plugin.data, now.toISOString());
     const viewWindow = this.contentEl.ownerDocument.defaultView ?? window;
     const url = viewWindow.URL.createObjectURL(new Blob([JSON.stringify(config, null, 2)], { type: "application/json" }));
-    const link = this.contentEl.ownerDocument.createElement("a");
+    const link = createEl("a");
     link.href = url;
     link.download = `knowledge-command-center-workspace-${now.toISOString().slice(0, 10)}.json`;
     link.click();
@@ -350,7 +350,7 @@ export class IndexManagerModal extends Modal {
   }
 
   private importWorkspace(): void {
-    const input = this.contentEl.ownerDocument.createElement("input");
+    const input = createEl("input");
     input.type = "file";
     input.accept = "application/json,.json";
     input.addEventListener("change", () => {
