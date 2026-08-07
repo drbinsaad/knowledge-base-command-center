@@ -743,7 +743,7 @@
 }
 
 .ent-cc-footer {
-  padding: 7px 24px;
+  padding: 7px 24px max(7px, env(safe-area-inset-bottom));
   border-top: 1px solid var(--ent-cc-border);
   color: var(--text-faint);
   background: var(--background-primary);
@@ -1259,10 +1259,17 @@
   }
 
   .ent-cc-row {
-    grid-template-columns: 20px minmax(0, 1fr) 28px;
-    min-height: 40px;
-    padding-right: 7px;
-    padding-left: 12px;
+    grid-template-columns: 44px minmax(0, 1fr) 44px;
+    min-height: 48px;
+    padding: 2px 4px;
+    gap: 2px;
+  }
+
+  .ent-cc-disclosure,
+  .ent-cc-row-more,
+  .ent-cc-drag-handle {
+    width: 44px;
+    height: 44px;
   }
 
   .ent-cc-heading-row .ent-cc-leading-icon,
@@ -1308,6 +1315,7 @@
 
   .ent-cc-footer {
     padding-right: 14px;
+    padding-bottom: max(7px, env(safe-area-inset-bottom));
     padding-left: 14px;
   }
 }
@@ -1485,7 +1493,7 @@
   bottom: -4px;
   z-index: 5;
   margin: 8px -2px 0;
-  padding: 12px 2px 4px;
+  padding: 12px 2px max(4px, env(safe-area-inset-bottom));
   border-top: 1px solid var(--background-modifier-border);
   background: var(--modal-background, var(--background-primary));
 }
@@ -1525,7 +1533,7 @@
 }
 
 .ent-cc-topic-editor input.is-error,
-.vertical-tab-content input.is-error {
+.vertical-tab-content .ent-cc-setting input.is-error {
   border-color: var(--text-error);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--text-error) 35%, transparent);
 }
@@ -1726,6 +1734,7 @@
 .ent-cc-manager-footer {
   margin-top: auto;
   padding-top: 8px;
+  padding-bottom: max(0px, env(safe-area-inset-bottom));
   border-top: 1px solid var(--background-modifier-border);
 }
 

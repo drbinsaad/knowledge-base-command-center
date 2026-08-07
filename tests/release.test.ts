@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import test from "node:test";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,6 +25,10 @@ test("public repository metadata is present", async () => {
   assert.match(readme, /Privacy and permissions/);
   assert.match(readme, /enumerates Markdown file paths/);
   assert.match(readme, /never reads clipboard contents/);
+  assert.match(readme, /direct BRAT install link/);
+  assert.match(readme, /### Uninstall/);
+  assert.match(readme, /Visual movement on iPhone/);
+  assert.match(readme, /stable internal ID `ent-vault-command-center`/);
 });
 
 test("manual release surface contains exactly the required nonempty assets", async () => {
@@ -45,7 +49,8 @@ test("release assets do not embed a local absolute workspace path", async () => 
 test("runtime source satisfies blocking Obsidian review rules", async () => {
   const main = await readFile(path.join(root, "src/main.ts"), "utf8");
   const settings = await readFile(path.join(root, "src/settings.ts"), "utf8");
-  const runtimeSources = await Promise.all(["main.ts", "modals.ts", "model.ts", "settings.ts", "view.ts"].map((name) => readFile(path.join(root, "src", name), "utf8")));
+  const runtimeNames = (await readdir(path.join(root, "src"))).filter((name) => name.endsWith(".ts") && !name.startsWith("._"));
+  const runtimeSources = await Promise.all(runtimeNames.map((name) => readFile(path.join(root, "src", name), "utf8")));
   const runtime = runtimeSources.join("\n");
   assert.doesNotMatch(main, /detachLeavesOfType\(VIEW_TYPE\)/);
   assert.doesNotMatch(settings, /setName\("Knowledge Base Command Center"\)\.setHeading\(\)/);
@@ -54,4 +59,25 @@ test("runtime source satisfies blocking Obsidian review rules", async () => {
   assert.doesNotMatch(runtime, /\.flatMap\(/);
   assert.doesNotMatch(runtime, /\.setWarning\(/);
   assert.doesNotMatch(runtime, /\.setDynamicTooltip\(/);
+});
+
+test("review and release automation is reproducible and least-privilege", async () => {
+  const packageJson = await readJson("package.json");
+  const scripts = packageJson.scripts as Record<string, string>;
+  for (const name of ["typecheck", "lint", "test", "verify-release", "verify-community", "review", "release:bundle"]) {
+    assert.equal(typeof scripts[name], "string", `missing npm script ${name}`);
+  }
+  const workflows = await Promise.all(["ci.yml", "release.yml"].map((name) => readFile(path.join(root, ".github", "workflows", name), "utf8")));
+  const workflow = workflows.join("\n");
+  assert.doesNotMatch(workflow, /uses:\s+[^\s]+@v\d+/);
+  assert.match(workflow, /permissions:\s*\n\s+contents: read/);
+  assert.match(workflow, /--notes-file release-notes\.md/);
+  assert.match(workflow, /attest-build-provenance@[0-9a-f]{40}/);
+});
+
+test("public issue intake prevents accidental private-vault disclosure", async () => {
+  const template = await readFile(path.join(root, ".github", "ISSUE_TEMPLATE", "bug_report.yml"), "utf8");
+  assert.match(template, /Do not attach private notes/);
+  assert.match(template, /patient information/);
+  assert.match(template, /copyrighted source/);
 });

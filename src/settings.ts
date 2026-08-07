@@ -2,6 +2,7 @@ import { App, Plugin, PluginSettingTab, Setting, SettingDefinitionItem, SettingD
 import {
   asUnknownRecord,
   DEFAULT_PROPOSAL_FOLDER,
+  pathIsInsideFolder,
   validateProposalFolderPath,
   validateWritableFolderPath,
   type MainTab,
@@ -28,7 +29,15 @@ function renderSetting(
   render: (setting: Setting) => void,
   aliases: string[] = [],
 ): SettingDefinitionRender {
-  return { name, desc, aliases, render };
+  return {
+    name,
+    desc,
+    aliases,
+    render: (setting) => {
+      setting.settingEl.addClass("ent-cc-setting");
+      render(setting);
+    },
+  };
 }
 
 export class EntCommandCenterSettingsTab extends PluginSettingTab {
@@ -97,7 +106,11 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
 
     const propertyNames = (): string[] => {
       const names = new Set<string>();
-      for (const file of this.host.app.vault.getMarkdownFiles()) {
+      const manual = new Set(this.host.data.manualIndexPaths);
+      const files = this.host.app.vault.getMarkdownFiles()
+        .filter((file) => pathIsInsideFolder(file.path, settings.primaryFolder) || manual.has(file.path))
+        .slice(0, 2000);
+      for (const file of files) {
         const frontmatter = asUnknownRecord(this.host.app.metadataCache.getFileCache(file)?.frontmatter);
         for (const key of Object.keys(frontmatter)) if (key !== "position") names.add(key);
       }
@@ -162,7 +175,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
                 this.update();
               }));
           }, ["generic", "ENT", "clinical", "preset"]),
-          renderSetting("Command center name", "Displayed in the view title, header, ribbon tooltip, and settings.", (row) => {
+          renderSetting("Command center name", "Displayed in the view title, header, and settings. The ribbon and hover source retain the stable plugin name.", (row) => {
             row.addText((text) => text.setPlaceholder("Knowledge base command center").setValue(settings.workspaceName).setDisabled(readOnly).onChange(async (value) => {
               const clean = value.trim();
               if (!clean) return;
@@ -284,7 +297,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
         items: [
           {
             name: "Metadata mapping behavior",
-            desc: "Property names are vault-specific. Notes without these properties still appear; folders provide safe fallbacks.",
+            desc: "Property names are vault-specific. Suggestions sample up to 2,000 notes inside the indexed folder (plus manual members); notes without properties still appear and folders provide safe fallbacks.",
             aliases: ["frontmatter", "properties"],
           },
           propertySetting("ID property", "Optional identifier shown beside each indexed note. Leave empty to disable it.", "id", settings.idProperty, (value) => { settings.idProperty = value; }),

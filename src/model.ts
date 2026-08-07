@@ -3,7 +3,18 @@ export const PROCEDURE_ROOT = "04 Procedures/";
 export const MEDICATION_ROOT = "06 Clinical Tools/Medications/";
 export const SYNDROME_ROOT = "06 Clinical Tools/Syndromes/";
 export const DEFAULT_PROPOSAL_FOLDER = "01 Inbox/ENT Topic Proposals";
-export const DATA_VERSION = 8;
+export const DATA_VERSION = 9;
+export const DEFAULT_COLLAPSED_QUEUES = [
+  "p1",
+  "gaps",
+  "procedure-review",
+  "medication-dose-absent",
+  "medication-source-traced",
+  "medication-source-gaps",
+  "syndrome-image-gaps",
+  "syndrome-source-gaps",
+] as const;
+export const MAX_UNDO_BYTES = 512 * 1024;
 
 export type RecordKind = "topic" | "procedure" | "medication" | "syndrome" | "proposal" | "note";
 export type RecordRole = "canonical" | "supporting" | "library" | "proposal" | "vault-note";
@@ -144,6 +155,12 @@ export interface PersonalSnapshot {
   indexGroupOrder: string[];
 }
 
+export interface ViewCollapseState {
+  curriculumDomains: string[];
+  curriculumNodes: string[];
+  queues: string[];
+}
+
 export interface PluginSettings {
   setupComplete: boolean;
   workspaceMode: WorkspaceMode;
@@ -189,7 +206,7 @@ export interface V2MigrationBackup {
 }
 
 export interface PluginData {
-  version: 8;
+  version: 9;
   collections: LayoutHeading[];
   pinnedPaths: string[];
   nextStudyPaths: string[];
@@ -205,6 +222,7 @@ export interface PluginData {
   layoutSnapshots: PersonalSnapshot[];
   undoStack: PersonalSnapshot[];
   redoStack: PersonalSnapshot[];
+  collapsed: ViewCollapseState;
   migrationBackup?: MigrationBackup;
   v2MigrationBackup?: V2MigrationBackup;
 }
@@ -260,7 +278,7 @@ export const ENT_CLINICAL_SETTINGS: PluginSettings = {
 };
 
 export const DEFAULT_DATA: PluginData = {
-  version: 8,
+  version: 9,
   collections: [],
   pinnedPaths: [],
   nextStudyPaths: [],
@@ -276,6 +294,11 @@ export const DEFAULT_DATA: PluginData = {
   layoutSnapshots: [],
   undoStack: [],
   redoStack: [],
+  collapsed: {
+    curriculumDomains: [],
+    curriculumNodes: [],
+    queues: [...DEFAULT_COLLAPSED_QUEUES],
+  },
 };
 
 export function makeId(prefix: string): string {
@@ -301,12 +324,6 @@ export function asUnknownRecord(value: unknown): Record<string, unknown> {
 export function normalizeWikiLink(value: string): string {
   const clean = value.trim().replace(/^\[\[/, "").replace(/\]\]$/, "");
   return (clean.split("|")[0] ?? clean).replace(/\.md$/, "").trim();
-}
-
-export function curriculumRoot(curriculumId: string): string {
-  return curriculumId.match(/^(ENT-[A-Z]+-EXT-\d+)/)?.[1]
-    ?? curriculumId.match(/^(ENT-[A-Z]+-\d+)/)?.[1]
-    ?? "";
 }
 
 export function cleanDomainFolder(path: string): string {
@@ -344,11 +361,134 @@ export function clonePathMap(input: Record<string, string>): Record<string, stri
   return { ...input };
 }
 
+export function limitSnapshotStack(
+  snapshots: PersonalSnapshot[],
+  maxCount = 20,
+  maxBytes = MAX_UNDO_BYTES,
+): PersonalSnapshot[] {
+  const kept: PersonalSnapshot[] = [];
+  let bytes = 2;
+  for (let index = snapshots.length - 1; index >= 0 && kept.length < maxCount; index -= 1) {
+    const snapshot = snapshots[index];
+    if (!snapshot) continue;
+    const snapshotBytes = JSON.stringify(snapshot).length;
+    if (snapshotBytes > maxBytes) continue;
+    if (bytes + snapshotBytes > maxBytes) break;
+    kept.unshift(snapshot);
+    bytes += snapshotBytes;
+  }
+  return kept;
+}
+
 export function replacePathMapKey(map: Record<string, string>, oldPath: string, newPath: string): boolean {
   if (!Object.prototype.hasOwnProperty.call(map, oldPath)) return false;
   map[newPath] = map[oldPath] ?? "";
   delete map[oldPath];
   return true;
+}
+
+export function replacePathPrefix(path: string, oldPath: string, newPath: string): string {
+  if (path === oldPath) return newPath;
+  return path.startsWith(`${oldPath}/`) ? `${newPath}${path.slice(oldPath.length)}` : path;
+}
+
+function rewritePathList(paths: string[], oldPath: string, newPath: string): boolean {
+  let changed = false;
+  for (let index = 0; index < paths.length; index += 1) {
+    const current = paths[index];
+    if (current === undefined) continue;
+    const next = replacePathPrefix(current, oldPath, newPath);
+    if (next !== current) {
+      paths[index] = next;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function rewritePathMapPrefixes(map: Record<string, string>, oldPath: string, newPath: string): boolean {
+  let changed = false;
+  for (const [path, value] of Object.entries(map)) {
+    const next = replacePathPrefix(path, oldPath, newPath);
+    if (next === path) continue;
+    map[next] = value;
+    delete map[path];
+    changed = true;
+  }
+  return changed;
+}
+
+function rewriteCurriculumVisualPrefixes(state: CurriculumVisualState, oldPath: string, newPath: string): boolean {
+  let changed = false;
+  const parents: Record<string, string | null> = {};
+  for (const [path, parent] of Object.entries(state.parentByPath)) {
+    const nextPath = replacePathPrefix(path, oldPath, newPath);
+    const nextParent = parent === null ? null : replacePathPrefix(parent, oldPath, newPath);
+    parents[nextPath] = nextParent;
+    if (nextPath !== path || nextParent !== parent) changed = true;
+  }
+  const orders: Record<string, string[]> = {};
+  for (const [key, paths] of Object.entries(state.orderByContainer)) {
+    const nextKey = key.startsWith("parent:")
+      ? `parent:${replacePathPrefix(key.slice(7), oldPath, newPath)}`
+      : key;
+    const nextPaths = paths.map((path) => replacePathPrefix(path, oldPath, newPath));
+    orders[nextKey] = nextPaths;
+    if (nextKey !== key || nextPaths.some((path, index) => path !== paths[index])) changed = true;
+  }
+  if (changed) {
+    state.parentByPath = parents;
+    state.orderByContainer = orders;
+  }
+  return changed;
+}
+
+function rewriteSnapshotPrefixes(snapshot: PersonalSnapshot, oldPath: string, newPath: string): boolean {
+  let changed = false;
+  for (const heading of snapshot.collections) {
+    if (rewritePathList(heading.subjects, oldPath, newPath)) changed = true;
+    for (const subheading of heading.subheadings) {
+      if (rewritePathList(subheading.subjects, oldPath, newPath)) changed = true;
+    }
+  }
+  for (const paths of [
+    snapshot.pinnedPaths,
+    snapshot.nextStudyPaths,
+    snapshot.manualIndexPaths,
+    snapshot.excludedIndexPaths,
+  ]) {
+    if (rewritePathList(paths, oldPath, newPath)) changed = true;
+  }
+  if (rewritePathMapPrefixes(snapshot.indexGroupByPath, oldPath, newPath)) changed = true;
+  if (rewriteCurriculumVisualPrefixes(snapshot.curriculumVisual, oldPath, newPath)) changed = true;
+  return changed;
+}
+
+/** Rewrite one file path or every descendant of a renamed folder across plugin-owned state. */
+export function rewritePluginDataPathPrefix(data: PluginData, oldPath: string, newPath: string): boolean {
+  if (!oldPath || !newPath || oldPath === newPath) return false;
+  let changed = false;
+  for (const heading of data.collections) {
+    if (rewritePathList(heading.subjects, oldPath, newPath)) changed = true;
+    for (const subheading of heading.subheadings) {
+      if (rewritePathList(subheading.subjects, oldPath, newPath)) changed = true;
+    }
+  }
+  for (const paths of [data.pinnedPaths, data.nextStudyPaths, data.manualIndexPaths, data.excludedIndexPaths]) {
+    if (rewritePathList(paths, oldPath, newPath)) changed = true;
+  }
+  if (rewritePathMapPrefixes(data.indexGroupByPath, oldPath, newPath)) changed = true;
+  if (rewriteCurriculumVisualPrefixes(data.curriculumVisual, oldPath, newPath)) changed = true;
+  for (const snapshot of [...data.layoutSnapshots, ...data.undoStack, ...data.redoStack]) {
+    if (rewriteSnapshotPrefixes(snapshot, oldPath, newPath)) changed = true;
+  }
+  const selectedPath = replacePathPrefix(data.selectedPath, oldPath, newPath);
+  if (selectedPath !== data.selectedPath) {
+    data.selectedPath = selectedPath;
+    changed = true;
+  }
+  if (rewritePathList(data.collapsed.curriculumNodes, oldPath, newPath)) changed = true;
+  return changed;
 }
 
 export function snapshotPersonal(data: PluginData, label: string): PersonalSnapshot {
@@ -439,6 +579,21 @@ function cleanSavedViews(input: unknown): SavedView[] {
   return views;
 }
 
+function safeObjectKey(key: string): boolean {
+  return key !== "__proto__" && key !== "constructor" && key !== "prototype";
+}
+
+function cleanCollapseState(input: unknown): ViewCollapseState {
+  const value = asUnknownRecord(input);
+  return {
+    curriculumDomains: [...new Set(asStringList(value.curriculumDomains))],
+    curriculumNodes: [...new Set(asStringList(value.curriculumNodes))],
+    queues: value.queues === undefined
+      ? [...DEFAULT_COLLAPSED_QUEUES]
+      : [...new Set(asStringList(value.queues))],
+  };
+}
+
 export function cleanCurriculumVisual(input: unknown): CurriculumVisualState {
   if (!input || typeof input !== "object") return { parentByPath: {}, orderByContainer: {} };
   const raw = input as Record<string, unknown>;
@@ -446,14 +601,14 @@ export function cleanCurriculumVisual(input: unknown): CurriculumVisualState {
   if (raw.parentByPath && typeof raw.parentByPath === "object") {
     for (const [path, parent] of Object.entries(raw.parentByPath as Record<string, unknown>)) {
       const cleanPath = asText(path);
-      if (cleanPath && (parent === null || typeof parent === "string")) parentByPath[cleanPath] = parent === null ? null : asText(parent);
+      if (safeObjectKey(cleanPath) && cleanPath && (parent === null || typeof parent === "string")) parentByPath[cleanPath] = parent === null ? null : asText(parent);
     }
   }
   const orderByContainer: Record<string, string[]> = {};
   if (raw.orderByContainer && typeof raw.orderByContainer === "object") {
     for (const [key, paths] of Object.entries(raw.orderByContainer as Record<string, unknown>)) {
       const cleanKey = asText(key);
-      if (cleanKey) orderByContainer[cleanKey] = [...new Set(asStringList(paths))];
+      if (safeObjectKey(cleanKey) && cleanKey) orderByContainer[cleanKey] = [...new Set(asStringList(paths))];
     }
   }
   return { parentByPath, orderByContainer };
@@ -465,7 +620,7 @@ function cleanPathMap(input: unknown): Record<string, string> {
   for (const [path, value] of Object.entries(input as Record<string, unknown>)) {
     const cleanPath = asText(path);
     const cleanValue = asText(value);
-    if (cleanPath && cleanValue) output[cleanPath] = cleanValue;
+    if (safeObjectKey(cleanPath) && cleanPath && cleanValue) output[cleanPath] = cleanValue;
   }
   return output;
 }
@@ -527,7 +682,26 @@ function cleanSettings(input: unknown, legacyEnt = false): PluginSettings {
 export function storedDataVersion(input: unknown): number {
   if (!input || typeof input !== "object") return 0;
   const version = Number((input as Record<string, unknown>).version);
-  return Number.isFinite(version) && version > 0 ? version : 1;
+  return Number.isFinite(version) && version > 0 ? version : 0;
+}
+
+export function isRecognizedPluginData(input: unknown): boolean {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return false;
+  const loaded = input as Record<string, unknown>;
+  if (Object.keys(loaded).length === 0) return true;
+  if (storedDataVersion(loaded) === 1 && Array.isArray(loaded.headings)) return true;
+  if (storedDataVersion(loaded) === 2) return true;
+  return [
+    "collections",
+    "pinnedPaths",
+    "nextStudyPaths",
+    "savedViews",
+    "curriculumVisual",
+    "manualIndexPaths",
+    "excludedIndexPaths",
+    "indexGroupByPath",
+    "settings",
+  ].some((key) => Object.prototype.hasOwnProperty.call(loaded, key));
 }
 
 export function migrateData(input: unknown): PluginData {
@@ -536,9 +710,9 @@ export function migrateData(input: unknown): PluginData {
   const loadedVersion = storedDataVersion(loaded);
   // Versions newer than this plugin are read through the latest compatible
   // shape instead of being mistaken for v1. main.ts keeps them read-only.
-  if (loadedVersion >= 3) {
+  if (loadedVersion >= 3 || (loadedVersion === 0 && isRecognizedPluginData(loaded) && Object.keys(loaded).length > 0)) {
     return {
-      version: 8,
+      version: 9,
       collections: cleanLayout(loaded.collections),
       pinnedPaths: asStringList(loaded.pinnedPaths),
       nextStudyPaths: asStringList(loaded.nextStudyPaths),
@@ -550,10 +724,11 @@ export function migrateData(input: unknown): PluginData {
       indexGroupOrder: [...new Set(asStringList(loaded.indexGroupOrder))],
       selectedPath: asText(loaded.selectedPath),
       activeTab: isMainTab(loaded.activeTab) ? loaded.activeTab : DEFAULT_SETTINGS.defaultTab,
-      settings: cleanSettings(loaded.settings, loadedVersion <= 5),
+      settings: cleanSettings(loaded.settings, loadedVersion > 0 && loadedVersion <= 5),
       layoutSnapshots: cleanSnapshots(loaded.layoutSnapshots),
       undoStack: cleanSnapshots(loaded.undoStack),
       redoStack: cleanSnapshots(loaded.redoStack),
+      collapsed: cleanCollapseState(loaded.collapsed),
       migrationBackup: loaded.migrationBackup as MigrationBackup | undefined,
       v2MigrationBackup: loaded.v2MigrationBackup as V2MigrationBackup | undefined,
     };
@@ -566,7 +741,7 @@ export function migrateData(input: unknown): PluginData {
     const savedViews = cleanSavedViews(loaded.savedViews);
     const rawSettings = loaded.settings && typeof loaded.settings === "object" ? loaded.settings as Record<string, unknown> : {};
     return {
-      version: 8,
+      version: 9,
       collections,
       pinnedPaths,
       nextStudyPaths,
@@ -582,6 +757,7 @@ export function migrateData(input: unknown): PluginData {
       layoutSnapshots: cleanSnapshots(loaded.layoutSnapshots),
       undoStack: [],
       redoStack: [],
+      collapsed: cleanCollapseState(loaded.collapsed),
       migrationBackup: loaded.migrationBackup as MigrationBackup | undefined,
       v2MigrationBackup: {
         version: 2,
@@ -595,7 +771,9 @@ export function migrateData(input: unknown): PluginData {
     };
   }
 
-  const oldHeadings = Array.isArray(loaded.headings) ? loaded.headings : [];
+  if (loadedVersion !== 1 || !Array.isArray(loaded.headings)) return structuredClone(DEFAULT_DATA);
+
+  const oldHeadings = loaded.headings;
   const custom = oldHeadings.filter((raw) => {
     if (!raw || typeof raw !== "object") return false;
     const heading = raw as Record<string, unknown>;
@@ -654,7 +832,7 @@ export function buildCurriculumTree(records: VaultRecord[], state: CurriculumVis
   const byPath = new Map(topics.map((record) => [record.path, record]));
   const parentByPath = new Map<string, string | null>();
   for (const record of topics) {
-    const hasOverride = Object.keys(state.parentByPath).includes(record.path);
+    const hasOverride = Object.getOwnPropertyDescriptor(state.parentByPath, record.path) !== undefined;
     const requested = hasOverride ? state.parentByPath[record.path] ?? null : defaultCurriculumParent(record, topics);
     const parent = requested ? byPath.get(requested) : undefined;
     parentByPath.set(record.path, parent && parent.path !== record.path && parent.domain === record.domain ? parent.path : null);
@@ -805,52 +983,16 @@ export function curriculumVisualHasChanges(state: CurriculumVisualState): boolea
   return Object.keys(state.parentByPath).length > 0 || Object.keys(state.orderByContainer).length > 0;
 }
 
-export function buildCurriculumLayout(records: VaultRecord[]): LayoutHeading[] {
-  const canonical = records.filter((record) => record.kind === "topic" && record.role === "canonical" && record.curriculumId);
-  const supporting = records.filter((record) => record.kind === "topic" && record.role === "supporting");
-  const buckets = new Map<string, { title: string; folderOrder: string; records: VaultRecord[] }>();
-  for (const topic of canonical) {
-    const key = topic.domain.toLowerCase();
-    const bucket = buckets.get(key) ?? { title: topic.domain || "Unassigned", folderOrder: topic.folderOrder, records: [] };
-    bucket.records.push(topic);
-    if (topic.folderOrder < bucket.folderOrder) bucket.folderOrder = topic.folderOrder;
-    buckets.set(key, bucket);
+export function visualPlacementPathSet(
+  state: CurriculumVisualState,
+  indexGroupByPath: Record<string, string>,
+): Set<string> {
+  const paths = new Set(Object.keys(state.parentByPath));
+  for (const ordered of Object.values(state.orderByContainer)) {
+    for (const path of ordered) paths.add(path);
   }
-
-  return [...buckets.values()]
-    .sort((a, b) => a.folderOrder.localeCompare(b.folderOrder, undefined, { numeric: true }))
-    .map((bucket) => {
-      const rootTitles = new Map<string, string>();
-      for (const topic of bucket.records) {
-        if (topic.curriculumId === curriculumRoot(topic.curriculumId)) rootTitles.set(topic.curriculumId, topic.title);
-      }
-      const groups = new Map<string, VaultRecord[]>();
-      for (const topic of bucket.records) {
-        const root = curriculumRoot(topic.curriculumId);
-        if (root) groups.set(root, [...(groups.get(root) ?? []), topic]);
-      }
-      const direct: VaultRecord[] = [];
-      for (const note of supporting.filter((item) => item.domain.toLowerCase() === bucket.title.toLowerCase())) {
-        const parent = canonical.find((candidate) => recordMatchesLink(candidate, note.parentTopic));
-        const root = parent ? curriculumRoot(parent.curriculumId) : "";
-        if (root) groups.set(root, [...(groups.get(root) ?? []), note]);
-        else direct.push(note);
-      }
-      return {
-        id: `curriculum-${bucket.title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
-        title: bucket.title,
-        collapsed: bucket.title.toLowerCase() !== "pediatric",
-        subjects: direct.sort(compareRecords).map((record) => record.path),
-        subheadings: [...groups.entries()]
-          .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
-          .map(([root, grouped]) => ({
-            id: `curriculum-${root.toLowerCase()}`,
-            title: rootTitles.get(root) ?? grouped.find((record) => record.curriculumId === root)?.title ?? root,
-            collapsed: !/congenital laryngeal anomalies/i.test(rootTitles.get(root) ?? ""),
-            subjects: grouped.sort((a, b) => a.role.localeCompare(b.role) || compareRecords(a, b)).map((record) => record.path),
-          })),
-      };
-    });
+  for (const path of Object.keys(indexGroupByPath)) paths.add(path);
+  return paths;
 }
 
 interface ParsedQuery {
@@ -858,14 +1000,18 @@ interface ParsedQuery {
   tokens: Map<string, string[]>;
 }
 
+export function normalizeSearchText(value: string): string {
+  return value.normalize("NFD").replace(/\p{M}/gu, "").toLocaleLowerCase();
+}
+
 export function parseQuery(query: string): ParsedQuery {
   const tokens = new Map<string, string[]>();
   const remainder = query.replace(/([a-z_]+):(?:"([^"]+)"|(\S+))/gi, (_match, key: string, quoted: string, bare: string) => {
     const normalized = key.toLowerCase();
-    tokens.set(normalized, [...(tokens.get(normalized) ?? []), (quoted || bare || "").toLowerCase()]);
+    tokens.set(normalized, [...(tokens.get(normalized) ?? []), normalizeSearchText(quoted || bare || "")]);
     return " ";
   });
-  return { text: remainder.trim().toLowerCase(), tokens };
+  return { text: normalizeSearchText(remainder.trim()), tokens };
 }
 
 export const KNOWN_QUERY_TOKENS = new Set([
@@ -889,14 +1035,14 @@ function fuzzyContains(haystack: string, needle: string): boolean {
 
 function tokenMatches(record: VaultRecord, key: string, values: string[]): boolean {
   return values.some((value) => {
-    if (key === "domain") return record.domain.toLowerCase().includes(value);
-    if (key === "priority") return record.priority.toLowerCase() === value;
-    if (key === "kind" || key === "type") return record.kind === value || record.role === value || record.topicKind.toLowerCase().includes(value);
-    if (key === "status" || key === "review") return record.reviewStatus.toLowerCase().includes(value) || record.synthesisStatus.toLowerCase().includes(value);
+    if (key === "domain") return normalizeSearchText(record.domain).includes(value);
+    if (key === "priority") return normalizeSearchText(record.priority) === value;
+    if (key === "kind" || key === "type") return record.kind === value || record.role === value || normalizeSearchText(record.topicKind).includes(value);
+    if (key === "status" || key === "review") return normalizeSearchText(record.reviewStatus).includes(value) || normalizeSearchText(record.synthesisStatus).includes(value);
     if (key === "safety") return record.safetyCritical === ["true", "yes", "critical", "1"].includes(value);
     if (key === "source") return value === "gap" ? record.sourceCount === 0 || record.sourceCoverage === "none" : value === "traced" ? record.sourceCount > 0 : String(record.sourceCount) === value;
-    if (key === "dose") return record.doseStatus.toLowerCase().includes(value);
-    if (key === "image") return record.imageStatus.toLowerCase().includes(value);
+    if (key === "dose") return normalizeSearchText(record.doseStatus).includes(value);
+    if (key === "image") return normalizeSearchText(record.imageStatus).includes(value);
     return false;
   });
 }
@@ -905,8 +1051,8 @@ export function matchesQuery(record: VaultRecord, query: string): boolean {
   const parsed = parseQuery(query);
   for (const [key, values] of parsed.tokens) if (!tokenMatches(record, key, values)) return false;
   if (!parsed.text) return true;
-  const haystack = [record.title, record.curriculumId, record.domain, record.topicKind, record.role, record.path, ...record.aliases].join(" ").toLowerCase();
-  const words = haystack.split(/[^a-z0-9]+/).filter(Boolean);
+  const haystack = normalizeSearchText([record.title, record.curriculumId, record.domain, record.topicKind, record.role, record.path, ...record.aliases].join(" "));
+  const words = haystack.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
   return parsed.text.split(/\s+/).every((term) => haystack.includes(term)
     || words.some((word) => word[0] === term[0] && fuzzyContains(word, term)));
 }
@@ -920,7 +1066,13 @@ export function metadataHasGap(record: VaultRecord): boolean {
 }
 
 export function sanitizeFileName(value: string): string {
-  return value.replace(/[\\/:*?"<>|]/g, "-").replace(/\s+/g, " ").replace(/[. ]+$/g, "").trim();
+  return value
+    .normalize("NFC")
+    .replace(/[\p{Cc}\p{Cf}]/gu, "")
+    .replace(/[\\/:*?"<>|]/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/[. ]+$/g, "")
+    .trim();
 }
 
 export function canonicalIdIsValid(curriculumId: string, domain: string): boolean {
@@ -1002,16 +1154,20 @@ export function configuredGroupFromPath(path: string, primaryFolder: string, fal
 
 export function applyTemplateTokens(content: string, title: string, date: string, time: string): string {
   return content
-    .replace(/{{\s*title\s*}}/gi, title)
-    .replace(/{{\s*date\s*}}/gi, date)
-    .replace(/{{\s*time\s*}}/gi, time);
+    .replace(/{{\s*title\s*}}/gi, () => title)
+    .replace(/{{\s*date\s*}}/gi, () => date)
+    .replace(/{{\s*time\s*}}/gi, () => time);
 }
 
 export function validateWritableFolderPath(folder: string, configDir: string): string | null {
-  const clean = folder.trim().replace(/^\/+|\/+$/g, "");
-  const cleanConfig = configDir.trim().replace(/^\/+|\/+$/g, "");
-  if (clean === cleanConfig || clean.startsWith(`${cleanConfig}/`)) return `The folder cannot be inside ${cleanConfig}.`;
-  if (clean.split("/").some((segment) => segment === "." || segment === "..")) return "The folder cannot contain . or .. path segments.";
+  const clean = folder.trim().replace(/^\/+|\/+$/g, "").normalize("NFC");
+  const cleanConfig = configDir.trim().replace(/^\/+|\/+$/g, "").normalize("NFC");
+  const segments = clean.split("/");
+  const comparable = segments.map((segment) => segment.trim().toLocaleLowerCase());
+  const comparableConfig = cleanConfig.split("/").map((segment) => segment.trim().toLocaleLowerCase());
+  if (comparable.some((segment) => segment === "." || segment === "..")) return "The folder cannot contain . or .. path segments.";
+  if (comparableConfig.every((segment, index) => comparable[index] === segment)) return `The folder cannot be inside ${cleanConfig}.`;
+  if (comparable[0] === ".trash") return "The folder cannot be inside Obsidian's trash folder.";
   return null;
 }
 
@@ -1296,8 +1452,9 @@ export function buildIndexDiagnostics(data: PluginData, records: VaultRecord[], 
   for (const heading of data.collections) {
     const inspect = (paths: string[], owner: string): void => {
       paths.forEach((path) => addMissing(path, owner));
-      for (const path of new Set(paths)) {
-        const count = paths.filter((candidate) => candidate === path).length;
+      const counts = new Map<string, number>();
+      for (const path of paths) counts.set(path, (counts.get(path) ?? 0) + 1);
+      for (const [path, count] of counts) {
         if (count > 1) diagnostics.push({ id: `duplicate:${owner}:${path}`, kind: "duplicate-membership", title: "Duplicate collection membership", detail: `${owner} contains the same note ${count} times.`, path });
       }
     };
@@ -1307,8 +1464,24 @@ export function buildIndexDiagnostics(data: PluginData, records: VaultRecord[], 
 
   const topics = records.filter((record) => record.kind === "topic" && (record.role === "canonical" || record.role === "supporting"));
   const topicByPath = new Map(topics.map((record) => [record.path, record]));
+  const linksByDomain = new Map<string, Map<string, Set<string>>>();
+  for (const topic of topics) {
+    const domain = normalizeSearchText(topic.domain);
+    const lookup = linksByDomain.get(domain) ?? new Map<string, Set<string>>();
+    const basename = topic.path.split("/").pop()?.replace(/\.md$/i, "") ?? "";
+    for (const value of [topic.title, basename, ...topic.aliases]) {
+      const key = normalizeSearchText(normalizeWikiLink(value));
+      if (!key) continue;
+      const paths = lookup.get(key) ?? new Set<string>();
+      paths.add(topic.path);
+      lookup.set(key, paths);
+    }
+    linksByDomain.set(domain, lookup);
+  }
   for (const record of topics) {
-    if (record.parentTopic && !topics.some((candidate) => candidate.path !== record.path && candidate.domain === record.domain && recordMatchesLink(candidate, record.parentTopic))) {
+    const parentKey = normalizeSearchText(normalizeWikiLink(record.parentTopic));
+    const matches = linksByDomain.get(normalizeSearchText(record.domain))?.get(parentKey);
+    if (record.parentTopic && (!matches || [...matches].every((path) => path === record.path))) {
       diagnostics.push({ id: `parent:${record.path}`, kind: "broken-parent", title: "Unresolved configured parent", detail: `The configured parent “${record.parentTopic}” does not resolve inside ${record.domain}.`, path: record.path });
     }
   }

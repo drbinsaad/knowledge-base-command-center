@@ -1,0 +1,65 @@
+name: Bug report
+description: Report a reproducible Knowledge Base Command Center problem without sharing private vault content.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping improve the plugin. Use a scratch vault when possible. Do not attach private notes, `data.json`, vault names, patient information, credentials, or copyrighted source content. Replace paths and titles with synthetic examples.
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      placeholder: 0.7.4
+    validations:
+      required: true
+  - type: input
+    id: obsidian-version
+    attributes:
+      label: Obsidian version and platform
+      placeholder: Obsidian 1.13.x, iPhone / Android / macOS / Windows / Linux
+    validations:
+      required: true
+  - type: dropdown
+    id: profile
+    attributes:
+      label: Workspace profile
+      options:
+        - Generic knowledge base
+        - ENT clinical preset
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Use synthetic note names and paths.
+      placeholder: |
+        1. Create a heading named Example
+        2. Add Scratch/Example.md
+        3. Tap … and choose Move under…
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and sanitized console error
+      description: Remove private note text and local absolute paths before pasting.
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy confirmation
+      options:
+        - label: I removed private note content, data.json, credentials, patient information, and copyrighted source text.
+          required: true
+        - label: I reproduced this in a scratch vault when practical.
+          required: false

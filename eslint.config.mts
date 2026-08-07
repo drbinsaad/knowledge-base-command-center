@@ -7,10 +7,11 @@ export default defineConfig(
     "node_modules",
     "dist",
     "main.js",
-    "package.json",
     "package-lock.json",
     "manifest.json",
     "versions.json",
+    "tsconfig.json",
+    "tsconfig.eslint.json",
     "**/._*",
   ]),
   {
@@ -21,10 +22,35 @@ export default defineConfig(
       parserOptions: {
         projectService: {
           allowDefaultProject: ["eslint.config.mts"],
+          defaultProject: "tsconfig.eslint.json",
         },
         tsconfigRootDir: import.meta.dirname,
       },
     },
   },
   ...obsidianmd.configs.recommended,
+  {
+    files: ["*.mjs", "scripts/**/*.mjs", "tests/**/*.{ts,mjs}"],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+      },
+      parserOptions: {
+        project: "./tsconfig.eslint.json",
+        projectService: false,
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+    rules: {
+      "obsidianmd/no-nodejs-modules": "off",
+      "@typescript-eslint/no-floating-promises": "off",
+      "@typescript-eslint/no-unsafe-argument": "off",
+      "@typescript-eslint/no-unsafe-assignment": "off",
+      "@typescript-eslint/no-unsafe-call": "off",
+      "@typescript-eslint/no-unsafe-member-access": "off",
+      "@typescript-eslint/no-unsafe-return": "off",
+      "obsidianmd/hardcoded-config-path": "off",
+      "obsidianmd/no-global-this": "off",
+    },
+  },
 );

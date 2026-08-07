@@ -1,6 +1,6 @@
 {
   "name": "knowledge-base-command-center",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "private": true,
   "type": "module",
   "description": "Configurable visual knowledge index, note creator, collections, and smart queues for Obsidian.",
@@ -15,12 +15,16 @@
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
-    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-    "lint": "eslint src",
-    "test": "node --experimental-strip-types --test tests/model.test.ts",
+    "typecheck": "tsc -noEmit -skipLibCheck",
+    "build": "npm run typecheck && node esbuild.config.mjs production",
+    "lint": "eslint . && node scripts/validate-json.mjs",
+    "test": "node --import tsx --import ./tests/support/register.mjs --test tests/model.test.ts tests/main.test.ts",
     "test:release": "node --experimental-strip-types --test tests/release.test.ts",
-    "check": "npm test && npm run lint && npm run build && npm run test:release",
-    "release:bundle": "npm run check && node scripts/package-release.mjs"
+    "verify-release": "npm run test:release",
+    "verify-community": "node scripts/verify-community.mjs",
+    "review": "npm run typecheck && npm run lint && npm test && npm run verify-community && npm run build && npm run verify-release",
+    "check": "npm run review",
+    "release:bundle": "npm run review && node scripts/package-release.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
@@ -30,8 +34,9 @@
     "eslint-plugin-obsidianmd": "^0.4.0",
     "globals": "^17.6.0",
     "jiti": "^2.6.1",
-    "obsidian": "latest",
+    "obsidian": "1.13.0",
     "tslib": "^2.8.1",
+    "tsx": "4.20.6",
     "typescript": "^5.8.0",
     "typescript-eslint": "^8.59.1"
   }

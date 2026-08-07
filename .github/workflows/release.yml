@@ -5,19 +5,16 @@ on:
     tags:
       - "[0-9]+.[0-9]+.[0-9]+"
 
-permissions:
-  contents: write
-  id-token: write
-  attestations: write
-
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
@@ -27,8 +24,33 @@ jobs:
         run: npm run check
       - name: Verify release tag
         run: node -e 'const manifest=require("./manifest.json"); if (manifest.version !== process.env.GITHUB_REF_NAME) throw new Error(`Tag ${process.env.GITHUB_REF_NAME} does not match manifest ${manifest.version}`)'
+      - name: Extract release notes
+        run: node scripts/extract-release-notes.mjs "$GITHUB_REF_NAME" > release-notes.md
+      - name: Upload verified release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-assets
+          path: |
+            main.js
+            manifest.json
+            styles.css
+            release-notes.md
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download verified release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-assets
       - name: Attest release assets
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: |
             main.js
@@ -37,4 +59,4 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" main.js manifest.json styles.css --verify-tag --title "Knowledge Base Command Center $GITHUB_REF_NAME" --notes "Obsidian Community review compatibility fixes with signed build provenance."
+        run: gh release create "$GITHUB_REF_NAME" main.js manifest.json styles.css --verify-tag --title "Knowledge Base Command Center $GITHUB_REF_NAME" --notes-file release-notes.md

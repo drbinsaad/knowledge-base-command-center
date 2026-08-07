@@ -1,4 +1,4 @@
-import { Modal, Notice, Setting, TFile, setIcon } from "obsidian";
+import { Modal, Notice, Platform, Setting, TFile, setIcon } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
 import {
   createWorkspaceConfig,
@@ -10,7 +10,7 @@ import {
   validateProposalFolderPath,
   validateWritableFolderPath,
 } from "./model";
-import { ConfirmModal, IndexGroupModal, StringPickerModal, TextPromptModal } from "./modals";
+import { ConfirmModal, IndexGroupModal, StringPickerModal, TextPromptModal, VaultFilePickerModal } from "./modals";
 
 type ManagerTab = "indexed" | "available" | "hidden" | "groups" | "diagnostics";
 
@@ -24,6 +24,8 @@ export class IndexManagerModal extends Modal {
   private tab: ManagerTab = "indexed";
   private query = "";
   private selected = new Set<string>();
+  private diagnosticsCache: IndexDiagnostic[] | null = null;
+  private searchTimer: number | null = null;
 
   constructor(private readonly plugin: EntVaultCommandCenterPlugin) {
     super(plugin.app);
@@ -36,6 +38,10 @@ export class IndexManagerModal extends Modal {
     this.render();
   }
 
+  onClose(): void {
+    if (this.searchTimer !== null) window.activeWindow.clearTimeout(this.searchTimer);
+  }
+
   private render(): void {
     this.contentEl.empty();
     const settings = this.plugin.data.settings;
@@ -43,21 +49,25 @@ export class IndexManagerModal extends Modal {
     const available = this.availableNotes();
     const hidden = this.hiddenNotes();
     const groups = this.plugin.getIndexGroups();
-    const diagnostics = this.plugin.getIndexDiagnostics();
+    const diagnostics = this.tab === "diagnostics"
+      ? (this.diagnosticsCache ??= this.plugin.getIndexDiagnostics())
+      : (this.diagnosticsCache ?? []);
 
     const header = this.contentEl.createDiv({ cls: "ent-cc-manager-header" });
     header.createEl("p", { text: `Manage membership, ${settings.groupLabel.toLowerCase()}s, and integrity without moving or rewriting Markdown notes.` });
     const portability = header.createDiv({ cls: "ent-cc-manager-portability" });
-    this.actionButton(portability, "download", "Export workspace", () => this.exportWorkspace());
+    this.actionButton(portability, "download", "Export workspace", () => void this.exportWorkspace().catch((error) => {
+      new Notice(error instanceof Error ? error.message : String(error));
+    }));
     this.actionButton(portability, "upload", "Import workspace…", () => this.importWorkspace());
 
     const tabs = this.contentEl.createDiv({ cls: "ent-cc-manager-tabs", attr: { role: "tablist" } });
-    const definitions: Array<{ id: ManagerTab; label: string; count: number; genericOnly?: boolean }> = [
+    const definitions: Array<{ id: ManagerTab; label: string; count: number | string; genericOnly?: boolean }> = [
       { id: "indexed", label: "Indexed", count: indexed.length },
       { id: "available", label: "Available", count: available.length, genericOnly: true },
       { id: "hidden", label: "Hidden", count: hidden.length, genericOnly: true },
       { id: "groups", label: settings.groupLabel, count: groups.length },
-      { id: "diagnostics", label: "Diagnostics", count: diagnostics.length },
+      { id: "diagnostics", label: "Diagnostics", count: this.diagnosticsCache?.length ?? "—" },
     ];
     for (const definition of definitions.filter((item) => !item.genericOnly || !this.plugin.isClinicalMode())) {
       const button = tabs.createEl("button", { cls: `ent-cc-manager-tab ${this.tab === definition.id ? "is-active" : ""}` });
@@ -112,12 +122,16 @@ export class IndexManagerModal extends Modal {
     search.addEventListener("input", () => {
       const cursor = search.selectionStart ?? search.value.length;
       this.query = search.value;
-      this.render();
-      window.activeWindow.setTimeout(() => {
-        const next = this.contentEl.querySelector<HTMLInputElement>('.ent-cc-manager-toolbar input[type="search"]');
-        next?.focus();
-        next?.setSelectionRange(cursor, cursor);
-      }, 0);
+      if (this.searchTimer !== null) window.activeWindow.clearTimeout(this.searchTimer);
+      this.searchTimer = window.activeWindow.setTimeout(() => {
+        this.searchTimer = null;
+        this.render();
+        window.activeWindow.setTimeout(() => {
+          const next = this.contentEl.querySelector<HTMLInputElement>('.ent-cc-manager-toolbar input[type="search"]');
+          next?.focus();
+          next?.setSelectionRange(cursor, cursor);
+        }, 0);
+      }, 150);
     });
     const filtered = this.filterNotes(notes);
     this.actionButton(toolbar, "list-checks", this.selected.size === filtered.length && filtered.length > 0 ? "Clear selection" : "Select matches", () => {
@@ -320,7 +334,11 @@ export class IndexManagerModal extends Modal {
     toolbar.createEl("p", { text: diagnostics.length === 0 ? "No index-organization problems detected." : `${diagnostics.length} issue${diagnostics.length === 1 ? "" : "s"} detected. Safe repair removes only stale or duplicate plugin references; configured parent properties are never rewritten.` });
     const repairable = diagnostics.some((item) => item.kind !== "broken-parent");
     this.actionButton(toolbar, "wrench", "Repair safe issues", () => {
-      void this.plugin.repairIndexOrganization().then(() => { this.render(); new Notice("Safe plugin-state repairs completed. Note metadata was not changed."); });
+      void this.plugin.repairIndexOrganization().then(() => {
+        this.diagnosticsCache = null;
+        this.render();
+        new Notice("Safe plugin-state repairs completed. Note metadata was not changed.");
+      });
     }, !repairable);
     const list = this.contentEl.createDiv({ cls: "ent-cc-manager-list" });
     for (const diagnostic of diagnostics) {
@@ -336,9 +354,14 @@ export class IndexManagerModal extends Modal {
     if (diagnostics.length === 0) list.createDiv({ cls: "ent-cc-empty", text: "Index organization is healthy." });
   }
 
-  private exportWorkspace(): void {
+  private async exportWorkspace(): Promise<void> {
     const now = new Date();
     const config = createWorkspaceConfig(this.plugin.data, now.toISOString());
+    if (Platform.isMobile) {
+      await this.plugin.writePortableJson("workspace", config);
+      new Notice("Workspace configuration saved inside the vault for mobile sharing. Note contents were not included.");
+      return;
+    }
     const viewWindow = this.contentEl.ownerDocument.defaultView ?? window;
     const url = viewWindow.URL.createObjectURL(new Blob([JSON.stringify(config, null, 2)], { type: "application/json" }));
     const link = createEl("a");
@@ -350,6 +373,17 @@ export class IndexManagerModal extends Modal {
   }
 
   private importWorkspace(): void {
+    if (Platform.isMobile) {
+      const files = this.plugin.getPortableJsonFiles();
+      if (files.length === 0) {
+        new Notice("No JSON files were found in the vault. Copy a workspace JSON into the vault, then try again.");
+        return;
+      }
+      new VaultFilePickerModal(this.app, files, "Choose a workspace configuration JSON", (file) => {
+        this.confirmWorkspaceImport(this.plugin.readPortableJson(file));
+      }).open();
+      return;
+    }
     const input = createEl("input");
     input.type = "file";
     input.accept = "application/json,.json";
@@ -357,36 +391,43 @@ export class IndexManagerModal extends Modal {
       const file = input.files?.[0];
       if (!file) return;
       void file.text().then((raw) => {
-        const config = parseWorkspaceConfig(JSON.parse(raw) as unknown);
-        for (const folder of [config.settings.primaryFolder, config.settings.defaultNoteFolder, config.settings.templatesFolder]) {
-          const error = validateWritableFolderPath(folder, this.app.vault.configDir);
-          if (error) throw new Error(error);
-        }
-        const inboxError = config.settings.workspaceMode === "ent-clinical"
-          ? validateProposalFolderPath(config.settings.proposalFolder, this.app.vault.configDir)
-          : validateWritableFolderPath(config.settings.proposalFolder, this.app.vault.configDir);
-        if (inboxError) throw new Error(inboxError);
-        const configuredTemplate = config.settings.defaultTemplatePath ? this.app.vault.getAbstractFileByPath(config.settings.defaultTemplatePath) : null;
-        const templateReset = config.settings.defaultNewNoteMode === "template" && !(configuredTemplate instanceof TFile);
-        if (templateReset) {
-          config.settings.defaultNewNoteMode = "empty";
-          config.settings.defaultTemplatePath = "";
-        }
-        new ConfirmModal(this.app, "Import workspace configuration?", `Replace the current labels, folders, metadata mappings, behavior settings, and group order with the configuration from ${config.exportedAt || "an unknown date"}? Note contents and note-specific memberships will not change.${templateReset ? " The configured template is unavailable in this vault, so new notes will default to Empty." : ""}`, "Import workspace", async () => {
-          this.plugin.assertDataWritable();
-          this.plugin.data.settings = config.settings;
-          this.plugin.data.indexGroupOrder = config.indexGroupOrder;
-          this.plugin.invalidateRecordCache();
-          await this.plugin.savePluginData();
-          await this.plugin.refreshViews();
-          this.titleEl.setText(`Manage ${this.plugin.data.settings.indexLabel}`);
-          if (this.plugin.isClinicalMode() && ["available", "hidden"].includes(this.tab)) this.tab = "indexed";
-          this.render();
-          new Notice("Workspace configuration imported. Markdown notes were not changed.");
-        }).open();
+        this.confirmWorkspaceImport(Promise.resolve(JSON.parse(raw) as unknown));
       }).catch((error) => new Notice(error instanceof Error ? error.message : String(error)));
     });
     input.click();
+  }
+
+  private confirmWorkspaceImport(input: Promise<unknown>): void {
+    void input.then((value) => {
+      const config = parseWorkspaceConfig(value);
+      for (const folder of [config.settings.primaryFolder, config.settings.defaultNoteFolder, config.settings.templatesFolder]) {
+        const error = validateWritableFolderPath(folder, this.app.vault.configDir);
+        if (error) throw new Error(error);
+      }
+      const inboxError = config.settings.workspaceMode === "ent-clinical"
+        ? validateProposalFolderPath(config.settings.proposalFolder, this.app.vault.configDir)
+        : validateWritableFolderPath(config.settings.proposalFolder, this.app.vault.configDir);
+      if (inboxError) throw new Error(inboxError);
+      const configuredTemplate = config.settings.defaultTemplatePath ? this.app.vault.getAbstractFileByPath(config.settings.defaultTemplatePath) : null;
+      const templateReset = config.settings.defaultNewNoteMode === "template" && !(configuredTemplate instanceof TFile);
+      if (templateReset) {
+        config.settings.defaultNewNoteMode = "empty";
+        config.settings.defaultTemplatePath = "";
+      }
+      new ConfirmModal(this.app, "Import workspace configuration?", `Replace the current labels, folders, metadata mappings, behavior settings, and group order with the configuration from ${config.exportedAt || "an unknown date"}? Note contents and note-specific memberships will not change.${templateReset ? " The configured template is unavailable in this vault, so new notes will default to Empty." : ""}`, "Import workspace", async () => {
+        this.plugin.assertDataWritable();
+        this.plugin.data.settings = config.settings;
+        this.plugin.data.indexGroupOrder = config.indexGroupOrder;
+        this.plugin.invalidateRecordCache();
+        await this.plugin.savePluginData();
+        await this.plugin.refreshViews();
+        this.diagnosticsCache = null;
+        this.titleEl.setText(`Manage ${this.plugin.data.settings.indexLabel}`);
+        if (this.plugin.isClinicalMode() && ["available", "hidden"].includes(this.tab)) this.tab = "indexed";
+        this.render();
+        new Notice("Workspace configuration imported. Markdown notes were not changed.");
+      }).open();
+    }).catch((error) => new Notice(error instanceof Error ? error.message : String(error)));
   }
 
   private actionButton(parent: HTMLElement, icon: string, label: string, action: () => void, disabled = false, warning = false): HTMLButtonElement {
