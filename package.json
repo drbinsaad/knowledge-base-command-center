@@ -1,0 +1,31 @@
+{
+  "name": "knowledge-base-command-center",
+  "version": "0.7.1",
+  "private": true,
+  "type": "module",
+  "description": "Configurable visual knowledge index, note creator, collections, and smart queues for Obsidian.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/drbinsaad/knowledge-base-command-center.git"
+  },
+  "bugs": {
+    "url": "https://github.com/drbinsaad/knowledge-base-command-center/issues"
+  },
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "test": "node --experimental-strip-types --test tests/model.test.ts",
+    "test:release": "node --experimental-strip-types --test tests/release.test.ts",
+    "check": "npm test && npm run build && npm run test:release",
+    "release:bundle": "npm run check && node scripts/package-release.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "esbuild": "^0.25.0",
+    "obsidian": "latest",
+    "tslib": "^2.8.1",
+    "typescript": "^5.8.0"
+  }
+}
