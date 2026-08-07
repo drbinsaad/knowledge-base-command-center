@@ -72,6 +72,7 @@ test("review and release automation is reproducible and least-privilege", async 
   assert.doesNotMatch(workflow, /uses:\s+[^\s]+@v\d+/);
   assert.match(workflow, /permissions:\s*\n\s+contents: read/);
   assert.match(workflow, /--notes-file release-notes\.md/);
+  assert.match(workflow, /GH_REPO: \$\{\{ github\.repository \}\}/);
   assert.match(workflow, /attest-build-provenance@[0-9a-f]{40}/);
 });
 
