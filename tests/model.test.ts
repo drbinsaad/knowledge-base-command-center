@@ -11,19 +11,28 @@ import {
   canonicalIdIsValid,
   canonicalHierarchyIssue,
   canonicalPath,
+  canonicalPathInputsUnchanged,
   cloneCollections,
   configuredGroupFromPath,
   createPersonalBackup,
   createWorkspaceConfig,
   expectedParentCurriculumId,
   genericNotePath,
+  groupRecordsByGroup,
   isExtensionCurriculumId,
   isRecognizedPluginData,
   limitSnapshotStack,
   matchesQuery,
+  matchesParsedQuery,
+  MAX_CURRICULUM_DEPTH,
+  MAX_UNDO_BYTES,
   metadataHasGap,
   migrateData,
   moveCurriculumVisual,
+  curriculumChildPaths,
+  curriculumDescendantPaths,
+  curriculumSiblingPaths,
+  parseQuery,
   parsePersonalBackup,
   parseWorkspaceConfig,
   pathIsInsideFolder,
@@ -34,7 +43,9 @@ import {
   rewritePluginDataPathPrefix,
   resetCurriculumVisualPath,
   restoreSnapshot,
+  rewriteTopLevelHeading,
   shouldHandleRowShortcut,
+  snapshotStackDepthIsTruncated,
   sanitizeFileName,
   snapshotPersonal,
   storedDataVersion,
@@ -118,6 +129,22 @@ test("recursive curriculum tree nests canonical children and supporting notes", 
   assert.equal(tree.domains[0]?.roots[0]?.record.path, family.path);
   assert.equal(tree.domains[0]?.roots[0]?.children[0]?.record.path, cleft.path);
   assert.equal(tree.domains[0]?.roots[0]?.children[0]?.children[0]?.record.path, supporting.path);
+});
+
+test("indexed parent lookup cannot collide across spaced domain names and remains first-wins", () => {
+  const headAndNeck = record({ path: "KB/head-and-neck-x.md", title: "x", domain: "Head and Neck", curriculumId: "", role: "supporting" });
+  const misleadingHead = record({ path: "KB/head-and-neck-x-collision.md", title: "and Neck x", domain: "Head", curriculumId: "", role: "supporting" });
+  const duplicateAlias = record({ path: "KB/duplicate-alias.md", title: "Second", aliases: ["shared"], domain: "Head and Neck", curriculumId: "", role: "supporting" });
+  const firstAlias = record({ path: "KB/first-alias.md", title: "First", aliases: ["shared"], domain: "Head and Neck", curriculumId: "", role: "supporting" });
+  const childByTitle = record({ path: "KB/child-title.md", title: "Child title", domain: "Head and Neck", curriculumId: "", role: "supporting", parentTopic: "[[x]]" });
+  const childByAlias = record({ path: "KB/child-alias.md", title: "Child alias", domain: "Head and Neck", curriculumId: "", role: "supporting", parentTopic: "[[shared]]" });
+  const tree = buildCurriculumTree(
+    [headAndNeck, misleadingHead, firstAlias, duplicateAlias, childByTitle, childByAlias],
+    { parentByPath: {}, orderByContainer: {} },
+  );
+
+  assert.equal(tree.parentByPath.get(childByTitle.path), headAndNeck.path);
+  assert.equal(tree.parentByPath.get(childByAlias.path), firstAlias.path);
 });
 
 test("visual curriculum moves reorder and reparent without mutating records", () => {
@@ -570,7 +597,7 @@ test("diagnostics and visual-placement indexes remain linear at large-vault scal
   const start = performance.now();
   const diagnostics = buildIndexDiagnostics(data, records, paths);
   const diagnosticMs = performance.now() - start;
-  assert.equal(diagnostics.length, 0);
+  assert.deepEqual(diagnostics.map((item) => item.kind), ["depth-limit"]);
   assert.ok(diagnosticMs < 1_000, `diagnostics took ${diagnosticMs.toFixed(1)} ms`);
 
   const state = { parentByPath: {} as Record<string, string | null>, orderByContainer: { "root:Research": records.map((item) => item.path) } };
@@ -594,4 +621,239 @@ test("snapshot history is bounded by count and serialized size", () => {
   const preserved = limitSnapshotStack([...limited, oversized], 10, 8_000);
   assert.equal(preserved.includes(oversized), false);
   assert.equal(preserved.at(-1)?.label, "Snapshot 49");
+});
+
+test("renaming paths invalidates cached snapshot sizes and re-applies the byte budget", () => {
+  const data = migrateData(null);
+  data.pinnedPaths = ["Old/Note.md"];
+  const snapshot = snapshotPersonal(data, "Before rename");
+  data.undoStack = [snapshot];
+  assert.equal(limitSnapshotStack(data.undoStack).length, 1); // warm the WeakMap cache
+
+  const oversizedPrefix = `New-${"x".repeat(MAX_UNDO_BYTES)}`;
+  assert.equal(rewritePluginDataPathPrefix(data, "Old", oversizedPrefix), true);
+  assert.equal(data.undoStack.length, 0);
+  assert.ok(JSON.stringify(snapshot).length > MAX_UNDO_BYTES);
+});
+
+test("filenames drop characters that would break an Obsidian wikilink", () => {
+  // `#^[]` are filesystem-legal, so they used to survive into note names and
+  // produce wikilinks such as [[KB/Array [1]]] that Obsidian cannot resolve.
+  assert.equal(sanitizeFileName("Array [1]"), "Array -1-");
+  assert.equal(sanitizeFileName("C# Notes"), "C- Notes");
+  assert.equal(sanitizeFileName("caret^power"), "caret-power");
+  const path = genericNotePath("KB", "Array [1]");
+  assert.equal(path, "KB/Array -1-.md");
+  const wikilink = `[[${path.replace(/\.md$/i, "")}]]`;
+  assert.equal(/[[\]#^]/.test(wikilink.slice(2, -2)), false, wikilink);
+  // Unicode, emoji and RTL content must still survive untouched.
+  assert.equal(sanitizeFileName("Ünïcödé عربي 日本語 🎉"), "Ünïcödé عربي 日本語 🎉");
+});
+
+test("reserved Windows device names never become bare note filenames", () => {
+  for (const reserved of ["CON", "prn", "AUX", "NUL", "COM1", "lpt9"]) {
+    assert.equal(sanitizeFileName(reserved), `${reserved}-note`, reserved);
+  }
+  assert.equal(sanitizeFileName("CONSOLE"), "CONSOLE");
+  assert.equal(sanitizeFileName("COM10"), "COM10");
+});
+
+test("a parsed query matches identically to the string form but is reusable", () => {
+  const target = record({ title: "Café airway", aliases: ["مجرى الهواء"] });
+  for (const query of ["cafe", "مجرى", "priority:P1", "priority:P3", "domain:pediatric cafe", ""]) {
+    const parsed = parseQuery(query);
+    assert.equal(matchesParsedQuery(target, parsed), matchesQuery(target, query), query);
+    // Reusing one parsed query across many records must be stateless.
+    assert.equal(matchesParsedQuery(target, parsed), matchesQuery(target, query), `${query} (second use)`);
+  }
+});
+
+test("search stays responsive across a ten-thousand record render pass", () => {
+  const records = Array.from({ length: 10_000 }, (_, index) => record({
+    path: `Knowledge Base/Group ${index % 20}/Note ${index}.md`,
+    title: `Sample note ${index} with Ünïcödé and عربي text`,
+    aliases: [`alias ${index}`],
+  }));
+  const parsed = parseQuery("sample uni");
+  const start = performance.now();
+  // renderCurriculum evaluates each node for filtering, counting and rendering.
+  let matched = 0;
+  for (let pass = 0; pass < 3; pass += 1) {
+    for (const item of records) if (matchesParsedQuery(item, parsed)) matched += 1;
+  }
+  const elapsed = performance.now() - start;
+  assert.equal(matched, records.length * 3);
+  assert.ok(elapsed < 250, `three match passes over 10,000 records took ${elapsed.toFixed(1)} ms`);
+});
+
+test("the curriculum tree exposes cached child and descendant lookups", () => {
+  const records = [
+    record({ path: "KB/root.md", title: "Root", curriculumId: "", role: "supporting", parentTopic: "" }),
+    record({ path: "KB/child-a.md", title: "Child A", curriculumId: "", role: "supporting", parentTopic: "[[root]]" }),
+    record({ path: "KB/child-b.md", title: "Child B", curriculumId: "", role: "supporting", parentTopic: "[[root]]" }),
+    record({ path: "KB/grandchild.md", title: "Grandchild", curriculumId: "", role: "supporting", parentTopic: "[[child-a]]" }),
+  ];
+  const tree = buildCurriculumTree(records, { parentByPath: {}, orderByContainer: {} });
+  assert.deepEqual(curriculumChildPaths(tree, "KB/root.md").sort(), ["KB/child-a.md", "KB/child-b.md"]);
+  assert.deepEqual(curriculumChildPaths(tree, "KB/child-a.md"), ["KB/grandchild.md"]);
+  assert.deepEqual(curriculumChildPaths(tree, "KB/grandchild.md"), []);
+  assert.deepEqual([...curriculumDescendantPaths(tree, "KB/root.md")].sort(), ["KB/child-a.md", "KB/child-b.md", "KB/grandchild.md"]);
+  assert.deepEqual([...curriculumDescendantPaths(tree, "KB/child-b.md")], []);
+  assert.deepEqual(curriculumSiblingPaths(tree, records[3]), ["KB/grandchild.md"]);
+  assert.equal(tree.nodeByPath.get("KB/root.md")?.record.title, "Root");
+});
+
+test("descendant lookup terminates on a cyclic override instead of hanging", () => {
+  const records = [
+    record({ path: "KB/a.md", title: "A", curriculumId: "", role: "supporting", parentTopic: "" }),
+    record({ path: "KB/b.md", title: "B", curriculumId: "", role: "supporting", parentTopic: "" }),
+  ];
+  const tree = buildCurriculumTree(records, {
+    parentByPath: { "KB/a.md": "KB/b.md", "KB/b.md": "KB/a.md" },
+    orderByContainer: {},
+  });
+  const descendants = curriculumDescendantPaths(tree, "KB/a.md");
+  assert.ok(descendants.size <= records.length);
+  assert.equal(descendants.has("KB/a.md"), false);
+});
+
+test("bounded snapshot history reports when the byte budget truncated it", () => {
+  const data = migrateData(null);
+  const small = Array.from({ length: 4 }, (_, index) => snapshotPersonal(data, `Small ${index}`));
+  const keptSmall = limitSnapshotStack(small, 10, 64_000);
+  assert.equal(keptSmall.length, small.length);
+  assert.equal(snapshotStackDepthIsTruncated(small, keptSmall, 10), false);
+
+  const bulky = Array.from({ length: 6 }, (_, index) => {
+    const snapshot = snapshotPersonal(data, `Bulky ${index}`);
+    snapshot.pinnedPaths = [`${"x".repeat(2_000)}${index}`];
+    return snapshot;
+  });
+  const keptBulky = limitSnapshotStack(bulky, 10, 5_000);
+  assert.ok(keptBulky.length < bulky.length);
+  assert.equal(snapshotStackDepthIsTruncated(bulky, keptBulky, 10), true);
+  assert.equal(keptBulky.at(-1)?.label, "Bulky 5");
+});
+
+test("repeated bounded-history recalculation does not re-serialize every snapshot", () => {
+  const data = migrateData(null);
+  data.collections = Array.from({ length: 20 }, (_, index) => ({
+    id: `c${index}`,
+    title: `Collection ${index}`,
+    collapsed: false,
+    subjects: Array.from({ length: 200 }, (_, item) => `Knowledge Base/Note ${index * 200 + item}.md`),
+    subheadings: [],
+  }));
+  const stack = Array.from({ length: 20 }, (_, index) => snapshotPersonal(data, `Snapshot ${index}`));
+  limitSnapshotStack(stack); // warms the per-snapshot size cache
+  const start = performance.now();
+  for (let index = 0; index < 20; index += 1) limitSnapshotStack(stack);
+  const elapsed = performance.now() - start;
+  assert.ok(elapsed < 100, `twenty bounded-history recalculations took ${elapsed.toFixed(1)} ms`);
+});
+
+test("library grouping keeps every record, including records without a group", () => {
+  const records = [
+    record({ path: "KB/a.md", title: "A", domain: "" }),
+    record({ path: "KB/b.md", title: "B", domain: "" }),
+    record({ path: "KB/c.md", title: "C", domain: "" }),
+    record({ path: "KB/d.md", title: "D", domain: "Otology" }),
+  ];
+  const groups = groupRecordsByGroup(records, "Procedures");
+  const grouped: VaultRecord[] = [];
+  for (const bucket of groups.values()) grouped.push(...bucket);
+  // A read key of "Other" with a write key of the fallback used to discard all
+  // but the last ungrouped record while still reporting the full count.
+  assert.equal(grouped.length, records.length);
+  assert.deepEqual(grouped.map((item) => item.title).sort(), ["A", "B", "C", "D"]);
+  assert.deepEqual(groups.get("Procedures")?.map((item) => item.title), ["A", "B", "C"]);
+  assert.deepEqual(groups.get("Otology")?.map((item) => item.title), ["D"]);
+});
+
+test("library grouping stays linear when every record shares one group", () => {
+  const records = Array.from({ length: 10_000 }, (_, index) => record({ path: `KB/${index}.md`, domain: "Otology" }));
+  const start = performance.now();
+  const groups = groupRecordsByGroup(records, "Other");
+  const elapsed = performance.now() - start;
+  assert.equal(groups.get("Otology")?.length, records.length);
+  assert.ok(elapsed < 100, `grouping 10,000 same-group records took ${elapsed.toFixed(1)} ms`);
+});
+
+test("rewriting a note heading treats the title as literal text", () => {
+  const content = "# Old Title\n\nbody text\n";
+  // A plain replacement string expands these, corrupting the note.
+  assert.equal(rewriteTopLevelHeading(content, "A $& B"), "# A $& B\n\nbody text\n");
+  assert.equal(rewriteTopLevelHeading(content, "X $' Y"), "# X $' Y\n\nbody text\n");
+  assert.equal(rewriteTopLevelHeading(content, "Y $` Z"), "# Y $` Z\n\nbody text\n");
+  assert.equal(rewriteTopLevelHeading(content, "Cost $100"), "# Cost $100\n\nbody text\n");
+  assert.equal(rewriteTopLevelHeading(content, "مجرى الهواء"), "# مجرى الهواء\n\nbody text\n");
+  // Only the first top-level heading changes; body content is preserved.
+  assert.equal(rewriteTopLevelHeading("# One\n\n# Two\n", "New"), "# New\n\n# Two\n");
+  assert.equal(rewriteTopLevelHeading("no heading here\n", "New"), "no heading here\n");
+});
+
+test("a pathological parent chain degrades gracefully instead of exhausting the stack", () => {
+  // Every note pointing at its predecessor is easy to produce by import or by a
+  // parent-property convention. Recursive tree walking used to throw
+  // RangeError: Maximum call stack size exceeded and leave the view blank.
+  const records = Array.from({ length: 10_000 }, (_, index) => record({
+    path: `Knowledge Base/Topic ${index}.md`,
+    title: `Topic ${index}`,
+    curriculumId: "",
+    role: "supporting",
+    domain: "Research",
+    folderOrder: "0",
+    parentTopic: index === 0 ? "" : `[[Topic ${index - 1}]]`,
+  }));
+  const start = performance.now();
+  const tree = buildCurriculumTree(records, { parentByPath: {}, orderByContainer: {} });
+  const elapsed = performance.now() - start;
+  assert.ok(elapsed < 2_000, `building a 10,000 deep chain took ${elapsed.toFixed(1)} ms`);
+
+  // Every record is still reachable, and no branch is nested past the cap.
+  assert.equal(tree.nodeByPath.size, records.length);
+  let deepest = 0;
+  for (const record of records) {
+    let depth = 0;
+    let cursor = tree.parentByPath.get(record.path) ?? null;
+    while (cursor) {
+      depth += 1;
+      assert.ok(depth <= MAX_CURRICULUM_DEPTH + 1, `chain below ${record.path} exceeded the depth cap`);
+      cursor = tree.parentByPath.get(cursor) ?? null;
+    }
+    deepest = Math.max(deepest, depth);
+  }
+  assert.ok(deepest > 1, "expected the chain to still nest below the cap");
+  assert.ok(deepest <= MAX_CURRICULUM_DEPTH + 1);
+  assert.ok(tree.depthLimitedPaths.length > 0, "depth-limited records must be disclosed to the UI");
+
+  // Descendant lookup over the capped tree also terminates.
+  const descendants = curriculumDescendantPaths(tree, "Knowledge Base/Topic 0.md");
+  assert.ok(descendants.size <= records.length);
+});
+
+test("a normal shallow hierarchy is untouched by the depth cap", () => {
+  const records = [
+    record({ path: "KB/a.md", title: "A", curriculumId: "", role: "supporting", domain: "G", parentTopic: "" }),
+    record({ path: "KB/b.md", title: "B", curriculumId: "", role: "supporting", domain: "G", parentTopic: "[[a]]" }),
+    record({ path: "KB/c.md", title: "C", curriculumId: "", role: "supporting", domain: "G", parentTopic: "[[b]]" }),
+  ];
+  const tree = buildCurriculumTree(records, { parentByPath: {}, orderByContainer: {} });
+  assert.deepEqual(tree.depthLimitedPaths, []);
+  assert.equal(tree.parentByPath.get("KB/b.md"), "KB/a.md");
+  assert.equal(tree.parentByPath.get("KB/c.md"), "KB/b.md");
+  assert.deepEqual([...curriculumDescendantPaths(tree, "KB/a.md")].sort(), ["KB/b.md", "KB/c.md"]);
+});
+
+test("unchanged canonical path inputs preserve a legacy filename after sanitization rules evolve", () => {
+  const legacy = record({
+    path: "03 Clinical Topics/03 Laryngology/ENT-LAR-010 - VPI assessment surgery.md",
+    title: "VPI: assessment / surgery",
+    domain: "Laryngology",
+    curriculumId: "ENT-LAR-010",
+  });
+  const unchanged = { title: " VPI: assessment / surgery ", domain: "Laryngology", curriculumId: "ent-lar-010" };
+  assert.equal(canonicalPathInputsUnchanged(legacy, unchanged), true);
+  assert.notEqual(canonicalPath(unchanged), legacy.path);
+  assert.equal(canonicalPathInputsUnchanged(legacy, { ...unchanged, title: "VPI updated" }), false);
 });

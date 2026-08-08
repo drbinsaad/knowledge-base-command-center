@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.7.5
+
+### Fixed
+
+- Made bulk “add matching records” actions use the search text currently visible in the input, including during the 120 ms render debounce.
+- Re-measured and re-bounded snapshots after file or folder renames mutate stored paths, preventing stale cached sizes from letting organization history exceed its data budget.
+- Preserved existing canonical filenames when a placement edit changes only non-path metadata, so newer filename-sanitization rules cannot silently rename a legacy note.
+- Disclosed hierarchy depth limiting in both the curriculum view and Index Manager diagnostics without modifying note metadata, and kept this informational condition out of safe-repair actions.
+- Awaited pending and in-flight selection persistence when the view closes, cleared detached Index Manager controls, refreshed backlink-dependent UI after any Markdown link change, and surfaced remaining user-action failures as Obsidian notices.
+- Stopped `buildCurriculumTree` from exhausting the call stack on a long parent chain. Nesting deeper than `MAX_CURRICULUM_DEPTH` is now re-rooted the same way cycles are broken, and sibling sorting is iterative, so an accidental chain degrades the layout instead of leaving the view blank.
+- Indexed configured-parent resolution by group, title, basename, and alias. Building the tree for 10,000 notes that all use the parent property went from about 54.6 s to about 0.12 s.
+- Kept every record visible in the Procedures, Medications, and Syndromes sections. Grouping read one map key and wrote another, so all but the last record without a group value were dropped from the list while the count still reported them.
+- Treated note titles as literal text when rewriting a promoted or re-placed note's top-level heading. A title containing `$&`, `` $` `` or `$'` previously corrupted the heading.
+- Kept the plugin loadable when `data.json` cannot be parsed. It now opens in read-only compatibility mode and never overwrites the damaged file, instead of failing during `onload`.
+- Surfaced failures from pin, next-list, undo, redo, drag-and-drop, reorder, and visual-move actions instead of discarding them. In read-only mode these previously did nothing with no explanation.
+- Replaced characters that are filesystem-legal but break Obsidian wikilinks (`#`, `^`, `[`, `]`) in generated filenames, and suffixed reserved Windows device names such as `CON`.
+- Reported collection counts that match the rows actually rendered, with a separate indicator for references whose notes no longer exist.
+- Kept safety-critical, AI-lock, and pin indicators visible on narrow phone screens.
+
+### Performance
+
+- Replaced linear membership scans inside the vault enumeration loop with set lookups. Building records for 10,000 files with 5,000 manual members went from about 1.0 s to about 0.15 s.
+- Parsed the search query once per render and memoized each record's normalized search text. Three match passes over 10,000 records went from about 467 ms to about 9 ms, and keystrokes are debounced.
+- Replaced copy-on-append accumulation in the backlink index, descendant walk, library grouping, and Bases view; a 10,000-entry group went from about 69 ms to under 1 ms.
+- Cached child order on the curriculum tree so drags and menu moves no longer rebuild it, and cached snapshot sizes so bounded history stops re-serializing the whole stack.
+- Stopped rewriting the whole plugin data file on every row selection; selection is now debounced and flushed when the view closes.
+
+### Changed
+
+- Removed personal and vault-specific references from shipped code: generated note bodies no longer name an individual reviewer, the default selection no longer targets a specific curriculum ID, and the clinical Base shortcuts appear only when those files exist in the vault.
+- Announced expanded and collapsed state on every disclosure control, and let the browser resolve text direction for note titles, identifiers, and paths so right-to-left titles render correctly.
+- Kept focus on the checkbox when selecting notes in the Index Manager instead of rebuilding the dialog.
+- Warned when the plugin data budget, rather than the count limit, shortened saved snapshot history.
+- `npm run lint` now fails on warnings as well as errors.
+
 ## 0.7.4
 
 - Prevented versionless modern plugin data from being misclassified as legacy ENT data; recognizable generic settings, collections, pins, and hierarchy now migrate safely, while unrecognized data opens read-only and is never overwritten.

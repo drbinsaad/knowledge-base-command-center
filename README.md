@@ -172,7 +172,9 @@ This creates a three-file install ZIP and SHA-256 checksum under `dist/`. The re
 - Copy buttons write only the plugin-generated command, wikilink, or vault-relative path shown by that action to the clipboard after you click; the plugin never reads clipboard contents.
 - It stores settings and personal organization in Obsidian's plugin data file.
 - It writes only when you explicitly create a note, organize plugin state, promote an ENT proposal, or edit canonical placement through the protected advanced workflow.
-- It does not access files outside the vault.
+- It never reads or writes files outside the vault on its own. On desktop, organization backup export and
+  import use your operating system's own download and file-picker dialogs, so those files go exactly where
+  you choose. On iPhone and iPad the same data stays inside the vault.
 
 ## Contributing and license
 

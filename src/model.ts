@@ -132,6 +132,15 @@ export interface CurriculumDomainTree {
 export interface CurriculumTreeResult {
   domains: CurriculumDomainTree[];
   parentByPath: Map<string, string | null>;
+  /** Child order per parent path, built once so moves never rescan the tree. */
+  childrenByPath: Map<string, string[]>;
+  nodeByPath: Map<string, CurriculumTreeNode>;
+  /** Records re-rooted only because the rendered hierarchy exceeded the safety cap. */
+  depthLimitedPaths: string[];
+}
+
+export function emptyCurriculumTree(): CurriculumTreeResult {
+  return { domains: [], parentByPath: new Map(), childrenByPath: new Map(), nodeByPath: new Map(), depthLimitedPaths: [] };
 }
 
 export interface SavedView {
@@ -361,6 +370,20 @@ export function clonePathMap(input: Record<string, string>): Record<string, stri
   return { ...input };
 }
 
+/**
+ * Snapshot sizes are cached between bounded-history calculations. Helpers that
+ * mutate snapshots in place must invalidate the corresponding cache entry.
+ */
+const snapshotByteCache = new WeakMap<PersonalSnapshot, number>();
+
+function snapshotByteLength(snapshot: PersonalSnapshot): number {
+  const cached = snapshotByteCache.get(snapshot);
+  if (cached !== undefined) return cached;
+  const bytes = JSON.stringify(snapshot).length;
+  snapshotByteCache.set(snapshot, bytes);
+  return bytes;
+}
+
 export function limitSnapshotStack(
   snapshots: PersonalSnapshot[],
   maxCount = 20,
@@ -371,13 +394,25 @@ export function limitSnapshotStack(
   for (let index = snapshots.length - 1; index >= 0 && kept.length < maxCount; index -= 1) {
     const snapshot = snapshots[index];
     if (!snapshot) continue;
-    const snapshotBytes = JSON.stringify(snapshot).length;
+    const snapshotBytes = snapshotByteLength(snapshot);
     if (snapshotBytes > maxBytes) continue;
     if (bytes + snapshotBytes > maxBytes) break;
     kept.unshift(snapshot);
     bytes += snapshotBytes;
   }
   return kept;
+}
+
+/**
+ * How many entries a bounded history can still hold. The view uses this to warn
+ * when the byte budget — not the count limit — is what shortened the history.
+ */
+export function snapshotStackDepthIsTruncated(
+  snapshots: PersonalSnapshot[],
+  kept: PersonalSnapshot[],
+  maxCount = 20,
+): boolean {
+  return kept.length < Math.min(snapshots.length, maxCount);
 }
 
 export function replacePathMapKey(map: Record<string, string>, oldPath: string, newPath: string): boolean {
@@ -461,6 +496,9 @@ function rewriteSnapshotPrefixes(snapshot: PersonalSnapshot, oldPath: string, ne
   }
   if (rewritePathMapPrefixes(snapshot.indexGroupByPath, oldPath, newPath)) changed = true;
   if (rewriteCurriculumVisualPrefixes(snapshot.curriculumVisual, oldPath, newPath)) changed = true;
+  // Renames mutate snapshots in place. Their cached serialized size is no
+  // longer valid once any path inside the snapshot changes.
+  if (changed) snapshotByteCache.delete(snapshot);
   return changed;
 }
 
@@ -482,6 +520,12 @@ export function rewritePluginDataPathPrefix(data: PluginData, oldPath: string, n
   for (const snapshot of [...data.layoutSnapshots, ...data.undoStack, ...data.redoStack]) {
     if (rewriteSnapshotPrefixes(snapshot, oldPath, newPath)) changed = true;
   }
+  const layoutSnapshots = limitSnapshotStack(data.layoutSnapshots, 10);
+  const undoStack = limitSnapshotStack(data.undoStack);
+  const redoStack = limitSnapshotStack(data.redoStack);
+  if (layoutSnapshots.length !== data.layoutSnapshots.length) { data.layoutSnapshots = layoutSnapshots; changed = true; }
+  if (undoStack.length !== data.undoStack.length) { data.undoStack = undoStack; changed = true; }
+  if (redoStack.length !== data.redoStack.length) { data.redoStack = redoStack; changed = true; }
   const selectedPath = replacePathPrefix(data.selectedPath, oldPath, newPath);
   if (selectedPath !== data.selectedPath) {
     data.selectedPath = selectedPath;
@@ -799,52 +843,106 @@ export function curriculumContainerKey(domain: string, parentPath: string | null
   return parentPath ? `parent:${parentPath}` : `root:${domain.toLowerCase()}`;
 }
 
-function defaultCurriculumParent(record: VaultRecord, topics: VaultRecord[]): string | null {
+interface CurriculumLookup {
+  byDomainAndId: Map<string, VaultRecord>;
+  byDomainAndLink: Map<string, VaultRecord>;
+}
+
+/**
+ * Resolving a configured parent by scanning every topic is O(n²) once notes
+ * actually use the parent property, so both lookups are indexed up front.
+ * First-wins insertion preserves the original `Array.prototype.find` semantics.
+ */
+function buildCurriculumLookup(topics: VaultRecord[]): CurriculumLookup {
+  const byDomainAndId = new Map<string, VaultRecord>();
+  const byDomainAndLink = new Map<string, VaultRecord>();
+  for (const record of topics) {
+    if (record.curriculumId) {
+      const idKey = `${record.domain} ${record.curriculumId}`;
+      if (!byDomainAndId.has(idKey)) byDomainAndId.set(idKey, record);
+    }
+    const basename = record.path.split("/").pop()?.replace(/\.md$/, "") ?? "";
+    for (const value of [record.title, basename, ...record.aliases]) {
+      const linkKey = `${record.domain} ${value.toLowerCase()}`;
+      if (value && !byDomainAndLink.has(linkKey)) byDomainAndLink.set(linkKey, record);
+    }
+  }
+  return { byDomainAndId, byDomainAndLink };
+}
+
+function defaultCurriculumParent(record: VaultRecord, lookup: CurriculumLookup): string | null {
   if (record.role === "canonical" && record.curriculumId) {
     const parentId = expectedParentCurriculumId(record.curriculumId);
-    if (parentId) return topics.find((candidate) => candidate.domain === record.domain && candidate.curriculumId === parentId)?.path ?? null;
+    if (parentId) return lookup.byDomainAndId.get(`${record.domain} ${parentId}`)?.path ?? null;
   }
   if (record.parentTopic) {
-    return topics.find((candidate) => candidate.domain === record.domain && recordMatchesLink(candidate, record.parentTopic))?.path ?? null;
+    const normalized = normalizeWikiLink(record.parentTopic).toLowerCase();
+    if (!normalized) return null;
+    return lookup.byDomainAndLink.get(`${record.domain} ${normalized}`)?.path ?? null;
   }
   return null;
 }
 
-function sortCurriculumNodes(nodes: CurriculumTreeNode[], state: CurriculumVisualState, key: string): void {
-  const order = state.orderByContainer[key] ?? [];
-  const positions = new Map(order.map((path, index) => [path, index]));
-  nodes.sort((a, b) => {
-    const aIndex = positions.get(a.record.path);
-    const bIndex = positions.get(b.record.path);
-    if (aIndex !== undefined || bIndex !== undefined) {
-      if (aIndex === undefined) return 1;
-      if (bIndex === undefined) return -1;
-      if (aIndex !== bIndex) return aIndex - bIndex;
-    }
-    return compareRecords(a.record, b.record);
-  });
-  for (const node of nodes) sortCurriculumNodes(node.children, state, curriculumContainerKey(node.record.domain, node.record.path));
+/**
+ * This is a rendering safety boundary, not a statement that deeper user data is
+ * invalid. Records projected to the root because of this cap are reported to the
+ * caller so the UI can disclose the altered visual hierarchy.
+ */
+export const MAX_CURRICULUM_DEPTH = 64;
+
+function sortCurriculumNodes(roots: CurriculumTreeNode[], state: CurriculumVisualState, rootKey: string): void {
+  const sortSiblings = (nodes: CurriculumTreeNode[], key: string): void => {
+    const order = state.orderByContainer[key] ?? [];
+    const positions = new Map(order.map((path, index) => [path, index]));
+    nodes.sort((a, b) => {
+      const aIndex = positions.get(a.record.path);
+      const bIndex = positions.get(b.record.path);
+      if (aIndex !== undefined || bIndex !== undefined) {
+        if (aIndex === undefined) return 1;
+        if (bIndex === undefined) return -1;
+        if (aIndex !== bIndex) return aIndex - bIndex;
+      }
+      return compareRecords(a.record, b.record);
+    });
+  };
+  // Iterative so tree depth never maps onto stack depth.
+  sortSiblings(roots, rootKey);
+  const stack = [...roots];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (!node || node.children.length === 0) continue;
+    sortSiblings(node.children, curriculumContainerKey(node.record.domain, node.record.path));
+    for (const child of node.children) stack.push(child);
+  }
 }
 
 /** Build the effective visual tree while safely ignoring invalid, cross-domain, and cyclic overrides. */
 export function buildCurriculumTree(records: VaultRecord[], state: CurriculumVisualState): CurriculumTreeResult {
   const topics = records.filter((record) => record.kind === "topic" && (record.role === "canonical" || record.role === "supporting"));
   const byPath = new Map(topics.map((record) => [record.path, record]));
+  const lookup = buildCurriculumLookup(topics);
   const parentByPath = new Map<string, string | null>();
+  const depthLimitedPaths: string[] = [];
   for (const record of topics) {
     const hasOverride = Object.getOwnPropertyDescriptor(state.parentByPath, record.path) !== undefined;
-    const requested = hasOverride ? state.parentByPath[record.path] ?? null : defaultCurriculumParent(record, topics);
+    const requested = hasOverride ? state.parentByPath[record.path] ?? null : defaultCurriculumParent(record, lookup);
     const parent = requested ? byPath.get(requested) : undefined;
     parentByPath.set(record.path, parent && parent.path !== record.path && parent.domain === record.domain ? parent.path : null);
   }
 
-  // Break each cycle at the first node encountered, leaving a valid rooted tree.
+  // Break each cycle at the first node encountered, and re-root anything nested
+  // past the depth cap, so the result is always a shallow, finite rooted tree.
   for (const record of topics) {
     const seen = new Set<string>([record.path]);
     let cursor = parentByPath.get(record.path) ?? null;
     while (cursor) {
       if (seen.has(cursor)) {
         parentByPath.set(record.path, null);
+        break;
+      }
+      if (seen.size > MAX_CURRICULUM_DEPTH) {
+        parentByPath.set(record.path, null);
+        depthLimitedPaths.push(record.path);
         break;
       }
       seen.add(cursor);
@@ -866,39 +964,34 @@ export function buildCurriculumTree(records: VaultRecord[], state: CurriculumVis
   }
   const sorted = [...domains.values()].sort((a, b) => a.folderOrder.localeCompare(b.folderOrder, undefined, { numeric: true }) || a.domain.localeCompare(b.domain));
   for (const domain of sorted) sortCurriculumNodes(domain.roots, state, curriculumContainerKey(domain.domain, null));
-  return { domains: sorted, parentByPath };
+  // Built after sorting so cached child order matches what the tree renders.
+  const childrenByPath = new Map<string, string[]>();
+  for (const [path, node] of nodes) childrenByPath.set(path, node.children.map((child) => child.record.path));
+  return { domains: sorted, parentByPath, childrenByPath, nodeByPath: nodes, depthLimitedPaths };
+}
+
+export function curriculumChildPaths(tree: CurriculumTreeResult, path: string): string[] {
+  return tree.childrenByPath.get(path) ?? [];
 }
 
 export function curriculumSiblingPaths(tree: CurriculumTreeResult, record: VaultRecord): string[] {
   const parentPath = tree.parentByPath.get(record.path) ?? null;
-  if (parentPath) {
-    const find = (nodes: CurriculumTreeNode[]): CurriculumTreeNode | undefined => {
-      for (const node of nodes) {
-        if (node.record.path === parentPath) return node;
-        const nested = find(node.children);
-        if (nested) return nested;
-      }
-      return undefined;
-    };
-    const roots: CurriculumTreeNode[] = [];
-    for (const domain of tree.domains) roots.push(...domain.roots);
-    return find(roots)?.children.map((node) => node.record.path) ?? [];
-  }
+  if (parentPath) return curriculumChildPaths(tree, parentPath);
   return tree.domains.find((domain) => domain.domain === record.domain)?.roots.map((node) => node.record.path) ?? [];
 }
 
 export function curriculumDescendantPaths(tree: CurriculumTreeResult, path: string): Set<string> {
-  const children = new Map<string, string[]>();
-  for (const [child, parent] of tree.parentByPath) if (parent) children.set(parent, [...(children.get(parent) ?? []), child]);
   const descendants = new Set<string>();
-  const visit = (parent: string): void => {
-    for (const child of children.get(parent) ?? []) {
+  const stack = [path];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (current === undefined) continue;
+    for (const child of tree.childrenByPath.get(current) ?? []) {
       if (descendants.has(child)) continue;
       descendants.add(child);
-      visit(child);
+      stack.push(child);
     }
-  };
-  visit(path);
+  }
   return descendants;
 }
 
@@ -995,8 +1088,9 @@ export function visualPlacementPathSet(
   return paths;
 }
 
-interface ParsedQuery {
+export interface ParsedQuery {
   text: string;
+  terms: string[];
   tokens: Map<string, string[]>;
 }
 
@@ -1008,10 +1102,13 @@ export function parseQuery(query: string): ParsedQuery {
   const tokens = new Map<string, string[]>();
   const remainder = query.replace(/([a-z_]+):(?:"([^"]+)"|(\S+))/gi, (_match, key: string, quoted: string, bare: string) => {
     const normalized = key.toLowerCase();
-    tokens.set(normalized, [...(tokens.get(normalized) ?? []), normalizeSearchText(quoted || bare || "")]);
+    const values = tokens.get(normalized);
+    const value = normalizeSearchText(quoted || bare || "");
+    if (values) values.push(value); else tokens.set(normalized, [value]);
     return " ";
   });
-  return { text: normalizeSearchText(remainder.trim()), tokens };
+  const text = normalizeSearchText(remainder.trim());
+  return { text, terms: text ? text.split(/\s+/) : [], tokens };
 }
 
 export const KNOWN_QUERY_TOKENS = new Set([
@@ -1047,14 +1144,61 @@ function tokenMatches(record: VaultRecord, key: string, values: string[]): boole
   });
 }
 
-export function matchesQuery(record: VaultRecord, query: string): boolean {
-  const parsed = parseQuery(query);
+interface SearchHaystack {
+  text: string;
+  words: string[];
+}
+
+/**
+ * Normalizing a record for search is pure and comparatively expensive, so it is
+ * memoized per record object. `getRecords()` rebuilds record objects whenever the
+ * underlying data changes, which invalidates these entries automatically.
+ */
+const haystackCache = new WeakMap<VaultRecord, SearchHaystack>();
+
+function searchHaystack(record: VaultRecord): SearchHaystack {
+  const cached = haystackCache.get(record);
+  if (cached) return cached;
+  const text = normalizeSearchText([record.title, record.curriculumId, record.domain, record.topicKind, record.role, record.path, ...record.aliases].join(" "));
+  const haystack: SearchHaystack = { text, words: text.split(/[^\p{L}\p{N}]+/u).filter(Boolean) };
+  haystackCache.set(record, haystack);
+  return haystack;
+}
+
+/** Match against an already-parsed query. Callers rendering many records should parse once. */
+export function matchesParsedQuery(record: VaultRecord, parsed: ParsedQuery): boolean {
   for (const [key, values] of parsed.tokens) if (!tokenMatches(record, key, values)) return false;
-  if (!parsed.text) return true;
-  const haystack = normalizeSearchText([record.title, record.curriculumId, record.domain, record.topicKind, record.role, record.path, ...record.aliases].join(" "));
-  const words = haystack.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-  return parsed.text.split(/\s+/).every((term) => haystack.includes(term)
+  if (parsed.terms.length === 0) return true;
+  const { text, words } = searchHaystack(record);
+  return parsed.terms.every((term) => text.includes(term)
     || words.some((word) => word[0] === term[0] && fuzzyContains(word, term)));
+}
+
+export function matchesQuery(record: VaultRecord, query: string): boolean {
+  return matchesParsedQuery(record, parseQuery(query));
+}
+
+/**
+ * Group records for a library section. The lookup and insert key must be the
+ * same value, otherwise records with an empty group are silently dropped.
+ */
+export function groupRecordsByGroup(records: VaultRecord[], fallbackGroup: string): Map<string, VaultRecord[]> {
+  const groups = new Map<string, VaultRecord[]>();
+  for (const record of records) {
+    const key = record.domain || fallbackGroup;
+    const bucket = groups.get(key);
+    if (bucket) bucket.push(record);
+    else groups.set(key, [record]);
+  }
+  return groups;
+}
+
+/**
+ * Replace the first top-level Markdown heading. A replacer function is required:
+ * a plain replacement string would expand `$&`, `$\'` and `` $` `` inside a title.
+ */
+export function rewriteTopLevelHeading(content: string, title: string): string {
+  return content.replace(/^# .+$/m, () => `# ${title}`);
 }
 
 export function metadataHasGap(record: VaultRecord): boolean {
@@ -1065,14 +1209,20 @@ export function metadataHasGap(record: VaultRecord): boolean {
   return false;
 }
 
+/** Windows reserves these basenames with or without an extension. */
+const RESERVED_BASENAMES = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
+
 export function sanitizeFileName(value: string): string {
-  return value
+  // `#^[]` are filesystem-legal but break Obsidian wikilinks, so they are folded
+  // into `-` alongside the characters the operating system itself rejects.
+  const clean = value
     .normalize("NFC")
     .replace(/[\p{Cc}\p{Cf}]/gu, "")
-    .replace(/[\\/:*?"<>|]/g, "-")
+    .replace(/[\\/:*?"<>|#^[\]]/g, "-")
     .replace(/\s+/g, " ")
     .replace(/[. ]+$/g, "")
     .trim();
+  return RESERVED_BASENAMES.test(clean) ? `${clean}-note` : clean;
 }
 
 export function canonicalIdIsValid(curriculumId: string, domain: string): boolean {
@@ -1128,6 +1278,17 @@ export function canonicalPath(value: Pick<TopicFormValue, "title" | "domain" | "
   const definition = DOMAIN_DEFINITIONS.find((item) => item.name === value.domain);
   if (!definition) return "";
   return `${TOPIC_ROOT}${definition.folder}/${value.curriculumId.trim().toUpperCase()} - ${sanitizeFileName(value.title)}.md`;
+}
+
+/** Whether a placement edit leaves every filename-driving field unchanged. */
+export function canonicalPathInputsUnchanged(
+  record: Pick<VaultRecord, "title" | "domain" | "curriculumId"> | null,
+  value: Pick<TopicFormValue, "title" | "domain" | "curriculumId">,
+): boolean {
+  return record !== null
+    && record.title === value.title.trim()
+    && record.domain === value.domain
+    && record.curriculumId.toUpperCase() === value.curriculumId.trim().toUpperCase();
 }
 
 export function proposalPath(folder: string, title: string): string {
@@ -1247,7 +1408,7 @@ cssclasses:
 # ${value.title}
 
 > [!warning] Topic proposal — unverified
-> This is an educational capture scaffold. It is not part of the canonical curriculum until Dr. Ali explicitly promotes it. Do not add clinical claims, doses, thresholds, or timing without source citations.
+> This is an educational capture scaffold. It is not part of the canonical curriculum until the vault owner explicitly promotes it. Do not add clinical claims, doses, thresholds, or timing without source citations.
 
 ## Summary
 
@@ -1316,7 +1477,7 @@ cssclasses:
 
 | Date | Change | Source or reason |
 |---|---|---|
-| ${date} | Topic proposal created from ENT Vault Command Center | User capture; unverified |
+| ${date} | Topic proposal created from the knowledge base command center | User capture; unverified |
 `;
 }
 
@@ -1349,7 +1510,7 @@ cssclasses:
 # ${value.title}
 
 > [!warning] Unverified clinical-topic scaffold
-> This educational note contains no clinically approved content. Complete a source-traced build and keep it unverified until Dr. Ali reviews it.
+> This educational note contains no clinically approved content. Complete a source-traced build and keep it unverified until the vault owner reviews it.
 
 ## Summary
 
@@ -1418,7 +1579,7 @@ cssclasses:
 
 | Date | Change | Source or reason |
 |---|---|---|
-| ${date} | Canonical topic scaffold created from ENT Vault Command Center | User-authorized creation; unverified |
+| ${date} | Canonical topic scaffold created from the knowledge base command center | User-authorized creation; unverified |
 `;
 }
 
@@ -1433,7 +1594,7 @@ export function isRestrictedVaultPath(path: string, configDir: string): boolean 
 
 export interface IndexDiagnostic {
   id: string;
-  kind: "missing-note" | "duplicate-membership" | "broken-parent" | "orphaned-group" | "invalid-visual-parent";
+  kind: "missing-note" | "duplicate-membership" | "broken-parent" | "orphaned-group" | "invalid-visual-parent" | "depth-limit";
   title: string;
   detail: string;
   path?: string;
@@ -1498,6 +1659,16 @@ export function buildIndexDiagnostics(data: PluginData, records: VaultRecord[], 
     if (!record || !parent || recordGroup !== parentGroup || path === parentPath) {
       diagnostics.push({ id: `visual-parent:${path}`, kind: "invalid-visual-parent", title: "Invalid visual parent", detail: `The visual parent ${parentPath} is missing, self-referential, or in another group.`, path });
     }
+  }
+  const depthLimited = buildCurriculumTree(records, data.curriculumVisual).depthLimitedPaths;
+  if (depthLimited.length > 0) {
+    diagnostics.push({
+      id: "depth-limit",
+      kind: "depth-limit",
+      title: "Hierarchy rendering depth exceeded",
+      detail: `${depthLimited.length} ${depthLimited.length === 1 ? "record was" : "records were"} shown at the top level because the hierarchy exceeds ${MAX_CURRICULUM_DEPTH} rendered levels. Parent properties and notes were not changed.`,
+      path: depthLimited[0],
+    });
   }
   return diagnostics;
 }

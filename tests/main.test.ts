@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import EntVaultCommandCenterPlugin from "../src/main.ts";
-import { Notice, Plugin } from "obsidian";
+import { Notice, Plugin, TFile } from "obsidian";
 
 interface TestPluginBase {
   loadedData: unknown;
@@ -78,4 +78,75 @@ test("the plugin rename handler preserves every note below a renamed folder and 
 test("test runtime uses the in-memory Obsidian plugin boundary", () => {
   const base = new Plugin();
   assert.ok(Array.isArray(base.savedData));
+});
+
+test("a corrupt data.json opens read-only instead of stopping the plugin from loading", async () => {
+  Notice.messages.length = 0;
+  const plugin = pluginWith(null);
+  // Obsidian's loadData() performs JSON.parse, so a malformed file rejects here.
+  (plugin as unknown as { loadData(): Promise<unknown> }).loadData = () =>
+    Promise.reject(new SyntaxError("Unexpected end of JSON input"));
+  await plugin.loadPluginData();
+  assert.match(plugin.dataCompatibilityWarning, /could not be parsed/i);
+  assert.match(plugin.dataCompatibilityWarning, /read-only/i);
+  // The plugin still has usable defaults, and never writes over the bad file.
+  assert.equal(plugin.data.version, 9);
+  assert.equal(plugin.isDataReadOnly(), true);
+  assert.equal(plugin.savedData.length, 0);
+  await plugin.savePluginData();
+  assert.equal(plugin.savedData.length, 0);
+  assert.throws(() => plugin.assertDataWritable(), /could not be parsed/i);
+  assert.equal(Notice.messages.some((message) => /could not be parsed/i.test(message)), true);
+});
+
+function vaultWith(fileCount: number) {
+  const files = Array.from({ length: fileCount }, (_, index) => new TFile(`Knowledge Base/Group ${index % 20}/Note ${index}.md`));
+  return {
+    vault: {
+      configDir: ".obsidian",
+      getMarkdownFiles: () => files,
+      getAbstractFileByPath: () => null,
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+    fileManager: {},
+  };
+}
+
+test("index membership lookups stay constant-time across a large vault", async () => {
+  const fileCount = 10_000;
+  const plugin = new EntVaultCommandCenterPlugin(vaultWith(fileCount) as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = null;
+  await plugin.loadPluginData();
+  plugin.data.settings.workspaceMode = "generic";
+  plugin.data.settings.primaryFolder = "Knowledge Base";
+  // Half the vault also carries an explicit manual membership. Testing these
+  // with Array.includes inside the per-file loop is quadratic.
+  plugin.data.manualIndexPaths = Array.from({ length: 5_000 }, (_, index) => `Elsewhere/Manual ${index}.md`);
+  plugin.data.excludedIndexPaths = Array.from({ length: 2_000 }, (_, index) => `Knowledge Base/Group ${index % 20}/Note ${index}.md`);
+  plugin.invalidateRecordCache();
+
+  const start = performance.now();
+  const records = plugin.getRecords();
+  const elapsed = performance.now() - start;
+  assert.equal(records.length, fileCount - plugin.data.excludedIndexPaths.length);
+  assert.ok(elapsed < 750, `building records for ${fileCount} files took ${elapsed.toFixed(1)} ms`);
+
+  // A warm cache must not rescan at all.
+  const cachedStart = performance.now();
+  assert.equal(plugin.getRecords(), records);
+  assert.ok(performance.now() - cachedStart < 100, "a warm record cache should not rebuild");
+});
+
+test("hidden notes leave the index while manual members stay in it", async () => {
+  const plugin = new EntVaultCommandCenterPlugin(vaultWith(6) as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = null;
+  await plugin.loadPluginData();
+  plugin.data.settings.workspaceMode = "generic";
+  plugin.data.settings.primaryFolder = "Knowledge Base";
+  plugin.data.excludedIndexPaths = ["Knowledge Base/Group 0/Note 0.md"];
+  plugin.invalidateRecordCache();
+  const paths = plugin.getRecords().map((item) => item.path);
+  assert.equal(paths.includes("Knowledge Base/Group 0/Note 0.md"), false);
+  assert.equal(paths.includes("Knowledge Base/Group 1/Note 1.md"), true);
 });

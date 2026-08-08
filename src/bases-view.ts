@@ -1,4 +1,4 @@
-import { BasesView, QueryController, setIcon } from "obsidian";
+import { BasesView, Notice, QueryController, setIcon } from "obsidian";
 import { asUnknownRecord } from "./model";
 
 export class EntHierarchyBasesView extends BasesView {
@@ -24,7 +24,11 @@ export class EntHierarchyBasesView extends BasesView {
     });
 
     const groups = new Map<string, typeof records>();
-    for (const record of records) groups.set(record.domain, [...(groups.get(record.domain) ?? []), record]);
+    for (const record of records) {
+      const bucket = groups.get(record.domain);
+      if (bucket) bucket.push(record);
+      else groups.set(record.domain, [record]);
+    }
 
     for (const [domain, grouped] of [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))) {
       const section = this.containerEl.createDiv({ cls: "ent-cc-base-group" });
@@ -37,7 +41,11 @@ export class EntHierarchyBasesView extends BasesView {
         row.createSpan({ text: record.title, cls: "ent-cc-base-record-title" });
         row.createSpan({ text: record.id, cls: "ent-cc-base-record-id" });
         if (record.priority) row.createSpan({ text: record.priority, cls: "ent-cc-priority" });
-        row.addEventListener("click", () => void this.app.workspace.getLeaf("tab").openFile(record.file));
+        row.addEventListener("click", () => {
+          void this.app.workspace.getLeaf("tab").openFile(record.file).catch((error) => {
+            new Notice(error instanceof Error ? error.message : String(error));
+          });
+        });
       }
     }
   }

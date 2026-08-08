@@ -26,6 +26,8 @@ export class IndexManagerModal extends Modal {
   private selected = new Set<string>();
   private diagnosticsCache: IndexDiagnostic[] | null = null;
   private searchTimer: number | null = null;
+  private selectionCountEl: HTMLElement | null = null;
+  private selectionButtons: Array<{ el: HTMLButtonElement; enabled: () => boolean }> = [];
 
   constructor(private readonly plugin: EntVaultCommandCenterPlugin) {
     super(plugin.app);
@@ -40,9 +42,16 @@ export class IndexManagerModal extends Modal {
 
   onClose(): void {
     if (this.searchTimer !== null) window.activeWindow.clearTimeout(this.searchTimer);
+    this.searchTimer = null;
+    this.selectionCountEl = null;
+    this.selectionButtons = [];
   }
 
   private render(): void {
+    // Do not retain controls detached by contentEl.empty(); selection refreshes
+    // must address only the currently rendered toolbar.
+    this.selectionCountEl = null;
+    this.selectionButtons = [];
     this.contentEl.empty();
     const settings = this.plugin.data.settings;
     const indexed = this.indexedNotes();
@@ -56,9 +65,7 @@ export class IndexManagerModal extends Modal {
     const header = this.contentEl.createDiv({ cls: "ent-cc-manager-header" });
     header.createEl("p", { text: `Manage membership, ${settings.groupLabel.toLowerCase()}s, and integrity without moving or rewriting Markdown notes.` });
     const portability = header.createDiv({ cls: "ent-cc-manager-portability" });
-    this.actionButton(portability, "download", "Export workspace", () => void this.exportWorkspace().catch((error) => {
-      new Notice(error instanceof Error ? error.message : String(error));
-    }));
+    this.actionButton(portability, "download", "Export workspace", () => this.run(() => this.exportWorkspace()));
     this.actionButton(portability, "upload", "Import workspace…", () => this.importWorkspace());
 
     const tabs = this.contentEl.createDiv({ cls: "ent-cc-manager-tabs", attr: { role: "tablist" } });
@@ -141,14 +148,15 @@ export class IndexManagerModal extends Modal {
     }, filtered.length === 0);
 
     const actions = this.contentEl.createDiv({ cls: "ent-cc-manager-bulk-actions" });
-    actions.createSpan({ text: `${this.selected.size} selected`, cls: "ent-cc-muted" });
+    this.selectionCountEl = actions.createSpan({ text: `${this.selected.size} selected`, cls: "ent-cc-muted", attr: { role: "status", "aria-live": "polite" } });
+    this.selectionButtons = [];
     if (this.tab === "indexed") {
-      this.actionButton(actions, "folder-input", `Move to ${this.plugin.data.settings.groupLabel.toLowerCase()}…`, () => this.chooseGroupForSelection("move"), this.selected.size === 0 || !this.plugin.canVisuallyMoveAcrossGroups());
-      if (!this.plugin.isClinicalMode()) this.actionButton(actions, "list-minus", "Remove from index…", () => this.removeSelectedFromIndex(), this.selected.size === 0, true);
+      this.selectionButtons.push({ el: this.actionButton(actions, "folder-input", `Move to ${this.plugin.data.settings.groupLabel.toLowerCase()}…`, () => this.chooseGroupForSelection("move"), this.selected.size === 0 || !this.plugin.canVisuallyMoveAcrossGroups()), enabled: () => this.selected.size > 0 && this.plugin.canVisuallyMoveAcrossGroups() });
+      if (!this.plugin.isClinicalMode()) this.selectionButtons.push({ el: this.actionButton(actions, "list-minus", "Remove from index…", () => this.removeSelectedFromIndex(), this.selected.size === 0, true), enabled: () => this.selected.size > 0 });
     } else if (this.tab === "available") {
-      this.actionButton(actions, "list-plus", "Add selected…", () => this.chooseGroupForSelection("add"), this.selected.size === 0);
+      this.selectionButtons.push({ el: this.actionButton(actions, "list-plus", "Add selected…", () => this.chooseGroupForSelection("add"), this.selected.size === 0), enabled: () => this.selected.size > 0 });
     } else {
-      this.actionButton(actions, "rotate-ccw", "Restore selected…", () => this.chooseGroupForSelection("restore"), this.selected.size === 0);
+      this.selectionButtons.push({ el: this.actionButton(actions, "rotate-ccw", "Restore selected…", () => this.chooseGroupForSelection("restore"), this.selected.size === 0), enabled: () => this.selected.size > 0 });
     }
 
     const list = this.contentEl.createDiv({ cls: "ent-cc-manager-list" });
@@ -156,6 +164,12 @@ export class IndexManagerModal extends Modal {
     for (const note of visible) this.renderNoteRow(list, note);
     if (filtered.length > visible.length) list.createDiv({ cls: "ent-cc-manager-limit", text: `Showing the first ${visible.length} matches. Narrow the search to reach the remaining ${filtered.length - visible.length}.` });
     if (filtered.length === 0) list.createDiv({ cls: "ent-cc-empty", text: this.query ? "No notes match this search." : "Nothing in this section." });
+  }
+
+  /** Updates only the controls that depend on the selection, preserving focus. */
+  private refreshSelectionState(): void {
+    this.selectionCountEl?.setText(`${this.selected.size} selected`);
+    for (const button of this.selectionButtons) button.el.disabled = !button.enabled();
   }
 
   private filterNotes(notes: ManagerNote[]): ManagerNote[] {
@@ -171,7 +185,9 @@ export class IndexManagerModal extends Modal {
     checkbox.checked = this.selected.has(note.path);
     checkbox.addEventListener("change", () => {
       if (checkbox.checked) this.selected.add(note.path); else this.selected.delete(note.path);
-      this.render();
+      // Re-rendering here would destroy the checkbox that has focus, making
+      // keyboard multi-selection impossible.
+      this.refreshSelectionState();
     });
     const text = selector.createDiv({ cls: "ent-cc-manager-note-text" });
     text.createDiv({ cls: "ent-cc-manager-note-title", text: note.title });
@@ -180,7 +196,7 @@ export class IndexManagerModal extends Modal {
     if (file instanceof TFile) {
       const open = row.createEl("button", { cls: "ent-cc-icon-button", attr: { "aria-label": `Open ${note.title}`, title: `Open ${note.title}`, type: "button" } });
       setIcon(open, "external-link");
-      open.addEventListener("click", (event) => { event.preventDefault(); void this.plugin.openFile(file); });
+      open.addEventListener("click", (event) => { event.preventDefault(); this.run(() => this.plugin.openFile(file)); });
     }
   }
 
@@ -271,12 +287,15 @@ export class IndexManagerModal extends Modal {
     const from = groups.indexOf(group);
     const to = from + direction;
     if (from < 0 || to < 0 || to >= groups.length) return;
-    void this.plugin.mutate(`Reorder visual group “${group}”`, () => {
-      const order = [...groups];
-      const [moved] = order.splice(from, 1);
-      if (moved) order.splice(to, 0, moved);
-      this.plugin.data.indexGroupOrder = order;
-    }).then(() => this.render());
+    this.run(async () => {
+      await this.plugin.mutate(`Reorder visual group “${group}”`, () => {
+        const order = [...groups];
+        const [moved] = order.splice(from, 1);
+        if (moved) order.splice(to, 0, moved);
+        this.plugin.data.indexGroupOrder = order;
+      });
+      this.render();
+    });
   }
 
   private renameGroup(group: string): void {
@@ -311,10 +330,13 @@ export class IndexManagerModal extends Modal {
   }
 
   private removeEmptyGroup(group: string): void {
-    void this.plugin.mutate(`Remove empty visual group “${group}”`, () => {
-      this.plugin.data.indexGroupOrder = this.plugin.data.indexGroupOrder.filter((candidate) => candidate !== group);
-      delete this.plugin.data.curriculumVisual.orderByContainer[curriculumContainerKey(group, null)];
-    }).then(() => this.render());
+    this.run(async () => {
+      await this.plugin.mutate(`Remove empty visual group “${group}”`, () => {
+        this.plugin.data.indexGroupOrder = this.plugin.data.indexGroupOrder.filter((candidate) => candidate !== group);
+        delete this.plugin.data.curriculumVisual.orderByContainer[curriculumContainerKey(group, null)];
+      });
+      this.render();
+    });
   }
 
   private transferRootOrder(source: string, target: string, merge: boolean): void {
@@ -332,9 +354,11 @@ export class IndexManagerModal extends Modal {
   private renderDiagnostics(diagnostics: IndexDiagnostic[]): void {
     const toolbar = this.contentEl.createDiv({ cls: "ent-cc-manager-toolbar" });
     toolbar.createEl("p", { text: diagnostics.length === 0 ? "No index-organization problems detected." : `${diagnostics.length} issue${diagnostics.length === 1 ? "" : "s"} detected. Safe repair removes only stale or duplicate plugin references; configured parent properties are never rewritten.` });
-    const repairable = diagnostics.some((item) => item.kind !== "broken-parent");
+    const repairableKinds = new Set<IndexDiagnostic["kind"]>(["missing-note", "duplicate-membership", "orphaned-group", "invalid-visual-parent"]);
+    const repairable = diagnostics.some((item) => repairableKinds.has(item.kind));
     this.actionButton(toolbar, "wrench", "Repair safe issues", () => {
-      void this.plugin.repairIndexOrganization().then(() => {
+      this.run(async () => {
+        await this.plugin.repairIndexOrganization();
         this.diagnosticsCache = null;
         this.render();
         new Notice("Safe plugin-state repairs completed. Note metadata was not changed.");
@@ -349,9 +373,13 @@ export class IndexManagerModal extends Modal {
       text.createDiv({ cls: "ent-cc-manager-note-title", text: diagnostic.title });
       text.createDiv({ cls: "ent-cc-picker-meta", text: `${diagnostic.detail}${diagnostic.path ? ` · ${diagnostic.path}` : ""}` });
       const file = diagnostic.path ? this.app.vault.getAbstractFileByPath(diagnostic.path) : null;
-      if (file instanceof TFile) this.iconAction(row, "external-link", `Open ${file.basename}`, () => void this.plugin.openFile(file));
+      if (file instanceof TFile) this.iconAction(row, "external-link", `Open ${file.basename}`, () => this.run(() => this.plugin.openFile(file)));
     }
     if (diagnostics.length === 0) list.createDiv({ cls: "ent-cc-empty", text: "Index organization is healthy." });
+  }
+
+  private run(action: () => Promise<unknown>): void {
+    void action().catch((error) => new Notice(error instanceof Error ? error.message : String(error)));
   }
 
   private async exportWorkspace(): Promise<void> {

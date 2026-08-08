@@ -4,6 +4,7 @@ import { IndexManagerModal } from "./index-manager";
 import {
   buildCurriculumTree,
   canonicalPath,
+  curriculumChildPaths,
   countHeading,
   createPersonalBackup,
   curriculumDescendantPaths,
@@ -12,16 +13,20 @@ import {
   CurriculumTreeNode,
   CurriculumTreeResult,
   curriculumVisualHasChanges,
+  emptyCurriculumTree,
   expectedParentCurriculumId,
   GenericNoteFormValue,
+  groupRecordsByGroup,
   isExtensionCurriculumId,
   LayoutHeading,
   LayoutSubheading,
   limitSnapshotStack,
   MainTab,
   makeId,
-  matchesQuery,
+  matchesParsedQuery,
   metadataHasGap,
+  ParsedQuery,
+  parseQuery,
   moveCurriculumVisual,
   pathIsInsideFolder,
   parsePersonalBackup,
@@ -31,6 +36,7 @@ import {
   resetCurriculumVisualPath,
   shouldHandleRowShortcut,
   snapshotPersonal,
+  snapshotStackDepthIsTruncated,
   TopicFormValue,
   PluginSettings,
   unknownQueryTokens,
@@ -102,6 +108,13 @@ function iconButton(parent: HTMLElement, icon: string, label: string, className 
   return button;
 }
 
+/** Marks a disclosure control so assistive technology can announce open/closed state. */
+function disclosureButton(parent: HTMLElement, collapsed: boolean, label: string): HTMLButtonElement {
+  const button = iconButton(parent, collapsed ? "chevron-right" : "chevron-down", `${collapsed ? "Expand" : "Collapse"} ${label}`, "ent-cc-disclosure");
+  button.setAttribute("aria-expanded", String(!collapsed));
+  return button;
+}
+
 function titleForTab(tab: MainTab, settings: PluginSettings): string {
   return tabDefinitions(settings).find((item) => item.id === tab)?.label ?? "Records";
 }
@@ -130,17 +143,17 @@ function queueRecords(queues: QueueDefinition[]): VaultRecord[] {
   return records;
 }
 
-function curriculumRoots(curriculum: CurriculumTreeResult): CurriculumTreeNode[] {
-  const roots: CurriculumTreeNode[] = [];
-  for (const domain of curriculum.domains) roots.push(...domain.roots);
-  return roots;
-}
-
 export class EntVaultCommandCenterView extends ItemView {
   private records: VaultRecord[] = [];
   private recordByPath = new Map<string, VaultRecord>();
-  private curriculum: CurriculumTreeResult = { domains: [], parentByPath: new Map() };
+  private curriculum: CurriculumTreeResult = emptyCurriculumTree();
   private query = "";
+  private parsedQuery: ParsedQuery = parseQuery("");
+  private searchDebounce: number | null = null;
+  private setupTimer: number | null = null;
+  private selectionSaveTimer: number | null = null;
+  private selectionSavePromise: Promise<void> | null = null;
+  private readonly timerWindow: Window = window.activeWindow ?? window;
   private editMode = false;
   private curriculumArrangeMode = false;
   private treeEl: HTMLElement | null = null;
@@ -169,7 +182,29 @@ export class EntVaultCommandCenterView extends ItemView {
     await this.reload();
     if (!this.plugin.data.settings.setupComplete && !this.setupPromptShown) {
       this.setupPromptShown = true;
-      window.activeWindow.setTimeout(() => this.openSetupWizard(), 100);
+      this.setupTimer = this.timerWindow.setTimeout(() => {
+        this.setupTimer = null;
+        this.openSetupWizard();
+      }, 100);
+    }
+  }
+
+  async onClose(): Promise<void> {
+    const selectionSavePending = this.selectionSaveTimer !== null;
+    for (const timer of [this.setupTimer, this.searchDebounce, this.selectionSaveTimer]) {
+      if (timer !== null) this.timerWindow.clearTimeout(timer);
+    }
+    this.setupTimer = null;
+    this.searchDebounce = null;
+    this.selectionSaveTimer = null;
+    // A pending selection must still reach disk when the view closes.
+    if (selectionSavePending || this.selectionSavePromise) {
+      try {
+        if (selectionSavePending) await this.saveSelectionState();
+        else await this.selectionSavePromise;
+      } catch (error) {
+        new Notice(error instanceof Error ? error.message : String(error));
+      }
     }
   }
 
@@ -181,13 +216,28 @@ export class EntVaultCommandCenterView extends ItemView {
     this.render();
   }
 
+  /** Runs a fire-and-forget action, surfacing failures (for example read-only data) as a Notice. */
+  private run(action: () => Promise<unknown>): void {
+    void action().catch((error) => new Notice(error instanceof Error ? error.message : String(error)));
+  }
+
+  /** Serialize selection writes and expose the active write to onClose(). */
+  private saveSelectionState(): Promise<void> {
+    const previous = this.selectionSavePromise?.catch(() => undefined) ?? Promise.resolve();
+    const save = previous.then(() => this.plugin.savePluginData());
+    this.selectionSavePromise = save;
+    return save.finally(() => {
+      if (this.selectionSavePromise === save) this.selectionSavePromise = null;
+    });
+  }
+
   private persistCollapseState(): void {
     this.plugin.data.collapsed = {
       curriculumDomains: [...this.collapsedCurriculumDomains],
       curriculumNodes: [...this.collapsedCurriculumNodes],
       queues: [...this.collapsedQueues],
     };
-    void this.plugin.savePluginData();
+    this.run(() => this.plugin.savePluginData());
   }
 
   public openAddActions(): void {
@@ -552,10 +602,10 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     const undo = iconButton(actions, "undo-2", "Undo personal organization change");
     undo.disabled = this.plugin.data.undoStack.length === 0;
-    undo.addEventListener("click", () => void this.plugin.undo());
+    undo.addEventListener("click", () => this.run(() => this.plugin.undo()));
     const redo = iconButton(actions, "redo-2", "Redo personal organization change");
     redo.disabled = this.plugin.data.redoStack.length === 0;
-    redo.addEventListener("click", () => void this.plugin.redo());
+    redo.addEventListener("click", () => this.run(() => this.plugin.redo()));
     iconButton(actions, "ellipsis-vertical", "Command center actions").addEventListener("click", (event) => this.showGlobalMenu(event));
 
     this.renderTabs(shell);
@@ -596,7 +646,7 @@ export class EntVaultCommandCenterView extends ItemView {
       setIcon(button.createSpan(), tab.icon);
       button.createSpan({ text: tab.label });
       button.createSpan({ text: String(this.tabCount(tab.id)), cls: "ent-cc-tab-count" });
-      button.addEventListener("click", () => void this.changeTab(tab.id));
+      button.addEventListener("click", () => this.run(() => this.changeTab(tab.id)));
       button.addEventListener("keydown", (event) => {
         const index = tabs.findIndex((candidate) => candidate.id === tab.id);
         const nextIndex = event.key === "Home" ? 0
@@ -607,7 +657,7 @@ export class EntVaultCommandCenterView extends ItemView {
         if (nextIndex < 0) return;
         event.preventDefault();
         const nextTab = tabs[nextIndex];
-        if (nextTab) void this.changeTab(nextTab.id, true);
+        if (nextTab) this.run(() => this.changeTab(nextTab.id, true));
       });
     }
   }
@@ -648,12 +698,20 @@ export class EntVaultCommandCenterView extends ItemView {
     });
     input.addEventListener("input", () => {
       this.query = input.value;
+      // Commands available during the debounce window must observe the text the
+      // user can already see, not the query from the previous render.
+      this.parsedQuery = parseQuery(this.query);
       if (bulkButton) bulkButton.disabled = !this.query.trim();
-      this.renderTree();
+      if (this.searchDebounce !== null) this.timerWindow.clearTimeout(this.searchDebounce);
+      this.searchDebounce = this.timerWindow.setTimeout(() => {
+        this.searchDebounce = null;
+        this.renderTree();
+      }, 120);
     });
     input.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && this.query) {
         this.query = "";
+        this.parsedQuery = parseQuery("");
         input.value = "";
         this.renderTree();
       }
@@ -716,7 +774,7 @@ export class EntVaultCommandCenterView extends ItemView {
     if (!this.countEl) return;
     this.countEl.empty();
     if (this.plugin.data.activeTab === "queues") {
-      const uniqueVisible = uniqueRecords(queueRecords(this.smartQueues())).filter((record) => matchesQuery(record, this.query)).length;
+      const uniqueVisible = uniqueRecords(queueRecords(this.smartQueues())).filter((record) => matchesParsedQuery(record, this.parsedQuery)).length;
       this.countEl.createSpan({ text: `${visible} queue entries · ${uniqueVisible} unique` });
     } else {
       const settings = this.plugin.data.settings;
@@ -727,6 +785,8 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private renderTree(): void {
     if (!this.treeEl) return;
+    // Parsed once per render; matchesParsedQuery is called O(n) times below.
+    this.parsedQuery = parseQuery(this.query);
     this.visualPlacementPaths = visualPlacementPathSet(this.plugin.data.curriculumVisual, this.plugin.data.indexGroupByPath);
     this.treeEl.empty();
     const unknownTokens = unknownQueryTokens(this.query);
@@ -783,7 +843,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private renderInbox(parent: HTMLElement): number {
-    const proposals = this.recordsForActiveTab().filter((record) => matchesQuery(record, this.query));
+    const proposals = this.recordsForActiveTab().filter((record) => matchesParsedQuery(record, this.parsedQuery));
     if (proposals.length === 0 && !this.query) {
       const empty = parent.createDiv({ cls: "ent-cc-empty ent-cc-empty-action" });
       setIcon(empty.createSpan(), "inbox");
@@ -812,7 +872,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private curriculumNodeMatches(node: CurriculumTreeNode): boolean {
-    return matchesQuery(node.record, this.query) || node.children.some((child) => this.curriculumNodeMatches(child));
+    return matchesParsedQuery(node.record, this.parsedQuery) || node.children.some((child) => this.curriculumNodeMatches(child));
   }
 
   private curriculumNodeCount(node: CurriculumTreeNode): number {
@@ -821,6 +881,12 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private renderCurriculum(parent: HTMLElement): number {
     let visible = 0;
+    if (this.curriculum.depthLimitedPaths.length > 0) {
+      const warning = parent.createDiv({ cls: "ent-cc-arrange-hint", attr: { role: "status" } });
+      setIcon(warning.createSpan(), "triangle-alert");
+      const count = this.curriculum.depthLimitedPaths.length;
+      warning.createSpan({ text: `${count} ${count === 1 ? "record is" : "records are"} shown at the top level because the hierarchy exceeds the rendering depth limit. Parent metadata was not changed. Review Manage index → Diagnostics.` });
+    }
     if (this.curriculumArrangeMode) {
       const hint = parent.createDiv({ cls: "ent-cc-arrange-hint", attr: { role: "note" } });
       setIcon(hint.createSpan(), "move");
@@ -836,7 +902,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private countCurriculumMatches(node: CurriculumTreeNode): number {
-    return Number(!this.query || matchesQuery(node.record, this.query))
+    return Number(!this.query || matchesParsedQuery(node.record, this.parsedQuery))
       + node.children.reduce((sum, child) => sum + this.countCurriculumMatches(child), 0);
   }
 
@@ -844,7 +910,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const collapsed = this.collapsedCurriculumDomains.has(domain.domain) && !this.query;
     const section = parent.createDiv({ cls: "ent-cc-heading ent-cc-curriculum-domain" });
     const row = section.createDiv({ cls: "ent-cc-row ent-cc-heading-row" });
-    const disclosure = iconButton(row, collapsed ? "chevron-right" : "chevron-down", `${collapsed ? "Expand" : "Collapse"} ${domain.domain}`, "ent-cc-disclosure");
+    const disclosure = disclosureButton(row, collapsed, domain.domain);
     disclosure.addEventListener("click", () => {
       if (collapsed) this.collapsedCurriculumDomains.delete(domain.domain); else this.collapsedCurriculumDomains.add(domain.domain);
       this.persistCollapseState();
@@ -876,7 +942,7 @@ export class EntVaultCommandCenterView extends ItemView {
     });
     row.addClass(`ent-cc-depth-${Math.min(depth, 12)}`);
     if (node.children.length > 0) {
-      const disclosure = iconButton(row, collapsed ? "chevron-right" : "chevron-down", `${collapsed ? "Expand" : "Collapse"} ${record.title}`, "ent-cc-disclosure");
+      const disclosure = disclosureButton(row, collapsed, record.title);
       disclosure.addEventListener("click", () => {
         if (collapsed) this.collapsedCurriculumNodes.delete(record.path); else this.collapsedCurriculumNodes.add(record.path);
         this.persistCollapseState();
@@ -899,18 +965,18 @@ export class EntVaultCommandCenterView extends ItemView {
     const title = row.createEl("button", {
       cls: "ent-cc-subject-title",
       text: record.title,
-      attr: { "aria-label": `${record.title}, ${this.recordRoleName(record)}. Space selects; Enter opens; M adds to a collection; P pins.` },
+      attr: { dir: "auto", "aria-label": `${record.title}, ${this.recordRoleName(record)}. Space selects; Enter opens; M adds to a collection; P pins.` },
     });
-    title.addEventListener("click", () => void this.selectRecord(record.path));
+    title.addEventListener("click", () => this.selectRecord(record.path));
     title.addEventListener("keydown", (event) => {
       if (!shouldHandleRowShortcut(true, event.key) && event.key !== " ") return;
-      if (event.key === "Enter") { event.preventDefault(); void this.openRecord(record.path); }
-      if (event.key === " ") { event.preventDefault(); void this.selectRecord(record.path); }
+      if (event.key === "Enter") { event.preventDefault(); this.run(() => this.openRecord(record.path)); }
+      if (event.key === " ") { event.preventDefault(); this.selectRecord(record.path); }
       if (event.key.toLowerCase() === "m" && !event.metaKey && !event.ctrlKey) { event.preventDefault(); this.openCollectionPicker(record.path); }
-      if (event.key.toLowerCase() === "p" && !event.metaKey && !event.ctrlKey) { event.preventDefault(); void this.togglePin(record.path); }
+      if (event.key.toLowerCase() === "p" && !event.metaKey && !event.ctrlKey) { event.preventDefault(); this.run(() => this.togglePin(record.path)); }
     });
     this.attachHoverPreview(title, record);
-    row.createSpan({ text: record.curriculumId || (this.plugin.isClinicalMode() ? "supporting" : this.plugin.data.settings.itemSingular), cls: "ent-cc-subject-id" });
+    row.createSpan({ text: record.curriculumId || (this.plugin.isClinicalMode() ? "supporting" : this.plugin.data.settings.itemSingular), cls: "ent-cc-subject-id", attr: { dir: "auto" } });
     const badges = row.createDiv({ cls: "ent-cc-row-badges" });
     if (this.hasCurriculumVisualPlacement(record.path)) {
       const visual = badges.createSpan({ cls: "ent-cc-visual-badge", attr: { title: "Custom visual placement" } });
@@ -926,7 +992,7 @@ export class EntVaultCommandCenterView extends ItemView {
       setIcon(pin, "pin");
     }
     iconButton(row, "ellipsis", `Actions for ${record.title}`, "ent-cc-row-more").addEventListener("click", (event) => this.showRecordMenu(event, record));
-    row.addEventListener("dblclick", () => void this.openRecord(record.path));
+    row.addEventListener("dblclick", () => this.run(() => this.openRecord(record.path)));
     if (collapsed) return;
     const children = section.createDiv({ cls: "ent-cc-curriculum-children" });
     for (const child of node.children) this.renderCurriculumNode(children, child, depth + 1);
@@ -947,21 +1013,30 @@ export class EntVaultCommandCenterView extends ItemView {
 
     const section = parent.createDiv({ cls: "ent-cc-heading" });
     const row = section.createDiv({ cls: "ent-cc-row ent-cc-heading-row" });
-    const disclosure = iconButton(row, heading.collapsed && !this.query ? "chevron-right" : "chevron-down", `${heading.collapsed ? "Expand" : "Collapse"} ${heading.title}`, "ent-cc-disclosure");
-    disclosure.addEventListener("click", () => void (async () => {
+    const disclosure = disclosureButton(row, heading.collapsed && !this.query, heading.title);
+    disclosure.addEventListener("click", () => this.run(async () => {
       heading.collapsed = !heading.collapsed;
       if (mutable) await this.plugin.savePluginData();
       this.renderTree();
-    })());
+    }));
     const leading = row.createSpan({ cls: "ent-cc-leading-icon" });
     setIcon(leading, mutable ? "folders" : "library");
     const title = row.createEl("button", { cls: "ent-cc-row-title", text: heading.title });
-    title.addEventListener("click", () => void (async () => {
+    title.addEventListener("click", () => this.run(async () => {
       heading.collapsed = !heading.collapsed;
       if (mutable) await this.plugin.savePluginData();
       this.renderTree();
-    })());
-    row.createSpan({ text: String(countHeading(heading)), cls: "ent-cc-row-count" });
+    }));
+    const resolved = this.resolvableCount(heading);
+    row.createSpan({ text: String(resolved), cls: "ent-cc-row-count" });
+    const missing = countHeading(heading) - resolved;
+    if (missing > 0) {
+      row.createSpan({
+        text: `${missing} missing`,
+        cls: "ent-cc-row-missing",
+        attr: { title: `${missing} referenced ${missing === 1 ? "note no longer exists" : "notes no longer exist"}. Open Manage index → Diagnostics to review or repair.` },
+      });
+    }
     if (mutable) iconButton(row, "ellipsis", `Actions for ${heading.title}`, "ent-cc-row-more").addEventListener("click", (event) => this.showHeadingMenu(event, heading));
     if (mutable && this.editMode) this.applyDrop(row, { headingId: heading.id });
 
@@ -979,21 +1054,21 @@ export class EntVaultCommandCenterView extends ItemView {
   private renderSubheading(parent: HTMLElement, heading: LayoutHeading, subheading: LayoutSubheading, paths: string[], mutable: boolean): void {
     const section = parent.createDiv({ cls: "ent-cc-subheading" });
     const row = section.createDiv({ cls: "ent-cc-row ent-cc-subheading-row" });
-    const disclosure = iconButton(row, subheading.collapsed && !this.query ? "chevron-right" : "chevron-down", `${subheading.collapsed ? "Expand" : "Collapse"} ${subheading.title}`, "ent-cc-disclosure");
-    disclosure.addEventListener("click", () => void (async () => {
+    const disclosure = disclosureButton(row, subheading.collapsed && !this.query, subheading.title);
+    disclosure.addEventListener("click", () => this.run(async () => {
       subheading.collapsed = !subheading.collapsed;
       if (mutable) await this.plugin.savePluginData();
       this.renderTree();
-    })());
+    }));
     const leading = row.createSpan({ cls: "ent-cc-leading-icon" });
     setIcon(leading, "folder");
     const title = row.createEl("button", { cls: "ent-cc-row-title", text: subheading.title });
-    title.addEventListener("click", () => void (async () => {
+    title.addEventListener("click", () => this.run(async () => {
       subheading.collapsed = !subheading.collapsed;
       if (mutable) await this.plugin.savePluginData();
       this.renderTree();
-    })());
-    row.createSpan({ text: String(subheading.subjects.length), cls: "ent-cc-row-count" });
+    }));
+    row.createSpan({ text: String(subheading.subjects.filter((path) => this.recordByPath.has(path)).length), cls: "ent-cc-row-count" });
     if (mutable) iconButton(row, "ellipsis", `Actions for ${subheading.title}`, "ent-cc-row-more").addEventListener("click", (event) => this.showSubheadingMenu(event, heading, subheading));
     if (mutable && this.editMode) this.applyDrop(row, { headingId: heading.id, subheadingId: subheading.id });
     if (subheading.collapsed && !this.query) return;
@@ -1006,12 +1081,12 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private renderQueue(parent: HTMLElement, queue: QueueDefinition): number {
-    const records = queue.records.filter((record) => matchesQuery(record, this.query));
+    const records = queue.records.filter((record) => matchesParsedQuery(record, this.parsedQuery));
     if (this.query && records.length === 0) return 0;
     const collapsed = this.collapsedQueues.has(queue.id);
     const section = parent.createDiv({ cls: "ent-cc-heading ent-cc-queue" });
     const row = section.createDiv({ cls: "ent-cc-row ent-cc-heading-row" });
-    const disclosure = iconButton(row, collapsed ? "chevron-right" : "chevron-down", `${collapsed ? "Expand" : "Collapse"} ${queue.title}`, "ent-cc-disclosure");
+    const disclosure = disclosureButton(row, collapsed, queue.title);
     disclosure.addEventListener("click", () => {
       if (collapsed) this.collapsedQueues.delete(queue.id); else this.collapsedQueues.add(queue.id);
       this.persistCollapseState();
@@ -1035,9 +1110,8 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private renderLibrary(parent: HTMLElement, input: VaultRecord[]): number {
-    const records = input.filter((record) => matchesQuery(record, this.query));
-    const groups = new Map<string, VaultRecord[]>();
-    for (const record of records) groups.set(record.domain || titleForTab(this.plugin.data.activeTab, this.plugin.data.settings), [...(groups.get(record.domain || "Other") ?? []), record]);
+    const records = input.filter((record) => matchesParsedQuery(record, this.parsedQuery));
+    const groups = groupRecordsByGroup(records, titleForTab(this.plugin.data.activeTab, this.plugin.data.settings));
     for (const [group, grouped] of [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))) {
       const section = parent.createDiv({ cls: "ent-cc-heading ent-cc-library-group" });
       const row = section.createDiv({ cls: "ent-cc-row ent-cc-heading-row" });
@@ -1052,9 +1126,15 @@ export class EntVaultCommandCenterView extends ItemView {
     return records.length;
   }
 
+  private resolvableCount(heading: LayoutHeading): number {
+    let total = heading.subjects.filter((path) => this.recordByPath.has(path)).length;
+    for (const subheading of heading.subheadings) total += subheading.subjects.filter((path) => this.recordByPath.has(path)).length;
+    return total;
+  }
+
   private matchesPath(path: string): boolean {
     const record = this.recordByPath.get(path);
-    return Boolean(record && matchesQuery(record, this.query));
+    return Boolean(record && matchesParsedQuery(record, this.parsedQuery));
   }
 
   private recordRoleName(record: VaultRecord): string {
@@ -1082,15 +1162,15 @@ export class EntVaultCommandCenterView extends ItemView {
     const title = row.createEl("button", {
       cls: "ent-cc-subject-title",
       text: record.title,
-      attr: { "aria-label": `${record.title}, ${this.recordRoleName(record)}. Space selects; Enter opens; M adds to a collection; P pins.` },
+      attr: { dir: "auto", "aria-label": `${record.title}, ${this.recordRoleName(record)}. Space selects; Enter opens; M adds to a collection; P pins.` },
     });
-    title.addEventListener("click", () => void this.selectRecord(record.path));
+    title.addEventListener("click", () => this.selectRecord(record.path));
     title.addEventListener("keydown", (event) => {
       if (!shouldHandleRowShortcut(true, event.key) && event.key !== " ") return;
-      if (event.key === "Enter") { event.preventDefault(); void this.openRecord(record.path); }
-      if (event.key === " ") { event.preventDefault(); void this.selectRecord(record.path); }
+      if (event.key === "Enter") { event.preventDefault(); this.run(() => this.openRecord(record.path)); }
+      if (event.key === " ") { event.preventDefault(); this.selectRecord(record.path); }
       if (event.key.toLowerCase() === "m" && !event.metaKey && !event.ctrlKey) { event.preventDefault(); this.openCollectionPicker(record.path); }
-      if (event.key.toLowerCase() === "p" && !event.metaKey && !event.ctrlKey) { event.preventDefault(); void this.togglePin(record.path); }
+      if (event.key.toLowerCase() === "p" && !event.metaKey && !event.ctrlKey) { event.preventDefault(); this.run(() => this.togglePin(record.path)); }
     });
     this.attachHoverPreview(title, record);
     row.createSpan({
@@ -1098,6 +1178,7 @@ export class EntVaultCommandCenterView extends ItemView {
         ? record.role === "supporting" ? "supporting" : record.role === "proposal" ? "proposal" : record.role === "vault-note" ? "vault note" : record.kind
         : record.role === "proposal" ? this.plugin.data.settings.inboxLabel : record.role === "vault-note" ? "vault note" : this.plugin.data.settings.itemSingular),
       cls: "ent-cc-subject-id",
+      attr: { dir: "auto" },
     });
     const badges = row.createDiv({ cls: "ent-cc-row-badges" });
     if (record.priority) badges.createSpan({ text: record.priority, cls: `ent-cc-priority ${record.priority === "P1" ? "is-urgent" : ""}` });
@@ -1114,7 +1195,7 @@ export class EntVaultCommandCenterView extends ItemView {
       setIcon(lock, "lock");
     }
     iconButton(row, "ellipsis", `Actions for ${record.title}`, "ent-cc-row-more").addEventListener("click", (event) => this.showRecordMenu(event, record, membership));
-    row.addEventListener("dblclick", () => void this.openRecord(record.path));
+    row.addEventListener("dblclick", () => this.run(() => this.openRecord(record.path)));
   }
 
   private attachHoverPreview(element: HTMLElement, record: VaultRecord): void {
@@ -1131,9 +1212,15 @@ export class EntVaultCommandCenterView extends ItemView {
     });
   }
 
-  private async selectRecord(path: string): Promise<void> {
+  private selectRecord(path: string): void {
     this.plugin.data.selectedPath = path;
-    await this.plugin.savePluginData();
+    // Selection is transient UI state; persisting it on every click rewrites the
+    // whole plugin data file and drives needless vault-sync traffic.
+    if (this.selectionSaveTimer !== null) this.timerWindow.clearTimeout(this.selectionSaveTimer);
+    this.selectionSaveTimer = this.timerWindow.setTimeout(() => {
+      this.selectionSaveTimer = null;
+      this.run(() => this.saveSelectionState());
+    }, 1000);
     this.renderTree();
     this.renderInspector();
   }
@@ -1151,7 +1238,7 @@ export class EntVaultCommandCenterView extends ItemView {
 
     const body = this.inspectorEl.createDiv({ cls: "ent-cc-inspector-body" });
     body.createDiv({ cls: "ent-cc-inspector-kind", text: this.recordRoleName(record) });
-    body.createEl("h3", { text: record.title });
+    body.createEl("h3", { text: record.title, attr: { dir: "auto" } });
     if (this.plugin.isClinicalMode() || record.reviewStatus || record.safetyCritical) {
       const statusLine = body.createDiv({ cls: "ent-cc-status-line" });
       if (this.plugin.isClinicalMode() || record.reviewStatus) statusLine.createSpan({
@@ -1164,7 +1251,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const actions = body.createDiv({ cls: "ent-cc-inspector-actions" });
     const open = actions.createEl("button", { cls: "ent-cc-button ent-cc-primary-button" });
     setIcon(open.createSpan(), "external-link"); open.createSpan({ text: "Open note" });
-    open.addEventListener("click", () => void this.openRecord(record.path));
+    open.addEventListener("click", () => this.run(() => this.openRecord(record.path)));
     const add = actions.createEl("button", { cls: "ent-cc-button" });
     setIcon(add.createSpan(), "folder-plus"); add.createSpan({ text: "Add to collection" });
     add.addEventListener("click", () => this.openCollectionPicker(record.path));
@@ -1173,7 +1260,7 @@ export class EntVaultCommandCenterView extends ItemView {
       setIcon(moveGroup.createSpan(), "folder-input"); moveGroup.createSpan({ text: `Move ${this.plugin.data.settings.groupLabel.toLowerCase()}…` });
       moveGroup.addEventListener("click", () => this.openIndexGroupPicker(record));
     }
-    iconButton(actions, this.plugin.data.pinnedPaths.includes(record.path) ? "pin-off" : "pin", this.plugin.data.pinnedPaths.includes(record.path) ? "Unpin" : "Pin").addEventListener("click", () => void this.togglePin(record.path));
+    iconButton(actions, this.plugin.data.pinnedPaths.includes(record.path) ? "pin-off" : "pin", this.plugin.data.pinnedPaths.includes(record.path) ? "Unpin" : "Pin").addEventListener("click", () => this.run(() => this.togglePin(record.path)));
     if (this.plugin.isClinicalMode() && record.role === "proposal") {
       const promote = actions.createEl("button", { cls: "ent-cc-button ent-cc-promote-button" });
       setIcon(promote.createSpan(), "arrow-up-right");
@@ -1210,7 +1297,7 @@ export class EntVaultCommandCenterView extends ItemView {
   private inspectorField(parent: HTMLElement, label: string, value: string, className = ""): void {
     const row = parent.createDiv({ cls: `ent-cc-inspector-field ${className}`.trim() });
     row.createDiv({ cls: "ent-cc-inspector-label", text: label });
-    row.createDiv({ cls: "ent-cc-inspector-value", text: value });
+    row.createDiv({ cls: "ent-cc-inspector-value", text: value, attr: { dir: "auto" } });
   }
 
   private renderStudyActions(parent: HTMLElement, record: VaultRecord): void {
@@ -1221,7 +1308,7 @@ export class EntVaultCommandCenterView extends ItemView {
     next.createSpan({ text: this.plugin.data.nextStudyPaths.includes(record.path)
       ? `Remove from ${this.plugin.isClinicalMode() ? "Next to study" : "Next list"}`
       : `Add to ${this.plugin.isClinicalMode() ? "Next to study" : "Next list"}` });
-    next.addEventListener("click", () => void this.toggleNext(record.path));
+    next.addEventListener("click", () => this.run(() => this.toggleNext(record.path)));
     if (this.plugin.isClinicalMode()) {
       this.copyAction(section, "wand-sparkles", "Copy deep-build command", `Deep-build ${record.title}`);
       this.copyAction(section, "search-check", "Copy autoresearch command", `Autoresearch ${record.title}`);
@@ -1236,7 +1323,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const button = parent.createEl("button", { cls: "ent-cc-study-action" });
     setIcon(button.createSpan(), icon);
     button.createSpan({ text: label });
-    button.addEventListener("click", () => void this.copyText(command, label));
+    button.addEventListener("click", () => this.run(() => this.copyText(command, label)));
   }
 
   private async copyText(text: string, label: string): Promise<void> {
@@ -1292,7 +1379,7 @@ export class EntVaultCommandCenterView extends ItemView {
       group.createDiv({ cls: "ent-cc-related-label", text: this.plugin.isClinicalMode() ? "Evidence & other backlinks" : "Other backlinks" });
       for (const path of external.slice(0, 8)) {
         const button = group.createEl("button", { cls: "ent-cc-related-record", text: path.split("/").pop()?.replace(/\.md$/, "") ?? path });
-        button.addEventListener("click", () => void this.openRecord(path));
+        button.addEventListener("click", () => this.run(() => this.openRecord(path)));
       }
     }
     if (parents.length + children.length + related.length + external.length === 0) {
@@ -1308,7 +1395,7 @@ export class EntVaultCommandCenterView extends ItemView {
       const button = group.createEl("button", { cls: "ent-cc-related-record" });
       button.createSpan({ text: record.title });
       button.createSpan({ text: record.curriculumId || (this.plugin.isClinicalMode() ? record.kind : this.plugin.data.settings.itemSingular), cls: "ent-cc-related-meta" });
-      button.addEventListener("click", () => void this.selectRecord(record.path));
+      button.addEventListener("click", () => this.selectRecord(record.path));
       this.attachHoverPreview(button, record);
     }
   }
@@ -1358,10 +1445,12 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private matchingRecordsForCurrentView(): VaultRecord[] {
+    // Toolbar actions can run while the visual search refresh is debounced.
+    const parsedQuery = parseQuery(this.query);
     const candidates = this.plugin.data.activeTab === "queues"
       ? uniqueRecords(queueRecords(this.smartQueues()))
       : this.recordsForActiveTab();
-    return uniqueRecords(candidates.filter((record) => matchesQuery(record, this.query)));
+    return uniqueRecords(candidates.filter((record) => matchesParsedQuery(record, parsedQuery)));
   }
 
   private addMatchingRecordsToCollection(): void {
@@ -1510,8 +1599,8 @@ export class EntVaultCommandCenterView extends ItemView {
   private showHeadingMenu(event: MouseEvent, heading: LayoutHeading): void {
     const menu = new Menu();
     const index = this.plugin.data.collections.findIndex((item) => item.id === heading.id);
-    menu.addItem((item) => item.setTitle("Move collection up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => void this.moveCollection(index, index - 1)));
-    menu.addItem((item) => item.setTitle("Move collection down").setIcon("arrow-down").setDisabled(index < 0 || index >= this.plugin.data.collections.length - 1).onClick(() => void this.moveCollection(index, index + 1)));
+    menu.addItem((item) => item.setTitle("Move collection up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => this.run(() => this.moveCollection(index, index - 1))));
+    menu.addItem((item) => item.setTitle("Move collection down").setIcon("arrow-down").setDisabled(index < 0 || index >= this.plugin.data.collections.length - 1).onClick(() => this.run(() => this.moveCollection(index, index + 1))));
     menu.addSeparator();
     menu.addItem((item) => item.setTitle("Add subheading").setIcon("folder-plus").onClick(() => this.promptNewSubheading(heading)));
     menu.addItem((item) => item.setTitle("Rename collection").setIcon("pencil").onClick(() => {
@@ -1534,8 +1623,8 @@ export class EntVaultCommandCenterView extends ItemView {
   private showSubheadingMenu(event: MouseEvent, heading: LayoutHeading, subheading: LayoutSubheading): void {
     const menu = new Menu();
     const index = heading.subheadings.findIndex((item) => item.id === subheading.id);
-    menu.addItem((item) => item.setTitle("Move subheading up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => void this.moveSubheading(heading, index, index - 1)));
-    menu.addItem((item) => item.setTitle("Move subheading down").setIcon("arrow-down").setDisabled(index < 0 || index >= heading.subheadings.length - 1).onClick(() => void this.moveSubheading(heading, index, index + 1)));
+    menu.addItem((item) => item.setTitle("Move subheading up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => this.run(() => this.moveSubheading(heading, index, index - 1))));
+    menu.addItem((item) => item.setTitle("Move subheading down").setIcon("arrow-down").setDisabled(index < 0 || index >= heading.subheadings.length - 1).onClick(() => this.run(() => this.moveSubheading(heading, index, index + 1))));
     menu.addSeparator();
     menu.addItem((item) => item.setTitle("Rename subheading").setIcon("pencil").onClick(() => {
       new TextPromptModal(this.app, {
@@ -1555,15 +1644,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private curriculumChildrenPaths(path: string): string[] {
-    const find = (nodes: CurriculumTreeNode[]): CurriculumTreeNode | undefined => {
-      for (const node of nodes) {
-        if (node.record.path === path) return node;
-        const child = find(node.children);
-        if (child) return child;
-      }
-      return undefined;
-    };
-    return find(curriculumRoots(this.curriculum))?.children.map((node) => node.record.path) ?? [];
+    return curriculumChildPaths(this.curriculum, path);
   }
 
   private async moveCurriculumRecord(record: VaultRecord, parentPath: string | null, siblingPaths: string[], index: number, label: string): Promise<void> {
@@ -1592,7 +1673,7 @@ export class EntVaultCommandCenterView extends ItemView {
       && !excluded.has(candidate.path));
     new RecordPickerModal(this.app, candidates, `Move “${record.title}” under…`, `Search a parent ${this.plugin.data.settings.itemSingular}${this.plugin.isClinicalMode() ? ` in this ${this.plugin.data.settings.groupLabel.toLowerCase()}` : ""}…`, (parent) => {
       const children = this.curriculumChildrenPaths(parent.path).filter((path) => path !== record.path);
-      void this.moveCurriculumRecord(record, parent.path, children, children.length, `Move “${record.title}” under “${parent.title}”`);
+      this.run(() => this.moveCurriculumRecord(record, parent.path, children, children.length, `Move “${record.title}” under “${parent.title}”`));
     }).open();
   }
 
@@ -1603,7 +1684,7 @@ export class EntVaultCommandCenterView extends ItemView {
     if (index < 0) return;
     const target = index + direction;
     if (target < 0 || target >= siblings.length) return;
-    void this.moveCurriculumRecord(record, parentPath, siblings, target, `${direction < 0 ? "Move up" : "Move down"} “${record.title}”`);
+    this.run(() => this.moveCurriculumRecord(record, parentPath, siblings, target, `${direction < 0 ? "Move up" : "Move down"} “${record.title}”`));
   }
 
   private indentCurriculumRecord(record: VaultRecord): void {
@@ -1613,7 +1694,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const previous = this.recordByPath.get(previousPath);
     if (!previous) return;
     const children = this.curriculumChildrenPaths(previous.path).filter((path) => path !== record.path);
-    void this.moveCurriculumRecord(record, previous.path, children, children.length, `Indent “${record.title}” under “${previous.title}”`);
+    this.run(() => this.moveCurriculumRecord(record, previous.path, children, children.length, `Indent “${record.title}” under “${previous.title}”`));
   }
 
   private outdentCurriculumRecord(record: VaultRecord): void {
@@ -1623,20 +1704,20 @@ export class EntVaultCommandCenterView extends ItemView {
     const grandParentPath = this.curriculum.parentByPath.get(parent.path) ?? null;
     const parentSiblings = curriculumSiblingPaths(this.curriculum, parent).filter((path) => path !== record.path);
     const index = Math.max(0, parentSiblings.indexOf(parent.path) + 1);
-    void this.moveCurriculumRecord(record, grandParentPath, parentSiblings, index, `Outdent “${record.title}”`);
+    this.run(() => this.moveCurriculumRecord(record, grandParentPath, parentSiblings, index, `Outdent “${record.title}”`));
   }
 
   private makeCurriculumTopLevel(record: VaultRecord): void {
     const roots = this.curriculum.domains.find((domain) => domain.domain === record.domain)?.roots.map((node) => node.record.path).filter((path) => path !== record.path) ?? [];
-    void this.moveCurriculumRecord(record, null, roots, roots.length, `Make “${record.title}” top-level`);
+    this.run(() => this.moveCurriculumRecord(record, null, roots, roots.length, `Make “${record.title}” top-level`));
   }
 
   private resetCurriculumRecord(record: VaultRecord): void {
-    void this.plugin.mutate(`Reset visual placement for “${record.title}”`, () => {
+    this.run(() => this.plugin.mutate(`Reset visual placement for “${record.title}”`, () => {
       resetCurriculumVisualPath(this.plugin.data.curriculumVisual, record.path);
       if (this.plugin.canVisuallyMoveAcrossGroups()) delete this.plugin.data.indexGroupByPath[record.path];
     })
-      .then(() => new Notice(`${this.plugin.isClinicalMode() ? "Canonical" : "Configured"} parent and sibling order restored. Source notes were not changed.`));
+      .then(() => new Notice(`${this.plugin.isClinicalMode() ? "Canonical" : "Configured"} parent and sibling order restored. Source notes were not changed.`)));
   }
 
   private openIndexGroupPicker(record: VaultRecord): void {
@@ -1709,7 +1790,7 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private showRecordMenu(event: MouseEvent, record: VaultRecord, membership?: Membership): void {
     const menu = new Menu();
-    menu.addItem((item) => item.setTitle("Open note").setIcon("external-link").onClick(() => void this.openRecord(record.path)));
+    menu.addItem((item) => item.setTitle("Open note").setIcon("external-link").onClick(() => this.run(() => this.openRecord(record.path))));
     menu.addItem((item) => item.setTitle("Add to collection…").setIcon("folder-plus").onClick(() => this.openCollectionPicker(record.path)));
     if (this.plugin.canVisuallyMoveAcrossGroups() && record.kind === "topic") {
       menu.addItem((item) => item.setTitle(`Move to ${this.plugin.data.settings.groupLabel.toLowerCase()}…`).setIcon("folder-input").onClick(() => this.openIndexGroupPicker(record)));
@@ -1718,12 +1799,12 @@ export class EntVaultCommandCenterView extends ItemView {
     if (membership) {
       const list = this.membershipList(membership);
       const index = list.indexOf(record.path);
-      menu.addItem((item) => item.setTitle("Move up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => void this.moveRecordWithin(membership, index, index - 1)));
-      menu.addItem((item) => item.setTitle("Move down").setIcon("arrow-down").setDisabled(index < 0 || index >= list.length - 1).onClick(() => void this.moveRecordWithin(membership, index, index + 1)));
+      menu.addItem((item) => item.setTitle("Move up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => this.run(() => this.moveRecordWithin(membership, index, index - 1))));
+      menu.addItem((item) => item.setTitle("Move down").setIcon("arrow-down").setDisabled(index < 0 || index >= list.length - 1).onClick(() => this.run(() => this.moveRecordWithin(membership, index, index + 1))));
       menu.addItem((item) => item.setTitle("Move this membership…").setIcon("folder-input").onClick(() => this.openCollectionPicker(record.path, membership, true)));
-      menu.addItem((item) => item.setTitle("Remove from this collection").setIcon("folder-minus").onClick(async () => {
-        await this.plugin.mutate(`Remove ${this.plugin.data.settings.itemSingular} membership`, () => this.removeMembership(record.path, membership));
-      }));
+      menu.addItem((item) => item.setTitle("Remove from this collection").setIcon("folder-minus").onClick(() => this.run(
+        () => this.plugin.mutate(`Remove ${this.plugin.data.settings.itemSingular} membership`, () => this.removeMembership(record.path, membership)),
+      )));
     }
     if (this.plugin.data.activeTab === "curriculum" && this.curriculumArrangeMode && record.kind === "topic") {
       const parentPath = this.curriculum.parentByPath.get(record.path) ?? null;
@@ -1740,16 +1821,16 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     menu.addSeparator();
     const pinned = this.plugin.data.pinnedPaths.includes(record.path);
-    menu.addItem((item) => item.setTitle(pinned ? "Unpin" : "Pin").setIcon(pinned ? "pin-off" : "pin").onClick(() => void this.togglePin(record.path)));
+    menu.addItem((item) => item.setTitle(pinned ? "Unpin" : "Pin").setIcon(pinned ? "pin-off" : "pin").onClick(() => this.run(() => this.togglePin(record.path))));
     const next = this.plugin.data.nextStudyPaths.includes(record.path);
     const nextLabel = this.plugin.isClinicalMode() ? "Next to study" : "Next list";
-    menu.addItem((item) => item.setTitle(next ? `Remove from ${nextLabel}` : `Add to ${nextLabel}`).setIcon(next ? "list-x" : "list-plus").onClick(() => void this.toggleNext(record.path)));
+    menu.addItem((item) => item.setTitle(next ? `Remove from ${nextLabel}` : `Add to ${nextLabel}`).setIcon(next ? "list-x" : "list-plus").onClick(() => this.run(() => this.toggleNext(record.path))));
     menu.addSeparator();
     if (this.plugin.isClinicalMode() && record.role === "proposal") menu.addItem((item) => item.setTitle("Promote proposal…").setIcon("arrow-up-right").setDisabled(record.aiLock).onClick(() => this.startPromoteProposal(record)));
     if (this.plugin.isClinicalMode() && record.role === "canonical" && this.plugin.data.settings.enableAdvancedCanonicalActions) menu.addItem((item) => item.setTitle("Edit canonical placement…").setIcon("folder-tree").setDisabled(record.aiLock).onClick(() => this.startEditCanonicalPlacement(record)));
     if (this.plugin.isClinicalMode() && record.role !== "vault-note") {
-      menu.addItem((item) => item.setTitle("Copy deep-build command").setIcon("wand-sparkles").onClick(() => void this.copyText(`Deep-build ${record.title}`, "Deep-build command")));
-      menu.addItem((item) => item.setTitle("Copy autoresearch command").setIcon("search-check").onClick(() => void this.copyText(`Autoresearch ${record.title}`, "Autoresearch command")));
+      menu.addItem((item) => item.setTitle("Copy deep-build command").setIcon("wand-sparkles").onClick(() => this.run(() => this.copyText(`Deep-build ${record.title}`, "Deep-build command"))));
+      menu.addItem((item) => item.setTitle("Copy autoresearch command").setIcon("search-check").onClick(() => this.run(() => this.copyText(`Autoresearch ${record.title}`, "Autoresearch command"))));
     }
     menu.showAtMouseEvent(event);
   }
@@ -1760,7 +1841,7 @@ export class EntVaultCommandCenterView extends ItemView {
     menu.addItem((item) => item.setTitle(`Manage ${this.plugin.data.settings.indexLabel}`).setIcon("list-tree").onClick(() => this.openIndexManager()));
     if (!this.plugin.isClinicalMode()) menu.addItem((item) => item.setTitle(`Add existing note to ${this.plugin.data.settings.indexLabel}`).setIcon("list-plus").onClick(() => this.startAddExistingToIndex()));
     menu.addSeparator();
-    menu.addItem((item) => item.setTitle("Expand all visible groups").setIcon("chevrons-down").onClick(async () => {
+    menu.addItem((item) => item.setTitle("Expand all visible groups").setIcon("chevrons-down").onClick(() => this.run(async () => {
       this.collapsedQueues.clear();
       if (this.plugin.data.activeTab === "curriculum") {
         this.collapsedCurriculumDomains.clear();
@@ -1771,8 +1852,8 @@ export class EntVaultCommandCenterView extends ItemView {
       if (this.plugin.data.activeTab === "collections") await this.plugin.savePluginData();
       else this.persistCollapseState();
       this.renderTree();
-    }));
-    menu.addItem((item) => item.setTitle("Collapse all visible groups").setIcon("chevrons-up").onClick(async () => {
+    })));
+    menu.addItem((item) => item.setTitle("Collapse all visible groups").setIcon("chevrons-up").onClick(() => this.run(async () => {
       this.smartQueues().forEach((queue) => this.collapsedQueues.add(queue.id));
       if (this.plugin.data.activeTab === "curriculum") {
         this.curriculum.domains.forEach((domain) => this.collapsedCurriculumDomains.add(domain.domain));
@@ -1784,11 +1865,18 @@ export class EntVaultCommandCenterView extends ItemView {
       if (this.plugin.data.activeTab === "collections") await this.plugin.savePluginData();
       else this.persistCollapseState();
       this.renderTree();
-    }));
+    })));
     if (this.plugin.isClinicalMode()) {
       menu.addSeparator();
-      menu.addItem((item) => item.setTitle("Open clinical review queue base").setIcon("layout-list").onClick(() => void this.openRecord("02 Maps of Content/Clinical Review Queue.base")));
-      menu.addItem((item) => item.setTitle("Open current library base").setIcon("database").onClick(() => void this.openCurrentBase()));
+      // Preset conveniences for the original clinical vault layout, shown only
+      // when this vault actually contains the corresponding Base files.
+      const reviewQueueBase = "02 Maps of Content/Clinical Review Queue.base";
+      if (this.app.vault.getAbstractFileByPath(reviewQueueBase) instanceof TFile) {
+        menu.addItem((item) => item.setTitle("Open clinical review queue base").setIcon("layout-list").onClick(() => this.run(() => this.openRecord(reviewQueueBase))));
+      }
+      if (this.app.vault.getAbstractFileByPath(this.currentBasePath()) instanceof TFile) {
+        menu.addItem((item) => item.setTitle("Open current library base").setIcon("database").onClick(() => this.run(() => this.openCurrentBase())));
+      }
     }
     if (this.plugin.data.activeTab === "collections" && this.plugin.data.collections.length > 0) {
       menu.addSeparator();
@@ -1818,7 +1906,7 @@ export class EntVaultCommandCenterView extends ItemView {
       menu.addItem((item) => item.setTitle("Restore organization snapshot…").setIcon("history").onClick(() => this.showOrganizationSnapshots(event)));
     }
     menu.addSeparator();
-    menu.addItem((item) => item.setTitle("Export organization backup").setIcon("download").onClick(() => void this.exportOrganizationBackup()));
+    menu.addItem((item) => item.setTitle("Export organization backup").setIcon("download").onClick(() => this.run(() => this.exportOrganizationBackup())));
     menu.addItem((item) => item.setTitle("Import organization backup…").setIcon("upload").onClick(() => this.importOrganizationBackup()));
     menu.showAtMouseEvent(event);
   }
@@ -1830,13 +1918,14 @@ export class EntVaultCommandCenterView extends ItemView {
       submitLabel: "Save snapshot",
       onSubmit: async (name) => {
         const snapshot = snapshotPersonal(this.plugin.data, name);
-        const next = limitSnapshotStack(
-          [...this.plugin.data.layoutSnapshots, snapshot],
-          10,
-        );
+        const candidates = [...this.plugin.data.layoutSnapshots, snapshot];
+        const next = limitSnapshotStack(candidates, 10);
         if (!next.includes(snapshot)) {
           new Notice("This organization is too large for an in-plugin snapshot. Export an organization backup instead.", 8000);
           return;
+        }
+        if (snapshotStackDepthIsTruncated(candidates, next, 10)) {
+          new Notice(`Only the ${next.length} most recent snapshot${next.length === 1 ? "" : "s"} fit in the plugin data budget. Export an organization backup to keep older ones.`, 8000);
         }
         this.plugin.data.layoutSnapshots = next;
         await this.plugin.savePluginData();
@@ -1851,10 +1940,10 @@ export class EntVaultCommandCenterView extends ItemView {
       menu.addItem((item) => item
         .setTitle(`${snapshot.label} · ${new Date(snapshot.at).toLocaleDateString()}`)
         .setIcon("history")
-        .onClick(async () => {
+        .onClick(() => this.run(async () => {
           await this.plugin.mutate(`Restore snapshot “${snapshot.label}”`, () => restoreSnapshot(this.plugin.data, snapshot));
           new Notice(`Restored organization snapshot “${snapshot.label}”.`);
-        }));
+        })));
     }
     menu.showAtMouseEvent(event);
   }
@@ -1951,12 +2040,12 @@ export class EntVaultCommandCenterView extends ItemView {
     const menu = new Menu();
     if (this.plugin.data.savedViews.length === 0) menu.addItem((item) => item.setTitle("No saved views yet").setDisabled(true));
     for (const view of this.plugin.data.savedViews) {
-      menu.addItem((item) => item.setTitle(view.name).setIcon("bookmark").onClick(async () => {
+      menu.addItem((item) => item.setTitle(view.name).setIcon("bookmark").onClick(() => this.run(async () => {
         this.query = view.query;
         this.plugin.data.activeTab = view.tab;
         await this.plugin.savePluginData();
         this.render();
-      }));
+      })));
     }
     if (this.plugin.data.savedViews.length > 0) {
       menu.addSeparator();
@@ -1968,11 +2057,11 @@ export class EntVaultCommandCenterView extends ItemView {
   private showDeleteSavedViews(event: MouseEvent): void {
     const menu = new Menu();
     for (const view of this.plugin.data.savedViews) {
-      menu.addItem((item) => item.setTitle(`Delete “${view.name}”`).setIcon("trash-2").onClick(async () => {
+      menu.addItem((item) => item.setTitle(`Delete “${view.name}”`).setIcon("trash-2").onClick(() => this.run(async () => {
         await this.plugin.mutate(`Delete saved view “${view.name}”`, () => {
           this.plugin.data.savedViews = this.plugin.data.savedViews.filter((item) => item.id !== view.id);
         });
-      }));
+      })));
     }
     menu.showAtMouseEvent(event);
   }
@@ -2013,9 +2102,9 @@ export class EntVaultCommandCenterView extends ItemView {
       }
       const roots = domain.roots.map((node) => node.record.path).filter((path) => path !== record.path);
       if (record.domain !== domain.domain) {
-        void this.moveIndexRecordToGroup(record, domain.domain, null, roots, roots.length, `Move “${record.title}” to ${domain.domain} top level`);
+        this.run(() => this.moveIndexRecordToGroup(record, domain.domain, null, roots, roots.length, `Move “${record.title}” to ${domain.domain} top level`));
       } else {
-        void this.moveCurriculumRecord(record, null, roots, roots.length, `Move “${record.title}” to ${domain.domain} top level`);
+        this.run(() => this.moveCurriculumRecord(record, null, roots, roots.length, `Move “${record.title}” to ${domain.domain} top level`));
       }
     });
   }
@@ -2048,9 +2137,9 @@ export class EntVaultCommandCenterView extends ItemView {
         this.collapsedCurriculumNodes.delete(target.path);
         this.persistCollapseState();
         if (this.plugin.canVisuallyMoveAcrossGroups() && record.domain !== target.domain) {
-          void this.moveIndexRecordToGroup(record, target.domain, target.path, children, children.length, `Nest “${record.title}” under “${target.title}”`);
+          this.run(() => this.moveIndexRecordToGroup(record, target.domain, target.path, children, children.length, `Nest “${record.title}” under “${target.title}”`));
         } else {
-          void this.moveCurriculumRecord(record, target.path, children, children.length, `Nest “${record.title}” under “${target.title}”`);
+          this.run(() => this.moveCurriculumRecord(record, target.path, children, children.length, `Nest “${record.title}” under “${target.title}”`));
         }
         return;
       }
@@ -2058,9 +2147,9 @@ export class EntVaultCommandCenterView extends ItemView {
       const siblings = curriculumSiblingPaths(this.curriculum, target).filter((path) => path !== record.path);
       const targetIndex = siblings.indexOf(target.path);
       if (this.plugin.canVisuallyMoveAcrossGroups() && record.domain !== target.domain) {
-        void this.moveIndexRecordToGroup(record, target.domain, parentPath, siblings, Math.max(0, targetIndex + (after ? 1 : 0)), `Move and reorder “${record.title}”`);
+        this.run(() => this.moveIndexRecordToGroup(record, target.domain, parentPath, siblings, Math.max(0, targetIndex + (after ? 1 : 0)), `Move and reorder “${record.title}”`));
       } else {
-        void this.moveCurriculumRecord(record, parentPath, siblings, Math.max(0, targetIndex + (after ? 1 : 0)), `Reorder “${record.title}”`);
+        this.run(() => this.moveCurriculumRecord(record, parentPath, siblings, Math.max(0, targetIndex + (after ? 1 : 0)), `Reorder “${record.title}”`));
       }
     });
   }
@@ -2096,10 +2185,10 @@ export class EntVaultCommandCenterView extends ItemView {
       element.removeClass("is-drop-target");
       const payload = this.readDrag(event);
       if (!payload) return;
-      void this.plugin.mutate("Move record membership", () => {
+      this.run(() => this.plugin.mutate("Move record membership", () => {
         this.removeMembership(payload.path, payload);
         this.addMembership(payload.path, target);
-      });
+      }));
     });
   }
 
@@ -2123,14 +2212,14 @@ export class EntVaultCommandCenterView extends ItemView {
       row.removeClass("is-drop-before", "is-drop-after");
       const payload = this.readDrag(event);
       if (!payload || payload.path === targetPath) return;
-      void this.plugin.mutate("Place record in collection order", () => {
+      this.run(() => this.plugin.mutate("Place record in collection order", () => {
         this.removeMembership(payload.path, payload);
         const list = this.membershipList(target);
         const existing = list.indexOf(payload.path);
         if (existing >= 0) list.splice(existing, 1);
         const targetIndex = list.indexOf(targetPath);
         list.splice(Math.max(0, targetIndex + (after ? 1 : 0)), 0, payload.path);
-      });
+      }));
     });
   }
 
@@ -2144,13 +2233,16 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private async openCurrentBase(): Promise<void> {
-    const path = this.plugin.data.activeTab === "procedures"
+    await this.openRecord(this.currentBasePath());
+  }
+
+  private currentBasePath(): string {
+    return this.plugin.data.activeTab === "procedures"
       ? "04 Procedures/Procedures.base"
       : this.plugin.data.activeTab === "medications"
         ? "06 Clinical Tools/Medications/Medications.base"
         : this.plugin.data.activeTab === "syndromes"
           ? "06 Clinical Tools/Syndromes/Syndromes.base"
           : "02 Maps of Content/Clinical Topics.base";
-    await this.openRecord(path);
   }
 }
