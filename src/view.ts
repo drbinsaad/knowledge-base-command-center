@@ -156,6 +156,11 @@ export class EntVaultCommandCenterView extends ItemView {
   private readonly timerWindow: Window = window.activeWindow ?? window;
   private editMode = false;
   private curriculumArrangeMode = false;
+  private mobileInspectorOpen = false;
+  private mobileInspectorNeedsFocus = false;
+  private mobileTreeScrollTop = 0;
+  private mobileInspectorScrollTop = 0;
+  private workspaceEl: HTMLElement | null = null;
   private treeEl: HTMLElement | null = null;
   private inspectorEl: HTMLElement | null = null;
   private countEl: HTMLElement | null = null;
@@ -536,12 +541,35 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private render(): void {
+    const compact = this.isCompactInspectorLayout();
+    if (compact && this.mobileInspectorOpen) {
+      const currentBody = this.inspectorEl?.querySelector<HTMLElement>(".ent-cc-inspector-body");
+      if (currentBody) this.mobileInspectorScrollTop = currentBody.scrollTop;
+      this.mobileInspectorNeedsFocus = true;
+    } else if (!compact) {
+      this.mobileInspectorOpen = false;
+      this.mobileInspectorNeedsFocus = false;
+    }
     this.contentEl.empty();
     this.contentEl.addClass("ent-cc-view");
     const shell = this.contentEl.createDiv({ cls: "ent-cc-shell" });
 
+    if (compact && this.mobileInspectorOpen && !this.recordByPath.has(this.plugin.data.selectedPath)) {
+      this.mobileInspectorOpen = false;
+      this.mobileInspectorNeedsFocus = false;
+    }
+
     if (this.plugin.dataCompatibilityWarning) {
       shell.createDiv({ cls: "ent-cc-compatibility-warning", text: this.plugin.dataCompatibilityWarning, attr: { role: "alert" } });
+    }
+
+    if (compact && this.mobileInspectorOpen && this.recordByPath.has(this.plugin.data.selectedPath)) {
+      shell.addClass("is-inspector-route");
+      this.workspaceEl = null;
+      this.treeEl = null;
+      this.createInspector(shell);
+      this.renderInspector();
+      return;
     }
 
     const header = shell.createDiv({ cls: "ent-cc-header" });
@@ -612,20 +640,33 @@ export class EntVaultCommandCenterView extends ItemView {
     this.renderSearch(shell);
 
     const workspace = shell.createDiv({ cls: "ent-cc-workspace" });
+    this.workspaceEl = workspace;
     const panelId = `ent-cc-record-panel-${this.viewInstanceId}`;
     this.treeEl = workspace.createDiv({
       cls: "ent-cc-tree-panel",
       attr: { id: panelId, role: "tabpanel", "aria-labelledby": this.tabElementId(this.plugin.data.activeTab), tabindex: "0" },
     });
-    this.inspectorEl = workspace.createEl("aside", { cls: "ent-cc-inspector" });
     this.renderTree();
-    this.renderInspector();
+    if (!compact) {
+      this.createInspector(workspace);
+      this.renderInspector();
+    } else {
+      this.inspectorEl = null;
+    }
 
     const footer = shell.createDiv({ cls: "ent-cc-footer" });
     setIcon(footer.createSpan(), "shield-check");
     footer.createSpan({ text: this.plugin.isClinicalMode()
       ? "Personal organization stays separate. New clinical scaffolds are unverified and never set review approval."
       : "Personal organization and visual hierarchy stay in plugin data. Index actions never move or rewrite source notes." });
+  }
+
+  private createInspector(parent: HTMLElement): void {
+    this.inspectorEl = parent.createEl("aside", {
+      cls: "ent-cc-inspector",
+      attr: { "aria-label": "Selected knowledge record" },
+    });
+    this.inspectorEl.addEventListener("keydown", (event) => this.handleMobileInspectorKeydown(event));
   }
 
   private renderTabs(parent: HTMLElement): void {
@@ -1241,6 +1282,16 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private selectRecord(path: string): void {
     this.plugin.data.selectedPath = path;
+    const compact = this.isCompactInspectorLayout();
+    if (compact) {
+      this.mobileTreeScrollTop = this.workspaceEl?.scrollTop ?? 0;
+      this.mobileInspectorScrollTop = 0;
+      this.mobileInspectorOpen = true;
+      this.mobileInspectorNeedsFocus = true;
+    } else {
+      this.mobileInspectorOpen = false;
+      this.mobileInspectorNeedsFocus = false;
+    }
     // Selection is transient UI state; persisting it on every click rewrites the
     // whole plugin data file and drives needless vault-sync traffic.
     if (this.selectionSaveTimer !== null) this.timerWindow.clearTimeout(this.selectionSaveTimer);
@@ -1248,24 +1299,84 @@ export class EntVaultCommandCenterView extends ItemView {
       this.selectionSaveTimer = null;
       this.run(() => this.saveSelectionState());
     }, 1000);
-    this.renderTree();
-    this.renderInspector();
+    if (compact) this.render();
+    else {
+      this.renderTree();
+      this.renderInspector();
+    }
+  }
+
+  private isCompactInspectorLayout(): boolean {
+    const viewWindow = this.contentEl.ownerDocument.defaultView;
+    return viewWindow?.matchMedia("(max-width: 900px)").matches === true;
+  }
+
+  private closeMobileInspector(): void {
+    this.mobileInspectorOpen = false;
+    this.mobileInspectorNeedsFocus = false;
+    this.render();
+    this.timerWindow.setTimeout(() => {
+      if (this.workspaceEl) this.workspaceEl.scrollTop = this.mobileTreeScrollTop;
+      const selected = this.treeEl?.querySelector<HTMLElement>(".ent-cc-subject-row.is-selected .ent-cc-subject-title");
+      (selected ?? this.treeEl)?.focus({ preventScroll: true });
+    }, 0);
+  }
+
+  private handleMobileInspectorKeydown(event: KeyboardEvent): void {
+    if (!this.mobileInspectorOpen || !this.isCompactInspectorLayout() || !this.inspectorEl) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      this.closeMobileInspector();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(this.inspectorEl.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    )).filter((element) => element.offsetParent !== null);
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (!first || !last) return;
+    const active = this.inspectorEl.ownerDocument.activeElement;
+    if (event.shiftKey && (active === first || !this.inspectorEl.contains(active))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && active === last) {
+      event.preventDefault();
+      first.focus();
+    }
   }
 
   private renderInspector(): void {
     if (!this.inspectorEl) return;
     this.inspectorEl.empty();
     const record = this.recordByPath.get(this.plugin.data.selectedPath);
+    const compact = this.isCompactInspectorLayout();
+    const mobileOpen = compact && this.mobileInspectorOpen && Boolean(record);
+    this.inspectorEl.toggleClass("is-mobile-open", mobileOpen);
+    this.inspectorEl.setAttribute("role", compact ? "dialog" : "complementary");
+    if (compact) {
+      this.inspectorEl.setAttribute("aria-modal", "true");
+    } else {
+      this.inspectorEl.removeAttribute("aria-modal");
+    }
+    const labelId = `ent-cc-inspector-label-${this.viewInstanceId}`;
+    const titleId = `ent-cc-inspector-title-${this.viewInstanceId}`;
     const header = this.inspectorEl.createDiv({ cls: "ent-cc-inspector-header" });
-    header.createEl("h2", { text: "Selected knowledge record" });
+    const headerCopy = header.createDiv({ cls: "ent-cc-inspector-header-copy" });
+    headerCopy.createEl("h2", { text: "Selected knowledge record", attr: { id: labelId } });
+    if (record) headerCopy.createDiv({ cls: "ent-cc-inspector-mobile-title", text: record.title, attr: { dir: "auto" } });
+    const close = iconButton(header, "x", "Close record details", "ent-cc-inspector-close");
+    close.addEventListener("click", () => this.closeMobileInspector());
     if (!record) {
+      this.inspectorEl.setAttribute("aria-labelledby", labelId);
       this.inspectorEl.createDiv({ cls: "ent-cc-empty", text: "Select a record to inspect it." });
       return;
     }
 
     const body = this.inspectorEl.createDiv({ cls: "ent-cc-inspector-body" });
     body.createDiv({ cls: "ent-cc-inspector-kind", text: this.recordRoleName(record) });
-    body.createEl("h3", { text: record.title, attr: { dir: "auto" } });
+    body.createEl("h3", { text: record.title, attr: { id: titleId, dir: "auto" } });
+    this.inspectorEl.setAttribute("aria-labelledby", `${labelId} ${titleId}`);
     if (this.plugin.isClinicalMode() || record.reviewStatus || record.safetyCritical) {
       const statusLine = body.createDiv({ cls: "ent-cc-status-line" });
       if (this.plugin.isClinicalMode() || record.reviewStatus) statusLine.createSpan({
@@ -1319,6 +1430,15 @@ export class EntVaultCommandCenterView extends ItemView {
 
     if (record.role !== "vault-note") this.renderStudyActions(body, record);
     this.renderRelatedKnowledge(body, record);
+
+    if (mobileOpen && this.mobileInspectorNeedsFocus) {
+      this.mobileInspectorNeedsFocus = false;
+      this.timerWindow.setTimeout(() => {
+        if (!this.mobileInspectorOpen || !this.inspectorEl) return;
+        body.scrollTop = this.mobileInspectorScrollTop;
+        this.inspectorEl.querySelector<HTMLElement>(".ent-cc-inspector-close")?.focus();
+      }, 0);
+    }
   }
 
   private inspectorField(parent: HTMLElement, label: string, value: string, className = ""): void {

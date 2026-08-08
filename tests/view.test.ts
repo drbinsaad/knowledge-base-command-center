@@ -130,3 +130,101 @@ test("closing the view also waits for a selection save already in flight", async
   await closing;
   assert.equal(closeFinished, true);
 });
+
+test("closing the compact record inspector hides it and restores row focus", () => {
+  let focusCount = 0;
+  let renderCount = 0;
+  const selected = { focus: (_options?: FocusOptions) => { focusCount += 1; } };
+  const workspace = { scrollTop: 0 };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    mobileInspectorOpen: boolean;
+    mobileInspectorNeedsFocus: boolean;
+    mobileTreeScrollTop: number;
+    workspaceEl: typeof workspace;
+    treeEl: { querySelector(): typeof selected; focus(options?: FocusOptions): void };
+    timerWindow: { setTimeout(callback: () => void): number };
+    render(): void;
+    closeMobileInspector(): void;
+  };
+  view.mobileInspectorOpen = true;
+  view.mobileInspectorNeedsFocus = true;
+  view.mobileTreeScrollTop = 73;
+  view.workspaceEl = workspace;
+  view.treeEl = { querySelector: () => selected, focus: () => { focusCount += 1; } };
+  view.render = () => { renderCount += 1; };
+  view.timerWindow = { setTimeout: (callback) => { callback(); return 1; } };
+
+  view.closeMobileInspector();
+
+  assert.equal(view.mobileInspectorOpen, false);
+  assert.equal(view.mobileInspectorNeedsFocus, false);
+  assert.equal(renderCount, 1);
+  assert.equal(workspace.scrollTop, 73);
+  assert.equal(focusCount, 1);
+});
+
+test("compact record inspector traps forward focus at its last control", () => {
+  let firstFocusCount = 0;
+  let prevented = false;
+  const first = { offsetParent: {}, focus: () => { firstFocusCount += 1; } };
+  const last = { offsetParent: {}, focus: () => {} };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    mobileInspectorOpen: boolean;
+    inspectorEl: {
+      ownerDocument: { activeElement: typeof last };
+      querySelectorAll(): Array<typeof first | typeof last>;
+      contains(): boolean;
+    };
+    contentEl: { ownerDocument: { defaultView: { matchMedia(): { matches: boolean } } } };
+    handleMobileInspectorKeydown(event: { key: string; shiftKey: boolean; preventDefault(): void }): void;
+  };
+  view.mobileInspectorOpen = true;
+  view.contentEl = { ownerDocument: { defaultView: { matchMedia: () => ({ matches: true }) } } };
+  view.inspectorEl = {
+    ownerDocument: { activeElement: last },
+    querySelectorAll: () => [first, last],
+    contains: () => true,
+  };
+
+  view.handleMobileInspectorKeydown({
+    key: "Tab",
+    shiftKey: false,
+    preventDefault: () => { prevented = true; },
+  });
+
+  assert.equal(prevented, true);
+  assert.equal(firstFocusCount, 1);
+});
+
+test("compact record inspector traps backward focus at its first control", () => {
+  let lastFocusCount = 0;
+  let prevented = false;
+  const first = { offsetParent: {}, focus: () => {} };
+  const last = { offsetParent: {}, focus: () => { lastFocusCount += 1; } };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    mobileInspectorOpen: boolean;
+    inspectorEl: {
+      ownerDocument: { activeElement: typeof first };
+      querySelectorAll(): Array<typeof first | typeof last>;
+      contains(): boolean;
+    };
+    contentEl: { ownerDocument: { defaultView: { matchMedia(): { matches: boolean } } } };
+    handleMobileInspectorKeydown(event: { key: string; shiftKey: boolean; preventDefault(): void }): void;
+  };
+  view.mobileInspectorOpen = true;
+  view.contentEl = { ownerDocument: { defaultView: { matchMedia: () => ({ matches: true }) } } };
+  view.inspectorEl = {
+    ownerDocument: { activeElement: first },
+    querySelectorAll: () => [first, last],
+    contains: () => true,
+  };
+
+  view.handleMobileInspectorKeydown({
+    key: "Tab",
+    shiftKey: true,
+    preventDefault: () => { prevented = true; },
+  });
+
+  assert.equal(prevented, true);
+  assert.equal(lastFocusCount, 1);
+});
