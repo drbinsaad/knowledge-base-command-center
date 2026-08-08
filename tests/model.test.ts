@@ -25,6 +25,9 @@ import {
   matchesQuery,
   matchesParsedQuery,
   MAX_CURRICULUM_DEPTH,
+  MAX_TRANSFER_LIST_ITEMS,
+  MAX_TRANSFER_SNAPSHOTS,
+  MAX_TRANSFER_TOTAL_REFERENCES,
   MAX_UNDO_BYTES,
   metadataHasGap,
   migrateData,
@@ -36,6 +39,7 @@ import {
   parsePersonalBackup,
   parseWorkspaceConfig,
   pathIsInsideFolder,
+  portablePlaceholderPath,
   resolveExpectedParentPath,
   replaceCurriculumVisualPath,
   replacePathMapKey,
@@ -51,9 +55,26 @@ import {
   storedDataVersion,
   unknownQueryTokens,
   validateWritableFolderPath,
+  validateProposalFolderPath,
+  validateTemplateFilePath,
   visualPlacementPathSet,
   type VaultRecord,
 } from "../src/model.ts";
+import {
+  applyPortableExport,
+  createPortableExport,
+  EMPTY_PORTABLE_SELECTION,
+  parseAnyCommandCenterExport,
+  parsePortableExport,
+  PORTABLE_EXPORT_KIND,
+  registerPortableGroup,
+  removePortableGroup,
+  renameOrMergePortableGroup,
+  serializePortableExport,
+  synchronizePortableRegistry,
+  type PortableExportSelection,
+  type PortableExportV1,
+} from "../src/portability.ts";
 
 function record(overrides: Partial<VaultRecord> = {}): VaultRecord {
   return {
@@ -83,6 +104,35 @@ function record(overrides: Partial<VaultRecord> = {}): VaultRecord {
   };
 }
 
+function portableSelection(overrides: Partial<PortableExportSelection>): PortableExportSelection {
+  return { ...EMPTY_PORTABLE_SELECTION, ...overrides };
+}
+
+function portableFixture(): PortableExportV1 {
+  return {
+    kind: PORTABLE_EXPORT_KIND,
+    version: 1,
+    exportedAt: "2026-08-08T00:00:00.000Z",
+    sourceWorkspace: "Source KB",
+    components: {
+      index: {
+        version: 1,
+        groups: [{ id: "group-airway", title: "Airway", order: 0 }],
+        subjects: [{
+          id: "subject-cleft",
+          title: "Laryngeal Cleft",
+          groupId: "group-airway",
+          parentId: null,
+          order: 0,
+          indexed: true,
+          configuredId: "ENT-PED-003.05",
+          recordKind: "topic",
+        }],
+      },
+    },
+  };
+}
+
 test("unknown metadata is narrowed to a mutable record at one boundary", () => {
   const metadata: Record<string, unknown> = { title: "Laryngeal Cleft" };
   assert.equal(asUnknownRecord(metadata), metadata);
@@ -99,7 +149,7 @@ test("migrates only custom v1 headings and keeps a recovery backup", () => {
       { id: "my-airway", title: "My Airway", kind: "custom", subjects: ["topic.md"], subheadings: [] },
     ],
   });
-  assert.equal(data.version, 9);
+  assert.equal(data.version, 10);
   assert.deepEqual(data.collections.map((item) => item.title), ["My Airway"]);
   assert.equal(data.migrationBackup?.headings.length, 2);
   assert.equal(data.selectedPath, "topic.md");
@@ -168,6 +218,26 @@ test("curriculum tree safely breaks visual cycles", () => {
   assert.equal([...tree.parentByPath.values()].filter((path) => path === null).length, 1);
 });
 
+test("an unresolved portable subject removed from the index stays out of the curriculum", () => {
+  const indexed = record({
+    path: portablePlaceholderPath("subject-indexed"),
+    title: "Indexed placeholder",
+    role: "placeholder",
+    isPlaceholder: true,
+    portableIndexed: true,
+  });
+  const collectionOnly = record({
+    path: portablePlaceholderPath("subject-collection-only"),
+    title: "Collection-only placeholder",
+    role: "placeholder",
+    isPlaceholder: true,
+    portableIndexed: false,
+  });
+  const tree = buildCurriculumTree([indexed, collectionOnly], { parentByPath: {}, orderByContainer: {} });
+  assert.equal(tree.nodeByPath.has(indexed.path), true);
+  assert.equal(tree.nodeByPath.has(collectionOnly.path), false);
+});
+
 test("gap rules are specific to each knowledge kind", () => {
   assert.equal(metadataHasGap(record()), false);
   assert.equal(metadataHasGap(record({ sourceCount: 0 })), true);
@@ -204,13 +274,13 @@ test("personal organization snapshots restore collections, pins, queues, and sav
   assert.deepEqual(data.indexGroupOrder, ["Airway", "Research"]);
 });
 
-test("v2 data migrates to v9 with the ENT clinical preset and safe settings", () => {
+test("v2 data migrates to v10 with the ENT clinical preset and safe settings", () => {
   const data = migrateData({
     version: 2,
     collections: [], pinnedPaths: [], nextStudyPaths: [], savedViews: [],
     settings: { defaultTab: "collections", recentLimit: 25, enableHoverPreview: true, showSafetyBadges: true },
   });
-  assert.equal(data.version, 9);
+  assert.equal(data.version, 10);
   assert.equal(data.settings.workspaceMode, "ent-clinical");
   assert.equal(data.settings.setupComplete, true);
   assert.equal(data.settings.proposalFolder, "01 Inbox/ENT Topic Proposals");
@@ -228,7 +298,7 @@ test("future plugin data is interpreted as the latest compatible shape, never as
     settings: { defaultTab: "collections", openNoteBehavior: "split" },
   });
   assert.equal(storedDataVersion({ version: 99 }), 99);
-  assert.equal(data.version, 9);
+  assert.equal(data.version, 10);
   assert.equal(data.collections[0]?.title, "Future collection");
   assert.equal(data.settings.openNoteBehavior, "split");
   assert.equal(data.migrationBackup, undefined);
@@ -236,14 +306,14 @@ test("future plugin data is interpreted as the latest compatible shape, never as
 
 test("v4 data gains an empty visual curriculum overlay", () => {
   const data = migrateData({ version: 4, collections: [], settings: {} });
-  assert.equal(data.version, 9);
+  assert.equal(data.version, 10);
   assert.equal(data.settings.workspaceMode, "ent-clinical");
   assert.deepEqual(data.curriculumVisual, { parentByPath: {}, orderByContainer: {} });
 });
 
 test("fresh installs start as a configurable generic knowledge base", () => {
   const data = migrateData(null);
-  assert.equal(data.version, 9);
+  assert.equal(data.version, 10);
   assert.equal(data.settings.workspaceMode, "generic");
   assert.equal(data.settings.setupComplete, false);
   assert.equal(data.settings.workspaceName, "Knowledge Base Command Center");
@@ -264,7 +334,7 @@ test("v7 generic organization migrates with manual index controls intact", () =>
     indexGroupOrder: ["Research", "Projects"],
     settings: { workspaceMode: "generic", setupComplete: true, workspaceName: "My KB" },
   });
-  assert.equal(data.version, 9);
+  assert.equal(data.version, 10);
   assert.equal(data.settings.workspaceMode, "generic");
   assert.equal(data.settings.workspaceName, "My KB");
   assert.deepEqual(data.manualIndexPaths, ["Research/Outside.md"]);
@@ -441,7 +511,7 @@ test("version 1 organization backups remain importable with empty index controls
     curriculumVisual: { parentByPath: {}, orderByContainer: {} },
     layoutSnapshots: [],
   });
-  assert.equal(parsed.version, 3);
+  assert.equal(parsed.version, 4);
   assert.deepEqual(parsed.manualIndexPaths, []);
   assert.deepEqual(parsed.excludedIndexPaths, []);
   assert.deepEqual(parsed.indexGroupByPath, {});
@@ -461,6 +531,663 @@ test("portable workspace configuration round-trips settings and group order with
   assert.deepEqual(parsed.indexGroupOrder, ["Projects", "Reading"]);
   assert.equal("manualIndexPaths" in parsed, false);
   assert.equal(JSON.stringify(parsed).includes("Private/Note.md"), false);
+});
+
+test("workspace import bounds its group-order list", () => {
+  const data = migrateData(null);
+  const config = createWorkspaceConfig(data, "2026-08-08T00:00:00.000Z");
+  config.indexGroupOrder = Array.from({ length: 10_001 }, (_, index) => `Group ${index}`);
+  assert.ok(new TextEncoder().encode(JSON.stringify(config)).byteLength < 10 * 1024 * 1024);
+  assert.throws(() => parseWorkspaceConfig(config), /group order has too many entries/i);
+});
+
+test("portable export includes only selected components and organization choices auto-include the index catalog", () => {
+  const data = migrateData(null);
+  const source = record({ path: "Private ENT/Laryngeal Cleft.md", domain: "Airway" });
+  data.collections = [{ id: "airway", title: "Airway", collapsed: false, subjects: [source.path], subheadings: [] }];
+  data.pinnedPaths = [source.path];
+
+  const workspaceOnly = createPortableExport(
+    data,
+    [source],
+    portableSelection({ workspace: true }),
+    "2026-08-08T00:00:00.000Z",
+  );
+  assert.deepEqual(Object.keys(workspaceOnly.components), ["workspace"]);
+  assert.equal(workspaceOnly.sourceWorkspace, data.settings.workspaceName);
+  assert.equal(data.portableIndex.subjects.length, 0, "workspace-only export must not allocate subject identities");
+
+  const savedViewsOnly = createPortableExport(
+    data,
+    [source],
+    portableSelection({ savedViews: true }),
+    "2026-08-08T00:00:30.000Z",
+  );
+  assert.equal(savedViewsOnly.sourceWorkspace, "", "the workspace name is exported only with workspace settings");
+  assert.equal(data.portableIndex.subjects.length, 0, "saved-view-only export must not scan or synchronize subjects");
+
+  const organization = createPortableExport(
+    data,
+    [source],
+    portableSelection({ collections: true, study: true }),
+    "2026-08-08T00:01:00.000Z",
+  );
+  assert.ok(organization.components.index);
+  assert.ok(organization.components.collections);
+  assert.ok(organization.components.study);
+  assert.equal(organization.components.workspace, undefined);
+  assert.equal(organization.components.savedViews, undefined);
+  assert.equal(organization.components.recovery, undefined);
+  assert.equal(organization.components.index.subjects.length, 1);
+});
+
+test("portable export is path-free, content-free, and keeps stable subject IDs across repeated exports", () => {
+  const data = migrateData(null);
+  const sourcePath = "Private ENT/Patient-free Study/Laryngeal Cleft.md";
+  const source = {
+    ...record({ path: sourcePath, domain: "Airway" }),
+    noteBody: "NEVER-EXPORT-THIS-NOTE-BODY",
+  } as VaultRecord;
+  data.collections = [{ id: "airway", title: "Airway", collapsed: false, subjects: [source.path], subheadings: [] }];
+
+  const first = createPortableExport(
+    data,
+    [source],
+    portableSelection({ index: true, collections: true }),
+    "2026-08-08T00:00:00.000Z",
+  );
+  const second = createPortableExport(
+    data,
+    [source],
+    portableSelection({ index: true, collections: true }),
+    "2026-08-08T00:02:00.000Z",
+  );
+  const serialized = JSON.stringify(first);
+
+  assert.equal(serialized.includes("resolvedPathBySubjectId"), false);
+  assert.equal(serialized.includes(sourcePath), false);
+  assert.equal(serialized.includes("NEVER-EXPORT-THIS-NOTE-BODY"), false);
+  assert.equal(first.components.index?.subjects[0]?.id, second.components.index?.subjects[0]?.id);
+  assert.equal(first.components.index?.subjects[0]?.configuredId, "", "generic configurable IDs are not portable metadata");
+  assert.equal(data.portableIndex.subjects.length, 1);
+  assert.equal(data.portableIndex.resolvedPathBySubjectId[first.components.index?.subjects[0]?.id ?? ""], sourcePath);
+});
+
+test("portable export retains only the canonical clinical curriculum ID mapping", () => {
+  const canonical = migrateData(null);
+  canonical.settings.workspaceMode = "ent-clinical";
+  canonical.settings.idProperty = "curriculum_id";
+  const canonicalExport = createPortableExport(
+    canonical,
+    [record()],
+    portableSelection({ index: true }),
+    "2026-08-08T00:00:00.000Z",
+  );
+  assert.equal(canonicalExport.components.index?.subjects[0]?.configuredId, "ENT-PED-003.05");
+
+  const customized = migrateData(null);
+  customized.settings.workspaceMode = "ent-clinical";
+  customized.settings.idProperty = "private_path";
+  const privateValue = "Patients/Alice/scan.md";
+  const customizedExport = createPortableExport(
+    customized,
+    [record({ curriculumId: privateValue })],
+    portableSelection({ index: true }),
+    "2026-08-08T00:00:00.000Z",
+  );
+  assert.equal(customizedExport.components.index?.subjects[0]?.configuredId, "");
+  assert.equal(JSON.stringify(customizedExport).includes(privateValue), false);
+
+  const malformedCanonical = migrateData(null);
+  malformedCanonical.settings.workspaceMode = "ent-clinical";
+  malformedCanonical.settings.idProperty = "curriculum_id";
+  const malformedExport = createPortableExport(
+    malformedCanonical,
+    [record({ curriculumId: privateValue })],
+    portableSelection({ index: true }),
+    "2026-08-08T00:00:00.000Z",
+  );
+  assert.equal(malformedExport.components.index?.subjects[0]?.configuredId, "");
+  assert.equal(JSON.stringify(malformedExport).includes(privateValue), false);
+});
+
+test("portable export includes the ancestor chain for collection-only subjects", () => {
+  const data = migrateData(null);
+  const parentId = "subject-parent";
+  const childId = "subject-child";
+  const parentPath = portablePlaceholderPath(parentId);
+  const childPath = portablePlaceholderPath(childId);
+  data.portableIndex = {
+    version: 1,
+    groups: [{ id: "group-airway", title: "Airway", order: 0 }],
+    subjects: [
+      { id: parentId, title: "Parent", groupId: "group-airway", parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "topic" },
+      { id: childId, title: "Child", groupId: "group-airway", parentId, order: 0, indexed: false, configuredId: "", recordKind: "topic" },
+    ],
+    resolvedPathBySubjectId: {},
+  };
+  data.collections = [{ id: "reading", title: "Reading", collapsed: false, subjects: [childPath], subheadings: [] }];
+  const records = [
+    record({ path: parentPath, title: "Parent", role: "placeholder", isPlaceholder: true, portableIndexed: false, portableId: parentId }),
+    record({ path: childPath, title: "Child", role: "placeholder", isPlaceholder: true, portableIndexed: false, portableId: childId }),
+  ];
+  const exported = createPortableExport(data, records, portableSelection({ collections: true }), "2026-08-08T00:00:00.000Z");
+  assert.deepEqual(new Set(exported.components.index?.subjects.map((subject) => subject.id)), new Set([parentId, childId]));
+  assert.equal(exported.components.index?.subjects.find((subject) => subject.id === childId)?.parentId, parentId);
+});
+
+test("portable group rename preserves identity without resurrecting the old heading", () => {
+  const data = migrateData(null);
+  data.indexGroupOrder = ["Old heading"];
+  const group = registerPortableGroup(data, "Old heading");
+  const subjectId = "subject-renamed-group";
+  const placeholder = portablePlaceholderPath(subjectId);
+  data.portableIndex.subjects.push({
+    id: subjectId,
+    title: "Portable topic",
+    groupId: group.id,
+    parentId: null,
+    order: 0,
+    indexed: true,
+    configuredId: "",
+    recordKind: "topic",
+  });
+  data.manualIndexPaths = [placeholder];
+
+  data.indexGroupOrder = ["Renamed heading"];
+  renameOrMergePortableGroup(data, "Old heading", "Renamed heading");
+  const exported = createPortableExport(data, [], portableSelection({ index: true }), "2026-08-08T00:00:00.000Z");
+
+  assert.equal(data.portableIndex.groups[0]?.id, group.id);
+  assert.deepEqual(exported.components.index?.groups.map((item) => item.title), ["Renamed heading"]);
+  assert.equal(exported.components.index?.subjects[0]?.groupId, group.id);
+});
+
+test("portable group merge and delete remove stale headings without orphaning subjects", () => {
+  const data = migrateData(null);
+  data.indexGroupOrder = ["Source", "Target", "Delete me"];
+  const source = registerPortableGroup(data, "Source");
+  const target = registerPortableGroup(data, "Target");
+  registerPortableGroup(data, "Delete me");
+  const subjectId = "subject-merged-group";
+  const placeholder = portablePlaceholderPath(subjectId);
+  data.portableIndex.subjects.push({
+    id: subjectId,
+    title: "Merged topic",
+    groupId: source.id,
+    parentId: null,
+    order: 0,
+    indexed: true,
+    configuredId: "",
+    recordKind: "topic",
+  });
+  data.manualIndexPaths = [placeholder];
+
+  data.indexGroupOrder = ["Target"];
+  renameOrMergePortableGroup(data, "Source", "Target");
+  removePortableGroup(data, "Delete me");
+  const exported = createPortableExport(data, [], portableSelection({ index: true }), "2026-08-08T00:00:00.000Z");
+
+  assert.equal(data.portableIndex.subjects[0]?.groupId, target.id);
+  assert.deepEqual(exported.components.index?.groups.map((item) => item.title), ["Target"]);
+  assert.equal(exported.components.index?.subjects[0]?.groupId, target.id);
+});
+
+test("a deliberately-created empty portable group survives synchronization and export", () => {
+  const data = migrateData(null);
+  data.indexGroupOrder = ["Future topics"];
+  const group = registerPortableGroup(data, "Future topics");
+
+  synchronizePortableRegistry(data, []);
+  const exported = createPortableExport(data, [], portableSelection({ index: true }), "2026-08-08T00:00:00.000Z");
+
+  assert.equal(data.portableIndex.groups.find((item) => item.id === group.id)?.title, "Future topics");
+  assert.deepEqual(exported.components.index?.groups.map((item) => item.title), ["Future topics"]);
+  assert.deepEqual(exported.components.index?.subjects, []);
+});
+
+test("portable parser rejects wrong envelopes, duplicate IDs, cycles, and prototype-like IDs", () => {
+  assert.throws(
+    () => parsePortableExport({ ...portableFixture(), kind: "another-export" }),
+    /unsupported/i,
+  );
+  assert.throws(
+    () => parsePortableExport({ ...portableFixture(), version: 2 }),
+    /unsupported/i,
+  );
+
+  const duplicate = portableFixture();
+  const duplicateIndex = duplicate.components.index;
+  assert.ok(duplicateIndex);
+  duplicateIndex.subjects.push({ ...duplicateIndex.subjects[0] });
+  assert.throws(() => parsePortableExport(duplicate), /duplicate subject ID/i);
+
+  const cyclic = portableFixture();
+  const cyclicIndex = cyclic.components.index;
+  assert.ok(cyclicIndex);
+  const first = cyclicIndex.subjects[0];
+  first.parentId = "subject-parent";
+  cyclicIndex.subjects.push({
+    ...first,
+    id: "subject-parent",
+    title: "Congenital Laryngeal Anomalies",
+    parentId: first.id,
+    order: 1,
+  });
+  assert.throws(() => parsePortableExport(cyclic), /cycle/i);
+
+  const prototypeId = portableFixture();
+  const prototypeIndex = prototypeId.components.index;
+  assert.ok(prototypeIndex);
+  prototypeIndex.groups[0].id = "__proto__";
+  prototypeIndex.subjects[0].groupId = "__proto__";
+  assert.throws(() => parsePortableExport(prototypeId), /invalid/i);
+
+  for (const inheritedKey of ["toString", "valueOf", "hasOwnProperty", "isPrototypeOf"]) {
+    const inheritedId = portableFixture();
+    const inheritedIndex = inheritedId.components.index;
+    assert.ok(inheritedIndex);
+    inheritedIndex.subjects[0].id = inheritedKey;
+    assert.throws(() => parsePortableExport(inheritedId), /invalid/i, inheritedKey);
+  }
+});
+
+test("same-vault recovery drops portable identities that collide with Object.prototype", () => {
+  const inheritedKeys = ["toString", "valueOf", "hasOwnProperty", "isPrototypeOf"];
+  const parsed = parsePersonalBackup({
+    kind: "ent-vault-command-center-personal-backup",
+    version: 4,
+    portableIndex: {
+      version: 1,
+      groups: [{ id: "group-safe", title: "Safe", order: 0 }],
+      subjects: [
+        ...inheritedKeys.map((id, order) => ({
+          id,
+          title: id,
+          groupId: "group-safe",
+          parentId: null,
+          order,
+          indexed: true,
+          configuredId: "",
+          recordKind: "topic",
+        })),
+        {
+          id: "subject-safe",
+          title: "Safe subject",
+          groupId: "group-safe",
+          parentId: null,
+          order: inheritedKeys.length,
+          indexed: true,
+          configuredId: "",
+          recordKind: "topic",
+        },
+      ],
+      resolvedPathBySubjectId: Object.fromEntries([
+        ...inheritedKeys.map((id) => [id, `Knowledge Base/${id}.md`]),
+        ["subject-safe", "Knowledge Base/Safe.md"],
+      ]),
+    },
+  });
+
+  assert.deepEqual(parsed.portableIndex.subjects.map((subject) => subject.id), ["subject-safe"]);
+  assert.deepEqual(parsed.portableIndex.resolvedPathBySubjectId, { "subject-safe": "Knowledge Base/Safe.md" });
+});
+
+test("portable parser bounds per-list and aggregate subject references below the file-size ceiling", () => {
+  const oversizedList = portableFixture();
+  oversizedList.components.study = {
+    version: 1,
+    pinnedSubjectIds: Array(MAX_TRANSFER_LIST_ITEMS + 1).fill("subject-cleft") as string[],
+    nextSubjectIds: [],
+  };
+  assert.ok(new TextEncoder().encode(JSON.stringify(oversizedList)).byteLength < 10 * 1024 * 1024);
+  assert.throws(() => parsePortableExport(oversizedList), /too many references/i);
+
+  const aggregate = portableFixture();
+  const referencesPerList = MAX_TRANSFER_LIST_ITEMS;
+  const listCount = Math.floor(MAX_TRANSFER_TOTAL_REFERENCES / referencesPerList) + 1;
+  aggregate.components.collections = {
+    version: 1,
+    collections: [{
+      id: "collection-bounded",
+      title: "Bounded",
+      collapsed: false,
+      subjectIds: [],
+      subheadings: Array.from({ length: listCount }, (_, index) => ({
+        id: `subheading-${index}`,
+        title: `Subheading ${index}`,
+        collapsed: false,
+        subjectIds: Array(referencesPerList).fill("subject-cleft") as string[],
+      })),
+    }],
+  };
+  assert.ok(new TextEncoder().encode(JSON.stringify(aggregate)).byteLength < 10 * 1024 * 1024);
+  assert.throws(() => parsePortableExport(aggregate), /portable package contains more than/i);
+});
+
+test("same-vault recovery bounds lists, aggregate references, saved views, and snapshots", () => {
+  const source = migrateData(null);
+  const oversizedList = createPersonalBackup(source, "2026-08-08T00:00:00.000Z");
+  oversizedList.pinnedPaths = Array(MAX_TRANSFER_LIST_ITEMS + 1).fill("Note.md") as string[];
+  assert.ok(new TextEncoder().encode(JSON.stringify(oversizedList)).byteLength < 10 * 1024 * 1024);
+  assert.throws(() => parsePersonalBackup(oversizedList), /too many references/i);
+
+  const aggregate = createPersonalBackup(source, "2026-08-08T00:00:00.000Z");
+  const referencesPerList = MAX_TRANSFER_LIST_ITEMS;
+  const listCount = Math.floor(MAX_TRANSFER_TOTAL_REFERENCES / referencesPerList) + 1;
+  aggregate.collections = [{
+    id: "collection-bounded",
+    title: "Bounded",
+    collapsed: false,
+    subjects: [],
+    subheadings: Array.from({ length: listCount }, (_, index) => ({
+      id: `subheading-${index}`,
+      title: `Subheading ${index}`,
+      collapsed: false,
+      subjects: Array(referencesPerList).fill("Note.md") as string[],
+    })),
+  }];
+  assert.ok(new TextEncoder().encode(JSON.stringify(aggregate)).byteLength < 10 * 1024 * 1024);
+  assert.throws(() => parsePersonalBackup(aggregate), /recovery backup contains more than/i);
+
+  const savedViews = createPersonalBackup(source, "2026-08-08T00:00:00.000Z");
+  savedViews.savedViews = Array.from({ length: 10_001 }, (_, index) => ({
+    id: `view-${index}`,
+    name: `View ${index}`,
+    tab: "curriculum" as const,
+    query: "",
+  }));
+  assert.throws(() => parsePersonalBackup(savedViews), /saved views has too many entries/i);
+
+  const snapshots = createPersonalBackup(source, "2026-08-08T00:00:00.000Z");
+  snapshots.layoutSnapshots = Array.from({ length: MAX_TRANSFER_SNAPSHOTS + 1 }, (_, index) => snapshotPersonal(source, `Snapshot ${index}`));
+  assert.throws(() => parsePersonalBackup(snapshots), /named snapshots has too many entries/i);
+});
+
+test("merge import creates unresolved portable placeholders without reintroducing source paths", () => {
+  const sourceData = migrateData(null);
+  const source = record({ path: "Source Vault/ENT/Laryngeal Cleft.md", domain: "Airway" });
+  sourceData.collections = [{ id: "airway", title: "Airway", collapsed: false, subjects: [source.path], subheadings: [] }];
+  sourceData.pinnedPaths = [source.path];
+  sourceData.nextStudyPaths = [source.path];
+  const exported = createPortableExport(
+    sourceData,
+    [source],
+    portableSelection({ collections: true, study: true }),
+    "2026-08-08T00:00:00.000Z",
+  );
+  const serialized = JSON.stringify(exported);
+  const parsed = parsePortableExport(JSON.parse(serialized) as unknown);
+  const target = migrateData(null);
+  const result = applyPortableExport(
+    target,
+    parsed,
+    portableSelection({ collections: true, study: true }),
+    "merge",
+  );
+  const subjectId = parsed.components.index?.subjects[0]?.id ?? "";
+  const placeholderPath = portablePlaceholderPath(subjectId);
+
+  assert.equal(serialized.includes(source.path), false);
+  assert.equal(serialized.includes("resolvedPathBySubjectId"), false);
+  assert.equal(result.unresolvedSubjects, 1);
+  assert.deepEqual(target.portableIndex.resolvedPathBySubjectId, {});
+  assert.ok(target.manualIndexPaths.includes(placeholderPath));
+  assert.deepEqual(target.collections[0]?.subjects, [placeholderPath]);
+  assert.deepEqual(target.pinnedPaths, [placeholderPath]);
+  assert.deepEqual(target.nextStudyPaths, [placeholderPath]);
+});
+
+test("replace import changes only selected components and preserves state omitted from the package", () => {
+  const target = migrateData(null);
+  const oldPlaceholder = portablePlaceholderPath("subject-old");
+  target.settings.workspaceName = "Keep Local Workspace";
+  target.portableIndex = {
+    version: 1,
+    groups: [{ id: "group-old", title: "Old", order: 0 }],
+    subjects: [{
+      id: "subject-old",
+      title: "Old unresolved subject",
+      groupId: "group-old",
+      parentId: null,
+      order: 0,
+      indexed: true,
+      configuredId: "",
+      recordKind: "topic",
+    }],
+    resolvedPathBySubjectId: {},
+  };
+  target.manualIndexPaths = [oldPlaceholder];
+  target.collections = [{ id: "local", title: "Local collection", collapsed: false, subjects: ["Local/Collection note.md"], subheadings: [] }];
+  target.pinnedPaths = ["Local/Pinned.md"];
+  target.nextStudyPaths = ["Local/Next.md"];
+  target.savedViews = [{ id: "local-view", name: "Local view", tab: "collections", query: "local" }];
+
+  applyPortableExport(
+    target,
+    parsePortableExport(portableFixture()),
+    portableSelection({ index: true }),
+    "replace",
+  );
+
+  assert.equal(target.portableIndex.subjects.some((subject) => subject.id === "subject-old"), false);
+  assert.equal(target.portableIndex.subjects.some((subject) => subject.id === "subject-cleft"), true);
+  assert.equal(target.settings.workspaceName, "Keep Local Workspace");
+  assert.equal(target.collections[0]?.title, "Local collection");
+  assert.deepEqual(target.pinnedPaths, ["Local/Pinned.md"]);
+  assert.deepEqual(target.nextStudyPaths, ["Local/Next.md"]);
+  assert.equal(target.savedViews[0]?.name, "Local view");
+});
+
+test("replace index preserves unresolved identities referenced by unselected local sections", () => {
+  const target = migrateData(null);
+  const oldId = "subject-local-reference";
+  const oldPath = portablePlaceholderPath(oldId);
+  target.portableIndex = {
+    version: 1,
+    groups: [{ id: "group-local", title: "Local", order: 0 }],
+    subjects: [{ id: oldId, title: "Local reference", groupId: "group-local", parentId: null, order: 0, indexed: true, configuredId: "", recordKind: "topic" }],
+    resolvedPathBySubjectId: {},
+  };
+  target.manualIndexPaths = [oldPath];
+  target.collections = [{ id: "local", title: "Local", collapsed: false, subjects: [oldPath], subheadings: [] }];
+
+  applyPortableExport(target, parsePortableExport(portableFixture()), portableSelection({ index: true }), "replace");
+
+  assert.equal(target.collections[0]?.subjects[0], oldPath);
+  assert.equal(target.portableIndex.subjects.find((subject) => subject.id === oldId)?.indexed, false);
+  assert.equal(target.portableIndex.subjects.some((subject) => subject.id === oldId), true);
+  assert.equal(target.manualIndexPaths.includes(oldPath), false);
+});
+
+test("replace index hides dropped primary notes and retains protected and imported non-index membership", () => {
+  const target = migrateData(null);
+  const droppedPath = "Knowledge Base/Dropped.md";
+  const protectedPath = "Knowledge Base/Protected.md";
+  const importedPath = "Knowledge Base/Imported ancestor.md";
+  target.portableIndex = {
+    version: 1,
+    groups: [{ id: "group-local", title: "Local", order: 0 }],
+    subjects: [
+      { id: "subject-dropped", title: "Dropped", groupId: "group-local", parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "topic" },
+      { id: "subject-protected", title: "Protected", groupId: "group-local", parentId: null, order: 1, indexed: false, configuredId: "", recordKind: "topic" },
+      { id: "subject-imported", title: "Imported ancestor", groupId: "group-local", parentId: null, order: 2, indexed: true, configuredId: "", recordKind: "topic" },
+    ],
+    resolvedPathBySubjectId: {
+      "subject-dropped": droppedPath,
+      "subject-protected": protectedPath,
+      "subject-imported": importedPath,
+    },
+  };
+  target.excludedIndexPaths = [droppedPath, protectedPath];
+  target.collections = [{ id: "local", title: "Local", collapsed: false, subjects: [protectedPath], subheadings: [] }];
+
+  const incoming = portableFixture();
+  incoming.components.index = {
+    version: 1,
+    groups: [{ id: "group-local", title: "Local", order: 0 }],
+    subjects: [{
+      id: "subject-imported",
+      title: "Imported ancestor",
+      groupId: "group-local",
+      parentId: null,
+      order: 0,
+      indexed: false,
+      configuredId: "",
+      recordKind: "topic",
+    }],
+  };
+
+  applyPortableExport(target, parsePortableExport(incoming), portableSelection({ index: true }), "replace");
+
+  assert.equal(target.portableIndex.subjects.some((subject) => subject.id === "subject-dropped"), false);
+  assert.equal(target.excludedIndexPaths.includes(droppedPath), true);
+  assert.equal(target.portableIndex.subjects.some((subject) => subject.id === "subject-protected"), true);
+  assert.equal(target.excludedIndexPaths.includes(protectedPath), true);
+  assert.equal(target.portableIndex.subjects.find((subject) => subject.id === "subject-imported")?.indexed, false);
+  assert.equal(target.excludedIndexPaths.includes(importedPath), true);
+});
+
+test("ambiguous metadata never collapses distinct incoming subjects", () => {
+  const target = migrateData(null);
+  target.portableIndex = {
+    version: 1,
+    groups: [{ id: "group-local", title: "Airway", order: 0 }],
+    subjects: [{ id: "subject-local", title: "Shared title", groupId: "group-local", parentId: null, order: 0, indexed: true, configuredId: "", recordKind: "topic" }],
+    resolvedPathBySubjectId: { "subject-local": "Knowledge Base/Shared title.md" },
+  };
+  const incoming = portableFixture();
+  incoming.components.index = {
+    version: 1,
+    groups: [{ id: "group-source", title: "Airway", order: 0 }],
+    subjects: [
+      { id: "subject-a", title: "Shared title", groupId: "group-source", parentId: null, order: 0, indexed: true, configuredId: "", recordKind: "topic" },
+      { id: "subject-b", title: "Shared title", groupId: "group-source", parentId: null, order: 1, indexed: true, configuredId: "", recordKind: "topic" },
+    ],
+  };
+
+  const result = applyPortableExport(target, parsePortableExport(incoming), portableSelection({ index: true }), "merge");
+  assert.equal(result.matchedSubjects, 1);
+  assert.equal(result.addedSubjects, 1);
+  assert.equal(new Set(target.portableIndex.subjects.map((subject) => subject.id)).size, 2);
+});
+
+test("clinical configured-ID conflicts do not fall back to title-only matching", () => {
+  const target = migrateData(null);
+  target.portableIndex = {
+    version: 1,
+    groups: [{ id: "group-local", title: "Airway", order: 0 }],
+    subjects: [{ id: "subject-local", title: "Laryngeal Cleft", groupId: "group-local", parentId: null, order: 0, indexed: true, configuredId: "ENT-PED-999", recordKind: "topic" }],
+    resolvedPathBySubjectId: { "subject-local": "Knowledge Base/Laryngeal Cleft.md" },
+  };
+  const result = applyPortableExport(target, parsePortableExport(portableFixture()), portableSelection({ index: true }), "merge");
+  assert.equal(result.matchedSubjects, 0);
+  assert.equal(result.addedSubjects, 1);
+});
+
+test("same-vault recovery is an explicit standalone replace operation", () => {
+  const source = migrateData(null);
+  const value: PortableExportV1 = {
+    kind: PORTABLE_EXPORT_KIND,
+    version: 1,
+    exportedAt: "2026-08-08T00:00:00.000Z",
+    sourceWorkspace: "",
+    components: { recovery: createPersonalBackup(source, "2026-08-08T00:00:00.000Z") },
+  };
+  const target = migrateData(null);
+  assert.throws(() => applyPortableExport(target, value, portableSelection({ recovery: true }), "merge"), /not a merge/i);
+  value.components.workspace = createWorkspaceConfig(source, value.exportedAt);
+  assert.throws(
+    () => applyPortableExport(target, value, portableSelection({ recovery: true, workspace: true }), "replace"),
+    /by itself/i,
+  );
+});
+
+test("portable serialization enforces the same 10 MB contract as import", () => {
+  const value = portableFixture();
+  value.sourceWorkspace = "x".repeat(11 * 1024 * 1024);
+  assert.throws(() => serializePortableExport(value), /above the 10 MB/i);
+});
+
+test("portable serialization rejects generated packages the importer cannot read", () => {
+  const invalidCollection = portableFixture();
+  invalidCollection.components.collections = {
+    version: 1,
+    collections: [{
+      id: "legacy collection",
+      title: "Legacy collection",
+      collapsed: false,
+      subjectIds: ["subject-cleft"],
+      subheadings: [],
+    }],
+  };
+  assert.throws(() => serializePortableExport(invalidCollection), /cannot be safely re-imported.*unsupported characters/i);
+
+  const oversizedTitle = portableFixture();
+  assert.ok(oversizedTitle.components.index);
+  oversizedTitle.components.index.subjects[0].title = "x".repeat(1_001);
+  assert.throws(() => serializePortableExport(oversizedTitle), /cannot be safely re-imported.*too long/i);
+
+  const oversizedQuery = portableFixture();
+  oversizedQuery.components.savedViews = {
+    version: 1,
+    views: [{ id: "view-long", name: "Long query", tab: "curriculum", query: "x".repeat(10_001) }],
+  };
+  assert.throws(() => serializePortableExport(oversizedQuery), /cannot be safely re-imported.*query is too long/i);
+});
+
+test("registry synchronization clears stale inactive bindings and remains linear", () => {
+  const data = migrateData(null);
+  const count = 10_000;
+  data.portableIndex = {
+    version: 1,
+    groups: [{ id: "group-airway", title: "Airway", order: 0 }],
+    subjects: Array.from({ length: count }, (_, index) => ({
+      id: `subject-${index}`,
+      title: `Subject ${index}`,
+      groupId: "group-airway",
+      parentId: null,
+      order: index,
+      indexed: true,
+      configuredId: "",
+      recordKind: "topic" as const,
+    })),
+    resolvedPathBySubjectId: Object.fromEntries(Array.from({ length: count }, (_, index) => [`subject-${index}`, `Archive/Subject ${index}.md`])),
+  };
+  const staleRecords = Array.from({ length: count }, (_, index) => record({
+    path: `Archive/Subject ${index}.md`,
+    title: `Subject ${index}`,
+    kind: "note",
+    role: "vault-note",
+    curriculumId: "",
+  }));
+  const start = performance.now();
+  synchronizePortableRegistry(data, staleRecords);
+  const elapsed = performance.now() - start;
+  assert.equal(data.portableIndex.subjects.length, 0);
+  assert.deepEqual(data.portableIndex.resolvedPathBySubjectId, {});
+  assert.ok(elapsed < 500, `synchronizing 10,000 inactive subjects took ${elapsed.toFixed(1)} ms`);
+});
+
+test("portable dispatcher accepts legacy workspace configurations and personal backups", () => {
+  const data = migrateData(null);
+  data.settings.workspaceName = "Legacy Workspace";
+  data.collections = [{ id: "legacy", title: "Legacy collection", collapsed: false, subjects: ["Legacy/Note.md"], subheadings: [] }];
+  const exportedAt = "2026-08-08T00:00:00.000Z";
+
+  const workspace = parseAnyCommandCenterExport(
+    JSON.parse(JSON.stringify(createWorkspaceConfig(data, exportedAt))) as unknown,
+  );
+  assert.equal(workspace.kind, PORTABLE_EXPORT_KIND);
+  assert.equal(workspace.components.workspace?.settings.workspaceName, "Legacy Workspace");
+  assert.equal(workspace.components.index, undefined);
+
+  const recovery = parseAnyCommandCenterExport(
+    JSON.parse(JSON.stringify(createPersonalBackup(data, exportedAt))) as unknown,
+  );
+  assert.equal(recovery.kind, PORTABLE_EXPORT_KIND);
+  assert.equal(recovery.components.recovery?.collections[0]?.title, "Legacy collection");
+  assert.equal(recovery.components.workspace, undefined);
 });
 
 test("index diagnostics distinguish missing, duplicate, parent, and orphaned group issues", () => {
@@ -525,7 +1252,7 @@ test("versionless modern data is preserved instead of being mistaken for legacy 
       pinnedPaths: ["Notes/Paper.md"],
       settings: { workspaceMode: "generic", workspaceName: "My research KB", setupComplete: true },
     });
-    assert.equal(data.version, 9);
+    assert.equal(data.version, 10);
     assert.equal(data.settings.workspaceMode, "generic");
     assert.equal(data.settings.workspaceName, "My research KB");
     assert.equal(data.collections[0]?.title, "Research");
@@ -567,6 +1294,19 @@ test("search, templates, filenames, and protected folders handle international a
     assert.notEqual(validateWritableFolderPath(path, ".obsidian"), null, path);
   }
   assert.notEqual(validateWritableFolderPath("Projects/ .. /Archive", ".obsidian"), null);
+  for (const path of [
+    "01 Inbox/../.obsidian/plugins",
+    "01 Inbox/./Drafts",
+    "01 Inbox/ .. /.obsidian/plugins",
+    "01 Inbox/ . /Drafts",
+  ]) {
+    assert.notEqual(validateProposalFolderPath(path, ".obsidian"), null, path);
+  }
+  assert.equal(validateTemplateFilePath("Templates/Topic.md", "Templates", ".obsidian"), null);
+  assert.equal(validateTemplateFilePath("Notes/Topic.md", "", ".obsidian"), null);
+  for (const path of [".obsidian/plugins/template.md", "05 Sources/_books/Book/page.md", "Notes/Not a template.md"]) {
+    assert.notEqual(validateTemplateFilePath(path, "Templates", ".obsidian"), null, path);
+  }
 });
 
 test("imported path maps discard prototype keys", () => {
@@ -621,6 +1361,31 @@ test("snapshot history is bounded by count and serialized size", () => {
   const preserved = limitSnapshotStack([...limited, oversized], 10, 8_000);
   assert.equal(preserved.includes(oversized), false);
   assert.equal(preserved.at(-1)?.label, "Snapshot 49");
+});
+
+test("ordinary Undo snapshots stay lean after a large portable registry is allocated", () => {
+  const data = migrateData(null);
+  data.portableIndex = {
+    version: 1,
+    groups: [{ id: "group-large", title: "Large", order: 0 }],
+    subjects: Array.from({ length: 10_000 }, (_, index) => ({
+      id: `subject-${index}`,
+      title: `Subject ${index}`,
+      groupId: "group-large",
+      parentId: null,
+      order: index,
+      indexed: true,
+      configuredId: "",
+      recordKind: "topic" as const,
+    })),
+    resolvedPathBySubjectId: {},
+  };
+  const ordinary = snapshotPersonal(data, "Collection change");
+  const portable = snapshotPersonal(data, "Portable import", false, true);
+  assert.equal(ordinary.portableIndex, undefined);
+  assert.ok(JSON.stringify(ordinary).length < MAX_UNDO_BYTES);
+  assert.equal(portable.portableIndex?.subjects.length, 10_000);
+  assert.equal(limitSnapshotStack([portable]).length, 1, "one large portable-state Undo uses the bounded import budget");
 });
 
 test("renaming paths invalidates cached snapshot sizes and re-applies the byte budget", () => {

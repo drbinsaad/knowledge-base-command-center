@@ -15,8 +15,8 @@ The internal plugin ID remains `ent-vault-command-center` so existing installati
 - Personal collections with headings, subheadings, multi-membership, drag-and-drop, and touch-friendly menu controls.
 - Smart queues for Inbox notes, a personal Next list, pins, ungrouped notes, and recent changes.
 - Empty-note creation or per-note template selection with a safe destination preview; notes created through the primary Create action are indexed even when saved elsewhere.
-- Organization undo/redo, named snapshots, and JSON backup/restore.
-- Portable workspace configuration export/import without note contents or note-specific memberships.
+- Organization undo/redo, named snapshots, and same-vault JSON recovery.
+- A component-aware Export / import center for portable workspace settings, a path-free index blueprint, collections, study state, and saved views.
 - Desktop, iPhone, and iPad support; no desktop-only APIs are used.
 
 Knowledge Base Command Center 0.7.3 and later requires Obsidian 1.13.0 or newer so its settings are searchable through Obsidian's current declarative settings interface.
@@ -75,11 +75,36 @@ The manager never moves, deletes, or rewrites Markdown notes. Membership, visual
 
 ENT visual groups follow canonical domains by default. An optional **Visual cross-domain movement** setting enables personal visual grouping and group reordering while continuing to protect note folders, IDs, domains, and clinical frontmatter.
 
-## Portable configuration
+## Export, import, and portable index blueprints
 
-Use **Export workspace configuration** in the Index Manager to share the workspace name, labels, folders, property mappings, behavior settings, and visual group order. Importing that JSON configures another vault after validating its folders and template availability. It does not contain note text, note paths, collections, pins, queues, or other note-specific personal organization.
+Open **Export / import center…** from the command palette, the Index Manager, or the command center menu. Choose any combination of the following sections:
 
-On iPhone and iPad, Export saves JSON under `Knowledge Base Command Center Exports/` inside the vault so it can sync or be shared through the Files app. Import uses an in-vault JSON picker. Desktop also supports the standard download and file picker.
+| Section | What it contains |
+| --- | --- |
+| **Workspace settings** | Workspace names and labels, configured folders and template location, metadata mappings, behavior, and visual group order. |
+| **Index blueprint** | Stable subject identities, titles, groups, nested parent relationships, record kinds, and visual order. The blueprint contains no source note paths. |
+| **Collections** | Collection and subheading structure with membership stored by portable subject identity, not source note path. |
+| **Study state** | Pins and the personal Next list stored by portable subject identity. |
+| **Saved views** | Named command center sections and literal search queries; a query can contain a path if you typed one. |
+| **Same-vault recovery** | A restoration snapshot of local plugin organization, including exact vault-relative note paths. |
+
+The default **Portable set** selects workspace settings, index blueprint, collections, study state, and saved views. **Everything** also selects same-vault recovery. Because recovery exposes exact vault-relative paths, the Export button stays disabled until you separately confirm that private recovery export. Selecting Collections or Study state automatically selects the index catalog they need. Every export summary shows what will be included before the JSON is created. Markdown note bodies and attachments are never included in any section. The complete Portable set is not necessarily path-free: workspace settings contain the folder and template paths you configured, and saved-query text is exported literally. Deselect either section when you do not want to share it.
+
+The index blueprint itself is path-free. It can recreate subject names, groups, nesting, and order in another vault without disclosing the original Markdown filenames or folders. Only a valid, canonical-format ENT curriculum ID from the fixed clinical mapping is retained; generic or customized ID-property values are omitted because they may contain a path or private identifier. Import never creates notes automatically. A subject with no linked Markdown file appears as a **No note** placeholder in its imported position. In a generic workspace, choose **Create empty note**, **Create from template**, **Link existing note**, or **Keep placeholder**. For a clinical topic, the ENT preset substitutes the safety-gated **Create unverified proposal** action for direct topic creation and then opens that linked proposal in the Inbox. Other clinical record kinds offer Link or Keep only. Creating or linking a note preserves the imported hierarchy and personal organization. A linked subject can later **Change linked note** or **Unlink note** back to a placeholder; choosing a note already owned by another portable subject requires confirmation before the two portable identities are merged.
+
+Before importing, choose which available sections to apply and select one behavior:
+
+- **Merge with this vault** adds or updates the selected organization while retaining unrelated local organization.
+- **Replace selected sections** resets only the selected plugin sections. Notes absent from a replacement index may be hidden from that index, but the operation never deletes, moves, overwrites, or rewrites Markdown notes.
+
+Same-vault recovery starts unselected when a file is opened. It must be selected and confirmed explicitly, is restored by itself, and is never described or executed as a merge. Undo restores the pre-recovery plugin state.
+
+Workspace folder paths are validated against the destination vault. If an exported default template is unavailable, restricted, or outside the configured templates folder, the imported default safely falls back to an empty note. Older standalone workspace exports and organization backups remain importable through the same center.
+
+On iPhone and iPad, Export saves JSON under `Knowledge Base Command Center Exports/` inside the vault so it can sync or be shared through the Files app. Import uses an in-vault JSON picker, displays the selected vault path during review and confirmation, and applies the same 10 MB, per-list, and aggregate-reference limits as desktop. Export also enforces 10 MB and validates the exact JSON before saving it, so the plugin never creates a portable package that it will refuse to re-import. Desktop uses the operating system download and file picker.
+
+> [!warning] Same-vault recovery privacy
+> Same-vault recovery is not a path-free portable blueprint. It contains exact vault-relative note paths, including folder and file names, for collections, pins, queues, and visual organization. Treat that JSON as private, do not share it publicly, and import it only into the vault it came from.
 
 ## Search
 
@@ -88,6 +113,7 @@ Plain text uses Unicode-aware fuzzy matching across titles, aliases, paths, conf
 ## Commands
 
 - Open workspace
+- Open export / import center
 - Manage index…
 - Add or create…
 - Create note from template or empty note…
@@ -128,7 +154,7 @@ For manual updates, download all three files from the same newer release and rep
 
 ### Uninstall
 
-Before uninstalling, use **Export organization backup** if you may want the personal hierarchy later. Disable the plugin, then remove it through Community Plugins (or remove `.obsidian/plugins/ent-vault-command-center/` for a manual install). Removing the plugin folder also removes `data.json`, including settings, collections, pins, visual hierarchy, snapshots, and undo history. Markdown notes are not removed.
+Before uninstalling, open **Export / import center…** and export **Same-vault recovery** if you may want the personal hierarchy later. Store that private JSON securely. Disable the plugin, then remove it through Community Plugins (or remove `.obsidian/plugins/ent-vault-command-center/` for a manual install). Removing the plugin folder also removes `data.json`, including settings, collections, pins, visual hierarchy, snapshots, and undo history. Markdown notes are not removed.
 
 ### Troubleshooting
 
@@ -136,8 +162,9 @@ Before uninstalling, use **Export organization backup** if you may want the pers
 - **BRAT does not update:** run BRAT's update command and confirm the GitHub release contains all three matching assets. Remove and re-add the beta plugin only after exporting organization data.
 - **A note is missing from the index:** check the indexed folder, hidden notes in **Manage index…**, and any manual membership. Diagnostics reports stale references without deleting note files.
 - **Visual movement on iPhone:** enable **Arrange**, tap the row's **…** button, and choose Move under, Move to group, Indent, Outdent, Move up/down, or Make top-level. Desktop drag-and-drop is optional.
-- **Mobile JSON import:** copy the JSON file anywhere inside the vault, then choose it from the in-vault picker.
+- **Mobile JSON import:** copy the JSON file anywhere inside the vault, open **Export / import center…**, then choose it from the in-vault picker.
 - **Settings are read-only:** the plugin detected unrecognized or newer `data.json` content and intentionally refused to overwrite it. Preserve the file and report the version and error message without attaching private note content.
+- **Transfer center is in salvage mode:** Import and same-vault Recovery export are disabled because the current build cannot faithfully interpret the preserved `data.json`. Other sections can be exported as a one-time salvage; newly generated index identities cannot be persisted and may differ on a later export. Keep the raw `data.json` until compatibility is restored.
 
 ### Development installation
 
@@ -162,8 +189,11 @@ This creates a three-file install ZIP and SHA-256 checksum under `dist/`. The re
 - Index and collection actions never move or rewrite source notes.
 - Hiding or removing an index membership never deletes the underlying Markdown note.
 - Visual hierarchy and personal organization live in `data.json`.
-- Organization backups contain plugin organization, not note contents.
-- Workspace configuration exports contain reusable settings and group order, not note contents or note-specific memberships.
+- No export option contains Markdown note bodies or attachments.
+- Portable index, collection, and study components use stable subject identities instead of source note paths.
+- Workspace settings can contain configured vault-relative folder and template locations.
+- Same-vault recovery contains exact vault-relative note paths and should be treated as private restoration data.
+- Merge and replace imports change only selected plugin-owned state; neither operation deletes, moves, or rewrites Markdown notes.
 - Plugin data from a newer schema opens read-only to prevent downgrade data loss.
 - The ENT preset respects `ai_lock: true` and never assigns clinical review approval.
 
@@ -174,9 +204,7 @@ This creates a three-file install ZIP and SHA-256 checksum under `dist/`. The re
 - Copy buttons write only the plugin-generated command, wikilink, or vault-relative path shown by that action to the clipboard after you click; the plugin never reads clipboard contents.
 - It stores settings and personal organization in Obsidian's plugin data file.
 - It writes only when you explicitly create a note, organize plugin state, promote an ENT proposal, or edit canonical placement through the protected advanced workflow.
-- It never reads or writes files outside the vault on its own. On desktop, organization backup export and
-  import use your operating system's own download and file-picker dialogs, so those files go exactly where
-  you choose. On iPhone and iPad the same data stays inside the vault.
+- It never reads or writes files outside the vault on its own. On desktop, JSON export and import use your operating system's own download and file-picker dialogs, so those files go exactly where you choose. On iPhone and iPad, exported JSON stays inside the vault unless you explicitly share it.
 
 ## Contributing and license
 

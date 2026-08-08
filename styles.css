@@ -10,6 +10,112 @@
   background: var(--background-primary);
 }
 
+/* Portable index subjects intentionally keep the compact row geometry. */
+.ent-cc-placeholder-row {
+  background: color-mix(in srgb, var(--background-secondary) 72%, transparent);
+  border-inline-start: 2px dashed var(--text-faint);
+}
+
+.ent-cc-placeholder-row .ent-cc-record-icon {
+  color: var(--text-muted);
+}
+
+.ent-cc-placeholder-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 1px 7px;
+  border: 1px dashed var(--text-faint);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.ent-cc-status-pill.is-placeholder {
+  border-style: dashed;
+  color: var(--text-muted);
+}
+
+.ent-cc-placeholder-help {
+  margin: 0 0 14px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.ent-cc-portability-modal {
+  width: min(720px, calc(100vw - 32px));
+  max-width: 720px;
+  max-height: calc(100vh - 40px);
+  max-height: calc(100dvh - 40px);
+}
+
+.ent-cc-portability-center {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.ent-cc-portability-center > .setting-item:last-child {
+  position: sticky;
+  z-index: 2;
+  bottom: 0;
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
+  background: var(--background-primary);
+}
+
+.ent-cc-portability-center .setting-item-control {
+  flex-wrap: wrap;
+}
+
+.ent-cc-portability-modal.is-busy .modal-close-button {
+  cursor: wait;
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.ent-cc-portability-center[aria-busy="true"] {
+  cursor: progress;
+}
+
+.ent-cc-portability-file-label {
+  overflow-wrap: anywhere;
+}
+
+.ent-cc-portability-path-warning {
+  border-color: color-mix(in srgb, var(--color-orange, var(--text-warning)) 55%, var(--background-modifier-border));
+}
+
+.ent-cc-portability-path-warning-text {
+  color: var(--color-orange, var(--text-warning));
+  font-weight: 600;
+}
+
+@media (max-width: 600px) {
+  .ent-cc-portability-modal {
+    width: calc(100vw - 16px);
+    max-height: calc(100vh - 16px);
+    max-height: calc(100dvh - 16px);
+  }
+
+  .ent-cc-portability-center .setting-item {
+    min-height: 54px;
+  }
+
+  .ent-cc-portability-center .setting-item-control button,
+  .ent-cc-portability-center .setting-item-control select {
+    min-height: 44px;
+  }
+
+  .ent-cc-portability-center .ent-cc-portability-toggle .setting-item-control {
+    min-width: 44px;
+    min-height: 44px;
+    align-items: center;
+    justify-content: flex-end;
+  }
+}
+
 .ent-cc-view .view-content,
 .ent-cc-shell {
   height: 100%;

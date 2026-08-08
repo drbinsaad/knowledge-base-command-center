@@ -3,7 +3,8 @@ export const PROCEDURE_ROOT = "04 Procedures/";
 export const MEDICATION_ROOT = "06 Clinical Tools/Medications/";
 export const SYNDROME_ROOT = "06 Clinical Tools/Syndromes/";
 export const DEFAULT_PROPOSAL_FOLDER = "01 Inbox/ENT Topic Proposals";
-export const DATA_VERSION = 9;
+export const DATA_VERSION = 10;
+export const PORTABLE_PLACEHOLDER_PREFIX = "kbcc-placeholder:";
 export const DEFAULT_COLLAPSED_QUEUES = [
   "p1",
   "gaps",
@@ -15,9 +16,16 @@ export const DEFAULT_COLLAPSED_QUEUES = [
   "syndrome-source-gaps",
 ] as const;
 export const MAX_UNDO_BYTES = 512 * 1024;
+/** Large component imports may need one bounded, full portable-state Undo. */
+export const MAX_PORTABLE_UNDO_BYTES = 12 * 1024 * 1024;
+/** Imported JSON may be byte-small but contain millions of tiny list entries. */
+export const MAX_TRANSFER_LIST_ITEMS = 50_000;
+export const MAX_TRANSFER_TOTAL_REFERENCES = 250_000;
+export const MAX_TRANSFER_COLLECTIONS = 10_000;
+export const MAX_TRANSFER_SNAPSHOTS = 10;
 
 export type RecordKind = "topic" | "procedure" | "medication" | "syndrome" | "proposal" | "note";
-export type RecordRole = "canonical" | "supporting" | "library" | "proposal" | "vault-note";
+export type RecordRole = "canonical" | "supporting" | "library" | "proposal" | "vault-note" | "placeholder";
 export type MainTab = "curriculum" | "inbox" | "collections" | "queues" | "procedures" | "medications" | "syndromes";
 export type OpenNoteBehavior = "new-tab" | "same-tab" | "split";
 export type WorkspaceMode = "generic" | "ent-clinical";
@@ -72,6 +80,40 @@ export interface VaultRecord {
   folderOrder: string;
   mtime: number;
   aiLock: boolean;
+  /** Stable portable identity, when this record participates in an export blueprint. */
+  portableId?: string;
+  /** True only for a portable subject that is not currently linked to a Markdown file. */
+  isPlaceholder?: boolean;
+  /** Effective index membership for an unresolved portable subject. */
+  portableIndexed?: boolean;
+}
+
+export interface PortableGroupDefinition {
+  id: string;
+  title: string;
+  order: number;
+}
+
+export interface PortableSubjectDefinition {
+  id: string;
+  title: string;
+  groupId: string;
+  parentId: string | null;
+  order: number;
+  indexed: boolean;
+  configuredId: string;
+  recordKind: RecordKind;
+}
+
+/**
+ * Portable identities and local bindings. `resolvedPathBySubjectId` is private
+ * vault state and is deliberately omitted by the portable export serializer.
+ */
+export interface PortableIndexLocalState {
+  version: 1;
+  groups: PortableGroupDefinition[];
+  subjects: PortableSubjectDefinition[];
+  resolvedPathBySubjectId: Record<string, string>;
 }
 
 export interface TopicFormValue {
@@ -162,6 +204,12 @@ export interface PersonalSnapshot {
   excludedIndexPaths: string[];
   indexGroupByPath: Record<string, string>;
   indexGroupOrder: string[];
+  /** Included only when the operation can change portable identity state. */
+  portableIndex?: PortableIndexLocalState;
+  /** Present only for a component-aware import snapshot. */
+  settings?: PluginSettings;
+  /** Included only when same-vault recovery can replace named snapshots. */
+  layoutSnapshots?: PersonalSnapshot[];
 }
 
 export interface ViewCollapseState {
@@ -215,7 +263,7 @@ export interface V2MigrationBackup {
 }
 
 export interface PluginData {
-  version: 9;
+  version: 10;
   collections: LayoutHeading[];
   pinnedPaths: string[];
   nextStudyPaths: string[];
@@ -225,6 +273,7 @@ export interface PluginData {
   excludedIndexPaths: string[];
   indexGroupByPath: Record<string, string>;
   indexGroupOrder: string[];
+  portableIndex: PortableIndexLocalState;
   selectedPath: string;
   activeTab: MainTab;
   settings: PluginSettings;
@@ -287,7 +336,7 @@ export const ENT_CLINICAL_SETTINGS: PluginSettings = {
 };
 
 export const DEFAULT_DATA: PluginData = {
-  version: 9,
+  version: 10,
   collections: [],
   pinnedPaths: [],
   nextStudyPaths: [],
@@ -297,6 +346,7 @@ export const DEFAULT_DATA: PluginData = {
   excludedIndexPaths: [],
   indexGroupByPath: {},
   indexGroupOrder: [],
+  portableIndex: { version: 1, groups: [], subjects: [], resolvedPathBySubjectId: {} },
   selectedPath: "",
   activeTab: "curriculum",
   settings: { ...DEFAULT_SETTINGS },
@@ -370,6 +420,27 @@ export function clonePathMap(input: Record<string, string>): Record<string, stri
   return { ...input };
 }
 
+export function clonePortableIndex(state: PortableIndexLocalState): PortableIndexLocalState {
+  return {
+    version: 1,
+    groups: state.groups.map((group) => ({ ...group })),
+    subjects: state.subjects.map((subject) => ({ ...subject })),
+    resolvedPathBySubjectId: { ...state.resolvedPathBySubjectId },
+  };
+}
+
+export function portablePlaceholderPath(subjectId: string): string {
+  return `${PORTABLE_PLACEHOLDER_PREFIX}${subjectId}`;
+}
+
+export function portableSubjectIdFromPath(path: string): string {
+  return path.startsWith(PORTABLE_PLACEHOLDER_PREFIX) ? path.slice(PORTABLE_PLACEHOLDER_PREFIX.length) : "";
+}
+
+export function isPortablePlaceholderPath(path: string): boolean {
+  return Boolean(portableSubjectIdFromPath(path));
+}
+
 /**
  * Snapshot sizes are cached between bounded-history calculations. Helpers that
  * mutate snapshots in place must invalidate the corresponding cache entry.
@@ -387,16 +458,19 @@ function snapshotByteLength(snapshot: PersonalSnapshot): number {
 export function limitSnapshotStack(
   snapshots: PersonalSnapshot[],
   maxCount = 20,
-  maxBytes = MAX_UNDO_BYTES,
+  maxBytes?: number,
 ): PersonalSnapshot[] {
+  const byteBudget = maxBytes ?? (snapshots.some((snapshot) => Boolean(snapshot.portableIndex || snapshot.layoutSnapshots))
+    ? MAX_PORTABLE_UNDO_BYTES
+    : MAX_UNDO_BYTES);
   const kept: PersonalSnapshot[] = [];
   let bytes = 2;
   for (let index = snapshots.length - 1; index >= 0 && kept.length < maxCount; index -= 1) {
     const snapshot = snapshots[index];
     if (!snapshot) continue;
     const snapshotBytes = snapshotByteLength(snapshot);
-    if (snapshotBytes > maxBytes) continue;
-    if (bytes + snapshotBytes > maxBytes) break;
+    if (snapshotBytes > byteBudget) continue;
+    if (bytes + snapshotBytes > byteBudget) break;
     kept.unshift(snapshot);
     bytes += snapshotBytes;
   }
@@ -496,14 +570,23 @@ function rewriteSnapshotPrefixes(snapshot: PersonalSnapshot, oldPath: string, ne
   }
   if (rewritePathMapPrefixes(snapshot.indexGroupByPath, oldPath, newPath)) changed = true;
   if (rewriteCurriculumVisualPrefixes(snapshot.curriculumVisual, oldPath, newPath)) changed = true;
+  if (snapshot.portableIndex) {
+    for (const [subjectId, path] of Object.entries(snapshot.portableIndex.resolvedPathBySubjectId)) {
+      const next = replacePathPrefix(path, oldPath, newPath);
+      if (next !== path) {
+        snapshot.portableIndex.resolvedPathBySubjectId[subjectId] = next;
+        changed = true;
+      }
+    }
+  }
   // Renames mutate snapshots in place. Their cached serialized size is no
   // longer valid once any path inside the snapshot changes.
   if (changed) snapshotByteCache.delete(snapshot);
   return changed;
 }
 
-/** Rewrite one file path or every descendant of a renamed folder across plugin-owned state. */
-export function rewritePluginDataPathPrefix(data: PluginData, oldPath: string, newPath: string): boolean {
+/** Rewrite current plugin-owned state without changing any historical snapshots. */
+export function rewriteActivePluginDataPathPrefix(data: PluginData, oldPath: string, newPath: string): boolean {
   if (!oldPath || !newPath || oldPath === newPath) return false;
   let changed = false;
   for (const heading of data.collections) {
@@ -517,15 +600,13 @@ export function rewritePluginDataPathPrefix(data: PluginData, oldPath: string, n
   }
   if (rewritePathMapPrefixes(data.indexGroupByPath, oldPath, newPath)) changed = true;
   if (rewriteCurriculumVisualPrefixes(data.curriculumVisual, oldPath, newPath)) changed = true;
-  for (const snapshot of [...data.layoutSnapshots, ...data.undoStack, ...data.redoStack]) {
-    if (rewriteSnapshotPrefixes(snapshot, oldPath, newPath)) changed = true;
+  for (const [subjectId, path] of Object.entries(data.portableIndex.resolvedPathBySubjectId)) {
+    const next = replacePathPrefix(path, oldPath, newPath);
+    if (next !== path) {
+      data.portableIndex.resolvedPathBySubjectId[subjectId] = next;
+      changed = true;
+    }
   }
-  const layoutSnapshots = limitSnapshotStack(data.layoutSnapshots, 10);
-  const undoStack = limitSnapshotStack(data.undoStack);
-  const redoStack = limitSnapshotStack(data.redoStack);
-  if (layoutSnapshots.length !== data.layoutSnapshots.length) { data.layoutSnapshots = layoutSnapshots; changed = true; }
-  if (undoStack.length !== data.undoStack.length) { data.undoStack = undoStack; changed = true; }
-  if (redoStack.length !== data.redoStack.length) { data.redoStack = redoStack; changed = true; }
   const selectedPath = replacePathPrefix(data.selectedPath, oldPath, newPath);
   if (selectedPath !== data.selectedPath) {
     data.selectedPath = selectedPath;
@@ -535,8 +616,30 @@ export function rewritePluginDataPathPrefix(data: PluginData, oldPath: string, n
   return changed;
 }
 
-export function snapshotPersonal(data: PluginData, label: string): PersonalSnapshot {
-  return {
+/** Rewrite one file path or every descendant of a renamed folder across current and historical plugin state. */
+export function rewritePluginDataPathPrefix(data: PluginData, oldPath: string, newPath: string): boolean {
+  let changed = rewriteActivePluginDataPathPrefix(data, oldPath, newPath);
+  if (!oldPath || !newPath || oldPath === newPath) return changed;
+  for (const snapshot of [...data.layoutSnapshots, ...data.undoStack, ...data.redoStack]) {
+    if (rewriteSnapshotPrefixes(snapshot, oldPath, newPath)) changed = true;
+  }
+  const layoutSnapshots = limitSnapshotStack(data.layoutSnapshots, 10);
+  const undoStack = limitSnapshotStack(data.undoStack);
+  const redoStack = limitSnapshotStack(data.redoStack);
+  if (layoutSnapshots.length !== data.layoutSnapshots.length) { data.layoutSnapshots = layoutSnapshots; changed = true; }
+  if (undoStack.length !== data.undoStack.length) { data.undoStack = undoStack; changed = true; }
+  if (redoStack.length !== data.redoStack.length) { data.redoStack = redoStack; changed = true; }
+  return changed;
+}
+
+export function snapshotPersonal(
+  data: PluginData,
+  label: string,
+  includeSettings = false,
+  includePortableIndex = false,
+  includeLayoutSnapshots = false,
+): PersonalSnapshot {
+  const snapshot: PersonalSnapshot = {
     label,
     at: Date.now(),
     collections: cloneCollections(data.collections),
@@ -549,6 +652,10 @@ export function snapshotPersonal(data: PluginData, label: string): PersonalSnaps
     indexGroupByPath: clonePathMap(data.indexGroupByPath),
     indexGroupOrder: [...data.indexGroupOrder],
   };
+  if (includeSettings) snapshot.settings = structuredClone(data.settings);
+  if (includePortableIndex) snapshot.portableIndex = clonePortableIndex(data.portableIndex);
+  if (includeLayoutSnapshots) snapshot.layoutSnapshots = data.layoutSnapshots.map((item) => structuredClone(item));
+  return snapshot;
 }
 
 export function restoreSnapshot(data: PluginData, snapshot: PersonalSnapshot): void {
@@ -561,6 +668,9 @@ export function restoreSnapshot(data: PluginData, snapshot: PersonalSnapshot): v
   data.excludedIndexPaths = [...snapshot.excludedIndexPaths];
   data.indexGroupByPath = clonePathMap(snapshot.indexGroupByPath);
   data.indexGroupOrder = [...snapshot.indexGroupOrder];
+  if (snapshot.portableIndex) data.portableIndex = clonePortableIndex(snapshot.portableIndex);
+  if (snapshot.settings) data.settings = structuredClone(snapshot.settings);
+  if (snapshot.layoutSnapshots) data.layoutSnapshots = snapshot.layoutSnapshots.map((item) => structuredClone(item));
 }
 
 function cleanLayout(input: unknown): LayoutHeading[] {
@@ -623,8 +733,70 @@ function cleanSavedViews(input: unknown): SavedView[] {
   return views;
 }
 
-function safeObjectKey(key: string): boolean {
-  return key !== "__proto__" && key !== "constructor" && key !== "prototype";
+/**
+ * Keys stored in ordinary object-backed dictionaries must not resolve through
+ * Object.prototype. This covers the familiar mutation keys and inherited
+ * methods such as `toString` that otherwise look like existing path bindings.
+ */
+export function isSafeObjectKey(key: string): boolean {
+  return key !== "prototype" && !Object.prototype.hasOwnProperty.call(Object.prototype, key);
+}
+
+function isRecordKind(value: unknown): value is RecordKind {
+  return ["topic", "procedure", "medication", "syndrome", "proposal", "note"].includes(String(value));
+}
+
+export function cleanPortableIndex(input: unknown): PortableIndexLocalState {
+  const value = asUnknownRecord(input);
+  const groups: PortableGroupDefinition[] = [];
+  const groupIds = new Set<string>();
+  if (Array.isArray(value.groups)) {
+    for (const raw of value.groups as unknown[]) {
+      const group = asUnknownRecord(raw);
+      const id = asText(group.id);
+      const title = asText(group.title);
+      if (!id || !title || !isSafeObjectKey(id) || groupIds.has(id)) continue;
+      groupIds.add(id);
+      groups.push({ id, title, order: Number.isFinite(Number(group.order)) ? Number(group.order) : groups.length });
+    }
+  }
+  const subjects: PortableSubjectDefinition[] = [];
+  const subjectIds = new Set<string>();
+  if (Array.isArray(value.subjects)) {
+    for (const raw of value.subjects as unknown[]) {
+      const subject = asUnknownRecord(raw);
+      const id = asText(subject.id);
+      const title = asText(subject.title);
+      const groupId = asText(subject.groupId);
+      if (!id || !title || !groupIds.has(groupId) || !isSafeObjectKey(id) || subjectIds.has(id)) continue;
+      const parentId = subject.parentId === null ? null : asText(subject.parentId) || null;
+      subjectIds.add(id);
+      subjects.push({
+        id,
+        title,
+        groupId,
+        parentId,
+        order: Number.isFinite(Number(subject.order)) ? Number(subject.order) : subjects.length,
+        indexed: subject.indexed !== false,
+        configuredId: asText(subject.configuredId),
+        recordKind: isRecordKind(subject.recordKind) ? subject.recordKind : "topic",
+      });
+    }
+  }
+  const validSubjects = new Set(subjects.map((subject) => subject.id));
+  for (const subject of subjects) {
+    if (subject.parentId && (!validSubjects.has(subject.parentId) || subject.parentId === subject.id)) subject.parentId = null;
+  }
+  const resolvedPathBySubjectId: Record<string, string> = {};
+  const usedPaths = new Set<string>();
+  const rawBindings = asUnknownRecord(value.resolvedPathBySubjectId);
+  for (const [subjectId, rawPath] of Object.entries(rawBindings)) {
+    const path = asText(rawPath);
+    if (!isSafeObjectKey(subjectId) || !validSubjects.has(subjectId) || !path || usedPaths.has(path) || isPortablePlaceholderPath(path)) continue;
+    resolvedPathBySubjectId[subjectId] = path;
+    usedPaths.add(path);
+  }
+  return { version: 1, groups, subjects, resolvedPathBySubjectId };
 }
 
 function cleanCollapseState(input: unknown): ViewCollapseState {
@@ -645,14 +817,14 @@ export function cleanCurriculumVisual(input: unknown): CurriculumVisualState {
   if (raw.parentByPath && typeof raw.parentByPath === "object") {
     for (const [path, parent] of Object.entries(raw.parentByPath as Record<string, unknown>)) {
       const cleanPath = asText(path);
-      if (safeObjectKey(cleanPath) && cleanPath && (parent === null || typeof parent === "string")) parentByPath[cleanPath] = parent === null ? null : asText(parent);
+      if (isSafeObjectKey(cleanPath) && cleanPath && (parent === null || typeof parent === "string")) parentByPath[cleanPath] = parent === null ? null : asText(parent);
     }
   }
   const orderByContainer: Record<string, string[]> = {};
   if (raw.orderByContainer && typeof raw.orderByContainer === "object") {
     for (const [key, paths] of Object.entries(raw.orderByContainer as Record<string, unknown>)) {
       const cleanKey = asText(key);
-      if (safeObjectKey(cleanKey) && cleanKey) orderByContainer[cleanKey] = [...new Set(asStringList(paths))];
+      if (isSafeObjectKey(cleanKey) && cleanKey) orderByContainer[cleanKey] = [...new Set(asStringList(paths))];
     }
   }
   return { parentByPath, orderByContainer };
@@ -664,12 +836,12 @@ function cleanPathMap(input: unknown): Record<string, string> {
   for (const [path, value] of Object.entries(input as Record<string, unknown>)) {
     const cleanPath = asText(path);
     const cleanValue = asText(value);
-    if (safeObjectKey(cleanPath) && cleanPath && cleanValue) output[cleanPath] = cleanValue;
+    if (isSafeObjectKey(cleanPath) && cleanPath && cleanValue) output[cleanPath] = cleanValue;
   }
   return output;
 }
 
-function cleanSnapshots(input: unknown): PersonalSnapshot[] {
+function cleanSnapshots(input: unknown, allowNested = true): PersonalSnapshot[] {
   if (!Array.isArray(input)) return [];
   const snapshots: PersonalSnapshot[] = [];
   for (const raw of input as unknown[]) {
@@ -686,6 +858,11 @@ function cleanSnapshots(input: unknown): PersonalSnapshot[] {
       excludedIndexPaths: asStringList(snapshot.excludedIndexPaths),
       indexGroupByPath: cleanPathMap(snapshot.indexGroupByPath),
       indexGroupOrder: [...new Set(asStringList(snapshot.indexGroupOrder))],
+      portableIndex: snapshot.portableIndex === undefined ? undefined : cleanPortableIndex(snapshot.portableIndex),
+      settings: snapshot.settings === undefined ? undefined : cleanSettings(snapshot.settings),
+      layoutSnapshots: allowNested && snapshot.layoutSnapshots !== undefined
+        ? cleanSnapshots(snapshot.layoutSnapshots, false)
+        : undefined,
     });
   }
   return snapshots;
@@ -744,6 +921,7 @@ export function isRecognizedPluginData(input: unknown): boolean {
     "manualIndexPaths",
     "excludedIndexPaths",
     "indexGroupByPath",
+    "portableIndex",
     "settings",
   ].some((key) => Object.prototype.hasOwnProperty.call(loaded, key));
 }
@@ -756,7 +934,7 @@ export function migrateData(input: unknown): PluginData {
   // shape instead of being mistaken for v1. main.ts keeps them read-only.
   if (loadedVersion >= 3 || (loadedVersion === 0 && isRecognizedPluginData(loaded) && Object.keys(loaded).length > 0)) {
     return {
-      version: 9,
+      version: 10,
       collections: cleanLayout(loaded.collections),
       pinnedPaths: asStringList(loaded.pinnedPaths),
       nextStudyPaths: asStringList(loaded.nextStudyPaths),
@@ -766,6 +944,7 @@ export function migrateData(input: unknown): PluginData {
       excludedIndexPaths: asStringList(loaded.excludedIndexPaths),
       indexGroupByPath: cleanPathMap(loaded.indexGroupByPath),
       indexGroupOrder: [...new Set(asStringList(loaded.indexGroupOrder))],
+      portableIndex: cleanPortableIndex(loaded.portableIndex),
       selectedPath: asText(loaded.selectedPath),
       activeTab: isMainTab(loaded.activeTab) ? loaded.activeTab : DEFAULT_SETTINGS.defaultTab,
       settings: cleanSettings(loaded.settings, loadedVersion > 0 && loadedVersion <= 5),
@@ -785,7 +964,7 @@ export function migrateData(input: unknown): PluginData {
     const savedViews = cleanSavedViews(loaded.savedViews);
     const rawSettings = loaded.settings && typeof loaded.settings === "object" ? loaded.settings as Record<string, unknown> : {};
     return {
-      version: 9,
+      version: 10,
       collections,
       pinnedPaths,
       nextStudyPaths,
@@ -795,6 +974,7 @@ export function migrateData(input: unknown): PluginData {
       excludedIndexPaths: [],
       indexGroupByPath: {},
       indexGroupOrder: [],
+      portableIndex: cleanPortableIndex(loaded.portableIndex),
       selectedPath: asText(loaded.selectedPath),
       activeTab: isMainTab(loaded.activeTab) ? loaded.activeTab : DEFAULT_SETTINGS.defaultTab,
       settings: cleanSettings(rawSettings, true),
@@ -918,7 +1098,10 @@ function sortCurriculumNodes(roots: CurriculumTreeNode[], state: CurriculumVisua
 
 /** Build the effective visual tree while safely ignoring invalid, cross-domain, and cyclic overrides. */
 export function buildCurriculumTree(records: VaultRecord[], state: CurriculumVisualState): CurriculumTreeResult {
-  const topics = records.filter((record) => record.kind === "topic" && (record.role === "canonical" || record.role === "supporting"));
+  const topics = records.filter((record) => record.kind === "topic" && (record.role === "canonical"
+    || record.role === "supporting"
+    || (record.role === "placeholder" && record.portableIndexed !== false)
+    || record.portableIndexed === true));
   const byPath = new Map(topics.map((record) => [record.path, record]));
   const lookup = buildCurriculumLookup(topics);
   const parentByPath = new Map<string, string | null>();
@@ -1049,7 +1232,10 @@ export function replaceCurriculumVisualPath(state: CurriculumVisualState, oldPat
 }
 
 export function reconcileCurriculumVisual(state: CurriculumVisualState, records: VaultRecord[], groupByPath: Record<string, string> = {}): boolean {
-  const topics = new Map(records.filter((record) => record.kind === "topic" && (record.role === "canonical" || record.role === "supporting")).map((record) => [record.path, record]));
+  const topics = new Map(records.filter((record) => record.kind === "topic" && (record.role === "canonical"
+    || record.role === "supporting"
+    || record.role === "placeholder"
+    || record.portableIndexed === true)).map((record) => [record.path, record]));
   let changed = false;
   for (const [path, parentPath] of Object.entries(state.parentByPath)) {
     const record = topics.get(path);
@@ -1334,8 +1520,22 @@ export function validateWritableFolderPath(folder: string, configDir: string): s
 
 export function validateProposalFolderPath(folder: string, configDir: string): string | null {
   const clean = folder.trim().replace(/^\/+|\/+$/g, "");
+  const writableError = validateWritableFolderPath(clean, configDir);
+  if (writableError) return writableError;
   if (!clean.startsWith("01 Inbox/")) return "The proposal folder must be a subfolder inside 01 Inbox.";
   if (isRestrictedVaultPath(`${clean}/`, configDir)) return "The proposal folder cannot use a restricted vault area.";
+  return null;
+}
+
+/** Validate a template reference before any later note-creation flow reads it. */
+export function validateTemplateFilePath(templatePath: string, templatesFolder: string, configDir: string): string | null {
+  const cleanPath = templatePath.trim().replace(/^\/+/, "").normalize("NFC");
+  const cleanRoot = templatesFolder.trim().replace(/^\/+|\/+$/g, "").normalize("NFC");
+  if (!cleanPath) return "Choose a template, or switch the starting content to Empty note.";
+  const pathError = validateWritableFolderPath(cleanPath, configDir);
+  if (pathError) return "The template path uses a restricted vault area.";
+  if (isImmutableSourcePath(cleanPath)) return "Immutable source-book files cannot be used as note templates.";
+  if (cleanRoot && !pathIsInsideFolder(cleanPath, cleanRoot)) return `The template must be inside ${cleanRoot}.`;
   return null;
 }
 
@@ -1603,7 +1803,7 @@ export interface IndexDiagnostic {
 export function buildIndexDiagnostics(data: PluginData, records: VaultRecord[], existingPaths: Set<string>): IndexDiagnostic[] {
   const diagnostics: IndexDiagnostic[] = [];
   const addMissing = (path: string, owner: string): void => {
-    if (!path || existingPaths.has(path)) return;
+    if (!path || existingPaths.has(path) || isPortablePlaceholderPath(path)) return;
     diagnostics.push({ id: `missing:${owner}:${path}`, kind: "missing-note", title: "Missing note reference", detail: `${owner} references a note that no longer exists.`, path });
   };
   for (const path of data.manualIndexPaths) addMissing(path, "Manual index membership");
@@ -1623,7 +1823,10 @@ export function buildIndexDiagnostics(data: PluginData, records: VaultRecord[], 
     for (const subheading of heading.subheadings) inspect(subheading.subjects, `Collection “${heading.title} / ${subheading.title}”`);
   }
 
-  const topics = records.filter((record) => record.kind === "topic" && (record.role === "canonical" || record.role === "supporting"));
+  const topics = records.filter((record) => record.kind === "topic" && (record.role === "canonical"
+    || record.role === "supporting"
+    || record.role === "placeholder"
+    || record.portableIndexed === true));
   const topicByPath = new Map(topics.map((record) => [record.path, record]));
   const linksByDomain = new Map<string, Map<string, Set<string>>>();
   for (const topic of topics) {
@@ -1695,6 +1898,7 @@ export function parseWorkspaceConfig(input: unknown): WorkspaceConfig {
   if (!input || typeof input !== "object") throw new Error("The selected file is not a Command Center workspace configuration.");
   const value = input as Record<string, unknown>;
   if (value.kind !== "knowledge-base-command-center-workspace" || value.version !== 1) throw new Error("Unsupported Command Center workspace configuration.");
+  transferArrayLength(value.indexGroupOrder, "Workspace group order", MAX_TRANSFER_COLLECTIONS);
   return {
     kind: "knowledge-base-command-center-workspace",
     version: 1,
@@ -1706,7 +1910,7 @@ export function parseWorkspaceConfig(input: unknown): WorkspaceConfig {
 
 export interface PersonalBackup {
   kind: "ent-vault-command-center-personal-backup";
-  version: 3;
+  version: 4;
   exportedAt: string;
   collections: LayoutHeading[];
   pinnedPaths: string[];
@@ -1718,12 +1922,13 @@ export interface PersonalBackup {
   indexGroupByPath: Record<string, string>;
   indexGroupOrder: string[];
   layoutSnapshots: PersonalSnapshot[];
+  portableIndex: PortableIndexLocalState;
 }
 
 export function createPersonalBackup(data: PluginData, exportedAt: string): PersonalBackup {
   return {
     kind: "ent-vault-command-center-personal-backup",
-    version: 3,
+    version: 4,
     exportedAt,
     collections: cloneCollections(data.collections),
     pinnedPaths: [...data.pinnedPaths],
@@ -1735,18 +1940,133 @@ export function createPersonalBackup(data: PluginData, exportedAt: string): Pers
     indexGroupByPath: clonePathMap(data.indexGroupByPath),
     indexGroupOrder: [...data.indexGroupOrder],
     layoutSnapshots: cleanSnapshots(data.layoutSnapshots),
+    portableIndex: clonePortableIndex(data.portableIndex),
   };
+}
+
+interface TransferValidationBudget {
+  references: number;
+  collectionStructures: number;
+  snapshots: number;
+}
+
+function transferArrayLength(input: unknown, label: string, max: number): number {
+  if (!Array.isArray(input)) return 0;
+  if (input.length > max) throw new Error(`${label} has too many entries.`);
+  return input.length;
+}
+
+function addTransferReferenceCount(budget: TransferValidationBudget, count: number, label: string): void {
+  if (count > MAX_TRANSFER_LIST_ITEMS) throw new Error(`${label} has too many references.`);
+  if (budget.references > MAX_TRANSFER_TOTAL_REFERENCES - count) {
+    throw new Error(`The recovery backup contains more than ${MAX_TRANSFER_TOTAL_REFERENCES.toLocaleString()} references.`);
+  }
+  budget.references += count;
+}
+
+function validateRecoveryReferenceList(input: unknown, label: string, budget: TransferValidationBudget): void {
+  const count = Array.isArray(input) ? input.length : typeof input === "string" && input.trim() ? 1 : 0;
+  addTransferReferenceCount(budget, count, label);
+}
+
+function ownEntryCount(input: unknown, label: string): number {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return 0;
+  let count = 0;
+  for (const key in input as Record<string, unknown>) {
+    if (!Object.prototype.hasOwnProperty.call(input, key)) continue;
+    count += 1;
+    if (count > MAX_TRANSFER_LIST_ITEMS) throw new Error(`${label} has too many entries.`);
+  }
+  return count;
+}
+
+function validateRecoveryPortableIndex(input: unknown, label: string, budget: TransferValidationBudget): void {
+  const value = asUnknownRecord(input);
+  transferArrayLength(value.groups, `${label} groups`, MAX_TRANSFER_COLLECTIONS);
+  transferArrayLength(value.subjects, `${label} subjects`, MAX_TRANSFER_LIST_ITEMS);
+  addTransferReferenceCount(budget, ownEntryCount(value.resolvedPathBySubjectId, `${label} note bindings`), `${label} note bindings`);
+}
+
+function validateRecoveryVisual(input: unknown, label: string, budget: TransferValidationBudget): void {
+  const value = asUnknownRecord(input);
+  const parentCount = ownEntryCount(value.parentByPath, `${label} parent map`);
+  addTransferReferenceCount(budget, parentCount, `${label} parent map`);
+  const orders = asUnknownRecord(value.orderByContainer);
+  ownEntryCount(orders, `${label} order containers`);
+  for (const [key, paths] of Object.entries(orders)) {
+    validateRecoveryReferenceList(paths, `${label} order ${key}`, budget);
+  }
+}
+
+function validateRecoveryCollections(input: unknown, label: string, budget: TransferValidationBudget): void {
+  const collectionCount = transferArrayLength(input, label, MAX_TRANSFER_COLLECTIONS);
+  if (budget.collectionStructures > MAX_TRANSFER_COLLECTIONS - collectionCount) {
+    throw new Error(`The recovery backup contains too many collections and subheadings.`);
+  }
+  budget.collectionStructures += collectionCount;
+  if (!Array.isArray(input)) return;
+  for (const [collectionIndex, raw] of input.entries()) {
+    const collection = asUnknownRecord(raw);
+    validateRecoveryReferenceList(collection.subjects, `${label} ${collectionIndex + 1} subjects`, budget);
+    const subheadingCount = transferArrayLength(collection.subheadings, `${label} ${collectionIndex + 1} subheadings`, MAX_TRANSFER_COLLECTIONS);
+    if (budget.collectionStructures > MAX_TRANSFER_COLLECTIONS - subheadingCount) {
+      throw new Error(`The recovery backup contains too many collections and subheadings.`);
+    }
+    budget.collectionStructures += subheadingCount;
+    if (!Array.isArray(collection.subheadings)) continue;
+    for (const [subheadingIndex, rawSubheading] of collection.subheadings.entries()) {
+      const subheading = asUnknownRecord(rawSubheading);
+      validateRecoveryReferenceList(
+        subheading.subjects,
+        `${label} ${collectionIndex + 1} subheading ${subheadingIndex + 1} subjects`,
+        budget,
+      );
+    }
+  }
+}
+
+function validateRecoverySnapshot(input: unknown, label: string, budget: TransferValidationBudget, remainingSnapshotLevels: number): void {
+  const value = asUnknownRecord(input);
+  validateRecoveryCollections(value.collections, `${label} collections`, budget);
+  for (const [key, list] of [
+    ["pins", value.pinnedPaths],
+    ["Next list", value.nextStudyPaths],
+    ["manual index", value.manualIndexPaths],
+    ["hidden index", value.excludedIndexPaths],
+  ] as const) validateRecoveryReferenceList(list, `${label} ${key}`, budget);
+  transferArrayLength(value.savedViews, `${label} saved views`, MAX_TRANSFER_COLLECTIONS);
+  transferArrayLength(value.indexGroupOrder, `${label} group order`, MAX_TRANSFER_COLLECTIONS);
+  addTransferReferenceCount(budget, ownEntryCount(value.indexGroupByPath, `${label} visual groups`), `${label} visual groups`);
+  validateRecoveryVisual(value.curriculumVisual, `${label} visual hierarchy`, budget);
+  if (value.portableIndex !== undefined) validateRecoveryPortableIndex(value.portableIndex, `${label} portable index`, budget);
+  if (remainingSnapshotLevels <= 0 || value.layoutSnapshots === undefined) return;
+  const snapshotCount = transferArrayLength(value.layoutSnapshots, `${label} named snapshots`, MAX_TRANSFER_SNAPSHOTS);
+  if (budget.snapshots > MAX_TRANSFER_SNAPSHOTS - snapshotCount) throw new Error(`The recovery backup contains too many named snapshots.`);
+  budget.snapshots += snapshotCount;
+  if (!Array.isArray(value.layoutSnapshots)) return;
+  value.layoutSnapshots.forEach((snapshot, index) => validateRecoverySnapshot(
+    snapshot,
+    `${label} snapshot ${index + 1}`,
+    budget,
+    remainingSnapshotLevels - 1,
+  ));
+}
+
+function validatePersonalBackupTransferShape(value: Record<string, unknown>): void {
+  const budget: TransferValidationBudget = { references: 0, collectionStructures: 0, snapshots: 0 };
+  validateRecoverySnapshot(value, "Recovery", budget, 2);
 }
 
 export function parsePersonalBackup(input: unknown): PersonalBackup {
   if (!input || typeof input !== "object") throw new Error("The selected file is not a Command Center backup.");
   const value = input as Record<string, unknown>;
-  if (value.kind !== "ent-vault-command-center-personal-backup" || ![1, 2, 3].includes(Number(value.version))) {
+  if (value.kind !== "ent-vault-command-center-personal-backup" || ![1, 2, 3, 4].includes(Number(value.version))) {
     throw new Error("Unsupported Command Center backup format.");
   }
+  validatePersonalBackupTransferShape(value);
   return {
     kind: "ent-vault-command-center-personal-backup",
-    version: 3,
+    version: 4,
     exportedAt: asText(value.exportedAt),
     collections: cleanLayout(value.collections),
     pinnedPaths: asStringList(value.pinnedPaths),
@@ -1758,6 +2078,7 @@ export function parsePersonalBackup(input: unknown): PersonalBackup {
     indexGroupByPath: cleanPathMap(value.indexGroupByPath),
     indexGroupOrder: [...new Set(asStringList(value.indexGroupOrder))],
     layoutSnapshots: cleanSnapshots(value.layoutSnapshots),
+    portableIndex: cleanPortableIndex(value.portableIndex),
   };
 }
 
@@ -1766,6 +2087,7 @@ export function roleLabel(record: Pick<VaultRecord, "role" | "kind">): string {
   if (record.role === "supporting") return "Supporting note";
   if (record.role === "proposal") return "Topic proposal";
   if (record.role === "vault-note") return "Vault note";
+  if (record.role === "placeholder") return "No note yet";
   return record.kind[0]?.toUpperCase() + record.kind.slice(1);
 }
 

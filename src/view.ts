@@ -1,6 +1,7 @@
 import { ItemView, Menu, Notice, Platform, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
 import { IndexManagerModal, type ManagerTab } from "./index-manager";
+import { ExportImportCenterModal } from "./portability-modal";
 import {
   buildCurriculumTree,
   canonicalPath,
@@ -41,6 +42,7 @@ import {
   PluginSettings,
   unknownQueryTokens,
   validateWritableFolderPath,
+  validateTemplateFilePath,
   VaultRecord,
   visualPlacementPathSet,
 } from "./model";
@@ -279,7 +281,110 @@ export class EntVaultCommandCenterView extends ItemView {
     new IndexManagerModal(this.plugin, initialTab).open();
   }
 
-  public startCreateKnowledgeNote(initial: Partial<GenericNoteFormValue> = {}, indexAfterCreate = !this.plugin.isClinicalMode()): void {
+  public openPortabilityCenter(mode: "export" | "import" = "export"): void {
+    new ExportImportCenterModal(this.plugin, mode).open();
+  }
+
+  private openPortableSubjectLinkPicker(record: VaultRecord): void {
+    const subjectId = record.portableId;
+    if (!subjectId) {
+      new Notice("This imported subject has no portable identity.");
+      return;
+    }
+    const currentPath = this.plugin.data.portableIndex.resolvedPathBySubjectId[subjectId] ?? "";
+    const files = this.plugin.getVaultNoteFiles(false).filter((file) => file.path !== currentPath);
+    if (files.length === 0) {
+      new Notice(currentPath
+        ? "No other eligible Markdown notes are available to link."
+        : "No eligible Markdown notes are available to link.");
+      return;
+    }
+    new VaultFilePickerModal(
+      this.app,
+      files,
+      `${currentPath ? "Change linked note for" : "Link note to"} “${record.title}”`,
+      (file) => this.resolvePortableSubjectLink(subjectId, record.title, file),
+    ).open();
+  }
+
+  private async resolvePortableSubjectLink(subjectId: string, subjectTitle: string, file: TFile): Promise<void> {
+    const existingOwnerId = Object.entries(this.plugin.data.portableIndex.resolvedPathBySubjectId)
+      .find(([candidateId, path]) => candidateId !== subjectId && path === file.path)?.[0] ?? "";
+    if (existingOwnerId) {
+      const existingOwner = this.plugin.getPortableSubject(existingOwnerId);
+      new ConfirmModal(
+        this.app,
+        "Merge portable subjects?",
+        `“${file.basename}” is already linked to the imported subject “${existingOwner?.title ?? file.basename}”. Linking it to “${subjectTitle}” will merge that portable identity into this subject and remove the duplicate identity. The Markdown note will not be changed, and Undo remains available.`,
+        "Merge and link",
+        async () => {
+          await this.plugin.resolvePortableSubject(subjectId, file.path, true);
+          new Notice(`Linked “${subjectTitle}” to “${file.basename}” after merging the duplicate portable identity. The Markdown note was not changed.`);
+        },
+      ).open();
+      return;
+    }
+    await this.plugin.resolvePortableSubject(subjectId, file.path);
+    new Notice(`Linked “${subjectTitle}” to “${file.basename}”. The Markdown note was not changed.`);
+  }
+
+  private confirmPortableSubjectUnlink(record: VaultRecord): void {
+    const subjectId = record.portableId;
+    if (!subjectId) {
+      new Notice("This note has no portable subject identity to unlink.");
+      return;
+    }
+    new ConfirmModal(
+      this.app,
+      "Unlink note from imported subject?",
+      `“${record.title}” will return to a No note placeholder with its imported hierarchy and personal organization. The Markdown note at ${record.path} will not be moved, changed, or deleted. Undo remains available.`,
+      "Unlink note",
+      async () => {
+        await this.plugin.unlinkPortableSubject(subjectId);
+        new Notice(`Unlinked “${record.title}”. The imported subject is a placeholder again, and the Markdown note was not changed.`);
+      },
+    ).open();
+  }
+
+  private openPlaceholderActions(record: VaultRecord): void {
+    if (!record.portableId) {
+      new Notice("This imported subject has no portable identity.");
+      return;
+    }
+    const settings = this.plugin.data.settings;
+    const actions = this.plugin.isClinicalMode()
+      ? [
+          ...(record.kind === "topic" ? [{ id: "proposal", title: "Create unverified proposal", description: "Create a safety-gated topic proposal in the configured clinical Inbox, then link it.", icon: "shield-alert" }] : []),
+          { id: "link", title: "Link existing note", description: "Connect this subject to an existing Markdown note without changing that note.", icon: "link" },
+          { id: "keep", title: "Keep placeholder", description: "Leave the subject in the index with no Markdown note for now.", icon: "bookmark" },
+        ]
+      : [
+          { id: "empty", title: "Create empty note", description: "Create a blank Markdown note and retain this subject’s group and hierarchy.", icon: "file-plus" },
+          { id: "template", title: "Create from template", description: "Choose a local template, create a note, and retain this subject’s placement.", icon: "copy-plus" },
+          { id: "link", title: "Link existing note", description: "Connect this subject to an existing Markdown note without changing that note.", icon: "link" },
+          { id: "keep", title: "Keep placeholder", description: "Leave the subject in the index with no Markdown note for now.", icon: "bookmark" },
+        ];
+    new AddActionModal(this.app, actions, (action) => {
+      const resolve = (file: TFile): Promise<void> => this.plugin.resolvePortableSubject(record.portableId ?? "", file.path);
+      if (action.id === "empty") {
+        this.startCreateKnowledgeNote({ title: record.title, folder: settings.defaultNoteFolder, mode: "empty" }, false, resolve);
+      } else if (action.id === "template") {
+        this.startCreateKnowledgeNote({ title: record.title, folder: settings.defaultNoteFolder, mode: "template", templatePath: settings.defaultTemplatePath }, false, resolve);
+      } else if (action.id === "proposal") {
+        this.startCreateProposal({ title: record.title, domain: record.domain, topicKind: "condition", priority: "P2", safetyCritical: false }, resolve);
+      } else if (action.id === "link") {
+        this.openPortableSubjectLinkPicker(record);
+      } else {
+        new Notice(`“${record.title}” remains available as a placeholder.`);
+      }
+    }, `Complete “${record.title}”`).open();
+  }
+
+  public startCreateKnowledgeNote(
+    initial: Partial<GenericNoteFormValue> = {},
+    indexAfterCreate = !this.plugin.isClinicalMode(),
+    onCreated?: (file: TFile) => void | Promise<void>,
+  ): void {
     const settings = this.plugin.data.settings;
     new KnowledgeNoteModal(this.app, {
       itemSingular: settings.itemSingular,
@@ -294,7 +399,9 @@ export class EntVaultCommandCenterView extends ItemView {
       validate: (value) => this.plugin.validateGenericNote(value),
       onSubmit: async (value) => {
         const file = await this.plugin.createKnowledgeNote(value);
-        if (indexAfterCreate && !this.plugin.isClinicalMode()) {
+        if (onCreated) {
+          await onCreated(file);
+        } else if (indexAfterCreate && !this.plugin.isClinicalMode()) {
           await this.plugin.mutate(`Add created ${settings.itemSingular} to ${settings.indexLabel}`, () => {
             this.plugin.data.excludedIndexPaths = this.plugin.data.excludedIndexPaths.filter((path) => path !== file.path);
             if (!pathIsInsideFolder(file.path, settings.primaryFolder) && !this.plugin.data.manualIndexPaths.includes(file.path)) {
@@ -307,7 +414,9 @@ export class EntVaultCommandCenterView extends ItemView {
           await this.plugin.savePluginData();
           await this.reload();
         }
-        new Notice(`${settings.itemSingular[0]?.toUpperCase() ?? "N"}${settings.itemSingular.slice(1)} created${indexAfterCreate && !this.plugin.isClinicalMode() ? ` and added to ${settings.indexLabel}` : ""}. Existing notes were not changed.`);
+        new Notice(onCreated
+          ? `${settings.itemSingular[0]?.toUpperCase() ?? "N"}${settings.itemSingular.slice(1)} created and linked to the imported subject.`
+          : `${settings.itemSingular[0]?.toUpperCase() ?? "N"}${settings.itemSingular.slice(1)} created${indexAfterCreate && !this.plugin.isClinicalMode() ? ` and added to ${settings.indexLabel}` : ""}. Existing notes were not changed.`);
         if (value.addToCollection) this.openCollectionPicker(file.path);
         await this.plugin.openFile(file);
       },
@@ -323,6 +432,8 @@ export class EntVaultCommandCenterView extends ItemView {
         if (error) throw new Error(error);
       }
       if (value.defaultNewNoteMode === "template") {
+        const templatePathError = validateTemplateFilePath(value.defaultTemplatePath, value.templatesFolder, this.app.vault.configDir);
+        if (templatePathError) throw new Error(templatePathError);
         const template = this.app.vault.getAbstractFileByPath(value.defaultTemplatePath);
         if (!(template instanceof TFile)) throw new Error("The selected default template could not be found.");
       }
@@ -397,7 +508,7 @@ export class EntVaultCommandCenterView extends ItemView {
     this.openCollectionPicker(file.path);
   }
 
-  public startCreateProposal(initial: Partial<TopicFormValue> = {}): void {
+  public startCreateProposal(initial: Partial<TopicFormValue> = {}, onCreated?: (file: TFile) => void | Promise<void>): void {
     new TopicEditorModal(this.app, {
       mode: "proposal",
       title: "Create topic proposal",
@@ -408,11 +519,24 @@ export class EntVaultCommandCenterView extends ItemView {
       validate: (value) => this.plugin.validateProposal(value),
       onSubmit: async (value) => {
         const file = await this.plugin.createProposal(value);
-        this.plugin.data.activeTab = "inbox";
-        this.plugin.data.selectedPath = file.path;
-        await this.plugin.savePluginData();
-        await this.reload();
-        new Notice("Topic proposal created as unverified in the inbox.");
+        if (onCreated) {
+          await onCreated(file);
+          // Route to the newly created Inbox proposal. Its portable subject
+          // also remains projected in the index until promotion.
+          this.plugin.data.activeTab = "inbox";
+          this.plugin.data.selectedPath = file.path;
+          this.mobileInspectorOpen = false;
+          this.mobileInspectorNeedsFocus = false;
+          await this.plugin.savePluginData();
+          await this.reload();
+          new Notice("Unverified topic proposal created and linked to the imported subject.");
+        } else {
+          this.plugin.data.activeTab = "inbox";
+          this.plugin.data.selectedPath = file.path;
+          await this.plugin.savePluginData();
+          await this.reload();
+          new Notice("Topic proposal created as unverified in the inbox.");
+        }
         if (value.addToCollection) this.openCollectionPicker(file.path);
       },
     }).open();
@@ -725,7 +849,10 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private tabCount(tab: MainTab): number {
-    if (tab === "curriculum") return this.records.filter((record) => record.kind === "topic" && (record.role === "canonical" || record.role === "supporting")).length;
+    if (tab === "curriculum") return this.records.filter((record) => record.kind === "topic" && (record.role === "canonical"
+      || record.role === "supporting"
+      || (record.role === "placeholder" && record.portableIndexed !== false)
+      || record.portableIndexed === true)).length;
     if (tab === "inbox") return this.records.filter((record) => record.role === "proposal").length;
     if (tab === "collections") return new Set(collectionPaths(this.plugin.data.collections)).size;
     if (tab === "queues") return uniqueRecords(queueRecords(this.smartQueues())).length;
@@ -810,7 +937,10 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private recordsForActiveTab(): VaultRecord[] {
     const tab = this.plugin.data.activeTab;
-    if (tab === "curriculum") return this.records.filter((record) => record.role === "canonical" || record.role === "supporting");
+    if (tab === "curriculum") return this.records.filter((record) => record.role === "canonical"
+      || record.role === "supporting"
+      || (record.role === "placeholder" && record.kind === "topic" && record.portableIndexed !== false)
+      || (record.kind === "topic" && record.portableIndexed === true));
     if (tab === "inbox") return this.records.filter((record) => record.role === "proposal");
     if (tab === "collections") return this.records;
     if (tab === "procedures") return this.records.filter((record) => record.kind === "procedure");
@@ -1006,7 +1136,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const collapsed = this.collapsedCurriculumNodes.has(record.path) && !this.query;
     const section = parent.createDiv({ cls: "ent-cc-curriculum-node" });
     const row = section.createDiv({
-      cls: `ent-cc-row ent-cc-subject-row ent-cc-curriculum-row ${this.plugin.data.selectedPath === record.path ? "is-selected" : ""}`,
+      cls: `ent-cc-row ent-cc-subject-row ent-cc-curriculum-row ${record.isPlaceholder ? "ent-cc-placeholder-row" : ""} ${this.plugin.data.selectedPath === record.path ? "is-selected" : ""}`,
     });
     row.addClass(`ent-cc-depth-${Math.min(depth, 12)}`);
     if (node.children.length > 0) {
@@ -1028,14 +1158,19 @@ export class EntVaultCommandCenterView extends ItemView {
       this.applyCurriculumRowDrop(row, record);
     } else {
       const icon = row.createSpan({ cls: "ent-cc-leading-icon ent-cc-record-icon" });
-      setIcon(icon, record.role === "supporting" ? "files" : "file-text");
+      setIcon(icon, record.isPlaceholder ? "file-question" : record.role === "supporting" ? "files" : "file-text");
     }
     const title = row.createEl("button", {
       cls: "ent-cc-subject-title",
       text: record.title,
-      attr: { dir: "auto", "aria-label": `${record.title}, ${this.recordRoleName(record)}. Space selects; Enter opens; M adds to a collection; P pins.` },
+      attr: { dir: "auto", "aria-label": record.isPlaceholder
+        ? `${record.title}, no note yet. Space selects; Enter creates or links a note; M adds to a collection; P pins.`
+        : `${record.title}, ${this.recordRoleName(record)}. Space selects; Enter opens; M adds to a collection; P pins.` },
     });
-    title.addEventListener("click", () => this.selectRecord(record.path));
+    title.addEventListener("click", () => {
+      if (record.isPlaceholder) this.openPlaceholderActions(record);
+      else this.selectRecord(record.path);
+    });
     title.addEventListener("keydown", (event) => {
       if (!shouldHandleRowShortcut(true, event.key) && event.key !== " ") return;
       if (event.key === "Enter") { event.preventDefault(); this.run(() => this.openRecord(record.path)); }
@@ -1044,8 +1179,9 @@ export class EntVaultCommandCenterView extends ItemView {
       if (event.key.toLowerCase() === "p" && !event.metaKey && !event.ctrlKey) { event.preventDefault(); this.run(() => this.togglePin(record.path)); }
     });
     this.attachHoverPreview(title, record);
-    row.createSpan({ text: record.curriculumId || (this.plugin.isClinicalMode() ? "supporting" : this.plugin.data.settings.itemSingular), cls: "ent-cc-subject-id", attr: { dir: "auto" } });
+    row.createSpan({ text: record.isPlaceholder ? "No note yet" : record.curriculumId || (this.plugin.isClinicalMode() ? "supporting" : this.plugin.data.settings.itemSingular), cls: "ent-cc-subject-id", attr: { dir: "auto" } });
     const badges = row.createDiv({ cls: "ent-cc-row-badges" });
+    if (record.isPlaceholder) badges.createSpan({ text: "No note", cls: "ent-cc-placeholder-badge" });
     if (this.hasCurriculumVisualPlacement(record.path)) {
       const visual = badges.createSpan({ cls: "ent-cc-visual-badge", attr: { title: "Custom visual placement" } });
       setIcon(visual, "move");
@@ -1206,6 +1342,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private recordRoleName(record: VaultRecord): string {
+    if (record.isPlaceholder) return "No note yet";
     if (this.plugin.isClinicalMode()) return roleLabel(record);
     if (record.kind === "topic") return `Indexed ${this.plugin.data.settings.itemSingular}`;
     if (record.role === "proposal") return `${this.plugin.data.settings.inboxLabel} ${this.plugin.data.settings.itemSingular}`;
@@ -1214,7 +1351,7 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private renderRecordRow(parent: HTMLElement, record: VaultRecord, level: number, membership?: Membership): void {
     const row = parent.createDiv({
-      cls: `ent-cc-row ent-cc-subject-row ent-cc-level-${level} ${this.plugin.data.selectedPath === record.path ? "is-selected" : ""}`,
+      cls: `ent-cc-row ent-cc-subject-row ent-cc-level-${level} ${record.isPlaceholder ? "ent-cc-placeholder-row" : ""} ${this.plugin.data.selectedPath === record.path ? "is-selected" : ""}`,
     });
     if (membership && this.editMode && !Platform.isMobile) {
       const handle = iconButton(row, "grip-vertical", `Drag ${record.title}`, "ent-cc-drag-handle");
@@ -1225,14 +1362,19 @@ export class EntVaultCommandCenterView extends ItemView {
       this.applyRowDrop(row, membership, record.path);
     } else {
       const icon = row.createSpan({ cls: "ent-cc-leading-icon ent-cc-record-icon" });
-      setIcon(icon, record.role === "proposal" ? "inbox" : record.role === "supporting" ? "files" : record.role === "vault-note" ? "sticky-note" : record.kind === "topic" ? "file-text" : record.kind === "procedure" ? "clipboard-list" : record.kind === "medication" ? "pill" : "dna");
+      setIcon(icon, record.isPlaceholder ? "file-question" : record.role === "proposal" ? "inbox" : record.role === "supporting" ? "files" : record.role === "vault-note" ? "sticky-note" : record.kind === "topic" ? "file-text" : record.kind === "procedure" ? "clipboard-list" : record.kind === "medication" ? "pill" : "dna");
     }
     const title = row.createEl("button", {
       cls: "ent-cc-subject-title",
       text: record.title,
-      attr: { dir: "auto", "aria-label": `${record.title}, ${this.recordRoleName(record)}. Space selects; Enter opens; M adds to a collection; P pins.` },
+      attr: { dir: "auto", "aria-label": record.isPlaceholder
+        ? `${record.title}, no note yet. Space selects; Enter creates or links a note; M adds to a collection; P pins.`
+        : `${record.title}, ${this.recordRoleName(record)}. Space selects; Enter opens; M adds to a collection; P pins.` },
     });
-    title.addEventListener("click", () => this.selectRecord(record.path));
+    title.addEventListener("click", () => {
+      if (record.isPlaceholder) this.openPlaceholderActions(record);
+      else this.selectRecord(record.path);
+    });
     title.addEventListener("keydown", (event) => {
       if (!shouldHandleRowShortcut(true, event.key) && event.key !== " ") return;
       if (event.key === "Enter") { event.preventDefault(); this.run(() => this.openRecord(record.path)); }
@@ -1242,13 +1384,14 @@ export class EntVaultCommandCenterView extends ItemView {
     });
     this.attachHoverPreview(title, record);
     row.createSpan({
-      text: record.curriculumId || (this.plugin.isClinicalMode()
+      text: record.isPlaceholder ? "No note yet" : record.curriculumId || (this.plugin.isClinicalMode()
         ? record.role === "supporting" ? "supporting" : record.role === "proposal" ? "proposal" : record.role === "vault-note" ? "vault note" : record.kind
         : record.role === "proposal" ? this.plugin.data.settings.inboxLabel : record.role === "vault-note" ? "vault note" : this.plugin.data.settings.itemSingular),
       cls: "ent-cc-subject-id",
       attr: { dir: "auto" },
     });
     const badges = row.createDiv({ cls: "ent-cc-row-badges" });
+    if (record.isPlaceholder) badges.createSpan({ text: "No note", cls: "ent-cc-placeholder-badge" });
     if (record.priority) badges.createSpan({ text: record.priority, cls: `ent-cc-priority ${record.priority === "P1" ? "is-urgent" : ""}` });
     if (this.plugin.isClinicalMode() && this.plugin.data.settings.showSafetyBadges && record.safetyCritical) {
       const safety = badges.createSpan({ cls: "ent-cc-safety-badge", attr: { title: "Safety-critical" } });
@@ -1267,7 +1410,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private attachHoverPreview(element: HTMLElement, record: VaultRecord): void {
-    if (!this.plugin.data.settings.enableHoverPreview) return;
+    if (!this.plugin.data.settings.enableHoverPreview || record.isPlaceholder) return;
     element.addEventListener("mouseover", (event) => {
       this.app.workspace.trigger("hover-link", {
         event,
@@ -1383,6 +1526,33 @@ export class EntVaultCommandCenterView extends ItemView {
     body.createDiv({ cls: "ent-cc-inspector-kind", text: this.recordRoleName(record) });
     body.createEl("h3", { text: record.title, attr: { id: titleId, dir: "auto" } });
     this.inspectorEl.setAttribute("aria-labelledby", `${labelId} ${titleId}`);
+    if (record.isPlaceholder) {
+      const statusLine = body.createDiv({ cls: "ent-cc-status-line" });
+      statusLine.createSpan({ text: "No Markdown note linked", cls: "ent-cc-status-pill is-placeholder" });
+      body.createEl("p", {
+        cls: "ent-cc-placeholder-help",
+        text: this.plugin.isClinicalMode() && record.kind !== "topic"
+          ? "This subject was imported without a linked Markdown note. Link an existing eligible note, or keep it as a placeholder."
+          : "This subject was imported with its name and visual placement only. Create a new note, link an existing note, or keep it as a placeholder.",
+      });
+      const actions = body.createDiv({ cls: "ent-cc-inspector-actions" });
+      const complete = actions.createEl("button", { cls: "ent-cc-button ent-cc-primary-button" });
+      setIcon(complete.createSpan(), "file-plus");
+      complete.createSpan({ text: this.plugin.isClinicalMode() && record.kind !== "topic" ? "Link note…" : this.plugin.isClinicalMode() ? "Create or link…" : "Complete subject…" });
+      complete.addEventListener("click", () => this.openPlaceholderActions(record));
+      const add = actions.createEl("button", { cls: "ent-cc-button" });
+      setIcon(add.createSpan(), "folder-plus"); add.createSpan({ text: "Add to collection" });
+      add.addEventListener("click", () => this.openCollectionPicker(record.path));
+      iconButton(actions, this.plugin.data.pinnedPaths.includes(record.path) ? "pin-off" : "pin", this.plugin.data.pinnedPaths.includes(record.path) ? "Unpin" : "Pin").addEventListener("click", () => this.run(() => this.togglePin(record.path)));
+      this.inspectorField(body, this.plugin.data.settings.groupLabel, record.domain || "Ungrouped");
+      this.inspectorField(body, "Portable subject ID", record.portableId || "—");
+      this.inspectorField(body, "Note status", "Not created or linked");
+      if (mobileOpen && this.mobileInspectorNeedsFocus) {
+        this.mobileInspectorNeedsFocus = false;
+        this.timerWindow.setTimeout(() => this.inspectorEl?.querySelector<HTMLElement>(".ent-cc-inspector-close")?.focus(), 0);
+      }
+      return;
+    }
     if (this.plugin.isClinicalMode() || record.reviewStatus || record.safetyCritical) {
       const statusLine = body.createDiv({ cls: "ent-cc-status-line" });
       if (this.plugin.isClinicalMode() || record.reviewStatus) statusLine.createSpan({
@@ -1399,6 +1569,14 @@ export class EntVaultCommandCenterView extends ItemView {
     const add = actions.createEl("button", { cls: "ent-cc-button" });
     setIcon(add.createSpan(), "folder-plus"); add.createSpan({ text: "Add to collection" });
     add.addEventListener("click", () => this.openCollectionPicker(record.path));
+    if (record.portableId) {
+      const changeLink = actions.createEl("button", { cls: "ent-cc-button" });
+      setIcon(changeLink.createSpan(), "link"); changeLink.createSpan({ text: "Change linked note…" });
+      changeLink.addEventListener("click", () => this.openPortableSubjectLinkPicker(record));
+      const unlink = actions.createEl("button", { cls: "ent-cc-button ent-cc-warning-button" });
+      setIcon(unlink.createSpan(), "link-2-off"); unlink.createSpan({ text: "Unlink note…" });
+      unlink.addEventListener("click", () => this.confirmPortableSubjectUnlink(record));
+    }
     if (this.plugin.canVisuallyMoveAcrossGroups() && record.kind === "topic") {
       const moveGroup = actions.createEl("button", { cls: "ent-cc-button" });
       setIcon(moveGroup.createSpan(), "folder-input"); moveGroup.createSpan({ text: `Move ${this.plugin.data.settings.groupLabel.toLowerCase()}…` });
@@ -1821,7 +1999,10 @@ export class EntVaultCommandCenterView extends ItemView {
     const excluded = curriculumDescendantPaths(this.curriculum, record.path);
     excluded.add(record.path);
     const candidates = this.records.filter((candidate) => candidate.kind === "topic"
-      && (candidate.role === "canonical" || candidate.role === "supporting")
+      && (candidate.role === "canonical"
+        || candidate.role === "supporting"
+        || (candidate.role === "placeholder" && candidate.portableIndexed !== false)
+        || candidate.portableIndexed === true)
       && (this.plugin.canVisuallyMoveAcrossGroups() || candidate.domain === record.domain)
       && !excluded.has(candidate.path));
     new RecordPickerModal(this.app, candidates, `Move “${record.title}” under…`, `Search a parent ${this.plugin.data.settings.itemSingular}${this.plugin.isClinicalMode() ? ` in this ${this.plugin.data.settings.groupLabel.toLowerCase()}` : ""}…`, (parent) => {
@@ -1931,11 +2112,15 @@ export class EntVaultCommandCenterView extends ItemView {
       action,
       async () => {
         await this.plugin.mutate(`${action} “${record.title}”`, () => {
+          if (record.portableId) {
+            const subject = this.plugin.getPortableSubject(record.portableId);
+            if (subject) subject.indexed = false;
+          }
           this.plugin.data.manualIndexPaths = this.plugin.data.manualIndexPaths.filter((path) => path !== record.path);
           if (insidePrimary && !this.plugin.data.excludedIndexPaths.includes(record.path)) this.plugin.data.excludedIndexPaths.push(record.path);
           delete this.plugin.data.indexGroupByPath[record.path];
           resetCurriculumVisualPath(this.plugin.data.curriculumVisual, record.path);
-        });
+        }, { includePortableIndex: true });
         new Notice(`${record.title} was removed from the visual index. Its note was not moved or deleted.`);
       },
     ).open();
@@ -1943,7 +2128,14 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private showRecordMenu(event: MouseEvent, record: VaultRecord, membership?: Membership): void {
     const menu = new Menu();
-    menu.addItem((item) => item.setTitle("Open note").setIcon("external-link").onClick(() => this.run(() => this.openRecord(record.path))));
+    menu.addItem((item) => item
+      .setTitle(record.isPlaceholder ? "Create or link note…" : "Open note")
+      .setIcon(record.isPlaceholder ? "file-plus" : "external-link")
+      .onClick(() => record.isPlaceholder ? this.openPlaceholderActions(record) : this.run(() => this.openRecord(record.path))));
+    if (record.portableId && !record.isPlaceholder) {
+      menu.addItem((item) => item.setTitle("Change linked note…").setIcon("link").onClick(() => this.openPortableSubjectLinkPicker(record)));
+      menu.addItem((item) => item.setTitle("Unlink note…").setIcon("link-2-off").onClick(() => this.confirmPortableSubjectUnlink(record)));
+    }
     menu.addItem((item) => item.setTitle("Add to collection…").setIcon("folder-plus").onClick(() => this.openCollectionPicker(record.path)));
     if (this.plugin.canVisuallyMoveAcrossGroups() && record.kind === "topic") {
       menu.addItem((item) => item.setTitle(`Move to ${this.plugin.data.settings.groupLabel.toLowerCase()}…`).setIcon("folder-input").onClick(() => this.openIndexGroupPicker(record)));
@@ -1981,7 +2173,7 @@ export class EntVaultCommandCenterView extends ItemView {
     menu.addSeparator();
     if (this.plugin.isClinicalMode() && record.role === "proposal") menu.addItem((item) => item.setTitle("Promote proposal…").setIcon("arrow-up-right").setDisabled(record.aiLock).onClick(() => this.startPromoteProposal(record)));
     if (this.plugin.isClinicalMode() && record.role === "canonical" && this.plugin.data.settings.enableAdvancedCanonicalActions) menu.addItem((item) => item.setTitle("Edit canonical placement…").setIcon("folder-tree").setDisabled(record.aiLock).onClick(() => this.startEditCanonicalPlacement(record)));
-    if (this.plugin.isClinicalMode() && record.role !== "vault-note") {
+    if (this.plugin.isClinicalMode() && record.role !== "vault-note" && !record.isPlaceholder) {
       menu.addItem((item) => item.setTitle("Copy deep-build command").setIcon("wand-sparkles").onClick(() => this.run(() => this.copyText(`Deep-build ${record.title}`, "Deep-build command"))));
       menu.addItem((item) => item.setTitle("Copy autoresearch command").setIcon("search-check").onClick(() => this.run(() => this.copyText(`Autoresearch ${record.title}`, "Autoresearch command"))));
     }
@@ -2062,8 +2254,7 @@ export class EntVaultCommandCenterView extends ItemView {
       menu.addItem((item) => item.setTitle("Restore organization snapshot…").setIcon("history").onClick(() => this.showOrganizationSnapshots(event)));
     }
     menu.addSeparator();
-    menu.addItem((item) => item.setTitle("Export organization backup").setIcon("download").onClick(() => this.run(() => this.exportOrganizationBackup())));
-    menu.addItem((item) => item.setTitle("Import organization backup…").setIcon("upload").onClick(() => this.importOrganizationBackup()));
+    menu.addItem((item) => item.setTitle("Export / import center…").setIcon("arrow-left-right").onClick(() => this.openPortabilityCenter()));
     menu.showAtMouseEvent(event);
   }
 
@@ -2073,7 +2264,7 @@ export class EntVaultCommandCenterView extends ItemView {
       placeholder: this.plugin.isClinicalMode() ? "e.g. Before airway exam block" : "e.g. Before reorganizing projects",
       submitLabel: "Save snapshot",
       onSubmit: async (name) => {
-        const snapshot = snapshotPersonal(this.plugin.data, name);
+        const snapshot = snapshotPersonal(this.plugin.data, name, false, true);
         const candidates = [...this.plugin.data.layoutSnapshots, snapshot];
         const next = limitSnapshotStack(candidates, 10);
         if (!next.includes(snapshot)) {
@@ -2097,7 +2288,11 @@ export class EntVaultCommandCenterView extends ItemView {
         .setTitle(`${snapshot.label} · ${new Date(snapshot.at).toLocaleDateString()}`)
         .setIcon("history")
         .onClick(() => this.run(async () => {
-          await this.plugin.mutate(`Restore snapshot “${snapshot.label}”`, () => restoreSnapshot(this.plugin.data, snapshot));
+          await this.plugin.mutate(
+            `Restore snapshot “${snapshot.label}”`,
+            () => restoreSnapshot(this.plugin.data, snapshot),
+            { includePortableIndex: Boolean(snapshot.portableIndex) },
+          );
           new Notice(`Restored organization snapshot “${snapshot.label}”.`);
         })));
     }
@@ -2176,7 +2371,8 @@ export class EntVaultCommandCenterView extends ItemView {
             this.plugin.data.indexGroupByPath = backup.indexGroupByPath;
             this.plugin.data.indexGroupOrder = backup.indexGroupOrder;
             this.plugin.data.layoutSnapshots = limitSnapshotStack(backup.layoutSnapshots, 10);
-          });
+            this.plugin.data.portableIndex = backup.portableIndex;
+          }, { includePortableIndex: true, includeLayoutSnapshots: true });
           new Notice("Organization backup imported. Undo is available.");
         },
       ).open();
@@ -2380,6 +2576,11 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private async openRecord(path: string): Promise<void> {
+    const record = this.recordByPath.get(path) ?? this.plugin.getRecord(path);
+    if (record?.isPlaceholder) {
+      this.openPlaceholderActions(record);
+      return;
+    }
     const file = this.app.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) {
       new Notice("The note could not be found.");

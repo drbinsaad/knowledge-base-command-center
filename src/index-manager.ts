@@ -4,6 +4,7 @@ import {
   createWorkspaceConfig,
   curriculumContainerKey,
   IndexDiagnostic,
+  isPortablePlaceholderPath,
   parseWorkspaceConfig,
   pathIsInsideFolder,
   resetCurriculumVisualPath,
@@ -11,6 +12,8 @@ import {
   validateWritableFolderPath,
 } from "./model";
 import { ConfirmModal, IndexGroupModal, StringPickerModal, TextPromptModal, VaultFilePickerModal } from "./modals";
+import { registerPortableGroup, removePortableGroup, renameOrMergePortableGroup } from "./portability";
+import { ExportImportCenterModal } from "./portability-modal";
 
 export type ManagerTab = "indexed" | "available" | "hidden" | "groups" | "diagnostics";
 
@@ -29,6 +32,7 @@ export class IndexManagerModal extends Modal {
   private selectionCountEl: HTMLElement | null = null;
   private selectionActionsEl: HTMLElement | null = null;
   private selectionButtons: Array<{ el: HTMLButtonElement; enabled: () => boolean }> = [];
+  private managerOpen = false;
 
   constructor(private readonly plugin: EntVaultCommandCenterPlugin, initialTab: ManagerTab = "indexed") {
     super(plugin.app);
@@ -36,6 +40,7 @@ export class IndexManagerModal extends Modal {
   }
 
   onOpen(): void {
+    this.managerOpen = true;
     this.modalEl.addClass("ent-cc-index-manager-modal");
     this.contentEl.addClass("ent-cc-modal", "ent-cc-index-manager");
     this.titleEl.setText(`Manage ${this.plugin.data.settings.indexLabel}`);
@@ -43,11 +48,28 @@ export class IndexManagerModal extends Modal {
   }
 
   onClose(): void {
+    this.managerOpen = false;
     if (this.searchTimer !== null) window.activeWindow.clearTimeout(this.searchTimer);
     this.searchTimer = null;
     this.selectionCountEl = null;
     this.selectionActionsEl = null;
     this.selectionButtons = [];
+  }
+
+  private openPortabilityCenter(mode: "export" | "import"): void {
+    new ExportImportCenterModal(this.plugin, mode, (dataChanged) => this.refreshAfterPortability(dataChanged)).open();
+  }
+
+  private refreshAfterPortability(dataChanged: boolean): void {
+    if (!dataChanged || !this.managerOpen) return;
+    if (this.searchTimer !== null) window.activeWindow.clearTimeout(this.searchTimer);
+    this.searchTimer = null;
+    this.query = "";
+    this.selected.clear();
+    this.diagnosticsCache = null;
+    if (this.plugin.isClinicalMode() && (this.tab === "available" || this.tab === "hidden")) this.tab = "indexed";
+    this.titleEl.setText(`Manage ${this.plugin.data.settings.indexLabel}`);
+    this.render();
   }
 
   private render(): void {
@@ -69,8 +91,8 @@ export class IndexManagerModal extends Modal {
     const header = this.contentEl.createDiv({ cls: "ent-cc-manager-header" });
     header.createEl("p", { text: `Manage membership, ${settings.groupLabel.toLowerCase()}s, and integrity without moving or rewriting Markdown notes.` });
     const portability = header.createDiv({ cls: "ent-cc-manager-portability" });
-    this.actionButton(portability, "download", "Export workspace", () => this.run(() => this.exportWorkspace()));
-    this.actionButton(portability, "upload", "Import workspace…", () => this.importWorkspace());
+    this.actionButton(portability, "download", "Export…", () => this.openPortabilityCenter("export"));
+    this.actionButton(portability, "upload", "Import…", () => this.openPortabilityCenter("import"));
 
     const tabs = this.contentEl.createDiv({ cls: "ent-cc-manager-tabs", attr: { role: "tablist" } });
     const definitions: Array<{ id: ManagerTab; label: string; count: number | string; genericOnly?: boolean }> = [
@@ -120,7 +142,20 @@ export class IndexManagerModal extends Modal {
   private availableNotes(): ManagerNote[] {
     if (this.plugin.isClinicalMode()) return [];
     const hidden = new Set(this.plugin.data.excludedIndexPaths);
-    return this.plugin.getIndexCandidateFiles().filter((file) => !hidden.has(file.path)).map((file) => ({ path: file.path, title: file.basename, meta: file.path }));
+    const vaultNotes = this.plugin.getIndexCandidateFiles()
+      .filter((file) => !hidden.has(file.path))
+      .map((file) => ({ path: file.path, title: file.basename, meta: file.path }));
+    const portablePlaceholders = this.plugin.getRecords()
+      .filter((record) => record.role === "placeholder"
+        && record.portableIndexed === false
+        && isPortablePlaceholderPath(record.path)
+        && !hidden.has(record.path))
+      .map((record) => ({
+        path: record.path,
+        title: record.title,
+        meta: `${record.domain} · imported subject without a note`,
+      }));
+    return [...portablePlaceholders, ...vaultNotes];
   }
 
   private hiddenNotes(): ManagerNote[] {
@@ -237,6 +272,7 @@ export class IndexManagerModal extends Modal {
     const paths = [...this.selected];
     if (paths.length === 0) return;
     const first = this.plugin.getRecord(paths[0] ?? "");
+    const updatesPortableMembership = mode !== "move" && paths.some((path) => Boolean(this.plugin.getRecord(path)?.portableId));
     new IndexGroupModal(this.app, {
       title: `${mode === "move" ? "Move" : mode === "restore" ? "Restore" : "Add"} ${paths.length} note${paths.length === 1 ? "" : "s"}`,
       groupLabel: this.plugin.data.settings.groupLabel,
@@ -248,13 +284,18 @@ export class IndexManagerModal extends Modal {
           if (!this.plugin.data.indexGroupOrder.includes(group)) this.plugin.data.indexGroupOrder.push(group);
           for (const path of paths) {
             if (mode !== "move") {
+              const portableId = this.plugin.getRecord(path)?.portableId;
+              if (portableId) {
+                const subject = this.plugin.getPortableSubject(portableId);
+                if (subject) subject.indexed = true;
+              }
               this.plugin.data.excludedIndexPaths = this.plugin.data.excludedIndexPaths.filter((candidate) => candidate !== path);
               if (!pathIsInsideFolder(path, this.plugin.data.settings.primaryFolder) && !this.plugin.data.manualIndexPaths.includes(path)) this.plugin.data.manualIndexPaths.push(path);
             }
             this.plugin.data.indexGroupByPath[path] = group;
             resetCurriculumVisualPath(this.plugin.data.curriculumVisual, path);
           }
-        });
+        }, { includePortableIndex: updatesPortableMembership });
         this.selected.clear();
         this.tab = "indexed";
         this.render();
@@ -269,12 +310,17 @@ export class IndexManagerModal extends Modal {
     new ConfirmModal(this.app, "Remove selected notes from index?", `${paths.length} membership${paths.length === 1 ? "" : "s"} will be removed. Markdown notes and collection memberships remain untouched.`, "Remove from index", async () => {
       await this.plugin.mutate(`Remove ${paths.length} notes from index`, () => {
         for (const path of paths) {
+          const record = this.plugin.getRecord(path);
+          if (record?.portableId) {
+            const subject = this.plugin.getPortableSubject(record.portableId);
+            if (subject) subject.indexed = false;
+          }
           this.plugin.data.manualIndexPaths = this.plugin.data.manualIndexPaths.filter((candidate) => candidate !== path);
           if (pathIsInsideFolder(path, this.plugin.data.settings.primaryFolder) && !this.plugin.data.excludedIndexPaths.includes(path)) this.plugin.data.excludedIndexPaths.push(path);
           delete this.plugin.data.indexGroupByPath[path];
           resetCurriculumVisualPath(this.plugin.data.curriculumVisual, path);
         }
-      });
+      }, { includePortableIndex: true });
       this.selected.clear();
       this.render();
       new Notice("Index memberships removed. No Markdown note was deleted or moved.");
@@ -309,7 +355,10 @@ export class IndexManagerModal extends Modal {
       placeholder: `${this.plugin.data.settings.groupLabel} name`,
       onSubmit: async (group) => {
         if (this.plugin.getIndexGroups().some((candidate) => candidate.toLowerCase() === group.toLowerCase())) throw new Error(`${group} already exists.`);
-        await this.plugin.mutate(`Create visual group “${group}”`, () => this.plugin.data.indexGroupOrder.push(group));
+        await this.plugin.mutate(`Create visual group “${group}”`, () => {
+          this.plugin.data.indexGroupOrder.push(group);
+          registerPortableGroup(this.plugin.data, group);
+        }, { includePortableIndex: true });
         this.render();
       },
     }).open();
@@ -341,7 +390,8 @@ export class IndexManagerModal extends Modal {
           members.forEach((record) => { this.plugin.data.indexGroupByPath[record.path] = next; });
           this.transferRootOrder(group, next, false);
           this.plugin.data.indexGroupOrder = this.plugin.getIndexGroups().map((candidate) => candidate === group ? next : candidate).filter((candidate, index, all) => all.indexOf(candidate) === index);
-        });
+          renameOrMergePortableGroup(this.plugin.data, group, next);
+        }, { includePortableIndex: true });
         this.render();
       },
     }).open();
@@ -356,7 +406,8 @@ export class IndexManagerModal extends Modal {
           members.forEach((record) => { this.plugin.data.indexGroupByPath[record.path] = target; });
           this.transferRootOrder(source, target, true);
           this.plugin.data.indexGroupOrder = this.plugin.getIndexGroups().filter((group) => group !== source);
-        });
+          renameOrMergePortableGroup(this.plugin.data, source, target);
+        }, { includePortableIndex: true });
         this.render();
       }).open();
     }).open();
@@ -367,7 +418,8 @@ export class IndexManagerModal extends Modal {
       await this.plugin.mutate(`Remove empty visual group “${group}”`, () => {
         this.plugin.data.indexGroupOrder = this.plugin.data.indexGroupOrder.filter((candidate) => candidate !== group);
         delete this.plugin.data.curriculumVisual.orderByContainer[curriculumContainerKey(group, null)];
-      });
+        removePortableGroup(this.plugin.data, group);
+      }, { includePortableIndex: true });
       this.render();
     });
   }
