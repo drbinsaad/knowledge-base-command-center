@@ -1284,6 +1284,15 @@
     gap: 2px;
   }
 
+  /* Subject rows need an explicit one-line grid on phones. Curriculum rows
+     contain both a disclosure control and a record icon; leaving either one
+     to auto-placement creates extra 44px grid rows and makes a selected topic
+     look like an oversized card. */
+  .ent-cc-subject-row {
+    grid-template-columns: 44px minmax(0, 1fr) max-content 44px;
+    grid-template-rows: 44px;
+  }
+
   .ent-cc-disclosure,
   .ent-cc-row-more,
   .ent-cc-drag-handle {
@@ -1298,17 +1307,37 @@
     display: none;
   }
 
+  .ent-cc-subject-row .ent-cc-disclosure,
+  .ent-cc-subject-row .ent-cc-record-icon {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .ent-cc-curriculum-row .ent-cc-record-icon {
+    display: none;
+  }
+
   .ent-cc-heading-row .ent-cc-row-title,
   .ent-cc-subheading-row .ent-cc-row-title,
   .ent-cc-subject-row .ent-cc-subject-title {
     grid-column: 2;
   }
 
+  .ent-cc-view .ent-cc-subject-row button.ent-cc-subject-title {
+    grid-row: 1;
+    min-height: 44px;
+  }
+
   .ent-cc-heading-row .ent-cc-row-more,
-  .ent-cc-subheading-row .ent-cc-row-more,
-  .ent-cc-subject-row .ent-cc-row-more {
+  .ent-cc-subheading-row .ent-cc-row-more {
     display: inline-grid;
     grid-column: 3;
+  }
+
+  .ent-cc-subject-row .ent-cc-row-more {
+    display: inline-grid;
+    grid-column: 4;
+    grid-row: 1;
   }
 
   .ent-cc-level-1 {
@@ -1343,6 +1372,13 @@
     display: flex;
     gap: 2px;
     flex: 0 0 auto;
+  }
+
+  .ent-cc-subject-row .ent-cc-row-badges {
+    grid-column: 3;
+    grid-row: 1;
+    align-self: center;
+    justify-self: end;
   }
 
   .ent-cc-row-badges .ent-cc-priority,
