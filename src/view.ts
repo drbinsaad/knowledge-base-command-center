@@ -1365,7 +1365,13 @@ export class EntVaultCommandCenterView extends ItemView {
     const headerCopy = header.createDiv({ cls: "ent-cc-inspector-header-copy" });
     headerCopy.createEl("h2", { text: "Selected knowledge record", attr: { id: labelId } });
     if (record) headerCopy.createDiv({ cls: "ent-cc-inspector-mobile-title", text: record.title, attr: { dir: "auto" } });
-    const close = iconButton(header, "x", "Close record details", "ent-cc-inspector-close");
+    const backLabel = "Back to main page";
+    const close = header.createEl("button", {
+      cls: "ent-cc-button ent-cc-inspector-close",
+      attr: { type: "button", "aria-label": backLabel, title: backLabel },
+    });
+    setIcon(close.createSpan(), "arrow-left");
+    close.createSpan({ text: backLabel });
     close.addEventListener("click", () => this.closeMobileInspector());
     if (!record) {
       this.inspectorEl.setAttribute("aria-labelledby", labelId);

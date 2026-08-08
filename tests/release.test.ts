@@ -63,11 +63,14 @@ test("mobile flows keep primary actions visible and empty states actionable", as
   assert.match(modals, /calculateModalViewportLayout/);
   assert.match(styles, /ent-cc-knowledge-note-content/);
   assert.match(styles, /--ent-cc-modal-visual-height/);
-  assert.match(view, /Close record details/);
+  assert.match(view, /const backLabel = "Back to main page"/);
+  assert.match(view, /"aria-label": backLabel, title: backLabel/);
+  assert.match(view, /createSpan\(\{ text: backLabel \}\)/);
   assert.match(view, /aria-modal/);
   assert.match(view, /handleMobileInspectorKeydown/);
   assert.match(styles, /ent-cc-inspector\.is-mobile-open/);
   assert.match(styles, /ent-cc-shell\.is-inspector-route/);
+  assert.match(styles, /min-width: 118px/);
   assert.match(styles, /calc\(112px \+ var\(--safe-area-inset-bottom, env\(safe-area-inset-bottom, 0px\)\)\)/);
   assert.match(styles, /overscroll-behavior-y: contain/);
 });

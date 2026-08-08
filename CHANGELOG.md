@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.10
+
+### Fixed
+
+- Replaced the ambiguous mobile × control with a labelled 44-point **Back to main page** button, giving the focused record view an obvious and accessible return path to the command center.
+
 ## 0.7.9
 
 ### Improved
