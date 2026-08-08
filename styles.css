@@ -1396,6 +1396,26 @@
   max-height: calc(100vh - 40px);
 }
 
+.ent-cc-knowledge-note-modal {
+  display: flex;
+  flex-direction: column;
+}
+
+.ent-cc-knowledge-note-content {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ent-cc-note-form-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 .ent-cc-topic-editor {
   overflow-y: auto;
   padding-bottom: 4px;
@@ -1512,6 +1532,17 @@
   padding: 12px 2px max(4px, env(safe-area-inset-bottom));
   border-top: 1px solid var(--background-modifier-border);
   background: var(--modal-background, var(--background-primary));
+}
+
+.ent-cc-knowledge-note-content > .ent-cc-modal-footer {
+  position: relative;
+  bottom: auto;
+  flex: 0 0 auto;
+  margin-top: 0;
+}
+
+.ent-cc-topic-editor .ent-cc-template-setting.is-hidden {
+  display: none;
 }
 
 .ent-cc-compatibility-warning,
@@ -1852,6 +1883,30 @@
 
   .ent-cc-topic-editor-modal {
     width: calc(100vw - 16px);
+  }
+
+  .ent-cc-knowledge-note-modal {
+    height: calc(var(--ent-cc-modal-visual-height, 100dvh) - 16px);
+    max-height: calc(var(--ent-cc-modal-visual-height, 100dvh) - 16px);
+    overflow: hidden;
+    translate: 0 var(--ent-cc-modal-visual-shift, 0);
+  }
+
+  .ent-cc-knowledge-note-content .ent-cc-modal-lead {
+    display: none;
+  }
+
+  .ent-cc-knowledge-note-content .ent-cc-note-cancel-button {
+    display: none;
+  }
+
+  .ent-cc-knowledge-note-content > .ent-cc-modal-footer {
+    padding-top: 10px;
+  }
+
+  .ent-cc-knowledge-note-content > .ent-cc-modal-footer .setting-item-control,
+  .ent-cc-knowledge-note-content > .ent-cc-modal-footer button {
+    width: 100%;
   }
 
   .ent-cc-index-manager-modal {
