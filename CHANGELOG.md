@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.11
+
+### Fixed
+
+- Kept selected mobile index subjects in a single compact 48-point row instead of allowing curriculum icons, status badges, and the actions menu to auto-place into a tall multi-row card.
+
 ## 0.7.10
 
 ### Fixed

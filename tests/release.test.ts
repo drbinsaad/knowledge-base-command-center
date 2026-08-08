@@ -71,6 +71,12 @@ test("mobile flows keep primary actions visible and empty states actionable", as
   assert.match(styles, /ent-cc-inspector\.is-mobile-open/);
   assert.match(styles, /ent-cc-shell\.is-inspector-route/);
   assert.match(styles, /min-width: 118px/);
+  assert.match(styles, /\.ent-cc-subject-row \{\s*grid-template-columns: 44px minmax\(0, 1fr\) max-content 44px;\s*grid-template-rows: 44px/);
+  assert.match(styles, /\.ent-cc-subject-row \.ent-cc-disclosure,\s*\.ent-cc-subject-row \.ent-cc-record-icon \{\s*grid-column: 1;\s*grid-row: 1/);
+  assert.match(styles, /\.ent-cc-curriculum-row \.ent-cc-record-icon \{\s*display: none/);
+  assert.match(styles, /\.ent-cc-view \.ent-cc-subject-row button\.ent-cc-subject-title \{\s*grid-row: 1;\s*min-height: 44px/);
+  assert.match(styles, /\.ent-cc-subject-row \.ent-cc-row-badges \{\s*grid-column: 3;\s*grid-row: 1/);
+  assert.match(styles, /\.ent-cc-subject-row \.ent-cc-row-more \{\s*display: inline-grid;\s*grid-column: 4;\s*grid-row: 1/);
   assert.match(styles, /calc\(112px \+ var\(--safe-area-inset-bottom, env\(safe-area-inset-bottom, 0px\)\)\)/);
   assert.match(styles, /overscroll-behavior-y: contain/);
 });
