@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.9
+
+### Improved
+
+- Replaced the inline phone inspector with a focused record-detail view, so selecting a note no longer leaves its identity and primary actions below the command-center header.
+- Kept the selected note title and a 44-point Close control visible while the details scroll independently, with enough safe-area clearance for Obsidian's floating mobile navigation.
+- Preserved the index scroll position and restored focus to the selected row after Close or Escape; Tab and Shift+Tab remain contained in the mobile detail view.
+- Kept the existing desktop split view unchanged.
+
 ## 0.7.8
 
 ### Improved

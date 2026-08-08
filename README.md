@@ -53,6 +53,8 @@ Press **Arrange** to create a separate visual hierarchy. Drag on desktop, or use
 
 Visual arrangement is stored in plugin data. It never changes a note path or frontmatter. A note can also belong to multiple personal collection headings or subheadings without being duplicated or moved.
 
+On a narrow phone screen, selecting a record opens a focused detail view with its title and Close control kept visible. The detail content scrolls independently above Obsidian's mobile navigation; Close or Escape returns to the same row and list position. Desktop keeps the side-by-side index and inspector.
+
 ### Index Manager
 
 Open **Manage Index…** from the command palette, the index header, or the command center menu. It provides:

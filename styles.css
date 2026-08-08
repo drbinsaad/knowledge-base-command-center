@@ -16,9 +16,11 @@
 }
 
 .ent-cc-shell {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow: hidden;
   background: var(--background-primary);
 }
 
@@ -207,9 +209,17 @@
 }
 
 .ent-cc-inspector-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   margin-bottom: 14px;
   padding-bottom: 10px;
   border-bottom: 1px solid var(--ent-cc-border);
+}
+
+.ent-cc-inspector-header-copy {
+  min-width: 0;
 }
 
 .ent-cc-inspector-header h2 {
@@ -219,6 +229,11 @@
   font-weight: 750;
   letter-spacing: 0.11em;
   text-transform: uppercase;
+}
+
+.ent-cc-inspector-mobile-title,
+.ent-cc-inspector-close {
+  display: none;
 }
 
 .ent-cc-inspector-body > h3 {
@@ -2011,6 +2026,71 @@
     width: 100%;
     min-width: 0;
     margin-top: 8px;
+  }
+}
+
+/* A selected record becomes a focused detail route on compact layouts. This
+   keeps its identity and actions visible instead of appending a second long
+   page beneath the index. */
+@media (max-width: 900px) {
+  .ent-cc-inspector {
+    display: none;
+  }
+
+  .ent-cc-shell.is-inspector-route .ent-cc-inspector.is-mobile-open {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+    padding: 0;
+    overflow: hidden;
+    border: 0;
+    background: var(--background-primary);
+  }
+
+  .ent-cc-shell.is-inspector-route .ent-cc-inspector-header {
+    flex: 0 0 auto;
+    min-height: 68px;
+    margin: 0;
+    padding: 10px 12px 10px 16px;
+    background: var(--background-primary);
+  }
+
+  .ent-cc-inspector-mobile-title {
+    display: block;
+    margin-top: 3px;
+    overflow: hidden;
+    color: var(--text-normal);
+    font-family: var(--font-text), Georgia, Cambria, "Times New Roman", serif;
+    font-size: 17px;
+    font-weight: 650;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .ent-cc-shell.is-inspector-route .ent-cc-inspector-close {
+    display: inline-grid;
+    flex: 0 0 auto;
+    width: 44px;
+    min-width: 44px;
+    min-height: 44px;
+    border-radius: 50%;
+  }
+
+  .ent-cc-shell.is-inspector-route .ent-cc-inspector-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    padding: 18px 16px calc(112px + var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)));
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    scrollbar-gutter: stable;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .ent-cc-shell.is-inspector-route .ent-cc-inspector-actions .ent-cc-button,
+  .ent-cc-shell.is-inspector-route .ent-cc-study-action {
+    min-height: 44px;
   }
 }
 
