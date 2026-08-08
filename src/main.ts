@@ -679,7 +679,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
     for (const subject of this.data.portableIndex.subjects) {
       const path = this.data.portableIndex.resolvedPathBySubjectId[subject.id];
-      if (path && subject.indexed) paths.add(path);
+      // A resolved library identity must stay discoverable even though it is
+      // intentionally absent from the topic index. Otherwise a newly created
+      // or linked generic note falls back to a false unresolved placeholder.
+      if (path) paths.add(path);
     }
     return paths;
   }
@@ -732,6 +735,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const records: VaultRecord[] = [];
     const portableIdByPath = new Map<string, string>();
     const portableSubjectById = new Map(this.data.portableIndex.subjects.map((subject) => [subject.id, subject]));
+    const portableGroupById = new Map(this.data.portableIndex.groups.map((group) => [group.id, group]));
     for (const [subjectId, path] of Object.entries(this.data.portableIndex.resolvedPathBySubjectId)) {
       if (path && !portableIdByPath.has(path)) portableIdByPath.set(path, subjectId);
     }
@@ -741,14 +745,22 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       const identity = this.identityForFile(file, frontmatter, referenced, proposalRoot, manual, excluded);
       if (!identity) continue;
       if (!this.isClinicalMode()) frontmatter = asUnknownRecord(this.app.metadataCache.getFileCache(file)?.frontmatter);
-      const { kind: detectedKind, role } = identity;
+      const { kind: detectedKind, role: detectedRole } = identity;
+      const portableId = portableIdByPath.get(file.path);
+      const portableSubject = portableId ? portableSubjectById.get(portableId) : undefined;
+      const portableGroup = portableSubject ? portableGroupById.get(portableSubject.groupId)?.title ?? "" : "";
+      const portableLibraryInGeneric = !this.isClinicalMode()
+        && (portableSubject?.recordKind === "procedure"
+          || portableSubject?.recordKind === "medication"
+          || portableSubject?.recordKind === "syndrome");
+      const role = portableLibraryInGeneric ? "library" : detectedRole;
       const entDomains = asStringList(frontmatter.ent_domains);
       const titleFallback = file.basename.replace(/^(Procedure|Drug|Syndrome)\s*-\s*/i, "");
       const configuredGroup = asStringList(frontmatter[settings.groupProperty])[0] ?? "";
       const visualGroup = this.canVisuallyMoveAcrossGroups() ? asText(this.data.indexGroupByPath[file.path]) : "";
       const configuredIdValue = frontmatter[settings.idProperty];
       const configuredId = typeof configuredIdValue === "number" ? String(configuredIdValue) : asText(configuredIdValue);
-      const sourceDomain = role === "proposal"
+      const sourceDomain = detectedRole === "proposal"
         ? asText(frontmatter.proposed_domain, settings.inboxLabel)
         : detectedKind === "topic"
           ? configuredGroup || (this.isClinicalMode() ? asText(frontmatter.domain, cleanDomainFolder(file.path)) : configuredGroupFromPath(file.path, settings.primaryFolder))
@@ -759,18 +771,20 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
               : detectedKind === "syndrome"
                 ? entDomains[0] || asText(frontmatter.syndrome_group, "Syndromes")
                 : asText(frontmatter.domain, file.parent?.path || "Vault notes");
-      const domain = detectedKind === "topic"
-        ? visualGroup || asText(this.data.indexGroupAliases[sourceDomain], sourceDomain)
-        : sourceDomain;
-      const portableId = portableIdByPath.get(file.path);
-      const portableSubject = portableId ? portableSubjectById.get(portableId) : undefined;
+      const domain = portableLibraryInGeneric
+        ? portableGroup || sourceDomain
+        : detectedKind === "topic"
+          ? visualGroup || asText(this.data.indexGroupAliases[sourceDomain], sourceDomain)
+          : sourceDomain;
       // A clinical proposal can safely back an imported index subject while it
       // awaits promotion. Project that one record into both the Inbox (by role)
       // and the index (by kind/portableIndexed) without changing the Markdown.
       const proposalBacksIndexedSubject = detectedKind === "proposal"
         && portableSubject?.recordKind === "topic"
         && portableSubject.indexed;
-      const kind: RecordKind = proposalBacksIndexedSubject ? "topic" : detectedKind;
+      const kind: RecordKind = proposalBacksIndexedSubject
+        ? "topic"
+        : portableSubject?.recordKind ?? detectedKind;
       const sourceTitle = asText(frontmatter.title, asText(frontmatter.canonical_name, titleFallback));
       const displayTitle = asText(this.data.displayNameByPath[file.path]);
       const aliases = asStringList(frontmatter.aliases);
@@ -806,13 +820,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       });
     }
     const recordPaths = new Set(records.map((record) => record.path));
-    const groupById = new Map(this.data.portableIndex.groups.map((group) => [group.id, group]));
     for (const subject of this.data.portableIndex.subjects) {
       const resolvedPath = this.data.portableIndex.resolvedPathBySubjectId[subject.id] || "";
       if (resolvedPath && recordPaths.has(resolvedPath)) continue;
       const path = resolvedPath || portablePlaceholderPath(subject.id);
       if (recordPaths.has(path)) continue;
-      const sourceGroup = groupById.get(subject.groupId)?.title || "Ungrouped";
+      const sourceGroup = portableGroupById.get(subject.groupId)?.title || "Ungrouped";
       const domain = (this.canVisuallyMoveAcrossGroups() ? asText(this.data.indexGroupByPath[path]) : "")
         || asText(this.data.indexGroupAliases[sourceGroup], sourceGroup);
       const displayTitle = asText(this.data.displayNameByPath[path]);

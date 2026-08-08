@@ -1,7 +1,7 @@
 {
   "id": "ent-vault-command-center",
   "name": "Knowledge Base Command Center",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "minAppVersion": "1.13.0",
   "description": "Build a configurable visual index, collections, queues, and template-based notes for any knowledge base.",
   "author": "Dr. Ali Alshahrani",

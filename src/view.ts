@@ -88,18 +88,26 @@ interface QueueDefinition {
 
 interface TabDefinition { id: MainTab; label: string; icon: string }
 
-function tabDefinitions(settings: PluginSettings): TabDefinition[] {
+export function tabDefinitions(
+  settings: PluginSettings,
+  records: ReadonlyArray<Pick<VaultRecord, "kind">> = [],
+): TabDefinition[] {
   const tabs: TabDefinition[] = [
     { id: "curriculum", label: settings.indexLabel, icon: "library" },
     { id: "inbox", label: settings.inboxLabel, icon: "inbox" },
     { id: "collections", label: "My Collections", icon: "folders" },
     { id: "queues", label: "Smart Queues", icon: "list-checks" },
   ];
-  if (settings.workspaceMode === "ent-clinical") tabs.push(
-    { id: "procedures", label: "Procedures", icon: "clipboard-list" },
-    { id: "medications", label: "Medications", icon: "pill" },
-    { id: "syndromes", label: "Syndromes", icon: "dna" },
-  );
+  const hasKind = (kind: VaultRecord["kind"]): boolean => records.some((record) => record.kind === kind);
+  if (settings.workspaceMode === "ent-clinical" || hasKind("procedure")) {
+    tabs.push({ id: "procedures", label: "Procedures", icon: "clipboard-list" });
+  }
+  if (settings.workspaceMode === "ent-clinical" || hasKind("medication")) {
+    tabs.push({ id: "medications", label: "Medications", icon: "pill" });
+  }
+  if (settings.workspaceMode === "ent-clinical" || hasKind("syndrome")) {
+    tabs.push({ id: "syndromes", label: "Syndromes", icon: "dna" });
+  }
   return tabs;
 }
 
@@ -119,8 +127,8 @@ function disclosureButton(parent: HTMLElement, collapsed: boolean, label: string
   return button;
 }
 
-function titleForTab(tab: MainTab, settings: PluginSettings): string {
-  return tabDefinitions(settings).find((item) => item.id === tab)?.label ?? "Records";
+function titleForTab(tab: MainTab, settings: PluginSettings, records: VaultRecord[] = []): string {
+  return tabDefinitions(settings, records).find((item) => item.id === tab)?.label ?? "Records";
 }
 
 function uniqueRecords(records: VaultRecord[]): VaultRecord[] {
@@ -255,6 +263,13 @@ export class EntVaultCommandCenterView extends ItemView {
     if (await this.plugin.reconcileRecords(this.records)) {
       this.records = this.plugin.getRecords();
       this.recordByPath = new Map(this.records.map((record) => [record.path, record]));
+    }
+    if (!tabDefinitions(this.plugin.data.settings, this.records)
+      .some((tab) => tab.id === this.plugin.data.activeTab)
+      && !this.plugin.isDataReadOnly()) {
+      this.plugin.data.activeTab = "curriculum";
+      await this.plugin.savePluginData();
+      if (!this.guardLoadedBase()) return;
     }
     this.curriculum = buildCurriculumTree(this.records, this.plugin.data.curriculumVisual);
     this.render();
@@ -996,7 +1011,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private renderTabs(parent: HTMLElement): void {
-    const tabs = tabDefinitions(this.plugin.data.settings);
+    const tabs = tabDefinitions(this.plugin.data.settings, this.records);
     const bar = parent.createDiv({ cls: "ent-cc-tabs", attr: { role: "tablist", "aria-label": "Command center sections" } });
     for (const tab of tabs) {
       const button = bar.createEl("button", {
@@ -1213,7 +1228,7 @@ export class EntVaultCommandCenterView extends ItemView {
       const settings = this.plugin.data.settings;
       this.countEl.createSpan({ text: `${visible} ${visible === 1 ? settings.itemSingular : settings.itemPlural}` });
     }
-    this.countEl.createSpan({ text: ` · ${titleForTab(this.plugin.data.activeTab, this.plugin.data.settings)}`, cls: "ent-cc-muted" });
+    this.countEl.createSpan({ text: ` · ${titleForTab(this.plugin.data.activeTab, this.plugin.data.settings, this.records)}`, cls: "ent-cc-muted" });
   }
 
   private renderTree(): void {

@@ -13,7 +13,7 @@ import {
   STORE_KIND,
   STORE_VERSION,
 } from "../src/model.ts";
-import { createPortableExport, parsePortableExport } from "../src/portability.ts";
+import { createPortableExport, parsePortableExport, synchronizePortableRegistry } from "../src/portability.ts";
 import { IndexManagerModal } from "../src/index-manager.ts";
 import { ConfirmModal, IndexGroupModal } from "../src/modals.ts";
 import { Notice, Plugin, TFile } from "obsidian";
@@ -1716,6 +1716,127 @@ test("a collection-only generic placeholder can link a new in-folder note withou
   assert.equal(plugin.data.excludedIndexPaths.includes(created.path), true);
   assert.equal(plugin.getRecord(created.path)?.kind, "note");
   assert.equal(plugin.getIndexRecords().some((record) => record.path === created.path), false);
+});
+
+test("a non-indexed syndrome linked to an ordinary generic note survives cache rebuild as a library record", async () => {
+  const linkedFile = new TFile("Reference/Usher syndrome.md");
+  linkedFile.stat.mtime = 24680;
+  const frontmatter = { title: "Usher syndrome", tags: ["reference"] };
+  const originalFrontmatter = structuredClone(frontmatter);
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.primaryFolder = "Knowledge Base";
+  const subjectId = "subject-usher-syndrome";
+  data.portableIndex = {
+    version: 1,
+    groups: [{ id: "group-syndromes", title: "Syndromes", order: 0 }],
+    subjects: [{
+      id: subjectId,
+      title: "Usher syndrome",
+      groupId: "group-syndromes",
+      parentId: null,
+      order: 0,
+      indexed: false,
+      configuredId: "",
+      recordKind: "syndrome",
+    }],
+    resolvedPathBySubjectId: {},
+  };
+  const { plugin, sourceMutationCount } = pluginWithFiles(data, [linkedFile], { [linkedFile.path]: frontmatter });
+  await plugin.loadPluginData();
+
+  await plugin.resolvePortableSubject(subjectId, linkedFile.path);
+  plugin.invalidateRecordCache();
+  const rebuilt = plugin.getRecord(linkedFile.path);
+
+  assert.equal(plugin.data.portableIndex.resolvedPathBySubjectId[subjectId], linkedFile.path);
+  assert.equal(rebuilt?.kind, "syndrome");
+  assert.equal(rebuilt?.portableId, subjectId);
+  assert.equal(rebuilt?.portableIndexed, false);
+  assert.equal(rebuilt?.isPlaceholder, undefined);
+  assert.equal(plugin.data.manualIndexPaths.includes(linkedFile.path), false);
+  assert.equal(plugin.getIndexRecords().some((record) => record.path === linkedFile.path), false);
+  assert.equal(linkedFile.path, "Reference/Usher syndrome.md");
+  assert.equal(linkedFile.stat.mtime, 24680);
+  assert.deepEqual(frontmatter, originalFrontmatter);
+  assert.equal(sourceMutationCount(), 0);
+});
+
+test("a linked generic syndrome keeps its library role and portable group through synchronization and re-export", async () => {
+  const linkedFile = new TFile("Reference/Usher syndrome.md");
+  linkedFile.stat.mtime = 97531;
+  const frontmatter = { title: "Usher syndrome", tags: ["reference"] };
+  const originalFrontmatter = structuredClone(frontmatter);
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.primaryFolder = "Knowledge Base";
+  const subjectId = "subject-usher-portable";
+  const groupId = "group-inherited-syndromes";
+  data.portableIndex = {
+    version: 1,
+    groups: [{ id: groupId, title: "Inherited syndromes", order: 0 }],
+    subjects: [{
+      id: subjectId,
+      title: "Usher syndrome",
+      groupId,
+      parentId: null,
+      order: 0,
+      indexed: false,
+      configuredId: "",
+      recordKind: "syndrome",
+    }],
+    resolvedPathBySubjectId: {},
+  };
+  const { plugin, sourceMutationCount } = pluginWithFiles(data, [linkedFile], { [linkedFile.path]: frontmatter });
+  await plugin.loadPluginData();
+  await plugin.resolvePortableSubject(subjectId, linkedFile.path);
+
+  plugin.invalidateRecordCache();
+  const rebuilt = plugin.getRecord(linkedFile.path);
+  assert.equal(rebuilt?.kind, "syndrome");
+  assert.equal(rebuilt?.role, "library");
+  assert.equal(rebuilt?.domain, "Inherited syndromes");
+
+  synchronizePortableRegistry(plugin.data, plugin.getRecords());
+  plugin.invalidateRecordCache();
+  const synchronized = plugin.getRecord(linkedFile.path);
+  const synchronizedSubject = plugin.getPortableSubject(subjectId);
+  assert.equal(synchronized?.kind, "syndrome");
+  assert.equal(synchronized?.role, "library");
+  assert.equal(synchronized?.domain, "Inherited syndromes");
+  assert.equal(synchronizedSubject?.groupId, groupId);
+  assert.equal(synchronizedSubject?.recordKind, "syndrome");
+  assert.equal(synchronizedSubject?.indexed, false);
+
+  const exported = parsePortableExport(structuredClone(createPortableExport(
+    plugin.data,
+    plugin.getRecords(),
+    {
+      workspace: false,
+      index: false,
+      procedures: false,
+      medications: false,
+      syndromes: true,
+      collections: false,
+      study: false,
+      savedViews: false,
+      recovery: false,
+    },
+    "2026-08-08T00:00:00.000Z",
+  )));
+  const exportedSubject = exported.components.index?.subjects.find((subject) => subject.id === subjectId);
+  assert.equal(exportedSubject?.recordKind, "syndrome");
+  assert.equal(exportedSubject?.groupId, groupId);
+  assert.equal(exported.components.index?.groups.find((group) => group.id === groupId)?.title, "Inherited syndromes");
+  assert.deepEqual(exported.components.index?.includedSections, {
+    index: false,
+    procedures: false,
+    medications: false,
+    syndromes: true,
+  });
+  assert.equal(linkedFile.stat.mtime, 97531);
+  assert.deepEqual(frontmatter, originalFrontmatter);
+  assert.equal(sourceMutationCount(), 0);
 });
 
 test("portable linking rejects configured-ID and record-kind mismatches before mutating identity state", async () => {
