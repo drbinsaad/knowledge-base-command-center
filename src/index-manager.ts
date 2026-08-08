@@ -420,7 +420,7 @@ export class IndexManagerModal extends Modal {
     const config = createWorkspaceConfig(this.plugin.data, now.toISOString());
     if (Platform.isMobile) {
       await this.plugin.writePortableJson("workspace", config);
-      new Notice("Workspace configuration saved inside the vault for mobile sharing. Note contents were not included.");
+      new Notice("Workspace saved in the export folder inside the vault. No note contents included.");
       return;
     }
     const viewWindow = this.contentEl.ownerDocument.defaultView ?? window;

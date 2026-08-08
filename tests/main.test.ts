@@ -150,3 +150,33 @@ test("hidden notes leave the index while manual members stay in it", async () =>
   assert.equal(paths.includes("Knowledge Base/Group 0/Note 0.md"), false);
   assert.equal(paths.includes("Knowledge Base/Group 1/Note 1.md"), true);
 });
+
+test("portable JSON writes do not create a second success notice", async () => {
+  Notice.messages.length = 0;
+  const plugin = pluginWith(null);
+  let createdPath = "";
+  let createdContent = "";
+  const app = plugin.app as unknown as {
+    vault: {
+      getAbstractFileByPath(path: string): null;
+      createFolder(path: string): Promise<void>;
+      create(path: string, content: string): Promise<TFile>;
+    };
+  };
+  app.vault = {
+    getAbstractFileByPath: () => null,
+    createFolder: async () => {},
+    create: async (path, content) => {
+      createdPath = path;
+      createdContent = content;
+      return new TFile(path);
+    },
+  };
+
+  const file = await plugin.writePortableJson("workspace", { workspace: "test" });
+
+  assert.equal(file.path, createdPath);
+  assert.match(createdPath, /^Knowledge Base Command Center Exports\/knowledge-base-command-center-workspace-/);
+  assert.equal(createdContent, '{\n  "workspace": "test"\n}\n');
+  assert.deepEqual(Notice.messages, []);
+});

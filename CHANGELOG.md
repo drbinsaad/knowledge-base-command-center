@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.7
+
+### Fixed
+
+- Replaced the two overlapping iPhone notifications after workspace or organization export with one concise confirmation that keeps the Index Manager controls visible.
+
 ## 0.7.6
 
 ### Improved

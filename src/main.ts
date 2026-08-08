@@ -633,7 +633,6 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const path = normalizePath(`${folder}/knowledge-base-command-center-${kind}-${stamp}.json`);
     const file = await this.app.vault.create(path, `${JSON.stringify(value, null, 2)}\n`);
-    new Notice(`Saved ${kind} JSON inside the vault at ${path}.`);
     return file;
   }
 
