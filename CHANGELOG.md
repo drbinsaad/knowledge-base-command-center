@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.6
+
+### Improved
+
+- Kept Add, Manage, Arrange, and the overflow menu visible together on narrow iPhone screens; Undo and Redo remain available in the overflow menu.
+- Made the main and Index Manager tab bars touch-scrollable, keyboard-described, and automatically reveal the active tab.
+- Replaced the generic empty-index dead end with a direct path to available existing notes, including the available count and an explicit no-file-movement guarantee.
+- Compressed idle bulk controls in the Index Manager, placed mobile workspace import and export side by side, and preserved enough list height for useful results.
+- Prevented Index Manager tabs from being flex-compressed out of view and accounted for iOS dynamic viewport and bottom navigation space.
+- Added a mobile layout regression check covering primary actions, actionable empty states, tab overflow, viewport sizing, and compact bulk controls.
+
 ## 0.7.5
 
 ### Fixed

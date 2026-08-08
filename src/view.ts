@@ -1,6 +1,6 @@
 import { ItemView, Menu, Notice, Platform, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
-import { IndexManagerModal } from "./index-manager";
+import { IndexManagerModal, type ManagerTab } from "./index-manager";
 import {
   buildCurriculumTree,
   canonicalPath,
@@ -270,8 +270,8 @@ export class EntVaultCommandCenterView extends ItemView {
     }, `Add to ${settings.workspaceName}`).open();
   }
 
-  public openIndexManager(): void {
-    new IndexManagerModal(this.plugin).open();
+  public openIndexManager(initialTab: ManagerTab = "indexed"): void {
+    new IndexManagerModal(this.plugin, initialTab).open();
   }
 
   public startCreateKnowledgeNote(initial: Partial<GenericNoteFormValue> = {}, indexAfterCreate = !this.plugin.isClinicalMode()): void {
@@ -600,10 +600,10 @@ export class EntVaultCommandCenterView extends ItemView {
       edit.createSpan({ text: this.editMode ? "Finish" : "Edit" });
       edit.addEventListener("click", () => { this.editMode = !this.editMode; this.render(); });
     }
-    const undo = iconButton(actions, "undo-2", "Undo personal organization change");
+    const undo = iconButton(actions, "undo-2", "Undo personal organization change", "ent-cc-history-action");
     undo.disabled = this.plugin.data.undoStack.length === 0;
     undo.addEventListener("click", () => this.run(() => this.plugin.undo()));
-    const redo = iconButton(actions, "redo-2", "Redo personal organization change");
+    const redo = iconButton(actions, "redo-2", "Redo personal organization change", "ent-cc-history-action");
     redo.disabled = this.plugin.data.redoStack.length === 0;
     redo.addEventListener("click", () => this.run(() => this.plugin.redo()));
     iconButton(actions, "ellipsis-vertical", "Command center actions").addEventListener("click", (event) => this.showGlobalMenu(event));
@@ -660,6 +660,14 @@ export class EntVaultCommandCenterView extends ItemView {
         if (nextTab) this.run(() => this.changeTab(nextTab.id, true));
       });
     }
+    this.revealActiveTab(bar);
+  }
+
+  private revealActiveTab(tablist: HTMLElement): void {
+    this.timerWindow.setTimeout(() => {
+      const active = tablist.querySelector<HTMLElement>('[aria-selected="true"]');
+      active?.scrollIntoView({ block: "nearest", inline: "center" });
+    }, 0);
   }
 
   private tabElementId(tab: MainTab): string {
@@ -816,9 +824,28 @@ export class EntVaultCommandCenterView extends ItemView {
     if (visible === 0
       && !(tab === "collections" && this.plugin.data.collections.length === 0)
       && !(tab === "inbox" && !this.query)) {
-      body.createDiv({ cls: "ent-cc-empty", text: this.query ? "No records match this search." : "No records in this section." });
+      if (tab === "curriculum" && !this.query && !this.plugin.isClinicalMode()) this.renderKnowledgeIndexEmpty(body);
+      else body.createDiv({ cls: "ent-cc-empty", text: this.query ? "No records match this search." : "No records in this section." });
     }
     this.updateCount(visible);
+  }
+
+  private renderKnowledgeIndexEmpty(parent: HTMLElement): void {
+    const settings = this.plugin.data.settings;
+    const hidden = new Set(this.plugin.data.excludedIndexPaths);
+    const availableCount = this.plugin.getIndexCandidateFiles().filter((file) => !hidden.has(file.path)).length;
+    const empty = parent.createDiv({ cls: "ent-cc-empty ent-cc-empty-action" });
+    setIcon(empty.createSpan(), availableCount > 0 ? "list-plus" : "file-plus-2");
+    empty.createEl("strong", { text: `Start your ${settings.indexLabel.toLowerCase()}` });
+    empty.createEl("p", { text: availableCount > 0
+      ? `${availableCount} existing note${availableCount === 1 ? " is" : "s are"} ready to add without moving or rewriting files.`
+      : `Create your first ${settings.itemSingular}, or change the indexed folder in Settings.` });
+    const button = empty.createEl("button", { cls: "ent-cc-button ent-cc-add-button" });
+    setIcon(button.createSpan(), availableCount > 0 ? "list-plus" : "plus");
+    button.createSpan({ text: availableCount > 0 ? `Add existing ${settings.itemPlural}` : `Create ${settings.itemSingular}` });
+    button.addEventListener("click", () => availableCount > 0
+      ? this.openIndexManager("available")
+      : this.startCreateKnowledgeNote());
   }
 
   private treeHeaderTitle(): string {
@@ -1840,6 +1867,9 @@ export class EntVaultCommandCenterView extends ItemView {
     menu.addItem((item) => item.setTitle("Add or create…").setIcon("plus").onClick(() => this.openAddActions()));
     menu.addItem((item) => item.setTitle(`Manage ${this.plugin.data.settings.indexLabel}`).setIcon("list-tree").onClick(() => this.openIndexManager()));
     if (!this.plugin.isClinicalMode()) menu.addItem((item) => item.setTitle(`Add existing note to ${this.plugin.data.settings.indexLabel}`).setIcon("list-plus").onClick(() => this.startAddExistingToIndex()));
+    menu.addSeparator();
+    menu.addItem((item) => item.setTitle("Undo personal organization change").setIcon("undo-2").setDisabled(this.plugin.data.undoStack.length === 0).onClick(() => this.run(() => this.plugin.undo())));
+    menu.addItem((item) => item.setTitle("Redo personal organization change").setIcon("redo-2").setDisabled(this.plugin.data.redoStack.length === 0).onClick(() => this.run(() => this.plugin.redo())));
     menu.addSeparator();
     menu.addItem((item) => item.setTitle("Expand all visible groups").setIcon("chevrons-down").onClick(() => this.run(async () => {
       this.collapsedQueues.clear();

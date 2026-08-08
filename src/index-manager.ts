@@ -12,7 +12,7 @@ import {
 } from "./model";
 import { ConfirmModal, IndexGroupModal, StringPickerModal, TextPromptModal, VaultFilePickerModal } from "./modals";
 
-type ManagerTab = "indexed" | "available" | "hidden" | "groups" | "diagnostics";
+export type ManagerTab = "indexed" | "available" | "hidden" | "groups" | "diagnostics";
 
 interface ManagerNote {
   path: string;
@@ -27,10 +27,12 @@ export class IndexManagerModal extends Modal {
   private diagnosticsCache: IndexDiagnostic[] | null = null;
   private searchTimer: number | null = null;
   private selectionCountEl: HTMLElement | null = null;
+  private selectionActionsEl: HTMLElement | null = null;
   private selectionButtons: Array<{ el: HTMLButtonElement; enabled: () => boolean }> = [];
 
-  constructor(private readonly plugin: EntVaultCommandCenterPlugin) {
+  constructor(private readonly plugin: EntVaultCommandCenterPlugin, initialTab: ManagerTab = "indexed") {
     super(plugin.app);
+    this.tab = initialTab;
   }
 
   onOpen(): void {
@@ -44,6 +46,7 @@ export class IndexManagerModal extends Modal {
     if (this.searchTimer !== null) window.activeWindow.clearTimeout(this.searchTimer);
     this.searchTimer = null;
     this.selectionCountEl = null;
+    this.selectionActionsEl = null;
     this.selectionButtons = [];
   }
 
@@ -51,6 +54,7 @@ export class IndexManagerModal extends Modal {
     // Do not retain controls detached by contentEl.empty(); selection refreshes
     // must address only the currently rendered toolbar.
     this.selectionCountEl = null;
+    this.selectionActionsEl = null;
     this.selectionButtons = [];
     this.contentEl.empty();
     const settings = this.plugin.data.settings;
@@ -77,7 +81,11 @@ export class IndexManagerModal extends Modal {
       { id: "diagnostics", label: "Diagnostics", count: this.diagnosticsCache?.length ?? "—" },
     ];
     for (const definition of definitions.filter((item) => !item.genericOnly || !this.plugin.isClinicalMode())) {
-      const button = tabs.createEl("button", { cls: `ent-cc-manager-tab ${this.tab === definition.id ? "is-active" : ""}` });
+      const active = this.tab === definition.id;
+      const button = tabs.createEl("button", {
+        cls: `ent-cc-manager-tab ${active ? "is-active" : ""}`,
+        attr: { role: "tab", "aria-selected": String(active), tabindex: active ? "0" : "-1", "data-manager-tab": definition.id },
+      });
       button.createSpan({ text: definition.label });
       button.createSpan({ cls: "ent-cc-manager-tab-count", text: String(definition.count) });
       button.addEventListener("click", () => {
@@ -87,10 +95,11 @@ export class IndexManagerModal extends Modal {
         this.render();
       });
     }
+    this.revealActiveTab(tabs);
 
     if (["indexed", "available", "hidden"].includes(this.tab)) {
       const notes = this.tab === "indexed" ? indexed : this.tab === "available" ? available : hidden;
-      this.renderNoteManager(notes);
+      this.renderNoteManager(notes, available.length);
     } else if (this.tab === "groups") {
       this.renderGroups(groups);
     } else {
@@ -122,7 +131,7 @@ export class IndexManagerModal extends Modal {
     });
   }
 
-  private renderNoteManager(notes: ManagerNote[]): void {
+  private renderNoteManager(notes: ManagerNote[], availableCount: number): void {
     const toolbar = this.contentEl.createDiv({ cls: "ent-cc-manager-toolbar" });
     const search = toolbar.createEl("input", { type: "search", placeholder: "Search note title or path…", attr: { "aria-label": "Search index manager notes" } });
     search.value = this.query;
@@ -147,7 +156,8 @@ export class IndexManagerModal extends Modal {
       this.render();
     }, filtered.length === 0);
 
-    const actions = this.contentEl.createDiv({ cls: "ent-cc-manager-bulk-actions" });
+    const actions = this.contentEl.createDiv({ cls: `ent-cc-manager-bulk-actions ${this.selected.size === 0 ? "is-idle" : ""} ${filtered.length === 0 ? "is-empty-list" : ""}` });
+    this.selectionActionsEl = actions;
     this.selectionCountEl = actions.createSpan({ text: `${this.selected.size} selected`, cls: "ent-cc-muted", attr: { role: "status", "aria-live": "polite" } });
     this.selectionButtons = [];
     if (this.tab === "indexed") {
@@ -163,13 +173,36 @@ export class IndexManagerModal extends Modal {
     const visible = filtered.slice(0, 300);
     for (const note of visible) this.renderNoteRow(list, note);
     if (filtered.length > visible.length) list.createDiv({ cls: "ent-cc-manager-limit", text: `Showing the first ${visible.length} matches. Narrow the search to reach the remaining ${filtered.length - visible.length}.` });
-    if (filtered.length === 0) list.createDiv({ cls: "ent-cc-empty", text: this.query ? "No notes match this search." : "Nothing in this section." });
+    if (filtered.length === 0) {
+      if (!this.query && this.tab === "indexed" && !this.plugin.isClinicalMode() && availableCount > 0) {
+        const empty = list.createDiv({ cls: "ent-cc-empty ent-cc-empty-action" });
+        setIcon(empty.createSpan(), "list-plus");
+        empty.createEl("strong", { text: `Start your ${this.plugin.data.settings.indexLabel.toLowerCase()}` });
+        empty.createEl("p", { text: `${availableCount} existing note${availableCount === 1 ? " is" : "s are"} available to add. Their files will not be moved or rewritten.` });
+        const browse = empty.createEl("button", { cls: "ent-cc-button ent-cc-add-button", text: `Browse ${availableCount} available` });
+        browse.addEventListener("click", () => {
+          this.tab = "available";
+          this.selected.clear();
+          this.render();
+        });
+      } else {
+        list.createDiv({ cls: "ent-cc-empty", text: this.query ? "No notes match this search." : "Nothing in this section." });
+      }
+    }
   }
 
   /** Updates only the controls that depend on the selection, preserving focus. */
   private refreshSelectionState(): void {
     this.selectionCountEl?.setText(`${this.selected.size} selected`);
+    this.selectionActionsEl?.toggleClass("is-idle", this.selected.size === 0);
     for (const button of this.selectionButtons) button.el.disabled = !button.enabled();
+  }
+
+  private revealActiveTab(tablist: HTMLElement): void {
+    window.activeWindow.setTimeout(() => {
+      const active = tablist.querySelector<HTMLElement>('[aria-selected="true"]');
+      active?.scrollIntoView({ block: "nearest", inline: "center" });
+    }, 0);
   }
 
   private filterNotes(notes: ManagerNote[]): ManagerNote[] {
