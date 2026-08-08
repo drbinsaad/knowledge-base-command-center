@@ -1,6 +1,6 @@
 {
   "name": "knowledge-base-command-center",
-  "version": "0.7.6",
+  "version": "0.7.7",
   "private": true,
   "type": "module",
   "description": "Configurable visual knowledge index, note creator, collections, and smart queues for Obsidian.",

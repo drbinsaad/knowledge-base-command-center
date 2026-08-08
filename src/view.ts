@@ -1984,7 +1984,7 @@ export class EntVaultCommandCenterView extends ItemView {
       const backup = createPersonalBackup(this.plugin.data, now.toISOString());
       if (Platform.isMobile) {
         await this.plugin.writePortableJson("backup", backup);
-        new Notice("Organization backup saved inside the vault for mobile sharing. Source notes were not included.");
+        new Notice("Backup saved in the export folder inside the vault. Source notes were not included.");
         return;
       }
       const viewWindow = this.contentEl.ownerDocument.defaultView ?? window;
