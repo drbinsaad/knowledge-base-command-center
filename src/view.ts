@@ -28,6 +28,7 @@ import {
   makeId,
   matchesParsedQuery,
   metadataHasGap,
+  normalizeSearchText,
   ParsedQuery,
   parseQuery,
   moveCurriculumVisual,
@@ -88,18 +89,63 @@ interface QueueDefinition {
 
 interface TabDefinition { id: MainTab; label: string; icon: string }
 
-function tabDefinitions(settings: PluginSettings): TabDefinition[] {
+export interface SearchViewportLayout {
+  height: number;
+  keyboardInset: number;
+  keyboardOpen: boolean;
+}
+
+/**
+ * Fit the focused search route into the part of an iOS layout viewport that is
+ * not covered by the virtual keyboard. The command center begins below
+ * Obsidian's own title bar, so subtract the keyboard inset from its measured
+ * content height instead of assigning visualViewport.height directly.
+ */
+export function calculateSearchViewportLayout(
+  innerHeight: number,
+  contentHeight: number,
+  viewportHeight: number,
+  viewportOffsetTop = 0,
+): SearchViewportLayout {
+  const safeInnerHeight = Number.isFinite(innerHeight) ? Math.max(1, innerHeight) : 1;
+  const safeContentHeight = Number.isFinite(contentHeight)
+    ? Math.max(1, Math.min(contentHeight, safeInnerHeight))
+    : safeInnerHeight;
+  const safeViewportHeight = Number.isFinite(viewportHeight)
+    ? Math.max(1, Math.min(viewportHeight, safeInnerHeight))
+    : safeInnerHeight;
+  const safeOffsetTop = Number.isFinite(viewportOffsetTop)
+    ? Math.max(0, Math.min(viewportOffsetTop, safeInnerHeight))
+    : 0;
+  const visibleBottom = Math.min(safeInnerHeight, safeOffsetTop + safeViewportHeight);
+  const keyboardInset = Math.max(0, safeInnerHeight - visibleBottom);
+  return {
+    height: Math.max(1, Math.round(safeContentHeight - keyboardInset)),
+    keyboardInset: Math.round(keyboardInset),
+    keyboardOpen: safeInnerHeight - safeViewportHeight > 100,
+  };
+}
+
+export function tabDefinitions(
+  settings: PluginSettings,
+  records: ReadonlyArray<Pick<VaultRecord, "kind">> = [],
+): TabDefinition[] {
   const tabs: TabDefinition[] = [
     { id: "curriculum", label: settings.indexLabel, icon: "library" },
     { id: "inbox", label: settings.inboxLabel, icon: "inbox" },
     { id: "collections", label: "My Collections", icon: "folders" },
     { id: "queues", label: "Smart Queues", icon: "list-checks" },
   ];
-  if (settings.workspaceMode === "ent-clinical") tabs.push(
-    { id: "procedures", label: "Procedures", icon: "clipboard-list" },
-    { id: "medications", label: "Medications", icon: "pill" },
-    { id: "syndromes", label: "Syndromes", icon: "dna" },
-  );
+  const hasKind = (kind: VaultRecord["kind"]): boolean => records.some((record) => record.kind === kind);
+  if (settings.workspaceMode === "ent-clinical" || hasKind("procedure")) {
+    tabs.push({ id: "procedures", label: "Procedures", icon: "clipboard-list" });
+  }
+  if (settings.workspaceMode === "ent-clinical" || hasKind("medication")) {
+    tabs.push({ id: "medications", label: "Medications", icon: "pill" });
+  }
+  if (settings.workspaceMode === "ent-clinical" || hasKind("syndrome")) {
+    tabs.push({ id: "syndromes", label: "Syndromes", icon: "dna" });
+  }
   return tabs;
 }
 
@@ -119,8 +165,8 @@ function disclosureButton(parent: HTMLElement, collapsed: boolean, label: string
   return button;
 }
 
-function titleForTab(tab: MainTab, settings: PluginSettings): string {
-  return tabDefinitions(settings).find((item) => item.id === tab)?.label ?? "Records";
+function titleForTab(tab: MainTab, settings: PluginSettings, records: VaultRecord[] = []): string {
+  return tabDefinitions(settings, records).find((item) => item.id === tab)?.label ?? "Records";
 }
 
 function uniqueRecords(records: VaultRecord[]): VaultRecord[] {
@@ -130,6 +176,61 @@ function uniqueRecords(records: VaultRecord[]): VaultRecord[] {
     seen.add(record.path);
     return true;
   });
+}
+
+/** Search is intentionally knowledge-base wide; tabs organize browsing, not discovery. */
+export function matchingKnowledgeBaseRecords(records: VaultRecord[], query: string): VaultRecord[] {
+  const parsedQuery = parseQuery(query);
+  const matches = uniqueRecords(records.filter((record) => matchesParsedQuery(record, parsedQuery)));
+  const rankByPath = new Map(matches.map((record) => [record.path, knowledgeBaseSearchRank(record, parsedQuery)]));
+  return matches.sort((a, b) => {
+    const rankDifference = (rankByPath.get(a.path) ?? 0) - (rankByPath.get(b.path) ?? 0);
+    return rankDifference || a.title.localeCompare(b.title);
+  });
+}
+
+function fuzzyContainsForRank(haystack: string, needle: string): boolean {
+  let cursor = 0;
+  for (const character of haystack) {
+    if (character === needle[cursor]) cursor += 1;
+    if (cursor === needle.length) return true;
+  }
+  return needle.length === 0;
+}
+
+function fieldRank(value: string, term: string, base: number): number | null {
+  const normalized = normalizeSearchText(value);
+  if (!normalized) return null;
+  if (normalized === term) return base;
+  const words = normalized.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  // Within the same match class, prefer a concise single-subject title over a
+  // long phrase. This keeps “Laryngomalacia” above dozens of broader
+  // “Laryngeal …” and Laryngology-domain matches for a short phone query.
+  const specificity = Math.min(words.length, 9) / 100 + Math.min(normalized.length, 999) / 100_000;
+  if (normalized.startsWith(term)) return base + 1 + specificity;
+  if (words.some((word) => word.startsWith(term))) return base + 2 + specificity;
+  if (normalized.includes(term)) return base + 3;
+  if (words.some((word) => word[0] === term[0] && fuzzyContainsForRank(word, term))) return base + 4;
+  return null;
+}
+
+function knowledgeBaseSearchRank(record: VaultRecord, parsedQuery: ParsedQuery): number {
+  if (parsedQuery.terms.length === 0) return 0;
+  let total = 0;
+  for (const term of parsedQuery.terms) {
+    const titleRank = fieldRank(record.title, term, 0);
+    if (titleRank !== null) { total += titleRank; continue; }
+    const aliasRanks = record.aliases.map((alias) => fieldRank(alias, term, 10)).filter((rank): rank is number => rank !== null);
+    if (aliasRanks.length > 0) { total += Math.min(...aliasRanks); continue; }
+    const idRank = fieldRank(record.curriculumId, term, 20);
+    if (idRank !== null) { total += idRank; continue; }
+    const pathRank = fieldRank(record.path, term, 30);
+    if (pathRank !== null) { total += pathRank; continue; }
+    const domainRank = fieldRank(record.domain, term, 40);
+    if (domainRank !== null) { total += domainRank; continue; }
+    total += 100;
+  }
+  return total;
 }
 
 function collectionPaths(collections: LayoutHeading[]): string[] {
@@ -169,6 +270,7 @@ export class EntVaultCommandCenterView extends ItemView {
   private inspectorEl: HTMLElement | null = null;
   private countEl: HTMLElement | null = null;
   private searchStatusEl: HTMLElement | null = null;
+  private searchViewportWindow: Window | null = null;
   private collapsedQueues = new Set<string>();
   private collapsedCurriculumDomains = new Set<string>();
   private collapsedCurriculumNodes = new Set<string>();
@@ -194,6 +296,7 @@ export class EntVaultCommandCenterView extends ItemView {
 
   async onOpen(): Promise<void> {
     await this.reload();
+    this.bindSearchViewportLayout();
     if (!this.plugin.data.settings.setupComplete && !this.setupPromptShown) {
       const ownsBase = this.createOpenedBaseGuard();
       this.setupPromptShown = true;
@@ -206,6 +309,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.unbindSearchViewportLayout();
     const selectionSavePending = this.selectionSaveTimer !== null;
     for (const timer of [this.setupTimer, this.searchDebounce, this.selectionSaveTimer]) {
       if (timer !== null) this.timerWindow.clearTimeout(timer);
@@ -255,6 +359,13 @@ export class EntVaultCommandCenterView extends ItemView {
     if (await this.plugin.reconcileRecords(this.records)) {
       this.records = this.plugin.getRecords();
       this.recordByPath = new Map(this.records.map((record) => [record.path, record]));
+    }
+    if (!tabDefinitions(this.plugin.data.settings, this.records)
+      .some((tab) => tab.id === this.plugin.data.activeTab)
+      && !this.plugin.isDataReadOnly()) {
+      this.plugin.data.activeTab = "curriculum";
+      await this.plugin.savePluginData();
+      if (!this.guardLoadedBase()) return;
     }
     this.curriculum = buildCurriculumTree(this.records, this.plugin.data.curriculumVisual);
     this.render();
@@ -996,7 +1107,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private renderTabs(parent: HTMLElement): void {
-    const tabs = tabDefinitions(this.plugin.data.settings);
+    const tabs = tabDefinitions(this.plugin.data.settings, this.records);
     const bar = parent.createDiv({ cls: "ent-cc-tabs", attr: { role: "tablist", "aria-label": "Command center sections" } });
     for (const tab of tabs) {
       const button = bar.createEl("button", {
@@ -1072,20 +1183,52 @@ export class EntVaultCommandCenterView extends ItemView {
       type: "search",
       value: this.query,
       placeholder: this.plugin.isClinicalMode()
-        ? "Search…  domain:pediatric  priority:P1  source:gap  type:procedure"
-        : `Search ${this.plugin.data.settings.itemPlural}, IDs, ${this.plugin.data.settings.groupLabel.toLowerCase()}, or paths…`,
-      attr: { "aria-label": `Search and filter ${this.plugin.data.settings.itemPlural}` },
+        ? "Search all knowledge…  domain:pediatric  priority:P1  type:procedure"
+        : `Search all ${this.plugin.data.settings.itemPlural}, IDs, ${this.plugin.data.settings.groupLabel.toLowerCase()}, or paths…`,
+      attr: {
+        "aria-label": `Search and filter ${this.plugin.data.settings.itemPlural}`,
+        autocapitalize: "none",
+        enterkeyhint: "search",
+        spellcheck: "false",
+      },
+    });
+    const clear = iconButton(box, "x", "Clear search", "ent-cc-search-clear");
+    clear.type = "button";
+    clear.hidden = !this.query;
+    input.addEventListener("focus", () => {
+      if (Platform.isMobile) {
+        parent.addClass("is-search-focused");
+        this.syncSearchViewportLayout();
+        this.timerWindow.requestAnimationFrame(() => {
+          this.syncSearchViewportLayout();
+          this.resetSearchScrollPosition();
+        });
+        this.resetSearchScrollPosition();
+      }
+    });
+    input.addEventListener("blur", () => {
+      this.timerWindow.setTimeout(() => {
+        if (!searchRow.contains(input.ownerDocument.activeElement)) {
+          parent.removeClass("is-search-focused", "is-virtual-keyboard-open");
+          parent.style.removeProperty("--ent-cc-search-visual-height");
+          const tablist = parent.querySelector<HTMLElement>(".ent-cc-tabs");
+          if (tablist) this.revealActiveTab(tablist);
+        }
+      }, 0);
     });
     input.addEventListener("input", () => {
       this.query = input.value;
       // Commands available during the debounce window must observe the text the
       // user can already see, not the query from the previous render.
       this.parsedQuery = parseQuery(this.query);
+      clear.hidden = !this.query;
       if (bulkButton) bulkButton.disabled = !this.query.trim();
       if (this.searchDebounce !== null) this.timerWindow.clearTimeout(this.searchDebounce);
       this.searchDebounce = this.timerWindow.setTimeout(() => {
         this.searchDebounce = null;
         this.renderTree();
+        this.resetSearchScrollPosition();
+        this.timerWindow.requestAnimationFrame(() => this.resetSearchScrollPosition());
       }, 120);
     });
     input.addEventListener("keydown", (event) => {
@@ -1093,8 +1236,28 @@ export class EntVaultCommandCenterView extends ItemView {
         this.query = "";
         this.parsedQuery = parseQuery("");
         input.value = "";
+        clear.hidden = true;
+        if (bulkButton) bulkButton.disabled = true;
         this.renderTree();
+        this.resetSearchScrollPosition();
+        this.timerWindow.requestAnimationFrame(() => this.resetSearchScrollPosition());
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+        this.renderTree();
+        this.resetSearchScrollPosition();
+        input.blur();
       }
+    });
+    clear.addEventListener("click", () => {
+      this.query = "";
+      this.parsedQuery = parseQuery("");
+      input.value = "";
+      clear.hidden = true;
+      if (bulkButton) bulkButton.disabled = true;
+      this.renderTree();
+      this.resetSearchScrollPosition();
+      this.timerWindow.requestAnimationFrame(() => this.resetSearchScrollPosition());
+      input.focus({ preventScroll: true });
     });
     const save = iconButton(searchRow, "bookmark-plus", "Save this search");
     save.addEventListener("click", () => this.saveCurrentSearch());
@@ -1126,9 +1289,66 @@ export class EntVaultCommandCenterView extends ItemView {
       }
       chips.createSpan({ text: "Tip: combine tokens with fuzzy text", cls: "ent-cc-filter-hint" });
     } else {
+      chips.addClass("is-hint-only");
       chips.createSpan({ text: "Tip: fuzzy-search the title, path, configured ID, or group. Advanced field filters remain available.", cls: "ent-cc-filter-hint" });
     }
     this.searchStatusEl = parent.createDiv({ cls: "ent-cc-search-status", attr: { role: "status", "aria-live": "polite" } });
+  }
+
+  /**
+   * A phone may retain the long index's scroll offset after the DOM is replaced
+   * by a much shorter filtered result set. Reset both possible scroll owners so
+   * iOS cannot leave the matches above the visible keyboard viewport.
+   */
+  private resetSearchScrollPosition(): void {
+    this.contentEl.scrollTop = 0;
+    if (this.workspaceEl) this.workspaceEl.scrollTop = 0;
+    if (this.treeEl) this.treeEl.scrollTop = 0;
+  }
+
+  private readonly syncSearchViewportLayout = (): void => {
+    const shell = this.contentEl?.querySelector<HTMLElement>(".ent-cc-shell");
+    if (!shell) return;
+    if (!shell.classList.contains("is-search-focused")) {
+      shell.style.removeProperty("--ent-cc-search-visual-height");
+      shell.removeClass("is-virtual-keyboard-open");
+      return;
+    }
+    const viewWindow = this.searchViewportWindow ?? this.contentEl.ownerDocument.defaultView;
+    if (!viewWindow) return;
+    const viewport = viewWindow.visualViewport;
+    const contentRect = this.contentEl.getBoundingClientRect();
+    const shellRect = shell.getBoundingClientRect();
+    const contentHeightBelowShellTop = Math.max(1, contentRect.bottom - shellRect.top);
+    const layout = calculateSearchViewportLayout(
+      viewWindow.innerHeight,
+      Math.min(this.contentEl.clientHeight || viewWindow.innerHeight, contentHeightBelowShellTop),
+      viewport?.height ?? viewWindow.innerHeight,
+      viewport?.offsetTop ?? 0,
+    );
+    shell.style.setProperty("--ent-cc-search-visual-height", `${layout.height}px`);
+    shell.toggleClass("is-virtual-keyboard-open", layout.keyboardOpen);
+  };
+
+  private bindSearchViewportLayout(): void {
+    const viewWindow = this.contentEl.ownerDocument.defaultView;
+    if (!viewWindow || this.searchViewportWindow === viewWindow) return;
+    this.unbindSearchViewportLayout();
+    this.searchViewportWindow = viewWindow;
+    viewWindow.visualViewport?.addEventListener("resize", this.syncSearchViewportLayout);
+    viewWindow.visualViewport?.addEventListener("scroll", this.syncSearchViewportLayout);
+    viewWindow.addEventListener("resize", this.syncSearchViewportLayout);
+  }
+
+  private unbindSearchViewportLayout(): void {
+    const viewWindow = this.searchViewportWindow;
+    viewWindow?.visualViewport?.removeEventListener("resize", this.syncSearchViewportLayout);
+    viewWindow?.visualViewport?.removeEventListener("scroll", this.syncSearchViewportLayout);
+    viewWindow?.removeEventListener("resize", this.syncSearchViewportLayout);
+    this.searchViewportWindow = null;
+    const shell = this.contentEl?.querySelector<HTMLElement>(".ent-cc-shell");
+    shell?.style.removeProperty("--ent-cc-search-visual-height");
+    shell?.removeClass("is-virtual-keyboard-open");
   }
 
   private toggleToken(token: string): void {
@@ -1156,6 +1376,11 @@ export class EntVaultCommandCenterView extends ItemView {
   private updateCount(visible: number): void {
     if (!this.countEl) return;
     this.countEl.empty();
+    if (this.query.trim()) {
+      this.countEl.createSpan({ text: `${visible} ${visible === 1 ? "result" : "results"}` });
+      this.countEl.createSpan({ text: " · All knowledge", cls: "ent-cc-muted" });
+      return;
+    }
     if (this.plugin.data.activeTab === "queues") {
       const uniqueVisible = uniqueRecords(queueRecords(this.smartQueues())).filter((record) => matchesParsedQuery(record, this.parsedQuery)).length;
       this.countEl.createSpan({ text: `${visible} queue entries · ${uniqueVisible} unique` });
@@ -1163,7 +1388,7 @@ export class EntVaultCommandCenterView extends ItemView {
       const settings = this.plugin.data.settings;
       this.countEl.createSpan({ text: `${visible} ${visible === 1 ? settings.itemSingular : settings.itemPlural}` });
     }
-    this.countEl.createSpan({ text: ` · ${titleForTab(this.plugin.data.activeTab, this.plugin.data.settings)}`, cls: "ent-cc-muted" });
+    this.countEl.createSpan({ text: ` · ${titleForTab(this.plugin.data.activeTab, this.plugin.data.settings, this.records)}`, cls: "ent-cc-muted" });
   }
 
   private renderTree(): void {
@@ -1179,12 +1404,17 @@ export class EntVaultCommandCenterView extends ItemView {
     this.searchStatusEl?.toggleClass("is-error", unknownTokens.length > 0);
     const header = this.treeEl.createDiv({ cls: "ent-cc-tree-header" });
     header.createSpan({ text: this.treeHeaderTitle() });
-    header.createSpan({ text: this.plugin.data.settings.itemPlural });
+    const resultCount = header.createSpan({
+      text: this.plugin.data.settings.itemPlural,
+      attr: { role: "status", "aria-live": "polite" },
+    });
     const body = this.treeEl.createDiv({ cls: "ent-cc-tree-body" });
 
     let visible = 0;
     const tab = this.plugin.data.activeTab;
-    if (tab === "curriculum") {
+    if (this.query.trim()) {
+      visible = this.renderGlobalSearchResults(body);
+    } else if (tab === "curriculum") {
       visible = this.renderCurriculum(body);
     } else if (tab === "inbox") {
       visible = this.renderInbox(body);
@@ -1203,6 +1433,7 @@ export class EntVaultCommandCenterView extends ItemView {
       else body.createDiv({ cls: "ent-cc-empty", text: this.query ? "No records match this search." : "No records in this section." });
     }
     this.updateCount(visible);
+    if (this.query) resultCount.setText(`${visible} ${visible === 1 ? "result" : "results"}`);
   }
 
   private renderKnowledgeIndexEmpty(parent: HTMLElement): void {
@@ -1224,6 +1455,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private treeHeaderTitle(): string {
+    if (this.query.trim()) return "Search results / Library / Record";
     const tab = this.plugin.data.activeTab;
     const settings = this.plugin.data.settings;
     if (tab === "curriculum") return this.curriculumArrangeMode
@@ -1533,6 +1765,47 @@ export class EntVaultCommandCenterView extends ItemView {
       grouped.sort((a, b) => a.title.localeCompare(b.title)).forEach((record) => this.renderRecordRow(content, record, 1));
     }
     return records.length;
+  }
+
+  private renderGlobalSearchResults(parent: HTMLElement): number {
+    const matches = matchingKnowledgeBaseRecords(this.records, this.query);
+    const grouped = [
+      {
+        label: this.plugin.data.settings.indexLabel,
+        icon: "library",
+        records: matches.filter((record) => record.role !== "proposal" && record.kind === "topic"),
+      },
+      {
+        label: this.plugin.data.settings.inboxLabel,
+        icon: "inbox",
+        records: matches.filter((record) => record.role === "proposal" || record.kind === "proposal"),
+      },
+      { label: "Procedures", icon: "clipboard-list", records: matches.filter((record) => record.kind === "procedure") },
+      { label: "Medications", icon: "pill", records: matches.filter((record) => record.kind === "medication") },
+      { label: "Syndromes", icon: "dna", records: matches.filter((record) => record.kind === "syndrome") },
+    ];
+    const assigned = new Set<string>();
+    for (const group of grouped) {
+      for (const record of group.records) assigned.add(record.path);
+    }
+    grouped.push({
+      label: "Other notes",
+      icon: "sticky-note",
+      records: matches.filter((record) => !assigned.has(record.path)),
+    });
+    for (const group of grouped) {
+      if (group.records.length === 0) continue;
+      const section = parent.createDiv({ cls: "ent-cc-heading ent-cc-search-result-group" });
+      const row = section.createDiv({ cls: "ent-cc-row ent-cc-heading-row" });
+      row.createSpan({ cls: "ent-cc-disclosure" });
+      const icon = row.createSpan({ cls: "ent-cc-leading-icon" });
+      setIcon(icon, group.icon);
+      row.createSpan({ cls: "ent-cc-row-title", text: group.label });
+      row.createSpan({ cls: "ent-cc-row-count", text: String(group.records.length) });
+      const content = section.createDiv({ cls: "ent-cc-heading-body" });
+      group.records.forEach((record) => this.renderRecordRow(content, record, 1));
+    }
+    return matches.length;
   }
 
   private resolvableCount(heading: LayoutHeading): number {
@@ -1983,11 +2256,7 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private matchingRecordsForCurrentView(): VaultRecord[] {
     // Toolbar actions can run while the visual search refresh is debounced.
-    const parsedQuery = parseQuery(this.query);
-    const candidates = this.plugin.data.activeTab === "queues"
-      ? uniqueRecords(queueRecords(this.smartQueues()))
-      : this.recordsForActiveTab();
-    return uniqueRecords(candidates.filter((record) => matchesParsedQuery(record, parsedQuery)));
+    return matchingKnowledgeBaseRecords(this.records, this.query);
   }
 
   private addMatchingRecordsToCollection(): void {

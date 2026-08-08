@@ -268,7 +268,7 @@
 .ent-cc-search-box input {
   width: 100%;
   height: 36px;
-  padding: 7px 12px 7px 35px;
+  padding: 7px 40px 7px 35px;
   border: 1px solid var(--ent-cc-border);
   border-radius: 8px;
   color: var(--text-normal);
@@ -279,6 +279,11 @@
 .ent-cc-search-box input:focus {
   border-color: var(--ent-cc-accent);
   box-shadow: 0 0 0 2px var(--ent-cc-accent-soft);
+}
+
+.ent-cc-search-box input::-webkit-search-cancel-button {
+  appearance: none;
+  -webkit-appearance: none;
 }
 
 .ent-cc-search-icon {
@@ -292,6 +297,23 @@
 .ent-cc-search-icon svg {
   width: 15px;
   height: 15px;
+}
+
+.ent-cc-search-clear {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  z-index: 2;
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  border-color: transparent;
+  border-radius: 6px;
+  color: var(--text-muted);
+}
+
+.ent-cc-search-clear[hidden] {
+  display: none;
 }
 
 .ent-cc-topic-count {
@@ -1360,6 +1382,10 @@
     display: none;
   }
 
+  .ent-cc-filter-chips.is-hint-only {
+    display: none;
+  }
+
   .ent-cc-search-row {
     padding-right: 14px;
     padding-left: 14px;
@@ -2158,13 +2184,82 @@
     min-width: 0;
   }
 
-  .ent-cc-search-row .ent-cc-icon-button,
-  .ent-cc-search-row .ent-cc-saved-button {
+  .ent-cc-search-box input {
+    height: 44px;
+    padding-right: 50px;
+    font-size: 16px;
+  }
+
+  .ent-cc-search-clear {
+    top: 0;
+    right: 0;
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+  }
+
+  .ent-cc-search-icon {
+    top: 14px;
+  }
+
+  .ent-cc-search-row > .ent-cc-icon-button,
+  .ent-cc-search-row > .ent-cc-saved-button {
     width: 44px;
     min-width: 44px;
     min-height: 44px;
     justify-content: center;
     padding: 0;
+  }
+
+  /* iOS scrolls the layout viewport when the keyboard opens. Give search an
+     intentional compact route so the toolbar cannot be left half-clipped and
+     the filtered tree starts directly below the field. */
+  .ent-cc-shell.is-search-focused {
+    height: var(--ent-cc-search-visual-height, 100%);
+    max-height: var(--ent-cc-search-visual-height, 100%);
+  }
+
+  .ent-cc-shell.is-search-focused .ent-cc-header,
+  .ent-cc-shell.is-search-focused .ent-cc-tabs,
+  .ent-cc-shell.is-search-focused .ent-cc-filter-chips {
+    display: none;
+  }
+
+  .ent-cc-shell.is-search-focused .ent-cc-search-row {
+    position: relative;
+    z-index: 6;
+    grid-template-columns: minmax(0, 1fr);
+    padding-top: 8px;
+    padding-bottom: 8px;
+    background: var(--background-primary);
+  }
+
+  .ent-cc-shell.is-search-focused .ent-cc-search-row > .ent-cc-icon-button,
+  .ent-cc-shell.is-search-focused .ent-cc-search-row > .ent-cc-saved-button,
+  .ent-cc-shell.is-search-focused .ent-cc-search-row > .ent-cc-topic-count {
+    display: none;
+  }
+
+  .ent-cc-shell.is-search-focused .ent-cc-workspace {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    overflow-anchor: none;
+  }
+
+  .ent-cc-shell.is-search-focused .ent-cc-tree-panel {
+    min-height: max(100%, 180px);
+    overflow: visible;
+    overflow-anchor: none;
+  }
+
+  .ent-cc-shell.is-search-focused .ent-cc-tree-header {
+    position: sticky;
+    top: 0;
+    z-index: 4;
+    background: var(--background-primary);
   }
 
   .ent-cc-footer {

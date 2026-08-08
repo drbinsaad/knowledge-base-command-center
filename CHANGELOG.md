@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.8.2
+
+### Fixed
+
+- Made non-empty search queries cover every record in the active knowledge base instead of only the last selected tab. Results are grouped by library and rank title, alias, ID, and path matches ahead of broad group or domain matches.
+- Kept focused iPhone search results inside the keyboard-reduced visual viewport, retained a nonzero results pane, disabled WebKit scroll anchoring for that route, and reset all result scroll owners again after layout settles.
+- Restored the selected tab to view after leaving focused mobile search, so a previously selected off-screen library tab is visible again.
+
+## 0.8.1
+
+### Added
+
+- Added independent portable-export and import choices for Procedures, Medications, and Syndromes. Each selected library transfers only path-free names, group labels, record kinds, and stable identities; no Markdown paths, note bodies, doses, or attachments are included.
+- Added automatic Procedures, Medications, and Syndromes tabs in generic destination bases whenever those portable libraries are present. Missing notes remain actionable placeholders that can create or link a local note without changing the destination preset.
+
+### Fixed
+
+- Kept a created or linked generic library note bound to its imported procedure, medication, or syndrome identity after cache rebuild, reload, restart, and Sync instead of reverting to a false placeholder or disappearing.
+- Kept library-only groups out of the topic index and made Replace operate only on the selected portable catalogs, preserving unrelated local topic and library identities.
+- Added portable-package format version 2 with explicit catalog provenance. Older plugin builds reject the new format safely; the current importer still reads version 1 and treats its non-topic records as dependencies rather than complete catalogs.
+- Prevented collection- or study-only imports from replacing unrelated local libraries, made selected empty catalogs replaceable, and isolated conflicting group renames from unselected catalogs.
+- Preserved the imported group and library role when a generic placeholder is linked to a local Markdown note, including after registry synchronization and re-export.
+- Kept iPhone search results visible above the software keyboard by switching focused mobile search to compact chrome, resetting retained result scroll positions, and exposing a live result count plus a 44-point clear control.
+
 ## 0.8.0
 
 ### Added

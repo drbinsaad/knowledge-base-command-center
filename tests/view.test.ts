@@ -2,18 +2,23 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Notice } from "obsidian";
 import { calculateModalViewportLayout, ConfirmModal, KnowledgeNoteModal, TopicEditorModal } from "../src/modals.ts";
-import { EntVaultCommandCenterView } from "../src/view.ts";
+import {
+  calculateSearchViewportLayout,
+  EntVaultCommandCenterView,
+  matchingKnowledgeBaseRecords,
+  tabDefinitions,
+} from "../src/view.ts";
 import { IndexManagerModal } from "../src/index-manager.ts";
 import { ExportImportCenterModal, preparePortableExport } from "../src/portability-modal.ts";
 import { createPortableExport, EMPTY_PORTABLE_SELECTION } from "../src/portability.ts";
 import { createPersonalBackup, migrateData, parseQuery, type VaultRecord } from "../src/model.ts";
 import { EntCommandCenterSettingsTab } from "../src/settings.ts";
 
-function record(path: string, title: string): VaultRecord {
+function record(path: string, title: string, kind: VaultRecord["kind"] = "topic"): VaultRecord {
   return {
     path,
     title,
-    kind: "topic",
+    kind,
     role: "supporting",
     curriculumId: "",
     domain: "Research",
@@ -36,6 +41,83 @@ function record(path: string, title: string): VaultRecord {
   };
 }
 
+test("generic workspaces expose only the library tabs represented by their records", () => {
+  const settings = migrateData(null).settings;
+  settings.workspaceMode = "generic";
+  const ids = (records: VaultRecord[]): string[] => tabDefinitions(settings, records).map((tab) => tab.id);
+  const coreTabs = ["curriculum", "inbox", "collections", "queues"];
+
+  assert.deepEqual(ids([]), coreTabs);
+  assert.deepEqual(ids([record("Knowledge Base/Topic.md", "Topic")]), coreTabs);
+  assert.deepEqual(ids([record("Portable/Procedure.md", "Procedure", "procedure")]), [...coreTabs, "procedures"]);
+  assert.deepEqual(ids([record("Portable/Medication.md", "Medication", "medication")]), [...coreTabs, "medications"]);
+  assert.deepEqual(ids([record("Portable/Syndrome.md", "Syndrome", "syndrome")]), [...coreTabs, "syndromes"]);
+  assert.deepEqual(ids([
+    record("Portable/Procedure.md", "Procedure", "procedure"),
+    record("Portable/Medication.md", "Medication", "medication"),
+    record("Portable/Syndrome.md", "Syndrome", "syndrome"),
+  ]), [...coreTabs, "procedures", "medications", "syndromes"]);
+});
+
+test("ENT workspaces keep every clinical library tab visible even when it is empty", () => {
+  const settings = migrateData(null).settings;
+  settings.workspaceMode = "ent-clinical";
+
+  assert.deepEqual(tabDefinitions(settings, []).map((tab) => tab.id), [
+    "curriculum",
+    "inbox",
+    "collections",
+    "queues",
+    "procedures",
+    "medications",
+    "syndromes",
+  ]);
+});
+
+test("reload returns to the index when the active dynamic library tab no longer exists", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.activeTab = "syndromes";
+  let saves = 0;
+  let renders = 0;
+  const records = [record("Knowledge Base/Topic.md", "Topic")];
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    plugin: {
+      data: typeof data;
+      getActiveKnowledgeBaseId(): string;
+      getDataEpoch(): number;
+      getRecords(): VaultRecord[];
+      reconcileRecords(records: VaultRecord[]): Promise<boolean>;
+      isDataReadOnly(): boolean;
+      savePluginData(): Promise<void>;
+    };
+    render(): void;
+    reload(): Promise<void>;
+  };
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+  view.plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    getRecords: () => records,
+    reconcileRecords: async () => false,
+    isDataReadOnly: () => false,
+    savePluginData: async () => { saves += 1; },
+  };
+  view.render = () => { renders += 1; };
+
+  await view.reload();
+
+  assert.equal(data.activeTab, "curriculum");
+  assert.equal(saves, 1);
+  assert.equal(renders, 1);
+});
+
 test("mobile note sheets follow the visual viewport when the keyboard opens", () => {
   assert.deepEqual(calculateModalViewportLayout(844, 844), {
     height: 844,
@@ -47,6 +129,35 @@ test("mobile note sheets follow the visual viewport when the keyboard opens", ()
     keyboardOpen: true,
     shift: -187,
   });
+});
+
+test("focused mobile search subtracts the iOS keyboard from the command-center height", () => {
+  assert.deepEqual(calculateSearchViewportLayout(844, 780, 430, 20), {
+    height: 386,
+    keyboardInset: 394,
+    keyboardOpen: true,
+  });
+  assert.deepEqual(calculateSearchViewportLayout(844, 780, 844), {
+    height: 780,
+    keyboardInset: 0,
+    keyboardOpen: false,
+  });
+});
+
+test("search finds records across every library instead of the last selected tab", () => {
+  const records = [
+    record("Knowledge Base/Laryngomalacia.md", "Laryngomalacia"),
+    record("Procedures/Laryngeal injection.md", "Laryngeal injection", "procedure"),
+    record("Syndromes/Stickler syndrome.md", "Stickler syndrome", "syndrome"),
+  ];
+  const domainOnly = record("Knowledge Base/Voice.md", "Voice assessment");
+  domainOnly.domain = "Laryngology";
+  records.unshift(domainOnly);
+
+  assert.deepEqual(
+    matchingKnowledgeBaseRecords(records, "laryn").map((item) => item.title),
+    ["Laryngomalacia", "Laryngeal injection", "Voice assessment"],
+  );
 });
 
 test("mobile note-sheet viewport values are clamped to the layout viewport", () => {
@@ -804,7 +915,7 @@ test("Index Manager refreshes stale state after a child portability mutation", (
   assert.equal(renders, 1, "a closed parent modal is never re-rendered");
 });
 
-test("bulk collection actions use current search text during the render debounce", () => {
+test("bulk collection actions use current global search text during the render debounce", () => {
   const view = Object.create(EntVaultCommandCenterView.prototype) as {
     query: string;
     parsedQuery: ReturnType<typeof parseQuery>;
@@ -815,7 +926,7 @@ test("bulk collection actions use current search text during the render debounce
   view.query = "beta";
   view.parsedQuery = parseQuery("alpha");
   view.records = [record("KB/alpha.md", "Alpha"), record("KB/beta.md", "Beta")];
-  view.plugin = { data: { activeTab: "curriculum" } };
+  view.plugin = { data: { activeTab: "syndromes" } };
 
   assert.deepEqual(view.matchingRecordsForCurrentView().map((item) => item.title), ["Beta"]);
 });
@@ -927,6 +1038,27 @@ test("closing the compact record inspector hides it and restores row focus", () 
   assert.equal(renderCount, 1);
   assert.equal(workspace.scrollTop, 73);
   assert.equal(focusCount, 1);
+});
+
+test("mobile search resets both possible result scroll containers", () => {
+  const content = { scrollTop: 125 };
+  const workspace = { scrollTop: 840 };
+  const tree = { scrollTop: 320 };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    contentEl: typeof content;
+    workspaceEl: typeof workspace;
+    treeEl: typeof tree;
+    resetSearchScrollPosition(): void;
+  };
+  view.contentEl = content;
+  view.workspaceEl = workspace;
+  view.treeEl = tree;
+
+  view.resetSearchScrollPosition();
+
+  assert.equal(content.scrollTop, 0);
+  assert.equal(workspace.scrollTop, 0);
+  assert.equal(tree.scrollTop, 0);
 });
 
 test("compact record inspector traps forward focus at its last control", () => {

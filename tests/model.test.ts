@@ -22,6 +22,7 @@ import {
   expectedParentCurriculumId,
   genericNotePath,
   groupRecordsByGroup,
+  isPortablePlaceholderPath,
   isExtensionCurriculumId,
   isRecognizedPluginData,
   isSafeObjectKey,
@@ -81,7 +82,9 @@ import {
   registerPortableGroup,
   removePortableGroup,
   renameOrMergePortableGroup,
+  selectionAvailableForExport,
   serializePortableExport,
+  summarizePortableExport,
   synchronizePortableRegistry,
   type PortableExportSelection,
   type PortableExportV1,
@@ -664,6 +667,16 @@ test("unknown search tokens fail visibly instead of matching every record", () =
   assert.equal(matchesQuery(record(), "priorty:P1"), false);
 });
 
+test("phone search tolerates a realistic laryngology typing omission", () => {
+  const target = record({
+    title: "Laryngomalacia",
+    path: "Knowledge Base/ENT/Pediatric/Laryngomalacia.md",
+    domain: "ENT / Pediatric",
+  });
+  assert.equal(matchesQuery(target, "Layngo"), true);
+  assert.equal(matchesQuery(target, "laryngo"), true);
+});
+
 test("organization backup round-trips without clinical content", () => {
   const data = migrateData(null);
   data.collections = [{ id: "airway", title: "Airway", collapsed: false, subjects: [record().path], subheadings: [] }];
@@ -830,6 +843,223 @@ test("portable export is path-free, content-free, and keeps stable subject IDs a
   assert.equal(data.portableIndex.resolvedPathBySubjectId[first.components.index?.subjects[0]?.id ?? ""], sourcePath);
 });
 
+test("portable export carries exact procedure, medication, and syndrome catalogs without paths or note bodies", () => {
+  const data = migrateData(null);
+  const topic = record({
+    path: "Private Source/Topics/Laryngeal Cleft.md",
+    title: "Laryngeal Cleft",
+    domain: "Pediatric",
+  });
+  const procedures = Array.from({ length: 21 }, (_, index) => ({
+    ...record({
+      path: `Private Source/Procedures/Procedure ${index + 1}.md`,
+      title: `Procedure ${index + 1}`,
+      kind: "procedure",
+      role: "library",
+      domain: "Procedures",
+      curriculumId: "",
+    }),
+    noteBody: `NEVER-EXPORT-PROCEDURE-BODY-${index + 1}`,
+  })) as VaultRecord[];
+  const medications = Array.from({ length: 44 }, (_, index) => ({
+    ...record({
+      path: `Private Source/Medications/Medication ${index + 1}.md`,
+      title: `Medication ${index + 1}`,
+      kind: "medication",
+      role: "library",
+      domain: "Medications",
+      curriculumId: "",
+    }),
+    noteBody: `NEVER-EXPORT-MEDICATION-BODY-${index + 1}`,
+  })) as VaultRecord[];
+  const syndromes = Array.from({ length: 25 }, (_, index) => ({
+    ...record({
+      path: `Private Source/Syndromes/Syndrome ${index + 1}.md`,
+      title: `Syndrome ${index + 1}`,
+      kind: "syndrome",
+      role: "library",
+      domain: "Syndromes",
+      curriculumId: "",
+    }),
+    noteBody: `NEVER-EXPORT-SYNDROME-BODY-${index + 1}`,
+  })) as VaultRecord[];
+  const records = [topic, ...procedures, ...medications, ...syndromes];
+
+  const exported = createPortableExport(
+    data,
+    records,
+    portableSelection({ index: true, procedures: true, medications: true, syndromes: true }),
+    "2026-08-08T00:00:00.000Z",
+  );
+  const summary = summarizePortableExport(exported);
+  const groups = exported.components.index?.groups ?? [];
+  const subjects = exported.components.index?.subjects ?? [];
+  const serialized = serializePortableExport(exported);
+
+  assert.deepEqual(summary, {
+    groups: 1,
+    subjects: 91,
+    indexSubjects: 1,
+    procedures: 21,
+    medications: 44,
+    syndromes: 25,
+    placeholders: 91,
+    collections: 0,
+    pinned: 0,
+    next: 0,
+    views: 0,
+    hasRecovery: false,
+  });
+  assert.equal(groups.length, 4, "the catalog must carry the groups needed by both the index and all three libraries");
+  assert.deepEqual(
+    Object.fromEntries(["topic", "procedure", "medication", "syndrome"].map((kind) => [
+      kind,
+      subjects.filter((subject) => subject.recordKind === kind).length,
+    ])),
+    { topic: 1, procedure: 21, medication: 44, syndrome: 25 },
+  );
+  assert.equal(subjects.filter((subject) => subject.recordKind !== "topic").every((subject) => !subject.indexed), true);
+  assert.equal(serialized.includes("resolvedPathBySubjectId"), false);
+  for (const source of records) assert.equal(serialized.includes(source.path), false, source.path);
+  assert.equal(serialized.includes("NEVER-EXPORT-PROCEDURE-BODY"), false);
+  assert.equal(serialized.includes("NEVER-EXPORT-MEDICATION-BODY"), false);
+  assert.equal(serialized.includes("NEVER-EXPORT-SYNDROME-BODY"), false);
+});
+
+test("syndrome-only export imports path-free syndrome placeholders into a generic knowledge base", () => {
+  const source = migrateData(null);
+  const records = [
+    record({ path: "Source/Topic.md", title: "Topic", kind: "topic", domain: "Topics" }),
+    record({ path: "Source/Procedure.md", title: "Procedure", kind: "procedure", role: "library", domain: "Procedures" }),
+    record({ path: "Source/Medication.md", title: "Medication", kind: "medication", role: "library", domain: "Medications" }),
+    record({ path: "Source/Syndromes/CHARGE.md", title: "CHARGE syndrome", kind: "syndrome", role: "library", domain: "Syndromes" }),
+    record({ path: "Source/Syndromes/22q11.md", title: "22q11.2 deletion syndrome", kind: "syndrome", role: "library", domain: "Syndromes" }),
+  ];
+  const exported = createPortableExport(
+    source,
+    records,
+    portableSelection({ syndromes: true }),
+    "2026-08-08T00:00:00.000Z",
+  );
+  const serialized = serializePortableExport(exported);
+  const parsed = parsePortableExport(JSON.parse(serialized) as unknown);
+  const index = parsed.components.index;
+
+  assert.ok(index);
+  assert.equal(index.includeIndex, false);
+  assert.deepEqual(index.indexGroupIds, []);
+  assert.deepEqual(index.subjects.map((subject) => subject.recordKind), ["syndrome", "syndrome"]);
+  assert.equal(index.subjects.every((subject) => subject.indexed === false), true);
+  assert.deepEqual(selectionAvailableForExport(parsed), portableSelection({ syndromes: true }));
+  assert.equal(records.some((item) => serialized.includes(item.path)), false);
+
+  const target = migrateData(null);
+  assert.equal(target.settings.workspaceMode, "generic");
+  const result = applyPortableExport(target, parsed, portableSelection({ syndromes: true }), "replace");
+
+  assert.equal(result.addedSubjects, 2);
+  assert.equal(result.unresolvedSubjects, 2);
+  assert.deepEqual(target.portableIndex.resolvedPathBySubjectId, {});
+  assert.deepEqual(target.portableIndex.subjects.map((subject) => subject.recordKind), ["syndrome", "syndrome"]);
+  assert.equal(target.portableIndex.subjects.every((subject) => !subject.indexed), true);
+  const placeholderPaths = target.portableIndex.subjects.map((subject) => portablePlaceholderPath(subject.id));
+  assert.equal(placeholderPaths.every(isPortablePlaceholderPath), true);
+  assert.equal(result.unresolvedSubjects, placeholderPaths.length);
+  assert.deepEqual(target.manualIndexPaths, []);
+  assert.deepEqual(target.indexGroupByPath, {});
+  assert.deepEqual(target.curriculumVisual.parentByPath, {});
+});
+
+test("library-only replace preserves unrelated local topic identities and replaces only that library", () => {
+  const source = migrateData(null);
+  const incoming = parsePortableExport(createPortableExport(
+    source,
+    [record({
+      path: "Source/Syndromes/CHARGE.md",
+      title: "CHARGE syndrome",
+      kind: "syndrome",
+      role: "library",
+      domain: "Syndromes",
+      curriculumId: "",
+    })],
+    portableSelection({ syndromes: true }),
+    "2026-08-08T00:00:00.000Z",
+  ));
+  const target = migrateData(null);
+  const localTopicPath = "Knowledge Base/Local airway topic.md";
+  const localSyndromePath = "Knowledge Base/Old syndrome.md";
+  target.portableIndex = {
+    version: 1,
+    groups: [
+      { id: "group-topics", title: "Airway", order: 0 },
+      { id: "group-syndromes", title: "Syndromes", order: 1 },
+    ],
+    subjects: [
+      {
+        id: "subject-local-topic",
+        title: "Local airway topic",
+        groupId: "group-topics",
+        parentId: null,
+        order: 0,
+        indexed: true,
+        configuredId: "LOCAL-001",
+        recordKind: "topic",
+      },
+      {
+        id: "subject-old-syndrome",
+        title: "Old syndrome",
+        groupId: "group-syndromes",
+        parentId: null,
+        order: 0,
+        indexed: false,
+        configuredId: "",
+        recordKind: "syndrome",
+      },
+    ],
+    resolvedPathBySubjectId: {
+      "subject-local-topic": localTopicPath,
+      "subject-old-syndrome": localSyndromePath,
+    },
+  };
+  target.manualIndexPaths = [localTopicPath];
+  target.indexGroupByPath[localTopicPath] = "Airway";
+  const localTopicBefore = structuredClone(target.portableIndex.subjects[0]);
+
+  applyPortableExport(target, incoming, portableSelection({ syndromes: true }), "replace");
+
+  assert.deepEqual(target.portableIndex.subjects.find((subject) => subject.id === "subject-local-topic"), localTopicBefore);
+  assert.equal(target.portableIndex.resolvedPathBySubjectId["subject-local-topic"], localTopicPath);
+  assert.equal(target.manualIndexPaths.includes(localTopicPath), true);
+  assert.equal(target.indexGroupByPath[localTopicPath], "Airway");
+  assert.equal(target.portableIndex.subjects.some((subject) => subject.id === "subject-old-syndrome"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(target.portableIndex.resolvedPathBySubjectId, "subject-old-syndrome"), false);
+  assert.deepEqual(target.portableIndex.subjects.filter((subject) => subject.recordKind === "syndrome").map((subject) => subject.title), ["CHARGE syndrome"]);
+});
+
+test("older v1 topic-only packages remain index blueprints after library selections are introduced", () => {
+  const legacy = portableFixture();
+  const legacyIndex = legacy.components.index;
+  assert.ok(legacyIndex);
+  delete legacyIndex.includeIndex;
+  delete legacyIndex.indexGroupIds;
+  const legacySubject = legacyIndex.subjects[0] as unknown as Record<string, unknown>;
+  delete legacySubject.recordKind;
+
+  const parsed = parsePortableExport(JSON.parse(JSON.stringify(legacy)) as unknown);
+  assert.equal(parsed.components.index?.includeIndex, undefined);
+  assert.deepEqual(parsed.components.index?.subjects.map((subject) => subject.recordKind), ["topic"]);
+  assert.deepEqual(selectionAvailableForExport(parsed), portableSelection({ index: true }));
+
+  const target = migrateData(null);
+  const result = applyPortableExport(target, parsed, portableSelection({ index: true }), "replace");
+  const imported = target.portableIndex.subjects.find((subject) => subject.id === "subject-cleft");
+  assert.ok(imported);
+  assert.equal(imported.recordKind, "topic");
+  assert.equal(imported.indexed, true);
+  assert.equal(result.unresolvedSubjects, 1);
+  assert.ok(target.manualIndexPaths.includes(portablePlaceholderPath(imported.id)));
+});
+
 test("portable index round-trip preserves the effective ENT heading hierarchy, order, and collapse state", () => {
   const data = migrateData(null);
   data.settings.workspaceMode = "ent-clinical";
@@ -992,7 +1222,7 @@ test("portable export retains only the canonical clinical curriculum ID mapping"
   assert.equal(JSON.stringify(malformedExport).includes(privateValue), false);
 });
 
-test("portable export includes the ancestor chain for collection-only subjects", () => {
+test("collection-only export carries the referenced identity without importing index hierarchy", () => {
   const data = migrateData(null);
   const parentId = "subject-parent";
   const childId = "subject-child";
@@ -1013,8 +1243,10 @@ test("portable export includes the ancestor chain for collection-only subjects",
     record({ path: childPath, title: "Child", role: "placeholder", isPlaceholder: true, portableIndexed: false, portableId: childId }),
   ];
   const exported = createPortableExport(data, records, portableSelection({ collections: true }), "2026-08-08T00:00:00.000Z");
-  assert.deepEqual(new Set(exported.components.index?.subjects.map((subject) => subject.id)), new Set([parentId, childId]));
-  assert.equal(exported.components.index?.subjects.find((subject) => subject.id === childId)?.parentId, parentId);
+  assert.deepEqual(new Set(exported.components.index?.subjects.map((subject) => subject.id)), new Set([childId]));
+  assert.equal(exported.components.index?.subjects.find((subject) => subject.id === childId)?.parentId, null);
+  assert.equal(exported.components.index?.subjects.find((subject) => subject.id === childId)?.indexed, false);
+  assert.equal(exported.components.index?.includedSections?.index, false);
 });
 
 test("portable group rename preserves identity without resurrecting the old heading", () => {
@@ -1273,7 +1505,7 @@ test("merge import creates unresolved portable placeholders without reintroducin
   assert.equal(serialized.includes("resolvedPathBySubjectId"), false);
   assert.equal(result.unresolvedSubjects, 1);
   assert.deepEqual(target.portableIndex.resolvedPathBySubjectId, {});
-  assert.ok(target.manualIndexPaths.includes(placeholderPath));
+  assert.equal(target.manualIndexPaths.includes(placeholderPath), false);
   assert.deepEqual(target.collections[0]?.subjects, [placeholderPath]);
   assert.deepEqual(target.pinnedPaths, [placeholderPath]);
   assert.deepEqual(target.nextStudyPaths, [placeholderPath]);
@@ -2619,4 +2851,333 @@ test("unchanged canonical path inputs preserve a legacy filename after sanitizat
   assert.equal(canonicalPathInputsUnchanged(legacy, unchanged), true);
   assert.notEqual(canonicalPath(unchanged), legacy.path);
   assert.equal(canonicalPathInputsUnchanged(legacy, { ...unchanged, title: "VPI updated" }), false);
+});
+
+test("portable v2 declares every selected catalog while legacy v1 packages remain readable", () => {
+  const source = migrateData(null);
+  const medication = record({
+    path: "Source/Medications/Salipax.md",
+    title: "Salipax",
+    kind: "medication",
+    role: "library",
+    domain: "Medications",
+    curriculumId: "",
+  });
+  const current = createPortableExport(
+    source,
+    [medication],
+    portableSelection({ medications: true }),
+    "2026-08-08T00:00:00.000Z",
+  );
+
+  assert.equal(current.version, 2);
+  assert.equal(current.components.index?.version, 2);
+  assert.deepEqual(current.components.index?.includedSections, {
+    index: false,
+    procedures: false,
+    medications: true,
+    syndromes: false,
+  });
+  assert.deepEqual(selectionAvailableForExport(parsePortableExport(structuredClone(current))), portableSelection({ medications: true }));
+
+  const legacy = portableFixture();
+  const parsedLegacy = parsePortableExport(structuredClone(legacy));
+  assert.equal(parsedLegacy.version, 1);
+  assert.equal(parsedLegacy.components.index?.version, 1);
+  assert.equal(parsedLegacy.components.index?.includedSections, undefined);
+  assert.deepEqual(selectionAvailableForExport(parsedLegacy), portableSelection({ index: true }));
+});
+
+test("a v1 medication dependency is not advertised as a full catalog and replace preserves unrelated medications", () => {
+  const legacy: PortableExportV1 = {
+    kind: PORTABLE_EXPORT_KIND,
+    version: 1,
+    exportedAt: "2026-08-08T00:00:00.000Z",
+    sourceWorkspace: "Legacy source",
+    components: {
+      index: {
+        version: 1,
+        groups: [{ id: "group-imported-medications", title: "Imported medications", order: 0 }],
+        subjects: [{
+          id: "subject-imported-medication",
+          title: "Imported medication",
+          groupId: "group-imported-medications",
+          parentId: null,
+          order: 0,
+          indexed: false,
+          configuredId: "",
+          recordKind: "medication",
+        }],
+        includeIndex: false,
+        indexGroupIds: [],
+      },
+      collections: {
+        version: 1,
+        collections: [{
+          id: "collection-imported",
+          title: "Imported collection",
+          collapsed: false,
+          subjectIds: ["subject-imported-medication"],
+          subheadings: [],
+        }],
+      },
+    },
+  };
+  const parsed = parsePortableExport(structuredClone(legacy));
+  const available = selectionAvailableForExport(parsed);
+  assert.equal(available.collections, true);
+  assert.equal(available.index, false);
+  assert.equal(available.medications, false);
+  assert.throws(
+    () => applyPortableExport(migrateData(null), parsed, portableSelection({ medications: true }), "replace"),
+    /does not contain the selected medications component/i,
+  );
+
+  const target = migrateData(null);
+  const localMedicationPath = "Knowledge Base/Local medication.md";
+  target.portableIndex = {
+    version: 1,
+    groups: [{ id: "group-local-medications", title: "Local medications", order: 0 }],
+    subjects: [{
+      id: "subject-local-medication",
+      title: "Local medication",
+      groupId: "group-local-medications",
+      parentId: null,
+      order: 0,
+      indexed: false,
+      configuredId: "",
+      recordKind: "medication",
+    }],
+    resolvedPathBySubjectId: { "subject-local-medication": localMedicationPath },
+  };
+
+  applyPortableExport(target, parsed, portableSelection({ collections: true }), "replace");
+
+  assert.equal(target.portableIndex.subjects.some((subject) => subject.id === "subject-local-medication"), true);
+  assert.equal(target.portableIndex.resolvedPathBySubjectId["subject-local-medication"], localMedicationPath);
+  assert.equal(target.portableIndex.subjects.some((subject) => subject.id === "subject-imported-medication"), true);
+  assert.deepEqual(target.collections[0]?.subjects, [portablePlaceholderPath("subject-imported-medication")]);
+});
+
+test("a v2 collection-only export carries a medication solely as a referenced dependency", () => {
+  const source = migrateData(null);
+  const medication = record({
+    path: "Source/Medications/Dependency.md",
+    title: "Collection dependency",
+    kind: "medication",
+    role: "library",
+    domain: "Medications",
+    curriculumId: "",
+  });
+  source.collections = [{
+    id: "collection-medication",
+    title: "Medication reading",
+    collapsed: false,
+    subjects: [medication.path],
+    subheadings: [],
+  }];
+
+  const exported = createPortableExport(
+    source,
+    [medication],
+    portableSelection({ collections: true }),
+    "2026-08-08T00:00:00.000Z",
+  );
+  const parsed = parsePortableExport(structuredClone(exported));
+  const index = parsed.components.index;
+  assert.ok(index);
+  assert.deepEqual(index.includedSections, {
+    index: false,
+    procedures: false,
+    medications: false,
+    syndromes: false,
+  });
+  assert.deepEqual(index.subjects.map((subject) => subject.recordKind), ["medication"]);
+  assert.deepEqual(selectionAvailableForExport(parsed), portableSelection({ collections: true }));
+
+  const target = migrateData(null);
+  const result = applyPortableExport(target, parsed, portableSelection({ collections: true }), "replace");
+  assert.equal(result.addedSubjects, 1);
+  assert.equal(result.unresolvedSubjects, 1);
+  assert.equal(target.portableIndex.subjects[0]?.recordKind, "medication");
+  assert.deepEqual(target.collections[0]?.subjects, [portablePlaceholderPath(index.subjects[0]?.id ?? "")]);
+});
+
+test("an explicitly selected empty medication catalog is available and replace clears only medications", () => {
+  const source = migrateData(null);
+  const emptyMedicationCatalog = parsePortableExport(createPortableExport(
+    source,
+    [],
+    portableSelection({ medications: true }),
+    "2026-08-08T00:00:00.000Z",
+  ));
+  assert.deepEqual(selectionAvailableForExport(emptyMedicationCatalog), portableSelection({ medications: true }));
+  assert.deepEqual(emptyMedicationCatalog.components.index?.subjects, []);
+
+  const target = migrateData(null);
+  target.portableIndex = {
+    version: 1,
+    groups: [
+      { id: "group-topics", title: "Topics", order: 0 },
+      { id: "group-procedures", title: "Procedures", order: 1 },
+      { id: "group-medications", title: "Medications", order: 2 },
+      { id: "group-syndromes", title: "Syndromes", order: 3 },
+    ],
+    subjects: [
+      { id: "subject-topic", title: "Topic", groupId: "group-topics", parentId: null, order: 0, indexed: true, configuredId: "", recordKind: "topic" },
+      { id: "subject-procedure", title: "Procedure", groupId: "group-procedures", parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "procedure" },
+      { id: "subject-medication", title: "Medication", groupId: "group-medications", parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "medication" },
+      { id: "subject-syndrome", title: "Syndrome", groupId: "group-syndromes", parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "syndrome" },
+    ],
+    resolvedPathBySubjectId: {},
+  };
+
+  applyPortableExport(target, emptyMedicationCatalog, portableSelection({ medications: true }), "replace");
+
+  assert.deepEqual(
+    target.portableIndex.subjects.map((subject) => subject.recordKind).sort(),
+    ["procedure", "syndrome", "topic"],
+  );
+  assert.equal(target.portableIndex.subjects.some((subject) => subject.id === "subject-medication"), false);
+  assert.equal(target.portableIndex.groups.some((group) => group.id === "group-medications"), false);
+});
+
+test("portable v2 rejects missing, contradictory, and undeclared catalog provenance", () => {
+  const source = migrateData(null);
+  const medication = record({
+    path: "Source/Medications/Medication.md",
+    title: "Medication",
+    kind: "medication",
+    role: "library",
+    domain: "Medications",
+    curriculumId: "",
+  });
+  const valid = createPortableExport(
+    source,
+    [medication],
+    portableSelection({ medications: true }),
+    "2026-08-08T00:00:00.000Z",
+  );
+
+  const missing = structuredClone(valid) as unknown as { components: { index: Record<string, unknown> } };
+  delete missing.components.index.includedSections;
+  assert.throws(() => parsePortableExport(missing), /must declare includedSections/i);
+
+  const nonBoolean = structuredClone(valid) as unknown as {
+    components: { index: { includedSections: Record<string, unknown> } };
+  };
+  nonBoolean.components.index.includedSections.medications = "yes";
+  assert.throws(() => parsePortableExport(nonBoolean), /includedSections\.medications must be true or false/i);
+
+  const contradictory = structuredClone(valid) as unknown as { components: { index: { includeIndex: boolean } } };
+  contradictory.components.index.includeIndex = true;
+  assert.throws(() => parsePortableExport(contradictory), /includeIndex conflicts/i);
+
+  const undeclared = structuredClone(valid) as unknown as {
+    components: { index: { includedSections: { medications: boolean } } };
+  };
+  undeclared.components.index.includedSections.medications = false;
+  assert.throws(() => parsePortableExport(undeclared), /undeclared catalog/i);
+
+  const illegalIndexGroup = structuredClone(valid) as unknown as {
+    components: { index: { groups: Array<{ id: string }>; indexGroupIds: string[] } };
+  };
+  illegalIndexGroup.components.index.indexGroupIds = [illegalIndexGroup.components.index.groups[0]?.id ?? ""];
+  assert.throws(() => parsePortableExport(illegalIndexGroup), /without the index blueprint cannot declare index groups/i);
+});
+
+test("selective import splits a shared group collision without changing the unselected topic and stays idempotent", () => {
+  const incoming = parsePortableExport({
+    kind: PORTABLE_EXPORT_KIND,
+    version: 2,
+    exportedAt: "2026-08-08T00:00:00.000Z",
+    sourceWorkspace: "Source",
+    components: {
+      index: {
+        version: 2,
+        groups: [{ id: "group-shared", title: "Imported medicines", order: 0 }],
+        subjects: [{
+          id: "subject-imported-medication",
+          title: "Imported medication",
+          groupId: "group-shared",
+          parentId: null,
+          order: 0,
+          indexed: false,
+          configuredId: "",
+          recordKind: "medication",
+        }],
+        includedSections: { index: false, procedures: false, medications: true, syndromes: false },
+        includeIndex: false,
+        indexGroupIds: [],
+      },
+    },
+  });
+  const target = migrateData(null);
+  target.portableIndex = {
+    version: 1,
+    groups: [{ id: "group-shared", title: "Local topics", order: 0 }],
+    subjects: [{
+      id: "subject-local-topic",
+      title: "Local topic",
+      groupId: "group-shared",
+      parentId: null,
+      order: 0,
+      indexed: true,
+      configuredId: "",
+      recordKind: "topic",
+    }],
+    resolvedPathBySubjectId: {},
+  };
+
+  const first = applyPortableExport(target, incoming, portableSelection({ medications: true }), "replace");
+  const importedAfterFirst = target.portableIndex.subjects.find((subject) => subject.id === "subject-imported-medication");
+  assert.ok(importedAfterFirst);
+  const splitGroupId = importedAfterFirst.groupId;
+  assert.notEqual(splitGroupId, "group-shared");
+  assert.equal(target.portableIndex.groups.find((group) => group.id === "group-shared")?.title, "Local topics");
+  assert.equal(target.portableIndex.groups.find((group) => group.id === splitGroupId)?.title, "Imported medicines");
+  assert.equal(target.portableIndex.subjects.find((subject) => subject.id === "subject-local-topic")?.groupId, "group-shared");
+  assert.equal(first.addedSubjects, 1);
+
+  const second = applyPortableExport(target, incoming, portableSelection({ medications: true }), "replace");
+  assert.equal(second.addedSubjects, 0);
+  assert.equal(second.matchedSubjects, 1);
+  assert.equal(target.portableIndex.subjects.length, 2);
+  assert.equal(target.portableIndex.groups.length, 2);
+  assert.equal(target.portableIndex.subjects.find((subject) => subject.id === "subject-imported-medication")?.groupId, splitGroupId);
+  assert.equal(target.portableIndex.groups.filter((group) => group.title === "Imported medicines").length, 1);
+  assert.equal(target.portableIndex.groups.find((group) => group.id === "group-shared")?.title, "Local topics");
+});
+
+test("portable summaries count only selected catalogs while retaining selected organization dependencies", () => {
+  const source = migrateData(null);
+  const topic = record({ path: "Source/Topics/Topic.md", title: "Topic", domain: "Topics", curriculumId: "" });
+  const procedure = record({ path: "Source/Procedures/Procedure.md", title: "Procedure", kind: "procedure", role: "library", domain: "Procedures", curriculumId: "" });
+  const medication = record({ path: "Source/Medications/Medication.md", title: "Medication", kind: "medication", role: "library", domain: "Medications", curriculumId: "" });
+  const syndrome = record({ path: "Source/Syndromes/Syndrome.md", title: "Syndrome", kind: "syndrome", role: "library", domain: "Syndromes", curriculumId: "" });
+  source.collections = [{ id: "medications", title: "Medication reading", collapsed: false, subjects: [medication.path], subheadings: [] }];
+  const exported = createPortableExport(
+    source,
+    [topic, procedure, medication, syndrome],
+    portableSelection({ index: true, procedures: true, medications: true, syndromes: true, collections: true }),
+    "2026-08-08T00:00:00.000Z",
+  );
+
+  const indexOnly = summarizePortableExport(exported, portableSelection({ index: true }));
+  assert.deepEqual(
+    { subjects: indexOnly.subjects, groups: indexOnly.groups, index: indexOnly.indexSubjects, procedures: indexOnly.procedures, medications: indexOnly.medications, syndromes: indexOnly.syndromes },
+    { subjects: 1, groups: 1, index: 1, procedures: 0, medications: 0, syndromes: 0 },
+  );
+
+  const medicationsOnly = summarizePortableExport(exported, portableSelection({ medications: true }));
+  assert.deepEqual(
+    { subjects: medicationsOnly.subjects, groups: medicationsOnly.groups, index: medicationsOnly.indexSubjects, procedures: medicationsOnly.procedures, medications: medicationsOnly.medications, syndromes: medicationsOnly.syndromes },
+    { subjects: 1, groups: 0, index: 0, procedures: 0, medications: 1, syndromes: 0 },
+  );
+
+  const collectionOnly = summarizePortableExport(exported, portableSelection({ collections: true }));
+  assert.equal(collectionOnly.subjects, 1);
+  assert.equal(collectionOnly.medications, 1, "the selected collection still discloses its medication dependency");
+  assert.equal(collectionOnly.indexSubjects, 0);
+  assert.equal(collectionOnly.collections, 1);
 });

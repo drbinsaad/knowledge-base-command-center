@@ -87,6 +87,21 @@ const COMPONENTS: Array<{
     description: "Subject names, groups, nested hierarchy, and visual order. Missing notes become actionable placeholders.",
   },
   {
+    key: "procedures",
+    label: "Procedures",
+    description: "Procedure names and portable identities only. Missing notes become actionable placeholders in a Procedures tab.",
+  },
+  {
+    key: "medications",
+    label: "Medications",
+    description: "Medication names and portable identities only. Doses, note bodies, and attachments are never included.",
+  },
+  {
+    key: "syndromes",
+    label: "Syndromes",
+    description: "Syndrome names and portable identities only. Missing notes become actionable placeholders in a Syndromes tab.",
+  },
+  {
     key: "collections",
     label: "Collections",
     description: "Collection and subheading structure plus membership by portable subject identity.",
@@ -114,6 +129,15 @@ function cloneSelection(value: PortableExportSelection): PortableExportSelection
 
 function selectionCount(selection: PortableExportSelection): number {
   return COMPONENTS.filter(({ key }) => selection[key]).length;
+}
+
+function selectionUsesSubjectCatalog(selection: PortableExportSelection): boolean {
+  return selection.index
+    || selection.procedures
+    || selection.medications
+    || selection.syndromes
+    || selection.collections
+    || selection.study;
 }
 
 function errorMessage(error: unknown): string {
@@ -298,7 +322,7 @@ export class ExportImportCenterModal extends Modal {
         // a real plugin-data mutation that should happen only when Export runs.
         const preview = createPortableExport(
           isolatedExportData(this.plugin.data),
-          selection.index ? this.plugin.getRecords() : [],
+          selectionUsesSubjectCatalog(selection) ? this.plugin.getRecords() : [],
           selection,
           new Date().toISOString(),
           this.currentVaultId(),
@@ -347,6 +371,9 @@ export class ExportImportCenterModal extends Modal {
           this.exportSelection = {
             workspace: true,
             index: true,
+            procedures: true,
+            medications: true,
+            syndromes: true,
             collections: true,
             study: true,
             savedViews: true,
@@ -408,6 +435,11 @@ export class ExportImportCenterModal extends Modal {
     }
 
     const rawAvailable = selectionAvailableForExport(this.importValue);
+    const sourceWorkspaceMode = this.importValue.components.workspace?.settings.workspaceMode;
+    const workspaceBlockReason = rawAvailable.workspace && sourceWorkspaceMode
+      && sourceWorkspaceMode !== this.plugin.data.settings.workspaceMode
+      ? ` Source preset is ${sourceWorkspaceMode === "ent-clinical" ? "ENT clinical" : "Generic"}; this destination base is ${this.plugin.data.settings.workspaceMode === "ent-clinical" ? "ENT clinical" : "Generic"}. Other portable sections remain available.`
+      : "";
     let recoveryCheck: ReturnType<typeof assertPersonalBackupMatchesVault> | null = null;
     let recoveryBlockReason = "";
     if (this.importValue.components.recovery) {
@@ -427,12 +459,13 @@ export class ExportImportCenterModal extends Modal {
     }
     const available = {
       ...rawAvailable,
+      workspace: rawAvailable.workspace && !workspaceBlockReason,
       recovery: rawAvailable.recovery && !recoveryBlockReason,
     };
     this.renderImportSource(this.importValue);
     this.renderComponentToggles(this.importSelection, available, (selection) => {
       this.importSelection = selection;
-    }, recoveryBlockReason);
+    }, recoveryBlockReason, workspaceBlockReason);
 
     const selection = normalizePortableSelection(this.importSelection);
     this.renderSummary(this.importValue, selection, "Selected import");
@@ -542,28 +575,29 @@ export class ExportImportCenterModal extends Modal {
     available: PortableExportSelection | undefined,
     onChange: (selection: PortableExportSelection) => void,
     recoveryBlockReason = "",
+    workspaceBlockReason = "",
   ): void {
     this.contentEl.createEl("h3", { text: available ? "Sections in this file" : "Sections to export" });
     for (const component of COMPONENTS) {
-      const dependencyLock = component.key === "index" && (selection.collections || selection.study);
       const isAvailable = available?.[component.key] ?? true;
       const unavailableInReadOnly = !available && component.key === "recovery" && this.plugin.isDataReadOnly();
       const unavailableText = available && !isAvailable
-        ? component.key === "recovery" && recoveryBlockReason
+        ? component.key === "workspace" && workspaceBlockReason
+          ? workspaceBlockReason
+          : component.key === "recovery" && recoveryBlockReason
           ? ` ${recoveryBlockReason}`
           : " Not present in this file."
         : "";
       const readOnlyText = unavailableInReadOnly ? " Unavailable in compatibility read-only mode; preserve the raw data.json instead." : "";
-      const dependencyText = dependencyLock ? " Required by Collections or Study state." : "";
       const focusKey = `${available ? "import" : "export"}-component-${component.key}`;
       const setting = new Setting(this.contentEl)
         .setName(component.label)
-        .setDesc(`${component.description}${unavailableText}${readOnlyText}${dependencyText}`)
+        .setDesc(`${component.description}${unavailableText}${readOnlyText}`)
         .addToggle((toggle) => {
           toggle.toggleEl.dataset.portabilityFocus = focusKey;
           toggle
             .setValue(isAvailable && selection[component.key])
-            .setDisabled(Boolean(this.busyAction) || !isAvailable || dependencyLock || unavailableInReadOnly)
+            .setDisabled(Boolean(this.busyAction) || !isAvailable || unavailableInReadOnly)
             .onChange((enabled) => {
               let next = cloneSelection(selection);
               if (available && component.key === "recovery" && enabled) {
@@ -584,7 +618,6 @@ export class ExportImportCenterModal extends Modal {
                 }
               }
               if (!available && component.key === "recovery") this.exportRecoveryConfirmed = false;
-              if ((component.key === "collections" || component.key === "study") && enabled) next.index = true;
               onChange(normalizePortableSelection(next));
               this.rerenderFromControl(focusKey);
             });
@@ -626,10 +659,21 @@ export class ExportImportCenterModal extends Modal {
     selection: PortableExportSelection,
     heading: string,
   ): void {
-    const summary = summarizePortableExport(value);
+    const summary = summarizePortableExport(value, selection);
     const parts: string[] = [];
     if (selection.workspace) parts.push("workspace settings");
-    if (selection.index) parts.push(`${summary.groups} groups`, `${summary.subjects} subjects`);
+    if (selection.index) parts.push(`${summary.groups} groups`, `${summary.indexSubjects} index subjects`);
+    if (selection.procedures) parts.push(`${summary.procedures} procedures`);
+    if (selection.medications) parts.push(`${summary.medications} medications`);
+    if (selection.syndromes) parts.push(`${summary.syndromes} syndromes`);
+    const explicitlyCountedSubjects = (selection.index ? summary.indexSubjects : 0)
+      + (selection.procedures ? summary.procedures : 0)
+      + (selection.medications ? summary.medications : 0)
+      + (selection.syndromes ? summary.syndromes : 0);
+    if (summary.subjects > explicitlyCountedSubjects) {
+      const dependencies = summary.subjects - explicitlyCountedSubjects;
+      parts.push(`${dependencies} referenced subject ${dependencies === 1 ? "dependency" : "dependencies"}`);
+    }
     if (selection.collections) parts.push(`${summary.collections} collections`);
     if (selection.study) parts.push(`${summary.pinned} pinned`, `${summary.next} in Next`);
     if (selection.savedViews) parts.push(`${summary.views} saved views`);
@@ -637,9 +681,9 @@ export class ExportImportCenterModal extends Modal {
     const box = this.contentEl.createDiv({ cls: "ent-cc-manager-diagnostic ent-cc-portability-summary" });
     box.createEl("strong", { text: heading });
     box.createEl("p", { text: parts.length ? parts.join(" · ") : "No sections selected." });
-    if (selection.index && summary.subjects > 0) {
+    if (selectionUsesSubjectCatalog(selection) && summary.subjects > 0) {
       box.createEl("p", {
-        text: "In another vault, subjects that do not match a note remain in the index as placeholders until you create or link a note.",
+        text: "In another vault, subjects that do not match a note remain as placeholders in their selected index or library until you create or link a note.",
       });
     }
     if (selection.recovery && summary.hasRecovery) {
@@ -676,7 +720,7 @@ export class ExportImportCenterModal extends Modal {
     const exportData = this.plugin.data;
     const prepared = preparePortableExport(
       exportData,
-      selection.index ? this.plugin.getRecords() : [],
+      selectionUsesSubjectCatalog(selection) ? this.plugin.getRecords() : [],
       selection,
       now.toISOString(),
       this.currentVaultId(),
@@ -688,7 +732,7 @@ export class ExportImportCenterModal extends Modal {
     try {
       // The validated clone already contains the synchronized stable registry;
       // commit it once without repeating the full vault/index pass.
-      if (selection.index && !this.plugin.isDataReadOnly()) {
+      if (selectionUsesSubjectCatalog(selection) && !this.plugin.isDataReadOnly()) {
         if (!this.guardOpenedBase()) return;
         commitStarted = true;
         exportData.portableIndex = prepared.portableIndex;
@@ -781,7 +825,14 @@ export class ExportImportCenterModal extends Modal {
     if (!this.guardOpenedBase()) return;
     this.importValue = value;
     this.importSourceLabel = sourceLabel;
-    this.importSelection = { ...selectionAvailableForExport(value), recovery: false };
+    const selection = selectionAvailableForExport(value);
+    const sourceWorkspaceMode = value.components.workspace?.settings.workspaceMode;
+    this.importSelection = {
+      ...selection,
+      workspace: selection.workspace && (!sourceWorkspaceMode
+        || sourceWorkspaceMode === this.plugin.data.settings.workspaceMode),
+      recovery: false,
+    };
     this.importMode = "merge";
     this.recoveryConfirmed = false;
     this.crossBaseRecoveryConfirmed = false;
@@ -886,7 +937,7 @@ export class ExportImportCenterModal extends Modal {
           }
           this.plugin.invalidateRecordCache();
         }
-        if (selection.index) synchronizePortableRegistry(this.plugin.data, this.plugin.getRecords());
+        if (selectionUsesSubjectCatalog(selection)) synchronizePortableRegistry(this.plugin.data, this.plugin.getRecords());
         const remainingSelection: PortableExportSelection = {
           ...selection,
           workspace: false,
@@ -899,14 +950,14 @@ export class ExportImportCenterModal extends Modal {
       },
       {
         includeSettings: selection.workspace,
-        includePortableIndex: selection.index || selection.recovery,
+        includePortableIndex: selectionUsesSubjectCatalog(selection) || selection.recovery,
         includeLayoutSnapshots: selection.recovery,
         requireUndo: true,
       },
     );
     this.dataChanged = true;
     if (!this.guardOpenedBase()) return;
-    const subjectText = selection.index
+    const subjectText = selectionUsesSubjectCatalog(selection)
       ? ` ${imported.addedSubjects} added, ${imported.matchedSubjects} matched, and ${imported.unresolvedSubjects} awaiting a note.`
       : "";
     new Notice(`Import complete.${subjectText}${templateReset ? " The missing source template was reset to Empty note." : ""} Markdown notes were not changed.`, 10000);
