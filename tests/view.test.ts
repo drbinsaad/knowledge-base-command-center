@@ -929,6 +929,23 @@ test("closing the compact record inspector hides it and restores row focus", () 
   assert.equal(focusCount, 1);
 });
 
+test("mobile search resets both possible result scroll containers", () => {
+  const workspace = { scrollTop: 840 };
+  const tree = { scrollTop: 320 };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    workspaceEl: typeof workspace;
+    treeEl: typeof tree;
+    resetSearchScrollPosition(): void;
+  };
+  view.workspaceEl = workspace;
+  view.treeEl = tree;
+
+  view.resetSearchScrollPosition();
+
+  assert.equal(workspace.scrollTop, 0);
+  assert.equal(tree.scrollTop, 0);
+});
+
 test("compact record inspector traps forward focus at its last control", () => {
   let firstFocusCount = 0;
   let prevented = false;

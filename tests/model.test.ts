@@ -664,6 +664,16 @@ test("unknown search tokens fail visibly instead of matching every record", () =
   assert.equal(matchesQuery(record(), "priorty:P1"), false);
 });
 
+test("phone search tolerates a realistic laryngology typing omission", () => {
+  const target = record({
+    title: "Laryngomalacia",
+    path: "Knowledge Base/ENT/Pediatric/Laryngomalacia.md",
+    domain: "ENT / Pediatric",
+  });
+  assert.equal(matchesQuery(target, "Layngo"), true);
+  assert.equal(matchesQuery(target, "laryngo"), true);
+});
+
 test("organization backup round-trips without clinical content", () => {
   const data = migrateData(null);
   data.collections = [{ id: "airway", title: "Airway", collapsed: false, subjects: [record().path], subheadings: [] }];

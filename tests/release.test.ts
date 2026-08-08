@@ -79,6 +79,10 @@ test("mobile flows keep primary actions visible and empty states actionable", as
   assert.match(styles, /\.ent-cc-subject-row \.ent-cc-row-more \{\s*display: inline-grid;\s*grid-column: 4;\s*grid-row: 1/);
   assert.match(styles, /calc\(112px \+ var\(--safe-area-inset-bottom, env\(safe-area-inset-bottom, 0px\)\)\)/);
   assert.match(styles, /overscroll-behavior-y: contain/);
+  assert.match(view, /resetSearchScrollPosition/);
+  assert.match(view, /Clear search/);
+  assert.match(styles, /ent-cc-shell\.is-search-focused/);
+  assert.match(styles, /font-size: 16px/);
 });
 
 test("runtime source satisfies blocking Obsidian review rules", async () => {

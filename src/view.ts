@@ -1074,18 +1074,39 @@ export class EntVaultCommandCenterView extends ItemView {
       placeholder: this.plugin.isClinicalMode()
         ? "Search…  domain:pediatric  priority:P1  source:gap  type:procedure"
         : `Search ${this.plugin.data.settings.itemPlural}, IDs, ${this.plugin.data.settings.groupLabel.toLowerCase()}, or paths…`,
-      attr: { "aria-label": `Search and filter ${this.plugin.data.settings.itemPlural}` },
+      attr: {
+        "aria-label": `Search and filter ${this.plugin.data.settings.itemPlural}`,
+        autocapitalize: "none",
+        enterkeyhint: "search",
+        spellcheck: "false",
+      },
+    });
+    const clear = iconButton(box, "x", "Clear search", "ent-cc-search-clear");
+    clear.type = "button";
+    clear.hidden = !this.query;
+    input.addEventListener("focus", () => {
+      if (Platform.isMobile) {
+        parent.addClass("is-search-focused");
+        this.resetSearchScrollPosition();
+      }
+    });
+    input.addEventListener("blur", () => {
+      this.timerWindow.setTimeout(() => {
+        if (!searchRow.contains(input.ownerDocument.activeElement)) parent.removeClass("is-search-focused");
+      }, 0);
     });
     input.addEventListener("input", () => {
       this.query = input.value;
       // Commands available during the debounce window must observe the text the
       // user can already see, not the query from the previous render.
       this.parsedQuery = parseQuery(this.query);
+      clear.hidden = !this.query;
       if (bulkButton) bulkButton.disabled = !this.query.trim();
       if (this.searchDebounce !== null) this.timerWindow.clearTimeout(this.searchDebounce);
       this.searchDebounce = this.timerWindow.setTimeout(() => {
         this.searchDebounce = null;
         this.renderTree();
+        this.resetSearchScrollPosition();
       }, 120);
     });
     input.addEventListener("keydown", (event) => {
@@ -1093,8 +1114,26 @@ export class EntVaultCommandCenterView extends ItemView {
         this.query = "";
         this.parsedQuery = parseQuery("");
         input.value = "";
+        clear.hidden = true;
+        if (bulkButton) bulkButton.disabled = true;
         this.renderTree();
+        this.resetSearchScrollPosition();
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+        this.renderTree();
+        this.resetSearchScrollPosition();
+        input.blur();
       }
+    });
+    clear.addEventListener("click", () => {
+      this.query = "";
+      this.parsedQuery = parseQuery("");
+      input.value = "";
+      clear.hidden = true;
+      if (bulkButton) bulkButton.disabled = true;
+      this.renderTree();
+      this.resetSearchScrollPosition();
+      input.focus({ preventScroll: true });
     });
     const save = iconButton(searchRow, "bookmark-plus", "Save this search");
     save.addEventListener("click", () => this.saveCurrentSearch());
@@ -1126,9 +1165,20 @@ export class EntVaultCommandCenterView extends ItemView {
       }
       chips.createSpan({ text: "Tip: combine tokens with fuzzy text", cls: "ent-cc-filter-hint" });
     } else {
+      chips.addClass("is-hint-only");
       chips.createSpan({ text: "Tip: fuzzy-search the title, path, configured ID, or group. Advanced field filters remain available.", cls: "ent-cc-filter-hint" });
     }
     this.searchStatusEl = parent.createDiv({ cls: "ent-cc-search-status", attr: { role: "status", "aria-live": "polite" } });
+  }
+
+  /**
+   * A phone may retain the long index's scroll offset after the DOM is replaced
+   * by a much shorter filtered result set. Reset both possible scroll owners so
+   * iOS cannot leave the matches above the visible keyboard viewport.
+   */
+  private resetSearchScrollPosition(): void {
+    if (this.workspaceEl) this.workspaceEl.scrollTop = 0;
+    if (this.treeEl) this.treeEl.scrollTop = 0;
   }
 
   private toggleToken(token: string): void {
@@ -1179,7 +1229,10 @@ export class EntVaultCommandCenterView extends ItemView {
     this.searchStatusEl?.toggleClass("is-error", unknownTokens.length > 0);
     const header = this.treeEl.createDiv({ cls: "ent-cc-tree-header" });
     header.createSpan({ text: this.treeHeaderTitle() });
-    header.createSpan({ text: this.plugin.data.settings.itemPlural });
+    const resultCount = header.createSpan({
+      text: this.plugin.data.settings.itemPlural,
+      attr: { role: "status", "aria-live": "polite" },
+    });
     const body = this.treeEl.createDiv({ cls: "ent-cc-tree-body" });
 
     let visible = 0;
@@ -1203,6 +1256,7 @@ export class EntVaultCommandCenterView extends ItemView {
       else body.createDiv({ cls: "ent-cc-empty", text: this.query ? "No records match this search." : "No records in this section." });
     }
     this.updateCount(visible);
+    if (this.query) resultCount.setText(`${visible} ${visible === 1 ? "result" : "results"}`);
   }
 
   private renderKnowledgeIndexEmpty(parent: HTMLElement): void {
