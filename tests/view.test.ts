@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Notice } from "obsidian";
 import { calculateModalViewportLayout, ConfirmModal, KnowledgeNoteModal, TopicEditorModal } from "../src/modals.ts";
-import { EntVaultCommandCenterView, tabDefinitions } from "../src/view.ts";
+import {
+  calculateSearchViewportLayout,
+  EntVaultCommandCenterView,
+  matchingKnowledgeBaseRecords,
+  tabDefinitions,
+} from "../src/view.ts";
 import { IndexManagerModal } from "../src/index-manager.ts";
 import { ExportImportCenterModal, preparePortableExport } from "../src/portability-modal.ts";
 import { createPortableExport, EMPTY_PORTABLE_SELECTION } from "../src/portability.ts";
@@ -124,6 +129,35 @@ test("mobile note sheets follow the visual viewport when the keyboard opens", ()
     keyboardOpen: true,
     shift: -187,
   });
+});
+
+test("focused mobile search subtracts the iOS keyboard from the command-center height", () => {
+  assert.deepEqual(calculateSearchViewportLayout(844, 780, 430, 20), {
+    height: 386,
+    keyboardInset: 394,
+    keyboardOpen: true,
+  });
+  assert.deepEqual(calculateSearchViewportLayout(844, 780, 844), {
+    height: 780,
+    keyboardInset: 0,
+    keyboardOpen: false,
+  });
+});
+
+test("search finds records across every library instead of the last selected tab", () => {
+  const records = [
+    record("Knowledge Base/Laryngomalacia.md", "Laryngomalacia"),
+    record("Procedures/Laryngeal injection.md", "Laryngeal injection", "procedure"),
+    record("Syndromes/Stickler syndrome.md", "Stickler syndrome", "syndrome"),
+  ];
+  const domainOnly = record("Knowledge Base/Voice.md", "Voice assessment");
+  domainOnly.domain = "Laryngology";
+  records.unshift(domainOnly);
+
+  assert.deepEqual(
+    matchingKnowledgeBaseRecords(records, "laryn").map((item) => item.title),
+    ["Laryngomalacia", "Laryngeal injection", "Voice assessment"],
+  );
 });
 
 test("mobile note-sheet viewport values are clamped to the layout viewport", () => {
@@ -881,7 +915,7 @@ test("Index Manager refreshes stale state after a child portability mutation", (
   assert.equal(renders, 1, "a closed parent modal is never re-rendered");
 });
 
-test("bulk collection actions use current search text during the render debounce", () => {
+test("bulk collection actions use current global search text during the render debounce", () => {
   const view = Object.create(EntVaultCommandCenterView.prototype) as {
     query: string;
     parsedQuery: ReturnType<typeof parseQuery>;
@@ -892,7 +926,7 @@ test("bulk collection actions use current search text during the render debounce
   view.query = "beta";
   view.parsedQuery = parseQuery("alpha");
   view.records = [record("KB/alpha.md", "Alpha"), record("KB/beta.md", "Beta")];
-  view.plugin = { data: { activeTab: "curriculum" } };
+  view.plugin = { data: { activeTab: "syndromes" } };
 
   assert.deepEqual(view.matchingRecordsForCurrentView().map((item) => item.title), ["Beta"]);
 });
@@ -1007,18 +1041,22 @@ test("closing the compact record inspector hides it and restores row focus", () 
 });
 
 test("mobile search resets both possible result scroll containers", () => {
+  const content = { scrollTop: 125 };
   const workspace = { scrollTop: 840 };
   const tree = { scrollTop: 320 };
   const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    contentEl: typeof content;
     workspaceEl: typeof workspace;
     treeEl: typeof tree;
     resetSearchScrollPosition(): void;
   };
+  view.contentEl = content;
   view.workspaceEl = workspace;
   view.treeEl = tree;
 
   view.resetSearchScrollPosition();
 
+  assert.equal(content.scrollTop, 0);
   assert.equal(workspace.scrollTop, 0);
   assert.equal(tree.scrollTop, 0);
 });

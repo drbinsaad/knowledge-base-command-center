@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.2
+
+### Fixed
+
+- Made non-empty search queries cover every record in the active knowledge base instead of only the last selected tab. Results are grouped by library and rank title, alias, ID, and path matches ahead of broad group or domain matches.
+- Kept focused iPhone search results inside the keyboard-reduced visual viewport, retained a nonzero results pane, disabled WebKit scroll anchoring for that route, and reset all result scroll owners again after layout settles.
+- Restored the selected tab to view after leaving focused mobile search, so a previously selected off-screen library tab is visible again.
+
 ## 0.8.1
 
 ### Added

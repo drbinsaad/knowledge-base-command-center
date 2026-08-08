@@ -80,8 +80,14 @@ test("mobile flows keep primary actions visible and empty states actionable", as
   assert.match(styles, /calc\(112px \+ var\(--safe-area-inset-bottom, env\(safe-area-inset-bottom, 0px\)\)\)/);
   assert.match(styles, /overscroll-behavior-y: contain/);
   assert.match(view, /resetSearchScrollPosition/);
+  assert.match(view, /calculateSearchViewportLayout/);
+  assert.match(view, /matchingKnowledgeBaseRecords/);
+  assert.match(view, /visualViewport/);
   assert.match(view, /Clear search/);
   assert.match(styles, /ent-cc-shell\.is-search-focused/);
+  assert.match(styles, /--ent-cc-search-visual-height/);
+  assert.match(styles, /min-height: max\(100%, 180px\)/);
+  assert.match(styles, /overflow-anchor: none/);
   assert.match(styles, /font-size: 16px/);
 });
 

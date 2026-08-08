@@ -2214,6 +2214,11 @@
   /* iOS scrolls the layout viewport when the keyboard opens. Give search an
      intentional compact route so the toolbar cannot be left half-clipped and
      the filtered tree starts directly below the field. */
+  .ent-cc-shell.is-search-focused {
+    height: var(--ent-cc-search-visual-height, 100%);
+    max-height: var(--ent-cc-search-visual-height, 100%);
+  }
+
   .ent-cc-shell.is-search-focused .ent-cc-header,
   .ent-cc-shell.is-search-focused .ent-cc-tabs,
   .ent-cc-shell.is-search-focused .ent-cc-filter-chips {
@@ -2235,9 +2240,19 @@
     display: none;
   }
 
-  .ent-cc-shell.is-search-focused .ent-cc-workspace,
-  .ent-cc-shell.is-search-focused .ent-cc-tree-panel {
+  .ent-cc-shell.is-search-focused .ent-cc-workspace {
+    flex: 1 1 0;
     min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    overflow-anchor: none;
+  }
+
+  .ent-cc-shell.is-search-focused .ent-cc-tree-panel {
+    min-height: max(100%, 180px);
+    overflow: visible;
+    overflow-anchor: none;
   }
 
   .ent-cc-shell.is-search-focused .ent-cc-tree-header {
