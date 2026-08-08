@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.8
+
+### Improved
+
+- Reworked the iPhone Create note sheet so its form scrolls independently and the primary action remains above the software keyboard.
+- Hid the inactive template section for empty notes, removed the redundant mobile Cancel button, and added accessible control labels plus Return-to-create behavior for the title field.
+
 ## 0.7.7
 
 ### Fixed

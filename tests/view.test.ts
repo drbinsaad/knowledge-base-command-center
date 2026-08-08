@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { calculateModalViewportLayout } from "../src/modals.ts";
 import { EntVaultCommandCenterView } from "../src/view.ts";
 import { parseQuery, type VaultRecord } from "../src/model.ts";
 
@@ -29,6 +30,27 @@ function record(path: string, title: string): VaultRecord {
     aiLock: false,
   };
 }
+
+test("mobile note sheets follow the visual viewport when the keyboard opens", () => {
+  assert.deepEqual(calculateModalViewportLayout(844, 844), {
+    height: 844,
+    keyboardOpen: false,
+    shift: 0,
+  });
+  assert.deepEqual(calculateModalViewportLayout(844, 430, 20), {
+    height: 430,
+    keyboardOpen: true,
+    shift: -187,
+  });
+});
+
+test("mobile note-sheet viewport values are clamped to the layout viewport", () => {
+  assert.deepEqual(calculateModalViewportLayout(600, 900), {
+    height: 600,
+    keyboardOpen: false,
+    shift: 0,
+  });
+});
 
 test("bulk collection actions use current search text during the render debounce", () => {
   const view = Object.create(EntVaultCommandCenterView.prototype) as {

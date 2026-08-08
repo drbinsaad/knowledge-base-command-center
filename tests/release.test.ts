@@ -46,9 +46,10 @@ test("release assets do not embed a local absolute workspace path", async () => 
   }
 });
 
-test("mobile index flows keep primary actions visible and empty states actionable", async () => {
+test("mobile flows keep primary actions visible and empty states actionable", async () => {
   const view = await readFile(path.join(root, "src/view.ts"), "utf8");
   const manager = await readFile(path.join(root, "src/index-manager.ts"), "utf8");
+  const modals = await readFile(path.join(root, "src/modals.ts"), "utf8");
   const styles = await readFile(path.join(root, "styles.css"), "utf8");
   assert.match(view, /Add existing \$\{settings\.itemPlural\}/);
   assert.match(view, /ent-cc-history-action/);
@@ -58,6 +59,10 @@ test("mobile index flows keep primary actions visible and empty states actionabl
   assert.match(styles, /scroll-snap-type: x proximity/);
   assert.match(styles, /height: calc\(100dvh - 16px\)/);
   assert.match(styles, /ent-cc-manager-bulk-actions\.is-idle/);
+  assert.match(modals, /visualViewport/);
+  assert.match(modals, /calculateModalViewportLayout/);
+  assert.match(styles, /ent-cc-knowledge-note-content/);
+  assert.match(styles, /--ent-cc-modal-visual-height/);
 });
 
 test("runtime source satisfies blocking Obsidian review rules", async () => {

@@ -326,11 +326,47 @@ export interface KnowledgeNoteModalOptions {
   onSubmit: (value: GenericNoteFormValue) => void | Promise<void>;
 }
 
+export interface ModalViewportLayout {
+  height: number;
+  keyboardOpen: boolean;
+  shift: number;
+}
+
+export function calculateModalViewportLayout(
+  innerHeight: number,
+  viewportHeight: number,
+  viewportOffsetTop = 0,
+): ModalViewportLayout {
+  const safeInnerHeight = Math.max(1, innerHeight);
+  const safeViewportHeight = Math.max(1, Math.min(viewportHeight, safeInnerHeight));
+  return {
+    height: Math.round(safeViewportHeight),
+    keyboardOpen: safeInnerHeight - safeViewportHeight > 100,
+    shift: Math.round(viewportOffsetTop + safeViewportHeight / 2 - safeInnerHeight / 2),
+  };
+}
+
 export class KnowledgeNoteModal extends Modal {
   private value: GenericNoteFormValue;
   private pathEl: HTMLElement | null = null;
   private templateButton: HTMLButtonElement | null = null;
+  private templateSettingEl: HTMLElement | null = null;
   private errorEl: HTMLElement | null = null;
+  private viewportWindow: Window | null = null;
+
+  private readonly syncViewportLayout = (): void => {
+    const viewWindow = this.viewportWindow;
+    if (!viewWindow) return;
+    const viewport = viewWindow.visualViewport;
+    const layout = calculateModalViewportLayout(
+      viewWindow.innerHeight,
+      viewport?.height ?? viewWindow.innerHeight,
+      viewport?.offsetTop ?? 0,
+    );
+    this.modalEl.style.setProperty("--ent-cc-modal-visual-height", `${layout.height}px`);
+    this.modalEl.style.setProperty("--ent-cc-modal-visual-shift", `${layout.shift}px`);
+    this.modalEl.toggleClass("is-virtual-keyboard-open", layout.keyboardOpen);
+  };
 
   constructor(app: App, private readonly options: KnowledgeNoteModalOptions) {
     super(app);
@@ -339,48 +375,63 @@ export class KnowledgeNoteModal extends Modal {
 
   onOpen(): void {
     this.contentEl.empty();
-    this.modalEl.addClass("ent-cc-topic-editor-modal");
-    this.contentEl.addClass("ent-cc-modal", "ent-cc-topic-editor");
+    this.modalEl.addClass("ent-cc-topic-editor-modal", "ent-cc-knowledge-note-modal");
+    this.contentEl.addClass("ent-cc-modal", "ent-cc-topic-editor", "ent-cc-knowledge-note-content");
     this.titleEl.setText(`Create ${this.options.itemSingular}`);
-    this.contentEl.createEl("p", {
+    const formBody = this.contentEl.createDiv({ cls: "ent-cc-note-form-body" });
+    formBody.createEl("p", {
       cls: "ent-cc-modal-lead",
       text: "Choose a destination and start with a truly empty note or a copied Markdown template. Existing files are never overwritten.",
     });
 
-    new Setting(this.contentEl)
+    new Setting(formBody)
       .setName("Title")
       .addText((text) => {
         text.setPlaceholder(`New ${this.options.itemSingular}`).setValue(this.value.title).onChange((value) => {
           this.value.title = value;
           this.updatePreview();
         });
+        text.inputEl.setAttribute("aria-label", `${this.options.itemSingular} title`);
+        text.inputEl.enterKeyHint = "done";
+        text.inputEl.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter" || event.isComposing) return;
+          event.preventDefault();
+          void this.submit();
+        });
         window.activeWindow.setTimeout(() => text.inputEl.focus(), 40);
       });
 
-    new Setting(this.contentEl)
+    new Setting(formBody)
       .setName("Destination folder")
       .setDesc("Vault-relative folder. Leave empty to create at the vault root.")
-      .addText((text) => text.setPlaceholder("Vault root").setValue(this.value.folder).onChange((value) => {
-        this.value.folder = value;
-        this.updatePreview();
-      }));
+      .addText((text) => {
+        text.setPlaceholder("Vault root").setValue(this.value.folder).onChange((value) => {
+          this.value.folder = value;
+          this.updatePreview();
+        });
+        text.inputEl.setAttribute("aria-label", "Destination folder");
+      });
 
-    new Setting(this.contentEl)
+    new Setting(formBody)
       .setName("Starting content")
-      .addDropdown((dropdown) => dropdown
-        .addOptions({ empty: "Empty note", template: "Copy a template" })
-        .setValue(this.value.mode)
-        .onChange((value) => {
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOptions({ empty: "Empty note", template: "Copy a template" })
+          .setValue(this.value.mode)
+          .onChange((value) => {
           this.value.mode = value as GenericNoteFormValue["mode"];
           this.updateTemplateButton();
           this.updatePreview();
-        }));
+          });
+        dropdown.selectEl.setAttribute("aria-label", "Starting content");
+      });
 
-    new Setting(this.contentEl)
+    const templateSetting = new Setting(formBody)
       .setName("Template")
       .setDesc("Supports {{title}}, {{date}}, and {{time}}. Other template syntax is copied unchanged.")
       .addButton((button) => {
         this.templateButton = button.buttonEl;
+        button.buttonEl.setAttribute("aria-label", "Choose note template");
         button.onClick(() => {
           if (this.value.mode !== "template") return;
           if (this.options.templates.length === 0) {
@@ -393,28 +444,62 @@ export class KnowledgeNoteModal extends Modal {
             this.updatePreview();
           }).open();
         });
-        this.updateTemplateButton();
+      });
+    this.templateSettingEl = templateSetting.settingEl;
+    this.templateSettingEl.addClass("ent-cc-template-setting");
+    this.updateTemplateButton();
+
+    new Setting(formBody)
+      .setName("Add to a collection after creation")
+      .addToggle((toggle) => {
+        toggle.setValue(this.value.addToCollection).onChange((value) => { this.value.addToCollection = value; });
+        toggle.toggleEl.setAttribute("aria-label", "Add to a collection after creation");
       });
 
-    new Setting(this.contentEl)
-      .setName("Add to a collection after creation")
-      .addToggle((toggle) => toggle.setValue(this.value.addToCollection).onChange((value) => { this.value.addToCollection = value; }));
-
-    const preview = this.contentEl.createDiv({ cls: "ent-cc-path-preview" });
+    const preview = formBody.createDiv({ cls: "ent-cc-path-preview" });
     preview.createDiv({ cls: "ent-cc-path-preview-label", text: "New note path" });
     this.pathEl = preview.createDiv({ cls: "ent-cc-path-preview-value" });
-    this.errorEl = this.contentEl.createDiv({ cls: "ent-cc-form-error", attr: { role: "alert", "aria-live": "polite" } });
+    this.errorEl = formBody.createDiv({ cls: "ent-cc-form-error", attr: { role: "alert", "aria-live": "polite" } });
     this.updatePreview();
 
     new Setting(this.contentEl)
-      .addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()))
+      .addButton((button) => {
+        button.setButtonText("Cancel").onClick(() => this.close());
+        button.buttonEl.addClass("ent-cc-note-cancel-button");
+      })
       .addButton((button) => button.setButtonText(`Create ${this.options.itemSingular}`).setCta().onClick(() => void this.submit()))
       .settingEl.addClass("ent-cc-modal-footer");
+
+    this.bindViewportLayout();
+  }
+
+  onClose(): void {
+    const viewWindow = this.viewportWindow;
+    const viewport = viewWindow?.visualViewport;
+    viewport?.removeEventListener("resize", this.syncViewportLayout);
+    viewport?.removeEventListener("scroll", this.syncViewportLayout);
+    viewWindow?.removeEventListener("resize", this.syncViewportLayout);
+    this.viewportWindow = null;
+    this.modalEl.style.removeProperty("--ent-cc-modal-visual-height");
+    this.modalEl.style.removeProperty("--ent-cc-modal-visual-shift");
+    this.modalEl.removeClass("is-virtual-keyboard-open");
+  }
+
+  private bindViewportLayout(): void {
+    const viewWindow = this.contentEl.ownerDocument.defaultView;
+    if (!viewWindow) return;
+    this.viewportWindow = viewWindow;
+    viewWindow.visualViewport?.addEventListener("resize", this.syncViewportLayout);
+    viewWindow.visualViewport?.addEventListener("scroll", this.syncViewportLayout);
+    viewWindow.addEventListener("resize", this.syncViewportLayout);
+    this.syncViewportLayout();
   }
 
   private updateTemplateButton(): void {
     if (!this.templateButton) return;
-    this.templateButton.disabled = this.value.mode !== "template";
+    const isTemplate = this.value.mode === "template";
+    this.templateSettingEl?.toggleClass("is-hidden", !isTemplate);
+    this.templateButton.disabled = !isTemplate;
     this.templateButton.setText(this.value.mode === "empty"
       ? "Not used for empty note"
       : this.value.templatePath.split("/").pop()?.replace(/\.md$/, "") || "Choose template…");
