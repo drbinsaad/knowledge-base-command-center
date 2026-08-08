@@ -1,6 +1,7 @@
 import { Modal, Notice, Platform, Setting, TFile, normalizePath } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
 import {
+  assertPersonalBackupMatchesVault,
   validateProposalFolderPath,
   validateTemplateFilePath,
   validateWritableFolderPath,
@@ -52,9 +53,20 @@ export function preparePortableExport(
   records: VaultRecord[],
   selection: PortableExportSelection,
   exportedAt: string,
+  sourceVaultId: string,
+  sourceBaseId = "",
+  sourceBaseName = "",
 ): PreparedPortableExport {
   const preparedData = isolatedExportData(data);
-  const value = createPortableExport(preparedData, records, selection, exportedAt);
+  const value = createPortableExport(
+    preparedData,
+    records,
+    selection,
+    exportedAt,
+    sourceVaultId,
+    sourceBaseId,
+    sourceBaseName,
+  );
   const serialized = serializePortableExport(value);
   return { value, serialized, portableIndex: preparedData.portableIndex };
 }
@@ -67,7 +79,7 @@ const COMPONENTS: Array<{
   {
     key: "workspace",
     label: "Workspace settings",
-    description: "Knowledge-base name, labels, configured folder and template paths, metadata mappings, behavior, and group order.",
+    description: "Labels, compatible folder and template paths, metadata mappings, behavior, and group order. The destination base name, preset, and protected ENT scope stay unchanged.",
   },
   {
     key: "index",
@@ -92,7 +104,7 @@ const COMPONENTS: Array<{
   {
     key: "recovery",
     label: "Same-vault recovery",
-    description: "A recovery snapshot that may contain vault-relative note paths. Use it only to restore the same vault.",
+    description: "Private exact-path recovery. New backups carry vault, knowledge-base, and preset identities; a cross-base restore requires a separate explicit override and can never cross presets.",
   },
 ];
 
@@ -116,12 +128,17 @@ export class ExportImportCenterModal extends Modal {
   private importSourceLabel = "";
   private importMode: PortableImportMode = "merge";
   private recoveryConfirmed = false;
+  private crossBaseRecoveryConfirmed = false;
   private exportRecoveryConfirmed = false;
   private busyAction: BusyAction | null = null;
   private centerOpen = false;
   private dataChanged = false;
   private completionNotified = false;
   private pendingFocusKey: string | null = null;
+  private openedBaseId = "";
+  private openedDataEpoch = -1;
+  private staleBaseNoticeShown = false;
+  private pendingTimers = new Set<number>();
 
   private readonly blockCloseWhileBusy = (event: KeyboardEvent): void => {
     if (!this.busyAction || event.key !== "Escape") return;
@@ -139,6 +156,9 @@ export class ExportImportCenterModal extends Modal {
   }
 
   onOpen(): void {
+    this.openedBaseId = this.plugin.getActiveKnowledgeBaseId();
+    this.openedDataEpoch = this.plugin.getDataEpoch();
+    this.staleBaseNoticeShown = false;
     this.centerOpen = true;
     this.modalEl.addClass("ent-cc-portability-modal");
     this.contentEl.addClass("ent-cc-modal", "ent-cc-portability-center");
@@ -148,6 +168,11 @@ export class ExportImportCenterModal extends Modal {
 
   onClose(): void {
     this.centerOpen = false;
+    for (const timer of this.pendingTimers) {
+      const viewWindow = this.contentEl.ownerDocument.defaultView ?? window;
+      viewWindow.clearTimeout(timer);
+    }
+    this.pendingTimers.clear();
     this.modalEl.removeEventListener("keydown", this.blockCloseWhileBusy, true);
     if (this.completionNotified) return;
     this.completionNotified = true;
@@ -155,6 +180,7 @@ export class ExportImportCenterModal extends Modal {
   }
 
   private render(): void {
+    if (!this.guardOpenedBase()) return;
     const scrollTop = this.contentEl.scrollTop;
     this.contentEl.empty();
     this.titleEl.setText("Export / import center");
@@ -175,9 +201,7 @@ export class ExportImportCenterModal extends Modal {
     const focusKey = this.pendingFocusKey;
     this.pendingFocusKey = null;
     if (!focusKey) return;
-    const viewWindow = this.contentEl.ownerDocument.defaultView ?? window;
-    viewWindow.setTimeout(() => {
-      if (!this.centerOpen) return;
+    this.setGuardedTimer(() => {
       const control = Array.from(this.contentEl.querySelectorAll<HTMLElement>("[data-portability-focus]"))
         .find((element) => element.dataset.portabilityFocus === focusKey);
       control?.focus({ preventScroll: true });
@@ -251,7 +275,7 @@ export class ExportImportCenterModal extends Modal {
       const warning = this.contentEl.createDiv({ cls: "ent-cc-manager-diagnostic ent-cc-portability-path-warning", attr: { role: "alert" } });
       warning.createEl("strong", { text: "Exact vault paths will be included" });
       warning.createEl("p", {
-        text: "Same-vault recovery contains exact folder and Markdown filenames from this vault. Treat the JSON as private and restore it only to this same vault.",
+        text: "Same-vault recovery contains exact folder and Markdown filenames from this vault. Treat the JSON as private. The plugin embeds this vault's identity and will reject it in every other vault.",
       });
       const confirmation = new Setting(this.contentEl)
         .setName("Confirm private recovery export")
@@ -277,6 +301,9 @@ export class ExportImportCenterModal extends Modal {
           selection.index ? this.plugin.getRecords() : [],
           selection,
           new Date().toISOString(),
+          this.currentVaultId(),
+          this.currentBaseId(),
+          this.plugin.data.settings.workspaceName,
         );
         this.renderSummary(preview, selection, "Export preview");
       } catch (error) {
@@ -305,7 +332,7 @@ export class ExportImportCenterModal extends Modal {
     const compatibilityReadOnly = this.plugin.isDataReadOnly();
     new Setting(this.contentEl)
       .setName("Quick selection")
-      .setDesc("Portable set excludes private recovery paths. Everything adds same-vault recovery and requires a separate exact-path confirmation before export.")
+      .setDesc("Portable set is for cross-vault transfer. All + private recovery additionally creates exact-path recovery that is locked to this vault and requires separate confirmation.")
       .addButton((button) => {
         button.buttonEl.dataset.portabilityFocus = "preset-portable";
         button.setButtonText("Portable set").setDisabled(Boolean(this.busyAction)).onClick(() => {
@@ -316,7 +343,7 @@ export class ExportImportCenterModal extends Modal {
       })
       .addButton((button) => {
         button.buttonEl.dataset.portabilityFocus = "preset-everything";
-        button.setButtonText("Everything").setDisabled(Boolean(this.busyAction) || compatibilityReadOnly).onClick(() => {
+        button.setButtonText("All + private recovery").setDisabled(Boolean(this.busyAction) || compatibilityReadOnly).onClick(() => {
           this.exportSelection = {
             workspace: true,
             index: true,
@@ -380,23 +407,86 @@ export class ExportImportCenterModal extends Modal {
       return;
     }
 
-    const available = selectionAvailableForExport(this.importValue);
+    const rawAvailable = selectionAvailableForExport(this.importValue);
+    let recoveryCheck: ReturnType<typeof assertPersonalBackupMatchesVault> | null = null;
+    let recoveryBlockReason = "";
+    if (this.importValue.components.recovery) {
+      try {
+        recoveryCheck = assertPersonalBackupMatchesVault(
+          this.importValue.components.recovery,
+          this.currentVaultId(),
+          (path) => this.recoveryPathExists(path),
+          this.currentBaseId(),
+          this.plugin.data.settings.workspaceName,
+          this.plugin.data.settings.workspaceMode,
+          true,
+        );
+      } catch (error) {
+        recoveryBlockReason = errorMessage(error);
+      }
+    }
+    const available = {
+      ...rawAvailable,
+      recovery: rawAvailable.recovery && !recoveryBlockReason,
+    };
     this.renderImportSource(this.importValue);
     this.renderComponentToggles(this.importSelection, available, (selection) => {
       this.importSelection = selection;
-    });
+    }, recoveryBlockReason);
 
     const selection = normalizePortableSelection(this.importSelection);
     this.renderSummary(this.importValue, selection, "Selected import");
     if (selection.recovery) {
+      const recovery = this.importValue.components.recovery;
+      const needsBaseOverride = recoveryCheck?.baseIdentity !== "verified";
       const warning = this.contentEl.createDiv({ cls: "ent-cc-manager-diagnostic" });
-      warning.createEl("strong", { text: "Same-vault recovery selected" });
-      warning.createEl("p", {
-        text: `Recovery is restored by itself, never merged with portable sections. It contains vault-relative paths and replaces recovery-managed organization. Verify ${this.importSourceLabel || "the selected file"} came from this same vault.`,
+      const legacyCheck = recoveryCheck?.identity === "legacy-unverified" ? recoveryCheck : null;
+      const legacy = legacyCheck !== null;
+      warning.createEl("strong", {
+        text: legacy
+          ? "Legacy recovery selected — vault and base identity unverified"
+          : recoveryCheck?.baseIdentity === "verified"
+            ? "Same-base recovery selected — identities verified"
+            : recoveryCheck?.baseIdentity === "cross-base-override"
+              ? "Different knowledge base — explicit override required"
+              : "Legacy base identity and preset unverified",
       });
+      warning.createEl("p", {
+        text: legacyCheck
+          ? legacyCheck.referencedPathCount > 0
+            ? `This older file has no embedded vault identity. A conservative preflight found ${legacyCheck.existingPathCount} of ${legacyCheck.referencedPathCount} unique referenced paths in this vault, meeting the required at-least-half threshold of ${legacyCheck.requiredPathCount} (50%). This does not prove origin. Restore only if you know ${this.importSourceLabel || "the selected file"} came from this vault.`
+            : `This older file has no embedded vault identity and contains no note-path references to preflight. Restore only if you know ${this.importSourceLabel || "the selected file"} came from this vault.`
+          : recoveryCheck?.baseIdentity === "verified"
+            ? `Recovery is restored by itself, never merged with portable sections. Its embedded vault, knowledge-base, and ${recovery?.sourceWorkspaceMode === "ent-clinical" ? "ENT clinical" : "Generic"} preset identities match the active base.`
+            : recoveryCheck?.baseIdentity === "cross-base-override"
+              ? `This recovery belongs to “${recovery?.sourceBaseName || "Unknown source"}” (${recovery?.sourceBaseId || "unknown ID"}), but the active destination is “${this.plugin.data.settings.workspaceName}” (${this.currentBaseId()}). The ${recovery?.sourceWorkspaceMode === "ent-clinical" ? "ENT clinical" : "Generic"} preset matches, but restoring across bases replaces the destination base's recovery-managed organization.`
+              : `This v1–v6 recovery verifies this vault but has no embedded knowledge-base identity or preset. The plugin cannot prove that it belongs to “${this.plugin.data.settings.workspaceName}” or that its original preset matches.`,
+      });
+      if (needsBaseOverride) {
+        const baseConfirmation = new Setting(this.contentEl)
+          .setName(recoveryCheck?.baseIdentity === "cross-base-override"
+            ? "Confirm restore into a different base"
+            : "Confirm base and preset are unverified")
+          .setDesc(recoveryCheck?.baseIdentity === "cross-base-override"
+            ? `I explicitly choose to restore organization from “${recovery?.sourceBaseName || "Unknown source"}” into “${this.plugin.data.settings.workspaceName}”. The preset matches, but these are different stable knowledge-base identities.`
+            : `I accept that this v1–v6 file cannot verify its source knowledge base or preset, and I explicitly choose “${this.plugin.data.settings.workspaceName}” as the destination.`)
+          .addToggle((toggle) => {
+            toggle.toggleEl.dataset.portabilityFocus = "import-cross-base-confirm";
+            toggle
+              .setValue(this.crossBaseRecoveryConfirmed)
+              .setDisabled(Boolean(this.busyAction))
+              .onChange((confirmed) => {
+                this.crossBaseRecoveryConfirmed = confirmed;
+                this.rerenderFromControl("import-cross-base-confirm");
+              });
+          });
+        baseConfirmation.settingEl.addClass("ent-cc-portability-toggle");
+      }
       const confirmation = new Setting(this.contentEl)
-        .setName("Confirm same-vault restore")
-        .setDesc(`I verified ${this.importSourceLabel || "this JSON file"} is the intended same-vault backup. Restore replaces collections, pins, the next list, saved views, index organization, named snapshots, and portable bindings with exact-path recovery data.`)
+        .setName("Confirm destructive recovery restore")
+        .setDesc(legacy
+          ? `I know ${this.importSourceLabel || "this JSON file"} came from this vault despite its missing identity. Meeting the at-least-half (50%) path threshold is not proof. Restore replaces collections, pins, the next list, saved views, index organization, named snapshots, and portable bindings.`
+          : `I intend to restore ${this.importSourceLabel || "this JSON file"}. The plugin's vault-identity check passed; this confirmation acknowledges that recovery replaces collections, pins, the next list, saved views, index organization, named snapshots, and portable bindings.`)
         .addToggle((toggle) => {
           toggle.toggleEl.dataset.portabilityFocus = "import-recovery-confirm";
           toggle
@@ -437,9 +527,12 @@ export class ExportImportCenterModal extends Modal {
         button.buttonEl.dataset.portabilityFocus = "import-submit";
         const busyLabel = selection.recovery ? "Restoring…" : "Importing…";
         button
-          .setButtonText(this.busyAction === "import" ? busyLabel : selection.recovery ? "Restore same-vault recovery" : this.importMode === "merge" ? "Import and merge" : "Import and replace")
+          .setButtonText(this.busyAction === "import" ? busyLabel : selection.recovery ? "Restore private recovery" : this.importMode === "merge" ? "Import and merge" : "Import and replace")
           .setCta()
-          .setDisabled(Boolean(this.busyAction) || !portableSelectionHasAny(selection) || (selection.recovery && !this.recoveryConfirmed))
+          .setDisabled(Boolean(this.busyAction)
+            || !portableSelectionHasAny(selection)
+            || (selection.recovery && (!this.recoveryConfirmed
+              || (recoveryCheck?.baseIdentity !== "verified" && !this.crossBaseRecoveryConfirmed))))
           .onClick(() => this.run("import", () => this.importSelected()));
       });
   }
@@ -448,13 +541,18 @@ export class ExportImportCenterModal extends Modal {
     selection: PortableExportSelection,
     available: PortableExportSelection | undefined,
     onChange: (selection: PortableExportSelection) => void,
+    recoveryBlockReason = "",
   ): void {
     this.contentEl.createEl("h3", { text: available ? "Sections in this file" : "Sections to export" });
     for (const component of COMPONENTS) {
       const dependencyLock = component.key === "index" && (selection.collections || selection.study);
       const isAvailable = available?.[component.key] ?? true;
       const unavailableInReadOnly = !available && component.key === "recovery" && this.plugin.isDataReadOnly();
-      const unavailableText = available && !isAvailable ? " Not present in this file." : "";
+      const unavailableText = available && !isAvailable
+        ? component.key === "recovery" && recoveryBlockReason
+          ? ` ${recoveryBlockReason}`
+          : " Not present in this file."
+        : "";
       const readOnlyText = unavailableInReadOnly ? " Unavailable in compatibility read-only mode; preserve the raw data.json instead." : "";
       const dependencyText = dependencyLock ? " Required by Collections or Study state." : "";
       const focusKey = `${available ? "import" : "export"}-component-${component.key}`;
@@ -472,11 +570,17 @@ export class ExportImportCenterModal extends Modal {
                 next = { ...EMPTY_PORTABLE_SELECTION, recovery: true };
                 this.importMode = "replace";
                 this.recoveryConfirmed = false;
+                this.crossBaseRecoveryConfirmed = false;
               } else {
                 next[component.key] = enabled;
+                if (available && component.key === "recovery" && !enabled) {
+                  this.recoveryConfirmed = false;
+                  this.crossBaseRecoveryConfirmed = false;
+                }
                 if (available && enabled && component.key !== "recovery" && next.recovery) {
                   next.recovery = false;
                   this.recoveryConfirmed = false;
+                  this.crossBaseRecoveryConfirmed = false;
                 }
               }
               if (!available && component.key === "recovery") this.exportRecoveryConfirmed = false;
@@ -500,6 +604,21 @@ export class ExportImportCenterModal extends Modal {
     details.createEl("p", {
       text: value.exportedAt ? `Exported ${value.exportedAt}` : "The source export did not include a date.",
     });
+  }
+
+  /** Test fixtures from older schemas may omit the new plugin boundary. */
+  private currentVaultId(): string {
+    return typeof this.plugin.getVaultId === "function" ? this.plugin.getVaultId() : "";
+  }
+
+  private currentBaseId(): string {
+    return typeof this.plugin.getActiveKnowledgeBaseId === "function"
+      ? this.plugin.getActiveKnowledgeBaseId()
+      : this.openedBaseId;
+  }
+
+  private recoveryPathExists(path: string): boolean {
+    return this.app.vault.getAbstractFileByPath(normalizePath(path)) !== null;
   }
 
   private renderSummary(
@@ -544,6 +663,7 @@ export class ExportImportCenterModal extends Modal {
   }
 
   private async exportSelected(): Promise<void> {
+    if (!this.guardOpenedBase()) return;
     const selection = normalizePortableSelection(this.exportSelection);
     if (!portableSelectionHasAny(selection)) throw new Error("Choose at least one section to export.");
     if (selection.recovery && this.plugin.isDataReadOnly()) {
@@ -553,47 +673,63 @@ export class ExportImportCenterModal extends Modal {
       throw new Error("Confirm that same-vault recovery contains exact private vault paths before exporting it.");
     }
     const now = new Date();
+    const exportData = this.plugin.data;
     const prepared = preparePortableExport(
-      this.plugin.data,
+      exportData,
       selection.index ? this.plugin.getRecords() : [],
       selection,
       now.toISOString(),
+      this.currentVaultId(),
+      this.currentBaseId(),
+      this.plugin.data.settings.workspaceName,
     );
-    const previousPortableIndex = structuredClone(this.plugin.data.portableIndex);
+    const previousPortableIndex = structuredClone(exportData.portableIndex);
     let commitStarted = false;
     try {
       // The validated clone already contains the synchronized stable registry;
       // commit it once without repeating the full vault/index pass.
       if (selection.index && !this.plugin.isDataReadOnly()) {
+        if (!this.guardOpenedBase()) return;
         commitStarted = true;
-        this.plugin.data.portableIndex = prepared.portableIndex;
+        exportData.portableIndex = prepared.portableIndex;
         this.plugin.invalidateRecordCache();
         await this.plugin.savePluginData();
+        this.dataChanged = true;
+        if (!this.guardOpenedBase()) return;
       }
       if (Platform.isMobile) {
         const file = await this.plugin.writePortableJson("portable", prepared.value);
-        this.dataChanged ||= commitStarted;
+        if (!this.guardOpenedBase()) return;
         new Notice(`Saved ${selectionCount(selection)} selected sections inside the vault at ${file.path}. Note contents were not included.`, 8000);
         this.close();
         return;
       }
 
       const viewWindow = this.contentEl.ownerDocument.defaultView ?? window;
+      if (!this.guardOpenedBase()) return;
       const url = viewWindow.URL.createObjectURL(new Blob([prepared.serialized], { type: "application/json" }));
       const link = createEl("a");
       link.href = url;
       link.download = `knowledge-base-command-center-portable-${now.toISOString().slice(0, 10)}.json`;
       link.click();
       viewWindow.setTimeout(() => viewWindow.URL.revokeObjectURL(url), 1000);
-      this.dataChanged ||= commitStarted;
       new Notice(`Exported ${selectionCount(selection)} selected sections. Note contents and attachments were not included.`);
       this.close();
     } catch (error) {
+      if (!this.ownsOpenedBase()) {
+        this.guardOpenedBase();
+        return;
+      }
       if (commitStarted) {
-        this.plugin.data.portableIndex = previousPortableIndex;
+        if (this.plugin.data !== exportData) {
+          throw new Error(`The export failed (${errorMessage(error)}), but its registry rollback was skipped because the active knowledge-base data reloaded. Reopen the export/import center before retrying.`);
+        }
+        exportData.portableIndex = previousPortableIndex;
         this.plugin.invalidateRecordCache();
         try {
           await this.plugin.savePluginData();
+          this.dataChanged = false;
+          if (!this.guardOpenedBase()) return;
         } catch (rollbackError) {
           console.error("Knowledge Base Command Center could not persist the export rollback", rollbackError);
           throw new Error(`The export failed (${errorMessage(error)}) and its registry rollback could not be saved. Restart Obsidian before retrying.`);
@@ -604,7 +740,7 @@ export class ExportImportCenterModal extends Modal {
   }
 
   private chooseImportFile(): void {
-    if (this.busyAction) return;
+    if (this.busyAction || !this.guardOpenedBase()) return;
     if (Platform.isMobile) {
       const files = this.plugin.getPortableJsonFiles();
       if (files.length === 0) {
@@ -612,6 +748,7 @@ export class ExportImportCenterModal extends Modal {
         return;
       }
       new VaultFilePickerModal(this.app, files, "Choose a Command Center export JSON", (file) => {
+        if (!this.guardOpenedBase()) return;
         this.run("file", () => this.loadImportValue(this.plugin.readPortableJson(file), file.path));
       }).open();
       return;
@@ -621,11 +758,13 @@ export class ExportImportCenterModal extends Modal {
     input.type = "file";
     input.accept = "application/json,.json";
     input.addEventListener("change", () => {
+      if (!this.guardOpenedBase()) return;
       const file = input.files?.[0];
       if (!file) return;
       this.run("file", async () => {
         if (file.size > MAX_PORTABLE_PACKAGE_BYTES) throw new Error("The selected JSON is larger than the 10 MB import limit.");
         const parsed = JSON.parse(await file.text()) as unknown;
+        if (!this.guardOpenedBase()) return;
         this.setImportValue(parseAnyCommandCenterExport(parsed), file.name);
       });
     });
@@ -633,15 +772,19 @@ export class ExportImportCenterModal extends Modal {
   }
 
   private async loadImportValue(value: Promise<unknown>, sourceLabel: string): Promise<void> {
-    this.setImportValue(parseAnyCommandCenterExport(await value), sourceLabel);
+    const parsed = parseAnyCommandCenterExport(await value);
+    if (!this.guardOpenedBase()) return;
+    this.setImportValue(parsed, sourceLabel);
   }
 
   private setImportValue(value: PortableExportV1, sourceLabel: string): void {
+    if (!this.guardOpenedBase()) return;
     this.importValue = value;
     this.importSourceLabel = sourceLabel;
     this.importSelection = { ...selectionAvailableForExport(value), recovery: false };
     this.importMode = "merge";
     this.recoveryConfirmed = false;
+    this.crossBaseRecoveryConfirmed = false;
     this.pendingFocusKey = "import-file";
     if (!this.busyAction) this.render();
   }
@@ -673,12 +816,38 @@ export class ExportImportCenterModal extends Modal {
   }
 
   private async importSelected(): Promise<void> {
+    if (!this.guardOpenedBase()) return;
     if (this.plugin.isDataReadOnly()) throw new Error("Import is unavailable in compatibility read-only mode.");
     const value = this.importValue;
     if (!value) throw new Error("Choose an import file first.");
     const selection = normalizePortableSelection(this.importSelection);
     if (!portableSelectionHasAny(selection)) throw new Error("Choose at least one section to import.");
-    if (selection.recovery && !this.recoveryConfirmed) throw new Error("Confirm that this is a same-vault recovery restore before continuing.");
+    if (selection.recovery && !this.recoveryConfirmed) throw new Error("Confirm the destructive private recovery restore before continuing.");
+    if (selection.recovery && value.components.recovery) {
+      const assessment = assertPersonalBackupMatchesVault(
+        value.components.recovery,
+        this.currentVaultId(),
+        (path) => this.recoveryPathExists(path),
+        this.currentBaseId(),
+        this.plugin.data.settings.workspaceName,
+        this.plugin.data.settings.workspaceMode,
+        true,
+      );
+      if (assessment.baseIdentity !== "verified" && !this.crossBaseRecoveryConfirmed) {
+        throw new Error("Confirm the different or unverified source knowledge base before continuing.");
+      }
+      // This check must happen before mutate() creates an Undo snapshot or
+      // invokes any apply path. The apply function repeats it defensively.
+      assertPersonalBackupMatchesVault(
+        value.components.recovery,
+        this.currentVaultId(),
+        (path) => this.recoveryPathExists(path),
+        this.currentBaseId(),
+        this.plugin.data.settings.workspaceName,
+        this.plugin.data.settings.workspaceMode,
+        this.crossBaseRecoveryConfirmed,
+      );
+    }
     const templateReset = this.validateWorkspaceComponent(value, selection);
     let imported = {
       addedSubjects: 0,
@@ -697,7 +866,17 @@ export class ExportImportCenterModal extends Modal {
           recovery: selection.recovery,
         };
         if (portableSelectionHasAny(firstSelection)) {
-          applyPortableExport(this.plugin.data, value, firstSelection, this.importMode);
+          applyPortableExport(
+            this.plugin.data,
+            value,
+            firstSelection,
+            this.importMode,
+            this.currentVaultId(),
+            (path) => this.recoveryPathExists(path),
+            this.currentBaseId(),
+            this.plugin.data.settings.workspaceName,
+            this.crossBaseRecoveryConfirmed,
+          );
           if (templateReset && firstSelection.workspace) {
             // Keep destination-only template sanitization inside the same
             // undo-protected mutation as the workspace import. The selected
@@ -726,6 +905,7 @@ export class ExportImportCenterModal extends Modal {
       },
     );
     this.dataChanged = true;
+    if (!this.guardOpenedBase()) return;
     const subjectText = selection.index
       ? ` ${imported.addedSubjects} added, ${imported.matchedSubjects} matched, and ${imported.unresolvedSubjects} awaiting a note.`
       : "";
@@ -733,18 +913,58 @@ export class ExportImportCenterModal extends Modal {
     this.close();
   }
 
+  private ownsOpenedBase(): boolean {
+    // Prototype-only unit-test fixtures do not run onOpen(); real modal
+    // instances always capture a non-empty ID and non-negative epoch before
+    // their first render.
+    const ownsBase = !this.openedBaseId || this.plugin.getActiveKnowledgeBaseId() === this.openedBaseId;
+    const ownsEpoch = typeof this.openedDataEpoch !== "number"
+      || this.openedDataEpoch < 0
+      || this.plugin.getDataEpoch() === this.openedDataEpoch;
+    return ownsBase && ownsEpoch;
+  }
+
+  private guardOpenedBase(): boolean {
+    if (this.ownsOpenedBase()) return true;
+    const showNotice = !this.staleBaseNoticeShown;
+    this.staleBaseNoticeShown = true;
+    if (this.centerOpen) this.close();
+    if (showNotice) {
+      new Notice("The active knowledge base changed or its data was reloaded. Reopen the export/import center before continuing.", 8000);
+    }
+    return false;
+  }
+
+  private setGuardedTimer(action: () => void, delay: number): number {
+    const viewWindow = this.contentEl.ownerDocument.defaultView ?? window;
+    let timer = 0;
+    let firedSynchronously = false;
+    timer = viewWindow.setTimeout(() => {
+      firedSynchronously = true;
+      this.pendingTimers?.delete(timer);
+      if (!this.centerOpen || !this.guardOpenedBase()) return;
+      action();
+    }, delay);
+    if (!firedSynchronously) (this.pendingTimers ??= new Set<number>()).add(timer);
+    return timer;
+  }
+
   private run(kind: BusyAction, action: () => Promise<void>): void {
-    if (this.busyAction) return;
+    if (this.busyAction || !this.guardOpenedBase()) return;
     this.busyAction = kind;
     this.render();
     void action()
       .catch((error) => {
+        if (!this.ownsOpenedBase()) {
+          this.guardOpenedBase();
+          return;
+        }
         console.error("Knowledge Base Command Center portability action failed", error);
         new Notice(errorMessage(error), 8000);
       })
       .finally(() => {
         this.busyAction = null;
-        if (!this.centerOpen) return;
+        if (!this.centerOpen || !this.guardOpenedBase()) return;
         this.pendingFocusKey ??= kind === "file" ? "import-file" : `${kind}-submit`;
         this.render();
       });

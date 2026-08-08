@@ -658,6 +658,7 @@ export interface TopicEditorOptions {
   title: string;
   submitLabel: string;
   proposalFolder: string;
+  canonicalRoot?: string;
   canonicalRecords: VaultRecord[];
   initial?: Partial<TopicFormValue>;
   validate: (value: TopicFormValue) => string | null;
@@ -840,7 +841,7 @@ export class TopicEditorModal extends Modal {
     if (!this.previewEl) return;
     const path = this.options.mode === "proposal"
       ? proposalPath(this.options.proposalFolder, this.value.title || "Untitled proposal")
-      : canonicalPath(this.value) || "Choose a valid domain, ID, and title";
+      : canonicalPath(this.value, this.options.canonicalRoot) || "Choose a valid domain, ID, and title";
     this.previewEl.setText(path);
     this.detailsEl?.empty();
     for (const detail of this.options.previewDetails?.({ ...this.value }) ?? []) {

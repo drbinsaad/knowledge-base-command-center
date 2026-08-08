@@ -1,4 +1,6 @@
-import { App, Plugin, PluginSettingTab, Setting, SettingDefinitionItem, SettingDefinitionRender, TFile, TFolder } from "obsidian";
+import { App, Notice, Plugin, PluginSettingTab, Setting, SettingDefinitionItem, SettingDefinitionRender, TFile, TFolder } from "obsidian";
+import { ManageKnowledgeBasesModal } from "./knowledge-base-modal";
+import type EntVaultCommandCenterPlugin from "./main";
 import {
   asUnknownRecord,
   DEFAULT_PROPOSAL_FOLDER,
@@ -8,10 +10,10 @@ import {
   type MainTab,
   type NewNoteMode,
   type OpenNoteBehavior,
+  type KnowledgeBaseEntry,
   type PluginData,
-  type WorkspaceMode,
 } from "./model";
-import { StringPickerModal, VaultFilePickerModal } from "./modals";
+import { StringPickerModal, TextPromptModal, VaultFilePickerModal } from "./modals";
 
 interface SettingsHost extends Plugin {
   data: PluginData;
@@ -19,8 +21,14 @@ interface SettingsHost extends Plugin {
   refreshViews(): Promise<void>;
   getTemplateFiles(): TFile[];
   getIndexGroups(): string[];
+  getIndexRecords(): Array<{ path: string }>;
   isDataReadOnly(): boolean;
   dataCompatibilityWarning: string;
+  getKnowledgeBases(includeArchived?: boolean): KnowledgeBaseEntry[];
+  getActiveKnowledgeBaseId(): string;
+  getDataEpoch?(): number;
+  switchKnowledgeBase(id: string): Promise<void>;
+  renameKnowledgeBase(id: string, name: string): Promise<void>;
 }
 
 function renderSetting(
@@ -51,11 +59,25 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
     if (refresh) await this.host.refreshViews();
   }
 
+  private createOpenedBaseGuard(openedBaseId = this.host.getActiveKnowledgeBaseId()): () => boolean {
+    const openedDataEpoch = this.host.getDataEpoch?.() ?? 0;
+    let noticeShown = false;
+    return (): boolean => {
+      if (this.host.getActiveKnowledgeBaseId() === openedBaseId
+        && (this.host.getDataEpoch?.() ?? 0) === openedDataEpoch) return true;
+      if (!noticeShown) {
+        noticeShown = true;
+        new Notice("The active knowledge base changed. Reopen this setting before continuing.", 8000);
+      }
+      return false;
+    };
+  }
+
   getSettingDefinitions(): SettingDefinitionItem[] {
     const settings = this.host.data.settings;
     const readOnly = this.host.isDataReadOnly();
     const definitions: SettingDefinitionItem[] = [{
-      name: "About this workspace",
+      name: "About this knowledge base",
       desc: "Configure the command center for this vault. Organization and visual hierarchy remain in plugin data; source notes are never moved by index actions.",
       aliases: ["knowledge base", "index", "command center"],
     }];
@@ -66,6 +88,58 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
         aliases: ["warning", "data version"],
       });
     }
+
+    const knowledgeBases = this.host.getKnowledgeBases();
+    const activeBaseId = this.host.getActiveKnowledgeBaseId();
+    const ownsConfiguredBase = this.createOpenedBaseGuard(activeBaseId);
+    const activeBase = knowledgeBases.find((entry) => entry.id === activeBaseId);
+    definitions.push({
+      type: "group",
+      heading: "Knowledge bases",
+      items: [
+        {
+          name: "Separate knowledge bases",
+          desc: "Use separate index profiles for ENT, research, general medicine, or any other subject inside the same vault. These are plugin knowledge bases—not Obsidian .base files or saved Workspace layouts. Each keeps its own index, folders, templates, collections, study state, and history. Switching never moves or rewrites Markdown notes.",
+          aliases: ["multiple knowledge bases", "workspace", "profile", "ENT", "research"],
+        },
+        renderSetting(
+          "Active knowledge base",
+          activeBase
+            ? `${this.host.getIndexRecords().length} index entries · ${activeBase.data.collections.length} collections · ${activeBase.data.settings.workspaceMode === "ent-clinical" ? "ENT clinical" : "Generic"} preset`
+            : "Choose the independent knowledge base shown in the command center.",
+          (row) => {
+            row.settingEl.addClass("ent-cc-base-setting");
+            row.addDropdown((dropdown) => {
+              const options = Object.fromEntries(knowledgeBases.map((entry) => [entry.id, entry.data.settings.workspaceName]));
+              dropdown.selectEl.addClass("ent-cc-base-setting-select");
+              dropdown
+                .addOptions(options)
+                .setValue(activeBaseId)
+                .setDisabled(readOnly || knowledgeBases.length < 2)
+                .onChange(async (value) => {
+                  dropdown.setDisabled(true);
+                  try {
+                    await this.host.switchKnowledgeBase(value);
+                    this.update();
+                  } catch (error) {
+                    new Notice(error instanceof Error ? error.message : "Could not switch knowledge bases.", 8000);
+                    dropdown.setValue(activeBaseId).setDisabled(readOnly || knowledgeBases.length < 2);
+                  }
+                });
+            });
+            row.addButton((button) => {
+              button.buttonEl.addClass("ent-cc-base-setting-manage");
+              button
+                .setButtonText("Manage…")
+                .setIcon("library")
+                .setDisabled(readOnly)
+                .onClick(() => new ManageKnowledgeBasesModal(this.host as EntVaultCommandCenterPlugin).open());
+            });
+          },
+          ["switch", "manage", "rename", "duplicate", "archive", "restore", "base", "profile"],
+        ),
+      ],
+    });
 
     const folderPaths = (): string[] => this.host.app.vault.getAllLoadedFiles()
       .filter((file): file is TFolder => file instanceof TFolder && !file.isRoot())
@@ -85,6 +159,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
         .setValue(current)
         .setDisabled(readOnly)
         .onChange(async (value) => {
+          if (!ownsConfiguredBase()) return;
           const clean = value.trim().replace(/^\/+|\/+$/g, "");
           const error = validateWritableFolderPath(clean, this.host.app.vault.configDir) || (!allowEmpty && !clean ? "Choose a folder." : null);
           text.inputEl.toggleClass("is-error", Boolean(error));
@@ -94,11 +169,14 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
           await this.save();
         }));
       row.addButton((button) => button.setButtonText("Browse…").setDisabled(readOnly).onClick(() => {
+        if (!ownsConfiguredBase()) return;
         const folders = folderPaths();
         if (folders.length === 0) return;
         new StringPickerModal(this.host.app, folders, `Choose ${name.toLowerCase()}`, "Search vault folders…", async (path) => {
+          if (!ownsConfiguredBase()) return;
           onValid(path);
           await this.save();
+          if (!ownsConfiguredBase()) return;
           this.update();
         }).open();
       }));
@@ -129,15 +207,19 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
         .setValue(current)
         .setDisabled(readOnly)
         .onChange(async (value) => {
+          if (!ownsConfiguredBase()) return;
           onChange(value.trim());
           await this.save();
         }));
       row.addButton((button) => button.setButtonText("Choose…").setDisabled(readOnly).onClick(() => {
+        if (!ownsConfiguredBase()) return;
         const properties = propertyNames();
         if (properties.length === 0) return;
         new StringPickerModal(this.host.app, properties, `Choose ${name.toLowerCase()}`, "Search frontmatter properties…", async (property) => {
+          if (!ownsConfiguredBase()) return;
           onChange(property);
           await this.save();
+          if (!ownsConfiguredBase()) return;
           this.update();
         }).open();
       }));
@@ -158,39 +240,44 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
     definitions.push(
       {
         type: "group",
-        heading: "Workspace",
+        heading: "Knowledge-base configuration",
         items: [
-          renderSetting("Workspace profile", "Generic works with any folder-based knowledge base. ENT clinical retains the protected clinical creation and review workflow.", (row) => {
+          renderSetting("Index preset", "The preset is fixed for this knowledge base so its folder and creation rules cannot drift apart. Create or duplicate a base to use another preset.", (row) => {
             row.addDropdown((dropdown) => dropdown
               .addOptions({ generic: "Generic knowledge base", "ent-clinical": "ENT clinical preset" })
               .setValue(settings.workspaceMode)
-              .setDisabled(readOnly)
-              .onChange(async (value) => {
-                settings.workspaceMode = value as WorkspaceMode;
-                if (settings.workspaceMode === "generic") {
-                  settings.enableAdvancedCanonicalActions = false;
-                  if (["procedures", "medications", "syndromes"].includes(this.host.data.activeTab)) this.host.data.activeTab = "curriculum";
-                }
-                await this.save();
-                this.update();
-              }));
+              .setDisabled(true));
           }, ["generic", "ENT", "clinical", "preset"]),
           renderSetting("Command center name", "Displayed in the view title, header, and settings. The ribbon and hover source retain the stable plugin name.", (row) => {
-            row.addText((text) => text.setPlaceholder("Knowledge base command center").setValue(settings.workspaceName).setDisabled(readOnly).onChange(async (value) => {
-              const clean = value.trim();
-              if (!clean) return;
-              settings.workspaceName = clean;
-              await this.save();
-            }));
+            row.addText((text) => text.setValue(settings.workspaceName).setDisabled(true));
+            row.addButton((button) => button
+              .setButtonText("Rename…")
+              .setDisabled(readOnly)
+              .onClick(() => {
+                if (!ownsConfiguredBase()) return;
+                new TextPromptModal(this.app, {
+                  title: "Rename knowledge base",
+                  placeholder: "Knowledge base name",
+                  initialValue: settings.workspaceName,
+                  submitLabel: "Rename",
+                  onSubmit: async (value) => {
+                    if (!ownsConfiguredBase()) return;
+                    await this.host.renameKnowledgeBase(activeBaseId, value);
+                    if (ownsConfiguredBase()) this.update();
+                  },
+                }).open();
+              }));
           }, ["workspace name", "title"]),
           renderSetting("Header description", "Short explanation shown below the command center name.", (row) => {
             row.addText((text) => text.setPlaceholder("Search, organize, arrange, and create notes.").setValue(settings.workspaceSubtitle).setDisabled(readOnly).onChange(async (value) => {
+              if (!ownsConfiguredBase()) return;
               settings.workspaceSubtitle = value.trim();
               await this.save();
             }));
           }, ["subtitle"]),
           renderSetting("Index name", "For example: Knowledge Index, Curriculum, Projects, Research Library.", (row) => {
             row.addText((text) => text.setPlaceholder("Knowledge index").setValue(settings.indexLabel).setDisabled(readOnly).onChange(async (value) => {
+              if (!ownsConfiguredBase()) return;
               const clean = value.trim();
               if (!clean) return;
               settings.indexLabel = clean;
@@ -199,6 +286,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
           }, ["curriculum", "library"]),
           renderSetting("Item singular", "Singular label used throughout the interface.", (row) => {
             row.addText((text) => text.setPlaceholder("Note").setValue(settings.itemSingular).setDisabled(readOnly).onChange(async (value) => {
+              if (!ownsConfiguredBase()) return;
               if (!value.trim()) return;
               settings.itemSingular = value.trim();
               await this.save();
@@ -206,6 +294,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
           }, ["item name", "terminology"]),
           renderSetting("Item plural", "Plural label used throughout the interface.", (row) => {
             row.addText((text) => text.setPlaceholder("Notes").setValue(settings.itemPlural).setDisabled(readOnly).onChange(async (value) => {
+              if (!ownsConfiguredBase()) return;
               if (!value.trim()) return;
               settings.itemPlural = value.trim();
               await this.save();
@@ -213,6 +302,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
           }, ["item names", "terminology"]),
           renderSetting("Group name", "Label for the top-level grouping property, such as Category, Domain, Area, or Course.", (row) => {
             row.addText((text) => text.setPlaceholder("Group").setValue(settings.groupLabel).setDisabled(readOnly).onChange(async (value) => {
+              if (!ownsConfiguredBase()) return;
               if (!value.trim()) return;
               settings.groupLabel = value.trim();
               await this.save();
@@ -224,7 +314,11 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
         type: "group",
         heading: "Folders and templates",
         items: [
-          folderSetting("Indexed notes folder", "Every Markdown note in this folder and its subfolders appears in the main index.", settings.primaryFolder, (value) => { settings.primaryFolder = value; }),
+          settings.workspaceMode === "ent-clinical"
+            ? renderSetting("Indexed notes folder", "Protected ENT scope. Canonical creation and index discovery both follow this folder; its path updates automatically when the folder is renamed in the vault.", (row) => {
+                row.addText((text) => text.setValue(settings.primaryFolder).setDisabled(true));
+              }, ["folder", "path", "clinical scope"])
+            : folderSetting("Indexed notes folder", "Every Markdown note in this folder and its subfolders appears in the main index.", settings.primaryFolder, (value) => { settings.primaryFolder = value; }, false),
           folderSetting("Default new-note folder", "Initial destination in Create note. It can still be changed for each note.", settings.defaultNoteFolder, (value) => { settings.defaultNoteFolder = value; }),
           folderSetting("Templates folder", "Markdown templates offered by the per-note template picker. Leave empty to allow any Markdown file.", settings.templatesFolder, (value) => { settings.templatesFolder = value; }),
           renderSetting("Default starting content", "Every new note can override this choice.", (row) => {
@@ -233,6 +327,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
               .setValue(settings.defaultNewNoteMode)
               .setDisabled(readOnly)
               .onChange(async (value) => {
+                if (!ownsConfiguredBase()) return;
                 settings.defaultNewNoteMode = value as NewNoteMode;
                 await this.save(false);
               }));
@@ -242,24 +337,30 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
               .setButtonText(settings.defaultTemplatePath ? settings.defaultTemplatePath.split("/").pop()?.replace(/\.md$/, "") ?? "Choose…" : "Choose…")
               .setDisabled(readOnly)
               .onClick(() => {
+                if (!ownsConfiguredBase()) return;
                 const templates = this.host.getTemplateFiles();
                 if (templates.length === 0) return;
                 new VaultFilePickerModal(this.host.app, templates, "Choose the default note template", async (file) => {
+                  if (!ownsConfiguredBase()) return;
                   settings.defaultTemplatePath = file.path;
                   await this.save(false);
+                  if (!ownsConfiguredBase()) return;
                   this.update();
                 }).open();
               }));
             row.addButton((button) => button.setIcon("x").setTooltip("Clear default template").setDisabled(readOnly || !settings.defaultTemplatePath).onClick(async () => {
+              if (!ownsConfiguredBase()) return;
               settings.defaultTemplatePath = "";
               if (settings.defaultNewNoteMode === "template") settings.defaultNewNoteMode = "empty";
               await this.save(false);
+              if (!ownsConfiguredBase()) return;
               this.update();
             }));
           }, ["template file"]),
           renderSetting("Inbox folder", settings.workspaceMode === "ent-clinical" ? "Clinical proposals must stay inside 01 Inbox." : "Notes in this folder appear in the Inbox section.", (row) => {
             const description = settings.workspaceMode === "ent-clinical" ? "Clinical proposals must stay inside 01 Inbox." : "Notes in this folder appear in the Inbox section.";
             row.addText((text) => text.setPlaceholder(DEFAULT_PROPOSAL_FOLDER).setValue(settings.proposalFolder).setDisabled(readOnly).onChange(async (value) => {
+              if (!ownsConfiguredBase()) return;
               const clean = value.trim().replace(/^\/+|\/+$/g, "");
               const error = settings.workspaceMode === "ent-clinical"
                 ? validateProposalFolderPath(clean, this.host.app.vault.configDir)
@@ -271,19 +372,23 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
               await this.save();
             }));
             row.addButton((button) => button.setButtonText("Browse…").setDisabled(readOnly).onClick(() => {
+              if (!ownsConfiguredBase()) return;
               new StringPickerModal(this.host.app, folderPaths(), "Choose inbox folder", "Search vault folders…", async (path) => {
+                if (!ownsConfiguredBase()) return;
                 const error = settings.workspaceMode === "ent-clinical"
                   ? validateProposalFolderPath(path, this.host.app.vault.configDir)
                   : validateWritableFolderPath(path, this.host.app.vault.configDir);
                 if (error) return;
                 settings.proposalFolder = path;
                 await this.save();
+                if (!ownsConfiguredBase()) return;
                 this.update();
               }).open();
             }));
           }, ["proposal folder"]),
           renderSetting("Inbox name", "Label used for the Inbox section.", (row) => {
             row.addText((text) => text.setPlaceholder("Inbox").setValue(settings.inboxLabel).setDisabled(readOnly).onChange(async (value) => {
+              if (!ownsConfiguredBase()) return;
               if (!value.trim()) return;
               settings.inboxLabel = value.trim();
               await this.save();
@@ -311,6 +416,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
         items: [
           renderSetting("Default section", "Section shown when the command center opens for the first time.", (row) => {
             row.addDropdown((dropdown) => dropdown.addOptions(defaultTabs).setValue(settings.defaultTab).setDisabled(readOnly).onChange(async (value) => {
+              if (!ownsConfiguredBase()) return;
               settings.defaultTab = value as MainTab;
               this.host.data.activeTab = value as MainTab;
               await this.save();
@@ -318,12 +424,14 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
           }, ["tab", "start page"]),
           renderSetting("Recent changes limit", "Maximum entries in the Recently changed smart queue (5–100).", (row) => {
             row.addSlider((slider) => slider.setLimits(5, 100, 5).setValue(settings.recentLimit).setDisabled(readOnly).onChange(async (value) => {
+              if (!ownsConfiguredBase()) return;
               settings.recentLimit = value;
               await this.save();
             }));
           }, ["recent queue", "history"]),
           renderSetting("Hover previews", "Use Obsidian Page Preview when hovering a record title.", (row) => {
             row.addToggle((toggle) => toggle.setValue(settings.enableHoverPreview).setDisabled(readOnly).onChange(async (value) => {
+              if (!ownsConfiguredBase()) return;
               settings.enableHoverPreview = value;
               await this.save();
             }));
@@ -334,6 +442,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
               .setValue(settings.openNoteBehavior)
               .setDisabled(readOnly)
               .onChange(async (value) => {
+                if (!ownsConfiguredBase()) return;
                 settings.openNoteBehavior = value as OpenNoteBehavior;
                 await this.save(false);
               }));
@@ -363,18 +472,21 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
         items: [
           renderSetting("Safety badges", "Show a safety-critical indicator. This never changes clinical metadata.", (row) => {
             row.addToggle((toggle) => toggle.setValue(settings.showSafetyBadges).setDisabled(readOnly).onChange(async (value) => {
+              if (!ownsConfiguredBase()) return;
               settings.showSafetyBadges = value;
               await this.save();
             }));
           }, ["clinical", "safety critical"]),
           renderSetting("Advanced canonical actions", "Show direct ENT canonical creation and placement editing. Promotion from the clinical Inbox remains available.", (row) => {
             row.addToggle((toggle) => toggle.setValue(settings.enableAdvancedCanonicalActions).setDisabled(readOnly).onChange(async (value) => {
+              if (!ownsConfiguredBase()) return;
               settings.enableAdvancedCanonicalActions = value;
               await this.save();
             }));
           }, ["clinical", "topic placement", "create canonical"]),
           renderSetting("Visual cross-domain movement", "Allow ENT topics to be visually grouped across canonical domains. This changes only plugin organization; note folders, curriculum IDs, domain properties, and clinical metadata stay untouched. Off by default.", (row) => {
             row.addToggle((toggle) => toggle.setValue(settings.allowClinicalVisualGroupMoves).setDisabled(readOnly).onChange(async (value) => {
+              if (!ownsConfiguredBase()) return;
               if (value && this.host.data.indexGroupOrder.length === 0) this.host.data.indexGroupOrder = this.host.getIndexGroups();
               settings.allowClinicalVisualGroupMoves = value;
               await this.save();

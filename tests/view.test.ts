@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { calculateModalViewportLayout } from "../src/modals.ts";
+import { Notice } from "obsidian";
+import { calculateModalViewportLayout, ConfirmModal, KnowledgeNoteModal, TopicEditorModal } from "../src/modals.ts";
 import { EntVaultCommandCenterView } from "../src/view.ts";
 import { IndexManagerModal } from "../src/index-manager.ts";
 import { ExportImportCenterModal, preparePortableExport } from "../src/portability-modal.ts";
 import { createPortableExport, EMPTY_PORTABLE_SELECTION } from "../src/portability.ts";
-import { migrateData, parseQuery, type VaultRecord } from "../src/model.ts";
+import { createPersonalBackup, migrateData, parseQuery, type VaultRecord } from "../src/model.ts";
+import { EntCommandCenterSettingsTab } from "../src/settings.ts";
 
 function record(path: string, title: string): VaultRecord {
   return {
@@ -55,6 +57,47 @@ test("mobile note-sheet viewport values are clamped to the layout viewport", () 
   });
 });
 
+test("topic editor canonical previews use the knowledge base root captured at open", () => {
+  let preview = "";
+  const modal = Object.create(TopicEditorModal.prototype) as {
+    value: {
+      title: string;
+      domain: string;
+      parentPath: string;
+      topicKind: string;
+      priority: string;
+      safetyCritical: boolean;
+      curriculumId: string;
+      addToCollection: boolean;
+    };
+    options: {
+      mode: "canonical";
+      canonicalRoot: string;
+      previewDetails?: (value: unknown) => string[];
+    };
+    previewEl: { setText(value: string): void };
+    detailsEl: null;
+    updatePreview(): void;
+  };
+  modal.value = {
+    title: "Laryngeal cleft",
+    domain: "Laryngology",
+    parentPath: "",
+    topicKind: "condition",
+    priority: "P2",
+    safetyCritical: false,
+    curriculumId: "ENT-LAR-010",
+    addToCollection: false,
+  };
+  modal.options = { mode: "canonical", canonicalRoot: "ENT Library/Clinical Topics" };
+  modal.previewEl = { setText: (value) => { preview = value; } };
+  modal.detailsEl = null;
+
+  modal.updatePreview();
+
+  assert.match(preview, /^ENT Library\/Clinical Topics\/03 Laryngology\//);
+});
+
 test("oversized export preparation never mutates the live portable registry", () => {
   const data = migrateData(null);
   const before = structuredClone(data.portableIndex);
@@ -69,6 +112,7 @@ test("oversized export preparation never mutates the live portable registry", ()
       records,
       { ...EMPTY_PORTABLE_SELECTION, index: true },
       "2026-08-08T00:00:00.000Z",
+      "vault-ent-main",
     ),
     /above the 10 MB/i,
   );
@@ -105,6 +149,402 @@ test("portability center ignores a second action while an import is busy", async
   assert.equal(renders, 2, "one busy render and one completion render");
 });
 
+test("stale modal callbacks close once and never start work in another knowledge base", () => {
+  Notice.messages.length = 0;
+  let activeBaseId = "base-a";
+  let closes = 0;
+  let starts = 0;
+  const center = Object.create(ExportImportCenterModal.prototype) as {
+    plugin: { getActiveKnowledgeBaseId(): string };
+    openedBaseId: string;
+    staleBaseNoticeShown: boolean;
+    centerOpen: boolean;
+    busyAction: "export" | "import" | "file" | null;
+    close(): void;
+    run(kind: "export" | "import" | "file", action: () => Promise<void>): void;
+  };
+  center.plugin = { getActiveKnowledgeBaseId: () => activeBaseId };
+  center.openedBaseId = "base-a";
+  center.staleBaseNoticeShown = false;
+  center.centerOpen = true;
+  center.busyAction = null;
+  center.close = () => { closes += 1; center.centerOpen = false; };
+
+  activeBaseId = "base-b";
+  center.run("import", async () => { starts += 1; });
+  center.run("import", async () => { starts += 1; });
+
+  assert.equal(starts, 0);
+  assert.equal(closes, 1);
+  assert.equal(Notice.messages.filter((message) => message.includes("active knowledge base changed")).length, 1);
+});
+
+test("same-base Sync reload invalidates an open portability center before work starts", () => {
+  Notice.messages.length = 0;
+  let starts = 0;
+  let closes = 0;
+  const center = Object.create(ExportImportCenterModal.prototype) as {
+    plugin: { getActiveKnowledgeBaseId(): string; getDataEpoch(): number };
+    openedBaseId: string;
+    openedDataEpoch: number;
+    staleBaseNoticeShown: boolean;
+    centerOpen: boolean;
+    busyAction: "export" | "import" | "file" | null;
+    close(): void;
+    run(kind: "export" | "import" | "file", action: () => Promise<void>): void;
+  };
+  center.plugin = { getActiveKnowledgeBaseId: () => "base-a", getDataEpoch: () => 8 };
+  center.openedBaseId = "base-a";
+  center.openedDataEpoch = 7;
+  center.staleBaseNoticeShown = false;
+  center.centerOpen = true;
+  center.busyAction = null;
+  center.close = () => { closes += 1; center.centerOpen = false; };
+
+  center.run("import", async () => { starts += 1; });
+  center.run("export", async () => { starts += 1; });
+
+  assert.equal(starts, 0);
+  assert.equal(closes, 1);
+  assert.equal(Notice.messages.filter((message) => message.includes("data was reloaded")).length, 1);
+});
+
+test("the index manager rejects a stale mutation callback after a base switch", () => {
+  Notice.messages.length = 0;
+  let activeBaseId = "base-b";
+  let closes = 0;
+  let starts = 0;
+  const manager = Object.create(IndexManagerModal.prototype) as {
+    plugin: { getActiveKnowledgeBaseId(): string };
+    openedBaseId: string;
+    staleBaseNoticeShown: boolean;
+    managerOpen: boolean;
+    close(): void;
+    run(action: () => Promise<unknown>): void;
+  };
+  manager.plugin = { getActiveKnowledgeBaseId: () => activeBaseId };
+  manager.openedBaseId = "base-a";
+  manager.staleBaseNoticeShown = false;
+  manager.managerOpen = true;
+  manager.close = () => { closes += 1; manager.managerOpen = false; };
+
+  manager.run(async () => { starts += 1; });
+  manager.run(async () => { starts += 1; });
+
+  assert.equal(activeBaseId, "base-b");
+  assert.equal(starts, 0);
+  assert.equal(closes, 1);
+  assert.equal(Notice.messages.filter((message) => message.includes("active knowledge base changed")).length, 1);
+});
+
+test("view workflow guards stay bound to the base that opened the picker", () => {
+  Notice.messages.length = 0;
+  let activeBaseId = "base-a";
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    plugin: { getActiveKnowledgeBaseId(): string };
+    createOpenedBaseGuard(): () => boolean;
+  };
+  view.plugin = { getActiveKnowledgeBaseId: () => activeBaseId };
+  const ownsBase = view.createOpenedBaseGuard();
+
+  assert.equal(ownsBase(), true);
+  activeBaseId = "base-b";
+  assert.equal(ownsBase(), false);
+  assert.equal(ownsBase(), false);
+  assert.equal(Notice.messages.filter((message) => message.includes("active knowledge base changed")).length, 1);
+});
+
+test("a guard created by an old A row during the pre-reload B window still owns A", () => {
+  Notice.messages.length = 0;
+  let mutationsInB = 0;
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    plugin: { getActiveKnowledgeBaseId(): string; getDataEpoch(): number };
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    createOpenedBaseGuard(): () => boolean;
+  };
+  // Plugin state has already switched, but the visible DOM still belongs to A.
+  view.plugin = { getActiveKnowledgeBaseId: () => "base-b", getDataEpoch: () => 2 };
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 1;
+
+  const ownsRenderedBase = view.createOpenedBaseGuard();
+  if (ownsRenderedBase()) mutationsInB += 1;
+  if (ownsRenderedBase()) mutationsInB += 1;
+
+  assert.equal(mutationsInB, 0);
+  assert.equal(Notice.messages.filter((message) => message.includes("active knowledge base changed")).length, 1);
+});
+
+test("view and settings guards reject stale same-base objects after a Sync replacement", () => {
+  Notice.messages.length = 0;
+  let epoch = 1;
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    plugin: { getActiveKnowledgeBaseId(): string; getDataEpoch(): number };
+    createOpenedBaseGuard(): () => boolean;
+  };
+  view.plugin = { getActiveKnowledgeBaseId: () => "base-a", getDataEpoch: () => epoch };
+  const viewGuard = view.createOpenedBaseGuard();
+  assert.equal(viewGuard(), true);
+
+  const settingsTab = Object.create(EntCommandCenterSettingsTab.prototype) as {
+    host: { getActiveKnowledgeBaseId(): string; getDataEpoch(): number };
+    createOpenedBaseGuard(openedBaseId?: string): () => boolean;
+  };
+  settingsTab.host = { getActiveKnowledgeBaseId: () => "base-a", getDataEpoch: () => epoch };
+  const settingsGuard = settingsTab.createOpenedBaseGuard();
+  assert.equal(settingsGuard(), true);
+
+  epoch = 2;
+  assert.equal(viewGuard(), false);
+  assert.equal(settingsGuard(), false);
+});
+
+test("stale rendered rows cannot write selection or collapse state into a newly active base", () => {
+  Notice.messages.length = 0;
+  let activeBaseId = "base-b";
+  let saves = 0;
+  const data = migrateData(null);
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    plugin: {
+      data: typeof data;
+      getActiveKnowledgeBaseId(): string;
+      savePluginData(): Promise<void>;
+    };
+    loadedBaseId: string;
+    staleViewNoticeShown: boolean;
+    collapsedQueues: Set<string>;
+    collapsedCurriculumDomains: Set<string>;
+    collapsedCurriculumNodes: Set<string>;
+    persistCollapseState(): void;
+    selectRecord(path: string): void;
+  };
+  view.plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => activeBaseId,
+    savePluginData: async () => { saves += 1; },
+  };
+  view.loadedBaseId = "base-a";
+  view.staleViewNoticeShown = false;
+  view.collapsedQueues = new Set(["old-queue"]);
+  view.collapsedCurriculumDomains = new Set(["Old domain"]);
+  view.collapsedCurriculumNodes = new Set(["Old/Subject.md"]);
+
+  view.persistCollapseState();
+  view.selectRecord("Old/Subject.md");
+
+  assert.equal(data.selectedPath, "");
+  assert.deepEqual(data.collapsed.curriculumDomains, []);
+  assert.equal(saves, 0);
+  assert.equal(Notice.messages.filter((message) => message.includes("knowledge base changed")).length, 1);
+  activeBaseId = "base-a";
+});
+
+test("reload cancels A selection and search timers before adopting B", async () => {
+  const dataB = migrateData(null);
+  dataB.settings.workspaceName = "Base B";
+  const pendingCallbacks = new Map<number, () => void>();
+  let savesIntoB = 0;
+  let renders = 0;
+  const cleared: number[] = [];
+  pendingCallbacks.set(41, () => { renders += 100; });
+  pendingCallbacks.set(42, () => { savesIntoB += 1; });
+  const plugin = {
+    data: dataB,
+    getActiveKnowledgeBaseId: () => "base-b",
+    getDataEpoch: () => 2,
+    getRecords: (): VaultRecord[] => [],
+    reconcileRecords: async () => false,
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    plugin: typeof plugin;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    searchDebounce: number | null;
+    selectionSaveTimer: number | null;
+    timerWindow: { clearTimeout(timer: number): void };
+    query: string;
+    parsedQuery: ReturnType<typeof parseQuery>;
+    editMode: boolean;
+    curriculumArrangeMode: boolean;
+    mobileInspectorOpen: boolean;
+    mobileInspectorNeedsFocus: boolean;
+    mobileTreeScrollTop: number;
+    mobileInspectorScrollTop: number;
+    collapsedQueues: Set<string>;
+    collapsedCurriculumDomains: Set<string>;
+    collapsedCurriculumNodes: Set<string>;
+    render(): void;
+    reload(): Promise<void>;
+  };
+  view.plugin = plugin;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 1;
+  view.staleViewNoticeShown = true;
+  view.searchDebounce = 41;
+  view.selectionSaveTimer = 42;
+  view.timerWindow = {
+    clearTimeout: (timer) => {
+      cleared.push(timer);
+      pendingCallbacks.delete(timer);
+    },
+  };
+  view.query = "stale A search";
+  view.parsedQuery = parseQuery(view.query);
+  view.editMode = true;
+  view.curriculumArrangeMode = true;
+  view.mobileInspectorOpen = true;
+  view.mobileInspectorNeedsFocus = true;
+  view.mobileTreeScrollTop = 100;
+  view.mobileInspectorScrollTop = 200;
+  view.collapsedQueues = new Set(["A queue"]);
+  view.collapsedCurriculumDomains = new Set(["A domain"]);
+  view.collapsedCurriculumNodes = new Set(["A note"]);
+  view.render = () => { renders += 1; };
+
+  await view.reload();
+  for (const callback of pendingCallbacks.values()) callback();
+
+  assert.deepEqual(cleared, [41, 42]);
+  assert.equal(pendingCallbacks.size, 0);
+  assert.equal(savesIntoB, 0);
+  assert.equal(renders, 1, "only reload renders B; the stale search callback never runs");
+  assert.equal(view.searchDebounce, null);
+  assert.equal(view.selectionSaveTimer, null);
+  assert.equal(view.loadedBaseId, "base-b");
+  assert.equal(view.loadedDataEpoch, 2);
+  assert.equal(view.query, "");
+});
+
+test("settings callbacks stay bound to the knowledge base that rendered them", () => {
+  Notice.messages.length = 0;
+  let activeBaseId = "base-a";
+  const settingsTab = Object.create(EntCommandCenterSettingsTab.prototype) as {
+    host: { getActiveKnowledgeBaseId(): string };
+    createOpenedBaseGuard(openedBaseId?: string): () => boolean;
+  };
+  settingsTab.host = { getActiveKnowledgeBaseId: () => activeBaseId };
+  const ownsBase = settingsTab.createOpenedBaseGuard();
+
+  assert.equal(ownsBase(), true);
+  activeBaseId = "base-b";
+  assert.equal(ownsBase(), false);
+  assert.equal(ownsBase(), false);
+  assert.equal(Notice.messages.filter((message) => message.includes("active knowledge base changed")).length, 1);
+});
+
+test("a create-note form cannot submit into a different active knowledge base", async () => {
+  Notice.messages.length = 0;
+  let activeBaseId = "base-a";
+  let createCalls = 0;
+  let submit: ((value: {
+    title: string;
+    folder: string;
+    mode: "empty";
+    templatePath: string;
+    addToCollection: boolean;
+  }) => void | Promise<void>) | null = null;
+  const plugin = {
+    data: {
+      settings: {
+        itemSingular: "note",
+        indexLabel: "Index",
+        defaultNoteFolder: "Notes",
+        defaultNewNoteMode: "empty" as const,
+        defaultTemplatePath: "",
+      },
+    },
+    getActiveKnowledgeBaseId: () => activeBaseId,
+    getDataEpoch: () => 0,
+    isClinicalMode: () => false,
+    getTemplateFiles: () => [],
+    validateGenericNote: () => null,
+    async createKnowledgeNote(): Promise<never> {
+      createCalls += 1;
+      throw new Error("must not run");
+    },
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: object;
+    plugin: typeof plugin;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    startCreateKnowledgeNote(): void;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+
+  KnowledgeNoteModal.prototype.open = function openForTest(): void {
+    submit = (this as unknown as { options: { onSubmit: typeof submit } }).options.onSubmit;
+  };
+  try {
+    view.startCreateKnowledgeNote();
+    activeBaseId = "base-b";
+    await submit?.({ title: "Stale", folder: "Notes", mode: "empty", templatePath: "", addToCollection: false });
+  } finally {
+    delete (KnowledgeNoteModal.prototype as { open?: () => void }).open;
+  }
+
+  assert.equal(createCalls, 0);
+  assert.equal(Notice.messages.filter((message) => message.includes("active knowledge base changed")).length, 1);
+});
+
+test("an export failure after a base switch never rolls the old registry into the new base", async () => {
+  Notice.messages.length = 0;
+  const oldData = migrateData(null);
+  oldData.settings.workspaceName = "Base A";
+  const newData = migrateData(null);
+  newData.settings.workspaceName = "Base B";
+  newData.portableIndex.groups = [{ id: "base-b-group", title: "Base B heading", order: 0 }];
+  const newRegistryBefore = structuredClone(newData.portableIndex);
+  let activeBaseId = "base-a";
+  let saveCalls = 0;
+  const plugin = {
+    data: oldData,
+    getActiveKnowledgeBaseId: () => activeBaseId,
+    isDataReadOnly: () => false,
+    getRecords: (): VaultRecord[] => [],
+    invalidateRecordCache(): void {},
+    async savePluginData(): Promise<void> {
+      saveCalls += 1;
+      activeBaseId = "base-b";
+      this.data = newData;
+      throw new Error("forced export save failure");
+    },
+  };
+  const center = Object.create(ExportImportCenterModal.prototype) as {
+    plugin: typeof plugin;
+    exportSelection: typeof EMPTY_PORTABLE_SELECTION;
+    exportRecoveryConfirmed: boolean;
+    dataChanged: boolean;
+    openedBaseId: string;
+    staleBaseNoticeShown: boolean;
+    centerOpen: boolean;
+    close(): void;
+    exportSelected(): Promise<void>;
+  };
+  center.plugin = plugin;
+  center.exportSelection = { ...EMPTY_PORTABLE_SELECTION, index: true };
+  center.exportRecoveryConfirmed = false;
+  center.dataChanged = false;
+  center.openedBaseId = "base-a";
+  center.staleBaseNoticeShown = false;
+  center.centerOpen = true;
+  center.close = () => { center.centerOpen = false; };
+
+  await center.exportSelected();
+
+  assert.equal(saveCalls, 1, "no rollback save is attempted against the newly active base");
+  assert.deepEqual(newData.portableIndex, newRegistryBefore);
+  assert.equal(center.centerOpen, false);
+  assert.equal(Notice.messages.filter((message) => message.includes("active knowledge base changed")).length, 1);
+});
+
 test("recovery export cannot run without the exact-path confirmation", async () => {
   const center = Object.create(ExportImportCenterModal.prototype) as {
     plugin: { isDataReadOnly(): boolean };
@@ -132,6 +572,142 @@ test("compatibility read-only mode blocks recovery export and import", async () 
 
   await assert.rejects(center.exportSelected(), /recovery is unavailable.*read-only/i);
   await assert.rejects(center.importSelected(), /import is unavailable.*read-only/i);
+});
+
+test("portability center rejects cross-vault recovery before mutate starts", async () => {
+  const source = migrateData(null);
+  source.collections = [{ id: "ent", title: "ENT", collapsed: false, subjects: ["03 Clinical Topics/Larynx.md"], subheadings: [] }];
+  const value = createPortableExport(
+    source,
+    [],
+    { ...EMPTY_PORTABLE_SELECTION, recovery: true },
+    "2026-08-08T00:00:00.000Z",
+    "vault-ent-main-vault",
+    "base-ent",
+    "ENT",
+  );
+  const data = migrateData(null);
+  data.collections = [{ id: "local", title: "Local", collapsed: false, subjects: [], subheadings: [] }];
+  const before = structuredClone(data);
+  let mutateCalls = 0;
+  const plugin = {
+    data,
+    isDataReadOnly: () => false,
+    getVaultId: () => "vault-my-main-note-kb",
+    getActiveKnowledgeBaseId: () => "base-main",
+    async mutate(): Promise<void> { mutateCalls += 1; },
+  };
+  const center = Object.create(ExportImportCenterModal.prototype) as {
+    plugin: typeof plugin;
+    importValue: typeof value;
+    importSelection: typeof EMPTY_PORTABLE_SELECTION;
+    importMode: "merge" | "replace";
+    recoveryConfirmed: boolean;
+    importSelected(): Promise<void>;
+  };
+  center.plugin = plugin;
+  center.importValue = value;
+  center.importSelection = { ...EMPTY_PORTABLE_SELECTION, recovery: true };
+  center.importMode = "replace";
+  center.recoveryConfirmed = true;
+
+  await assert.rejects(center.importSelected(), /different Obsidian vault/i);
+  assert.equal(mutateCalls, 0);
+  assert.deepEqual(plugin.data, before);
+});
+
+test("portability center requires the separate cross-base override before mutate starts", async () => {
+  const source = migrateData(null);
+  source.settings.workspaceName = "ENT";
+  const value = createPortableExport(
+    source,
+    [],
+    { ...EMPTY_PORTABLE_SELECTION, recovery: true },
+    "2026-08-08T00:00:00.000Z",
+    "vault-shared",
+    "base-ent",
+    "ENT",
+  );
+  const data = migrateData(null);
+  data.settings.workspaceName = "Research";
+  const before = structuredClone(data);
+  let mutateCalls = 0;
+  const plugin = {
+    data,
+    isDataReadOnly: () => false,
+    getVaultId: () => "vault-shared",
+    getActiveKnowledgeBaseId: () => "base-research",
+    async mutate(): Promise<void> { mutateCalls += 1; },
+  };
+  const center = Object.create(ExportImportCenterModal.prototype) as {
+    plugin: typeof plugin;
+    importValue: typeof value;
+    importSelection: typeof EMPTY_PORTABLE_SELECTION;
+    importMode: "merge" | "replace";
+    recoveryConfirmed: boolean;
+    crossBaseRecoveryConfirmed: boolean;
+    importSelected(): Promise<void>;
+  };
+  center.plugin = plugin;
+  center.importValue = value;
+  center.importSelection = { ...EMPTY_PORTABLE_SELECTION, recovery: true };
+  center.importMode = "replace";
+  center.recoveryConfirmed = true;
+  center.crossBaseRecoveryConfirmed = false;
+
+  await assert.rejects(center.importSelected(), /different or unverified source knowledge base/i);
+  assert.equal(mutateCalls, 0);
+  assert.deepEqual(plugin.data, before);
+});
+
+test("direct organization recovery refuses to apply when safe Undo cannot be guaranteed", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceName = "ENT";
+  const backup = createPersonalBackup(
+    data,
+    "2026-08-08T00:00:00.000Z",
+    "vault-shared",
+    "base-ent",
+    "ENT",
+  );
+  let mutateOptions: { requireUndo?: boolean } | null = null;
+  const plugin = {
+    data,
+    getVaultId: () => "vault-shared",
+    getActiveKnowledgeBaseId: () => "base-ent",
+    async mutate(
+      _label: string,
+      _action: () => void,
+      options: { requireUndo?: boolean },
+    ): Promise<void> {
+      mutateOptions = options;
+      if (options.requireUndo) throw new Error("simulated Undo budget refusal");
+    },
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: { vault: { getAbstractFileByPath(path: string): null } };
+    plugin: typeof plugin;
+    confirmOrganizationImport(input: Promise<unknown>, ownsBase: () => boolean): void;
+  };
+  view.app = { vault: { getAbstractFileByPath: () => null } };
+  view.plugin = plugin;
+  const opened: Array<{ onConfirm(): void | Promise<void> }> = [];
+  const hadOwnOpen = Object.prototype.hasOwnProperty.call(ConfirmModal.prototype, "open");
+  const originalOpen = Object.getOwnPropertyDescriptor(ConfirmModal.prototype, "open");
+  ConfirmModal.prototype.open = function captureConfirm(): void {
+    opened.push(this);
+  };
+  try {
+    view.confirmOrganizationImport(Promise.resolve(backup), () => true);
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(opened.length, 1, "an exact-base recovery proceeds directly to the final confirmation");
+    await assert.rejects(Promise.resolve(opened[0]?.onConfirm()), /Undo budget refusal/i);
+    assert.equal(mutateOptions?.requireUndo, true);
+  } finally {
+    if (hadOwnOpen && originalOpen) Object.defineProperty(ConfirmModal.prototype, "open", originalOpen);
+    else Reflect.deleteProperty(ConfirmModal.prototype, "open");
+  }
 });
 
 test("template fallback stays transactional and does not mutate the selected import package", async () => {
@@ -253,19 +829,33 @@ test("closing the view waits for a pending selection save", async () => {
     setupTimer: number | null;
     searchDebounce: number | null;
     selectionSaveTimer: number | null;
+    selectionSavePromise: Promise<void> | null;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
     timerWindow: { clearTimeout(timer: number): void };
-    plugin: { savePluginData(): Promise<void> };
+    plugin: {
+      savePluginData(): Promise<void>;
+      getActiveKnowledgeBaseId(): string;
+      getDataEpoch(): number;
+    };
     onClose(): Promise<void>;
   };
   view.setupTimer = 1;
   view.searchDebounce = 2;
   view.selectionSaveTimer = 3;
+  view.selectionSavePromise = null;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
   view.timerWindow = { clearTimeout: (timer) => { cleared.push(timer); } };
   view.plugin = {
     savePluginData: async () => {
       await saveGate;
       saveFinished = true;
     },
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
   };
 
   const closing = view.onClose();

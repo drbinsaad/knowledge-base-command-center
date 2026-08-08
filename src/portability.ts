@@ -1,5 +1,6 @@
 import {
   asUnknownRecord,
+  assertPersonalBackupMatchesVault,
   buildCurriculumTree,
   canonicalIdIsValid,
   cloneCollections,
@@ -72,6 +73,10 @@ export interface PortableIndexV1 {
   version: 1;
   groups: PortableGroupDefinition[];
   subjects: PortableSubjectDefinition[];
+  /** Path-free view state. Optional so existing v1 packages remain valid. */
+  collapsedGroupIds?: string[];
+  /** Path-free view state. Optional so existing v1 packages remain valid. */
+  collapsedSubjectIds?: string[];
 }
 
 export interface PortableCollectionSubheadingV1 {
@@ -416,9 +421,30 @@ export function synchronizePortableRegistry(data: PluginData, records: VaultReco
     visit(domain.roots, null);
   }
 
-  const orderByTitle = new Map(data.indexGroupOrder.map((title, order) => [normalizeText(title), order]));
+  // The index renders domains in the tree's effective folder order. In the ENT
+  // preset that order comes from folders such as `01 Pediatric`, not from
+  // `indexGroupOrder`, which is commonly empty. Persist the rendered order
+  // first, followed by deliberately-created empty headings and then any
+  // internal groups retained only for non-index organization.
+  const renderedGroupKeys = new Set(tree.domains.map((domain) => normalizeText(domain.domain)));
+  const remainingGroups = [...data.portableIndex.groups]
+    .sort((a, b) => a.order - b.order || a.title.localeCompare(b.title));
+  const effectiveGroupTitles: string[] = [];
+  const effectiveGroupKeys = new Set<string>();
+  const addEffectiveGroup = (title: string): void => {
+    const key = normalizeText(title);
+    if (!key || effectiveGroupKeys.has(key)) return;
+    effectiveGroupKeys.add(key);
+    effectiveGroupTitles.push(title);
+  };
+  tree.domains.forEach((domain) => addEffectiveGroup(domain.domain));
+  data.indexGroupOrder
+    .filter((title) => !renderedGroupKeys.has(normalizeText(title)))
+    .forEach(addEffectiveGroup);
+  remainingGroups.forEach((group) => addEffectiveGroup(group.title));
+  const orderByTitle = new Map(effectiveGroupTitles.map((title, order) => [normalizeText(title), order]));
   data.portableIndex.groups.forEach((group, fallback) => {
-    group.order = orderByTitle.get(normalizeText(group.title)) ?? (data.indexGroupOrder.length + fallback);
+    group.order = orderByTitle.get(normalizeText(group.title)) ?? (effectiveGroupTitles.length + fallback);
   });
   data.portableIndex.groups.sort((a, b) => a.order - b.order || a.title.localeCompare(b.title));
 
@@ -465,6 +491,9 @@ export function createPortableExport(
   records: VaultRecord[],
   requestedSelection: PortableExportSelection,
   exportedAt: string,
+  sourceVaultId = "",
+  sourceBaseId = "",
+  sourceBaseName = "",
 ): PortableExportV1 {
   const selection = normalizePortableSelection(requestedSelection);
   if (!portableSelectionHasAny(selection)) throw new Error("Choose at least one export component.");
@@ -516,9 +545,23 @@ export function createPortableExport(
     .filter((group) => includedGroupIds.has(group.id) || selectedEmptyGroupTitles.has(normalizeText(group.title)))
     .map((group) => ({ ...group }))
     .sort((a, b) => a.order - b.order || a.title.localeCompare(b.title));
+  const groupIdByTitle = new Map(groups.map((group) => [normalizeText(group.title), group.id]));
+  const collapsedGroupIds = unique(data.collapsed.curriculumDomains
+    .map((title) => groupIdByTitle.get(normalizeText(title)) ?? ""));
+  const collapsedSubjectIds = unique(data.collapsed.curriculumNodes
+    .map((path) => pathToId.get(path) ?? "")
+    .filter((id) => includedIds.has(id)));
   const components: PortableExportV1["components"] = {};
   if (selection.workspace) components.workspace = createWorkspaceConfig(data, exportedAt);
-  if (selection.index) components.index = { version: 1, groups, subjects };
+  if (selection.index) {
+    components.index = {
+      version: 1,
+      groups,
+      subjects,
+      collapsedGroupIds,
+      collapsedSubjectIds,
+    };
+  }
   if (selection.collections) {
     components.collections = {
       version: 1,
@@ -544,7 +587,9 @@ export function createPortableExport(
     };
   }
   if (selection.savedViews) components.savedViews = { version: 1, views: data.savedViews.map((view) => ({ ...view })) };
-  if (selection.recovery) components.recovery = createPersonalBackup(data, exportedAt);
+  if (selection.recovery) {
+    components.recovery = createPersonalBackup(data, exportedAt, sourceVaultId, sourceBaseId, sourceBaseName);
+  }
   return {
     kind: PORTABLE_EXPORT_KIND,
     version: PORTABLE_EXPORT_VERSION,
@@ -615,7 +660,35 @@ function parsePortableIndex(input: unknown): PortableIndexV1 {
     }
     chain.forEach((id) => done.add(id));
   }
-  return { version: 1, groups, subjects };
+  const parseCollapsedIds = (
+    inputIds: unknown,
+    knownIds: Set<string>,
+    label: string,
+    maximum: number,
+  ): string[] | undefined => {
+    if (inputIds === undefined) return undefined;
+    if (!Array.isArray(inputIds)) throw new Error(`${label} must be a list.`);
+    if (inputIds.length > maximum) throw new Error(`${label} has too many entries.`);
+    const ids: string[] = [];
+    const seen = new Set<string>();
+    for (const [index, rawId] of inputIds.entries()) {
+      const id = safeId(rawId, `${label} ${index + 1}`);
+      if (!knownIds.has(id)) throw new Error(`${label} references unknown ID ${id}.`);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      ids.push(id);
+    }
+    return ids;
+  };
+  const collapsedGroupIds = parseCollapsedIds(value.collapsedGroupIds, groupIds, "Collapsed index groups", MAX_PORTABLE_GROUPS);
+  const collapsedSubjectIds = parseCollapsedIds(value.collapsedSubjectIds, subjectIds, "Collapsed index subjects", MAX_PORTABLE_SUBJECTS);
+  return {
+    version: 1,
+    groups,
+    subjects,
+    ...(collapsedGroupIds ? { collapsedGroupIds } : {}),
+    ...(collapsedSubjectIds ? { collapsedSubjectIds } : {}),
+  };
 }
 
 interface PortableReferenceBudget {
@@ -788,6 +861,8 @@ function applyRecovery(data: PluginData, backup: PersonalBackup): void {
   data.manualIndexPaths = [...backup.manualIndexPaths];
   data.excludedIndexPaths = [...backup.excludedIndexPaths];
   data.indexGroupByPath = { ...backup.indexGroupByPath };
+  data.displayNameByPath = { ...backup.displayNameByPath };
+  data.indexGroupAliases = { ...backup.indexGroupAliases };
   data.indexGroupOrder = [...backup.indexGroupOrder];
   data.layoutSnapshots = backup.layoutSnapshots.map((snapshot) => structuredClone(snapshot));
   data.portableIndex = structuredClone(backup.portableIndex);
@@ -799,6 +874,11 @@ export function applyPortableExport(
   value: PortableExportV1,
   requestedSelection: PortableExportSelection,
   mode: PortableImportMode,
+  currentVaultId = "",
+  recoveryPathExists?: (path: string) => boolean,
+  currentBaseId = "",
+  currentBaseName = "",
+  allowCrossBaseRecovery = false,
 ): PortableImportResult {
   const selection = normalizePortableSelection(requestedSelection);
   const available = selectionAvailableForExport(value);
@@ -809,6 +889,17 @@ export function applyPortableExport(
     const otherSelected = Object.entries(selection).some(([key, enabled]) => key !== "recovery" && enabled);
     if (otherSelected) throw new Error("Same-vault recovery must be restored by itself.");
     if (mode !== "replace") throw new Error("Same-vault recovery is a restore operation, not a merge.");
+    if (value.components.recovery) {
+      assertPersonalBackupMatchesVault(
+        value.components.recovery,
+        currentVaultId,
+        recoveryPathExists,
+        currentBaseId,
+        currentBaseName,
+        data.settings.workspaceMode,
+        allowCrossBaseRecovery,
+      );
+    }
   }
   const result: PortableImportResult = {
     addedSubjects: 0,
@@ -819,10 +910,28 @@ export function applyPortableExport(
     importedViews: 0,
   };
 
+  const incomingWorkspace = selection.workspace ? value.components.workspace : undefined;
+  if (incomingWorkspace && incomingWorkspace.settings.workspaceMode !== data.settings.workspaceMode) {
+    throw new Error(`This package uses the ${incomingWorkspace.settings.workspaceMode === "ent-clinical" ? "ENT clinical" : "Generic"} preset. Create or switch to a matching knowledge base before importing Workspace settings.`);
+  }
+
   if (selection.recovery && value.components.recovery) applyRecovery(data, value.components.recovery);
-  if (selection.workspace && value.components.workspace) {
-    data.settings = { ...structuredClone(value.components.workspace.settings), setupComplete: true };
-    if (!selection.index) data.indexGroupOrder = [...value.components.workspace.indexGroupOrder];
+  if (incomingWorkspace) {
+    // A portable package configures the active base; it must never change the
+    // destination base's stable identity. Otherwise importing an ENT package
+    // into Research could leave two indistinguishable "ENT" bases in the
+    // switcher. The source name remains available as export metadata.
+    const destinationWorkspaceName = data.settings.workspaceName;
+    const destinationMode = data.settings.workspaceMode;
+    const protectedPrimaryFolder = data.settings.primaryFolder;
+    data.settings = {
+      ...structuredClone(incomingWorkspace.settings),
+      workspaceName: destinationWorkspaceName,
+      workspaceMode: destinationMode,
+      ...(destinationMode === "ent-clinical" ? { primaryFolder: protectedPrimaryFolder } : {}),
+      setupComplete: true,
+    };
+    if (!selection.index) data.indexGroupOrder = [...incomingWorkspace.indexGroupOrder];
   }
 
   const incomingIndex = selection.index ? value.components.index : undefined;
@@ -1050,6 +1159,21 @@ export function applyPortableExport(
         .filter((group) => !incomingGroupTitles.includes(group.title))
         .sort((a, b) => a.order - b.order)
         .map((group) => group.title)]);
+    if (incomingIndex.collapsedGroupIds) {
+      const incomingCollapsedGroups = unique(incomingIndex.collapsedGroupIds
+        .map((groupId) => localGroupTitle(groupIdMap.get(groupId) || groupId)));
+      data.collapsed.curriculumDomains = mode === "merge"
+        ? unique([...data.collapsed.curriculumDomains, ...incomingCollapsedGroups])
+        : incomingCollapsedGroups;
+    }
+    if (incomingIndex.collapsedSubjectIds) {
+      const incomingCollapsedSubjects = unique(incomingIndex.collapsedSubjectIds
+        .map((subjectId) => subjectIdMap.get(subjectId) || subjectId)
+        .map((subjectId) => portableSubjectPath(data, subjectId)));
+      data.collapsed.curriculumNodes = mode === "merge"
+        ? unique([...data.collapsed.curriculumNodes, ...incomingCollapsedSubjects])
+        : incomingCollapsedSubjects;
+    }
   }
 
   const translateIds = (ids: string[]): string[] => unique(ids.map((id) => subjectIdMap.get(id) || id).map((id) => portableSubjectPath(data, id)));

@@ -4,6 +4,12 @@ export const MEDICATION_ROOT = "06 Clinical Tools/Medications/";
 export const SYNDROME_ROOT = "06 Clinical Tools/Syndromes/";
 export const DEFAULT_PROPOSAL_FOLDER = "01 Inbox/ENT Topic Proposals";
 export const DATA_VERSION = 10;
+export const STORE_VERSION = 11;
+export const STORE_KIND = "knowledge-base-command-center-store";
+export const MAX_KNOWLEDGE_BASES = 50;
+/** Permanent base-deletion tombstones are small, but remain bounded and are never silently evicted. */
+export const MAX_DELETED_KNOWLEDGE_BASE_IDS = 10_000;
+export const DEFAULT_KNOWLEDGE_BASE_ID = "base-default";
 export const PORTABLE_PLACEHOLDER_PREFIX = "kbcc-placeholder:";
 export const DEFAULT_COLLAPSED_QUEUES = [
   "p1",
@@ -60,6 +66,8 @@ export const TOPIC_KINDS = [
 export interface VaultRecord {
   path: string;
   title: string;
+  /** Original note/frontmatter title when this base applies a display-only alias. */
+  sourceTitle?: string;
   kind: RecordKind;
   role: RecordRole;
   curriculumId: string;
@@ -203,6 +211,10 @@ export interface PersonalSnapshot {
   manualIndexPaths: string[];
   excludedIndexPaths: string[];
   indexGroupByPath: Record<string, string>;
+  /** Base-local display titles. Keys may be note paths or portable placeholder IDs. */
+  displayNameByPath: Record<string, string>;
+  /** Visual aliases for configured/folder-derived group names. */
+  indexGroupAliases: Record<string, string>;
   indexGroupOrder: string[];
   /** Included only when the operation can change portable identity state. */
   portableIndex?: PortableIndexLocalState;
@@ -272,6 +284,8 @@ export interface PluginData {
   manualIndexPaths: string[];
   excludedIndexPaths: string[];
   indexGroupByPath: Record<string, string>;
+  displayNameByPath: Record<string, string>;
+  indexGroupAliases: Record<string, string>;
   indexGroupOrder: string[];
   portableIndex: PortableIndexLocalState;
   selectedPath: string;
@@ -283,6 +297,26 @@ export interface PluginData {
   collapsed: ViewCollapseState;
   migrationBackup?: MigrationBackup;
   v2MigrationBackup?: V2MigrationBackup;
+}
+
+export interface KnowledgeBaseEntry {
+  id: string;
+  createdAt: number;
+  updatedAt: number;
+  archivedAt: number | null;
+  /** Existing v10 workspace payload, deliberately kept intact per base. */
+  data: PluginData;
+}
+
+export interface PluginStore {
+  kind: typeof STORE_KIND;
+  version: typeof STORE_VERSION;
+  /** Stable per-vault identity used to reject cross-vault recovery restores. */
+  vaultId: string;
+  activeBaseId: string;
+  bases: KnowledgeBaseEntry[];
+  /** Stable IDs permanently removed from this vault. Tombstones prevent Sync from resurrecting them. */
+  deletedBaseIds: Record<string, number>;
 }
 
 export const DEFAULT_SETTINGS: PluginSettings = {
@@ -345,6 +379,8 @@ export const DEFAULT_DATA: PluginData = {
   manualIndexPaths: [],
   excludedIndexPaths: [],
   indexGroupByPath: {},
+  displayNameByPath: {},
+  indexGroupAliases: {},
   indexGroupOrder: [],
   portableIndex: { version: 1, groups: [], subjects: [], resolvedPathBySubjectId: {} },
   selectedPath: "",
@@ -360,8 +396,144 @@ export const DEFAULT_DATA: PluginData = {
   },
 };
 
+export function createDefaultStore(
+  data: PluginData = structuredClone(DEFAULT_DATA),
+  now = Date.now(),
+  vaultId = makeId("vault"),
+): PluginStore {
+  return {
+    kind: STORE_KIND,
+    version: STORE_VERSION,
+    vaultId: cleanKnowledgeBaseId(vaultId, "Vault"),
+    activeBaseId: DEFAULT_KNOWLEDGE_BASE_ID,
+    bases: [{ id: DEFAULT_KNOWLEDGE_BASE_ID, createdAt: now, updatedAt: now, archivedAt: null, data }],
+    deletedBaseIds: {},
+  };
+}
+
 export function makeId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function canonicalMigrationValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => canonicalMigrationValue(item) ?? null);
+  if (!value || typeof value !== "object") return value;
+  const output: Record<string, unknown> = {};
+  for (const key of Object.keys(value).sort()) {
+    const normalized = canonicalMigrationValue((value as Record<string, unknown>)[key]);
+    if (normalized !== undefined) output[key] = normalized;
+  }
+  return output;
+}
+
+function fingerprintText(text: string): string {
+  const hash = (seed: number): string => {
+    let value = seed >>> 0;
+    for (let index = 0; index < text.length; index += 1) {
+      value ^= text.charCodeAt(index);
+      value = Math.imul(value, 0x01000193) >>> 0;
+    }
+    return value.toString(16).padStart(8, "0");
+  };
+  return `${hash(0x811c9dc5)}${hash(0x9e3779b9)}`;
+}
+
+function migrationFingerprint(data: PluginData): string {
+  const comparable = structuredClone(data);
+  if (comparable.migrationBackup) comparable.migrationBackup.migratedAt = 0;
+  if (comparable.v2MigrationBackup) comparable.v2MigrationBackup.migratedAt = 0;
+  return fingerprintText(JSON.stringify(canonicalMigrationValue(comparable)));
+}
+
+function randomMigrationNonce(): string {
+  const values = new Uint32Array(4);
+  if (typeof window !== "undefined" && typeof window.crypto?.getRandomValues === "function") {
+    window.crypto.getRandomValues(values);
+    return Array.from(values, (value) => value.toString(16).padStart(8, "0")).join("");
+  }
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function migratedVaultId(data: PluginData): string {
+  return `vault-migrated-${migrationFingerprint(data)}-${randomMigrationNonce()}`;
+}
+
+function migratedVaultIdFromLegacyDeterministicId(vaultId: string): string {
+  const fingerprint = /^vault-migrated-([0-9a-f]{16})$/i.exec(vaultId.trim())?.[1]?.toLowerCase();
+  if (!fingerprint) throw new Error("The legacy migrated-vault identity is invalid.");
+  return `vault-migrated-${fingerprint}-${randomMigrationNonce()}`;
+}
+
+/** Fingerprint carried only by a random provisional first-upgrade identity. */
+export function provisionalMigratedVaultFingerprint(vaultId: string): string | null {
+  const match = /^vault-migrated-([0-9a-f]{16})-([a-z0-9]{12,64})$/i.exec(vaultId.trim());
+  return match?.[1]?.toLowerCase() ?? null;
+}
+
+export function isLegacyDeterministicMigratedVaultId(vaultId: string): boolean {
+  return /^vault-migrated-[0-9a-f]{16}$/i.test(vaultId.trim());
+}
+
+type InterimEnvelopeIdentitySource = Pick<PluginStore, "bases" | "deletedBaseIds">;
+
+/**
+ * Stable serialization of the complete multi-base payload that existed when a
+ * v11 envelope without `vaultId` was first loaded. `activeBaseId` is omitted
+ * because it is device-local UI state; every base, tombstone, timestamp, and
+ * nested payload remains part of the identity material.
+ */
+export function canonicalInterimEnvelopeString(store: InterimEnvelopeIdentitySource): string {
+  const bases = [...store.bases].sort((left, right) => left.id.localeCompare(right.id));
+  return JSON.stringify(canonicalMigrationValue({
+    kind: STORE_KIND,
+    version: STORE_VERSION,
+    bases,
+    deletedBaseIds: store.deletedBaseIds,
+  }));
+}
+
+function interimEnvelopeFingerprint(store: InterimEnvelopeIdentitySource): string {
+  return fingerprintText(canonicalInterimEnvelopeString(store));
+}
+
+function migratedVaultIdFromInterimEnvelope(store: InterimEnvelopeIdentitySource): string {
+  return `vault-envelope-migrated-${interimEnvelopeFingerprint(store)}-${randomMigrationNonce()}`;
+}
+
+/** Fingerprint carried only by a random identity for a v11 envelope that lacked `vaultId`. */
+export function provisionalInterimEnvelopeVaultFingerprint(vaultId: string): string | null {
+  const match = /^vault-envelope-migrated-([0-9a-f]{16})-([a-z0-9]{12,64})$/i.exec(vaultId.trim());
+  return match?.[1]?.toLowerCase() ?? null;
+}
+
+/**
+ * Returns the embedded fingerprint only while the complete envelope remains
+ * byte-equivalent to its canonical first-load state.
+ */
+export function pristineProvisionalInterimEnvelopeStoreFingerprint(store: PluginStore): string | null {
+  const fingerprint = provisionalInterimEnvelopeVaultFingerprint(store.vaultId);
+  if (!fingerprint || interimEnvelopeFingerprint(store) !== fingerprint) return null;
+  return fingerprint;
+}
+
+/**
+ * A mismatched provisional identity may converge only before either migrated
+ * payload has been edited. Normal vault IDs never use this path.
+ */
+export function pristineProvisionalMigratedStoreFingerprint(store: PluginStore): string | null {
+  const fingerprint = provisionalMigratedVaultFingerprint(store.vaultId)
+    ?? (/^vault-migrated-([0-9a-f]{16})$/i.exec(store.vaultId.trim())?.[1]?.toLowerCase() ?? null);
+  if (!fingerprint
+    || store.activeBaseId !== DEFAULT_KNOWLEDGE_BASE_ID
+    || store.bases.length !== 1
+    || Object.keys(store.deletedBaseIds).length !== 0) return null;
+  const entry = store.bases[0];
+  if (!entry
+    || entry.id !== DEFAULT_KNOWLEDGE_BASE_ID
+    || entry.archivedAt !== null
+    || entry.createdAt !== entry.updatedAt
+    || migrationFingerprint(entry.data) !== fingerprint) return null;
+  return fingerprint;
 }
 
 export function asText(value: unknown, fallback = ""): string {
@@ -552,6 +724,243 @@ function rewriteCurriculumVisualPrefixes(state: CurriculumVisualState, oldPath: 
   return changed;
 }
 
+const FOLDER_PATH_SETTING_KEYS = [
+  "primaryFolder",
+  "proposalFolder",
+  "templatesFolder",
+  "defaultNoteFolder",
+  "defaultTemplatePath",
+] as const satisfies ReadonlyArray<keyof PluginSettings>;
+
+interface FolderDerivedGroupState {
+  curriculumVisual: CurriculumVisualState;
+  indexGroupAliases: Record<string, string>;
+  indexGroupOrder: string[];
+}
+
+interface FolderDerivedGroupRename {
+  oldGroup: string;
+  newGroup: string;
+}
+
+function cleanVaultPath(path: string): string {
+  return path.trim().replace(/\\/g, "/").replace(/\/{2,}/g, "/").replace(/^\/+|\/+$/g, "");
+}
+
+function directChildFolderName(primaryFolder: string, path: string): string {
+  const root = cleanVaultPath(primaryFolder);
+  const candidate = cleanVaultPath(path);
+  const relative = root
+    ? candidate.startsWith(`${root}/`) ? candidate.slice(root.length + 1) : ""
+    : candidate;
+  return relative && !relative.includes("/") ? relative : "";
+}
+
+function folderDerivedGroupFromPath(
+  settings: Pick<PluginSettings, "primaryFolder" | "workspaceMode">,
+  path: string,
+): string {
+  const folderName = directChildFolderName(settings.primaryFolder, path);
+  return settings.workspaceMode === "ent-clinical"
+    ? folderName.replace(/^\d+\s+/, "").trim()
+    : folderName;
+}
+
+function folderDerivedGroupRename(
+  settings: Pick<PluginSettings, "primaryFolder" | "workspaceMode">,
+  oldPath: string,
+  newPath: string,
+): FolderDerivedGroupRename | null {
+  const oldGroup = folderDerivedGroupFromPath(settings, oldPath);
+  const newGroup = folderDerivedGroupFromPath(settings, newPath);
+  return oldGroup && newGroup && oldGroup !== newGroup ? { oldGroup, newGroup } : null;
+}
+
+function rewriteFolderPathSettings(settings: PluginSettings, oldPath: string, newPath: string): boolean {
+  let changed = false;
+  for (const key of FOLDER_PATH_SETTING_KEYS) {
+    const current = settings[key];
+    const next = replacePathPrefix(current, oldPath, newPath);
+    if (next !== current) {
+      settings[key] = next;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function rewriteCurriculumRootContainers(
+  state: CurriculumVisualState,
+  sourceLabels: Set<string>,
+  targetLabel: string,
+): boolean {
+  const targetKey = curriculumContainerKey(targetLabel, null);
+  const sourceKeys = [...new Set([...sourceLabels].map((label) => curriculumContainerKey(label, null)))];
+  const copiedKeys = sourceKeys.filter((key) => key !== targetKey
+    && Object.prototype.hasOwnProperty.call(state.orderByContainer, key));
+  if (copiedKeys.length === 0) return false;
+  const current = state.orderByContainer[targetKey] ?? [];
+  const combined = [...current];
+  for (const key of copiedKeys) combined.push(...(state.orderByContainer[key] ?? []));
+  const unique = [...new Set(combined)];
+  if (Object.prototype.hasOwnProperty.call(state.orderByContainer, targetKey)
+    && unique.length === current.length
+    && unique.every((path, index) => path === current[index])) return false;
+  state.orderByContainer[targetKey] = unique;
+  return true;
+}
+
+function insertTargetAfterSource(values: string[], sourceLabels: Set<string>, targetLabel: string): string[] {
+  if (values.includes(targetLabel)) return values;
+  const sourceIndex = values.findIndex((value) => sourceLabels.has(value));
+  if (sourceIndex < 0) return values;
+  const output = [...values];
+  output.splice(sourceIndex + 1, 0, targetLabel);
+  return output;
+}
+
+function rewriteFolderDerivedGroupState(
+  state: FolderDerivedGroupState,
+  rename: FolderDerivedGroupRename,
+): boolean {
+  const { oldGroup, newGroup } = rename;
+  const aliases = state.indexGroupAliases;
+  const aliasEntries = Object.entries(aliases);
+  const oldAliasEntry = aliasEntries.find(([source]) => source === oldGroup);
+  const newAliasEntry = aliasEntries.find(([source]) => source === newGroup);
+  const hasNewAlias = newAliasEntry !== undefined;
+  const oldAlias = oldAliasEntry?.[1] ?? "";
+  const carriedAlias = isSafeObjectKey(newGroup)
+    ? newAliasEntry?.[1] || oldAlias
+    : "";
+  const oldEffective = oldAlias || oldGroup;
+  const newEffective = carriedAlias || newGroup;
+  let changed = false;
+
+  // Folder names are only one possible source of a group. Keep the old
+  // logical taxonomy intact for explicit frontmatter, saved layouts, and
+  // portable identities; the renamed folder inherits the old display alias
+  // only when it does not already have an independent mapping.
+  if (isSafeObjectKey(newGroup) && !hasNewAlias && carriedAlias && carriedAlias !== newGroup) {
+    aliases[newGroup] = carriedAlias;
+    changed = true;
+  }
+
+  const sourceLabels = new Set([oldGroup, oldEffective]);
+  const nextOrder = insertTargetAfterSource(state.indexGroupOrder, sourceLabels, newEffective);
+  if (nextOrder.length !== state.indexGroupOrder.length
+    || nextOrder.some((label, index) => label !== state.indexGroupOrder[index])) {
+    state.indexGroupOrder = nextOrder;
+    changed = true;
+  }
+  if (rewriteCurriculumRootContainers(state.curriculumVisual, sourceLabels, newEffective)) changed = true;
+  return changed;
+}
+
+function rewriteSnapshotFolderRename(
+  snapshot: PersonalSnapshot,
+  oldPath: string,
+  newPath: string,
+  inheritedGroupRename: FolderDerivedGroupRename | null,
+): boolean {
+  const ownGroupRename = snapshot.settings
+    ? folderDerivedGroupRename(snapshot.settings, oldPath, newPath)
+    : inheritedGroupRename;
+  let changed = false;
+  if (ownGroupRename && rewriteFolderDerivedGroupState(snapshot, ownGroupRename)) changed = true;
+  if (snapshot.settings && rewriteFolderPathSettings(snapshot.settings, oldPath, newPath)) changed = true;
+  for (const nested of snapshot.layoutSnapshots ?? []) {
+    if (rewriteSnapshotFolderRename(nested, oldPath, newPath, ownGroupRename)) changed = true;
+  }
+  if (changed) snapshotByteCache.delete(snapshot);
+  return changed;
+}
+
+/**
+ * Migrate folder-derived group identity and folder-valued settings after an
+ * Obsidian TFolder rename. The caller separately rewrites note-path references.
+ */
+export function rewritePluginDataFolderRename(
+  data: PluginData,
+  oldPath: string,
+  newPath: string,
+): boolean {
+  if (!oldPath || !newPath || oldPath === newPath) return false;
+  const currentGroupRename = folderDerivedGroupRename(data.settings, oldPath, newPath);
+  let changed = false;
+  if (currentGroupRename) {
+    const oldAlias = Object.entries(data.indexGroupAliases)
+      .find(([source]) => source === currentGroupRename.oldGroup)?.[1] ?? "";
+    const existingNewEffective = Object.entries(data.indexGroupAliases)
+      .find(([source]) => source === currentGroupRename.newGroup)?.[1] ?? "";
+    const oldEffective = oldAlias || currentGroupRename.oldGroup;
+    const newEffective = existingNewEffective || oldAlias || currentGroupRename.newGroup;
+    if (rewriteFolderDerivedGroupState(data, currentGroupRename)) changed = true;
+    const sourceLabels = new Set([currentGroupRename.oldGroup, oldEffective]);
+    const nextCollapsed = insertTargetAfterSource(data.collapsed.curriculumDomains, sourceLabels, newEffective);
+    if (nextCollapsed.length !== data.collapsed.curriculumDomains.length
+      || nextCollapsed.some((label, index) => label !== data.collapsed.curriculumDomains[index])) {
+      data.collapsed.curriculumDomains = nextCollapsed;
+      changed = true;
+    }
+  }
+  if (rewriteFolderPathSettings(data.settings, oldPath, newPath)) changed = true;
+  for (const snapshot of [...data.layoutSnapshots, ...data.undoStack, ...data.redoStack]) {
+    if (rewriteSnapshotFolderRename(
+      snapshot,
+      oldPath,
+      newPath,
+      currentGroupRename,
+    )) changed = true;
+  }
+  const layoutSnapshots = limitSnapshotStack(data.layoutSnapshots, 10);
+  const undoStack = limitSnapshotStack(data.undoStack);
+  const redoStack = limitSnapshotStack(data.redoStack);
+  if (layoutSnapshots.length !== data.layoutSnapshots.length) { data.layoutSnapshots = layoutSnapshots; changed = true; }
+  if (undoStack.length !== data.undoStack.length) { data.undoStack = undoStack; changed = true; }
+  if (redoStack.length !== data.redoStack.length) { data.redoStack = redoStack; changed = true; }
+  return changed;
+}
+
+function rewriteSnapshotTemplatePathRename(snapshot: PersonalSnapshot, oldPath: string, newPath: string): boolean {
+  let changed = false;
+  if (snapshot.settings) {
+    const current = snapshot.settings.defaultTemplatePath;
+    const next = current === oldPath ? newPath : current;
+    if (next !== current) {
+      snapshot.settings.defaultTemplatePath = next;
+      changed = true;
+    }
+  }
+  for (const nested of snapshot.layoutSnapshots ?? []) {
+    if (rewriteSnapshotTemplatePathRename(nested, oldPath, newPath)) changed = true;
+  }
+  if (changed) snapshotByteCache.delete(snapshot);
+  return changed;
+}
+
+/** Rewrite the one file-valued setting after an Obsidian TFile rename. */
+export function rewritePluginDataTemplatePathRename(data: PluginData, oldPath: string, newPath: string): boolean {
+  if (!oldPath || !newPath || oldPath === newPath) return false;
+  let changed = false;
+  const current = data.settings.defaultTemplatePath;
+  const next = current === oldPath ? newPath : current;
+  if (next !== current) {
+    data.settings.defaultTemplatePath = next;
+    changed = true;
+  }
+  for (const snapshot of [...data.layoutSnapshots, ...data.undoStack, ...data.redoStack]) {
+    if (rewriteSnapshotTemplatePathRename(snapshot, oldPath, newPath)) changed = true;
+  }
+  const layoutSnapshots = limitSnapshotStack(data.layoutSnapshots, 10);
+  const undoStack = limitSnapshotStack(data.undoStack);
+  const redoStack = limitSnapshotStack(data.redoStack);
+  if (layoutSnapshots.length !== data.layoutSnapshots.length) { data.layoutSnapshots = layoutSnapshots; changed = true; }
+  if (undoStack.length !== data.undoStack.length) { data.undoStack = undoStack; changed = true; }
+  if (redoStack.length !== data.redoStack.length) { data.redoStack = redoStack; changed = true; }
+  return changed;
+}
+
 function rewriteSnapshotPrefixes(snapshot: PersonalSnapshot, oldPath: string, newPath: string): boolean {
   let changed = false;
   for (const heading of snapshot.collections) {
@@ -569,6 +978,7 @@ function rewriteSnapshotPrefixes(snapshot: PersonalSnapshot, oldPath: string, ne
     if (rewritePathList(paths, oldPath, newPath)) changed = true;
   }
   if (rewritePathMapPrefixes(snapshot.indexGroupByPath, oldPath, newPath)) changed = true;
+  if (rewritePathMapPrefixes(snapshot.displayNameByPath, oldPath, newPath)) changed = true;
   if (rewriteCurriculumVisualPrefixes(snapshot.curriculumVisual, oldPath, newPath)) changed = true;
   if (snapshot.portableIndex) {
     for (const [subjectId, path] of Object.entries(snapshot.portableIndex.resolvedPathBySubjectId)) {
@@ -578,6 +988,9 @@ function rewriteSnapshotPrefixes(snapshot: PersonalSnapshot, oldPath: string, ne
         changed = true;
       }
     }
+  }
+  for (const nested of snapshot.layoutSnapshots ?? []) {
+    if (rewriteSnapshotPrefixes(nested, oldPath, newPath)) changed = true;
   }
   // Renames mutate snapshots in place. Their cached serialized size is no
   // longer valid once any path inside the snapshot changes.
@@ -599,6 +1012,7 @@ export function rewriteActivePluginDataPathPrefix(data: PluginData, oldPath: str
     if (rewritePathList(paths, oldPath, newPath)) changed = true;
   }
   if (rewritePathMapPrefixes(data.indexGroupByPath, oldPath, newPath)) changed = true;
+  if (rewritePathMapPrefixes(data.displayNameByPath, oldPath, newPath)) changed = true;
   if (rewriteCurriculumVisualPrefixes(data.curriculumVisual, oldPath, newPath)) changed = true;
   for (const [subjectId, path] of Object.entries(data.portableIndex.resolvedPathBySubjectId)) {
     const next = replacePathPrefix(path, oldPath, newPath);
@@ -650,6 +1064,8 @@ export function snapshotPersonal(
     manualIndexPaths: [...data.manualIndexPaths],
     excludedIndexPaths: [...data.excludedIndexPaths],
     indexGroupByPath: clonePathMap(data.indexGroupByPath),
+    displayNameByPath: clonePathMap(data.displayNameByPath),
+    indexGroupAliases: clonePathMap(data.indexGroupAliases),
     indexGroupOrder: [...data.indexGroupOrder],
   };
   if (includeSettings) snapshot.settings = structuredClone(data.settings);
@@ -667,6 +1083,8 @@ export function restoreSnapshot(data: PluginData, snapshot: PersonalSnapshot): v
   data.manualIndexPaths = [...snapshot.manualIndexPaths];
   data.excludedIndexPaths = [...snapshot.excludedIndexPaths];
   data.indexGroupByPath = clonePathMap(snapshot.indexGroupByPath);
+  data.displayNameByPath = clonePathMap(snapshot.displayNameByPath);
+  data.indexGroupAliases = clonePathMap(snapshot.indexGroupAliases);
   data.indexGroupOrder = [...snapshot.indexGroupOrder];
   if (snapshot.portableIndex) data.portableIndex = clonePortableIndex(snapshot.portableIndex);
   if (snapshot.settings) data.settings = structuredClone(snapshot.settings);
@@ -857,6 +1275,8 @@ function cleanSnapshots(input: unknown, allowNested = true): PersonalSnapshot[] 
       manualIndexPaths: asStringList(snapshot.manualIndexPaths),
       excludedIndexPaths: asStringList(snapshot.excludedIndexPaths),
       indexGroupByPath: cleanPathMap(snapshot.indexGroupByPath),
+      displayNameByPath: cleanPathMap(snapshot.displayNameByPath),
+      indexGroupAliases: cleanPathMap(snapshot.indexGroupAliases),
       indexGroupOrder: [...new Set(asStringList(snapshot.indexGroupOrder))],
       portableIndex: snapshot.portableIndex === undefined ? undefined : cleanPortableIndex(snapshot.portableIndex),
       settings: snapshot.settings === undefined ? undefined : cleanSettings(snapshot.settings),
@@ -926,6 +1346,106 @@ export function isRecognizedPluginData(input: unknown): boolean {
   ].some((key) => Object.prototype.hasOwnProperty.call(loaded, key));
 }
 
+function cleanKnowledgeBaseId(input: unknown, label: string): string {
+  const id = asText(input);
+  if (!id || id.length > 128 || !/^[a-z0-9][a-z0-9._:@+-]*$/i.test(id) || !isSafeObjectKey(id)) {
+    throw new Error(`${label} has an invalid stable ID.`);
+  }
+  return id;
+}
+
+function cleanTimestamp(input: unknown, fallback: number): number {
+  const value = Number(input);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+export function createKnowledgeBaseEntry(data: PluginData, id = makeId("base"), now = Date.now()): KnowledgeBaseEntry {
+  return {
+    id: cleanKnowledgeBaseId(id, "Knowledge base"),
+    createdAt: now,
+    updatedAt: now,
+    archivedAt: null,
+    data,
+  };
+}
+
+export function isRecognizedPluginStore(input: unknown): boolean {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return false;
+  const value = input as Record<string, unknown>;
+  return value.kind === STORE_KIND && Number(value.version) >= STORE_VERSION && Array.isArray(value.bases);
+}
+
+/**
+ * Parse the v11 multi-base envelope, or wrap any recognized flat v1-v10 data
+ * unchanged into one base with a random provisional vault identity. A malformed envelope throws so the
+ * loader can preserve the original data.json in read-only mode.
+ */
+export function migrateStore(input: unknown, now = Date.now()): PluginStore {
+  if (!isRecognizedPluginStore(input)) {
+    if (input && typeof input === "object" && !Array.isArray(input)) {
+      const value = input as Record<string, unknown>;
+      if (Number(value.version) >= STORE_VERSION || Object.prototype.hasOwnProperty.call(value, "bases")) {
+        throw new Error("The knowledge-base store has an unrecognized or damaged shape.");
+      }
+    }
+    const hasLegacyData = Boolean(input && typeof input === "object" && !Array.isArray(input)
+      && Object.keys(input as Record<string, unknown>).length > 0);
+    const migrated = migrateData(input);
+    return createDefaultStore(migrated, now, hasLegacyData ? migratedVaultId(migrated) : makeId("vault"));
+  }
+
+  const value = input as Record<string, unknown>;
+  const rawBases = value.bases as unknown[];
+  if (rawBases.length === 0 || rawBases.length > MAX_KNOWLEDGE_BASES) {
+    throw new Error(`The knowledge-base store must contain between 1 and ${MAX_KNOWLEDGE_BASES} bases.`);
+  }
+  const ids = new Set<string>();
+  const bases: KnowledgeBaseEntry[] = rawBases.map((raw, index) => {
+    const entry = asUnknownRecord(raw);
+    const id = cleanKnowledgeBaseId(entry.id, `Knowledge base ${index + 1}`);
+    if (ids.has(id)) throw new Error(`Duplicate knowledge-base ID: ${id}`);
+    ids.add(id);
+    if (!isRecognizedPluginData(entry.data)) throw new Error(`Knowledge base ${id} has unrecognized data.`);
+    const innerVersion = storedDataVersion(entry.data);
+    if (innerVersion > DATA_VERSION) throw new Error(`Knowledge base ${id} uses unsupported data version ${innerVersion}.`);
+    const createdAt = cleanTimestamp(entry.createdAt, now);
+    const updatedAt = cleanTimestamp(entry.updatedAt, createdAt);
+    const archivedValue = entry.archivedAt;
+    const archivedAt = archivedValue === null || archivedValue === undefined
+      ? null
+      : cleanTimestamp(archivedValue, now);
+    return { id, createdAt, updatedAt, archivedAt, data: migrateData(entry.data) };
+  });
+  const rawDeletedBaseIds = value.deletedBaseIds;
+  if (rawDeletedBaseIds !== undefined && (!rawDeletedBaseIds || typeof rawDeletedBaseIds !== "object" || Array.isArray(rawDeletedBaseIds))) {
+    throw new Error("Deleted knowledge-base IDs must be a timestamp map.");
+  }
+  const deletedEntries = Object.entries((rawDeletedBaseIds ?? {}) as Record<string, unknown>);
+  if (deletedEntries.length > MAX_DELETED_KNOWLEDGE_BASE_IDS) {
+    throw new Error(`The knowledge-base store contains more than ${MAX_DELETED_KNOWLEDGE_BASE_IDS.toLocaleString()} permanent-deletion tombstones.`);
+  }
+  const deletedBaseIds: Record<string, number> = {};
+  for (const [rawId, rawTimestamp] of deletedEntries) {
+    const id = cleanKnowledgeBaseId(rawId, "Deleted knowledge base");
+    const deletedAt = Number(rawTimestamp);
+    if (!Number.isFinite(deletedAt) || deletedAt <= 0) throw new Error(`Deleted knowledge base ${id} has an invalid timestamp.`);
+    if (ids.has(id)) throw new Error(`Deleted knowledge base ${id} is still present in the base list.`);
+    deletedBaseIds[id] = deletedAt;
+  }
+  if (!bases.some((entry) => entry.archivedAt === null)) throw new Error("At least one knowledge base must remain available.");
+  const activeBaseId = cleanKnowledgeBaseId(value.activeBaseId, "Active knowledge base");
+  const active = bases.find((entry) => entry.id === activeBaseId);
+  if (!active || active.archivedAt !== null) throw new Error("The active knowledge base is missing or archived.");
+  const rawVaultId = asText(value.vaultId);
+  const vaultId = cleanKnowledgeBaseId(
+    isLegacyDeterministicMigratedVaultId(rawVaultId)
+      ? migratedVaultIdFromLegacyDeterministicId(rawVaultId)
+      : rawVaultId || migratedVaultIdFromInterimEnvelope({ bases, deletedBaseIds }),
+    "Vault",
+  );
+  return { kind: STORE_KIND, version: STORE_VERSION, vaultId, activeBaseId, bases, deletedBaseIds };
+}
+
 export function migrateData(input: unknown): PluginData {
   if (!input || typeof input !== "object") return structuredClone(DEFAULT_DATA);
   const loaded = input as Record<string, unknown>;
@@ -943,6 +1463,8 @@ export function migrateData(input: unknown): PluginData {
       manualIndexPaths: asStringList(loaded.manualIndexPaths),
       excludedIndexPaths: asStringList(loaded.excludedIndexPaths),
       indexGroupByPath: cleanPathMap(loaded.indexGroupByPath),
+      displayNameByPath: cleanPathMap(loaded.displayNameByPath),
+      indexGroupAliases: cleanPathMap(loaded.indexGroupAliases),
       indexGroupOrder: [...new Set(asStringList(loaded.indexGroupOrder))],
       portableIndex: cleanPortableIndex(loaded.portableIndex),
       selectedPath: asText(loaded.selectedPath),
@@ -973,6 +1495,8 @@ export function migrateData(input: unknown): PluginData {
       manualIndexPaths: [],
       excludedIndexPaths: [],
       indexGroupByPath: {},
+      displayNameByPath: {},
+      indexGroupAliases: {},
       indexGroupOrder: [],
       portableIndex: cleanPortableIndex(loaded.portableIndex),
       selectedPath: asText(loaded.selectedPath),
@@ -1038,12 +1562,12 @@ function buildCurriculumLookup(topics: VaultRecord[]): CurriculumLookup {
   const byDomainAndLink = new Map<string, VaultRecord>();
   for (const record of topics) {
     if (record.curriculumId) {
-      const idKey = `${record.domain} ${record.curriculumId}`;
+      const idKey = `${record.domain}\u0000${record.curriculumId}`;
       if (!byDomainAndId.has(idKey)) byDomainAndId.set(idKey, record);
     }
     const basename = record.path.split("/").pop()?.replace(/\.md$/, "") ?? "";
     for (const value of [record.title, basename, ...record.aliases]) {
-      const linkKey = `${record.domain} ${value.toLowerCase()}`;
+      const linkKey = `${record.domain}\u0000${value.toLowerCase()}`;
       if (value && !byDomainAndLink.has(linkKey)) byDomainAndLink.set(linkKey, record);
     }
   }
@@ -1053,12 +1577,12 @@ function buildCurriculumLookup(topics: VaultRecord[]): CurriculumLookup {
 function defaultCurriculumParent(record: VaultRecord, lookup: CurriculumLookup): string | null {
   if (record.role === "canonical" && record.curriculumId) {
     const parentId = expectedParentCurriculumId(record.curriculumId);
-    if (parentId) return lookup.byDomainAndId.get(`${record.domain} ${parentId}`)?.path ?? null;
+    if (parentId) return lookup.byDomainAndId.get(`${record.domain}\u0000${parentId}`)?.path ?? null;
   }
   if (record.parentTopic) {
     const normalized = normalizeWikiLink(record.parentTopic).toLowerCase();
     if (!normalized) return null;
-    return lookup.byDomainAndLink.get(`${record.domain} ${normalized}`)?.path ?? null;
+    return lookup.byDomainAndLink.get(`${record.domain}\u0000${normalized}`)?.path ?? null;
   }
   return null;
 }
@@ -1460,19 +1984,24 @@ export function canonicalHierarchyIssue(value: TopicFormValue, records: VaultRec
   return null;
 }
 
-export function canonicalPath(value: Pick<TopicFormValue, "title" | "domain" | "curriculumId">): string {
+export function canonicalPath(
+  value: Pick<TopicFormValue, "title" | "domain" | "curriculumId">,
+  root = TOPIC_ROOT,
+): string {
   const definition = DOMAIN_DEFINITIONS.find((item) => item.name === value.domain);
   if (!definition) return "";
-  return `${TOPIC_ROOT}${definition.folder}/${value.curriculumId.trim().toUpperCase()} - ${sanitizeFileName(value.title)}.md`;
+  const cleanRoot = cleanVaultPath(root);
+  const prefix = cleanRoot ? `${cleanRoot}/` : "";
+  return `${prefix}${definition.folder}/${value.curriculumId.trim().toUpperCase()} - ${sanitizeFileName(value.title)}.md`;
 }
 
 /** Whether a placement edit leaves every filename-driving field unchanged. */
 export function canonicalPathInputsUnchanged(
-  record: Pick<VaultRecord, "title" | "domain" | "curriculumId"> | null,
+  record: Pick<VaultRecord, "title" | "sourceTitle" | "domain" | "curriculumId"> | null,
   value: Pick<TopicFormValue, "title" | "domain" | "curriculumId">,
 ): boolean {
   return record !== null
-    && record.title === value.title.trim()
+    && (record.sourceTitle || record.title) === value.title.trim()
     && record.domain === value.domain
     && record.curriculumId.toUpperCase() === value.curriculumId.trim().toUpperCase();
 }
@@ -1910,8 +2439,15 @@ export function parseWorkspaceConfig(input: unknown): WorkspaceConfig {
 
 export interface PersonalBackup {
   kind: "ent-vault-command-center-personal-backup";
-  version: 4;
+  version: 7;
   exportedAt: string;
+  /** Stable identity of the vault that created this exact-path recovery. */
+  sourceVaultId: string;
+  /** Stable identity and visible name of the knowledge base that owns it. */
+  sourceBaseId: string;
+  sourceBaseName: string;
+  /** Recovery is never allowed to cross the generic/clinical preset boundary. */
+  sourceWorkspaceMode: WorkspaceMode | "";
   collections: LayoutHeading[];
   pinnedPaths: string[];
   nextStudyPaths: string[];
@@ -1920,16 +2456,49 @@ export interface PersonalBackup {
   manualIndexPaths: string[];
   excludedIndexPaths: string[];
   indexGroupByPath: Record<string, string>;
+  displayNameByPath: Record<string, string>;
+  indexGroupAliases: Record<string, string>;
   indexGroupOrder: string[];
   layoutSnapshots: PersonalSnapshot[];
   portableIndex: PortableIndexLocalState;
 }
 
-export function createPersonalBackup(data: PluginData, exportedAt: string): PersonalBackup {
+function cleanRecoveryVaultId(value: unknown): string {
+  const id = asText(value);
+  if (id.length > 200 || /[\p{Cc}\p{Cf}]/u.test(id)) {
+    throw new Error("The recovery backup contains an invalid source-vault identity.");
+  }
+  return id;
+}
+
+function cleanRecoveryBaseName(value: unknown): string {
+  const name = asText(value);
+  if (name.length > 100 || /[\p{Cc}\p{Cf}]/u.test(name)) {
+    throw new Error("The recovery backup contains an invalid source knowledge-base name.");
+  }
+  return name;
+}
+
+export function createPersonalBackup(
+  data: PluginData,
+  exportedAt: string,
+  sourceVaultId: string,
+  sourceBaseId: string,
+  sourceBaseName: string,
+): PersonalBackup {
+  const cleanSourceVaultId = cleanRecoveryVaultId(sourceVaultId);
+  if (!cleanSourceVaultId) throw new Error("A vault identity is required to create same-vault recovery data.");
+  const cleanSourceBaseId = cleanKnowledgeBaseId(sourceBaseId, "Source knowledge base");
+  const cleanSourceBaseName = cleanRecoveryBaseName(sourceBaseName);
+  if (!cleanSourceBaseName) throw new Error("A knowledge-base name is required to create same-base recovery data.");
   return {
     kind: "ent-vault-command-center-personal-backup",
-    version: 4,
+    version: 7,
     exportedAt,
+    sourceVaultId: cleanSourceVaultId,
+    sourceBaseId: cleanSourceBaseId,
+    sourceBaseName: cleanSourceBaseName,
+    sourceWorkspaceMode: data.settings.workspaceMode,
     collections: cloneCollections(data.collections),
     pinnedPaths: [...data.pinnedPaths],
     nextStudyPaths: [...data.nextStudyPaths],
@@ -1938,6 +2507,8 @@ export function createPersonalBackup(data: PluginData, exportedAt: string): Pers
     manualIndexPaths: [...data.manualIndexPaths],
     excludedIndexPaths: [...data.excludedIndexPaths],
     indexGroupByPath: clonePathMap(data.indexGroupByPath),
+    displayNameByPath: clonePathMap(data.displayNameByPath),
+    indexGroupAliases: clonePathMap(data.indexGroupAliases),
     indexGroupOrder: [...data.indexGroupOrder],
     layoutSnapshots: cleanSnapshots(data.layoutSnapshots),
     portableIndex: clonePortableIndex(data.portableIndex),
@@ -2037,6 +2608,8 @@ function validateRecoverySnapshot(input: unknown, label: string, budget: Transfe
   transferArrayLength(value.savedViews, `${label} saved views`, MAX_TRANSFER_COLLECTIONS);
   transferArrayLength(value.indexGroupOrder, `${label} group order`, MAX_TRANSFER_COLLECTIONS);
   addTransferReferenceCount(budget, ownEntryCount(value.indexGroupByPath, `${label} visual groups`), `${label} visual groups`);
+  addTransferReferenceCount(budget, ownEntryCount(value.displayNameByPath, `${label} display names`), `${label} display names`);
+  addTransferReferenceCount(budget, ownEntryCount(value.indexGroupAliases, `${label} group aliases`), `${label} group aliases`);
   validateRecoveryVisual(value.curriculumVisual, `${label} visual hierarchy`, budget);
   if (value.portableIndex !== undefined) validateRecoveryPortableIndex(value.portableIndex, `${label} portable index`, budget);
   if (remainingSnapshotLevels <= 0 || value.layoutSnapshots === undefined) return;
@@ -2060,14 +2633,31 @@ function validatePersonalBackupTransferShape(value: Record<string, unknown>): vo
 export function parsePersonalBackup(input: unknown): PersonalBackup {
   if (!input || typeof input !== "object") throw new Error("The selected file is not a Command Center backup.");
   const value = input as Record<string, unknown>;
-  if (value.kind !== "ent-vault-command-center-personal-backup" || ![1, 2, 3, 4].includes(Number(value.version))) {
+  const sourceVersion = Number(value.version);
+  if (value.kind !== "ent-vault-command-center-personal-backup" || ![1, 2, 3, 4, 5, 6, 7].includes(sourceVersion)) {
     throw new Error("Unsupported Command Center backup format.");
+  }
+  const sourceVaultId = cleanRecoveryVaultId(value.sourceVaultId);
+  if (sourceVersion >= 6 && !sourceVaultId) {
+    throw new Error("This recovery backup is missing its required source-vault identity.");
+  }
+  const sourceBaseId = sourceVersion >= 7 ? cleanKnowledgeBaseId(value.sourceBaseId, "Source knowledge base") : "";
+  const sourceBaseName = sourceVersion >= 7 ? cleanRecoveryBaseName(value.sourceBaseName) : "";
+  const sourceWorkspaceMode = sourceVersion >= 7 && isWorkspaceMode(value.sourceWorkspaceMode)
+    ? value.sourceWorkspaceMode
+    : "";
+  if (sourceVersion >= 7 && (!sourceBaseName || !sourceWorkspaceMode)) {
+    throw new Error("This recovery backup is missing its required source knowledge-base identity or preset.");
   }
   validatePersonalBackupTransferShape(value);
   return {
     kind: "ent-vault-command-center-personal-backup",
-    version: 4,
+    version: 7,
     exportedAt: asText(value.exportedAt),
+    sourceVaultId,
+    sourceBaseId,
+    sourceBaseName,
+    sourceWorkspaceMode,
     collections: cleanLayout(value.collections),
     pinnedPaths: asStringList(value.pinnedPaths),
     nextStudyPaths: asStringList(value.nextStudyPaths),
@@ -2076,10 +2666,140 @@ export function parsePersonalBackup(input: unknown): PersonalBackup {
     manualIndexPaths: asStringList(value.manualIndexPaths),
     excludedIndexPaths: asStringList(value.excludedIndexPaths),
     indexGroupByPath: cleanPathMap(value.indexGroupByPath),
+    displayNameByPath: cleanPathMap(value.displayNameByPath),
+    indexGroupAliases: cleanPathMap(value.indexGroupAliases),
     indexGroupOrder: [...new Set(asStringList(value.indexGroupOrder))],
     layoutSnapshots: cleanSnapshots(value.layoutSnapshots),
     portableIndex: cleanPortableIndex(value.portableIndex),
   };
+}
+
+export interface PersonalBackupVaultCheck {
+  identity: "verified" | "legacy-unverified";
+  baseIdentity: "verified" | "legacy-unverified" | "cross-base-override";
+  referencedPathCount: number;
+  existingPathCount: number;
+  requiredPathCount: number;
+}
+
+function collectPersonalBackupPaths(backup: PersonalBackup): string[] {
+  const paths = new Set<string>();
+  const add = (path: string | null | undefined): void => {
+    const clean = path?.trim() ?? "";
+    if (clean && !isPortablePlaceholderPath(clean)) paths.add(clean);
+  };
+  const addVisual = (visual: CurriculumVisualState): void => {
+    for (const [child, parent] of Object.entries(visual.parentByPath)) {
+      add(child);
+      add(parent);
+    }
+    for (const orderedPaths of Object.values(visual.orderByContainer)) orderedPaths.forEach(add);
+  };
+  const seenSnapshots = new Set<PersonalSnapshot>();
+  const addState = (state: Pick<PersonalBackup, "collections" | "pinnedPaths" | "nextStudyPaths" | "curriculumVisual" | "manualIndexPaths" | "excludedIndexPaths" | "indexGroupByPath" | "displayNameByPath" | "layoutSnapshots" | "portableIndex">): void => {
+    for (const collection of state.collections) {
+      collection.subjects.forEach(add);
+      for (const subheading of collection.subheadings) subheading.subjects.forEach(add);
+    }
+    for (const list of [state.pinnedPaths, state.nextStudyPaths, state.manualIndexPaths, state.excludedIndexPaths]) list.forEach(add);
+    Object.keys(state.indexGroupByPath).forEach(add);
+    Object.keys(state.displayNameByPath).forEach(add);
+    addVisual(state.curriculumVisual);
+    Object.values(state.portableIndex.resolvedPathBySubjectId).forEach(add);
+    for (const snapshot of state.layoutSnapshots) {
+      if (seenSnapshots.has(snapshot)) continue;
+      seenSnapshots.add(snapshot);
+      addState({
+        ...snapshot,
+        portableIndex: snapshot.portableIndex ?? { version: 1, groups: [], subjects: [], resolvedPathBySubjectId: {} },
+        layoutSnapshots: snapshot.layoutSnapshots ?? [],
+      });
+    }
+  };
+  addState(backup);
+  return [...paths];
+}
+
+/**
+ * Exact-path recovery is deliberately non-portable. Current backups use a
+ * stable opaque persisted vault identity. Identity-less legacy backups use a
+ * conservative destination-path preflight and remain explicitly unverified.
+ */
+export function assertPersonalBackupMatchesVault(
+  backup: PersonalBackup,
+  currentVaultId: string,
+  pathExists?: (path: string) => boolean,
+  currentBaseId = "",
+  currentBaseName = "",
+  currentWorkspaceMode: WorkspaceMode | "" = "",
+  allowCrossBaseRecovery = false,
+): PersonalBackupVaultCheck {
+  const destinationVaultId = cleanRecoveryVaultId(currentVaultId);
+  if (!destinationVaultId) {
+    throw new Error("The current vault identity is unavailable. Restart Obsidian before restoring recovery data.");
+  }
+  if (backup.sourceVaultId) {
+    if (backup.sourceVaultId !== destinationVaultId) {
+      throw new Error("This recovery was created by a different Obsidian vault and cannot be restored here. Use the portable Index blueprint and Collections sections for cross-vault transfer.");
+    }
+    if (backup.sourceBaseId) {
+      const destinationBaseId = cleanKnowledgeBaseId(currentBaseId, "Current knowledge base");
+      const destinationBaseName = cleanRecoveryBaseName(currentBaseName);
+      if (!destinationBaseName || !currentWorkspaceMode) {
+        throw new Error("The current knowledge-base identity or preset is unavailable. Restart Obsidian before restoring recovery data.");
+      }
+      if (backup.sourceWorkspaceMode !== currentWorkspaceMode) {
+        throw new Error(`This recovery was created for the ${backup.sourceWorkspaceMode === "ent-clinical" ? "ENT clinical" : "Generic"} preset and cannot be restored into the ${currentWorkspaceMode === "ent-clinical" ? "ENT clinical" : "Generic"} preset. Use the portable Index blueprint and Collections sections for cross-preset transfer.`);
+      }
+      if (backup.sourceBaseId !== destinationBaseId) {
+        if (!allowCrossBaseRecovery) {
+          throw new Error(`This recovery belongs to knowledge base “${backup.sourceBaseName}” (${backup.sourceBaseId}), not “${destinationBaseName}” (${destinationBaseId}). A separate cross-base restore confirmation is required.`);
+        }
+        return {
+          identity: "verified",
+          baseIdentity: "cross-base-override",
+          referencedPathCount: 0,
+          existingPathCount: 0,
+          requiredPathCount: 0,
+        };
+      }
+      return {
+        identity: "verified",
+        baseIdentity: "verified",
+        referencedPathCount: 0,
+        existingPathCount: 0,
+        requiredPathCount: 0,
+      };
+    }
+    if (!allowCrossBaseRecovery) {
+      throw new Error("This v1–v6 recovery has no knowledge-base identity or preset. A separate base-unverified restore confirmation is required.");
+    }
+    return {
+      identity: "verified",
+      baseIdentity: "legacy-unverified",
+      referencedPathCount: 0,
+      existingPathCount: 0,
+      requiredPathCount: 0,
+    };
+  }
+
+  const paths = collectPersonalBackupPaths(backup);
+  if (paths.length === 0) {
+    if (!allowCrossBaseRecovery) {
+      throw new Error("This v1–v6 recovery has no knowledge-base identity or preset. A separate base-unverified restore confirmation is required.");
+    }
+    return { identity: "legacy-unverified", baseIdentity: "legacy-unverified", referencedPathCount: 0, existingPathCount: 0, requiredPathCount: 0 };
+  }
+  if (!pathExists) throw new Error("This legacy recovery requires a destination-vault path preflight before it can be restored.");
+  const existingPathCount = paths.reduce((count, path) => count + (pathExists(path) ? 1 : 0), 0);
+  const requiredPathCount = Math.ceil(paths.length / 2);
+  if (existingPathCount < requiredPathCount) {
+    throw new Error(`This identity-less legacy recovery matches ${existingPathCount} of ${paths.length} unique referenced paths in the current vault. At least ${requiredPathCount} (50%) must exist before restoration, so it cannot be restored here.`);
+  }
+  if (!allowCrossBaseRecovery) {
+    throw new Error("This v1–v6 recovery has no knowledge-base identity or preset. A separate base-unverified restore confirmation is required.");
+  }
+  return { identity: "legacy-unverified", baseIdentity: "legacy-unverified", referencedPathCount: paths.length, existingPathCount, requiredPathCount };
 }
 
 export function roleLabel(record: Pick<VaultRecord, "role" | "kind">): string {
