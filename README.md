@@ -146,13 +146,13 @@ The ENT profile additionally exposes proposal promotion and advanced canonical p
 
 ### Community Plugins
 
-The plugin is being submitted to the Obsidian Community Plugins directory. After it is listed, search for **Knowledge Base Command Center** under **Settings → Community plugins → Browse**.
+Knowledge Base Command Center is available in the Obsidian Community Plugins directory. Open **Settings → Community plugins → Browse**, search for **Knowledge Base Command Center**, then choose **Install** and **Enable**.
 
-Community Plugin updates are delivered through Obsidian after approval. Obsidian keeps the stable internal ID `ent-vault-command-center`, so upgrading preserves the same plugin data file.
+Community Plugin updates are delivered through Obsidian's normal **Check for updates** flow. Obsidian keeps the stable internal ID `ent-vault-command-center`, so upgrading preserves the same plugin data file.
 
 ### BRAT
 
-Until Community approval, install with [BRAT](https://github.com/TfTHacker/obsidian42-brat):
+For beta testing or release testing outside the Community update channel, install with [BRAT](https://github.com/TfTHacker/obsidian42-brat):
 
 1. Install and enable BRAT from Community Plugins.
 2. Open **BRAT: Add a beta plugin for testing**.

@@ -23,6 +23,7 @@
 - Replaced deterministic legacy-migration vault IDs with random persisted provisional IDs. Obsidian Sync can converge only pristine single-base copies that carry the same legacy fingerprint, including a late third device or an interim deterministic-ID copy; any real edit closes that exception. Recovery exported before first-upgrade identity convergence must be exported again after Sync settles.
 - Invalidated open export/import dialogs when the active base data is reloaded by Sync, preventing a reviewed package from being applied to a newer same-base state.
 - Kept permanent deletion durable across Obsidian Sync with bounded, validated base-ID tombstones. Deleted IDs are never reused or silently evicted, stale devices cannot resurrect deleted bases, and a merge that would leave no available base is rejected without discarding local data.
+- Updated installation guidance now that Knowledge Base Command Center is available directly from the Obsidian Community Plugins directory; BRAT remains supported for beta and release testing.
 
 ## 0.7.12
 
