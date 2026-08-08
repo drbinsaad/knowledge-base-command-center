@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.7.12
+
+### Added
+
+- Added one **Export / import center** for component-aware transfers. Users can select workspace settings, an index blueprint, collections, study state, saved views, same-vault recovery, or a preset; Collections and Study state automatically include their portable subject catalog.
+- Added a path-free portable index blueprint with stable subject identities, titles, groups, nested hierarchy, record kinds, and visual order. Portable collections, pins, and the Next list reference those identities instead of exposing source Markdown paths.
+- Added unresolved **No note** placeholders when an imported subject has no local Markdown file. Generic workspaces can create an empty note, create from a local template, link an existing note, or keep the placeholder while retaining its imported placement. The clinical preset offers a safety-gated unverified proposal instead of direct topic creation and visibly routes the result to the Inbox.
+- Added conflict-aware **Change linked note** and **Unlink note** controls to row menus and the mobile inspector. Already-bound notes remain selectable, but merging two portable identities requires confirmation; unlinking restores the placeholder without changing either Markdown note.
+- Added per-import section selection, a summary of the selected data, and explicit **Merge with this vault** or **Replace selected sections** behavior. Both modes change plugin-owned organization only and never delete, move, overwrite, or rewrite Markdown notes.
+- Added iPhone and iPad portable-package export to `Knowledge Base Command Center Exports/` plus in-vault JSON import; desktop keeps download and file-picker behavior. All imports enforce the 10 MB limit, bounded list/reference counts, and validation of supported versions, hierarchy integrity, identifiers, folders, and template availability.
+
+### Changed
+
+- Kept older workspace JSON and organization backups importable through the new center, and advanced plugin data to schema version 10 for stable portable identities and local note bindings.
+- Distinguished the default cross-vault **Portable set** from **Everything**, which also includes same-vault recovery. The interface and documentation now warn that recovery JSON contains exact vault-relative note paths, require a separate export confirmation, and display the selected import filename or vault path during review.
+- Made recovery an explicit, confirmed, standalone restore; portable sections remain selected by default while recovery starts off. Undo now covers portable bindings and named snapshots when those components change.
+- Kept the index blueprint path-free by omitting generic user-configurable ID-property values while retaining only valid, canonical-format ENT curriculum IDs from the fixed clinical mapping. Workspace paths and literal saved-query text remain separately selectable and disclosed.
+- Reworked registry synchronization and import matching to stay linear on large indexes, preserve unselected local references, reject ambiguous matches, and require confirmation before portable identities are merged.
+- Kept note bodies and attachments out of every export option. A missing, restricted, or out-of-folder destination template now falls back to Empty note without changing any Markdown file.
+- Enforced the same 10 MB ceiling on export and import and validate the exact serialized package before saving it, so the plugin never hands out an export its own importer rejects.
+
 ## 0.7.11
 
 ### Fixed

@@ -15,6 +15,7 @@ import {
   canonicalPathInputsUnchanged,
   cleanDomainFolder,
   configuredGroupFromPath,
+  curriculumContainerKey,
   DATA_VERSION,
   DEFAULT_DATA,
   genericNotePath,
@@ -27,14 +28,17 @@ import {
   migrateData,
   normalizeWikiLink,
   pathIsInsideFolder,
+  portablePlaceholderPath,
   PluginData,
   PROCEDURE_ROOT,
   proposalPath,
   reconcileCurriculumVisual,
   RecordKind,
   RecordRole,
+  replacePathPrefix,
   restoreSnapshot,
   rewriteTopLevelHeading,
+  rewriteActivePluginDataPathPrefix,
   rewritePluginDataPathPrefix,
   sanitizeFileName,
   snapshotPersonal,
@@ -42,9 +46,11 @@ import {
   SYNDROME_ROOT,
   TopicFormValue,
   validateProposalFolderPath,
+  validateTemplateFilePath,
   validateWritableFolderPath,
   VaultRecord,
 } from "./model";
+import { MAX_PORTABLE_PACKAGE_BYTES, portableSubjectPath } from "./portability";
 import { EntCommandCenterSettingsTab } from "./settings";
 import { EntVaultCommandCenterView, VIEW_TYPE } from "./view";
 
@@ -70,6 +76,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.addCommand({ id: "open-workspace", name: "Open workspace", callback: () => this.run(() => this.activateView()) });
     this.addCommand({ id: "add-or-create", name: "Add or create…", callback: () => void this.withView((view) => view.openAddActions()) });
     this.addCommand({ id: "manage-knowledge-index", name: "Manage index…", callback: () => void this.withView((view) => view.openIndexManager()) });
+    this.addCommand({ id: "export-import-center", name: "Open export / import center", callback: () => void this.withView((view) => view.openPortabilityCenter()) });
     this.addCommand({ id: "create-knowledge-note", name: "Create note from template or empty note…", callback: () => void this.withView((view) => view.startCreateKnowledgeNote()) });
     this.addCommand({
       id: "create-topic-proposal",
@@ -262,6 +269,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         for (const path of subheading.subjects) paths.add(path);
       }
     }
+    for (const subject of this.data.portableIndex.subjects) {
+      const path = this.data.portableIndex.resolvedPathBySubjectId[subject.id];
+      if (path && subject.indexed) paths.add(path);
+    }
     return paths;
   }
 
@@ -308,13 +319,18 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const manual = new Set(this.data.manualIndexPaths);
     const excluded = new Set(this.data.excludedIndexPaths);
     const records: VaultRecord[] = [];
+    const portableIdByPath = new Map<string, string>();
+    const portableSubjectById = new Map(this.data.portableIndex.subjects.map((subject) => [subject.id, subject]));
+    for (const [subjectId, path] of Object.entries(this.data.portableIndex.resolvedPathBySubjectId)) {
+      if (path && !portableIdByPath.has(path)) portableIdByPath.set(path, subjectId);
+    }
     for (const file of this.app.vault.getMarkdownFiles()) {
       let frontmatter: Record<string, unknown> = {};
       if (this.isClinicalMode()) frontmatter = asUnknownRecord(this.app.metadataCache.getFileCache(file)?.frontmatter);
       const identity = this.identityForFile(file, frontmatter, referenced, proposalRoot, manual, excluded);
       if (!identity) continue;
       if (!this.isClinicalMode()) frontmatter = asUnknownRecord(this.app.metadataCache.getFileCache(file)?.frontmatter);
-      const { kind, role } = identity;
+      const { kind: detectedKind, role } = identity;
       const entDomains = asStringList(frontmatter.ent_domains);
       const titleFallback = file.basename.replace(/^(Procedure|Drug|Syndrome)\s*-\s*/i, "");
       const configuredGroup = asStringList(frontmatter[settings.groupProperty])[0] ?? "";
@@ -323,15 +339,24 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       const configuredId = typeof configuredIdValue === "number" ? String(configuredIdValue) : asText(configuredIdValue);
       const domain = role === "proposal"
         ? asText(frontmatter.proposed_domain, settings.inboxLabel)
-        : kind === "topic"
+        : detectedKind === "topic"
           ? visualGroup || configuredGroup || (this.isClinicalMode() ? asText(frontmatter.domain, cleanDomainFolder(file.path)) : configuredGroupFromPath(file.path, settings.primaryFolder))
-          : kind === "procedure"
+          : detectedKind === "procedure"
             ? asText(frontmatter.domain, "Procedures")
-            : kind === "medication"
+            : detectedKind === "medication"
               ? entDomains[0] || "Medications"
-              : kind === "syndrome"
+              : detectedKind === "syndrome"
                 ? entDomains[0] || asText(frontmatter.syndrome_group, "Syndromes")
                 : asText(frontmatter.domain, file.parent?.path || "Vault notes");
+      const portableId = portableIdByPath.get(file.path);
+      const portableSubject = portableId ? portableSubjectById.get(portableId) : undefined;
+      // A clinical proposal can safely back an imported index subject while it
+      // awaits promotion. Project that one record into both the Inbox (by role)
+      // and the index (by kind/portableIndexed) without changing the Markdown.
+      const proposalBacksIndexedSubject = detectedKind === "proposal"
+        && portableSubject?.recordKind === "topic"
+        && portableSubject.indexed;
+      const kind: RecordKind = proposalBacksIndexedSubject ? "topic" : detectedKind;
       records.push({
         path: file.path,
         title: asText(frontmatter.title, asText(frontmatter.canonical_name, titleFallback)),
@@ -357,7 +382,48 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         folderOrder: kind === "topic" ? this.indexGroupSortKey(domain, file.path) : role === "proposal" ? "00" : "99",
         mtime: file.stat.mtime,
         aiLock: frontmatter.ai_lock === true,
+        ...(portableId ? { portableId } : {}),
+        ...(portableSubject ? { portableIndexed: portableSubject.indexed } : {}),
       });
+    }
+    const recordPaths = new Set(records.map((record) => record.path));
+    const groupById = new Map(this.data.portableIndex.groups.map((group) => [group.id, group]));
+    for (const subject of this.data.portableIndex.subjects) {
+      const resolvedPath = this.data.portableIndex.resolvedPathBySubjectId[subject.id] || "";
+      if (resolvedPath && recordPaths.has(resolvedPath)) continue;
+      const path = resolvedPath || portablePlaceholderPath(subject.id);
+      if (recordPaths.has(path)) continue;
+      const domain = (this.canVisuallyMoveAcrossGroups() ? asText(this.data.indexGroupByPath[path]) : "")
+        || groupById.get(subject.groupId)?.title
+        || "Ungrouped";
+      records.push({
+        path,
+        title: subject.title,
+        kind: subject.indexed ? "topic" : subject.recordKind,
+        role: "placeholder",
+        curriculumId: subject.configuredId,
+        domain,
+        topicKind: subject.recordKind,
+        priority: "",
+        reviewStatus: "unverified",
+        synthesisStatus: "",
+        autoresearchStatus: "",
+        safetyCritical: false,
+        sourceCount: 0,
+        aliases: [],
+        relatedTopics: [],
+        parentTopic: "",
+        imageStatus: "",
+        doseStatus: "",
+        sourceCoverage: "",
+        folderOrder: this.indexGroupSortKey(domain, path),
+        mtime: 0,
+        aiLock: false,
+        portableId: subject.id,
+        isPlaceholder: true,
+        portableIndexed: subject.indexed,
+      });
+      recordPaths.add(path);
     }
     records.sort((a, b) => a.role.localeCompare(b.role)
       || (a.curriculumId || "ZZZ").localeCompare(b.curriculumId || "ZZZ", undefined, { numeric: true })
@@ -394,8 +460,199 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   getRecord(path: string): VaultRecord | null { return this.getRecords().find((record) => record.path === path) ?? null; }
+  getPortableSubject(subjectId: string) { return this.data.portableIndex.subjects.find((subject) => subject.id === subjectId) ?? null; }
+  getPortableSubjectPath(subjectId: string): string { return portableSubjectPath(this.data, subjectId); }
+
+  private dedupeActiveOrganizationPaths(): void {
+    const unique = (paths: string[]): string[] => [...new Set(paths)];
+    for (const heading of this.data.collections) {
+      heading.subjects = unique(heading.subjects);
+      for (const subheading of heading.subheadings) subheading.subjects = unique(subheading.subjects);
+    }
+    this.data.pinnedPaths = unique(this.data.pinnedPaths);
+    this.data.nextStudyPaths = unique(this.data.nextStudyPaths);
+    this.data.manualIndexPaths = unique(this.data.manualIndexPaths);
+    this.data.excludedIndexPaths = unique(this.data.excludedIndexPaths);
+    for (const [container, paths] of Object.entries(this.data.curriculumVisual.orderByContainer)) {
+      this.data.curriculumVisual.orderByContainer[container] = unique(paths);
+    }
+  }
+
+  async resolvePortableSubject(subjectId: string, path: string, mergeExistingIdentity = false): Promise<void> {
+    this.assertDataWritable();
+    const subject = this.getPortableSubject(subjectId);
+    if (!subject) throw new Error("The portable subject no longer exists.");
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile) || file.extension.toLocaleLowerCase() !== "md") throw new Error("Choose an existing Markdown note.");
+    if (isImmutableSourcePath(file.path)) throw new Error("Immutable source-book files cannot be linked as portable subjects.");
+    const existingOwnerId = Object.entries(this.data.portableIndex.resolvedPathBySubjectId)
+      .find(([otherId, otherPath]) => otherId !== subjectId && otherPath === file.path)?.[0] ?? "";
+    const existingOwner = existingOwnerId ? this.getPortableSubject(existingOwnerId) : null;
+    const candidateRecord = this.getRecord(file.path);
+    const candidateKind: RecordKind = existingOwner?.recordKind
+      ?? candidateRecord?.kind
+      ?? (!this.isClinicalMode() && subject.recordKind === "topic" ? "topic" : "note");
+    const compatibleKinds = subject.recordKind === candidateKind
+      || (subject.recordKind === "topic" && candidateKind === "proposal")
+      || (!this.isClinicalMode() && !existingOwner && (candidateKind === "topic" || candidateKind === "note"));
+    if (!compatibleKinds) {
+      throw new Error(`This ${candidateKind} note cannot be linked to a portable ${subject.recordKind} subject.`);
+    }
+    const candidateConfiguredId = (existingOwner?.configuredId || candidateRecord?.curriculumId || "").trim();
+    if (subject.configuredId.trim() && candidateConfiguredId && subject.configuredId.trim() !== candidateConfiguredId) {
+      throw new Error(`Configured ID mismatch: ${subject.configuredId.trim()} cannot be linked to ${candidateConfiguredId}.`);
+    }
+    const subjectGroupTitle = this.data.portableIndex.groups.find((group) => group.id === subject.groupId)?.title ?? "";
+    const candidateDomain = candidateRecord?.domain.trim() ?? "";
+    if (this.isClinicalMode() && !this.canVisuallyMoveAcrossGroups() && subjectGroupTitle && candidateDomain
+      && subjectGroupTitle.trim().toLocaleLowerCase() !== candidateDomain.toLocaleLowerCase()) {
+      throw new Error(`Clinical group mismatch: this subject belongs to ${subjectGroupTitle}, but the selected note belongs to ${candidateDomain}.`);
+    }
+    if (existingOwnerId && !mergeExistingIdentity) {
+      throw new Error("That Markdown note already has a portable identity. Confirm identity reassignment before linking it to this subject.");
+    }
+    if (existingOwnerId && mergeExistingIdentity) {
+      const byId = new Map(this.data.portableIndex.subjects.map((candidate) => [candidate.id, candidate]));
+      const isAncestor = (ancestorId: string, descendantId: string): boolean => {
+        const visited = new Set<string>();
+        let cursor = byId.get(descendantId)?.parentId ?? null;
+        while (cursor && !visited.has(cursor)) {
+          if (cursor === ancestorId) return true;
+          visited.add(cursor);
+          cursor = byId.get(cursor)?.parentId ?? null;
+        }
+        return false;
+      };
+      if (isAncestor(existingOwnerId, subjectId) || isAncestor(subjectId, existingOwnerId)) {
+        throw new Error("A portable subject cannot merge with one of its ancestors or descendants. Move them apart first, then retry.");
+      }
+      const childrenByParent = new Map<string, typeof this.data.portableIndex.subjects>();
+      for (const candidate of this.data.portableIndex.subjects) {
+        if (!candidate.parentId) continue;
+        const children = childrenByParent.get(candidate.parentId) ?? [];
+        children.push(candidate);
+        childrenByParent.set(candidate.parentId, children);
+      }
+      const descendantStack = [...(childrenByParent.get(existingOwnerId) ?? [])];
+      const visitedDescendants = new Set<string>();
+      let crossGroupDescendant = false;
+      while (descendantStack.length > 0) {
+        const descendant = descendantStack.pop();
+        if (!descendant || visitedDescendants.has(descendant.id)) continue;
+        visitedDescendants.add(descendant.id);
+        if (descendant.groupId !== subject.groupId) {
+          crossGroupDescendant = true;
+          break;
+        }
+        descendantStack.push(...(childrenByParent.get(descendant.id) ?? []));
+      }
+      if (crossGroupDescendant) {
+        throw new Error(`Cannot merge across groups while “${existingOwner?.title ?? file.basename}” has child subjects. Move or detach its children first.`);
+      }
+    }
+    const oldPath = this.data.portableIndex.resolvedPathBySubjectId[subjectId] || portablePlaceholderPath(subjectId);
+    const visual = this.data.curriculumVisual;
+    const targetHasParentOverride = Object.getOwnPropertyDescriptor(visual.parentByPath, oldPath) !== undefined;
+    const targetParentPath = targetHasParentOverride
+      ? visual.parentByPath[oldPath] ?? null
+      : subject.parentId ? portableSubjectPath(this.data, subject.parentId) : null;
+    const targetGroupTitle = this.data.indexGroupByPath[oldPath]
+      || this.data.portableIndex.groups.find((group) => group.id === subject.groupId)?.title
+      || "Ungrouped";
+    const targetContainerKey = curriculumContainerKey(targetGroupTitle, targetParentPath);
+    const targetContainerOrder = [...(visual.orderByContainer[targetContainerKey] ?? [])];
+    const sortedChildren = (parentId: string): string[] => this.data.portableIndex.subjects
+      .filter((candidate) => candidate.parentId === parentId)
+      .sort((a, b) => a.order - b.order || a.title.localeCompare(b.title))
+      .map((candidate) => portableSubjectPath(this.data, candidate.id));
+    const targetChildOrder = [
+      ...(visual.orderByContainer[`parent:${oldPath}`] ?? []),
+      ...sortedChildren(subjectId),
+    ];
+    const ownerChildOrder = existingOwnerId ? [
+      ...(visual.orderByContainer[`parent:${file.path}`] ?? []),
+      ...sortedChildren(existingOwnerId),
+    ] : [];
+    await this.mutate(`Link portable subject “${subject.title}”`, () => {
+      rewriteActivePluginDataPathPrefix(this.data, oldPath, file.path);
+      if (existingOwnerId) {
+        if (this.canVisuallyMoveAcrossGroups()) this.data.indexGroupByPath[file.path] = targetGroupTitle;
+        else delete this.data.indexGroupByPath[file.path];
+        if (existingOwner) subject.indexed ||= existingOwner.indexed;
+        if (subject.parentId === existingOwnerId) subject.parentId = null;
+        for (const candidate of this.data.portableIndex.subjects) {
+          if (candidate.parentId === existingOwnerId && candidate.id !== subjectId) candidate.parentId = subjectId;
+        }
+        this.data.portableIndex.subjects = this.data.portableIndex.subjects.filter((candidate) => candidate.id !== existingOwnerId);
+        delete this.data.portableIndex.resolvedPathBySubjectId[existingOwnerId];
+
+        // The selected/imported identity is the survivor. Generic prefix
+        // rewriting deliberately unions path-based memberships, but visual
+        // maps can collide when both identities already have placements. Make
+        // the survivor's parent and sibling position authoritative, then append
+        // owner-only children in their previous order.
+        const nextParent = targetParentPath === null ? null : replacePathPrefix(targetParentPath, oldPath, file.path);
+        this.data.curriculumVisual.parentByPath[file.path] = nextParent;
+        for (const [container, paths] of Object.entries(this.data.curriculumVisual.orderByContainer)) {
+          const filtered = paths.filter((candidate) => candidate !== file.path);
+          if (filtered.length > 0) this.data.curriculumVisual.orderByContainer[container] = filtered;
+          else delete this.data.curriculumVisual.orderByContainer[container];
+        }
+        const nextTargetContainer = targetContainerKey.startsWith("parent:")
+          ? `parent:${replacePathPrefix(targetContainerKey.slice(7), oldPath, file.path)}`
+          : targetContainerKey;
+        if (targetContainerOrder.length > 0) {
+          const targetOrder = targetContainerOrder.map((candidate) => replacePathPrefix(candidate, oldPath, file.path));
+          const remaining = this.data.curriculumVisual.orderByContainer[nextTargetContainer] ?? [];
+          this.data.curriculumVisual.orderByContainer[nextTargetContainer] = [...new Set([...targetOrder, ...remaining])];
+        }
+        const childContainer = `parent:${file.path}`;
+        const mergedChildren = [...new Set([
+          ...targetChildOrder.map((candidate) => replacePathPrefix(candidate, oldPath, file.path)),
+          ...ownerChildOrder.map((candidate) => replacePathPrefix(candidate, oldPath, file.path)),
+          ...(this.data.curriculumVisual.orderByContainer[childContainer] ?? []),
+        ].filter((candidate) => candidate !== file.path))];
+        if (mergedChildren.length > 0) this.data.curriculumVisual.orderByContainer[childContainer] = mergedChildren;
+      }
+      this.data.portableIndex.resolvedPathBySubjectId[subjectId] = file.path;
+      this.dedupeActiveOrganizationPaths();
+      if (subject.indexed) {
+        this.data.excludedIndexPaths = this.data.excludedIndexPaths.filter((candidate) => candidate !== file.path);
+        if (!pathIsInsideFolder(file.path, this.data.settings.primaryFolder) && !this.data.manualIndexPaths.includes(file.path)) {
+          this.data.manualIndexPaths.push(file.path);
+        }
+      } else if (!this.isClinicalMode()) {
+        this.data.manualIndexPaths = this.data.manualIndexPaths.filter((candidate) => candidate !== file.path);
+        if (pathIsInsideFolder(file.path, this.data.settings.primaryFolder)
+          && !this.data.excludedIndexPaths.includes(file.path)) {
+          this.data.excludedIndexPaths.push(file.path);
+        }
+      }
+      this.data.selectedPath = file.path;
+      this.invalidateRecordCache();
+    }, { includePortableIndex: true, requireUndo: true });
+  }
+
+  async unlinkPortableSubject(subjectId: string): Promise<void> {
+    this.assertDataWritable();
+    const subject = this.getPortableSubject(subjectId);
+    const oldPath = this.data.portableIndex.resolvedPathBySubjectId[subjectId];
+    if (!subject || !oldPath) throw new Error("This portable subject is not linked to a Markdown note.");
+    const placeholder = portablePlaceholderPath(subjectId);
+    await this.mutate(`Unlink portable subject “${subject.title}”`, () => {
+      rewriteActivePluginDataPathPrefix(this.data, oldPath, placeholder);
+      delete this.data.portableIndex.resolvedPathBySubjectId[subjectId];
+      this.data.selectedPath = placeholder;
+      this.invalidateRecordCache();
+    }, { includePortableIndex: true, requireUndo: true });
+  }
   getCanonicalTopics(): VaultRecord[] { return this.getRecords().filter((record) => record.role === "canonical"); }
-  getIndexRecords(): VaultRecord[] { return this.getRecords().filter((record) => record.kind === "topic" && (record.role === "canonical" || record.role === "supporting")); }
+  getIndexRecords(): VaultRecord[] {
+    return this.getRecords().filter((record) => record.kind === "topic" && (record.role === "canonical"
+      || record.role === "supporting"
+      || (record.role === "placeholder" && record.portableIndexed !== false)
+      || record.portableIndexed === true));
+  }
 
   getIndexCandidateFiles(): TFile[] {
     if (this.isClinicalMode()) return [];
@@ -434,6 +691,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   async repairIndexOrganization(): Promise<void> {
     const existing = new Set(this.app.vault.getMarkdownFiles().map((file) => file.path));
+    for (const subject of this.data.portableIndex.subjects) existing.add(portableSubjectPath(this.data, subject.id));
     const indexed = new Set(this.getIndexRecords().map((record) => record.path));
     const uniqueExisting = (paths: string[]): string[] => paths.filter((path, index, all) => existing.has(path) && all.indexOf(path) === index);
     await this.mutate("Repair safe index organization issues", () => {
@@ -529,15 +787,48 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (changed) { this.invalidateRecordCache(); await this.savePluginData(); }
   }
 
-  async mutate(label: string, action: () => void): Promise<void> {
+  async mutate(
+    label: string,
+    action: () => void,
+    options: {
+      includeSettings?: boolean;
+      includePortableIndex?: boolean;
+      includeLayoutSnapshots?: boolean;
+      requireUndo?: boolean;
+    } = {},
+  ): Promise<void> {
     this.assertDataWritable();
-    const snapshot = snapshotPersonal(this.data, label);
+    const transactionBackup = options.requireUndo ? structuredClone(this.data) : null;
+    const snapshot = snapshotPersonal(
+      this.data,
+      label,
+      options.includeSettings === true,
+      options.includePortableIndex === true,
+      options.includeLayoutSnapshots === true,
+    );
     const undoStack = limitSnapshotStack([...this.data.undoStack, snapshot]);
-    if (!undoStack.includes(snapshot)) new Notice("This change is too large for the bounded undo history. Export a backup before further bulk organization changes.", 8000);
+    if (!undoStack.includes(snapshot)) {
+      if (options.requireUndo) throw new Error("This change is too large for safe in-plugin Undo. Export a same-vault recovery backup, then reduce the operation size.");
+      new Notice("This change is too large for the bounded undo history. Export a backup before further bulk organization changes.", 8000);
+    }
     this.data.undoStack = undoStack;
     this.data.redoStack = [];
-    action();
-    await this.savePluginData();
+    try {
+      action();
+      await this.savePluginData();
+    } catch (error) {
+      if (transactionBackup) {
+        this.data = transactionBackup;
+        this.invalidateRecordCache();
+        try {
+          await this.savePluginData();
+        } catch (rollbackError) {
+          console.error("Knowledge Base Command Center could not persist the import rollback", rollbackError);
+          throw new Error("The import failed and its rollback could not be saved. Restart Obsidian, then restore a same-vault recovery backup.");
+        }
+      }
+      throw error;
+    }
     await this.refreshViews(false);
   }
 
@@ -545,8 +836,15 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.assertDataWritable();
     const previous = this.data.undoStack.pop();
     if (!previous) return;
-    this.data.redoStack = limitSnapshotStack([...this.data.redoStack, snapshotPersonal(this.data, previous.label)]);
+    this.data.redoStack = limitSnapshotStack([...this.data.redoStack, snapshotPersonal(
+      this.data,
+      previous.label,
+      Boolean(previous.settings),
+      Boolean(previous.portableIndex),
+      Boolean(previous.layoutSnapshots),
+    )]);
     restoreSnapshot(this.data, previous);
+    this.invalidateRecordCache();
     await this.savePluginData();
     await this.refreshViews(false);
     new Notice(`Undid: ${previous.label}`);
@@ -556,8 +854,15 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.assertDataWritable();
     const next = this.data.redoStack.pop();
     if (!next) return;
-    this.data.undoStack = limitSnapshotStack([...this.data.undoStack, snapshotPersonal(this.data, next.label)]);
+    this.data.undoStack = limitSnapshotStack([...this.data.undoStack, snapshotPersonal(
+      this.data,
+      next.label,
+      Boolean(next.settings),
+      Boolean(next.portableIndex),
+      Boolean(next.layoutSnapshots),
+    )]);
     restoreSnapshot(this.data, next);
+    this.invalidateRecordCache();
     await this.savePluginData();
     await this.refreshViews(false);
     new Notice(`Redid: ${next.label}`);
@@ -593,7 +898,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const folderError = validateWritableFolderPath(value.folder, this.app.vault.configDir);
     if (folderError) return folderError;
     if (value.mode === "template") {
-      if (!value.templatePath) return "Choose a template, or switch the starting content to Empty note.";
+      const templatePathError = validateTemplateFilePath(value.templatePath, this.data.settings.templatesFolder, this.app.vault.configDir);
+      if (templatePathError) return templatePathError;
       const template = this.app.vault.getAbstractFileByPath(normalizePath(value.templatePath));
       if (!(template instanceof TFile) || template.extension !== "md") return "The selected template could not be found.";
     }
@@ -627,17 +933,24 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       .sort((a, b) => a.path.localeCompare(b.path));
   }
 
-  async writePortableJson(kind: "backup" | "workspace", value: unknown): Promise<TFile> {
+  async writePortableJson(kind: "backup" | "workspace" | "portable", value: unknown): Promise<TFile> {
     const folder = "Knowledge Base Command Center Exports";
     await this.ensureFolder(folder);
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const path = normalizePath(`${folder}/knowledge-base-command-center-${kind}-${stamp}.json`);
+    const basePath = normalizePath(`${folder}/knowledge-base-command-center-${kind}-${stamp}`);
+    let path = `${basePath}.json`;
+    let suffix = 2;
+    while (this.app.vault.getAbstractFileByPath(path)) {
+      path = `${basePath}-${suffix}.json`;
+      suffix += 1;
+    }
     const file = await this.app.vault.create(path, `${JSON.stringify(value, null, 2)}\n`);
     return file;
   }
 
   async readPortableJson(file: TFile): Promise<unknown> {
     if (file.extension.toLocaleLowerCase() !== "json") throw new Error("Choose a JSON export file.");
+    if (file.stat.size > MAX_PORTABLE_PACKAGE_BYTES) throw new Error("The selected JSON is larger than the 10 MB import limit.");
     return JSON.parse(await this.app.vault.read(file)) as unknown;
   }
 
