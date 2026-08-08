@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.8.0
+
+### Added
+
+- Added multiple independent knowledge bases inside one plugin installation. ENT, research, another specialty, and other subjects can each keep separate index scope, labels, headings, memberships, collections, templates, study state, snapshots, and Undo history while referencing the same vault notes safely.
+- Added a header switcher, searchable settings control, management screen, and commands to create, switch, rename, duplicate, archive, and restore knowledge bases. The active base is shared by every open Command Center view.
+- Added base-local subject display labels and index-heading aliases. Renaming in the index never renames a Markdown file, heading, or frontmatter title.
+- Added restorable removal of individual subjects or complete non-empty index headings in both generic and protected ENT presets. Removal changes only active-base membership and visual organization; Markdown notes and other bases remain untouched.
+- Added permanent deletion for archived knowledge bases with exact-name confirmation, a recovery-export recommendation, and an archived-only API. It removes plugin organization only, never Markdown notes, and frees one of the 50 base slots.
+
+### Changed
+
+- Wrapped existing v1–v10 plugin data into a single-base v11 store on first load, preserving the previous organization exactly. Archived bases remain recoverable and at least one available base is always retained.
+- Made file and folder rename reconciliation update every active and archived base, while direct saves remain bound to their call-time base and synchronized base/reload operations cannot cross-contaminate sibling bases.
+- Coalesced external `data.json` reloads from Obsidian Sync or other programs with queued local writes. An overlapping local action is rejected with a retry message instead of replaying an opaque stale base over newly synced collections or settings.
+- Reworked mobile index-heading controls into one labelled 44-point Actions menu and made base-management actions, validation, long names, safe-area layout, and reversible archive messaging touch-friendly.
+- Standardized visible counts as index entries and clarified that plugin knowledge bases are independent index profiles, not Obsidian `.base` files or saved Workspace layouts.
+- Kept portable export/import scoped to the active base. Switch bases to export each one separately; Markdown note bodies and attachments remain excluded.
+- Kept each base's preset immutable after creation, protected the ENT canonical index scope, and made new generic bases suggest a distinct folder with an explicit overlap warning.
+- Hard-locked newly generated v7 exact-path recovery files to the vault, knowledge-base ID/name, and Generic/ENT preset that created them. Same-preset cross-base recovery requires a distinct source/destination override plus the destructive confirmation; cross-preset recovery is always rejected. Version 1–6 files remain base/preset-unverified, and identity-less v1–v5 files also undergo the conservative at-least-half unique-path preflight. The path-free Index blueprint remains the supported cross-vault or cross-preset transfer.
+- Replaced deterministic legacy-migration vault IDs with random persisted provisional IDs. Obsidian Sync can converge only pristine single-base copies that carry the same legacy fingerprint, including a late third device or an interim deterministic-ID copy; any real edit closes that exception. Recovery exported before first-upgrade identity convergence must be exported again after Sync settles.
+- Invalidated open export/import dialogs when the active base data is reloaded by Sync, preventing a reviewed package from being applied to a newer same-base state.
+- Kept permanent deletion durable across Obsidian Sync with bounded, validated base-ID tombstones. Deleted IDs are never reused or silently evicted, stale devices cannot resurrect deleted bases, and a merge that would leave no available base is rejected without discarding local data.
+
 ## 0.7.12
 
 ### Added

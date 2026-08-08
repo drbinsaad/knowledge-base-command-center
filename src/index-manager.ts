@@ -1,15 +1,17 @@
-import { Modal, Notice, Platform, Setting, TFile, setIcon } from "obsidian";
+import { Menu, Modal, Notice, Platform, Setting, TFile, setIcon } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
 import {
   createWorkspaceConfig,
   curriculumContainerKey,
   IndexDiagnostic,
+  isSafeObjectKey,
   isPortablePlaceholderPath,
   parseWorkspaceConfig,
   pathIsInsideFolder,
   resetCurriculumVisualPath,
   validateProposalFolderPath,
   validateWritableFolderPath,
+  VaultRecord,
 } from "./model";
 import { ConfirmModal, IndexGroupModal, StringPickerModal, TextPromptModal, VaultFilePickerModal } from "./modals";
 import { registerPortableGroup, removePortableGroup, renameOrMergePortableGroup } from "./portability";
@@ -33,6 +35,10 @@ export class IndexManagerModal extends Modal {
   private selectionActionsEl: HTMLElement | null = null;
   private selectionButtons: Array<{ el: HTMLButtonElement; enabled: () => boolean }> = [];
   private managerOpen = false;
+  private openedBaseId = "";
+  private openedDataEpoch = 0;
+  private staleBaseNoticeShown = false;
+  private pendingTimers = new Set<number>();
 
   constructor(private readonly plugin: EntVaultCommandCenterPlugin, initialTab: ManagerTab = "indexed") {
     super(plugin.app);
@@ -40,6 +46,9 @@ export class IndexManagerModal extends Modal {
   }
 
   onOpen(): void {
+    this.openedBaseId = this.plugin.getActiveKnowledgeBaseId();
+    this.openedDataEpoch = this.plugin.getDataEpoch();
+    this.staleBaseNoticeShown = false;
     this.managerOpen = true;
     this.modalEl.addClass("ent-cc-index-manager-modal");
     this.contentEl.addClass("ent-cc-modal", "ent-cc-index-manager");
@@ -49,7 +58,8 @@ export class IndexManagerModal extends Modal {
 
   onClose(): void {
     this.managerOpen = false;
-    if (this.searchTimer !== null) window.activeWindow.clearTimeout(this.searchTimer);
+    for (const timer of this.pendingTimers) window.activeWindow.clearTimeout(timer);
+    this.pendingTimers.clear();
     this.searchTimer = null;
     this.selectionCountEl = null;
     this.selectionActionsEl = null;
@@ -57,22 +67,25 @@ export class IndexManagerModal extends Modal {
   }
 
   private openPortabilityCenter(mode: "export" | "import"): void {
+    if (!this.guardOpenedBase()) return;
     new ExportImportCenterModal(this.plugin, mode, (dataChanged) => this.refreshAfterPortability(dataChanged)).open();
   }
 
   private refreshAfterPortability(dataChanged: boolean): void {
     if (!dataChanged || !this.managerOpen) return;
-    if (this.searchTimer !== null) window.activeWindow.clearTimeout(this.searchTimer);
+    if (!this.guardOpenedBase()) return;
+    if (this.searchTimer !== null) this.clearTimer(this.searchTimer);
     this.searchTimer = null;
     this.query = "";
     this.selected.clear();
     this.diagnosticsCache = null;
-    if (this.plugin.isClinicalMode() && (this.tab === "available" || this.tab === "hidden")) this.tab = "indexed";
+    if (this.plugin.isClinicalMode() && this.tab === "available") this.tab = "indexed";
     this.titleEl.setText(`Manage ${this.plugin.data.settings.indexLabel}`);
     this.render();
   }
 
   private render(): void {
+    if (!this.guardOpenedBase()) return;
     // Do not retain controls detached by contentEl.empty(); selection refreshes
     // must address only the currently rendered toolbar.
     this.selectionCountEl = null;
@@ -98,8 +111,8 @@ export class IndexManagerModal extends Modal {
     const definitions: Array<{ id: ManagerTab; label: string; count: number | string; genericOnly?: boolean }> = [
       { id: "indexed", label: "Indexed", count: indexed.length },
       { id: "available", label: "Available", count: available.length, genericOnly: true },
-      { id: "hidden", label: "Hidden", count: hidden.length, genericOnly: true },
-      { id: "groups", label: settings.groupLabel, count: groups.length },
+      { id: "hidden", label: "Hidden", count: hidden.length },
+      { id: "groups", label: "Index headings", count: groups.length },
       { id: "diagnostics", label: "Diagnostics", count: this.diagnosticsCache?.length ?? "—" },
     ];
     for (const definition of definitions.filter((item) => !item.genericOnly || !this.plugin.isClinicalMode())) {
@@ -159,11 +172,28 @@ export class IndexManagerModal extends Modal {
   }
 
   private hiddenNotes(): ManagerNote[] {
-    if (this.plugin.isClinicalMode()) return [];
-    return this.plugin.data.excludedIndexPaths.map((path) => {
+    const excluded = new Set(this.plugin.data.excludedIndexPaths);
+    const hidden = this.plugin.data.excludedIndexPaths.map((path) => {
       const file = this.app.vault.getAbstractFileByPath(path);
-      return { path, title: file instanceof TFile ? file.basename : path.split("/").pop()?.replace(/\.md$/, "") || path, meta: file instanceof TFile ? path : `${path} · missing` };
+      const fallbackTitle = file instanceof TFile ? file.basename : path.split("/").pop()?.replace(/\.md$/, "") || path;
+      return {
+        path,
+        title: this.plugin.data.displayNameByPath[path] || fallbackTitle,
+        meta: file instanceof TFile ? path : `${path} · missing`,
+      };
     });
+    if (!this.plugin.isClinicalMode()) return hidden;
+    const placeholders = this.plugin.getRecords()
+      .filter((record) => record.role === "placeholder"
+        && record.portableIndexed === false
+        && isPortablePlaceholderPath(record.path)
+        && !excluded.has(record.path))
+      .map((record) => ({
+        path: record.path,
+        title: record.title,
+        meta: `${record.domain} · imported subject removed from this knowledge base`,
+      }));
+    return [...hidden, ...placeholders];
   }
 
   private renderNoteManager(notes: ManagerNote[], availableCount: number): void {
@@ -173,11 +203,11 @@ export class IndexManagerModal extends Modal {
     search.addEventListener("input", () => {
       const cursor = search.selectionStart ?? search.value.length;
       this.query = search.value;
-      if (this.searchTimer !== null) window.activeWindow.clearTimeout(this.searchTimer);
-      this.searchTimer = window.activeWindow.setTimeout(() => {
+      if (this.searchTimer !== null) this.clearTimer(this.searchTimer);
+      this.searchTimer = this.setGuardedTimer(() => {
         this.searchTimer = null;
         this.render();
-        window.activeWindow.setTimeout(() => {
+        this.setGuardedTimer(() => {
           const next = this.contentEl.querySelector<HTMLInputElement>('.ent-cc-manager-toolbar input[type="search"]');
           next?.focus();
           next?.setSelectionRange(cursor, cursor);
@@ -197,7 +227,7 @@ export class IndexManagerModal extends Modal {
     this.selectionButtons = [];
     if (this.tab === "indexed") {
       this.selectionButtons.push({ el: this.actionButton(actions, "folder-input", `Move to ${this.plugin.data.settings.groupLabel.toLowerCase()}…`, () => this.chooseGroupForSelection("move"), this.selected.size === 0 || !this.plugin.canVisuallyMoveAcrossGroups()), enabled: () => this.selected.size > 0 && this.plugin.canVisuallyMoveAcrossGroups() });
-      if (!this.plugin.isClinicalMode()) this.selectionButtons.push({ el: this.actionButton(actions, "list-minus", "Remove from index…", () => this.removeSelectedFromIndex(), this.selected.size === 0, true), enabled: () => this.selected.size > 0 });
+      this.selectionButtons.push({ el: this.actionButton(actions, "list-minus", "Remove from index…", () => this.removeSelectedFromIndex(), this.selected.size === 0, true), enabled: () => this.selected.size > 0 });
     } else if (this.tab === "available") {
       this.selectionButtons.push({ el: this.actionButton(actions, "list-plus", "Add selected…", () => this.chooseGroupForSelection("add"), this.selected.size === 0), enabled: () => this.selected.size > 0 });
     } else {
@@ -228,13 +258,14 @@ export class IndexManagerModal extends Modal {
 
   /** Updates only the controls that depend on the selection, preserving focus. */
   private refreshSelectionState(): void {
+    if (!this.guardOpenedBase()) return;
     this.selectionCountEl?.setText(`${this.selected.size} selected`);
     this.selectionActionsEl?.toggleClass("is-idle", this.selected.size === 0);
     for (const button of this.selectionButtons) button.el.disabled = !button.enabled();
   }
 
   private revealActiveTab(tablist: HTMLElement): void {
-    window.activeWindow.setTimeout(() => {
+    this.setGuardedTimer(() => {
       const active = tablist.querySelector<HTMLElement>('[aria-selected="true"]');
       active?.scrollIntoView({ block: "nearest", inline: "center" });
     }, 0);
@@ -269,8 +300,20 @@ export class IndexManagerModal extends Modal {
   }
 
   private chooseGroupForSelection(mode: "add" | "restore" | "move"): void {
+    if (!this.guardOpenedBase()) return;
     const paths = [...this.selected];
     if (paths.length === 0) return;
+    if (mode === "restore" && !this.plugin.canVisuallyMoveAcrossGroups()) {
+      this.run(async () => {
+        await this.plugin.restoreRecordsToIndex(paths, `Restore ${paths.length} notes to this knowledge base`);
+        if (!this.guardOpenedBase()) return;
+        this.selected.clear();
+        this.tab = "indexed";
+        this.render();
+        new Notice(`${paths.length} ${paths.length === 1 ? "subject was" : "subjects were"} restored to the protected source placement. No Markdown file was changed.`);
+      });
+      return;
+    }
     const first = this.plugin.getRecord(paths[0] ?? "");
     const updatesPortableMembership = mode !== "move" && paths.some((path) => Boolean(this.plugin.getRecord(path)?.portableId));
     new IndexGroupModal(this.app, {
@@ -280,6 +323,7 @@ export class IndexManagerModal extends Modal {
       existingGroups: this.plugin.getIndexGroups(),
       submitLabel: mode === "move" ? "Move visually" : mode === "restore" ? "Restore to index" : "Add to index",
       onSubmit: async (group) => {
+        if (!this.guardOpenedBase()) return;
         await this.plugin.mutate(`${mode} ${paths.length} index note${paths.length === 1 ? "" : "s"}`, () => {
           if (!this.plugin.data.indexGroupOrder.includes(group)) this.plugin.data.indexGroupOrder.push(group);
           for (const path of paths) {
@@ -296,6 +340,7 @@ export class IndexManagerModal extends Modal {
             resetCurriculumVisualPath(this.plugin.data.curriculumVisual, path);
           }
         }, { includePortableIndex: updatesPortableMembership });
+        if (!this.guardOpenedBase()) return;
         this.selected.clear();
         this.tab = "indexed";
         this.render();
@@ -305,22 +350,13 @@ export class IndexManagerModal extends Modal {
   }
 
   private removeSelectedFromIndex(): void {
+    if (!this.guardOpenedBase()) return;
     const paths = [...this.selected];
-    if (paths.length === 0 || this.plugin.isClinicalMode()) return;
+    if (paths.length === 0) return;
     new ConfirmModal(this.app, "Remove selected notes from index?", `${paths.length} membership${paths.length === 1 ? "" : "s"} will be removed. Markdown notes and collection memberships remain untouched.`, "Remove from index", async () => {
-      await this.plugin.mutate(`Remove ${paths.length} notes from index`, () => {
-        for (const path of paths) {
-          const record = this.plugin.getRecord(path);
-          if (record?.portableId) {
-            const subject = this.plugin.getPortableSubject(record.portableId);
-            if (subject) subject.indexed = false;
-          }
-          this.plugin.data.manualIndexPaths = this.plugin.data.manualIndexPaths.filter((candidate) => candidate !== path);
-          if (pathIsInsideFolder(path, this.plugin.data.settings.primaryFolder) && !this.plugin.data.excludedIndexPaths.includes(path)) this.plugin.data.excludedIndexPaths.push(path);
-          delete this.plugin.data.indexGroupByPath[path];
-          resetCurriculumVisualPath(this.plugin.data.curriculumVisual, path);
-        }
-      }, { includePortableIndex: true });
+      if (!this.guardOpenedBase()) return;
+      await this.plugin.removeRecordsFromIndex(paths, `Remove ${paths.length} notes from this knowledge base`);
+      if (!this.guardOpenedBase()) return;
       this.selected.clear();
       this.render();
       new Notice("Index memberships removed. No Markdown note was deleted or moved.");
@@ -328,43 +364,97 @@ export class IndexManagerModal extends Modal {
   }
 
   private renderGroups(groups: string[]): void {
-    const canEdit = this.plugin.canVisuallyMoveAcrossGroups();
+    const canMove = this.plugin.canVisuallyMoveAcrossGroups();
+    const readOnly = this.plugin.isDataReadOnly();
     const toolbar = this.contentEl.createDiv({ cls: "ent-cc-manager-toolbar" });
-    toolbar.createEl("p", { text: canEdit ? "Group changes are visual-only and do not rewrite note properties or folders." : "Cross-domain visual changes are disabled by the ENT clinical safeguard in Settings." });
-    this.actionButton(toolbar, "folder-plus", `New ${this.plugin.data.settings.groupLabel.toLowerCase()}`, () => this.createGroup(), !canEdit);
-    const counts = new Map<string, number>();
-    for (const record of this.plugin.getIndexRecords()) counts.set(record.domain, (counts.get(record.domain) ?? 0) + 1);
+    toolbar.createEl("p", { text: canMove
+      ? "Group changes are visual-only and do not rewrite note properties or folders."
+      : "Display labels and base membership remain editable. Cross-domain movement, group creation, merging, and reordering are disabled by the ENT clinical safeguard." });
+    this.actionButton(toolbar, "folder-plus", `New ${this.plugin.data.settings.groupLabel.toLowerCase()}`, () => this.createGroup(), readOnly || !canMove);
+    const membersByGroup = new Map<string, VaultRecord[]>();
+    for (const record of this.plugin.getIndexRecords()) {
+      const members = membersByGroup.get(record.domain) ?? [];
+      members.push(record);
+      membersByGroup.set(record.domain, members);
+    }
     const list = this.contentEl.createDiv({ cls: "ent-cc-manager-list ent-cc-manager-groups" });
     groups.forEach((group, index) => {
+      const members = membersByGroup.get(group) ?? [];
       const row = list.createDiv({ cls: "ent-cc-manager-group" });
       const text = row.createDiv({ cls: "ent-cc-manager-note-text" });
       text.createDiv({ cls: "ent-cc-manager-note-title", text: group });
-      text.createDiv({ cls: "ent-cc-picker-meta", text: `${counts.get(group) ?? 0} indexed ${this.plugin.data.settings.itemPlural}` });
-      this.iconAction(row, "arrow-up", `Move ${group} up`, () => this.reorderGroup(group, -1), !canEdit || index === 0);
-      this.iconAction(row, "arrow-down", `Move ${group} down`, () => this.reorderGroup(group, 1), !canEdit || index === groups.length - 1);
-      this.iconAction(row, "pencil", `Rename ${group}`, () => this.renameGroup(group), !canEdit);
-      this.iconAction(row, "combine", `Merge ${group}`, () => this.mergeGroup(group), !canEdit || groups.length < 2);
-      if ((counts.get(group) ?? 0) === 0) this.iconAction(row, "trash-2", `Remove empty ${group}`, () => this.removeEmptyGroup(group), !canEdit, true);
+      text.createDiv({ cls: "ent-cc-picker-meta", text: `${members.length} indexed ${this.plugin.data.settings.itemPlural}` });
+      const actions = row.createEl("button", {
+        cls: "ent-cc-button ent-cc-manager-group-actions",
+        type: "button",
+        attr: { "aria-label": `Actions for index heading ${group}`, title: `Actions for ${group}` },
+      });
+      setIcon(actions.createSpan(), "ellipsis");
+      actions.createSpan({ text: "Actions…" });
+      actions.disabled = readOnly;
+      actions.addEventListener("click", (event) => this.showGroupActions(event, group, members, index, groups, canMove));
     });
     if (groups.length === 0) list.createDiv({ cls: "ent-cc-empty", text: `No ${this.plugin.data.settings.groupLabel.toLowerCase()}s yet.` });
   }
 
+  private showGroupActions(
+    event: MouseEvent,
+    group: string,
+    members: VaultRecord[],
+    index: number,
+    groups: string[],
+    canMove: boolean,
+  ): void {
+    if (!this.guardOpenedBase()) return;
+    const menu = new Menu();
+    menu.addItem((item) => item
+      .setTitle("Move heading up")
+      .setIcon("arrow-up")
+      .setDisabled(!canMove || index === 0)
+      .onClick(() => this.reorderGroup(group, -1)));
+    menu.addItem((item) => item
+      .setTitle("Move heading down")
+      .setIcon("arrow-down")
+      .setDisabled(!canMove || index === groups.length - 1)
+      .onClick(() => this.reorderGroup(group, 1)));
+    menu.addSeparator();
+    menu.addItem((item) => item
+      .setTitle("Rename in this index…")
+      .setIcon("pencil")
+      .onClick(() => this.renameGroup(group)));
+    menu.addItem((item) => item
+      .setTitle("Merge into another heading…")
+      .setIcon("combine")
+      .setDisabled(!canMove || groups.length < 2)
+      .onClick(() => this.mergeGroup(group)));
+    menu.addSeparator();
+    menu.addItem((item) => item
+      .setTitle(members.length > 0 ? "Remove heading and subjects from this base…" : "Remove heading from this base…")
+      .setIcon("trash-2")
+      .onClick(() => this.removeGroup(group, members)));
+    menu.showAtMouseEvent(event);
+  }
+
   private createGroup(): void {
+    if (!this.guardOpenedBase()) return;
     new TextPromptModal(this.app, {
       title: `Create ${this.plugin.data.settings.groupLabel.toLowerCase()}`,
       placeholder: `${this.plugin.data.settings.groupLabel} name`,
       onSubmit: async (group) => {
+        if (!this.guardOpenedBase()) return;
         if (this.plugin.getIndexGroups().some((candidate) => candidate.toLowerCase() === group.toLowerCase())) throw new Error(`${group} already exists.`);
         await this.plugin.mutate(`Create visual group “${group}”`, () => {
           this.plugin.data.indexGroupOrder.push(group);
           registerPortableGroup(this.plugin.data, group);
         }, { includePortableIndex: true });
+        if (!this.guardOpenedBase()) return;
         this.render();
       },
     }).open();
   }
 
   private reorderGroup(group: string, direction: -1 | 1): void {
+    if (!this.guardOpenedBase()) return;
     const groups = this.plugin.getIndexGroups();
     const from = groups.indexOf(group);
     const to = from + direction;
@@ -376,52 +466,133 @@ export class IndexManagerModal extends Modal {
         if (moved) order.splice(to, 0, moved);
         this.plugin.data.indexGroupOrder = order;
       });
+      if (!this.guardOpenedBase()) return;
       this.render();
     });
   }
 
+  /** Resolve the configured/portable source groups represented by one display label. */
+  private sourceGroupsForDisplayGroup(group: string, members: VaultRecord[]): string[] {
+    const aliases = this.plugin.data.indexGroupAliases;
+    const sources = new Set(Object.entries(aliases)
+      .filter(([, display]) => display === group)
+      .map(([source]) => source));
+    const portableGroups = new Map(this.plugin.data.portableIndex.groups.map((item) => [item.id, item.title]));
+    for (const record of members) {
+      // An explicit visual placement owns its label directly; renaming the
+      // source group would unexpectedly affect unrelated records.
+      if (this.plugin.data.indexGroupByPath[record.path]) continue;
+      const file = this.app.vault.getAbstractFileByPath(record.path);
+      const subject = record.portableId ? this.plugin.getPortableSubject(record.portableId) : null;
+      const source = file instanceof TFile
+        ? this.plugin.suggestedIndexGroup(file)
+        : subject ? portableGroups.get(subject.groupId) ?? "" : "";
+      if (source && (aliases[source] || source) === group) sources.add(source);
+    }
+    if (sources.size === 0) sources.add(group);
+    return [...sources];
+  }
+
   private renameGroup(group: string): void {
+    if (!this.guardOpenedBase()) return;
     new TextPromptModal(this.app, {
       title: `Rename “${group}”`, placeholder: `${this.plugin.data.settings.groupLabel} name`, initialValue: group,
       onSubmit: async (next) => {
-        if (next !== group && this.plugin.getIndexGroups().some((candidate) => candidate.toLowerCase() === next.toLowerCase())) throw new Error(`${next} already exists. Use Merge instead.`);
+        if (!this.guardOpenedBase()) return;
+        if (next !== group && this.plugin.getIndexGroups().some((candidate) => candidate !== group && candidate.toLowerCase() === next.toLowerCase())) throw new Error(`${next} already exists. Use Merge instead.`);
         const members = this.plugin.getIndexRecords().filter((record) => record.domain === group);
+        const sourceGroups = this.sourceGroupsForDisplayGroup(group, members);
+        const unsafeSourceGroups = new Set(sourceGroups.filter((source) => !isSafeObjectKey(source)));
+        const groupOrder = this.plugin.getIndexGroups();
         await this.plugin.mutate(`Rename visual group “${group}”`, () => {
-          members.forEach((record) => { this.plugin.data.indexGroupByPath[record.path] = next; });
+          for (const [path, display] of Object.entries(this.plugin.data.indexGroupByPath)) {
+            if (display === group) this.plugin.data.indexGroupByPath[path] = next;
+          }
+          for (const source of sourceGroups) {
+            if (unsafeSourceGroups.has(source)) continue;
+            if (source === next) delete this.plugin.data.indexGroupAliases[source];
+            else this.plugin.data.indexGroupAliases[source] = next;
+          }
+          if (unsafeSourceGroups.size > 0) {
+            // Reserved JavaScript object keys cannot safely be persisted in an
+            // alias map. Materialize the same visual result per member instead.
+            for (const record of members) this.plugin.data.indexGroupByPath[record.path] = next;
+          }
           this.transferRootOrder(group, next, false);
-          this.plugin.data.indexGroupOrder = this.plugin.getIndexGroups().map((candidate) => candidate === group ? next : candidate).filter((candidate, index, all) => all.indexOf(candidate) === index);
-          renameOrMergePortableGroup(this.plugin.data, group, next);
+          this.plugin.data.indexGroupOrder = groupOrder.map((candidate) => candidate === group ? next : candidate).filter((candidate, index, all) => all.indexOf(candidate) === index);
+          for (const source of new Set([group, ...sourceGroups])) renameOrMergePortableGroup(this.plugin.data, source, next);
+          this.plugin.invalidateRecordCache();
         }, { includePortableIndex: true });
+        if (!this.guardOpenedBase()) return;
         this.render();
       },
     }).open();
   }
 
   private mergeGroup(source: string): void {
+    if (!this.guardOpenedBase()) return;
     const targets = this.plugin.getIndexGroups().filter((group) => group !== source);
     new StringPickerModal(this.app, targets, `Merge “${source}” into…`, `Search ${this.plugin.data.settings.groupLabel.toLowerCase()}s…`, (target) => {
+      if (!this.guardOpenedBase()) return;
       new ConfirmModal(this.app, "Merge visual groups?", `All indexed notes in “${source}” will appear in “${target}”. Note folders and properties will not change.`, "Merge groups", async () => {
+        if (!this.guardOpenedBase()) return;
         const members = this.plugin.getIndexRecords().filter((record) => record.domain === source);
+        const sourceGroups = this.sourceGroupsForDisplayGroup(source, members);
+        const unsafeSourceGroups = new Set(sourceGroups.filter((group) => !isSafeObjectKey(group)));
+        const groupOrder = this.plugin.getIndexGroups();
         await this.plugin.mutate(`Merge visual group “${source}” into “${target}”`, () => {
           members.forEach((record) => { this.plugin.data.indexGroupByPath[record.path] = target; });
+          for (const group of sourceGroups) {
+            if (unsafeSourceGroups.has(group)) continue;
+            if (group === target) delete this.plugin.data.indexGroupAliases[group];
+            else this.plugin.data.indexGroupAliases[group] = target;
+          }
+          if (unsafeSourceGroups.size > 0) {
+            // Reserved object keys cannot be stored safely as persistent source
+            // aliases. Existing members retain the merged label per path.
+            for (const record of members) this.plugin.data.indexGroupByPath[record.path] = target;
+          }
           this.transferRootOrder(source, target, true);
-          this.plugin.data.indexGroupOrder = this.plugin.getIndexGroups().filter((group) => group !== source);
-          renameOrMergePortableGroup(this.plugin.data, source, target);
+          this.plugin.data.indexGroupOrder = groupOrder.filter((group) => group !== source);
+          for (const group of new Set([source, ...sourceGroups])) renameOrMergePortableGroup(this.plugin.data, group, target);
+          this.plugin.invalidateRecordCache();
         }, { includePortableIndex: true });
+        if (!this.guardOpenedBase()) return;
         this.render();
       }).open();
     }).open();
   }
 
-  private removeEmptyGroup(group: string): void {
-    this.run(async () => {
-      await this.plugin.mutate(`Remove empty visual group “${group}”`, () => {
+  private removeGroup(group: string, members: VaultRecord[]): void {
+    if (!this.guardOpenedBase()) return;
+    const paths = [...new Set(members.map((record) => record.path))];
+    const count = paths.length;
+    const noun = count === 1 ? this.plugin.data.settings.itemSingular : this.plugin.data.settings.itemPlural;
+    const message = count === 0
+      ? `“${group}” will be removed from this knowledge base. No Markdown note, property, or folder will be changed.`
+      : `“${group}” and its ${count} indexed ${noun} will be removed from this knowledge base. The subjects can be restored from Available or Hidden. Markdown notes, properties, folders, and collection memberships will remain untouched.`;
+    new ConfirmModal(this.app, `Remove “${group}” from this knowledge base?`, message, "Remove group", async () => {
+      if (!this.guardOpenedBase()) return;
+      const sourceGroups = this.sourceGroupsForDisplayGroup(group, members);
+      await this.plugin.mutate(`Remove visual group “${group}” from this knowledge base`, () => {
+        this.plugin.removeRecordsFromIndexState(paths);
+        for (const [path, display] of Object.entries(this.plugin.data.indexGroupByPath)) {
+          if (display === group) delete this.plugin.data.indexGroupByPath[path];
+        }
+        for (const [source, display] of Object.entries(this.plugin.data.indexGroupAliases)) {
+          if (display === group) delete this.plugin.data.indexGroupAliases[source];
+        }
         this.plugin.data.indexGroupOrder = this.plugin.data.indexGroupOrder.filter((candidate) => candidate !== group);
         delete this.plugin.data.curriculumVisual.orderByContainer[curriculumContainerKey(group, null)];
-        removePortableGroup(this.plugin.data, group);
-      }, { includePortableIndex: true });
+        for (const source of new Set([group, ...sourceGroups])) removePortableGroup(this.plugin.data, source);
+        this.plugin.invalidateRecordCache();
+      }, { includePortableIndex: true, requireUndo: true });
+      if (!this.guardOpenedBase()) return;
       this.render();
-    });
+      new Notice(count === 0
+        ? `Removed “${group}” from this knowledge base. No Markdown note was changed.`
+        : `Removed “${group}” and ${count} ${noun} from this knowledge base. Their Markdown notes were not changed.`);
+    }).open();
   }
 
   private transferRootOrder(source: string, target: string, merge: boolean): void {
@@ -444,6 +615,7 @@ export class IndexManagerModal extends Modal {
     this.actionButton(toolbar, "wrench", "Repair safe issues", () => {
       this.run(async () => {
         await this.plugin.repairIndexOrganization();
+        if (!this.guardOpenedBase()) return;
         this.diagnosticsCache = null;
         this.render();
         new Notice("Safe plugin-state repairs completed. Note metadata was not changed.");
@@ -463,15 +635,61 @@ export class IndexManagerModal extends Modal {
     if (diagnostics.length === 0) list.createDiv({ cls: "ent-cc-empty", text: "Index organization is healthy." });
   }
 
+  private ownsOpenedBase(): boolean {
+    // Prototype-only unit-test fixtures do not run onOpen(); real modal
+    // instances always capture a non-empty ID before their first render.
+    const currentEpoch = typeof this.plugin.getDataEpoch === "function" ? this.plugin.getDataEpoch() : 0;
+    return !this.openedBaseId || (this.plugin.getActiveKnowledgeBaseId() === this.openedBaseId
+      && currentEpoch === (this.openedDataEpoch ?? 0));
+  }
+
+  private guardOpenedBase(): boolean {
+    if (this.ownsOpenedBase()) return true;
+    const showNotice = !this.staleBaseNoticeShown;
+    this.staleBaseNoticeShown = true;
+    if (this.managerOpen) this.close();
+    if (showNotice) {
+      new Notice("The active knowledge base changed. Reopen the index manager before making more changes.", 8000);
+    }
+    return false;
+  }
+
+  private setGuardedTimer(action: () => void, delay: number): number {
+    let timer = 0;
+    let firedSynchronously = false;
+    timer = window.activeWindow.setTimeout(() => {
+      firedSynchronously = true;
+      this.pendingTimers?.delete(timer);
+      if (!this.managerOpen || !this.guardOpenedBase()) return;
+      action();
+    }, delay);
+    if (!firedSynchronously) (this.pendingTimers ??= new Set<number>()).add(timer);
+    return timer;
+  }
+
+  private clearTimer(timer: number): void {
+    window.activeWindow.clearTimeout(timer);
+    this.pendingTimers?.delete(timer);
+  }
+
   private run(action: () => Promise<unknown>): void {
-    void action().catch((error) => new Notice(error instanceof Error ? error.message : String(error)));
+    if (!this.guardOpenedBase()) return;
+    void action().catch((error) => {
+      if (!this.ownsOpenedBase()) {
+        this.guardOpenedBase();
+        return;
+      }
+      new Notice(error instanceof Error ? error.message : String(error));
+    });
   }
 
   private async exportWorkspace(): Promise<void> {
+    if (!this.guardOpenedBase()) return;
     const now = new Date();
     const config = createWorkspaceConfig(this.plugin.data, now.toISOString());
     if (Platform.isMobile) {
       await this.plugin.writePortableJson("workspace", config);
+      if (!this.guardOpenedBase()) return;
       new Notice("Workspace saved in the export folder inside the vault. No note contents included.");
       return;
     }
@@ -486,6 +704,7 @@ export class IndexManagerModal extends Modal {
   }
 
   private importWorkspace(): void {
+    if (!this.guardOpenedBase()) return;
     if (Platform.isMobile) {
       const files = this.plugin.getPortableJsonFiles();
       if (files.length === 0) {
@@ -493,6 +712,7 @@ export class IndexManagerModal extends Modal {
         return;
       }
       new VaultFilePickerModal(this.app, files, "Choose a workspace configuration JSON", (file) => {
+        if (!this.guardOpenedBase()) return;
         this.confirmWorkspaceImport(this.plugin.readPortableJson(file));
       }).open();
       return;
@@ -501,46 +721,75 @@ export class IndexManagerModal extends Modal {
     input.type = "file";
     input.accept = "application/json,.json";
     input.addEventListener("change", () => {
+      if (!this.guardOpenedBase()) return;
       const file = input.files?.[0];
       if (!file) return;
       void file.text().then((raw) => {
+        if (!this.guardOpenedBase()) return;
         this.confirmWorkspaceImport(Promise.resolve(JSON.parse(raw) as unknown));
-      }).catch((error) => new Notice(error instanceof Error ? error.message : String(error)));
+      }).catch((error) => {
+        if (!this.ownsOpenedBase()) {
+          this.guardOpenedBase();
+          return;
+        }
+        new Notice(error instanceof Error ? error.message : String(error));
+      });
     });
     input.click();
   }
 
   private confirmWorkspaceImport(input: Promise<unknown>): void {
+    if (!this.guardOpenedBase()) return;
     void input.then((value) => {
+      if (!this.guardOpenedBase()) return;
       const config = parseWorkspaceConfig(value);
-      for (const folder of [config.settings.primaryFolder, config.settings.defaultNoteFolder, config.settings.templatesFolder]) {
+      const destinationSettings = this.plugin.data.settings;
+      if (config.settings.workspaceMode !== destinationSettings.workspaceMode) {
+        throw new Error(`This configuration uses the ${config.settings.workspaceMode === "ent-clinical" ? "ENT clinical" : "Generic"} preset. Create or switch to a matching knowledge base before importing Workspace settings.`);
+      }
+      const importedSettings = {
+        ...config.settings,
+        workspaceName: destinationSettings.workspaceName,
+        workspaceMode: destinationSettings.workspaceMode,
+        ...(destinationSettings.workspaceMode === "ent-clinical"
+          ? { primaryFolder: destinationSettings.primaryFolder }
+          : {}),
+      };
+      for (const folder of [importedSettings.primaryFolder, importedSettings.defaultNoteFolder, importedSettings.templatesFolder]) {
         const error = validateWritableFolderPath(folder, this.app.vault.configDir);
         if (error) throw new Error(error);
       }
-      const inboxError = config.settings.workspaceMode === "ent-clinical"
-        ? validateProposalFolderPath(config.settings.proposalFolder, this.app.vault.configDir)
-        : validateWritableFolderPath(config.settings.proposalFolder, this.app.vault.configDir);
+      const inboxError = importedSettings.workspaceMode === "ent-clinical"
+        ? validateProposalFolderPath(importedSettings.proposalFolder, this.app.vault.configDir)
+        : validateWritableFolderPath(importedSettings.proposalFolder, this.app.vault.configDir);
       if (inboxError) throw new Error(inboxError);
-      const configuredTemplate = config.settings.defaultTemplatePath ? this.app.vault.getAbstractFileByPath(config.settings.defaultTemplatePath) : null;
-      const templateReset = config.settings.defaultNewNoteMode === "template" && !(configuredTemplate instanceof TFile);
+      const configuredTemplate = importedSettings.defaultTemplatePath ? this.app.vault.getAbstractFileByPath(importedSettings.defaultTemplatePath) : null;
+      const templateReset = importedSettings.defaultNewNoteMode === "template" && !(configuredTemplate instanceof TFile);
       if (templateReset) {
-        config.settings.defaultNewNoteMode = "empty";
-        config.settings.defaultTemplatePath = "";
+        importedSettings.defaultNewNoteMode = "empty";
+        importedSettings.defaultTemplatePath = "";
       }
-      new ConfirmModal(this.app, "Import workspace configuration?", `Replace the current labels, folders, metadata mappings, behavior settings, and group order with the configuration from ${config.exportedAt || "an unknown date"}? Note contents and note-specific memberships will not change.${templateReset ? " The configured template is unavailable in this vault, so new notes will default to Empty." : ""}`, "Import workspace", async () => {
-        this.plugin.assertDataWritable();
-        this.plugin.data.settings = config.settings;
-        this.plugin.data.indexGroupOrder = config.indexGroupOrder;
-        this.plugin.invalidateRecordCache();
-        await this.plugin.savePluginData();
-        await this.plugin.refreshViews();
+      new ConfirmModal(this.app, "Import workspace configuration?", `Replace the current labels, compatible folders, metadata mappings, behavior settings, and group order with the configuration from ${config.exportedAt || "an unknown date"}? The destination base name, preset, and protected ENT scope will stay unchanged. Note contents and note-specific memberships will not change.${templateReset ? " The configured template is unavailable in this vault, so new notes will default to Empty." : ""}`, "Import workspace", async () => {
+        if (!this.guardOpenedBase()) return;
+        await this.plugin.mutate("Import workspace configuration", () => {
+          this.plugin.data.settings = importedSettings;
+          this.plugin.data.indexGroupOrder = config.indexGroupOrder;
+          this.plugin.invalidateRecordCache();
+        }, { includeSettings: true, requireUndo: true });
+        if (!this.guardOpenedBase()) return;
         this.diagnosticsCache = null;
         this.titleEl.setText(`Manage ${this.plugin.data.settings.indexLabel}`);
-        if (this.plugin.isClinicalMode() && ["available", "hidden"].includes(this.tab)) this.tab = "indexed";
+        if (this.plugin.isClinicalMode() && this.tab === "available") this.tab = "indexed";
         this.render();
         new Notice("Workspace configuration imported. Markdown notes were not changed.");
       }).open();
-    }).catch((error) => new Notice(error instanceof Error ? error.message : String(error)));
+    }).catch((error) => {
+      if (!this.ownsOpenedBase()) {
+        this.guardOpenedBase();
+        return;
+      }
+      new Notice(error instanceof Error ? error.message : String(error));
+    });
   }
 
   private actionButton(parent: HTMLElement, icon: string, label: string, action: () => void, disabled = false, warning = false): HTMLButtonElement {
@@ -548,7 +797,9 @@ export class IndexManagerModal extends Modal {
     setIcon(button.createSpan(), icon);
     button.createSpan({ text: label });
     button.disabled = disabled;
-    button.addEventListener("click", action);
+    button.addEventListener("click", () => {
+      if (this.guardOpenedBase()) action();
+    });
     return button;
   }
 
@@ -556,7 +807,9 @@ export class IndexManagerModal extends Modal {
     const button = parent.createEl("button", { cls: `ent-cc-icon-button ${warning ? "ent-cc-warning-button" : ""}`.trim(), attr: { type: "button", "aria-label": label, title: label } });
     setIcon(button, icon);
     button.disabled = disabled;
-    button.addEventListener("click", action);
+    button.addEventListener("click", () => {
+      if (this.guardOpenedBase()) action();
+    });
     return button;
   }
 }

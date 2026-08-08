@@ -14,23 +14,29 @@ import {
   canonicalPathInputsUnchanged,
   cloneCollections,
   configuredGroupFromPath,
+  createDefaultStore,
+  createKnowledgeBaseEntry,
   createPersonalBackup,
   createWorkspaceConfig,
+  curriculumContainerKey,
   expectedParentCurriculumId,
   genericNotePath,
   groupRecordsByGroup,
   isExtensionCurriculumId,
   isRecognizedPluginData,
+  isSafeObjectKey,
   limitSnapshotStack,
   matchesQuery,
   matchesParsedQuery,
   MAX_CURRICULUM_DEPTH,
+  MAX_DELETED_KNOWLEDGE_BASE_IDS,
   MAX_TRANSFER_LIST_ITEMS,
   MAX_TRANSFER_SNAPSHOTS,
   MAX_TRANSFER_TOTAL_REFERENCES,
   MAX_UNDO_BYTES,
   metadataHasGap,
   migrateData,
+  migrateStore,
   moveCurriculumVisual,
   curriculumChildPaths,
   curriculumDescendantPaths,
@@ -40,11 +46,14 @@ import {
   parseWorkspaceConfig,
   pathIsInsideFolder,
   portablePlaceholderPath,
+  provisionalMigratedVaultFingerprint,
   resolveExpectedParentPath,
   replaceCurriculumVisualPath,
   replacePathMapKey,
   reconcileCurriculumVisual,
   rewritePluginDataPathPrefix,
+  rewritePluginDataFolderRename,
+  rewritePluginDataTemplatePathRename,
   resetCurriculumVisualPath,
   restoreSnapshot,
   rewriteTopLevelHeading,
@@ -52,6 +61,8 @@ import {
   snapshotStackDepthIsTruncated,
   sanitizeFileName,
   snapshotPersonal,
+  STORE_KIND,
+  STORE_VERSION,
   storedDataVersion,
   unknownQueryTokens,
   validateWritableFolderPath,
@@ -154,6 +165,181 @@ test("migrates only custom v1 headings and keeps a recovery backup", () => {
   assert.equal(data.migrationBackup?.headings.length, 2);
   assert.equal(data.selectedPath, "topic.md");
   assert.deepEqual(data.layoutSnapshots, []);
+});
+
+test("flat v10 data wraps into one v11 base without losing workspace state", () => {
+  const flat = migrateData(null);
+  flat.settings.workspaceName = "Surgical Knowledge";
+  flat.collections = [{
+    id: "collection-airway",
+    title: "Airway",
+    collapsed: true,
+    subjects: ["Knowledge/Airway.md"],
+    subheadings: [{ id: "sub-pediatric", title: "Pediatric", collapsed: false, subjects: ["Knowledge/Cleft.md"] }],
+  }];
+  flat.pinnedPaths = ["Knowledge/Airway.md"];
+  flat.nextStudyPaths = ["Knowledge/Cleft.md"];
+  flat.savedViews = [{ id: "view-airway", name: "Airway review", tab: "curriculum", query: "group:airway" }];
+  flat.curriculumVisual = {
+    parentByPath: { "Knowledge/Cleft.md": "Knowledge/Airway.md" },
+    orderByContainer: { "parent:Knowledge/Airway.md": ["Knowledge/Cleft.md"] },
+  };
+  flat.manualIndexPaths = ["Knowledge/Airway.md"];
+  flat.excludedIndexPaths = ["Knowledge/Hidden.md"];
+  flat.indexGroupByPath = { "Knowledge/Airway.md": "Airway" };
+  flat.displayNameByPath = { "Knowledge/Airway.md": "Upper Airway" };
+  flat.indexGroupAliases = { airway: "Airway" };
+  flat.indexGroupOrder = ["Airway"];
+  flat.portableIndex = {
+    version: 1,
+    groups: [{ id: "group-airway", title: "Airway", order: 0 }],
+    subjects: [{
+      id: "subject-cleft",
+      title: "Laryngeal Cleft",
+      groupId: "group-airway",
+      parentId: null,
+      order: 0,
+      indexed: true,
+      configuredId: "",
+      recordKind: "topic",
+    }],
+    resolvedPathBySubjectId: { "subject-cleft": "Knowledge/Cleft.md" },
+  };
+  flat.selectedPath = "Knowledge/Cleft.md";
+  flat.activeTab = "collections";
+  flat.collapsed.curriculumDomains = ["Airway"];
+  flat.layoutSnapshots = [snapshotPersonal(flat, "Before migration", false, true)];
+  flat.undoStack = [snapshotPersonal(flat, "Undo migration", true, true)];
+  flat.redoStack = [snapshotPersonal(flat, "Redo migration", false, true)];
+
+  const before = structuredClone(flat);
+  const store = migrateStore(flat, 1_800_000_000_000);
+
+  assert.equal(store.kind, STORE_KIND);
+  assert.equal(store.version, STORE_VERSION);
+  assert.equal(store.activeBaseId, "base-default");
+  assert.equal(store.bases.length, 1);
+  assert.equal(store.bases[0]?.id, "base-default");
+  assert.equal(store.bases[0]?.archivedAt, null);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(store.bases[0]?.data)) as unknown,
+    JSON.parse(JSON.stringify(before)) as unknown,
+    "the persisted v10 JSON payload must be preserved exactly",
+  );
+  assert.deepEqual(flat, before, "wrapping must not mutate the source v10 object");
+});
+
+test("legacy migration creates distinct random provisional IDs with the same content fingerprint", () => {
+  const flat = migrateData(null);
+  flat.settings.workspaceName = "ENT";
+  flat.pinnedPaths = ["03 Clinical Topics/Airway.md"];
+
+  const firstDevice = migrateStore(structuredClone(flat), 100);
+  const secondDevice = migrateStore(structuredClone(flat), 999);
+  const otherPayload = structuredClone(flat);
+  otherPayload.settings.workspaceName = "Research";
+  const otherVault = migrateStore(otherPayload, 100);
+
+  assert.notEqual(firstDevice.vaultId, secondDevice.vaultId);
+  assert.equal(
+    provisionalMigratedVaultFingerprint(firstDevice.vaultId),
+    provisionalMigratedVaultFingerprint(secondDevice.vaultId),
+  );
+  assert.notEqual(
+    provisionalMigratedVaultFingerprint(firstDevice.vaultId),
+    provisionalMigratedVaultFingerprint(otherVault.vaultId),
+  );
+});
+
+test("a valid v11 store migrates multiple bases as isolated workspace payloads", () => {
+  const sharedPath = "Knowledge/Shared.md";
+  const sharedPortable = {
+    version: 1 as const,
+    groups: [{ id: "group-shared", title: "Shared", order: 0 }],
+    subjects: [{
+      id: "subject-shared",
+      title: "Shared subject",
+      groupId: "group-shared",
+      parentId: null,
+      order: 0,
+      indexed: true,
+      configuredId: "",
+      recordKind: "topic" as const,
+    }],
+    resolvedPathBySubjectId: { "subject-shared": sharedPath },
+  };
+  const first = migrateData(null);
+  first.settings.workspaceName = "First KB";
+  first.pinnedPaths = [sharedPath];
+  first.portableIndex = structuredClone(sharedPortable);
+  const second = migrateData(null);
+  second.settings.workspaceName = "Second KB";
+  second.nextStudyPaths = [sharedPath];
+  second.portableIndex = structuredClone(sharedPortable);
+  const raw = {
+    kind: STORE_KIND,
+    version: STORE_VERSION,
+    activeBaseId: "base-second",
+    bases: [
+      createKnowledgeBaseEntry(first, "base-first", 100),
+      createKnowledgeBaseEntry(second, "base-second", 200),
+    ],
+  };
+
+  const migrated = migrateStore(raw, 300);
+  assert.equal(migrated.activeBaseId, "base-second");
+  assert.deepEqual(migrated.bases.map((entry) => entry.data.settings.workspaceName), ["First KB", "Second KB"]);
+  assert.deepEqual(migrated.bases[0]?.data.pinnedPaths, [sharedPath]);
+  assert.deepEqual(migrated.bases[1]?.data.nextStudyPaths, [sharedPath]);
+  assert.deepEqual(migrated.deletedBaseIds, {}, "older v11 envelopes gain an empty deletion-tombstone map");
+
+  migrated.bases[0].data.pinnedPaths.push("Knowledge/First only.md");
+  migrated.bases[0].data.portableIndex.subjects[0].title = "Changed only in first";
+  assert.deepEqual(migrated.bases[1]?.data.pinnedPaths, []);
+  assert.equal(migrated.bases[1]?.data.portableIndex.subjects[0]?.title, "Shared subject");
+  assert.equal(raw.bases[0]?.data.portableIndex.subjects[0]?.title, "Shared subject", "migration must isolate output from the parsed input");
+});
+
+test("v11 store parsing rejects duplicate IDs and invalid active-base invariants", () => {
+  const valid = createDefaultStore(migrateData(null), 100);
+  const duplicate = structuredClone(valid);
+  duplicate.bases.push({ ...structuredClone(duplicate.bases[0]), createdAt: 200, updatedAt: 200 });
+  assert.throws(() => migrateStore(duplicate, 300), /duplicate knowledge-base ID/i);
+
+  const missingActive = structuredClone(valid);
+  missingActive.activeBaseId = "base-missing";
+  assert.throws(() => migrateStore(missingActive, 300), /active knowledge base is missing/i);
+
+  const archivedActive = structuredClone(valid);
+  archivedActive.bases[0].archivedAt = 250;
+  assert.throws(() => migrateStore(archivedActive, 300), /at least one knowledge base must remain available|active knowledge base is missing or archived/i);
+
+  const malformed = structuredClone(valid);
+  malformed.bases[0].id = "__proto__";
+  malformed.activeBaseId = "__proto__";
+  assert.throws(() => migrateStore(malformed, 300), /invalid stable ID/i);
+});
+
+test("v11 store parsing validates and bounds permanent-deletion tombstones", () => {
+  const valid = createDefaultStore(migrateData(null), 100);
+  const malformedMap = structuredClone(valid) as unknown as Record<string, unknown>;
+  malformedMap.deletedBaseIds = [];
+  assert.throws(() => migrateStore(malformedMap, 300), /timestamp map/i);
+
+  const overlapping = structuredClone(valid);
+  overlapping.deletedBaseIds[overlapping.bases[0].id] = 200;
+  assert.throws(() => migrateStore(overlapping, 300), /still present in the base list/i);
+
+  const unsafe = structuredClone(valid) as unknown as { deletedBaseIds: Record<string, number> };
+  unsafe.deletedBaseIds = JSON.parse('{"__proto__":200}') as Record<string, number>;
+  assert.throws(() => migrateStore(unsafe, 300), /invalid stable ID/i);
+
+  const oversized = structuredClone(valid);
+  oversized.deletedBaseIds = Object.fromEntries(Array.from(
+    { length: MAX_DELETED_KNOWLEDGE_BASE_IDS + 1 },
+    (_, index) => [`base-deleted-${index}`, index + 1],
+  ));
+  assert.throws(() => migrateStore(oversized, 300), /permanent-deletion tombstones/i);
 });
 
 test("collection cloning preserves multi-membership while isolating mutations", () => {
@@ -486,20 +672,30 @@ test("organization backup round-trips without clinical content", () => {
   data.manualIndexPaths = ["Outside/Topic.md"];
   data.excludedIndexPaths = ["Knowledge Base/Hidden.md"];
   data.indexGroupByPath["Outside/Topic.md"] = "Airway";
+  data.displayNameByPath["Outside/Topic.md"] = "Airway overview";
+  data.indexGroupAliases.airway = "Airway";
   data.indexGroupOrder = ["Airway"];
-  const backup = createPersonalBackup(data, "2026-08-07T00:00:00.000Z");
+  const backup = createPersonalBackup(data, "2026-08-07T00:00:00.000Z", "vault-ent-main", "base-ent", "ENT");
   const parsed = parsePersonalBackup(JSON.parse(JSON.stringify(backup)) as unknown);
+  assert.equal(backup.version, 7);
+  assert.equal(parsed.version, 7);
+  assert.equal(parsed.sourceVaultId, "vault-ent-main");
+  assert.equal(parsed.sourceBaseId, "base-ent");
+  assert.equal(parsed.sourceBaseName, "ENT");
+  assert.equal(parsed.sourceWorkspaceMode, "generic");
   assert.equal(parsed.collections[0]?.title, "Airway");
   assert.deepEqual(parsed.pinnedPaths, [record().path]);
   assert.equal(parsed.curriculumVisual.parentByPath[record().path], null);
   assert.deepEqual(parsed.manualIndexPaths, ["Outside/Topic.md"]);
   assert.deepEqual(parsed.excludedIndexPaths, ["Knowledge Base/Hidden.md"]);
   assert.equal(parsed.indexGroupByPath["Outside/Topic.md"], "Airway");
+  assert.equal(parsed.displayNameByPath["Outside/Topic.md"], "Airway overview");
+  assert.equal(parsed.indexGroupAliases.airway, "Airway");
   assert.deepEqual(parsed.indexGroupOrder, ["Airway"]);
   assert.equal("settings" in parsed, false);
 });
 
-test("version 1 organization backups remain importable with empty index controls", () => {
+test("version 1 organization backups remain readable but carry no trusted vault identity", () => {
   const parsed = parsePersonalBackup({
     kind: "ent-vault-command-center-personal-backup",
     version: 1,
@@ -511,10 +707,15 @@ test("version 1 organization backups remain importable with empty index controls
     curriculumVisual: { parentByPath: {}, orderByContainer: {} },
     layoutSnapshots: [],
   });
-  assert.equal(parsed.version, 4);
+  assert.equal(parsed.version, 7);
+  assert.equal(parsed.sourceVaultId, "");
+  assert.equal(parsed.sourceBaseId, "");
+  assert.equal(parsed.sourceWorkspaceMode, "");
   assert.deepEqual(parsed.manualIndexPaths, []);
   assert.deepEqual(parsed.excludedIndexPaths, []);
   assert.deepEqual(parsed.indexGroupByPath, {});
+  assert.deepEqual(parsed.displayNameByPath, {});
+  assert.deepEqual(parsed.indexGroupAliases, {});
   assert.deepEqual(parsed.indexGroupOrder, []);
 });
 
@@ -531,6 +732,22 @@ test("portable workspace configuration round-trips settings and group order with
   assert.deepEqual(parsed.indexGroupOrder, ["Projects", "Reading"]);
   assert.equal("manualIndexPaths" in parsed, false);
   assert.equal(JSON.stringify(parsed).includes("Private/Note.md"), false);
+});
+
+test("workspace imports preserve the destination knowledge-base identity", () => {
+  const source = migrateData(null);
+  source.settings.workspaceName = "ENT";
+  source.settings.indexLabel = "ENT master index";
+  source.indexGroupOrder = ["Pediatric", "Otology"];
+  const target = migrateData(null);
+  target.settings.workspaceName = "Research";
+  const value = parseAnyCommandCenterExport(createWorkspaceConfig(source, "2026-08-08T00:00:00.000Z"));
+
+  applyPortableExport(target, value, portableSelection({ workspace: true }), "replace");
+
+  assert.equal(target.settings.workspaceName, "Research");
+  assert.equal(target.settings.indexLabel, "ENT master index");
+  assert.deepEqual(target.indexGroupOrder, ["Pediatric", "Otology"]);
 });
 
 test("workspace import bounds its group-order list", () => {
@@ -611,6 +828,130 @@ test("portable export is path-free, content-free, and keeps stable subject IDs a
   assert.equal(first.components.index?.subjects[0]?.configuredId, "", "generic configurable IDs are not portable metadata");
   assert.equal(data.portableIndex.subjects.length, 1);
   assert.equal(data.portableIndex.resolvedPathBySubjectId[first.components.index?.subjects[0]?.id ?? ""], sourcePath);
+});
+
+test("portable index round-trip preserves the effective ENT heading hierarchy, order, and collapse state", () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  data.settings.idProperty = "curriculum_id";
+  const clinicalEvaluation = record({
+    path: "03 Clinical Topics/01 Pediatric/ENT-PED-003 - Clinical Evaluation of Airway Obstruction.md",
+    title: "Clinical Evaluation of Airway Obstruction",
+    curriculumId: "ENT-PED-003",
+    folderOrder: "01 Pediatric",
+  });
+  const stridor = record({
+    path: "03 Clinical Topics/01 Pediatric/ENT-PED-003.01 - Evaluation of stridor.md",
+    title: "Evaluation of stridor",
+    curriculumId: "ENT-PED-003.01",
+    folderOrder: "01 Pediatric",
+  });
+  const aspiration = record({
+    path: "03 Clinical Topics/01 Pediatric/ENT-PED-003.02 - Evaluation of aspiration.md",
+    title: "Evaluation of aspiration",
+    curriculumId: "ENT-PED-003.02",
+    folderOrder: "01 Pediatric",
+  });
+  const otology = record({
+    path: "03 Clinical Topics/02 Otology/ENT-OTO-001 - Hearing Loss.md",
+    title: "Hearing Loss",
+    curriculumId: "ENT-OTO-001",
+    domain: "Otology",
+    folderOrder: "02 Otology",
+  });
+  const general = record({
+    path: "03 Clinical Topics/99 General/ENT-GEN-001 - General ENT.md",
+    title: "General ENT",
+    curriculumId: "ENT-GEN-001",
+    domain: "General",
+    folderOrder: "99 General",
+  });
+  // Deliberately differ from both folder order and the requested child order.
+  const records = [general, aspiration, otology, stridor, clinicalEvaluation];
+  data.curriculumVisual.orderByContainer[curriculumContainerKey("Pediatric", clinicalEvaluation.path)] = [stridor.path, aspiration.path];
+  data.indexGroupOrder = ["Future empty heading"];
+  registerPortableGroup(data, "Future empty heading");
+  data.collapsed.curriculumDomains = ["Pediatric"];
+  data.collapsed.curriculumNodes = [clinicalEvaluation.path];
+
+  const exported = createPortableExport(data, records, portableSelection({ index: true }), "2026-08-08T00:00:00.000Z");
+  const parsed = parsePortableExport(JSON.parse(JSON.stringify(exported)) as unknown);
+  const index = parsed.components.index;
+  assert.ok(index);
+  assert.deepEqual(index.groups.map((group) => group.title), ["Pediatric", "Otology", "General", "Future empty heading"]);
+  const parent = index.subjects.find((subject) => subject.title === clinicalEvaluation.title);
+  const exportedStridor = index.subjects.find((subject) => subject.title === stridor.title);
+  const exportedAspiration = index.subjects.find((subject) => subject.title === aspiration.title);
+  assert.ok(parent);
+  assert.ok(exportedStridor);
+  assert.ok(exportedAspiration);
+  assert.equal(exportedStridor.parentId, parent.id);
+  assert.equal(exportedAspiration.parentId, parent.id);
+  assert.deepEqual(
+    [exportedStridor, exportedAspiration].sort((a, b) => a.order - b.order).map((subject) => subject.title),
+    [stridor.title, aspiration.title],
+  );
+  const pediatricGroup = index.groups.find((group) => group.title === "Pediatric");
+  assert.deepEqual(index.collapsedGroupIds, [pediatricGroup?.id]);
+  assert.deepEqual(index.collapsedSubjectIds, [parent.id]);
+  const serialized = JSON.stringify(exported);
+  assert.equal(records.some((item) => serialized.includes(item.path)), false, "portable hierarchy state must remain path-free");
+
+  const replaced = migrateData(null);
+  replaced.collapsed.curriculumDomains = ["Old local group"];
+  replaced.collapsed.curriculumNodes = ["Old/Local parent.md"];
+  applyPortableExport(replaced, parsed, portableSelection({ index: true }), "replace");
+  const replacedParent = replaced.portableIndex.subjects.find((subject) => subject.title === clinicalEvaluation.title);
+  const replacedStridor = replaced.portableIndex.subjects.find((subject) => subject.title === stridor.title);
+  const replacedAspiration = replaced.portableIndex.subjects.find((subject) => subject.title === aspiration.title);
+  assert.ok(replacedParent);
+  assert.ok(replacedStridor);
+  assert.ok(replacedAspiration);
+  const parentPath = portablePlaceholderPath(replacedParent.id);
+  const stridorPath = portablePlaceholderPath(replacedStridor.id);
+  const aspirationPath = portablePlaceholderPath(replacedAspiration.id);
+  assert.deepEqual(replaced.indexGroupOrder, ["Pediatric", "Otology", "General", "Future empty heading"]);
+  assert.equal(replaced.curriculumVisual.parentByPath[stridorPath], parentPath);
+  assert.equal(replaced.curriculumVisual.parentByPath[aspirationPath], parentPath);
+  assert.deepEqual(
+    replaced.curriculumVisual.orderByContainer[curriculumContainerKey("Pediatric", parentPath)],
+    [stridorPath, aspirationPath],
+  );
+  assert.deepEqual(replaced.collapsed.curriculumDomains, ["Pediatric"]);
+  assert.deepEqual(replaced.collapsed.curriculumNodes, [parentPath]);
+
+  const merged = migrateData(null);
+  merged.collapsed.curriculumDomains = ["Local group"];
+  merged.collapsed.curriculumNodes = ["Local/Parent.md"];
+  applyPortableExport(merged, parsed, portableSelection({ index: true }), "merge");
+  const mergedParent = merged.portableIndex.subjects.find((subject) => subject.title === clinicalEvaluation.title);
+  assert.ok(mergedParent);
+  assert.deepEqual(merged.collapsed.curriculumDomains, ["Local group", "Pediatric"]);
+  assert.deepEqual(merged.collapsed.curriculumNodes, ["Local/Parent.md", portablePlaceholderPath(mergedParent.id)]);
+});
+
+test("legacy portable index packages preserve local collapse state when path-free collapse IDs are absent", () => {
+  const parsed = parsePortableExport(portableFixture());
+  assert.equal(parsed.components.index?.collapsedGroupIds, undefined);
+  assert.equal(parsed.components.index?.collapsedSubjectIds, undefined);
+  const target = migrateData(null);
+  target.collapsed.curriculumDomains = ["Keep local group"];
+  target.collapsed.curriculumNodes = ["Keep/Local subject.md"];
+
+  applyPortableExport(target, parsed, portableSelection({ index: true }), "replace");
+
+  assert.deepEqual(target.collapsed.curriculumDomains, ["Keep local group"]);
+  assert.deepEqual(target.collapsed.curriculumNodes, ["Keep/Local subject.md"]);
+});
+
+test("portable parser validates and bounds path-free collapsed hierarchy IDs", () => {
+  const unknown = portableFixture();
+  if (unknown.components.index) unknown.components.index.collapsedSubjectIds = ["subject-unknown"];
+  assert.throws(() => parsePortableExport(unknown), /collapsed index subjects references unknown ID/i);
+
+  const oversized = portableFixture();
+  if (oversized.components.index) oversized.components.index.collapsedGroupIds = Array(10_001).fill("group-airway") as string[];
+  assert.throws(() => parsePortableExport(oversized), /collapsed index groups has too many entries/i);
 });
 
 test("portable export retains only the canonical clinical curriculum ID mapping", () => {
@@ -867,12 +1208,12 @@ test("portable parser bounds per-list and aggregate subject references below the
 
 test("same-vault recovery bounds lists, aggregate references, saved views, and snapshots", () => {
   const source = migrateData(null);
-  const oversizedList = createPersonalBackup(source, "2026-08-08T00:00:00.000Z");
+  const oversizedList = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-ent-main", "base-ent", "ENT");
   oversizedList.pinnedPaths = Array(MAX_TRANSFER_LIST_ITEMS + 1).fill("Note.md") as string[];
   assert.ok(new TextEncoder().encode(JSON.stringify(oversizedList)).byteLength < 10 * 1024 * 1024);
   assert.throws(() => parsePersonalBackup(oversizedList), /too many references/i);
 
-  const aggregate = createPersonalBackup(source, "2026-08-08T00:00:00.000Z");
+  const aggregate = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-ent-main", "base-ent", "ENT");
   const referencesPerList = MAX_TRANSFER_LIST_ITEMS;
   const listCount = Math.floor(MAX_TRANSFER_TOTAL_REFERENCES / referencesPerList) + 1;
   aggregate.collections = [{
@@ -890,7 +1231,7 @@ test("same-vault recovery bounds lists, aggregate references, saved views, and s
   assert.ok(new TextEncoder().encode(JSON.stringify(aggregate)).byteLength < 10 * 1024 * 1024);
   assert.throws(() => parsePersonalBackup(aggregate), /recovery backup contains more than/i);
 
-  const savedViews = createPersonalBackup(source, "2026-08-08T00:00:00.000Z");
+  const savedViews = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-ent-main", "base-ent", "ENT");
   savedViews.savedViews = Array.from({ length: 10_001 }, (_, index) => ({
     id: `view-${index}`,
     name: `View ${index}`,
@@ -899,7 +1240,7 @@ test("same-vault recovery bounds lists, aggregate references, saved views, and s
   }));
   assert.throws(() => parsePersonalBackup(savedViews), /saved views has too many entries/i);
 
-  const snapshots = createPersonalBackup(source, "2026-08-08T00:00:00.000Z");
+  const snapshots = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-ent-main", "base-ent", "ENT");
   snapshots.layoutSnapshots = Array.from({ length: MAX_TRANSFER_SNAPSHOTS + 1 }, (_, index) => snapshotPersonal(source, `Snapshot ${index}`));
   assert.throws(() => parsePersonalBackup(snapshots), /named snapshots has too many entries/i);
 });
@@ -1092,7 +1433,7 @@ test("same-vault recovery is an explicit standalone replace operation", () => {
     version: 1,
     exportedAt: "2026-08-08T00:00:00.000Z",
     sourceWorkspace: "",
-    components: { recovery: createPersonalBackup(source, "2026-08-08T00:00:00.000Z") },
+    components: { recovery: createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-ent-main", "base-ent", "ENT") },
   };
   const target = migrateData(null);
   assert.throws(() => applyPortableExport(target, value, portableSelection({ recovery: true }), "merge"), /not a merge/i);
@@ -1101,6 +1442,370 @@ test("same-vault recovery is an explicit standalone replace operation", () => {
     () => applyPortableExport(target, value, portableSelection({ recovery: true, workspace: true }), "replace"),
     /by itself/i,
   );
+});
+
+test("same-vault recovery rejects ent-Main-vault data in MY MAIN NOTE KB before mutation", () => {
+  const source = migrateData(null);
+  source.collections = [{ id: "ent", title: "ENT", collapsed: false, subjects: ["03 Clinical Topics/Larynx.md"], subheadings: [] }];
+  const value: PortableExportV1 = {
+    kind: PORTABLE_EXPORT_KIND,
+    version: 1,
+    exportedAt: "2026-08-08T00:00:00.000Z",
+    sourceWorkspace: "ENT main vault",
+    components: {
+      recovery: createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-ent-main-vault", "base-ent", "ENT"),
+    },
+  };
+  const target = migrateData(null);
+  target.collections = [{ id: "local", title: "MY MAIN NOTE KB", collapsed: false, subjects: ["Knowledge Base/Local.md"], subheadings: [] }];
+  const before = structuredClone(target);
+
+  assert.throws(
+    () => applyPortableExport(target, value, portableSelection({ recovery: true }), "replace", "vault-my-main-note-kb"),
+    /different Obsidian vault/i,
+  );
+  assert.deepEqual(target, before);
+});
+
+test("v7 recovery restores only into its exact knowledge base by default", () => {
+  const source = migrateData(null);
+  source.settings.workspaceName = "ENT";
+  source.collections = [{ id: "airway", title: "Airway", collapsed: false, subjects: ["Knowledge/Airway.md"], subheadings: [] }];
+  const value: PortableExportV1 = {
+    kind: PORTABLE_EXPORT_KIND,
+    version: 1,
+    exportedAt: "2026-08-08T00:00:00.000Z",
+    sourceWorkspace: "ENT",
+    components: {
+      recovery: createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-shared", "base-ent", "ENT"),
+    },
+  };
+  const target = migrateData(null);
+  target.settings.workspaceName = "ENT renamed";
+
+  applyPortableExport(
+    target,
+    value,
+    portableSelection({ recovery: true }),
+    "replace",
+    "vault-shared",
+    undefined,
+    "base-ent",
+    "ENT renamed",
+  );
+
+  assert.equal(target.collections[0]?.title, "Airway");
+});
+
+test("same-vault recovery cannot overwrite another knowledge base without a separate override", () => {
+  const source = migrateData(null);
+  source.settings.workspaceName = "ENT";
+  source.collections = [{ id: "ent", title: "ENT", collapsed: false, subjects: [], subheadings: [] }];
+  const value: PortableExportV1 = {
+    kind: PORTABLE_EXPORT_KIND,
+    version: 1,
+    exportedAt: "2026-08-08T00:00:00.000Z",
+    sourceWorkspace: "ENT",
+    components: {
+      recovery: createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-shared", "base-ent", "ENT"),
+    },
+  };
+  const target = migrateData(null);
+  target.settings.workspaceName = "Research";
+  target.collections = [{ id: "local", title: "Keep", collapsed: false, subjects: [], subheadings: [] }];
+  const before = structuredClone(target);
+
+  assert.throws(
+    () => applyPortableExport(
+      target,
+      value,
+      portableSelection({ recovery: true }),
+      "replace",
+      "vault-shared",
+      undefined,
+      "base-research",
+      "Research",
+    ),
+    /belongs to knowledge base “ENT”.*not “Research”.*separate cross-base/i,
+  );
+  assert.deepEqual(target, before);
+
+  applyPortableExport(
+    target,
+    value,
+    portableSelection({ recovery: true }),
+    "replace",
+    "vault-shared",
+    undefined,
+    "base-research",
+    "Research",
+    true,
+  );
+  assert.equal(target.collections[0]?.title, "ENT");
+});
+
+test("cross-base recovery is hard-blocked across Generic and ENT clinical presets", () => {
+  const source = migrateData(null);
+  source.settings.workspaceMode = "ent-clinical";
+  source.settings.workspaceName = "ENT";
+  const value: PortableExportV1 = {
+    kind: PORTABLE_EXPORT_KIND,
+    version: 1,
+    exportedAt: "2026-08-08T00:00:00.000Z",
+    sourceWorkspace: "ENT",
+    components: {
+      recovery: createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-shared", "base-ent", "ENT"),
+    },
+  };
+  const target = migrateData(null);
+  target.settings.workspaceName = "Research";
+  const before = structuredClone(target);
+
+  assert.throws(
+    () => applyPortableExport(
+      target,
+      value,
+      portableSelection({ recovery: true }),
+      "replace",
+      "vault-shared",
+      undefined,
+      "base-research",
+      "Research",
+      true,
+    ),
+    /ENT clinical preset.*cannot be restored into the Generic preset/i,
+  );
+  assert.deepEqual(target, before);
+});
+
+test("v1–v6 recovery requires a distinct base-unverified override", () => {
+  const source = migrateData(null);
+  source.savedViews = [{ id: "review", name: "Review", tab: "curriculum", query: "larynx" }];
+  const modern = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-shared", "base-ent", "ENT");
+  const v6 = { ...modern, version: 6 } as Record<string, unknown>;
+  delete v6.sourceBaseId;
+  delete v6.sourceBaseName;
+  delete v6.sourceWorkspaceMode;
+  const parsed = parsePersonalBackup(v6);
+  const value: PortableExportV1 = {
+    kind: PORTABLE_EXPORT_KIND,
+    version: 1,
+    exportedAt: modern.exportedAt,
+    sourceWorkspace: "",
+    components: { recovery: parsed },
+  };
+  const target = migrateData(null);
+
+  assert.throws(
+    () => applyPortableExport(
+      target,
+      value,
+      portableSelection({ recovery: true }),
+      "replace",
+      "vault-shared",
+      undefined,
+      "base-ent",
+      "ENT",
+    ),
+    /v1–v6 recovery.*base-unverified/i,
+  );
+  applyPortableExport(
+    target,
+    value,
+    portableSelection({ recovery: true }),
+    "replace",
+    "vault-shared",
+    undefined,
+    "base-ent",
+    "ENT",
+    true,
+  );
+  assert.equal(target.savedViews[0]?.name, "Review");
+});
+
+test("recovery exported from a losing provisional ID is rejected after first-upgrade convergence", () => {
+  const legacy = migrateData(null);
+  const first = migrateStore(structuredClone(legacy), 100);
+  const second = migrateStore(structuredClone(legacy), 100);
+  const winnerId = [first.vaultId, second.vaultId].sort()[0];
+  const loserId = [first.vaultId, second.vaultId].sort()[1];
+  const backup = createPersonalBackup(legacy, "2026-08-08T00:00:00.000Z", loserId, "base-default", "My Knowledge Base");
+  const value: PortableExportV1 = {
+    kind: PORTABLE_EXPORT_KIND,
+    version: 1,
+    exportedAt: backup.exportedAt,
+    sourceWorkspace: "",
+    components: { recovery: backup },
+  };
+  const target = migrateData(null);
+
+  assert.throws(
+    () => applyPortableExport(
+      target,
+      value,
+      portableSelection({ recovery: true }),
+      "replace",
+      winnerId,
+      undefined,
+      "base-default",
+      "My Knowledge Base",
+    ),
+    /different Obsidian vault/i,
+  );
+});
+
+test("legacy recovery with 0 of 722 referenced paths is rejected before mutation", () => {
+  const source = migrateData(null);
+  source.manualIndexPaths = Array.from({ length: 722 }, (_, index) => `03 Clinical Topics/Legacy ${index}.md`);
+  const modern = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-ent-main-vault", "base-ent", "ENT");
+  const legacy = { ...modern, version: 5 } as Record<string, unknown>;
+  delete legacy.sourceVaultId;
+  const parsedLegacy = parsePersonalBackup(legacy);
+  const target = migrateData(null);
+  target.pinnedPaths = ["Knowledge Base/Keep.md"];
+  const before = structuredClone(target);
+  const value: PortableExportV1 = {
+    kind: PORTABLE_EXPORT_KIND,
+    version: 1,
+    exportedAt: "2026-08-08T00:00:00.000Z",
+    sourceWorkspace: "",
+    components: { recovery: parsedLegacy },
+  };
+
+  assert.throws(
+    () => applyPortableExport(
+      target,
+      value,
+      portableSelection({ recovery: true }),
+      "replace",
+      "vault-my-main-note-kb",
+      () => false,
+    ),
+    /matches 0 of 722 unique referenced paths.*at least 361 \(50%\)/i,
+  );
+  assert.deepEqual(target, before);
+});
+
+test("legacy recovery with only 1 of 722 matching paths is rejected before mutation", () => {
+  const source = migrateData(null);
+  source.manualIndexPaths = Array.from({ length: 722 }, (_, index) => `03 Clinical Topics/Legacy ${index}.md`);
+  const modern = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-ent-main-vault", "base-ent", "ENT");
+  const legacy = { ...modern, version: 5 } as Record<string, unknown>;
+  delete legacy.sourceVaultId;
+  const target = migrateData(null);
+  target.pinnedPaths = ["Knowledge Base/Keep.md"];
+  const before = structuredClone(target);
+  const value: PortableExportV1 = {
+    kind: PORTABLE_EXPORT_KIND,
+    version: 1,
+    exportedAt: modern.exportedAt,
+    sourceWorkspace: "",
+    components: { recovery: parsePersonalBackup(legacy) },
+  };
+
+  assert.throws(
+    () => applyPortableExport(
+      target,
+      value,
+      portableSelection({ recovery: true }),
+      "replace",
+      "vault-my-main-note-kb",
+      (path) => path === "03 Clinical Topics/Legacy 0.md",
+    ),
+    /matches 1 of 722 unique referenced paths.*at least 361 \(50%\)/i,
+  );
+  assert.deepEqual(target, before);
+});
+
+test("legacy recovery with exactly 361 of 722 matching paths reaches the threshold", () => {
+  const source = migrateData(null);
+  source.manualIndexPaths = Array.from({ length: 722 }, (_, index) => `03 Clinical Topics/Legacy ${index}.md`);
+  const modern = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-ent-main-vault", "base-ent", "ENT");
+  const legacy = { ...modern, version: 5 } as Record<string, unknown>;
+  delete legacy.sourceVaultId;
+  const target = migrateData(null);
+  const value: PortableExportV1 = {
+    kind: PORTABLE_EXPORT_KIND,
+    version: 1,
+    exportedAt: modern.exportedAt,
+    sourceWorkspace: "",
+    components: { recovery: parsePersonalBackup(legacy) },
+  };
+
+  applyPortableExport(
+    target,
+    value,
+    portableSelection({ recovery: true }),
+    "replace",
+    "vault-my-main-note-kb",
+    (path) => {
+      const match = /Legacy (\d+)\.md$/.exec(path);
+      return match ? Number(match[1]) < 361 : false;
+    },
+    "base-destination",
+    "Destination",
+    true,
+  );
+  assert.equal(target.manualIndexPaths.length, 722);
+});
+
+test("confirmed legacy recovery remains available at the at-least-half threshold", () => {
+  const source = migrateData(null);
+  source.manualIndexPaths = ["Knowledge Base/Found.md", "Knowledge Base/Missing.md"];
+  const modern = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-source", "base-source", "Source");
+  const legacy = { ...modern, version: 5 } as Record<string, unknown>;
+  delete legacy.sourceVaultId;
+  const parsedLegacy = parsePersonalBackup(legacy);
+  const target = migrateData(null);
+  const value: PortableExportV1 = {
+    kind: PORTABLE_EXPORT_KIND,
+    version: 1,
+    exportedAt: modern.exportedAt,
+    sourceWorkspace: "",
+    components: { recovery: parsedLegacy },
+  };
+
+  applyPortableExport(
+    target,
+    value,
+    portableSelection({ recovery: true }),
+    "replace",
+    "vault-destination",
+    (path) => path === "Knowledge Base/Found.md",
+    "base-destination",
+    "Destination",
+    true,
+  );
+  assert.deepEqual(target.manualIndexPaths, source.manualIndexPaths);
+});
+
+test("confirmed path-free legacy recovery does not require a path preflight", () => {
+  const source = migrateData(null);
+  source.savedViews = [{ id: "review", name: "Review", tab: "curriculum", query: "larynx" }];
+  const modern = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-source", "base-source", "Source");
+  const legacy = { ...modern, version: 5 } as Record<string, unknown>;
+  delete legacy.sourceVaultId;
+  const value: PortableExportV1 = {
+    kind: PORTABLE_EXPORT_KIND,
+    version: 1,
+    exportedAt: modern.exportedAt,
+    sourceWorkspace: "",
+    components: { recovery: parsePersonalBackup(legacy) },
+  };
+  const target = migrateData(null);
+
+  applyPortableExport(
+    target,
+    value,
+    portableSelection({ recovery: true }),
+    "replace",
+    "vault-destination",
+    undefined,
+    "base-destination",
+    "Destination",
+    true,
+  );
+  assert.equal(target.savedViews[0]?.name, "Review");
 });
 
 test("portable serialization enforces the same 10 MB contract as import", () => {
@@ -1183,7 +1888,7 @@ test("portable dispatcher accepts legacy workspace configurations and personal b
   assert.equal(workspace.components.index, undefined);
 
   const recovery = parseAnyCommandCenterExport(
-    JSON.parse(JSON.stringify(createPersonalBackup(data, exportedAt))) as unknown,
+    JSON.parse(JSON.stringify(createPersonalBackup(data, exportedAt, "vault-ent-main", "base-ent", "ENT"))) as unknown,
   );
   assert.equal(recovery.kind, PORTABLE_EXPORT_KIND);
   assert.equal(recovery.components.recovery?.collections[0]?.title, "Legacy collection");
@@ -1284,6 +1989,284 @@ test("folder renames rewrite every descendant reference, including snapshots and
   assert.deepEqual(data.undoStack[0]?.pinnedPaths, ["New/One.md"]);
 });
 
+test("direct-child folder renames migrate folder-derived groups through nested history", () => {
+  const data = migrateData(null);
+  data.settings.primaryFolder = "Knowledge Base";
+  data.settings.templatesFolder = "Knowledge Base/Old Group/Templates";
+  data.indexGroupAliases = { "Old Group": "Curated Airway" };
+  data.indexGroupOrder = ["Old Group", "Curated Airway", "Other"];
+  data.curriculumVisual.orderByContainer = {
+    [curriculumContainerKey("Old Group", null)]: ["Knowledge Base/Old Group/Legacy.md"],
+    [curriculumContainerKey("Curated Airway", null)]: ["Knowledge Base/Old Group/Current.md"],
+  };
+  data.collapsed.curriculumDomains = ["Old Group", "Curated Airway"];
+  data.portableIndex = {
+    version: 1,
+    groups: [
+      { id: "group-old", title: "Old Group", order: 0 },
+      { id: "group-curated", title: "Curated Airway", order: 1 },
+    ],
+    subjects: [{
+      id: "subject",
+      title: "Topic",
+      groupId: "group-old",
+      parentId: null,
+      order: 0,
+      indexed: true,
+      configuredId: "",
+      recordKind: "topic",
+    }],
+    resolvedPathBySubjectId: {},
+  };
+
+  const history = snapshotPersonal(data, "Historical state", true, true);
+  history.indexGroupAliases = {};
+  history.indexGroupOrder = ["Old Group", "Other"];
+  history.curriculumVisual.orderByContainer = {
+    [curriculumContainerKey("Old Group", null)]: ["Knowledge Base/Old Group/Historical.md"],
+  };
+  if (history.portableIndex) {
+    history.portableIndex.groups = [{ id: "history-group", title: "Old Group", order: 0 }];
+    history.portableIndex.subjects[0].groupId = "history-group";
+  }
+  const nested = structuredClone(history);
+  nested.label = "Nested historical state";
+  nested.indexGroupAliases = { "Old Group": "Nested display" };
+  nested.indexGroupOrder = ["Old Group", "Nested display"];
+  nested.curriculumVisual.orderByContainer = {
+    [curriculumContainerKey("Old Group", null)]: ["Knowledge Base/Old Group/Nested.md"],
+  };
+  nested.layoutSnapshots = undefined;
+  history.layoutSnapshots = [nested];
+  data.layoutSnapshots = [structuredClone(history)];
+  data.undoStack = [structuredClone(history)];
+  data.redoStack = [structuredClone(history)];
+
+  assert.equal(rewritePluginDataFolderRename(
+    data,
+    "Knowledge Base/Old Group",
+    "Knowledge Base/New Group",
+  ), true);
+
+  assert.deepEqual(data.indexGroupAliases, {
+    "Old Group": "Curated Airway",
+    "New Group": "Curated Airway",
+  });
+  assert.deepEqual(data.indexGroupOrder, ["Old Group", "Curated Airway", "Other"]);
+  assert.deepEqual(data.curriculumVisual.orderByContainer[curriculumContainerKey("Curated Airway", null)], [
+    "Knowledge Base/Old Group/Current.md",
+    "Knowledge Base/Old Group/Legacy.md",
+  ]);
+  assert.deepEqual(data.curriculumVisual.orderByContainer[curriculumContainerKey("Old Group", null)], [
+    "Knowledge Base/Old Group/Legacy.md",
+  ]);
+  assert.deepEqual(data.collapsed.curriculumDomains, ["Old Group", "Curated Airway"]);
+  assert.deepEqual(data.portableIndex.groups.map((group) => [group.id, group.title]), [
+    ["group-old", "Old Group"],
+    ["group-curated", "Curated Airway"],
+  ]);
+  assert.equal(data.portableIndex.subjects[0]?.groupId, "group-old");
+  assert.equal(data.settings.templatesFolder, "Knowledge Base/New Group/Templates");
+
+  for (const stack of [data.layoutSnapshots, data.undoStack, data.redoStack]) {
+    const saved = stack[0];
+    assert.deepEqual(saved?.indexGroupAliases, {});
+    assert.deepEqual(saved?.indexGroupOrder, ["Old Group", "New Group", "Other"]);
+    assert.deepEqual(saved?.curriculumVisual.orderByContainer[curriculumContainerKey("Old Group", null)], [
+      "Knowledge Base/Old Group/Historical.md",
+    ]);
+    assert.deepEqual(saved?.curriculumVisual.orderByContainer[curriculumContainerKey("New Group", null)], [
+      "Knowledge Base/Old Group/Historical.md",
+    ]);
+    assert.equal(saved?.portableIndex?.groups[0]?.title, "Old Group");
+    assert.equal(saved?.settings?.templatesFolder, "Knowledge Base/New Group/Templates");
+    const savedNested = saved?.layoutSnapshots?.[0];
+    assert.deepEqual(savedNested?.indexGroupAliases, {
+      "Old Group": "Nested display",
+      "New Group": "Nested display",
+    });
+    assert.deepEqual(savedNested?.indexGroupOrder, ["Old Group", "Nested display"]);
+    assert.deepEqual(savedNested?.curriculumVisual.orderByContainer[curriculumContainerKey("Old Group", null)], [
+      "Knowledge Base/Old Group/Nested.md",
+    ]);
+    assert.deepEqual(savedNested?.curriculumVisual.orderByContainer[curriculumContainerKey("Nested display", null)], [
+      "Knowledge Base/Old Group/Nested.md",
+    ]);
+  }
+});
+
+test("folder renames rewrite all path-valued settings recursively without treating nested folders as groups", () => {
+  const data = migrateData(null);
+  data.settings.primaryFolder = "Vault Root/Knowledge";
+  data.settings.proposalFolder = "Vault Root/Inbox/Proposals";
+  data.settings.templatesFolder = "Vault Root/Templates";
+  data.settings.defaultNoteFolder = "Vault Root/Knowledge/Inbox";
+  data.settings.defaultTemplatePath = "Vault Root/Templates/Topic.md";
+  data.indexGroupAliases = { Knowledge: "Study index" };
+  data.indexGroupOrder = ["Study index"];
+  const history = snapshotPersonal(data, "Saved settings", true);
+  const nested = snapshotPersonal(data, "Nested settings", true);
+  nested.layoutSnapshots = undefined;
+  history.layoutSnapshots = [nested];
+  data.undoStack = [history];
+
+  assert.equal(rewritePluginDataFolderRename(data, "Vault Root", "Renamed Root"), true);
+  for (const settings of [data.settings, data.undoStack[0]?.settings, data.undoStack[0]?.layoutSnapshots?.[0]?.settings]) {
+    assert.equal(settings?.primaryFolder, "Renamed Root/Knowledge");
+    assert.equal(settings?.proposalFolder, "Renamed Root/Inbox/Proposals");
+    assert.equal(settings?.templatesFolder, "Renamed Root/Templates");
+    assert.equal(settings?.defaultNoteFolder, "Renamed Root/Knowledge/Inbox");
+    assert.equal(settings?.defaultTemplatePath, "Renamed Root/Templates/Topic.md");
+  }
+  assert.deepEqual(data.indexGroupAliases, { Knowledge: "Study index" });
+  assert.deepEqual(data.indexGroupOrder, ["Study index"]);
+
+  const beforeNestedFolderRename = structuredClone(data.indexGroupAliases);
+  assert.equal(rewritePluginDataFolderRename(
+    data,
+    "Renamed Root/Knowledge/Nested",
+    "Renamed Root/Knowledge/Renamed Nested",
+  ), false);
+  assert.deepEqual(data.indexGroupAliases, beforeNestedFolderRename);
+});
+
+test("clinical folder-derived groups use the normalized direct-child domain name", () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  data.settings.primaryFolder = "03 Clinical Topics";
+  data.indexGroupAliases = { Pediatric: "Children's airway" };
+  data.indexGroupOrder = ["Children's airway"];
+
+  assert.equal(rewritePluginDataFolderRename(
+    data,
+    "03 Clinical Topics/01 Pediatric",
+    "03 Clinical Topics/02 Pediatric Airway",
+  ), true);
+  assert.deepEqual(data.indexGroupAliases, {
+    Pediatric: "Children's airway",
+    "Pediatric Airway": "Children's airway",
+  });
+  assert.deepEqual(data.indexGroupOrder, ["Children's airway"]);
+});
+
+test("folder renames always preserve old group aliases and portable identity", () => {
+  const data = migrateData(null);
+  data.settings.primaryFolder = "Knowledge Base";
+  data.settings.templatesFolder = "Knowledge Base/Old Group/Templates";
+  data.indexGroupAliases = { "Old Group": "Display group" };
+  data.indexGroupOrder = ["Display group", "Other"];
+  data.curriculumVisual.orderByContainer = {
+    [curriculumContainerKey("Old Group", null)]: ["Knowledge Base/Old Group/Topic.md"],
+  };
+  data.collapsed.curriculumDomains = ["Old Group"];
+  data.portableIndex = {
+    version: 1,
+    groups: [{ id: "stable-old-group", title: "Old Group", order: 0 }],
+    subjects: [{
+      id: "stable-subject",
+      title: "Explicit topic",
+      groupId: "stable-old-group",
+      parentId: null,
+      order: 0,
+      indexed: true,
+      configuredId: "",
+      recordKind: "topic",
+    }],
+    resolvedPathBySubjectId: {},
+  };
+  data.undoStack = [snapshotPersonal(data, "Before rename", true, true)];
+
+  assert.equal(rewritePluginDataFolderRename(
+    data,
+    "Knowledge Base/Old Group",
+    "Knowledge Base/New Group",
+  ), true);
+
+  assert.deepEqual(data.indexGroupAliases, {
+    "Old Group": "Display group",
+    "New Group": "Display group",
+  });
+  assert.deepEqual(data.indexGroupOrder, ["Display group", "Other"]);
+  assert.deepEqual(data.curriculumVisual.orderByContainer[curriculumContainerKey("Old Group", null)], [
+    "Knowledge Base/Old Group/Topic.md",
+  ]);
+  assert.deepEqual(data.curriculumVisual.orderByContainer[curriculumContainerKey("Display group", null)], [
+    "Knowledge Base/Old Group/Topic.md",
+  ]);
+  assert.deepEqual(data.collapsed.curriculumDomains, ["Old Group", "Display group"]);
+  assert.deepEqual(data.portableIndex.groups, [{ id: "stable-old-group", title: "Old Group", order: 0 }]);
+  assert.equal(data.portableIndex.subjects[0]?.groupId, "stable-old-group");
+  assert.equal(data.settings.templatesFolder, "Knowledge Base/New Group/Templates");
+
+  const history = data.undoStack[0];
+  assert.deepEqual(history?.indexGroupAliases, {
+    "Old Group": "Display group",
+    "New Group": "Display group",
+  });
+  assert.deepEqual(history?.portableIndex?.groups, [{ id: "stable-old-group", title: "Old Group", order: 0 }]);
+  assert.equal(history?.portableIndex?.subjects[0]?.groupId, "stable-old-group");
+  assert.equal(rewritePluginDataFolderRename(
+    data,
+    "Knowledge Base/Old Group",
+    "Knowledge Base/New Group",
+  ), false, "replaying the same conservative migration is idempotent");
+});
+
+test("file renames update the configured template path through nested history only", () => {
+  const data = migrateData(null);
+  data.settings.primaryFolder = "Templates/Old topic.md";
+  data.settings.templatesFolder = "Templates";
+  data.settings.defaultTemplatePath = "Templates/Old topic.md";
+  const history = snapshotPersonal(data, "Template settings", true);
+  history.layoutSnapshots = [snapshotPersonal(data, "Nested template settings", true)];
+  data.layoutSnapshots = [structuredClone(history)];
+  data.undoStack = [structuredClone(history)];
+  data.redoStack = [structuredClone(history)];
+
+  assert.equal(rewritePluginDataTemplatePathRename(
+    data,
+    "Templates/Old topic.md",
+    "Templates/New topic.md",
+  ), true);
+
+  for (const settings of [
+    data.settings,
+    ...[data.layoutSnapshots, data.undoStack, data.redoStack]
+      .flatMap((stack) => [stack[0]?.settings, stack[0]?.layoutSnapshots?.[0]?.settings]),
+  ]) {
+    assert.equal(settings?.defaultTemplatePath, "Templates/New topic.md");
+    assert.equal(settings?.primaryFolder, "Templates/Old topic.md");
+    assert.equal(settings?.templatesFolder, "Templates");
+  }
+});
+
+test("custom canonical roots follow a renamed ENT primary folder", () => {
+  const value = {
+    title: "Laryngeal cleft",
+    domain: "Pediatric",
+    curriculumId: "ENT-PED-003.05",
+  };
+  assert.equal(
+    canonicalPath(value, "Renamed Clinical Topics"),
+    "Renamed Clinical Topics/01 Pediatric/ENT-PED-003.05 - Laryngeal cleft.md",
+  );
+
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  data.settings.primaryFolder = "03 Clinical Topics";
+  data.settings.defaultNoteFolder = "03 Clinical Topics/01 Pediatric";
+  const history = snapshotPersonal(data, "Clinical settings", true);
+  history.layoutSnapshots = [snapshotPersonal(data, "Nested clinical settings", true)];
+  data.undoStack = [history];
+
+  assert.equal(rewritePluginDataFolderRename(data, "03 Clinical Topics", "Renamed Clinical Topics"), true);
+  for (const settings of [data.settings, data.undoStack[0]?.settings, data.undoStack[0]?.layoutSnapshots?.[0]?.settings]) {
+    assert.equal(settings?.primaryFolder, "Renamed Clinical Topics");
+    assert.equal(settings?.defaultNoteFolder, "Renamed Clinical Topics/01 Pediatric");
+    assert.equal(canonicalPath(value, settings?.primaryFolder), "Renamed Clinical Topics/01 Pediatric/ENT-PED-003.05 - Laryngeal cleft.md");
+  }
+});
+
 test("search, templates, filenames, and protected folders handle international and hostile input", () => {
   assert.equal(matchesQuery(record({ title: "Café airway", aliases: ["مجرى الهواء", "喉頭裂"] }), "cafe"), true);
   assert.equal(matchesQuery(record({ title: "Café airway", aliases: ["مجرى الهواء", "喉頭裂"] }), "مجرى"), true);
@@ -1322,6 +2305,21 @@ test("imported path maps discard prototype keys", () => {
   assert.deepEqual(Object.keys(data.indexGroupByPath), ["safe.md"]);
   assert.deepEqual(Object.keys(data.curriculumVisual.parentByPath), ["safe.md"]);
   assert.deepEqual(Object.keys(data.curriculumVisual.orderByContainer), ["root:Research"]);
+});
+
+test("group aliases reject reserved object keys while preserving ordinary source headings", () => {
+  for (const key of ["__proto__", "constructor", "prototype", "toString", "hasOwnProperty"]) {
+    assert.equal(isSafeObjectKey(key), false, key);
+  }
+  assert.equal(isSafeObjectKey("ENT / Pediatric"), true);
+
+  const data = migrateData({
+    version: 10,
+    indexGroupAliases: JSON.parse(
+      '{"__proto__":"Proto","constructor":"Constructor","prototype":"Prototype","toString":"String","hasOwnProperty":"Own","Pediatric":"Children"}',
+    ) as unknown,
+  });
+  assert.deepEqual(data.indexGroupAliases, { Pediatric: "Children" });
 });
 
 test("diagnostics and visual-placement indexes remain linear at large-vault scale", () => {

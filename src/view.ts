@@ -1,8 +1,10 @@
-import { ItemView, Menu, Notice, Platform, setIcon, TFile, WorkspaceLeaf } from "obsidian";
+import { ItemView, Menu, Notice, Platform, setIcon, TFile, WorkspaceLeaf, normalizePath } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
 import { IndexManagerModal, type ManagerTab } from "./index-manager";
 import { ExportImportCenterModal } from "./portability-modal";
+import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge-base-modal";
 import {
+  assertPersonalBackupMatchesVault,
   buildCurriculumTree,
   canonicalPath,
   curriculumChildPaths,
@@ -173,24 +175,31 @@ export class EntVaultCommandCenterView extends ItemView {
   private visualPlacementPaths = new Set<string>();
   private readonly viewInstanceId = makeId("view");
   private setupPromptShown = false;
+  private loadedBaseId = "";
+  private loadedDataEpoch = 0;
+  private staleViewNoticeShown = false;
 
   constructor(leaf: WorkspaceLeaf, private readonly plugin: EntVaultCommandCenterPlugin) {
     super(leaf);
     this.collapsedQueues = new Set(plugin.data.collapsed.queues);
     this.collapsedCurriculumDomains = new Set(plugin.data.collapsed.curriculumDomains);
     this.collapsedCurriculumNodes = new Set(plugin.data.collapsed.curriculumNodes);
+    this.loadedBaseId = plugin.getActiveKnowledgeBaseId();
+    this.loadedDataEpoch = this.currentDataEpoch();
   }
 
   getViewType(): string { return VIEW_TYPE; }
-  getDisplayText(): string { return this.plugin.data.settings.workspaceName; }
+  getDisplayText(): string { return "Knowledge base command center"; }
   getIcon(): string { return "library-big"; }
 
   async onOpen(): Promise<void> {
     await this.reload();
     if (!this.plugin.data.settings.setupComplete && !this.setupPromptShown) {
+      const ownsBase = this.createOpenedBaseGuard();
       this.setupPromptShown = true;
       this.setupTimer = this.timerWindow.setTimeout(() => {
         this.setupTimer = null;
+        if (!ownsBase()) return;
         this.openSetupWizard();
       }, 100);
     }
@@ -216,9 +225,37 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   async reload(): Promise<void> {
+    const activeBaseId = this.plugin.getActiveKnowledgeBaseId();
+    const dataEpoch = this.currentDataEpoch();
+    if (this.loadedBaseId !== activeBaseId || this.loadedDataEpoch !== dataEpoch) {
+      // Delayed work was scheduled by the previously rendered base. Once this
+      // view adopts the replacement data object, those callbacks would appear
+      // current again and could save/search the wrong base.
+      if (this.searchDebounce !== null) this.timerWindow.clearTimeout(this.searchDebounce);
+      if (this.selectionSaveTimer !== null) this.timerWindow.clearTimeout(this.selectionSaveTimer);
+      this.searchDebounce = null;
+      this.selectionSaveTimer = null;
+      this.loadedBaseId = activeBaseId;
+      this.loadedDataEpoch = dataEpoch;
+      this.staleViewNoticeShown = false;
+      this.query = "";
+      this.parsedQuery = parseQuery("");
+      this.editMode = false;
+      this.curriculumArrangeMode = false;
+      this.mobileInspectorOpen = false;
+      this.mobileInspectorNeedsFocus = false;
+      this.mobileTreeScrollTop = 0;
+      this.mobileInspectorScrollTop = 0;
+      this.collapsedQueues = new Set(this.plugin.data.collapsed.queues);
+      this.collapsedCurriculumDomains = new Set(this.plugin.data.collapsed.curriculumDomains);
+      this.collapsedCurriculumNodes = new Set(this.plugin.data.collapsed.curriculumNodes);
+    }
     this.records = this.plugin.getRecords();
     this.recordByPath = new Map(this.records.map((record) => [record.path, record]));
-    await this.plugin.reconcileRecords(this.records);
+    if (await this.plugin.reconcileRecords(this.records)) {
+      this.records = this.plugin.getRecords();
+      this.recordByPath = new Map(this.records.map((record) => [record.path, record]));
+    }
     this.curriculum = buildCurriculumTree(this.records, this.plugin.data.curriculumVisual);
     this.render();
   }
@@ -228,8 +265,46 @@ export class EntVaultCommandCenterView extends ItemView {
     void action().catch((error) => new Notice(error instanceof Error ? error.message : String(error)));
   }
 
+  /**
+   * Bind a delayed modal, picker, or menu callback to the knowledge base that
+   * opened it. This also covers the rare Sync fallback where that base was
+   * archived or removed on another device while the local dialog stayed open.
+   */
+  private createOpenedBaseGuard(): () => boolean {
+    // Capture the owner of the rendered DOM, not merely whichever base the
+    // plugin has already switched to. During the async switch window old rows
+    // can still receive a click while plugin.data points at the new base.
+    const openedBaseId = this.loadedBaseId || this.plugin.getActiveKnowledgeBaseId();
+    const openedDataEpoch = this.loadedBaseId ? this.loadedDataEpoch : this.currentDataEpoch();
+    let noticeShown = false;
+    return (): boolean => {
+      if (this.plugin.getActiveKnowledgeBaseId() === openedBaseId && this.currentDataEpoch() === openedDataEpoch) return true;
+      if (!noticeShown) {
+        noticeShown = true;
+        new Notice("The active knowledge base changed. Close and reopen this action before continuing.", 8000);
+      }
+      return false;
+    };
+  }
+
+  private currentDataEpoch(): number {
+    return typeof this.plugin.getDataEpoch === "function" ? this.plugin.getDataEpoch() : 0;
+  }
+
+  /** Block clicks from the old DOM during the brief async base-switch save. */
+  private guardLoadedBase(): boolean {
+    if (this.loadedBaseId === this.plugin.getActiveKnowledgeBaseId()
+      && this.loadedDataEpoch === this.currentDataEpoch()) return true;
+    if (!this.staleViewNoticeShown) {
+      this.staleViewNoticeShown = true;
+      new Notice("The knowledge base changed. Wait for the command center to refresh, then try again.", 5000);
+    }
+    return false;
+  }
+
   /** Serialize selection writes and expose the active write to onClose(). */
   private saveSelectionState(): Promise<void> {
+    if (!this.guardLoadedBase()) return Promise.resolve();
     const previous = this.selectionSavePromise?.catch(() => undefined) ?? Promise.resolve();
     const save = previous.then(() => this.plugin.savePluginData());
     this.selectionSavePromise = save;
@@ -239,6 +314,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private persistCollapseState(): void {
+    if (!this.guardLoadedBase()) return;
     this.plugin.data.collapsed = {
       curriculumDomains: [...this.collapsedCurriculumDomains],
       curriculumNodes: [...this.collapsedCurriculumNodes],
@@ -248,6 +324,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   public openAddActions(): void {
+    const ownsBase = this.createOpenedBaseGuard();
     const settings = this.plugin.data.settings;
     const actions = [
       { id: "create-note", title: `Create ${settings.itemSingular}`, description: "Start with an empty note or choose a Markdown template and destination folder.", icon: "file-plus-2" },
@@ -265,6 +342,7 @@ export class EntVaultCommandCenterView extends ItemView {
       );
     }
     new AddActionModal(this.app, actions, (action) => {
+      if (!ownsBase()) return;
       if (action.id === "create-note") this.startCreateKnowledgeNote();
       else if (action.id === "index-existing") this.startAddExistingToIndex();
       else if (action.id === "existing-topic") this.startAddExistingTopic();
@@ -285,7 +363,28 @@ export class EntVaultCommandCenterView extends ItemView {
     new ExportImportCenterModal(this.plugin, mode).open();
   }
 
+  public openKnowledgeBaseManager(): void {
+    new ManageKnowledgeBasesModal(this.plugin).open();
+  }
+
+  private showKnowledgeBaseMenu(event: MouseEvent): void {
+    const menu = new Menu();
+    const activeId = this.plugin.getActiveKnowledgeBaseId();
+    for (const entry of this.plugin.getKnowledgeBases()) {
+      menu.addItem((item) => item
+        .setTitle(`${entry.data.settings.workspaceName}${entry.id === activeId ? " (current)" : ""}`)
+        .setIcon(entry.id === activeId ? "check" : "library-big")
+        .setDisabled(entry.id === activeId)
+        .onClick(() => this.run(() => this.plugin.switchKnowledgeBase(entry.id))));
+    }
+    menu.addSeparator();
+    menu.addItem((item) => item.setTitle("New knowledge base…").setIcon("plus").onClick(() => new CreateKnowledgeBaseModal(this.plugin).open()));
+    menu.addItem((item) => item.setTitle("Manage knowledge bases…").setIcon("settings-2").onClick(() => this.openKnowledgeBaseManager()));
+    menu.showAtMouseEvent(event);
+  }
+
   private openPortableSubjectLinkPicker(record: VaultRecord): void {
+    const ownsBase = this.createOpenedBaseGuard();
     const subjectId = record.portableId;
     if (!subjectId) {
       new Notice("This imported subject has no portable identity.");
@@ -303,11 +402,16 @@ export class EntVaultCommandCenterView extends ItemView {
       this.app,
       files,
       `${currentPath ? "Change linked note for" : "Link note to"} “${record.title}”`,
-      (file) => this.resolvePortableSubjectLink(subjectId, record.title, file),
+      (file) => {
+        if (!ownsBase()) return;
+        return this.resolvePortableSubjectLink(subjectId, record.title, file);
+      },
     ).open();
   }
 
   private async resolvePortableSubjectLink(subjectId: string, subjectTitle: string, file: TFile): Promise<void> {
+    const ownsBase = this.createOpenedBaseGuard();
+    if (!ownsBase()) return;
     const existingOwnerId = Object.entries(this.plugin.data.portableIndex.resolvedPathBySubjectId)
       .find(([candidateId, path]) => candidateId !== subjectId && path === file.path)?.[0] ?? "";
     if (existingOwnerId) {
@@ -318,17 +422,22 @@ export class EntVaultCommandCenterView extends ItemView {
         `“${file.basename}” is already linked to the imported subject “${existingOwner?.title ?? file.basename}”. Linking it to “${subjectTitle}” will merge that portable identity into this subject and remove the duplicate identity. The Markdown note will not be changed, and Undo remains available.`,
         "Merge and link",
         async () => {
+          if (!ownsBase()) return;
           await this.plugin.resolvePortableSubject(subjectId, file.path, true);
+          if (!ownsBase()) return;
           new Notice(`Linked “${subjectTitle}” to “${file.basename}” after merging the duplicate portable identity. The Markdown note was not changed.`);
         },
       ).open();
       return;
     }
     await this.plugin.resolvePortableSubject(subjectId, file.path);
+    if (!ownsBase()) return;
     new Notice(`Linked “${subjectTitle}” to “${file.basename}”. The Markdown note was not changed.`);
   }
 
   private confirmPortableSubjectUnlink(record: VaultRecord): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
     const subjectId = record.portableId;
     if (!subjectId) {
       new Notice("This note has no portable subject identity to unlink.");
@@ -340,13 +449,17 @@ export class EntVaultCommandCenterView extends ItemView {
       `“${record.title}” will return to a No note placeholder with its imported hierarchy and personal organization. The Markdown note at ${record.path} will not be moved, changed, or deleted. Undo remains available.`,
       "Unlink note",
       async () => {
+        if (!ownsBase()) return;
         await this.plugin.unlinkPortableSubject(subjectId);
+        if (!ownsBase()) return;
         new Notice(`Unlinked “${record.title}”. The imported subject is a placeholder again, and the Markdown note was not changed.`);
       },
     ).open();
   }
 
   private openPlaceholderActions(record: VaultRecord): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
     if (!record.portableId) {
       new Notice("This imported subject has no portable identity.");
       return;
@@ -365,6 +478,7 @@ export class EntVaultCommandCenterView extends ItemView {
           { id: "keep", title: "Keep placeholder", description: "Leave the subject in the index with no Markdown note for now.", icon: "bookmark" },
         ];
     new AddActionModal(this.app, actions, (action) => {
+      if (!ownsBase()) return;
       const resolve = (file: TFile): Promise<void> => this.plugin.resolvePortableSubject(record.portableId ?? "", file.path);
       if (action.id === "empty") {
         this.startCreateKnowledgeNote({ title: record.title, folder: settings.defaultNoteFolder, mode: "empty" }, false, resolve);
@@ -385,6 +499,8 @@ export class EntVaultCommandCenterView extends ItemView {
     indexAfterCreate = !this.plugin.isClinicalMode(),
     onCreated?: (file: TFile) => void | Promise<void>,
   ): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
     const settings = this.plugin.data.settings;
     new KnowledgeNoteModal(this.app, {
       itemSingular: settings.itemSingular,
@@ -396,11 +512,16 @@ export class EntVaultCommandCenterView extends ItemView {
         templatePath: initial.templatePath ?? settings.defaultTemplatePath,
         addToCollection: initial.addToCollection ?? false,
       },
-      validate: (value) => this.plugin.validateGenericNote(value),
+      validate: (value) => ownsBase()
+        ? this.plugin.validateGenericNote(value)
+        : "The active knowledge base changed. Close and reopen this form.",
       onSubmit: async (value) => {
+        if (!ownsBase()) return;
         const file = await this.plugin.createKnowledgeNote(value);
+        if (!ownsBase()) return;
         if (onCreated) {
           await onCreated(file);
+          if (!ownsBase()) return;
         } else if (indexAfterCreate && !this.plugin.isClinicalMode()) {
           await this.plugin.mutate(`Add created ${settings.itemSingular} to ${settings.indexLabel}`, () => {
             this.plugin.data.excludedIndexPaths = this.plugin.data.excludedIndexPaths.filter((path) => path !== file.path);
@@ -409,10 +530,13 @@ export class EntVaultCommandCenterView extends ItemView {
             }
             this.plugin.data.selectedPath = file.path;
           });
+          if (!ownsBase()) return;
         } else {
           this.plugin.data.selectedPath = file.path;
           await this.plugin.savePluginData();
+          if (!ownsBase()) return;
           await this.reload();
+          if (!ownsBase()) return;
         }
         new Notice(onCreated
           ? `${settings.itemSingular[0]?.toUpperCase() ?? "N"}${settings.itemSingular.slice(1)} created and linked to the imported subject.`
@@ -424,8 +548,10 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   public openSetupWizard(): void {
+    const ownsBase = this.createOpenedBaseGuard();
     const settings = this.plugin.data.settings;
     new WorkspaceSetupModal(this.app, settings, async (value) => {
+      if (!ownsBase()) return;
       this.plugin.assertDataWritable();
       for (const folder of [value.primaryFolder, value.defaultNoteFolder, value.templatesFolder, value.proposalFolder]) {
         const error = validateWritableFolderPath(folder, this.app.vault.configDir);
@@ -439,20 +565,27 @@ export class EntVaultCommandCenterView extends ItemView {
       }
       Object.assign(settings, value, { setupComplete: true, workspaceMode: "generic" });
       await this.plugin.savePluginData();
+      if (!ownsBase()) return;
       await this.plugin.refreshViews();
+      if (!ownsBase()) return;
       new Notice(`${settings.workspaceName} is ready. No existing note was modified.`);
     }).open();
   }
 
   public startAddExistingTopic(): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
     const topics = this.plugin.getIndexRecords();
     const settings = this.plugin.data.settings;
     new RecordPickerModal(this.app, topics, `Add indexed ${settings.itemSingular}`, `Search title, ID, ${settings.groupLabel.toLowerCase()}, or path…`, (record) => {
+      if (!ownsBase()) return;
       this.openCollectionPicker(record.path);
     }).open();
   }
 
   public startAddExistingToIndex(): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
     if (this.plugin.isClinicalMode()) {
       new Notice("Manual index membership is available in the generic knowledge-base profile.");
       return;
@@ -464,6 +597,7 @@ export class EntVaultCommandCenterView extends ItemView {
       return;
     }
     new VaultFilePickerModal(this.app, files, `Add existing note to ${settings.indexLabel}`, async (file) => {
+      if (!ownsBase()) return;
       new IndexGroupModal(this.app, {
         title: `Place “${file.basename}” in ${settings.indexLabel}`,
         groupLabel: settings.groupLabel,
@@ -471,6 +605,7 @@ export class EntVaultCommandCenterView extends ItemView {
         existingGroups: this.plugin.getIndexGroups(),
         submitLabel: `Add to ${settings.indexLabel}`,
         onSubmit: async (group) => {
+          if (!ownsBase()) return;
           await this.plugin.mutate(`Add “${file.basename}” to ${settings.indexLabel}`, () => {
             this.plugin.data.excludedIndexPaths = this.plugin.data.excludedIndexPaths.filter((path) => path !== file.path);
             if (!pathIsInsideFolder(file.path, settings.primaryFolder) && !this.plugin.data.manualIndexPaths.includes(file.path)) {
@@ -479,6 +614,7 @@ export class EntVaultCommandCenterView extends ItemView {
             this.plugin.data.indexGroupByPath[file.path] = group;
             this.plugin.data.selectedPath = file.path;
           });
+          if (!ownsBase()) return;
           new Notice(`Added to ${settings.indexLabel} under ${group}. The note stayed at ${file.path}.`);
         },
       }).open();
@@ -486,12 +622,16 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   public startLinkVaultNote(includeRestricted = false): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
     new VaultFilePickerModal(this.app, this.plugin.getVaultNoteFiles(includeRestricted), includeRestricted ? "Link any Markdown note (advanced)" : "Link an existing vault note", (file) => {
+      if (!ownsBase()) return;
       this.openCollectionPicker(file.path);
     }).open();
   }
 
   public startAddCurrentNote(explicitPath?: string): void {
+    if (!this.guardLoadedBase()) return;
     const file = explicitPath ? this.app.vault.getAbstractFileByPath(explicitPath) : this.app.workspace.getActiveFile();
     if (explicitPath && !(file instanceof TFile)) {
       new Notice("The previously active Markdown note could not be found.");
@@ -509,18 +649,27 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   public startCreateProposal(initial: Partial<TopicFormValue> = {}, onCreated?: (file: TFile) => void | Promise<void>): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const canonicalRoot = this.plugin.data.settings.primaryFolder;
     new TopicEditorModal(this.app, {
       mode: "proposal",
       title: "Create topic proposal",
       submitLabel: "Create in Topic Inbox",
       proposalFolder: this.plugin.data.settings.proposalFolder,
+      canonicalRoot,
       canonicalRecords: this.plugin.getCanonicalTopics(),
       initial,
-      validate: (value) => this.plugin.validateProposal(value),
+      validate: (value) => ownsBase()
+        ? this.plugin.validateProposal(value)
+        : "The active knowledge base changed. Close and reopen this form.",
       onSubmit: async (value) => {
+        if (!ownsBase()) return;
         const file = await this.plugin.createProposal(value);
+        if (!ownsBase()) return;
         if (onCreated) {
           await onCreated(file);
+          if (!ownsBase()) return;
           // Route to the newly created Inbox proposal. Its portable subject
           // also remains projected in the index until promotion.
           this.plugin.data.activeTab = "inbox";
@@ -528,13 +677,17 @@ export class EntVaultCommandCenterView extends ItemView {
           this.mobileInspectorOpen = false;
           this.mobileInspectorNeedsFocus = false;
           await this.plugin.savePluginData();
+          if (!ownsBase()) return;
           await this.reload();
+          if (!ownsBase()) return;
           new Notice("Unverified topic proposal created and linked to the imported subject.");
         } else {
           this.plugin.data.activeTab = "inbox";
           this.plugin.data.selectedPath = file.path;
           await this.plugin.savePluginData();
+          if (!ownsBase()) return;
           await this.reload();
+          if (!ownsBase()) return;
           new Notice("Topic proposal created as unverified in the inbox.");
         }
         if (value.addToCollection) this.openCollectionPicker(file.path);
@@ -543,6 +696,9 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   public startCreateCanonical(initial: Partial<TopicFormValue> = {}): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const canonicalRoot = this.plugin.data.settings.primaryFolder;
     if (!this.plugin.data.settings.enableAdvancedCanonicalActions) {
       new Notice("Advanced canonical actions are disabled in settings.");
       return;
@@ -552,16 +708,25 @@ export class EntVaultCommandCenterView extends ItemView {
       title: "Create canonical topic — advanced",
       submitLabel: "Create unverified canonical topic",
       proposalFolder: this.plugin.data.settings.proposalFolder,
+      canonicalRoot,
       canonicalRecords: this.plugin.getCanonicalTopics(),
       initial,
-      validate: (value) => this.plugin.validateCanonical(value),
-      resolveExpectedParentPath: (value) => resolveExpectedParentPath(value.curriculumId, value.domain, this.plugin.getCanonicalTopics()),
+      validate: (value) => ownsBase()
+        ? this.plugin.validateCanonical(value)
+        : "The active knowledge base changed. Close and reopen this form.",
+      resolveExpectedParentPath: (value) => ownsBase()
+        ? resolveExpectedParentPath(value.curriculumId, value.domain, this.plugin.getCanonicalTopics())
+        : "",
       onSubmit: async (value) => {
+        if (!ownsBase()) return;
         const file = await this.plugin.createCanonical(value);
+        if (!ownsBase()) return;
         this.plugin.data.activeTab = "curriculum";
         this.plugin.data.selectedPath = file.path;
         await this.plugin.savePluginData();
+        if (!ownsBase()) return;
         await this.reload();
+        if (!ownsBase()) return;
         new Notice("Canonical scaffold created with review_status: unverified.");
         if (value.addToCollection) this.openCollectionPicker(file.path);
       },
@@ -569,6 +734,9 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   public startPromoteProposal(input?: VaultRecord): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const canonicalRoot = this.plugin.data.settings.primaryFolder;
     const record = input ?? this.recordByPath.get(this.plugin.data.selectedPath);
     if (!record || record.role !== "proposal") {
       new Notice("Select a topic inbox proposal first.");
@@ -583,9 +751,10 @@ export class EntVaultCommandCenterView extends ItemView {
       title: `Promote “${record.title}”`,
       submitLabel: "Promote as unverified topic",
       proposalFolder: this.plugin.data.settings.proposalFolder,
+      canonicalRoot,
       canonicalRecords: this.plugin.getCanonicalTopics(),
       initial: {
-        title: record.title,
+        title: record.sourceTitle || record.title,
         domain: record.domain,
         parentPath: this.parentPathFor(record),
         topicKind: record.topicKind,
@@ -593,21 +762,34 @@ export class EntVaultCommandCenterView extends ItemView {
         safetyCritical: record.safetyCritical,
         addToCollection: false,
       },
-      validate: (value) => this.plugin.validateCanonical(value, record.path),
-      resolveExpectedParentPath: (value) => resolveExpectedParentPath(value.curriculumId, value.domain, this.plugin.getCanonicalTopics()),
-      previewDetails: (value) => this.promotionPreviewDetails(record, value),
+      validate: (value) => ownsBase()
+        ? this.plugin.validateCanonical(value, record.path)
+        : "The active knowledge base changed. Close and reopen this form.",
+      resolveExpectedParentPath: (value) => ownsBase()
+        ? resolveExpectedParentPath(value.curriculumId, value.domain, this.plugin.getCanonicalTopics())
+        : "",
+      previewDetails: (value) => ownsBase()
+        ? this.promotionPreviewDetails(record, value, canonicalRoot)
+        : ["The active knowledge base changed. Close and reopen this form."],
       onSubmit: async (value) => {
+        if (!ownsBase()) return;
         const file = await this.plugin.promoteProposal(record.path, value);
+        if (!ownsBase()) return;
         this.plugin.data.activeTab = "curriculum";
         this.plugin.data.selectedPath = file.path;
         await this.plugin.savePluginData();
+        if (!ownsBase()) return;
         await this.reload();
+        if (!ownsBase()) return;
         new Notice("Proposal promoted. It remains unverified pending human review.");
       },
     }).open();
   }
 
   public startEditCanonicalPlacement(input?: VaultRecord): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const canonicalRoot = this.plugin.data.settings.primaryFolder;
     const record = input ?? this.recordByPath.get(this.plugin.data.selectedPath);
     if (!record || record.role !== "canonical") {
       new Notice("Select a canonical topic first.");
@@ -626,9 +808,10 @@ export class EntVaultCommandCenterView extends ItemView {
       title: `Edit placement for “${record.title}”`,
       submitLabel: "Apply structural placement",
       proposalFolder: this.plugin.data.settings.proposalFolder,
+      canonicalRoot,
       canonicalRecords: this.plugin.getCanonicalTopics(),
       initial: {
-        title: record.title,
+        title: record.sourceTitle || record.title,
         domain: record.domain,
         parentPath: this.parentPathFor(record),
         topicKind: record.topicKind,
@@ -637,13 +820,21 @@ export class EntVaultCommandCenterView extends ItemView {
         curriculumId: record.curriculumId,
         addToCollection: false,
       },
-      validate: (value) => this.plugin.validateCanonical(value, record.path),
-      resolveExpectedParentPath: (value) => resolveExpectedParentPath(value.curriculumId, value.domain, this.plugin.getCanonicalTopics()),
+      validate: (value) => ownsBase()
+        ? this.plugin.validateCanonical(value, record.path)
+        : "The active knowledge base changed. Close and reopen this form.",
+      resolveExpectedParentPath: (value) => ownsBase()
+        ? resolveExpectedParentPath(value.curriculumId, value.domain, this.plugin.getCanonicalTopics())
+        : "",
       onSubmit: async (value) => {
+        if (!ownsBase()) return;
         const file = await this.plugin.editCanonicalPlacement(record.path, value);
+        if (!ownsBase()) return;
         this.plugin.data.selectedPath = file.path;
         await this.plugin.savePluginData();
+        if (!ownsBase()) return;
         await this.reload();
+        if (!ownsBase()) return;
         new Notice("Canonical placement updated; review status was preserved.");
       },
     }).open();
@@ -653,11 +844,11 @@ export class EntVaultCommandCenterView extends ItemView {
     return record.parentTopic ? this.plugin.resolveLink(record.parentTopic, record.path, this.recordByPath)?.path ?? "" : "";
   }
 
-  private promotionPreviewDetails(record: VaultRecord, value: TopicFormValue): string[] {
+  private promotionPreviewDetails(record: VaultRecord, value: TopicFormValue, canonicalRoot?: string): string[] {
     const parent = this.plugin.getCanonicalTopics().find((candidate) => candidate.path === value.parentPath);
     return [
       `Move from ${record.path}`,
-      `Move to ${canonicalPath(value) || "Choose a valid destination"}`,
+      `Move to ${canonicalPath(value, canonicalRoot) || "Choose a valid destination"}`,
       `Curriculum placement: ${value.curriculumId || "ID required"}${parent ? ` under ${parent.curriculumId}` : ""}`,
       `Preserve ${record.sourceCount} source entr${record.sourceCount === 1 ? "y" : "ies"}; review_status stays unverified`,
       `Preserve ${this.plugin.countMemberships(record.path)} collection membership(s); ${this.plugin.getBacklinkPaths(record.path).length} backlink source(s) detected`,
@@ -698,21 +889,32 @@ export class EntVaultCommandCenterView extends ItemView {
 
     const header = shell.createDiv({ cls: "ent-cc-header" });
     const titleBlock = header.createDiv({ cls: "ent-cc-title-block" });
-    titleBlock.createDiv({ cls: "ent-cc-kicker", text: "Knowledge operations" });
-    titleBlock.createEl("h1", { text: this.plugin.data.settings.workspaceName });
+    const kickerRow = titleBlock.createDiv({ cls: "ent-cc-title-kicker-row" });
+    kickerRow.createDiv({ cls: "ent-cc-kicker", text: "Knowledge operations" });
+    const baseSwitcher = kickerRow.createEl("button", {
+      cls: "ent-cc-base-switcher",
+      type: "button",
+      attr: {
+        "aria-label": `Switch knowledge base. Current: ${this.plugin.data.settings.workspaceName}`,
+        title: `${this.plugin.data.settings.workspaceName} — switch knowledge base`,
+      },
+    });
+    setIcon(baseSwitcher.createSpan({ cls: "ent-cc-base-switcher-icon" }), "library-big");
+    baseSwitcher.createSpan({ cls: "ent-cc-base-switcher-name", text: this.plugin.data.settings.workspaceName, attr: { dir: "auto" } });
+    setIcon(baseSwitcher.createSpan({ cls: "ent-cc-base-switcher-icon" }), "chevrons-up-down");
+    baseSwitcher.addEventListener("click", (event) => this.showKnowledgeBaseMenu(event));
+    titleBlock.createEl("h1", { text: this.plugin.data.settings.workspaceName, attr: { dir: "auto" } });
     titleBlock.createEl("p", { text: this.plugin.data.settings.workspaceSubtitle });
     const health = titleBlock.createDiv({ cls: "ent-cc-health-summary", attr: { "aria-label": "Vault knowledge summary" } });
-    const canonicalCount = this.records.filter((record) => record.role === "canonical").length;
-    const supportingCount = this.records.filter((record) => record.role === "supporting").length;
+    const indexCount = this.plugin.getIndexRecords().length;
     const reviewedCount = this.records.filter((record) => record.reviewStatus === "reviewed").length;
     const proposalCount = this.records.filter((record) => record.role === "proposal").length;
     if (this.plugin.isClinicalMode()) {
-      health.createSpan({ text: `${canonicalCount} canonical` });
-      health.createSpan({ text: `${supportingCount} supporting` });
+      health.createSpan({ text: `${indexCount} index entries` });
       health.createSpan({ text: `${reviewedCount} human-reviewed` });
       health.createSpan({ text: `${proposalCount} inbox` });
     } else {
-      health.createSpan({ text: `${canonicalCount + supportingCount} indexed` });
+      health.createSpan({ text: `${indexCount} index entries` });
       health.createSpan({ text: `${proposalCount} inbox` });
       health.createSpan({ text: `${this.plugin.data.collections.length} collections` });
       health.createSpan({ text: `${this.plugin.data.pinnedPaths.length} pinned` });
@@ -840,10 +1042,12 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private async changeTab(tab: MainTab, focusTab = false): Promise<void> {
+    if (!this.guardLoadedBase()) return;
     this.plugin.data.activeTab = tab;
     this.editMode = false;
     this.curriculumArrangeMode = false;
     await this.plugin.savePluginData();
+    if (!this.guardLoadedBase()) return;
     this.render();
     if (focusTab) this.contentEl.querySelector<HTMLElement>(`[data-tab="${tab}"]`)?.focus();
   }
@@ -1123,6 +1327,7 @@ export class EntVaultCommandCenterView extends ItemView {
       this.renderTree();
     });
     row.createSpan({ text: String(domain.roots.reduce((sum, node) => sum + this.curriculumNodeCount(node), 0)), cls: "ent-cc-row-count" });
+    iconButton(row, "ellipsis", `Manage ${domain.domain}`, "ent-cc-row-more ent-cc-group-more").addEventListener("click", () => this.openIndexManager("groups"));
     if (this.curriculumArrangeMode) this.applyCurriculumDomainDrop(row, domain);
     if (collapsed) return;
     const content = section.createDiv({ cls: "ent-cc-heading-body ent-cc-curriculum-domain-body" });
@@ -1424,6 +1629,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private selectRecord(path: string): void {
+    if (!this.guardLoadedBase()) return;
     this.plugin.data.selectedPath = path;
     const compact = this.isCompactInspectorLayout();
     if (compact) {
@@ -1785,6 +1991,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private addMatchingRecordsToCollection(): void {
+    const ownsBase = this.createOpenedBaseGuard();
     if (!this.query.trim()) {
       new Notice("Enter a search or filter first.");
       return;
@@ -1801,27 +2008,34 @@ export class EntVaultCommandCenterView extends ItemView {
         title: "Create collection for matching records",
         placeholder: "Collection name",
         submitLabel: `Create with ${records.length} records`,
-        onSubmit: async (title) => this.plugin.mutate(`Create collection “${title}” from search`, () => {
-          this.plugin.data.activeTab = "collections";
-          this.plugin.data.collections.push({ id: makeId("collection"), title, collapsed: false, subjects: paths, subheadings: [] });
-        }),
+        onSubmit: async (title) => {
+          if (!ownsBase()) return;
+          await this.plugin.mutate(`Create collection “${title}” from search`, () => {
+            this.plugin.data.activeTab = "collections";
+            this.plugin.data.collections.push({ id: makeId("collection"), title, collapsed: false, subjects: paths, subheadings: [] });
+          });
+        },
       }).open();
       return;
     }
     new CollectionPickerModal(this.app, targets, "Add", async (target) => {
+      if (!ownsBase()) return;
       await this.plugin.mutate(`Add ${records.length} matching records to collection`, () => {
         for (const path of paths) this.addMembership(path, target);
       });
+      if (!ownsBase()) return;
       new Notice(`Added ${records.length} matching records. Source notes stayed in place.`);
     }).open();
   }
 
   private promptNewCollection(addPath?: string): void {
+    const ownsBase = this.createOpenedBaseGuard();
     new TextPromptModal(this.app, {
       title: "New collection",
       placeholder: "e.g. Airway board review",
       submitLabel: "Create collection",
       onSubmit: async (title) => {
+        if (!ownsBase()) return;
         await this.plugin.mutate(`Create collection “${title}”`, () => {
           this.plugin.data.activeTab = "collections";
           this.plugin.data.collections.push({ id: makeId("collection"), title, collapsed: false, subjects: addPath ? [addPath] : [], subheadings: [] });
@@ -1831,28 +2045,36 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private promptNewSubheading(heading: LayoutHeading): void {
+    const ownsBase = this.createOpenedBaseGuard();
     new TextPromptModal(this.app, {
       title: `New subheading in ${heading.title}`,
       placeholder: "Subheading name",
       submitLabel: "Create subheading",
-      onSubmit: async (title) => this.plugin.mutate(`Create subheading “${title}”`, () => {
-        heading.subheadings.push({ id: makeId("subheading"), title, collapsed: false, subjects: [] });
-        heading.collapsed = false;
-      }),
+      onSubmit: async (title) => {
+        if (!ownsBase()) return;
+        await this.plugin.mutate(`Create subheading “${title}”`, () => {
+          heading.subheadings.push({ id: makeId("subheading"), title, collapsed: false, subjects: [] });
+          heading.collapsed = false;
+        });
+      },
     }).open();
   }
 
   private openCollectionPicker(path: string, source?: Membership, move = false): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
     const targets = collectionTargets(this.plugin.data.collections);
     if (targets.length === 0) {
       this.promptNewCollection(path);
       return;
     }
     new CollectionPickerModal(this.app, targets, move ? "Move" : "Add", async (target) => {
+      if (!ownsBase()) return;
       await this.plugin.mutate(`${move ? "Move" : "Add"} record in collection`, () => {
         if (move && source) this.removeMembership(path, source);
         this.addMembership(path, target);
       });
+      if (!ownsBase()) return;
       new Notice(`${move ? "Moved" : "Added"} in My Collections. The source note stayed in place.`);
     }).open();
   }
@@ -1914,6 +2136,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private async togglePin(path: string): Promise<void> {
+    if (!this.guardLoadedBase()) return;
     const pinned = this.plugin.data.pinnedPaths.includes(path);
     await this.plugin.mutate(`${pinned ? "Unpin" : "Pin"} knowledge record`, () => {
       this.plugin.data.pinnedPaths = pinned ? this.plugin.data.pinnedPaths.filter((item) => item !== path) : [...this.plugin.data.pinnedPaths, path];
@@ -1921,6 +2144,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private async toggleNext(path: string): Promise<void> {
+    if (!this.guardLoadedBase()) return;
     const present = this.plugin.data.nextStudyPaths.includes(path);
     await this.plugin.mutate(`${present ? "Remove from" : "Add to"} Next to study`, () => {
       this.plugin.data.nextStudyPaths = present ? this.plugin.data.nextStudyPaths.filter((item) => item !== path) : [...this.plugin.data.nextStudyPaths, path];
@@ -1928,21 +2152,35 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private showHeadingMenu(event: MouseEvent, heading: LayoutHeading): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
     const menu = new Menu();
     const index = this.plugin.data.collections.findIndex((item) => item.id === heading.id);
-    menu.addItem((item) => item.setTitle("Move collection up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => this.run(() => this.moveCollection(index, index - 1))));
-    menu.addItem((item) => item.setTitle("Move collection down").setIcon("arrow-down").setDisabled(index < 0 || index >= this.plugin.data.collections.length - 1).onClick(() => this.run(() => this.moveCollection(index, index + 1))));
+    menu.addItem((item) => item.setTitle("Move collection up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => {
+      if (ownsBase()) this.run(() => this.moveCollection(index, index - 1));
+    }));
+    menu.addItem((item) => item.setTitle("Move collection down").setIcon("arrow-down").setDisabled(index < 0 || index >= this.plugin.data.collections.length - 1).onClick(() => {
+      if (ownsBase()) this.run(() => this.moveCollection(index, index + 1));
+    }));
     menu.addSeparator();
-    menu.addItem((item) => item.setTitle("Add subheading").setIcon("folder-plus").onClick(() => this.promptNewSubheading(heading)));
+    menu.addItem((item) => item.setTitle("Add subheading").setIcon("folder-plus").onClick(() => {
+      if (ownsBase()) this.promptNewSubheading(heading);
+    }));
     menu.addItem((item) => item.setTitle("Rename collection").setIcon("pencil").onClick(() => {
+      if (!ownsBase()) return;
       new TextPromptModal(this.app, {
         title: "Rename collection", placeholder: "Collection name", initialValue: heading.title,
-        onSubmit: async (title) => this.plugin.mutate(`Rename collection “${heading.title}”`, () => { heading.title = title; }),
+        onSubmit: async (title) => {
+          if (!ownsBase()) return;
+          await this.plugin.mutate(`Rename collection “${heading.title}”`, () => { heading.title = title; });
+        },
       }).open();
     }));
     menu.addSeparator();
     menu.addItem((item) => item.setTitle("Delete collection").setIcon("trash-2").onClick(() => {
+      if (!ownsBase()) return;
       new ConfirmModal(this.app, "Delete collection?", `“${heading.title}” and its memberships will be removed. No Markdown note will be deleted or moved.`, "Delete collection", async () => {
+        if (!ownsBase()) return;
         await this.plugin.mutate(`Delete collection “${heading.title}”`, () => {
           this.plugin.data.collections = this.plugin.data.collections.filter((item) => item.id !== heading.id);
         });
@@ -1952,19 +2190,31 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private showSubheadingMenu(event: MouseEvent, heading: LayoutHeading, subheading: LayoutSubheading): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
     const menu = new Menu();
     const index = heading.subheadings.findIndex((item) => item.id === subheading.id);
-    menu.addItem((item) => item.setTitle("Move subheading up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => this.run(() => this.moveSubheading(heading, index, index - 1))));
-    menu.addItem((item) => item.setTitle("Move subheading down").setIcon("arrow-down").setDisabled(index < 0 || index >= heading.subheadings.length - 1).onClick(() => this.run(() => this.moveSubheading(heading, index, index + 1))));
+    menu.addItem((item) => item.setTitle("Move subheading up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => {
+      if (ownsBase()) this.run(() => this.moveSubheading(heading, index, index - 1));
+    }));
+    menu.addItem((item) => item.setTitle("Move subheading down").setIcon("arrow-down").setDisabled(index < 0 || index >= heading.subheadings.length - 1).onClick(() => {
+      if (ownsBase()) this.run(() => this.moveSubheading(heading, index, index + 1));
+    }));
     menu.addSeparator();
     menu.addItem((item) => item.setTitle("Rename subheading").setIcon("pencil").onClick(() => {
+      if (!ownsBase()) return;
       new TextPromptModal(this.app, {
         title: "Rename subheading", placeholder: "Subheading name", initialValue: subheading.title,
-        onSubmit: async (title) => this.plugin.mutate(`Rename subheading “${subheading.title}”`, () => { subheading.title = title; }),
+        onSubmit: async (title) => {
+          if (!ownsBase()) return;
+          await this.plugin.mutate(`Rename subheading “${subheading.title}”`, () => { subheading.title = title; });
+        },
       }).open();
     }));
     menu.addItem((item) => item.setTitle("Remove subheading").setIcon("trash-2").onClick(() => {
+      if (!ownsBase()) return;
       new ConfirmModal(this.app, "Remove subheading?", `Its ${this.plugin.data.settings.itemSingular} memberships will remain directly under “${heading.title}”.`, "Remove subheading", async () => {
+        if (!ownsBase()) return;
         await this.plugin.mutate(`Remove subheading “${subheading.title}”`, () => {
           heading.subjects.push(...subheading.subjects.filter((path) => !heading.subjects.includes(path)));
           heading.subheadings = heading.subheadings.filter((item) => item.id !== subheading.id);
@@ -1996,6 +2246,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private openCurriculumParentPicker(record: VaultRecord): void {
+    const ownsBase = this.createOpenedBaseGuard();
     const excluded = curriculumDescendantPaths(this.curriculum, record.path);
     excluded.add(record.path);
     const candidates = this.records.filter((candidate) => candidate.kind === "topic"
@@ -2006,6 +2257,7 @@ export class EntVaultCommandCenterView extends ItemView {
       && (this.plugin.canVisuallyMoveAcrossGroups() || candidate.domain === record.domain)
       && !excluded.has(candidate.path));
     new RecordPickerModal(this.app, candidates, `Move “${record.title}” under…`, `Search a parent ${this.plugin.data.settings.itemSingular}${this.plugin.isClinicalMode() ? ` in this ${this.plugin.data.settings.groupLabel.toLowerCase()}` : ""}…`, (parent) => {
+      if (!ownsBase()) return;
       const children = this.curriculumChildrenPaths(parent.path).filter((path) => path !== record.path);
       this.run(() => this.moveCurriculumRecord(record, parent.path, children, children.length, `Move “${record.title}” under “${parent.title}”`));
     }).open();
@@ -2055,6 +2307,8 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private openIndexGroupPicker(record: VaultRecord): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
     if (!this.plugin.canVisuallyMoveAcrossGroups()) return;
     const settings = this.plugin.data.settings;
     new IndexGroupModal(this.app, {
@@ -2064,6 +2318,7 @@ export class EntVaultCommandCenterView extends ItemView {
       existingGroups: this.plugin.getIndexGroups(),
       submitLabel: "Move visually",
       onSubmit: async (group) => {
+        if (!ownsBase()) return;
         const roots = this.curriculum.domains.find((domain) => domain.domain === group)?.roots.map((node) => node.record.path).filter((path) => path !== record.path) ?? [];
         await this.moveIndexRecordToGroup(record, group, null, roots, roots.length, `Move “${record.title}” to ${group}`);
       },
@@ -2101,78 +2356,138 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private removeFromIndex(record: VaultRecord): void {
-    if (this.plugin.isClinicalMode() || record.kind !== "topic") return;
+    const ownsBase = this.createOpenedBaseGuard();
+    if (record.kind !== "topic") return;
     const settings = this.plugin.data.settings;
-    const insidePrimary = pathIsInsideFolder(record.path, settings.primaryFolder);
-    const action = insidePrimary ? "Hide from index" : "Remove from index";
+    const action = "Remove from this knowledge base";
     new ConfirmModal(
       this.app,
       `${action}?`,
-      `“${record.title}” will leave ${settings.indexLabel}. Its Markdown file, path, metadata, and collection memberships will not be changed. You can restore it with Add existing note to ${settings.indexLabel}.`,
-      action,
+      `“${record.title}” will leave ${settings.indexLabel} in “${settings.workspaceName}”. Its Markdown file, path, metadata, and memberships in other knowledge bases will not change. You can restore it from Manage → Available or Hidden.`,
+      "Remove from base",
       async () => {
-        await this.plugin.mutate(`${action} “${record.title}”`, () => {
-          if (record.portableId) {
-            const subject = this.plugin.getPortableSubject(record.portableId);
-            if (subject) subject.indexed = false;
-          }
-          this.plugin.data.manualIndexPaths = this.plugin.data.manualIndexPaths.filter((path) => path !== record.path);
-          if (insidePrimary && !this.plugin.data.excludedIndexPaths.includes(record.path)) this.plugin.data.excludedIndexPaths.push(record.path);
-          delete this.plugin.data.indexGroupByPath[record.path];
-          resetCurriculumVisualPath(this.plugin.data.curriculumVisual, record.path);
-        }, { includePortableIndex: true });
-        new Notice(`${record.title} was removed from the visual index. Its note was not moved or deleted.`);
+        if (!ownsBase()) return;
+        await this.plugin.removeRecordsFromIndex([record.path], `${action} “${record.title}”`);
+        if (!ownsBase()) return;
+        new Notice(`${record.title} was removed from “${settings.workspaceName}”. Its note was not moved, renamed, or deleted.`);
       },
     ).open();
   }
 
   private showRecordMenu(event: MouseEvent, record: VaultRecord, membership?: Membership): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
     const menu = new Menu();
     menu.addItem((item) => item
       .setTitle(record.isPlaceholder ? "Create or link note…" : "Open note")
       .setIcon(record.isPlaceholder ? "file-plus" : "external-link")
-      .onClick(() => record.isPlaceholder ? this.openPlaceholderActions(record) : this.run(() => this.openRecord(record.path))));
+      .onClick(() => {
+        if (!ownsBase()) return;
+        if (record.isPlaceholder) this.openPlaceholderActions(record);
+        else this.run(() => this.openRecord(record.path));
+      }));
     if (record.portableId && !record.isPlaceholder) {
-      menu.addItem((item) => item.setTitle("Change linked note…").setIcon("link").onClick(() => this.openPortableSubjectLinkPicker(record)));
-      menu.addItem((item) => item.setTitle("Unlink note…").setIcon("link-2-off").onClick(() => this.confirmPortableSubjectUnlink(record)));
+      menu.addItem((item) => item.setTitle("Change linked note…").setIcon("link").onClick(() => {
+        if (ownsBase()) this.openPortableSubjectLinkPicker(record);
+      }));
+      menu.addItem((item) => item.setTitle("Unlink note…").setIcon("link-2-off").onClick(() => {
+        if (ownsBase()) this.confirmPortableSubjectUnlink(record);
+      }));
     }
-    menu.addItem((item) => item.setTitle("Add to collection…").setIcon("folder-plus").onClick(() => this.openCollectionPicker(record.path)));
+    menu.addItem((item) => item.setTitle("Add to collection…").setIcon("folder-plus").onClick(() => {
+      if (ownsBase()) this.openCollectionPicker(record.path);
+    }));
+    if (record.kind === "topic") {
+      menu.addItem((item) => item.setTitle("Rename display label…").setIcon("pencil").onClick(() => {
+        if (!ownsBase()) return;
+        new TextPromptModal(this.app, {
+          title: "Rename subject display label",
+          placeholder: "Subject label",
+          initialValue: record.title,
+          submitLabel: "Rename label",
+          onSubmit: async (title) => {
+            if (!ownsBase()) return;
+            await this.plugin.renameRecordDisplay(record.path, title);
+            if (!ownsBase()) return;
+            new Notice(`Display label changed to “${title.trim()}”. The Markdown note was not renamed.`);
+          },
+        }).open();
+      }));
+      if (this.plugin.data.displayNameByPath[record.path]) {
+        menu.addItem((item) => item.setTitle("Restore source label").setIcon("rotate-ccw").onClick(() => {
+          if (ownsBase()) this.run(() => this.plugin.resetRecordDisplay(record.path));
+        }));
+      }
+    }
     if (this.plugin.canVisuallyMoveAcrossGroups() && record.kind === "topic") {
-      menu.addItem((item) => item.setTitle(`Move to ${this.plugin.data.settings.groupLabel.toLowerCase()}…`).setIcon("folder-input").onClick(() => this.openIndexGroupPicker(record)));
-      if (!this.plugin.isClinicalMode()) menu.addItem((item) => item.setTitle(pathIsInsideFolder(record.path, this.plugin.data.settings.primaryFolder) ? "Hide from index…" : "Remove from index…").setIcon("list-minus").onClick(() => this.removeFromIndex(record)));
+      menu.addItem((item) => item.setTitle(`Move to ${this.plugin.data.settings.groupLabel.toLowerCase()}…`).setIcon("folder-input").onClick(() => {
+        if (ownsBase()) this.openIndexGroupPicker(record);
+      }));
     }
+    if (record.kind === "topic") menu.addItem((item) => item.setTitle("Remove from this knowledge base…").setIcon("list-minus").onClick(() => {
+      if (ownsBase()) this.removeFromIndex(record);
+    }));
     if (membership) {
       const list = this.membershipList(membership);
       const index = list.indexOf(record.path);
-      menu.addItem((item) => item.setTitle("Move up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => this.run(() => this.moveRecordWithin(membership, index, index - 1))));
-      menu.addItem((item) => item.setTitle("Move down").setIcon("arrow-down").setDisabled(index < 0 || index >= list.length - 1).onClick(() => this.run(() => this.moveRecordWithin(membership, index, index + 1))));
-      menu.addItem((item) => item.setTitle("Move this membership…").setIcon("folder-input").onClick(() => this.openCollectionPicker(record.path, membership, true)));
-      menu.addItem((item) => item.setTitle("Remove from this collection").setIcon("folder-minus").onClick(() => this.run(
-        () => this.plugin.mutate(`Remove ${this.plugin.data.settings.itemSingular} membership`, () => this.removeMembership(record.path, membership)),
-      )));
+      menu.addItem((item) => item.setTitle("Move up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => {
+        if (ownsBase()) this.run(() => this.moveRecordWithin(membership, index, index - 1));
+      }));
+      menu.addItem((item) => item.setTitle("Move down").setIcon("arrow-down").setDisabled(index < 0 || index >= list.length - 1).onClick(() => {
+        if (ownsBase()) this.run(() => this.moveRecordWithin(membership, index, index + 1));
+      }));
+      menu.addItem((item) => item.setTitle("Move this membership…").setIcon("folder-input").onClick(() => {
+        if (ownsBase()) this.openCollectionPicker(record.path, membership, true);
+      }));
+      menu.addItem((item) => item.setTitle("Remove from this collection").setIcon("folder-minus").onClick(() => {
+        if (!ownsBase()) return;
+        this.run(() => this.plugin.mutate(`Remove ${this.plugin.data.settings.itemSingular} membership`, () => this.removeMembership(record.path, membership)));
+      }));
     }
     if (this.plugin.data.activeTab === "curriculum" && this.curriculumArrangeMode && record.kind === "topic") {
       const parentPath = this.curriculum.parentByPath.get(record.path) ?? null;
       const siblings = curriculumSiblingPaths(this.curriculum, record);
       const index = siblings.indexOf(record.path);
       menu.addSeparator();
-      menu.addItem((item) => item.setTitle("Move under…").setIcon("corner-down-right").onClick(() => this.openCurriculumParentPicker(record)));
-      menu.addItem((item) => item.setTitle(`Indent under previous ${this.plugin.data.settings.itemSingular}`).setIcon("indent-increase").setDisabled(index <= 0).onClick(() => this.indentCurriculumRecord(record)));
-      menu.addItem((item) => item.setTitle("Outdent one level").setIcon("indent-decrease").setDisabled(!parentPath).onClick(() => this.outdentCurriculumRecord(record)));
-      menu.addItem((item) => item.setTitle(`Make top-level in ${this.plugin.data.settings.groupLabel.toLowerCase()}`).setIcon("panel-top").setDisabled(!parentPath).onClick(() => this.makeCurriculumTopLevel(record)));
-      menu.addItem((item) => item.setTitle("Move up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => this.moveCurriculumUpOrDown(record, -1)));
-      menu.addItem((item) => item.setTitle("Move down").setIcon("arrow-down").setDisabled(index < 0 || index >= siblings.length - 1).onClick(() => this.moveCurriculumUpOrDown(record, 1)));
-      menu.addItem((item) => item.setTitle(`Reset to ${this.plugin.isClinicalMode() ? "canonical" : "configured"} placement`).setIcon("rotate-ccw").setDisabled(!this.hasCurriculumVisualPlacement(record.path)).onClick(() => this.resetCurriculumRecord(record)));
+      menu.addItem((item) => item.setTitle("Move under…").setIcon("corner-down-right").onClick(() => {
+        if (ownsBase()) this.openCurriculumParentPicker(record);
+      }));
+      menu.addItem((item) => item.setTitle(`Indent under previous ${this.plugin.data.settings.itemSingular}`).setIcon("indent-increase").setDisabled(index <= 0).onClick(() => {
+        if (ownsBase()) this.indentCurriculumRecord(record);
+      }));
+      menu.addItem((item) => item.setTitle("Outdent one level").setIcon("indent-decrease").setDisabled(!parentPath).onClick(() => {
+        if (ownsBase()) this.outdentCurriculumRecord(record);
+      }));
+      menu.addItem((item) => item.setTitle(`Make top-level in ${this.plugin.data.settings.groupLabel.toLowerCase()}`).setIcon("panel-top").setDisabled(!parentPath).onClick(() => {
+        if (ownsBase()) this.makeCurriculumTopLevel(record);
+      }));
+      menu.addItem((item) => item.setTitle("Move up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => {
+        if (ownsBase()) this.moveCurriculumUpOrDown(record, -1);
+      }));
+      menu.addItem((item) => item.setTitle("Move down").setIcon("arrow-down").setDisabled(index < 0 || index >= siblings.length - 1).onClick(() => {
+        if (ownsBase()) this.moveCurriculumUpOrDown(record, 1);
+      }));
+      menu.addItem((item) => item.setTitle(`Reset to ${this.plugin.isClinicalMode() ? "canonical" : "configured"} placement`).setIcon("rotate-ccw").setDisabled(!this.hasCurriculumVisualPlacement(record.path)).onClick(() => {
+        if (ownsBase()) this.resetCurriculumRecord(record);
+      }));
     }
     menu.addSeparator();
     const pinned = this.plugin.data.pinnedPaths.includes(record.path);
-    menu.addItem((item) => item.setTitle(pinned ? "Unpin" : "Pin").setIcon(pinned ? "pin-off" : "pin").onClick(() => this.run(() => this.togglePin(record.path))));
+    menu.addItem((item) => item.setTitle(pinned ? "Unpin" : "Pin").setIcon(pinned ? "pin-off" : "pin").onClick(() => {
+      if (ownsBase()) this.run(() => this.togglePin(record.path));
+    }));
     const next = this.plugin.data.nextStudyPaths.includes(record.path);
     const nextLabel = this.plugin.isClinicalMode() ? "Next to study" : "Next list";
-    menu.addItem((item) => item.setTitle(next ? `Remove from ${nextLabel}` : `Add to ${nextLabel}`).setIcon(next ? "list-x" : "list-plus").onClick(() => this.run(() => this.toggleNext(record.path))));
+    menu.addItem((item) => item.setTitle(next ? `Remove from ${nextLabel}` : `Add to ${nextLabel}`).setIcon(next ? "list-x" : "list-plus").onClick(() => {
+      if (ownsBase()) this.run(() => this.toggleNext(record.path));
+    }));
     menu.addSeparator();
-    if (this.plugin.isClinicalMode() && record.role === "proposal") menu.addItem((item) => item.setTitle("Promote proposal…").setIcon("arrow-up-right").setDisabled(record.aiLock).onClick(() => this.startPromoteProposal(record)));
-    if (this.plugin.isClinicalMode() && record.role === "canonical" && this.plugin.data.settings.enableAdvancedCanonicalActions) menu.addItem((item) => item.setTitle("Edit canonical placement…").setIcon("folder-tree").setDisabled(record.aiLock).onClick(() => this.startEditCanonicalPlacement(record)));
+    if (this.plugin.isClinicalMode() && record.role === "proposal") menu.addItem((item) => item.setTitle("Promote proposal…").setIcon("arrow-up-right").setDisabled(record.aiLock).onClick(() => {
+      if (ownsBase()) this.startPromoteProposal(record);
+    }));
+    if (this.plugin.isClinicalMode() && record.role === "canonical" && this.plugin.data.settings.enableAdvancedCanonicalActions) menu.addItem((item) => item.setTitle("Edit canonical placement…").setIcon("folder-tree").setDisabled(record.aiLock).onClick(() => {
+      if (ownsBase()) this.startEditCanonicalPlacement(record);
+    }));
     if (this.plugin.isClinicalMode() && record.role !== "vault-note" && !record.isPlaceholder) {
       menu.addItem((item) => item.setTitle("Copy deep-build command").setIcon("wand-sparkles").onClick(() => this.run(() => this.copyText(`Deep-build ${record.title}`, "Deep-build command"))));
       menu.addItem((item) => item.setTitle("Copy autoresearch command").setIcon("search-check").onClick(() => this.run(() => this.copyText(`Autoresearch ${record.title}`, "Autoresearch command"))));
@@ -2181,15 +2496,31 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private showGlobalMenu(event: MouseEvent): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
     const menu = new Menu();
-    menu.addItem((item) => item.setTitle("Add or create…").setIcon("plus").onClick(() => this.openAddActions()));
-    menu.addItem((item) => item.setTitle(`Manage ${this.plugin.data.settings.indexLabel}`).setIcon("list-tree").onClick(() => this.openIndexManager()));
-    if (!this.plugin.isClinicalMode()) menu.addItem((item) => item.setTitle(`Add existing note to ${this.plugin.data.settings.indexLabel}`).setIcon("list-plus").onClick(() => this.startAddExistingToIndex()));
+    menu.addItem((item) => item.setTitle(`Knowledge base: ${this.plugin.data.settings.workspaceName}`).setIcon("library-big").onClick(() => this.openKnowledgeBaseManager()));
+    menu.addItem((item) => item.setTitle("New knowledge base…").setIcon("plus").onClick(() => new CreateKnowledgeBaseModal(this.plugin).open()));
     menu.addSeparator();
-    menu.addItem((item) => item.setTitle("Undo personal organization change").setIcon("undo-2").setDisabled(this.plugin.data.undoStack.length === 0).onClick(() => this.run(() => this.plugin.undo())));
-    menu.addItem((item) => item.setTitle("Redo personal organization change").setIcon("redo-2").setDisabled(this.plugin.data.redoStack.length === 0).onClick(() => this.run(() => this.plugin.redo())));
+    menu.addItem((item) => item.setTitle("Add or create…").setIcon("plus").onClick(() => {
+      if (ownsBase()) this.openAddActions();
+    }));
+    menu.addItem((item) => item.setTitle(`Manage ${this.plugin.data.settings.indexLabel}`).setIcon("list-tree").onClick(() => {
+      if (ownsBase()) this.openIndexManager();
+    }));
+    if (!this.plugin.isClinicalMode()) menu.addItem((item) => item.setTitle(`Add existing note to ${this.plugin.data.settings.indexLabel}`).setIcon("list-plus").onClick(() => {
+      if (ownsBase()) this.startAddExistingToIndex();
+    }));
+    menu.addSeparator();
+    menu.addItem((item) => item.setTitle("Undo personal organization change").setIcon("undo-2").setDisabled(this.plugin.data.undoStack.length === 0).onClick(() => {
+      if (ownsBase()) this.run(() => this.plugin.undo());
+    }));
+    menu.addItem((item) => item.setTitle("Redo personal organization change").setIcon("redo-2").setDisabled(this.plugin.data.redoStack.length === 0).onClick(() => {
+      if (ownsBase()) this.run(() => this.plugin.redo());
+    }));
     menu.addSeparator();
     menu.addItem((item) => item.setTitle("Expand all visible groups").setIcon("chevrons-down").onClick(() => this.run(async () => {
+      if (!ownsBase()) return;
       this.collapsedQueues.clear();
       if (this.plugin.data.activeTab === "curriculum") {
         this.collapsedCurriculumDomains.clear();
@@ -2199,9 +2530,11 @@ export class EntVaultCommandCenterView extends ItemView {
       }
       if (this.plugin.data.activeTab === "collections") await this.plugin.savePluginData();
       else this.persistCollapseState();
+      if (!ownsBase()) return;
       this.renderTree();
     })));
     menu.addItem((item) => item.setTitle("Collapse all visible groups").setIcon("chevrons-up").onClick(() => this.run(async () => {
+      if (!ownsBase()) return;
       this.smartQueues().forEach((queue) => this.collapsedQueues.add(queue.id));
       if (this.plugin.data.activeTab === "curriculum") {
         this.curriculum.domains.forEach((domain) => this.collapsedCurriculumDomains.add(domain.domain));
@@ -2212,6 +2545,7 @@ export class EntVaultCommandCenterView extends ItemView {
       }
       if (this.plugin.data.activeTab === "collections") await this.plugin.savePluginData();
       else this.persistCollapseState();
+      if (!ownsBase()) return;
       this.renderTree();
     })));
     if (this.plugin.isClinicalMode()) {
@@ -2229,7 +2563,9 @@ export class EntVaultCommandCenterView extends ItemView {
     if (this.plugin.data.activeTab === "collections" && this.plugin.data.collections.length > 0) {
       menu.addSeparator();
       menu.addItem((item) => item.setTitle("Clear my collections").setIcon("rotate-ccw").onClick(() => {
+        if (!ownsBase()) return;
         new ConfirmModal(this.app, "Clear my collections?", "All personal headings, subheadings, and memberships will be removed. Undo remains available. Source notes are untouched.", "Clear collections", async () => {
+          if (!ownsBase()) return;
           await this.plugin.mutate("Clear my collections", () => { this.plugin.data.collections = []; });
         }).open();
       }));
@@ -2237,9 +2573,12 @@ export class EntVaultCommandCenterView extends ItemView {
     if (this.plugin.data.activeTab === "curriculum" && (curriculumVisualHasChanges(this.plugin.data.curriculumVisual) || (this.plugin.canVisuallyMoveAcrossGroups() && Object.keys(this.plugin.data.indexGroupByPath).length > 0))) {
       menu.addSeparator();
       menu.addItem((item) => item.setTitle(`Reset all visual ${this.plugin.data.settings.indexLabel.toLowerCase()} arrangement`).setIcon("rotate-ccw").onClick(() => {
+        if (!ownsBase()) return;
         new ConfirmModal(this.app, `Reset visual ${this.plugin.data.settings.indexLabel.toLowerCase()} arrangement?`, `All visual nesting and custom order will return to the ${this.plugin.isClinicalMode() ? "canonical note metadata" : "configured parent metadata and folder grouping"}. Source notes will not be changed, and Undo remains available.`, "Reset arrangement", async () => {
+          if (!ownsBase()) return;
           await this.plugin.mutate(`Reset all visual ${this.plugin.data.settings.indexLabel.toLowerCase()} arrangement`, () => {
             this.plugin.data.curriculumVisual = { parentByPath: {}, orderByContainer: {} };
+            this.plugin.data.indexGroupAliases = {};
             if (this.plugin.canVisuallyMoveAcrossGroups()) {
               this.plugin.data.indexGroupByPath = {};
               this.plugin.data.indexGroupOrder = [];
@@ -2249,21 +2588,29 @@ export class EntVaultCommandCenterView extends ItemView {
       }));
     }
     menu.addSeparator();
-    menu.addItem((item) => item.setTitle("Save organization snapshot").setIcon("archive").onClick(() => this.saveOrganizationSnapshot()));
+    menu.addItem((item) => item.setTitle("Save organization snapshot").setIcon("archive").onClick(() => {
+      if (ownsBase()) this.saveOrganizationSnapshot();
+    }));
     if (this.plugin.data.layoutSnapshots.length > 0) {
-      menu.addItem((item) => item.setTitle("Restore organization snapshot…").setIcon("history").onClick(() => this.showOrganizationSnapshots(event)));
+      menu.addItem((item) => item.setTitle("Restore organization snapshot…").setIcon("history").onClick(() => {
+        if (ownsBase()) this.showOrganizationSnapshots(event);
+      }));
     }
     menu.addSeparator();
-    menu.addItem((item) => item.setTitle("Export / import center…").setIcon("arrow-left-right").onClick(() => this.openPortabilityCenter()));
+    menu.addItem((item) => item.setTitle("Export / import center…").setIcon("arrow-left-right").onClick(() => {
+      if (ownsBase()) this.openPortabilityCenter();
+    }));
     menu.showAtMouseEvent(event);
   }
 
   private saveOrganizationSnapshot(): void {
+    const ownsBase = this.createOpenedBaseGuard();
     new TextPromptModal(this.app, {
       title: "Save organization snapshot",
       placeholder: this.plugin.isClinicalMode() ? "e.g. Before airway exam block" : "e.g. Before reorganizing projects",
       submitLabel: "Save snapshot",
       onSubmit: async (name) => {
+        if (!ownsBase()) return;
         const snapshot = snapshotPersonal(this.plugin.data, name, false, true);
         const candidates = [...this.plugin.data.layoutSnapshots, snapshot];
         const next = limitSnapshotStack(candidates, 10);
@@ -2276,23 +2623,28 @@ export class EntVaultCommandCenterView extends ItemView {
         }
         this.plugin.data.layoutSnapshots = next;
         await this.plugin.savePluginData();
+        if (!ownsBase()) return;
         new Notice(`Saved organization snapshot “${name}”.`);
       },
     }).open();
   }
 
   private showOrganizationSnapshots(event: MouseEvent): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
     const menu = new Menu();
     for (const snapshot of [...this.plugin.data.layoutSnapshots].reverse()) {
       menu.addItem((item) => item
         .setTitle(`${snapshot.label} · ${new Date(snapshot.at).toLocaleDateString()}`)
         .setIcon("history")
         .onClick(() => this.run(async () => {
+          if (!ownsBase()) return;
           await this.plugin.mutate(
             `Restore snapshot “${snapshot.label}”`,
             () => restoreSnapshot(this.plugin.data, snapshot),
             { includePortableIndex: Boolean(snapshot.portableIndex) },
           );
+          if (!ownsBase()) return;
           new Notice(`Restored organization snapshot “${snapshot.label}”.`);
         })));
     }
@@ -2300,11 +2652,21 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private async exportOrganizationBackup(): Promise<void> {
+    const ownsBase = this.createOpenedBaseGuard();
     try {
+      if (!ownsBase()) return;
       const now = new Date();
-      const backup = createPersonalBackup(this.plugin.data, now.toISOString());
+      const backup = createPersonalBackup(
+        this.plugin.data,
+        now.toISOString(),
+        this.plugin.getVaultId(),
+        this.plugin.getActiveKnowledgeBaseId(),
+        this.plugin.data.settings.workspaceName,
+      );
+      const workspaceName = this.plugin.data.settings.workspaceName;
       if (Platform.isMobile) {
         await this.plugin.writePortableJson("backup", backup);
+        if (!ownsBase()) return;
         new Notice("Backup saved in the export folder inside the vault. Source notes were not included.");
         return;
       }
@@ -2312,17 +2674,18 @@ export class EntVaultCommandCenterView extends ItemView {
       const url = viewWindow.URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" }));
       const link = createEl("a");
       link.href = url;
-      const slug = this.plugin.data.settings.workspaceName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "knowledge-command-center";
+      const slug = workspaceName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "knowledge-command-center";
       link.download = `${slug}-backup-${now.toISOString().slice(0, 10)}.json`;
       link.click();
       viewWindow.setTimeout(() => viewWindow.URL.revokeObjectURL(url), 1000);
       new Notice("Organization backup exported. Source notes were not included.");
     } catch (error) {
-      new Notice(error instanceof Error ? error.message : String(error));
+      if (ownsBase()) new Notice(error instanceof Error ? error.message : String(error));
     }
   }
 
   private importOrganizationBackup(): void {
+    const ownsBase = this.createOpenedBaseGuard();
     if (Platform.isMobile) {
       const files = this.plugin.getPortableJsonFiles();
       if (files.length === 0) {
@@ -2330,10 +2693,11 @@ export class EntVaultCommandCenterView extends ItemView {
         return;
       }
       new VaultFilePickerModal(this.app, files, "Choose an organization backup JSON", async (file) => {
+        if (!ownsBase()) return;
         try {
-          this.confirmOrganizationImport(this.plugin.readPortableJson(file));
+          this.confirmOrganizationImport(this.plugin.readPortableJson(file), ownsBase);
         } catch (error) {
-          new Notice(error instanceof Error ? error.message : String(error));
+          if (ownsBase()) new Notice(error instanceof Error ? error.message : String(error));
         }
       }).open();
       return;
@@ -2342,74 +2706,147 @@ export class EntVaultCommandCenterView extends ItemView {
     input.type = "file";
     input.accept = "application/json,.json";
     input.addEventListener("change", () => {
+      if (!ownsBase()) return;
       const file = input.files?.[0];
       if (!file) return;
       void file.text().then((raw) => {
-        this.confirmOrganizationImport(Promise.resolve(JSON.parse(raw) as unknown));
-      }).catch((error) => new Notice(error instanceof Error ? error.message : String(error)));
+        if (!ownsBase()) return;
+        this.confirmOrganizationImport(Promise.resolve(JSON.parse(raw) as unknown), ownsBase);
+      }).catch((error) => {
+        if (ownsBase()) new Notice(error instanceof Error ? error.message : String(error));
+      });
     });
     input.click();
   }
 
-  private confirmOrganizationImport(input: Promise<unknown>): void {
+  private confirmOrganizationImport(input: Promise<unknown>, ownsBase = this.createOpenedBaseGuard()): void {
+    if (!ownsBase()) return;
     void input.then((value) => {
+      if (!ownsBase()) return;
       const backup = parsePersonalBackup(value);
+      const recoveryCheck = assertPersonalBackupMatchesVault(
+        backup,
+        this.plugin.getVaultId(),
+        (path) => this.app.vault.getAbstractFileByPath(normalizePath(path)) !== null,
+        this.plugin.getActiveKnowledgeBaseId(),
+        this.plugin.data.settings.workspaceName,
+        this.plugin.data.settings.workspaceMode,
+        true,
+      );
+      const verification = recoveryCheck.identity === "verified"
+        ? recoveryCheck.baseIdentity === "verified"
+          ? "Vault, knowledge-base, and preset identities verified."
+          : recoveryCheck.baseIdentity === "cross-base-override"
+            ? `Vault and preset verified; source “${backup.sourceBaseName}” and destination “${this.plugin.data.settings.workspaceName}” are different knowledge bases.`
+            : "Vault identity verified; this v1–v6 backup has no knowledge-base identity or preset."
+        : recoveryCheck.referencedPathCount > 0
+          ? `Legacy identity unverified; ${recoveryCheck.existingPathCount} of ${recoveryCheck.referencedPathCount} unique referenced paths were found, meeting the required at-least-half threshold of ${recoveryCheck.requiredPathCount} (50%).`
+          : "Legacy identity unverified; this backup contains no note paths to preflight.";
+      const allowBaseOverride = recoveryCheck.baseIdentity !== "verified";
+      const openFinalConfirmation = (): void => {
+        if (!ownsBase()) return;
+        new ConfirmModal(
+          this.app,
+          "Restore organization backup?",
+          `${verification} Replace current personal collections, index membership and visual groups, pins, next list, saved views, and snapshots with the private backup from ${backup.exportedAt || "an unknown date"}? Source notes will not be changed.`,
+          "Import backup",
+          async () => {
+            if (!ownsBase()) return;
+            // Re-check immediately before mutation so no alternate path can
+            // bypass the vault/base/preset boundary or the explicit override.
+            assertPersonalBackupMatchesVault(
+              backup,
+              this.plugin.getVaultId(),
+              (path) => this.app.vault.getAbstractFileByPath(normalizePath(path)) !== null,
+              this.plugin.getActiveKnowledgeBaseId(),
+              this.plugin.data.settings.workspaceName,
+              this.plugin.data.settings.workspaceMode,
+              allowBaseOverride,
+            );
+            await this.plugin.mutate("Import organization backup", () => {
+              this.plugin.data.collections = backup.collections;
+              this.plugin.data.pinnedPaths = backup.pinnedPaths;
+              this.plugin.data.nextStudyPaths = backup.nextStudyPaths;
+              this.plugin.data.savedViews = backup.savedViews;
+              this.plugin.data.curriculumVisual = backup.curriculumVisual;
+              this.plugin.data.manualIndexPaths = backup.manualIndexPaths;
+              this.plugin.data.excludedIndexPaths = backup.excludedIndexPaths;
+              this.plugin.data.indexGroupByPath = backup.indexGroupByPath;
+              this.plugin.data.displayNameByPath = backup.displayNameByPath;
+              this.plugin.data.indexGroupAliases = backup.indexGroupAliases;
+              this.plugin.data.indexGroupOrder = backup.indexGroupOrder;
+              this.plugin.data.layoutSnapshots = limitSnapshotStack(backup.layoutSnapshots, 10);
+              this.plugin.data.portableIndex = backup.portableIndex;
+            }, { includePortableIndex: true, includeLayoutSnapshots: true, requireUndo: true });
+            if (!ownsBase()) return;
+            new Notice("Organization backup imported. Undo is available.");
+          },
+        ).open();
+      };
+      if (!allowBaseOverride) {
+        openFinalConfirmation();
+        return;
+      }
       new ConfirmModal(
         this.app,
-        "Import organization backup?",
-        `Replace current personal collections, index membership and visual groups, pins, next list, saved views, and snapshots with the backup from ${backup.exportedAt || "an unknown date"}? Source notes will not be changed.`,
-        "Import backup",
-        async () => {
-          await this.plugin.mutate("Import organization backup", () => {
-            this.plugin.data.collections = backup.collections;
-            this.plugin.data.pinnedPaths = backup.pinnedPaths;
-            this.plugin.data.nextStudyPaths = backup.nextStudyPaths;
-            this.plugin.data.savedViews = backup.savedViews;
-            this.plugin.data.curriculumVisual = backup.curriculumVisual;
-            this.plugin.data.manualIndexPaths = backup.manualIndexPaths;
-            this.plugin.data.excludedIndexPaths = backup.excludedIndexPaths;
-            this.plugin.data.indexGroupByPath = backup.indexGroupByPath;
-            this.plugin.data.indexGroupOrder = backup.indexGroupOrder;
-            this.plugin.data.layoutSnapshots = limitSnapshotStack(backup.layoutSnapshots, 10);
-            this.plugin.data.portableIndex = backup.portableIndex;
-          }, { includePortableIndex: true, includeLayoutSnapshots: true });
-          new Notice("Organization backup imported. Undo is available.");
-        },
+        recoveryCheck.baseIdentity === "cross-base-override"
+          ? "Restore into a different knowledge base?"
+          : "Restore from an unverified source base?",
+        recoveryCheck.baseIdentity === "cross-base-override"
+          ? `This recovery belongs to “${backup.sourceBaseName}” (${backup.sourceBaseId}). You are explicitly choosing “${this.plugin.data.settings.workspaceName}” (${this.plugin.getActiveKnowledgeBaseId()}) as the destination. The ${backup.sourceWorkspaceMode === "ent-clinical" ? "ENT clinical" : "Generic"} preset matches.`
+          : `This v1–v6 recovery does not identify its source knowledge base or preset. You are explicitly choosing “${this.plugin.data.settings.workspaceName}” as the destination despite that uncertainty.`,
+        "Continue to restore",
+        () => openFinalConfirmation(),
       ).open();
-    }).catch((error) => new Notice(error instanceof Error ? error.message : String(error)));
+    }).catch((error) => {
+      if (ownsBase()) new Notice(error instanceof Error ? error.message : String(error));
+    });
   }
 
   private saveCurrentSearch(): void {
+    const ownsBase = this.createOpenedBaseGuard();
     new TextPromptModal(this.app, {
       title: "Save current view", placeholder: this.plugin.isClinicalMode() ? "e.g. Pediatric P1 source gaps" : "e.g. Active research projects", submitLabel: "Save view",
-      onSubmit: async (name) => this.plugin.mutate(`Save view “${name}”`, () => {
-        this.plugin.data.savedViews.push({ id: makeId("view"), name, tab: this.plugin.data.activeTab, query: this.query });
-      }),
+      onSubmit: async (name) => {
+        if (!ownsBase()) return;
+        await this.plugin.mutate(`Save view “${name}”`, () => {
+          this.plugin.data.savedViews.push({ id: makeId("view"), name, tab: this.plugin.data.activeTab, query: this.query });
+        });
+      },
     }).open();
   }
 
   private showSavedViews(event: MouseEvent): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
     const menu = new Menu();
     if (this.plugin.data.savedViews.length === 0) menu.addItem((item) => item.setTitle("No saved views yet").setDisabled(true));
     for (const view of this.plugin.data.savedViews) {
       menu.addItem((item) => item.setTitle(view.name).setIcon("bookmark").onClick(() => this.run(async () => {
+        if (!ownsBase()) return;
         this.query = view.query;
         this.plugin.data.activeTab = view.tab;
         await this.plugin.savePluginData();
+        if (!ownsBase()) return;
         this.render();
       })));
     }
     if (this.plugin.data.savedViews.length > 0) {
       menu.addSeparator();
-      menu.addItem((item) => item.setTitle("Manage saved views").setIcon("list-x").onClick(() => this.showDeleteSavedViews(event)));
+      menu.addItem((item) => item.setTitle("Manage saved views").setIcon("list-x").onClick(() => {
+        if (ownsBase()) this.showDeleteSavedViews(event);
+      }));
     }
     menu.showAtMouseEvent(event);
   }
 
   private showDeleteSavedViews(event: MouseEvent): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
     const menu = new Menu();
     for (const view of this.plugin.data.savedViews) {
       menu.addItem((item) => item.setTitle(`Delete “${view.name}”`).setIcon("trash-2").onClick(() => this.run(async () => {
+        if (!ownsBase()) return;
         await this.plugin.mutate(`Delete saved view “${view.name}”`, () => {
           this.plugin.data.savedViews = this.plugin.data.savedViews.filter((item) => item.id !== view.id);
         });
