@@ -46,6 +46,20 @@ test("release assets do not embed a local absolute workspace path", async () => 
   }
 });
 
+test("mobile index flows keep primary actions visible and empty states actionable", async () => {
+  const view = await readFile(path.join(root, "src/view.ts"), "utf8");
+  const manager = await readFile(path.join(root, "src/index-manager.ts"), "utf8");
+  const styles = await readFile(path.join(root, "styles.css"), "utf8");
+  assert.match(view, /Add existing \$\{settings\.itemPlural\}/);
+  assert.match(view, /ent-cc-history-action/);
+  assert.match(manager, /Browse \$\{availableCount\} available/);
+  assert.match(manager, /aria-selected/);
+  assert.match(styles, /grid-template-columns: repeat\(3, max-content\) 44px/);
+  assert.match(styles, /scroll-snap-type: x proximity/);
+  assert.match(styles, /height: calc\(100dvh - 16px\)/);
+  assert.match(styles, /ent-cc-manager-bulk-actions\.is-idle/);
+});
+
 test("runtime source satisfies blocking Obsidian review rules", async () => {
   const main = await readFile(path.join(root, "src/main.ts"), "utf8");
   const settings = await readFile(path.join(root, "src/settings.ts"), "utf8");
