@@ -37,6 +37,7 @@ import {
   migrateData,
   migrateStore,
   normalizeWikiLink,
+  parseQuery,
   pathIsInsideFolder,
   portablePlaceholderPath,
   PluginData,
@@ -68,6 +69,12 @@ import {
   WorkspaceMode,
 } from "./model";
 import { MAX_PORTABLE_PACKAGE_BYTES, portableSubjectPath } from "./portability";
+import {
+  BoundedKnowledgeBaseSearchCollector,
+  DEFAULT_CROSS_BASE_SEARCH_LIMIT,
+  type KnowledgeBaseSearchResultSet,
+  type KnowledgeBaseSearchSource,
+} from "./search";
 import { EntCommandCenterSettingsTab } from "./settings";
 import { EntVaultCommandCenterView, VIEW_TYPE } from "./view";
 import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge-base-modal";
@@ -78,6 +85,20 @@ interface PluginDataLoadResult {
   hasVaultId: boolean;
   sourceVersion: number;
   compatible: boolean;
+}
+
+export type { KnowledgeBaseSearchSource } from "./search";
+
+export interface KnowledgeBaseSearchOptions {
+  isCancelled?: () => boolean;
+  limit?: number;
+  yieldEvery?: number;
+}
+
+interface KnowledgeBaseSearchVaultSnapshot {
+  files: readonly TFile[];
+  frontmatterByPath: ReadonlyMap<string, Record<string, unknown>>;
+  generation: number;
 }
 
 export default class EntVaultCommandCenterPlugin extends Plugin {
@@ -92,9 +113,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private dataEpoch = 0;
   private operationIdleResolvers: Array<() => void> = [];
   private refreshTimer: number | null = null;
-  private recordsCache: VaultRecord[] | null = null;
-  private recordsCacheReferenceKey = "";
+  private searchGeneration = 0;
+  private knowledgeBaseSearchVaultSnapshot: KnowledgeBaseSearchVaultSnapshot | null = null;
+  private recordsCacheByBase = new Map<string, VaultRecord[]>();
+  private recordPathsCacheByBase = new Map<string, Set<string>>();
+  private referencedPathsCacheByBase = new Map<string, Set<string>>();
+  private excludedPathsCacheByBase = new Map<string, Set<string>>();
   private recordLinkIndex = new Map<string, VaultRecord>();
+  private recordLinkIndexBaseId = "";
   private backlinkIndex: Map<string, string[]> | null = null;
   private refreshShouldInvalidateRecords = false;
   dataCompatibilityWarning = "";
@@ -204,23 +230,27 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         // Backlinks include the whole vault, including notes outside the configured
         // index. Any metadata-link change can therefore invalidate that cache.
         this.backlinkIndex = null;
-        if (this.isRelevant(file.path)) { this.invalidateRecordCache(); this.scheduleRefresh(); }
+        this.invalidateKnowledgeBaseSearchSnapshot();
+        if (this.invalidateRecordCachesForPath(file.path)) this.scheduleRefresh(false);
         else if (this.app.workspace.getLeavesOfType(VIEW_TYPE).length > 0) this.scheduleRefresh(false);
       }));
       this.registerEvent(this.app.vault.on("create", (file) => {
         if (!(file instanceof TFile)) return;
         this.backlinkIndex = null;
-        if (this.isRelevant(file.path)) { this.invalidateRecordCache(); this.scheduleRefresh(); }
+        this.invalidateKnowledgeBaseSearchSnapshot();
+        if (this.invalidateRecordCachesForPath(file.path)) this.scheduleRefresh(false);
         else if (this.app.workspace.getLeavesOfType(VIEW_TYPE).length > 0) this.scheduleRefresh(false);
       }));
       this.registerEvent(this.app.vault.on("delete", (file) => {
         if (!(file instanceof TFile)) return;
         this.backlinkIndex = null;
-        if (this.isRelevant(file.path)) { this.invalidateRecordCache(); this.scheduleRefresh(); }
+        this.invalidateKnowledgeBaseSearchSnapshot();
+        if (this.invalidateRecordCachesForPath(file.path)) this.scheduleRefresh(false);
         else if (this.app.workspace.getLeavesOfType(VIEW_TYPE).length > 0) this.scheduleRefresh(false);
       }));
       this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
         if (file instanceof TFile || file instanceof TFolder) {
+          this.invalidateKnowledgeBaseSearchSnapshot();
           this.run(() => this.handleRename(oldPath, file.path, file instanceof TFolder));
         }
       }));
@@ -451,6 +481,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   getActiveKnowledgeBase(): KnowledgeBaseEntry { return this.requireActiveBase(); }
   getActiveKnowledgeBaseId(): string { return this.store.activeBaseId; }
   getDataEpoch(): number { return this.dataEpoch; }
+  getSearchGeneration(): number { return this.searchGeneration; }
   getVaultId(): string { return this.store.vaultId; }
 
   private cleanKnowledgeBaseName(name: string): string {
@@ -662,52 +693,51 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   isClinicalMode(): boolean { return this.data.settings.workspaceMode === "ent-clinical"; }
   canVisuallyMoveAcrossGroups(): boolean { return !this.isClinicalMode() || this.data.settings.allowClinicalVisualGroupMoves; }
 
-  invalidateRecordCache(): void {
-    this.recordsCache = null;
-    this.recordsCacheReferenceKey = "";
+  private invalidateKnowledgeBaseSearchSnapshot(): void {
+    this.searchGeneration += 1;
+    this.knowledgeBaseSearchVaultSnapshot = null;
+  }
+
+  invalidateRecordCache(membershipChanged = true): void {
+    this.invalidateKnowledgeBaseSearchSnapshot();
+    this.recordsCacheByBase.clear();
+    this.recordPathsCacheByBase.clear();
+    if (membershipChanged) {
+      this.referencedPathsCacheByBase.clear();
+      this.excludedPathsCacheByBase.clear();
+    }
     this.recordLinkIndex.clear();
+    this.recordLinkIndexBaseId = "";
     this.backlinkIndex = null;
   }
 
-  private referencedPaths(): Set<string> {
-    const paths = new Set([...this.data.manualIndexPaths, ...this.data.pinnedPaths, ...this.data.nextStudyPaths]);
-    for (const heading of this.data.collections) {
+  private referencedPaths(data = this.data, baseId = this.store.activeBaseId): Set<string> {
+    const cached = this.referencedPathsCacheByBase.get(baseId);
+    if (cached) return cached;
+    const paths = new Set([...data.manualIndexPaths, ...data.pinnedPaths, ...data.nextStudyPaths]);
+    for (const heading of data.collections) {
       for (const path of heading.subjects) paths.add(path);
       for (const subheading of heading.subheadings) {
         for (const path of subheading.subjects) paths.add(path);
       }
     }
-    for (const subject of this.data.portableIndex.subjects) {
-      const path = this.data.portableIndex.resolvedPathBySubjectId[subject.id];
+    for (const subject of data.portableIndex.subjects) {
+      const path = data.portableIndex.resolvedPathBySubjectId[subject.id];
       // A resolved library identity must stay discoverable even though it is
       // intentionally absent from the topic index. Otherwise a newly created
       // or linked generic note falls back to a false unresolved placeholder.
       if (path) paths.add(path);
     }
+    this.referencedPathsCacheByBase.set(baseId, paths);
     return paths;
   }
 
-  private recordDependencyKey(referenced: Set<string>): string {
-    const settings = this.data.settings;
-    return JSON.stringify({
-      activeBaseId: this.store.activeBaseId,
-      referenced: [...referenced].sort(),
-      manual: [...this.data.manualIndexPaths].sort(),
-      excluded: [...this.data.excludedIndexPaths].sort(),
-      groups: Object.entries(this.data.indexGroupByPath).sort(([a], [b]) => a.localeCompare(b)),
-      displayNames: Object.entries(this.data.displayNameByPath).sort(([a], [b]) => a.localeCompare(b)),
-      groupAliases: Object.entries(this.data.indexGroupAliases).sort(([a], [b]) => a.localeCompare(b)),
-      groupOrder: this.data.indexGroupOrder,
-      settings: {
-        workspaceMode: settings.workspaceMode,
-        primaryFolder: settings.primaryFolder,
-        proposalFolder: settings.proposalFolder,
-        idProperty: settings.idProperty,
-        groupProperty: settings.groupProperty,
-        parentProperty: settings.parentProperty,
-        allowClinicalVisualGroupMoves: settings.allowClinicalVisualGroupMoves,
-      },
-    });
+  private excludedPaths(data = this.data, baseId = this.store.activeBaseId): Set<string> {
+    const cached = this.excludedPathsCacheByBase.get(baseId);
+    if (cached) return cached;
+    const paths = new Set(data.excludedIndexPaths);
+    this.excludedPathsCacheByBase.set(baseId, paths);
+    return paths;
   }
 
   private rebuildRecordLinkIndex(records: VaultRecord[]): void {
@@ -715,41 +745,152 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     for (const record of records) {
       const basename = record.path.split("/").pop()?.replace(/\.md$/i, "") ?? "";
       for (const value of [record.path.replace(/\.md$/i, ""), basename, record.title, ...record.aliases]) {
-        const key = normalizeWikiLink(value).toLocaleLowerCase();
+        const key = normalizeWikiLink(value).toLowerCase();
         if (key && !this.recordLinkIndex.has(key)) this.recordLinkIndex.set(key, record);
       }
     }
   }
 
   getRecords(): VaultRecord[] {
-    const referenced = this.referencedPaths();
-    const referenceKey = this.recordDependencyKey(referenced);
-    if (this.recordsCache && referenceKey === this.recordsCacheReferenceKey) return this.recordsCache;
-    const proposalFolder = normalizePath(this.data.settings.proposalFolder);
+    const active = this.requireActiveBase();
+    const records = this.getRecordsForEntry(active);
+    if (this.recordLinkIndexBaseId !== active.id) {
+      this.rebuildRecordLinkIndex(records);
+      this.recordLinkIndexBaseId = active.id;
+    }
+    return records;
+  }
+
+  async searchKnowledgeBases(
+    query: string,
+    options: KnowledgeBaseSearchOptions = {},
+  ): Promise<KnowledgeBaseSearchResultSet<KnowledgeBaseSearchSource> | null> {
+    const requestGeneration = this.searchGeneration;
+    const activeBaseId = this.store.activeBaseId;
+    const entries = this.getKnowledgeBases()
+      .sort((a, b) => Number(b.id === activeBaseId) - Number(a.id === activeBaseId)
+        || a.data.settings.workspaceName.localeCompare(b.data.settings.workspaceName));
+    const sources: KnowledgeBaseSearchSource[] = entries.map((entry) => ({
+      baseId: entry.id,
+      baseName: entry.data.settings.workspaceName,
+      data: entry.data,
+    }));
+    const collector = new BoundedKnowledgeBaseSearchCollector(
+      sources,
+      parseQuery(query),
+      options.limit ?? DEFAULT_CROSS_BASE_SEARCH_LIMIT,
+    );
+    const cancelled = (): boolean => requestGeneration !== this.searchGeneration || Boolean(options.isCancelled?.());
+    const yieldEvery = Math.max(1, Math.floor(options.yieldEvery ?? 750));
+    const useTimeBudget = options.yieldEvery === undefined;
+    const now = (): number => performance.now();
+    let sliceStartedAt = now();
+    let workSinceYield = 0;
+    const checkpoint = async (): Promise<boolean> => {
+      workSinceYield += 1;
+      if (cancelled()) return false;
+      if (workSinceYield < yieldEvery && (!useTimeBudget || now() - sliceStartedAt < 4)) return true;
+      workSinceYield = 0;
+      await new Promise<void>((resolve) => {
+        if (typeof window === "undefined") queueMicrotask(resolve);
+        else window.activeWindow.setTimeout(resolve, 0);
+      });
+      sliceStartedAt = now();
+      return !cancelled();
+    };
+    if (cancelled()) return null;
+
+    const needsVaultSnapshot = entries.some((entry) => !this.recordsCacheByBase.has(entry.id));
+    let vaultSnapshot = this.knowledgeBaseSearchVaultSnapshot;
+    if (needsVaultSnapshot && vaultSnapshot?.generation !== requestGeneration) vaultSnapshot = null;
+    if (needsVaultSnapshot && !vaultSnapshot) {
+      const files = this.app.vault.getMarkdownFiles();
+      const frontmatterByPath = new Map<string, Record<string, unknown>>();
+      for (const file of files) {
+        frontmatterByPath.set(file.path, asUnknownRecord(this.app.metadataCache.getFileCache(file)?.frontmatter));
+        if (!await checkpoint()) return null;
+      }
+      if (cancelled()) return null;
+      vaultSnapshot = { files, frontmatterByPath, generation: requestGeneration };
+      this.knowledgeBaseSearchVaultSnapshot = vaultSnapshot;
+    }
+    const files = vaultSnapshot?.files ?? [];
+    const frontmatterByPath = vaultSnapshot?.frontmatterByPath ?? new Map<string, Record<string, unknown>>();
+
+    for (let baseIndex = 0; baseIndex < entries.length; baseIndex += 1) {
+      if (cancelled()) return null;
+      const entry = entries[baseIndex];
+      if (!entry) continue;
+      const cached = this.recordsCacheByBase.get(entry.id);
+      const scan: Iterable<VaultRecord | null> = cached ?? this.iterateRecordScanForEntry(entry, files, frontmatterByPath);
+      for (const record of scan) {
+        if (record) collector.consider(baseIndex, record);
+        if (!await checkpoint()) return null;
+      }
+    }
+    return cancelled() ? null : collector.finish();
+  }
+
+  private getRecordsForEntry(entry: KnowledgeBaseEntry): VaultRecord[] {
+    const cached = this.recordsCacheByBase.get(entry.id);
+    if (cached) return cached;
+    return this.buildRecordsForEntry(entry, this.app.vault.getMarkdownFiles());
+  }
+
+  private buildRecordsForEntry(
+    entry: KnowledgeBaseEntry,
+    files: readonly TFile[],
+    frontmatterByPath?: ReadonlyMap<string, Record<string, unknown>>,
+  ): VaultRecord[] {
+    const records: VaultRecord[] = [];
+    for (const record of this.iterateRecordScanForEntry(entry, files, frontmatterByPath)) {
+      if (record) records.push(record);
+    }
+    records.sort((a, b) => a.role.localeCompare(b.role)
+      || (a.curriculumId || "ZZZ").localeCompare(b.curriculumId || "ZZZ", undefined, { numeric: true })
+      || a.title.localeCompare(b.title));
+    this.recordsCacheByBase.set(entry.id, records);
+    this.recordPathsCacheByBase.set(entry.id, new Set(records.map((record) => record.path)));
+    return records;
+  }
+
+  private *iterateRecordScanForEntry(
+    entry: KnowledgeBaseEntry,
+    files: readonly TFile[],
+    frontmatterByPath?: ReadonlyMap<string, Record<string, unknown>>,
+  ): Generator<VaultRecord | null> {
+    const data = entry.data;
+    const clinicalMode = data.settings.workspaceMode === "ent-clinical";
+    const canMoveAcrossGroups = !clinicalMode || data.settings.allowClinicalVisualGroupMoves;
+    const referenced = this.referencedPaths(data, entry.id);
+    const proposalFolder = normalizePath(data.settings.proposalFolder);
     const proposalRoot = proposalFolder ? `${proposalFolder}/` : "";
-    const settings = this.data.settings;
+    const settings = data.settings;
     // Membership lookups run once per markdown file, so they must not be linear
     // scans of the manual/hidden arrays.
-    const manual = new Set(this.data.manualIndexPaths);
-    const excluded = new Set(this.data.excludedIndexPaths);
-    const records: VaultRecord[] = [];
+    const manual = new Set(data.manualIndexPaths);
+    const excluded = this.excludedPaths(data, entry.id);
+    const recordPaths = new Set<string>();
     const portableIdByPath = new Map<string, string>();
-    const portableSubjectById = new Map(this.data.portableIndex.subjects.map((subject) => [subject.id, subject]));
-    const portableGroupById = new Map(this.data.portableIndex.groups.map((group) => [group.id, group]));
-    for (const [subjectId, path] of Object.entries(this.data.portableIndex.resolvedPathBySubjectId)) {
+    const portableSubjectById = new Map(data.portableIndex.subjects.map((subject) => [subject.id, subject]));
+    const portableGroupById = new Map(data.portableIndex.groups.map((group) => [group.id, group]));
+    for (const [subjectId, path] of Object.entries(data.portableIndex.resolvedPathBySubjectId)) {
       if (path && !portableIdByPath.has(path)) portableIdByPath.set(path, subjectId);
     }
-    for (const file of this.app.vault.getMarkdownFiles()) {
-      let frontmatter: Record<string, unknown> = {};
-      if (this.isClinicalMode()) frontmatter = asUnknownRecord(this.app.metadataCache.getFileCache(file)?.frontmatter);
-      const identity = this.identityForFile(file, frontmatter, referenced, proposalRoot, manual, excluded);
-      if (!identity) continue;
-      if (!this.isClinicalMode()) frontmatter = asUnknownRecord(this.app.metadataCache.getFileCache(file)?.frontmatter);
+    for (const file of files) {
+      let frontmatter = frontmatterByPath?.get(file.path) ?? {};
+      if (!frontmatterByPath && clinicalMode) frontmatter = asUnknownRecord(this.app.metadataCache.getFileCache(file)?.frontmatter);
+      const identity = this.identityForFile(file, frontmatter, data, clinicalMode, referenced, proposalRoot, manual, excluded);
+      if (!identity) {
+        yield null;
+        continue;
+      }
+      if (!frontmatterByPath && !clinicalMode) frontmatter = asUnknownRecord(this.app.metadataCache.getFileCache(file)?.frontmatter);
       const { kind: detectedKind, role: detectedRole } = identity;
       const portableId = portableIdByPath.get(file.path);
       const portableSubject = portableId ? portableSubjectById.get(portableId) : undefined;
       const portableGroup = portableSubject ? portableGroupById.get(portableSubject.groupId)?.title ?? "" : "";
-      const portableLibraryInGeneric = !this.isClinicalMode()
+      const portableLibraryInGeneric = !clinicalMode
         && (portableSubject?.recordKind === "procedure"
           || portableSubject?.recordKind === "medication"
           || portableSubject?.recordKind === "syndrome");
@@ -757,13 +898,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       const entDomains = asStringList(frontmatter.ent_domains);
       const titleFallback = file.basename.replace(/^(Procedure|Drug|Syndrome)\s*-\s*/i, "");
       const configuredGroup = asStringList(frontmatter[settings.groupProperty])[0] ?? "";
-      const visualGroup = this.canVisuallyMoveAcrossGroups() ? asText(this.data.indexGroupByPath[file.path]) : "";
+      const visualGroup = canMoveAcrossGroups ? asText(data.indexGroupByPath[file.path]) : "";
       const configuredIdValue = frontmatter[settings.idProperty];
       const configuredId = typeof configuredIdValue === "number" ? String(configuredIdValue) : asText(configuredIdValue);
       const sourceDomain = detectedRole === "proposal"
         ? asText(frontmatter.proposed_domain, settings.inboxLabel)
         : detectedKind === "topic"
-          ? configuredGroup || (this.isClinicalMode() ? asText(frontmatter.domain, cleanDomainFolder(file.path)) : configuredGroupFromPath(file.path, settings.primaryFolder))
+          ? configuredGroup || (clinicalMode ? asText(frontmatter.domain, cleanDomainFolder(file.path)) : configuredGroupFromPath(file.path, settings.primaryFolder))
           : detectedKind === "procedure"
             ? asText(frontmatter.domain, "Procedures")
             : detectedKind === "medication"
@@ -774,7 +915,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       const domain = portableLibraryInGeneric
         ? portableGroup || sourceDomain
         : detectedKind === "topic"
-          ? visualGroup || asText(this.data.indexGroupAliases[sourceDomain], sourceDomain)
+          ? visualGroup || asText(data.indexGroupAliases[sourceDomain], sourceDomain)
           : sourceDomain;
       // A clinical proposal can safely back an imported index subject while it
       // awaits promotion. Project that one record into both the Inbox (by role)
@@ -786,16 +927,16 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         ? "topic"
         : portableSubject?.recordKind ?? detectedKind;
       const sourceTitle = asText(frontmatter.title, asText(frontmatter.canonical_name, titleFallback));
-      const displayTitle = asText(this.data.displayNameByPath[file.path]);
+      const displayTitle = asText(data.displayNameByPath[file.path]);
       const aliases = asStringList(frontmatter.aliases);
       if (displayTitle && sourceTitle && displayTitle !== sourceTitle && !aliases.includes(sourceTitle)) aliases.push(sourceTitle);
-      records.push({
+      const record: VaultRecord = {
         path: file.path,
         title: displayTitle || sourceTitle,
         ...(displayTitle ? { sourceTitle } : {}),
         kind,
         role,
-        curriculumId: configuredId || (this.isClinicalMode() ? asText(frontmatter.curriculum_id) : ""),
+        curriculumId: configuredId || (clinicalMode ? asText(frontmatter.curriculum_id) : ""),
         domain,
         topicKind: asText(frontmatter.topic_kind, asText(frontmatter.type, asText(frontmatter.approach, role === "vault-note" ? "note" : kind))),
         priority: asText(frontmatter.priority),
@@ -807,29 +948,36 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         aliases,
         relatedTopics: asStringList(frontmatter.related_topics),
         parentTopic: role === "proposal"
-          ? (this.isClinicalMode() ? asText(frontmatter.proposed_parent) : asText(frontmatter[settings.parentProperty]))
-          : asText(frontmatter[settings.parentProperty], this.isClinicalMode() ? asText(frontmatter.parent_topic) : ""),
+          ? (clinicalMode ? asText(frontmatter.proposed_parent) : asText(frontmatter[settings.parentProperty]))
+          : asText(frontmatter[settings.parentProperty], clinicalMode ? asText(frontmatter.parent_topic) : ""),
         imageStatus: asText(frontmatter.image_status),
         doseStatus: asText(frontmatter.dose_status),
         sourceCoverage: asText(frontmatter.source_coverage),
-        folderOrder: kind === "topic" ? this.indexGroupSortKey(domain, file.path) : role === "proposal" ? "00" : "99",
+        folderOrder: kind === "topic" ? this.indexGroupSortKey(data, domain, file.path) : role === "proposal" ? "00" : "99",
         mtime: file.stat.mtime,
         aiLock: frontmatter.ai_lock === true,
         ...(portableId ? { portableId } : {}),
         ...(portableSubject ? { portableIndexed: portableSubject.indexed } : {}),
-      });
+      };
+      recordPaths.add(record.path);
+      yield record;
     }
-    const recordPaths = new Set(records.map((record) => record.path));
-    for (const subject of this.data.portableIndex.subjects) {
-      const resolvedPath = this.data.portableIndex.resolvedPathBySubjectId[subject.id] || "";
-      if (resolvedPath && recordPaths.has(resolvedPath)) continue;
+    for (const subject of data.portableIndex.subjects) {
+      const resolvedPath = data.portableIndex.resolvedPathBySubjectId[subject.id] || "";
+      if (resolvedPath && recordPaths.has(resolvedPath)) {
+        yield null;
+        continue;
+      }
       const path = resolvedPath || portablePlaceholderPath(subject.id);
-      if (recordPaths.has(path)) continue;
+      if (recordPaths.has(path)) {
+        yield null;
+        continue;
+      }
       const sourceGroup = portableGroupById.get(subject.groupId)?.title || "Ungrouped";
-      const domain = (this.canVisuallyMoveAcrossGroups() ? asText(this.data.indexGroupByPath[path]) : "")
-        || asText(this.data.indexGroupAliases[sourceGroup], sourceGroup);
-      const displayTitle = asText(this.data.displayNameByPath[path]);
-      records.push({
+      const domain = (canMoveAcrossGroups ? asText(data.indexGroupByPath[path]) : "")
+        || asText(data.indexGroupAliases[sourceGroup], sourceGroup);
+      const displayTitle = asText(data.displayNameByPath[path]);
+      const record: VaultRecord = {
         path,
         title: displayTitle || subject.title,
         ...(displayTitle ? { sourceTitle: subject.title } : {}),
@@ -850,46 +998,42 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         imageStatus: "",
         doseStatus: "",
         sourceCoverage: "",
-        folderOrder: this.indexGroupSortKey(domain, path),
+        folderOrder: this.indexGroupSortKey(data, domain, path),
         mtime: 0,
         aiLock: false,
         portableId: subject.id,
         isPlaceholder: true,
         portableIndexed: subject.indexed,
-      });
+      };
       recordPaths.add(path);
+      yield record;
     }
-    records.sort((a, b) => a.role.localeCompare(b.role)
-      || (a.curriculumId || "ZZZ").localeCompare(b.curriculumId || "ZZZ", undefined, { numeric: true })
-      || a.title.localeCompare(b.title));
-    this.recordsCache = records;
-    this.recordsCacheReferenceKey = referenceKey;
-    this.rebuildRecordLinkIndex(records);
-    return records;
   }
 
   private identityForFile(
     file: TFile,
     frontmatter: Record<string, unknown>,
+    data: PluginData,
+    clinicalMode: boolean,
     referenced: Set<string>,
     proposalRoot: string,
     manual: Set<string>,
     excluded: Set<string>,
   ): { kind: RecordKind; role: RecordRole } | null {
-    if (!this.isClinicalMode() && manual.has(file.path)) return { kind: "topic", role: "canonical" };
-    if ((proposalRoot && file.path.startsWith(proposalRoot)) || (this.isClinicalMode() && frontmatter.type === "topic-proposal")) return { kind: "proposal", role: "proposal" };
-    if (pathIsInsideFolder(file.path, this.data.settings.primaryFolder)) {
+    if (!clinicalMode && manual.has(file.path)) return { kind: "topic", role: "canonical" };
+    if ((proposalRoot && file.path.startsWith(proposalRoot)) || (clinicalMode && frontmatter.type === "topic-proposal")) return { kind: "proposal", role: "proposal" };
+    if (pathIsInsideFolder(file.path, data.settings.primaryFolder)) {
       if (excluded.has(file.path)) {
         return referenced.has(file.path) ? { kind: "note", role: "vault-note" } : null;
       }
-      if (!this.isClinicalMode()) return { kind: "topic", role: "canonical" };
-      return asText(frontmatter[this.data.settings.idProperty], asText(frontmatter.curriculum_id))
+      if (!clinicalMode) return { kind: "topic", role: "canonical" };
+      return asText(frontmatter[data.settings.idProperty], asText(frontmatter.curriculum_id))
         ? { kind: "topic", role: "canonical" }
         : { kind: "topic", role: "supporting" };
     }
-    if (this.isClinicalMode() && file.path.startsWith(PROCEDURE_ROOT) && file.basename.startsWith("Procedure - ")) return { kind: "procedure", role: "library" };
-    if (this.isClinicalMode() && file.path.startsWith(MEDICATION_ROOT) && file.basename.startsWith("Drug - ")) return { kind: "medication", role: "library" };
-    if (this.isClinicalMode() && file.path.startsWith(SYNDROME_ROOT) && file.basename.startsWith("Syndrome - ")) return { kind: "syndrome", role: "library" };
+    if (clinicalMode && file.path.startsWith(PROCEDURE_ROOT) && file.basename.startsWith("Procedure - ")) return { kind: "procedure", role: "library" };
+    if (clinicalMode && file.path.startsWith(MEDICATION_ROOT) && file.basename.startsWith("Drug - ")) return { kind: "medication", role: "library" };
+    if (clinicalMode && file.path.startsWith(SYNDROME_ROOT) && file.basename.startsWith("Syndrome - ")) return { kind: "syndrome", role: "library" };
     return referenced.has(file.path) ? { kind: "note", role: "vault-note" } : null;
   }
 
@@ -1209,7 +1353,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const existing = new Set(this.app.vault.getMarkdownFiles().map((file) => file.path));
     for (const subject of this.data.portableIndex.subjects) existing.add(portableSubjectPath(this.data, subject.id));
     const indexed = new Set(this.getIndexRecords().map((record) => record.path));
-    const uniqueExisting = (paths: string[]): string[] => paths.filter((path, index, all) => existing.has(path) && all.indexOf(path) === index);
+    const uniqueExisting = (paths: string[]): string[] => {
+      const seen = new Set<string>();
+      return paths.filter((path) => {
+        if (!existing.has(path) || seen.has(path)) return false;
+        seen.add(path);
+        return true;
+      });
+    };
     await this.mutate("Repair safe index organization issues", () => {
       this.data.manualIndexPaths = uniqueExisting(this.data.manualIndexPaths);
       const manual = new Set(this.data.manualIndexPaths);
@@ -1220,8 +1371,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         heading.subjects = uniqueExisting(heading.subjects);
         for (const subheading of heading.subheadings) subheading.subjects = uniqueExisting(subheading.subjects);
       }
+      const excluded = new Set(this.data.excludedIndexPaths);
       for (const path of Object.keys(this.data.indexGroupByPath)) {
-        if (!existing.has(path) || (!indexed.has(path) && !this.data.excludedIndexPaths.includes(path))) delete this.data.indexGroupByPath[path];
+        if (!existing.has(path) || (!indexed.has(path) && !excluded.has(path))) delete this.data.indexGroupByPath[path];
       }
       this.data.indexGroupOrder = [...new Set(this.data.indexGroupOrder.map((group) => group.trim()).filter(Boolean))];
       reconcileCurriculumVisual(this.data.curriculumVisual, this.getRecords(), this.data.indexGroupByPath);
@@ -1246,18 +1398,46 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       .sort((a, b) => a.basename.localeCompare(b.basename));
   }
 
-  isRelevant(path: string): boolean {
-    if (!this.data.settings.primaryFolder) return !pathIsInsideFolder(path, this.app.vault.configDir);
-    const proposalFolder = normalizePath(this.data.settings.proposalFolder);
+  private isRelevantToBase(path: string, data: PluginData, baseId: string): boolean {
+    if (!data.settings.primaryFolder) return !pathIsInsideFolder(path, this.app.vault.configDir);
+    const proposalFolder = normalizePath(data.settings.proposalFolder);
     const proposalRoot = proposalFolder ? `${proposalFolder}/` : "";
-    const configuredRoots = [this.data.settings.primaryFolder, this.data.settings.proposalFolder]
+    const configuredRoots = [data.settings.primaryFolder, data.settings.proposalFolder]
       .filter(Boolean)
       .map((root) => `${normalizePath(root)}/`);
-    const clinicalRoots = this.isClinicalMode() ? [PROCEDURE_ROOT, MEDICATION_ROOT, SYNDROME_ROOT, "07 Evidence Updates/"] : [];
+    const clinicalRoots = data.settings.workspaceMode === "ent-clinical" ? [PROCEDURE_ROOT, MEDICATION_ROOT, SYNDROME_ROOT, "07 Evidence Updates/"] : [];
     return [...configuredRoots, proposalRoot, ...clinicalRoots].filter(Boolean).some((root) => path.startsWith(root))
-      || this.referencedPaths().has(path)
-      || this.data.excludedIndexPaths.includes(path)
-      || Object.getOwnPropertyDescriptor(this.data.indexGroupByPath, path) !== undefined;
+      || this.referencedPaths(data, baseId).has(path)
+      || this.excludedPaths(data, baseId).has(path)
+      || Object.getOwnPropertyDescriptor(data.indexGroupByPath, path) !== undefined;
+  }
+
+  isRelevant(path: string): boolean {
+    return this.isRelevantToBase(path, this.data, this.store.activeBaseId);
+  }
+
+  private invalidateRecordCachesForPath(path: string): boolean {
+    let relevant = false;
+    let activeBaseInvalidated = false;
+    const currentFile = this.app.vault.getAbstractFileByPath(path);
+    const currentFrontmatter = currentFile instanceof TFile
+      ? asUnknownRecord(this.app.metadataCache.getFileCache(currentFile)?.frontmatter)
+      : {};
+    const isCurrentClinicalProposal = currentFrontmatter.type === "topic-proposal";
+    for (const entry of this.getKnowledgeBases()) {
+      const wasCachedRecord = this.recordPathsCacheByBase.get(entry.id)?.has(path) ?? false;
+      const isClinicalProposal = entry.data.settings.workspaceMode === "ent-clinical" && isCurrentClinicalProposal;
+      if (!wasCachedRecord && !isClinicalProposal && !this.isRelevantToBase(path, entry.data, entry.id)) continue;
+      relevant = true;
+      this.recordsCacheByBase.delete(entry.id);
+      this.recordPathsCacheByBase.delete(entry.id);
+      if (entry.id === this.store.activeBaseId) activeBaseInvalidated = true;
+    }
+    if (activeBaseInvalidated) {
+      this.recordLinkIndex.clear();
+      this.recordLinkIndexBaseId = "";
+    }
+    return relevant;
   }
 
   async reconcileRecords(records: VaultRecord[]): Promise<boolean> {
@@ -1344,6 +1524,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.data.redoStack = [];
       try {
         action();
+        // All organization mutations can affect membership, display aliases,
+        // portable subjects, or record grouping. Central invalidation keeps
+        // warm record-cache hits O(1) without relying on a proportional JSON key.
+        this.invalidateRecordCache();
         await this.savePluginData();
       } catch (error) {
         if (transactionBackup) {
@@ -1452,7 +1636,6 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (validation) throw new Error(validation);
     const path = normalizePath(genericNotePath(value.folder, value.title));
     const folder = path.includes("/") ? path.substring(0, path.lastIndexOf("/")) : "";
-    await this.ensureFolder(folder);
     let content = "";
     if (value.mode === "template") {
       const template = this.app.vault.getAbstractFileByPath(normalizePath(value.templatePath));
@@ -1460,9 +1643,16 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       const now = new Date();
       content = applyTemplateTokens(await this.app.vault.cachedRead(template), value.title, this.today(), now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
     }
-    const file = await this.app.vault.create(path, content);
-    this.invalidateRecordCache();
-    return file;
+    const createdFolders: string[] = [];
+    try {
+      await this.ensureFolder(folder, createdFolders);
+      const file = await this.app.vault.create(path, content);
+      this.invalidateRecordCache();
+      return file;
+    } catch (error) {
+      await this.removeCreatedEmptyFolders(createdFolders);
+      throw error;
+    }
   }
 
   getPortableJsonFiles(): TFile[] {
@@ -1473,7 +1663,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   async writePortableJson(kind: "backup" | "workspace" | "portable", value: unknown): Promise<TFile> {
     const folder = "Knowledge Base Command Center Exports";
-    await this.ensureFolder(folder);
+    const content = `${JSON.stringify(value, null, 2)}\n`;
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const basePath = normalizePath(`${folder}/knowledge-base-command-center-${kind}-${stamp}`);
     let path = `${basePath}.json`;
@@ -1482,8 +1672,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       path = `${basePath}-${suffix}.json`;
       suffix += 1;
     }
-    const file = await this.app.vault.create(path, `${JSON.stringify(value, null, 2)}\n`);
-    return file;
+    const createdFolders: string[] = [];
+    try {
+      await this.ensureFolder(folder, createdFolders);
+      return await this.app.vault.create(path, content);
+    } catch (error) {
+      await this.removeCreatedEmptyFolders(createdFolders);
+      throw error;
+    }
   }
 
   async readPortableJson(file: TFile): Promise<unknown> {
@@ -1531,8 +1727,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const validation = this.validateProposal(value);
     if (validation) throw new Error(validation);
     const path = normalizePath(proposalPath(this.data.settings.proposalFolder, value.title));
-    await this.ensureFolder(path.substring(0, path.lastIndexOf("/")));
-    const file = await this.app.vault.create(path, buildProposalMarkdown({
+    const content = buildProposalMarkdown({
       title: value.title,
       domain: value.domain,
       parentPath: value.parentPath,
@@ -1540,10 +1735,18 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       topicKind: value.topicKind,
       priority: value.priority,
       safetyCritical: value.safetyCritical,
-    }, this.today()));
-    this.invalidateRecordCache();
-    await this.refreshViews();
-    return file;
+    }, this.today());
+    const createdFolders: string[] = [];
+    try {
+      await this.ensureFolder(path.substring(0, path.lastIndexOf("/")), createdFolders);
+      const file = await this.app.vault.create(path, content);
+      this.invalidateRecordCache();
+      await this.refreshViews();
+      return file;
+    } catch (error) {
+      await this.removeCreatedEmptyFolders(createdFolders);
+      throw error;
+    }
   }
 
   async createCanonical(value: TopicFormValue): Promise<TFile> {
@@ -1551,8 +1754,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const validation = this.validateCanonical(value);
     if (validation) throw new Error(validation);
     const path = normalizePath(canonicalPath(value, this.data.settings.primaryFolder));
-    await this.ensureFolder(path.substring(0, path.lastIndexOf("/")));
-    const file = await this.app.vault.create(path, buildCanonicalMarkdown({
+    const content = buildCanonicalMarkdown({
       title: value.title,
       domain: value.domain,
       curriculumId: value.curriculumId,
@@ -1560,10 +1762,18 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       topicKind: value.topicKind,
       priority: value.priority,
       safetyCritical: value.safetyCritical,
-    }, this.today()));
-    this.invalidateRecordCache();
-    await this.refreshViews();
-    return file;
+    }, this.today());
+    const createdFolders: string[] = [];
+    try {
+      await this.ensureFolder(path.substring(0, path.lastIndexOf("/")), createdFolders);
+      const file = await this.app.vault.create(path, content);
+      this.invalidateRecordCache();
+      await this.refreshViews();
+      return file;
+    } catch (error) {
+      await this.removeCreatedEmptyFolders(createdFolders);
+      throw error;
+    }
   }
 
   async promoteProposal(sourcePath: string, value: TopicFormValue): Promise<TFile> {
@@ -1578,9 +1788,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const destination = normalizePath(canonicalPath(value, this.data.settings.primaryFolder));
     const originalContent = await this.app.vault.read(source);
     const originalPath = source.path;
+    const createdFolders: string[] = [];
     let current = source;
     try {
-      await this.ensureFolder(destination.substring(0, destination.lastIndexOf("/")));
+      await this.ensureFolder(destination.substring(0, destination.lastIndexOf("/")), createdFolders);
       await this.app.fileManager.renameFile(source, destination);
       const moved = this.app.vault.getAbstractFileByPath(destination);
       if (!(moved instanceof TFile)) throw new Error("The promoted note could not be found after it was moved.");
@@ -1600,15 +1811,15 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       await this.refreshViews();
       return current;
     } catch (error) {
+      let rollbackError: unknown = null;
       try {
-        const rollbackFile = this.app.vault.getAbstractFileByPath(destination);
-        if (rollbackFile instanceof TFile) {
-          await this.app.vault.process(rollbackFile, () => originalContent);
-          await this.app.fileManager.renameFile(rollbackFile, originalPath);
-        }
-      } catch (rollbackError) {
-        console.error("ENT Command Center promotion rollback failed", rollbackError);
+        await this.restoreMovedFile(current, originalPath, destination, originalContent);
+      } catch (caughtRollbackError) {
+        rollbackError = caughtRollbackError;
+        console.error("Knowledge Base Command Center promotion rollback failed", caughtRollbackError);
       }
+      await this.removeCreatedEmptyFolders(createdFolders);
+      if (rollbackError) throw this.operationFailureWithRollback("promotion", error, rollbackError, originalPath, destination);
       throw error;
     }
   }
@@ -1631,10 +1842,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       : normalizePath(canonicalPath(value, this.data.settings.primaryFolder));
     const originalContent = await this.app.vault.read(source);
     const originalPath = source.path;
+    const createdFolders: string[] = [];
     let current = source;
     try {
       if (destination !== originalPath) {
-        await this.ensureFolder(destination.substring(0, destination.lastIndexOf("/")));
+        await this.ensureFolder(destination.substring(0, destination.lastIndexOf("/")), createdFolders);
         await this.app.fileManager.renameFile(source, destination);
         const moved = this.app.vault.getAbstractFileByPath(destination);
         if (!(moved instanceof TFile)) throw new Error("The canonical note could not be found after it was moved.");
@@ -1653,16 +1865,15 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       await this.refreshViews();
       return current;
     } catch (error) {
+      let rollbackError: unknown = null;
       try {
-        const rollbackPath = destination === originalPath ? originalPath : destination;
-        const rollbackFile = this.app.vault.getAbstractFileByPath(rollbackPath);
-        if (rollbackFile instanceof TFile) {
-          await this.app.vault.process(rollbackFile, () => originalContent);
-          if (rollbackFile.path !== originalPath) await this.app.fileManager.renameFile(rollbackFile, originalPath);
-        }
-      } catch (rollbackError) {
-        console.error("ENT Command Center placement rollback failed", rollbackError);
+        await this.restoreMovedFile(current, originalPath, destination, originalContent);
+      } catch (caughtRollbackError) {
+        rollbackError = caughtRollbackError;
+        console.error("Knowledge Base Command Center placement rollback failed", caughtRollbackError);
       }
+      await this.removeCreatedEmptyFolders(createdFolders);
+      if (rollbackError) throw this.operationFailureWithRollback("placement", error, rollbackError, originalPath, destination);
       throw error;
     }
   }
@@ -1682,7 +1893,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return `${year}-${month}-${day}`;
   }
 
-  private async ensureFolder(path: string): Promise<void> {
+  private async ensureFolder(path: string, createdPaths: string[] = []): Promise<void> {
     const normalized = normalizePath(path);
     if (!normalized) return;
     let built = "";
@@ -1692,7 +1903,71 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (existing instanceof TFolder) continue;
       if (existing) throw new Error(`${built} exists but is not a folder.`);
       await this.app.vault.createFolder(built);
+      createdPaths.push(built);
     }
+  }
+
+  /** Remove only folders created by the failed operation and still confirmed empty. */
+  private async removeCreatedEmptyFolders(createdPaths: string[]): Promise<void> {
+    for (const path of [...createdPaths].reverse()) {
+      const folder = this.app.vault.getAbstractFileByPath(path);
+      if (!(folder instanceof TFolder) || folder.children.length > 0) continue;
+      try {
+        await this.app.fileManager.trashFile(folder);
+      } catch (error) {
+        // Leaving an empty folder is safer than broadening rollback deletion.
+        console.warn(`Knowledge Base Command Center could not remove the empty rollback folder ${path}`, error);
+      }
+    }
+  }
+
+  private async restoreMovedFile(
+    operationFile: TFile,
+    originalPath: string,
+    destination: string,
+    originalContent: string,
+  ): Promise<void> {
+    const destinationFile = this.app.vault.getAbstractFileByPath(destination);
+    const originalFile = this.app.vault.getAbstractFileByPath(originalPath);
+    const operationAtOriginal = originalFile === operationFile;
+    const operationAtDestination = destinationFile === operationFile;
+    if (!operationAtOriginal && !operationAtDestination) {
+      if (originalFile instanceof TFile && destinationFile instanceof TFile) {
+        throw new Error(`Both ${originalPath} and ${destination} exist, but the file moved by this operation could not be identified. No content was changed.`);
+      }
+      throw new Error(`The file moved by this operation could not be safely identified at either ${originalPath} or ${destination}. No content was changed.`);
+    }
+    // Never select a file merely because it occupies the destination path. A
+    // Sync client may create that path between validation and rename. Object
+    // identity keeps rollback scoped to the exact TFile this operation began
+    // with and prevents unrelated destination content from being overwritten.
+    const file = operationFile;
+    const failures: string[] = [];
+    try {
+      await this.app.vault.process(file, () => originalContent);
+    } catch (error) {
+      failures.push(`content restore failed (${error instanceof Error ? error.message : String(error)})`);
+    }
+    if (file.path !== originalPath) {
+      try {
+        await this.app.fileManager.renameFile(file, originalPath);
+      } catch (error) {
+        failures.push(`path restore failed (${error instanceof Error ? error.message : String(error)})`);
+      }
+    }
+    if (failures.length > 0) throw new Error(failures.join("; "));
+  }
+
+  private operationFailureWithRollback(
+    operation: "promotion" | "placement",
+    error: unknown,
+    rollbackError: unknown,
+    originalPath: string,
+    destination: string,
+  ): Error {
+    const operationMessage = error instanceof Error ? error.message : String(error);
+    const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+    return new Error(`${operationMessage} Automatic ${operation} rollback also failed (${rollbackMessage}). Inspect “${originalPath}” and “${destination}” before retrying; no further automatic changes were attempted.`);
   }
 
   private async handleRename(oldPath: string, newPath: string, folderRename = false): Promise<void> {
@@ -1747,14 +2022,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       + heading.subheadings.reduce((sum, subheading) => sum + Number(subheading.subjects.includes(path)), 0), 0);
   }
 
-  private indexGroupSortKey(domain: string, path: string): string {
-    if (this.isClinicalMode() && !this.data.settings.allowClinicalVisualGroupMoves
-      && pathIsInsideFolder(path, this.data.settings.primaryFolder)) {
-      const root = normalizePath(this.data.settings.primaryFolder);
+  private indexGroupSortKey(data: PluginData, domain: string, path: string): string {
+    if (data.settings.workspaceMode === "ent-clinical" && !data.settings.allowClinicalVisualGroupMoves
+      && pathIsInsideFolder(path, data.settings.primaryFolder)) {
+      const root = normalizePath(data.settings.primaryFolder);
       const relative = normalizePath(path).slice(root.length + 1);
       return relative.split("/")[0] || "99";
     }
-    const index = this.data.indexGroupOrder.indexOf(domain);
+    const index = data.indexGroupOrder.indexOf(domain);
     return index >= 0 ? String(index).padStart(4, "0") : `zz-${domain.toLowerCase()}`;
   }
 

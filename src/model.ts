@@ -1715,7 +1715,7 @@ export function moveCurriculumVisual(
     else delete state.orderByContainer[key];
   }
   state.parentByPath[record.path] = parentPath;
-  const ordered = siblingPaths.filter((path, position, all) => path !== record.path && all.indexOf(path) === position);
+  const ordered = [...new Set(siblingPaths)].filter((path) => path !== record.path);
   ordered.splice(Math.max(0, Math.min(index, ordered.length)), 0, record.path);
   state.orderByContainer[curriculumContainerKey(record.domain, parentPath)] = ordered;
 }
@@ -1774,7 +1774,7 @@ export function reconcileCurriculumVisual(state: CurriculumVisualState, records:
   for (const [key, paths] of Object.entries(state.orderByContainer)) {
     const parentPath = key.startsWith("parent:") ? key.slice(7) : "";
     if (parentPath && !topics.has(parentPath)) { delete state.orderByContainer[key]; changed = true; continue; }
-    const next = paths.filter((path, index, all) => topics.has(path) && all.indexOf(path) === index);
+    const next = [...new Set(paths.filter((path) => topics.has(path)))];
     if (next.length !== paths.length) { changed = true; }
     if (next.length > 0) state.orderByContainer[key] = next;
     else { delete state.orderByContainer[key]; changed = true; }
@@ -1805,7 +1805,21 @@ export interface ParsedQuery {
 }
 
 export function normalizeSearchText(value: string): string {
-  return value.normalize("NFD").replace(/\p{M}/gu, "").toLocaleLowerCase();
+  // Search is intentionally forgiving of common Arabic/Persian keyboard and
+  // presentation variants. This is a lookup key only; source text is untouched.
+  return value
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .replace(/\u0640/gu, "")
+    .replace(/[\u0649\u06cc]/gu, "\u064a")
+    .replace(/\u06a9/gu, "\u0643")
+    .replace(/\u0629/gu, "\u0647")
+    .replace(/[\u0660-\u0669\u06f0-\u06f9]/gu, (digit) => {
+      const codePoint = digit.codePointAt(0) ?? 0;
+      const value = codePoint >= 0x06f0 ? codePoint - 0x06f0 : codePoint - 0x0660;
+      return String(value);
+    })
+    .toLowerCase();
 }
 
 export function parseQuery(query: string): ParsedQuery {
@@ -2331,6 +2345,7 @@ export interface IndexDiagnostic {
 
 export function buildIndexDiagnostics(data: PluginData, records: VaultRecord[], existingPaths: Set<string>): IndexDiagnostic[] {
   const diagnostics: IndexDiagnostic[] = [];
+  const excludedPaths = new Set(data.excludedIndexPaths);
   const addMissing = (path: string, owner: string): void => {
     if (!path || existingPaths.has(path) || isPortablePlaceholderPath(path)) return;
     diagnostics.push({ id: `missing:${owner}:${path}`, kind: "missing-note", title: "Missing note reference", detail: `${owner} references a note that no longer exists.`, path });
@@ -2380,7 +2395,7 @@ export function buildIndexDiagnostics(data: PluginData, records: VaultRecord[], 
   }
   for (const [path, group] of Object.entries(data.indexGroupByPath)) {
     if (!existingPaths.has(path)) addMissing(path, `Visual group “${group}”`);
-    else if (!topicByPath.has(path) && !data.excludedIndexPaths.includes(path)) diagnostics.push({ id: `group:${path}`, kind: "orphaned-group", title: "Orphaned visual group override", detail: `The note has a visual group override (“${group}”) but is not currently indexed.`, path });
+    else if (!topicByPath.has(path) && !excludedPaths.has(path)) diagnostics.push({ id: `group:${path}`, kind: "orphaned-group", title: "Orphaned visual group override", detail: `The note has a visual group override (“${group}”) but is not currently indexed.`, path });
   }
   for (const [path, parentPath] of Object.entries(data.curriculumVisual.parentByPath)) {
     if (!parentPath) continue;

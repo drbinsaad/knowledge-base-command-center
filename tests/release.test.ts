@@ -13,6 +13,7 @@ test("release metadata is internally consistent and mobile-compatible", async ()
   const versions = await readJson("versions.json");
   assert.equal(manifest.version, packageJson.version);
   assert.equal(versions[String(manifest.version)], manifest.minAppVersion);
+  assert.equal(versions["0.8.1"], undefined, "the unreleased 0.8.1 must not be advertised as an installable version");
   assert.equal(manifest.isDesktopOnly, false);
   assert.equal(manifest.id, "ent-vault-command-center");
   assert.equal(packageJson.license, "MIT");
@@ -21,17 +22,32 @@ test("release metadata is internally consistent and mobile-compatible", async ()
 test("public repository metadata is present", async () => {
   const license = await readFile(path.join(root, "LICENSE"), "utf8");
   const readme = await readFile(path.join(root, "README.md"), "utf8");
+  const changelog = await readFile(path.join(root, "CHANGELOG.md"), "utf8");
+  const iphoneChecklist = await readFile(path.join(root, "docs", "manual-iphone-release-checklist.md"), "utf8");
   assert.match(license, /MIT License/);
   assert.match(readme, /Privacy and permissions/);
-  assert.match(readme, /enumerates Markdown file paths/);
+  assert.match(readme, /enumerates whole-vault Markdown file paths/);
+  assert.match(readme, /enumerates all loaded vault entries before retaining folder paths/);
+  assert.match(readme, /enumerates all vault file paths before retaining JSON packages/);
   assert.match(readme, /never reads clipboard contents/);
   assert.match(readme, /direct BRAT install link/);
+  assert.match(readme, /### Updating on iPhone and iPad/);
   assert.match(readme, /### Uninstall/);
   assert.match(readme, /Visual movement on iPhone/);
+  assert.match(readme, /## Backup and recovery/);
+  assert.match(readme, /## Known limitations/);
+  assert.match(readme, /every available, non-archived knowledge base/);
+  assert.match(readme, /Showing the first 300 of _N_ results/);
+  assert.match(readme, /Two deliberate ENT-only workflows are exceptions/);
   assert.match(readme, /stable internal ID `ent-vault-command-center`/);
+  assert.match(changelog, /Version 0\.8\.1 was not published as a tag or GitHub release/);
+  assert.doesNotMatch(changelog, /^## 0\.8\.1$/m);
+  assert.match(iphoneChecklist, /physical iPhone/);
+  assert.match(iphoneChecklist, /no more than 300 result rows are rendered/);
+  assert.match(iphoneChecklist, /grouped by knowledge base and then library section/);
 });
 
-test("manual release surface contains exactly the required nonempty assets", async () => {
+test("manual release surface contains the three required nonempty assets", async () => {
   for (const asset of ["main.js", "manifest.json", "styles.css"]) {
     const info = await stat(path.join(root, asset));
     assert.equal(info.isFile(), true);
@@ -86,6 +102,21 @@ test("mobile flows keep primary actions visible and empty states actionable", as
   assert.match(view, /Clear search/);
   assert.match(styles, /ent-cc-shell\.is-search-focused/);
   assert.match(styles, /--ent-cc-search-visual-height/);
+  for (const selector of [
+    ".ent-cc-view .ent-cc-subject-row button.ent-cc-subject-title {",
+    ".ent-cc-shell.is-search-focused {",
+  ]) {
+    const selectorIndex = styles.indexOf(selector);
+    assert.notEqual(selectorIndex, -1, `missing responsive selector: ${selector}`);
+    const mediaIndex = styles.lastIndexOf("@media", selectorIndex);
+    assert.equal(
+      styles.slice(mediaIndex, mediaIndex + "@media (max-width: 1024px)".length),
+      "@media (max-width: 1024px)",
+      `${selector} must remain active at modern iPhone landscape widths`,
+    );
+  }
+  assert.match(styles, /\.ent-cc-search-box input \{\s*height: 44px;[\s\S]*?font-size: 16px;/);
+  assert.match(styles, /translate: 0 var\(--ent-cc-search-visual-shift, 0px\)/);
   assert.match(styles, /min-height: max\(100%, 180px\)/);
   assert.match(styles, /overflow-anchor: none/);
   assert.match(styles, /font-size: 16px/);
@@ -112,10 +143,27 @@ test("review and release automation is reproducible and least-privilege", async 
   for (const name of ["typecheck", "lint", "test", "verify-release", "verify-community", "review", "release:bundle"]) {
     assert.equal(typeof scripts[name], "string", `missing npm script ${name}`);
   }
-  const workflows = await Promise.all(["ci.yml", "release.yml"].map((name) => readFile(path.join(root, ".github", "workflows", name), "utf8")));
-  const workflow = workflows.join("\n");
-  assert.doesNotMatch(workflow, /uses:\s+[^\s]+@v\d+/);
-  assert.match(workflow, /permissions:\s*\n\s+contents: read/);
+  const buildIndex = scripts.review.indexOf("npm run build");
+  const communityIndex = scripts.review.indexOf("npm run verify-community");
+  assert.notEqual(buildIndex, -1, "review must build main.js");
+  assert.notEqual(communityIndex, -1, "review must run Community verification");
+  assert.ok(buildIndex < communityIndex, "review must build main.js before Community verification scans it");
+  const communityVerifier = await readFile(path.join(root, "scripts", "verify-community.mjs"), "utf8");
+  assert.match(communityVerifier, /readFile\(path\.join\(root, "main\.js"\)/);
+  assert.match(communityVerifier, /built main\.js must not require external module/);
+  const [ciWorkflow, releaseWorkflow] = await Promise.all(["ci.yml", "release.yml"].map((name) => readFile(path.join(root, ".github", "workflows", name), "utf8")));
+  const workflow = `${ciWorkflow}\n${releaseWorkflow}`;
+  const actionReferences = [...workflow.matchAll(/^[ \t]*uses:[ \t]*([^\s#]+)/gm)].map((match) => match[1]);
+  assert.ok(actionReferences.length > 0, "workflows must contain pinned actions");
+  for (const reference of actionReferences) assert.match(reference, /^[^@\s]+@[0-9a-f]{40}$/, `action must use a full commit SHA: ${reference}`);
+  assert.equal((ciWorkflow.match(/^permissions:/gm) ?? []).length, 1);
+  assert.equal((ciWorkflow.match(/^[ \t]+permissions:/gm) ?? []).length, 0);
+  assert.match(ciWorkflow, /^permissions:\n {2}contents: read\n\njobs:/m);
+  assert.equal((releaseWorkflow.match(/^permissions:/gm) ?? []).length, 0);
+  assert.deepEqual(releaseWorkflow.match(/^ {4}permissions:\n(?:^ {6}[\w-]+: (?:read|write)\n)+/gm), [
+    "    permissions:\n      contents: read\n",
+    "    permissions:\n      contents: write\n      id-token: write\n      attestations: write\n",
+  ]);
   assert.match(workflow, /--notes-file release-notes\.md/);
   assert.match(workflow, /GH_REPO: \$\{\{ github\.repository \}\}/);
   assert.match(workflow, /attest-build-provenance@[0-9a-f]{40}/);
@@ -126,4 +174,12 @@ test("public issue intake prevents accidental private-vault disclosure", async (
   assert.match(template, /Do not attach private notes/);
   assert.match(template, /patient information/);
   assert.match(template, /copyrighted source/);
+});
+
+test("mobile-affecting pull requests require a physical-iPhone sign-off", async () => {
+  const template = await readFile(path.join(root, ".github", "PULL_REQUEST_TEMPLATE.md"), "utf8");
+  assert.match(template, /physical-iPhone release checklist/);
+  assert.match(template, /Checklist result and tester/);
+  assert.match(template, /Device \/ iOS \/ Obsidian versions/);
+  assert.match(template, /Evidence or follow-up issue link/);
 });

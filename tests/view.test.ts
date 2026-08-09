@@ -1,17 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Notice } from "obsidian";
-import { calculateModalViewportLayout, ConfirmModal, KnowledgeNoteModal, TopicEditorModal } from "../src/modals.ts";
+import { calculateModalViewportLayout, ConfirmModal, KnowledgeNoteModal, TextPromptModal, TopicEditorModal } from "../src/modals.ts";
 import {
   calculateSearchViewportLayout,
   EntVaultCommandCenterView,
   matchingKnowledgeBaseRecords,
+  prepareKnowledgeBaseSearchResults,
   tabDefinitions,
 } from "../src/view.ts";
 import { IndexManagerModal } from "../src/index-manager.ts";
 import { ExportImportCenterModal, preparePortableExport } from "../src/portability-modal.ts";
 import { createPortableExport, EMPTY_PORTABLE_SELECTION } from "../src/portability.ts";
 import { createPersonalBackup, migrateData, parseQuery, type VaultRecord } from "../src/model.ts";
+import { collectKnowledgeBaseSearchResults } from "../src/search.ts";
 import { EntCommandCenterSettingsTab } from "../src/settings.ts";
 
 function record(path: string, title: string, kind: VaultRecord["kind"] = "topic"): VaultRecord {
@@ -132,15 +134,23 @@ test("mobile note sheets follow the visual viewport when the keyboard opens", ()
 });
 
 test("focused mobile search subtracts the iOS keyboard from the command-center height", () => {
-  assert.deepEqual(calculateSearchViewportLayout(844, 780, 430, 20), {
+  assert.deepEqual(calculateSearchViewportLayout(844, 780, 430, 20, 64), {
     height: 386,
     keyboardInset: 394,
     keyboardOpen: true,
+    shift: 0,
   });
   assert.deepEqual(calculateSearchViewportLayout(844, 780, 844), {
     height: 780,
     keyboardInset: 0,
     keyboardOpen: false,
+    shift: 0,
+  });
+  assert.deepEqual(calculateSearchViewportLayout(844, 780, 430, 120, 64), {
+    height: 430,
+    keyboardInset: 294,
+    keyboardOpen: true,
+    shift: 56,
   });
 });
 
@@ -158,6 +168,155 @@ test("search finds records across every library instead of the last selected tab
     matchingKnowledgeBaseRecords(records, "laryn").map((item) => item.title),
     ["Laryngomalacia", "Laryngeal injection", "Voice assessment"],
   );
+});
+
+test("the global result cap keeps a better inactive-base match visible", () => {
+  const activeRecords = Array.from({ length: 300 }, (_, index) => record(
+    `Active/Laryngeal ${index.toString().padStart(3, "0")}.md`,
+    `Laryngeal ${index.toString().padStart(3, "0")}`,
+  ));
+  const exactInactiveMatch = record("Inactive/Laryn.md", "laryn");
+
+  const results = prepareKnowledgeBaseSearchResults([
+    { baseId: "active", baseName: "Active base", records: activeRecords },
+    { baseId: "inactive", baseName: "Inactive base", records: [exactInactiveMatch] },
+  ], "laryn", 300);
+
+  assert.equal(results.total, 301);
+  assert.equal(results.rendered, 300);
+  assert.deepEqual(results.groups.map((group) => [group.source.baseId, group.records.length, group.total]), [
+    ["active", 299, 300],
+    ["inactive", 1, 1],
+  ]);
+  assert.equal(results.groups[1]?.records[0], exactInactiveMatch);
+});
+
+test("cross-base deduplication keeps the first matching copy when an earlier same-path record does not match", () => {
+  const missed = record("Shared/Topic.md", "Unrelated title");
+  const matched = record("Shared/Topic.md", "Laryngomalacia");
+
+  const results = prepareKnowledgeBaseSearchResults([
+    { baseId: "active", baseName: "Active base", records: [missed, matched] },
+  ], "laryn");
+
+  assert.equal(results.total, 1);
+  assert.equal(results.groups[0]?.records[0], matched);
+});
+
+test("bounded cross-base collection counts 250k overlapping matches but retains and sorts only 300", () => {
+  const baseCount = 500;
+  const recordsPerBase = 500;
+  const sources = Array.from({ length: baseCount }, (_, baseIndex) => ({
+    source: { baseId: `base-${baseIndex}`, baseName: `Base ${baseIndex}` },
+    records: {
+      *[Symbol.iterator](): Generator<VaultRecord> {
+        for (let recordIndex = 0; recordIndex < recordsPerBase; recordIndex += 1) {
+          yield record(
+            `Shared/Result ${recordIndex.toString().padStart(3, "0")}.md`,
+            `Result ${recordIndex.toString().padStart(3, "0")}`,
+          );
+        }
+      },
+    },
+  }));
+
+  const results = collectKnowledgeBaseSearchResults(sources, parseQuery("result"), 300);
+
+  assert.equal(results.total, baseCount * recordsPerBase);
+  assert.equal(results.counts.length, baseCount);
+  assert.equal(results.counts.every(({ total }) => total === recordsPerBase), true);
+  assert.equal(results.rendered, 300);
+  assert.equal(results.stats.examinedRecords, baseCount * recordsPerBase);
+  assert.equal(results.stats.matchedRecords, baseCount * recordsPerBase);
+  assert.equal(results.stats.peakRetainedCandidates, 300);
+  assert.equal(results.stats.sortedCandidates, 300);
+});
+
+test("selecting an inactive-base search result switches bases and restores the global query", async () => {
+  const inactiveData = migrateData(null);
+  inactiveData.settings.workspaceName = "Inactive base";
+  const searchedRecord = record("Inactive/Laryngomalacia.md", "Laryngomalacia");
+  let activeBaseId = "active";
+  let switchedTo = "";
+  let selectedPath = "";
+  let renders = 0;
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    query: string;
+    parsedQuery: ReturnType<typeof parseQuery>;
+    plugin: {
+      getActiveKnowledgeBaseId(): string;
+      switchKnowledgeBase(id: string): Promise<void>;
+      getRecord(path: string): VaultRecord | null;
+    };
+    render(): void;
+    selectRecord(path: string): void;
+    activateSearchResult(
+      source: { baseId: string; baseName: string; data: typeof inactiveData; records: VaultRecord[] },
+      record: VaultRecord,
+      action: "select",
+    ): Promise<void>;
+  };
+  view.query = "laryn";
+  view.parsedQuery = parseQuery(view.query);
+  view.plugin = {
+    getActiveKnowledgeBaseId: () => activeBaseId,
+    switchKnowledgeBase: async (id) => {
+      switchedTo = id;
+      activeBaseId = id;
+      view.query = ""; // Simulate the base-local reload performed by the plugin.
+      view.parsedQuery = parseQuery("");
+    },
+    getRecord: (path) => path === searchedRecord.path ? searchedRecord : null,
+  };
+  view.render = () => { renders += 1; };
+  view.selectRecord = (path) => { selectedPath = path; };
+
+  await view.activateSearchResult({
+    baseId: "inactive",
+    baseName: "Inactive base",
+    data: inactiveData,
+    records: [searchedRecord],
+  }, searchedRecord, "select");
+
+  assert.equal(switchedTo, "inactive");
+  assert.equal(view.query, "laryn");
+  assert.deepEqual(view.parsedQuery, parseQuery("laryn"));
+  assert.equal(renders, 1);
+  assert.equal(selectedPath, searchedRecord.path);
+});
+
+test("Index Manager normalizes Arabic variants and indexes manual membership once per projection", () => {
+  const manualIndexPaths = ["Knowledge Base/Manual.md"];
+  let linearProbes = 0;
+  const includes = manualIndexPaths.includes.bind(manualIndexPaths);
+  manualIndexPaths.includes = (path, fromIndex) => {
+    linearProbes += 1;
+    return includes(path, fromIndex);
+  };
+  const records = [
+    record("Knowledge Base/Manual.md", "مستشفى"),
+    record("Knowledge Base/Folder.md", "حنجرة"),
+  ];
+  const manager = Object.create(IndexManagerModal.prototype) as {
+    query: string;
+    plugin: {
+      data: { manualIndexPaths: string[] };
+      getIndexRecords(): VaultRecord[];
+    };
+    indexedNotes(): Array<{ path: string; title: string; meta: string }>;
+    filterNotes(notes: Array<{ path: string; title: string; meta: string }>): Array<{ path: string; title: string; meta: string }>;
+  };
+  manager.plugin = { data: { manualIndexPaths }, getIndexRecords: () => records };
+
+  const notes = manager.indexedNotes();
+  assert.match(notes[0]?.meta ?? "", /manual membership/);
+  assert.match(notes[1]?.meta ?? "", /folder index/);
+  assert.equal(linearProbes, 0);
+
+  manager.query = "مستشفي";
+  assert.deepEqual(manager.filterNotes(notes).map((note) => note.path), ["Knowledge Base/Manual.md"]);
+  manager.query = "حـنـجـرة";
+  assert.deepEqual(manager.filterNotes(notes).map((note) => note.path), ["Knowledge Base/Folder.md"]);
 });
 
 test("mobile note-sheet viewport values are clamped to the layout viewport", () => {
@@ -1125,4 +1284,49 @@ test("compact record inspector traps backward focus at its first control", () =>
 
   assert.equal(prevented, true);
   assert.equal(lastFocusCount, 1);
+});
+
+test("organization snapshots cannot mutate memory or report success in compatibility read-only mode", async () => {
+  Notice.messages.length = 0;
+  const data = migrateData(null);
+  const snapshotsBefore = structuredClone(data.layoutSnapshots);
+  let saveCalls = 0;
+  let submit: ((name: string) => void | Promise<void>) | null = null;
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-default",
+    getDataEpoch: () => 7,
+    isClinicalMode: () => false,
+    isDataReadOnly: () => true,
+    assertDataWritable(): never { throw new Error("Organization is read-only for this compatibility test."); },
+    async savePluginData(): Promise<void> { saveCalls += 1; },
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: object;
+    plugin: typeof plugin;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    saveOrganizationSnapshot(): void;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.loadedBaseId = "base-default";
+  view.loadedDataEpoch = 7;
+  view.staleViewNoticeShown = false;
+
+  TextPromptModal.prototype.open = function openForTest(): void {
+    submit = (this as unknown as { options: { onSubmit: typeof submit } }).options.onSubmit;
+  };
+  try {
+    view.saveOrganizationSnapshot();
+    assert.ok(submit);
+    await assert.rejects(async () => { await submit?.("Blocked snapshot"); }, /read-only/i);
+  } finally {
+    delete (TextPromptModal.prototype as { open?: () => void }).open;
+  }
+
+  assert.deepEqual(data.layoutSnapshots, snapshotsBefore);
+  assert.equal(saveCalls, 0);
+  assert.equal(Notice.messages.some((message) => /Saved organization snapshot/i.test(message)), false);
 });

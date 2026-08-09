@@ -442,6 +442,22 @@
   padding: 8px 0 18px;
 }
 
+.ent-cc-search-limit {
+  margin: 8px 20px 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--ent-cc-border);
+  border-radius: 7px;
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.ent-cc-search-base-group + .ent-cc-search-base-group {
+  margin-top: 8px;
+  border-top: 1px solid var(--ent-cc-border);
+}
+
 .ent-cc-empty {
   margin: 22px 24px;
   padding: 18px;
@@ -1392,7 +1408,7 @@
   }
 }
 
-@media (max-width: 620px) {
+@media (max-width: 1024px) {
   .ent-cc-header {
     padding: 16px 14px 12px;
   }
@@ -2022,7 +2038,7 @@
   outline-offset: -2px;
 }
 
-@media (max-width: 620px) {
+@media (max-width: 1024px) {
   .ent-cc-curriculum-row {
     padding-left: calc(8px + (var(--ent-cc-depth, 0) * 14px));
   }
@@ -2217,6 +2233,7 @@
   .ent-cc-shell.is-search-focused {
     height: var(--ent-cc-search-visual-height, 100%);
     max-height: var(--ent-cc-search-visual-height, 100%);
+    translate: 0 var(--ent-cc-search-visual-shift, 0px);
   }
 
   .ent-cc-shell.is-search-focused .ent-cc-header,
@@ -2681,7 +2698,7 @@
   text-transform: uppercase;
 }
 
-@media (max-width: 620px) {
+@media (max-width: 1024px) {
   .ent-cc-title-kicker-row {
     width: 100%;
     max-width: 100%;

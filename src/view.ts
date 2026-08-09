@@ -28,7 +28,6 @@ import {
   makeId,
   matchesParsedQuery,
   metadataHasGap,
-  normalizeSearchText,
   ParsedQuery,
   parseQuery,
   moveCurriculumVisual,
@@ -50,6 +49,15 @@ import {
   visualPlacementPathSet,
 } from "./model";
 import {
+  collectKnowledgeBaseSearchResults,
+  DEFAULT_CROSS_BASE_SEARCH_LIMIT,
+  knowledgeBaseSearchRank,
+  type KnowledgeBaseSearchGroup as BoundedKnowledgeBaseSearchGroup,
+  type KnowledgeBaseSearchResultSet as BoundedKnowledgeBaseSearchResultSet,
+  type KnowledgeBaseSearchSource,
+  type KnowledgeBaseSearchSourceIdentity,
+} from "./search";
+import {
   AddActionModal,
   CollectionPickerModal,
   collectionTargets,
@@ -64,6 +72,22 @@ import {
 } from "./modals";
 
 export const VIEW_TYPE = "ent-vault-command-center-view";
+export const MAX_RENDERED_SEARCH_RESULTS = DEFAULT_CROSS_BASE_SEARCH_LIMIT;
+export type KnowledgeBaseSearchGroup = BoundedKnowledgeBaseSearchGroup<KnowledgeBaseSearchSourceIdentity>;
+export type KnowledgeBaseSearchResultSet = BoundedKnowledgeBaseSearchResultSet<KnowledgeBaseSearchSourceIdentity>;
+
+/** Match every available base, preserving the plugin's active-first base order. */
+export function prepareKnowledgeBaseSearchResults<TSource extends KnowledgeBaseSearchSourceIdentity>(
+  sources: Array<TSource & { records: VaultRecord[] }>,
+  query: string,
+  limit = MAX_RENDERED_SEARCH_RESULTS,
+): BoundedKnowledgeBaseSearchResultSet<TSource> {
+  return collectKnowledgeBaseSearchResults(
+    sources.map((source) => ({ source, records: source.records })),
+    parseQuery(query),
+    limit,
+  );
+}
 
 interface Membership {
   headingId: string;
@@ -89,23 +113,31 @@ interface QueueDefinition {
 
 interface TabDefinition { id: MainTab; label: string; icon: string }
 
+interface SearchRecordContext {
+  source: KnowledgeBaseSearchSource;
+}
+
 export interface SearchViewportLayout {
   height: number;
   keyboardInset: number;
   keyboardOpen: boolean;
+  shift: number;
 }
 
 /**
  * Fit the focused search route into the part of an iOS layout viewport that is
  * not covered by the virtual keyboard. The command center begins below
  * Obsidian's own title bar, so subtract the keyboard inset from its measured
- * content height instead of assigning visualViewport.height directly.
+ * content height instead of assigning visualViewport.height directly. When
+ * iOS pans the visual viewport below the route's layout top, `shift` moves the
+ * route down and its returned height is reduced by the same amount.
  */
 export function calculateSearchViewportLayout(
   innerHeight: number,
   contentHeight: number,
   viewportHeight: number,
   viewportOffsetTop = 0,
+  contentTop = 0,
 ): SearchViewportLayout {
   const safeInnerHeight = Number.isFinite(innerHeight) ? Math.max(1, innerHeight) : 1;
   const safeContentHeight = Number.isFinite(contentHeight)
@@ -117,12 +149,20 @@ export function calculateSearchViewportLayout(
   const safeOffsetTop = Number.isFinite(viewportOffsetTop)
     ? Math.max(0, Math.min(viewportOffsetTop, safeInnerHeight))
     : 0;
+  const safeContentTop = Number.isFinite(contentTop)
+    ? Math.max(-safeInnerHeight, Math.min(contentTop, safeInnerHeight))
+    : 0;
   const visibleBottom = Math.min(safeInnerHeight, safeOffsetTop + safeViewportHeight);
   const keyboardInset = Math.max(0, safeInnerHeight - visibleBottom);
+  // During iOS keyboard panning, visualViewport.offsetTop can move below the
+  // command center's layout-viewport top. Move the focused route into view and
+  // remove the same amount from its height so its bottom remains visible too.
+  const shift = Math.max(0, safeOffsetTop - safeContentTop);
   return {
-    height: Math.max(1, Math.round(safeContentHeight - keyboardInset)),
+    height: Math.max(1, Math.round(safeContentHeight - keyboardInset - shift)),
     keyboardInset: Math.round(keyboardInset),
     keyboardOpen: safeInnerHeight - safeViewportHeight > 100,
+    shift: Math.round(shift),
   };
 }
 
@@ -189,50 +229,6 @@ export function matchingKnowledgeBaseRecords(records: VaultRecord[], query: stri
   });
 }
 
-function fuzzyContainsForRank(haystack: string, needle: string): boolean {
-  let cursor = 0;
-  for (const character of haystack) {
-    if (character === needle[cursor]) cursor += 1;
-    if (cursor === needle.length) return true;
-  }
-  return needle.length === 0;
-}
-
-function fieldRank(value: string, term: string, base: number): number | null {
-  const normalized = normalizeSearchText(value);
-  if (!normalized) return null;
-  if (normalized === term) return base;
-  const words = normalized.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-  // Within the same match class, prefer a concise single-subject title over a
-  // long phrase. This keeps “Laryngomalacia” above dozens of broader
-  // “Laryngeal …” and Laryngology-domain matches for a short phone query.
-  const specificity = Math.min(words.length, 9) / 100 + Math.min(normalized.length, 999) / 100_000;
-  if (normalized.startsWith(term)) return base + 1 + specificity;
-  if (words.some((word) => word.startsWith(term))) return base + 2 + specificity;
-  if (normalized.includes(term)) return base + 3;
-  if (words.some((word) => word[0] === term[0] && fuzzyContainsForRank(word, term))) return base + 4;
-  return null;
-}
-
-function knowledgeBaseSearchRank(record: VaultRecord, parsedQuery: ParsedQuery): number {
-  if (parsedQuery.terms.length === 0) return 0;
-  let total = 0;
-  for (const term of parsedQuery.terms) {
-    const titleRank = fieldRank(record.title, term, 0);
-    if (titleRank !== null) { total += titleRank; continue; }
-    const aliasRanks = record.aliases.map((alias) => fieldRank(alias, term, 10)).filter((rank): rank is number => rank !== null);
-    if (aliasRanks.length > 0) { total += Math.min(...aliasRanks); continue; }
-    const idRank = fieldRank(record.curriculumId, term, 20);
-    if (idRank !== null) { total += idRank; continue; }
-    const pathRank = fieldRank(record.path, term, 30);
-    if (pathRank !== null) { total += pathRank; continue; }
-    const domainRank = fieldRank(record.domain, term, 40);
-    if (domainRank !== null) { total += domainRank; continue; }
-    total += 100;
-  }
-  return total;
-}
-
 function collectionPaths(collections: LayoutHeading[]): string[] {
   const paths: string[] = [];
   for (const heading of collections) {
@@ -270,6 +266,11 @@ export class EntVaultCommandCenterView extends ItemView {
   private inspectorEl: HTMLElement | null = null;
   private countEl: HTMLElement | null = null;
   private searchStatusEl: HTMLElement | null = null;
+  private globalSearchResult: BoundedKnowledgeBaseSearchResultSet<KnowledgeBaseSearchSource> | null = null;
+  private globalSearchResultKey = "";
+  private globalSearchPendingKey = "";
+  private globalSearchRequestGeneration = 0;
+  private viewClosed = false;
   private searchViewportWindow: Window | null = null;
   private collapsedQueues = new Set<string>();
   private collapsedCurriculumDomains = new Set<string>();
@@ -295,6 +296,7 @@ export class EntVaultCommandCenterView extends ItemView {
   getIcon(): string { return "library-big"; }
 
   async onOpen(): Promise<void> {
+    this.viewClosed = false;
     await this.reload();
     this.bindSearchViewportLayout();
     if (!this.plugin.data.settings.setupComplete && !this.setupPromptShown) {
@@ -309,6 +311,9 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.viewClosed = true;
+    this.globalSearchRequestGeneration += 1;
+    this.globalSearchPendingKey = "";
     this.unbindSearchViewportLayout();
     const selectionSavePending = this.selectionSaveTimer !== null;
     for (const timer of [this.setupTimer, this.searchDebounce, this.selectionSaveTimer]) {
@@ -339,6 +344,10 @@ export class EntVaultCommandCenterView extends ItemView {
       if (this.selectionSaveTimer !== null) this.timerWindow.clearTimeout(this.selectionSaveTimer);
       this.searchDebounce = null;
       this.selectionSaveTimer = null;
+      this.globalSearchResult = null;
+      this.globalSearchResultKey = "";
+      this.globalSearchPendingKey = "";
+      this.globalSearchRequestGeneration += 1;
       this.loadedBaseId = activeBaseId;
       this.loadedDataEpoch = dataEpoch;
       this.staleViewNoticeShown = false;
@@ -400,6 +409,53 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private currentDataEpoch(): number {
     return typeof this.plugin.getDataEpoch === "function" ? this.plugin.getDataEpoch() : 0;
+  }
+
+  private currentSearchGeneration(): number {
+    return typeof this.plugin.getSearchGeneration === "function" ? this.plugin.getSearchGeneration() : 0;
+  }
+
+  private globalSearchKey(query = this.query): string {
+    return [
+      this.plugin.getActiveKnowledgeBaseId(),
+      this.currentDataEpoch(),
+      this.currentSearchGeneration(),
+      query,
+    ].join("\u0000");
+  }
+
+  private cancelPendingGlobalSearch(): void {
+    this.globalSearchRequestGeneration += 1;
+    this.globalSearchPendingKey = "";
+  }
+
+  private requestGlobalSearch(key: string, query: string): void {
+    if (this.globalSearchPendingKey === key) return;
+    const requestGeneration = ++this.globalSearchRequestGeneration;
+    this.globalSearchPendingKey = key;
+    const cancelled = (): boolean => this.viewClosed
+      || requestGeneration !== this.globalSearchRequestGeneration
+      || this.globalSearchKey(query) !== key;
+    void this.plugin.searchKnowledgeBases(query, {
+      limit: MAX_RENDERED_SEARCH_RESULTS,
+      isCancelled: cancelled,
+    }).then((result) => {
+      if (!result || cancelled()) {
+        if (requestGeneration === this.globalSearchRequestGeneration && this.globalSearchPendingKey === key) {
+          this.globalSearchPendingKey = "";
+        }
+        return;
+      }
+      this.globalSearchResult = result;
+      this.globalSearchResultKey = key;
+      this.globalSearchPendingKey = "";
+      this.renderTree();
+      this.resetSearchScrollPosition();
+    }).catch((error) => {
+      if (cancelled()) return;
+      this.globalSearchPendingKey = "";
+      new Notice(error instanceof Error ? error.message : String(error));
+    });
   }
 
   /** Block clicks from the old DOM during the brief async base-switch save. */
@@ -1183,8 +1239,8 @@ export class EntVaultCommandCenterView extends ItemView {
       type: "search",
       value: this.query,
       placeholder: this.plugin.isClinicalMode()
-        ? "Search all knowledge…  domain:pediatric  priority:P1  type:procedure"
-        : `Search all ${this.plugin.data.settings.itemPlural}, IDs, ${this.plugin.data.settings.groupLabel.toLowerCase()}, or paths…`,
+        ? "Search all bases…  domain:pediatric  priority:P1  type:procedure"
+        : `Search all bases by title, ID, ${this.plugin.data.settings.groupLabel.toLowerCase()}, or path…`,
       attr: {
         "aria-label": `Search and filter ${this.plugin.data.settings.itemPlural}`,
         autocapitalize: "none",
@@ -1211,12 +1267,14 @@ export class EntVaultCommandCenterView extends ItemView {
         if (!searchRow.contains(input.ownerDocument.activeElement)) {
           parent.removeClass("is-search-focused", "is-virtual-keyboard-open");
           parent.style.removeProperty("--ent-cc-search-visual-height");
+          parent.style.removeProperty("--ent-cc-search-visual-shift");
           const tablist = parent.querySelector<HTMLElement>(".ent-cc-tabs");
           if (tablist) this.revealActiveTab(tablist);
         }
       }, 0);
     });
     input.addEventListener("input", () => {
+      if (this.query !== input.value) this.cancelPendingGlobalSearch();
       this.query = input.value;
       // Commands available during the debounce window must observe the text the
       // user can already see, not the query from the previous render.
@@ -1233,6 +1291,7 @@ export class EntVaultCommandCenterView extends ItemView {
     });
     input.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && this.query) {
+        this.cancelPendingGlobalSearch();
         this.query = "";
         this.parsedQuery = parseQuery("");
         input.value = "";
@@ -1249,6 +1308,7 @@ export class EntVaultCommandCenterView extends ItemView {
       }
     });
     clear.addEventListener("click", () => {
+      this.cancelPendingGlobalSearch();
       this.query = "";
       this.parsedQuery = parseQuery("");
       input.value = "";
@@ -1311,6 +1371,7 @@ export class EntVaultCommandCenterView extends ItemView {
     if (!shell) return;
     if (!shell.classList.contains("is-search-focused")) {
       shell.style.removeProperty("--ent-cc-search-visual-height");
+      shell.style.removeProperty("--ent-cc-search-visual-shift");
       shell.removeClass("is-virtual-keyboard-open");
       return;
     }
@@ -1325,8 +1386,10 @@ export class EntVaultCommandCenterView extends ItemView {
       Math.min(this.contentEl.clientHeight || viewWindow.innerHeight, contentHeightBelowShellTop),
       viewport?.height ?? viewWindow.innerHeight,
       viewport?.offsetTop ?? 0,
+      shellRect.top,
     );
     shell.style.setProperty("--ent-cc-search-visual-height", `${layout.height}px`);
+    shell.style.setProperty("--ent-cc-search-visual-shift", `${layout.shift}px`);
     shell.toggleClass("is-virtual-keyboard-open", layout.keyboardOpen);
   };
 
@@ -1348,6 +1411,7 @@ export class EntVaultCommandCenterView extends ItemView {
     this.searchViewportWindow = null;
     const shell = this.contentEl?.querySelector<HTMLElement>(".ent-cc-shell");
     shell?.style.removeProperty("--ent-cc-search-visual-height");
+    shell?.style.removeProperty("--ent-cc-search-visual-shift");
     shell?.removeClass("is-virtual-keyboard-open");
   }
 
@@ -1356,7 +1420,9 @@ export class EntVaultCommandCenterView extends ItemView {
     const index = parts.findIndex((part) => part.toLowerCase() === token.toLowerCase());
     if (index >= 0) parts.splice(index, 1);
     else parts.push(token);
-    this.query = parts.join(" ");
+    const query = parts.join(" ");
+    if (this.query !== query) this.cancelPendingGlobalSearch();
+    this.query = query;
   }
 
   private recordsForActiveTab(): VaultRecord[] {
@@ -1377,8 +1443,13 @@ export class EntVaultCommandCenterView extends ItemView {
     if (!this.countEl) return;
     this.countEl.empty();
     if (this.query.trim()) {
+      if (this.globalSearchPendingKey === this.globalSearchKey()) {
+        this.countEl.createSpan({ text: "Searching…" });
+        this.countEl.createSpan({ text: " · All available bases", cls: "ent-cc-muted" });
+        return;
+      }
       this.countEl.createSpan({ text: `${visible} ${visible === 1 ? "result" : "results"}` });
-      this.countEl.createSpan({ text: " · All knowledge", cls: "ent-cc-muted" });
+      this.countEl.createSpan({ text: " · All available bases", cls: "ent-cc-muted" });
       return;
     }
     if (this.plugin.data.activeTab === "queues") {
@@ -1426,14 +1497,16 @@ export class EntVaultCommandCenterView extends ItemView {
     } else {
       visible = this.renderLibrary(body, this.recordsForActiveTab());
     }
+    const globalSearchPending = Boolean(this.query.trim() && this.globalSearchPendingKey === this.globalSearchKey());
     if (visible === 0
+      && !globalSearchPending
       && !(tab === "collections" && this.plugin.data.collections.length === 0)
       && !(tab === "inbox" && !this.query)) {
       if (tab === "curriculum" && !this.query && !this.plugin.isClinicalMode()) this.renderKnowledgeIndexEmpty(body);
       else body.createDiv({ cls: "ent-cc-empty", text: this.query ? "No records match this search." : "No records in this section." });
     }
     this.updateCount(visible);
-    if (this.query) resultCount.setText(`${visible} ${visible === 1 ? "result" : "results"}`);
+    if (this.query) resultCount.setText(globalSearchPending ? "Searching…" : `${visible} ${visible === 1 ? "result" : "results"}`);
   }
 
   private renderKnowledgeIndexEmpty(parent: HTMLElement): void {
@@ -1768,44 +1841,72 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private renderGlobalSearchResults(parent: HTMLElement): number {
-    const matches = matchingKnowledgeBaseRecords(this.records, this.query);
-    const grouped = [
-      {
-        label: this.plugin.data.settings.indexLabel,
-        icon: "library",
-        records: matches.filter((record) => record.role !== "proposal" && record.kind === "topic"),
-      },
-      {
-        label: this.plugin.data.settings.inboxLabel,
-        icon: "inbox",
-        records: matches.filter((record) => record.role === "proposal" || record.kind === "proposal"),
-      },
-      { label: "Procedures", icon: "clipboard-list", records: matches.filter((record) => record.kind === "procedure") },
-      { label: "Medications", icon: "pill", records: matches.filter((record) => record.kind === "medication") },
-      { label: "Syndromes", icon: "dna", records: matches.filter((record) => record.kind === "syndrome") },
-    ];
-    const assigned = new Set<string>();
-    for (const group of grouped) {
-      for (const record of group.records) assigned.add(record.path);
+    const key = this.globalSearchKey();
+    if (!this.globalSearchResult || this.globalSearchResultKey !== key) {
+      this.requestGlobalSearch(key, this.query);
+      parent.createDiv({
+        cls: "ent-cc-empty ent-cc-search-pending",
+        text: "Searching all available knowledge bases…",
+        attr: { role: "status" },
+      });
+      return 0;
     }
-    grouped.push({
-      label: "Other notes",
-      icon: "sticky-note",
-      records: matches.filter((record) => !assigned.has(record.path)),
-    });
-    for (const group of grouped) {
-      if (group.records.length === 0) continue;
-      const section = parent.createDiv({ cls: "ent-cc-heading ent-cc-search-result-group" });
-      const row = section.createDiv({ cls: "ent-cc-row ent-cc-heading-row" });
-      row.createSpan({ cls: "ent-cc-disclosure" });
-      const icon = row.createSpan({ cls: "ent-cc-leading-icon" });
-      setIcon(icon, group.icon);
-      row.createSpan({ cls: "ent-cc-row-title", text: group.label });
-      row.createSpan({ cls: "ent-cc-row-count", text: String(group.records.length) });
-      const content = section.createDiv({ cls: "ent-cc-heading-body" });
-      group.records.forEach((record) => this.renderRecordRow(content, record, 1));
+    const results = this.globalSearchResult;
+    if (results.total > results.rendered) {
+      parent.createDiv({
+        cls: "ent-cc-search-limit",
+        text: `Showing the first ${results.rendered.toLocaleString()} of ${results.total.toLocaleString()} results. Refine the search to see more.`,
+        attr: { role: "status" },
+      });
     }
-    return matches.length;
+    for (const baseGroup of results.groups) {
+      const source = baseGroup.source;
+      const baseSection = parent.createDiv({ cls: "ent-cc-heading ent-cc-search-base-group" });
+      const baseRow = baseSection.createDiv({ cls: "ent-cc-row ent-cc-heading-row" });
+      baseRow.createSpan({ cls: "ent-cc-disclosure" });
+      const baseIcon = baseRow.createSpan({ cls: "ent-cc-leading-icon" });
+      setIcon(baseIcon, "library-big");
+      baseRow.createSpan({ cls: "ent-cc-row-title", text: source.baseName, attr: { dir: "auto" } });
+      baseRow.createSpan({ cls: "ent-cc-row-count", text: String(baseGroup.total) });
+      const baseContent = baseSection.createDiv({ cls: "ent-cc-heading-body" });
+      const libraryGroups = [
+        {
+          label: source.data.settings.indexLabel,
+          icon: "library",
+          records: baseGroup.records.filter((record) => record.role !== "proposal" && record.kind === "topic"),
+        },
+        {
+          label: source.data.settings.inboxLabel,
+          icon: "inbox",
+          records: baseGroup.records.filter((record) => record.role === "proposal" || record.kind === "proposal"),
+        },
+        { label: "Procedures", icon: "clipboard-list", records: baseGroup.records.filter((record) => record.kind === "procedure") },
+        { label: "Medications", icon: "pill", records: baseGroup.records.filter((record) => record.kind === "medication") },
+        { label: "Syndromes", icon: "dna", records: baseGroup.records.filter((record) => record.kind === "syndrome") },
+      ];
+      const assigned = new Set<string>();
+      for (const libraryGroup of libraryGroups) {
+        for (const record of libraryGroup.records) assigned.add(record.path);
+      }
+      libraryGroups.push({
+        label: "Other notes",
+        icon: "sticky-note",
+        records: baseGroup.records.filter((record) => !assigned.has(record.path)),
+      });
+      for (const libraryGroup of libraryGroups) {
+        if (libraryGroup.records.length === 0) continue;
+        const section = baseContent.createDiv({ cls: "ent-cc-subheading ent-cc-search-result-group" });
+        const row = section.createDiv({ cls: "ent-cc-row ent-cc-subheading-row" });
+        row.createSpan({ cls: "ent-cc-disclosure" });
+        const icon = row.createSpan({ cls: "ent-cc-leading-icon" });
+        setIcon(icon, libraryGroup.icon);
+        row.createSpan({ cls: "ent-cc-row-title", text: libraryGroup.label });
+        row.createSpan({ cls: "ent-cc-row-count", text: String(libraryGroup.records.length) });
+        const content = section.createDiv({ cls: "ent-cc-subheading-body" });
+        libraryGroup.records.forEach((record) => this.renderRecordRow(content, record, 2, undefined, { source }));
+      }
+    }
+    return results.total;
   }
 
   private resolvableCount(heading: LayoutHeading): number {
@@ -1819,17 +1920,26 @@ export class EntVaultCommandCenterView extends ItemView {
     return Boolean(record && matchesParsedQuery(record, this.parsedQuery));
   }
 
-  private recordRoleName(record: VaultRecord): string {
+  private recordRoleName(record: VaultRecord, data = this.plugin.data): string {
     if (record.isPlaceholder) return "No note yet";
-    if (this.plugin.isClinicalMode()) return roleLabel(record);
-    if (record.kind === "topic") return `Indexed ${this.plugin.data.settings.itemSingular}`;
-    if (record.role === "proposal") return `${this.plugin.data.settings.inboxLabel} ${this.plugin.data.settings.itemSingular}`;
+    if (data.settings.workspaceMode === "ent-clinical") return roleLabel(record);
+    if (record.kind === "topic") return `Indexed ${data.settings.itemSingular}`;
+    if (record.role === "proposal") return `${data.settings.inboxLabel} ${data.settings.itemSingular}`;
     return roleLabel(record);
   }
 
-  private renderRecordRow(parent: HTMLElement, record: VaultRecord, level: number, membership?: Membership): void {
+  private renderRecordRow(
+    parent: HTMLElement,
+    record: VaultRecord,
+    level: number,
+    membership?: Membership,
+    searchContext?: SearchRecordContext,
+  ): void {
+    const source = searchContext?.source;
+    const sourceData = source?.data ?? this.plugin.data;
+    const sourceIsActive = !source || source.baseId === this.plugin.getActiveKnowledgeBaseId();
     const row = parent.createDiv({
-      cls: `ent-cc-row ent-cc-subject-row ent-cc-level-${level} ${record.isPlaceholder ? "ent-cc-placeholder-row" : ""} ${this.plugin.data.selectedPath === record.path ? "is-selected" : ""}`,
+      cls: `ent-cc-row ent-cc-subject-row ent-cc-level-${level} ${record.isPlaceholder ? "ent-cc-placeholder-row" : ""} ${sourceIsActive && this.plugin.data.selectedPath === record.path ? "is-selected" : ""}`,
     });
     if (membership && this.editMode && !Platform.isMobile) {
       const handle = iconButton(row, "grip-vertical", `Drag ${record.title}`, "ent-cc-drag-handle");
@@ -1847,35 +1957,54 @@ export class EntVaultCommandCenterView extends ItemView {
       text: record.title,
       attr: { dir: "auto", "aria-label": record.isPlaceholder
         ? `${record.title}, no note yet. Space selects; Enter creates or links a note; M adds to a collection; P pins.`
-        : `${record.title}, ${this.recordRoleName(record)}. Space selects; Enter opens; M adds to a collection; P pins.` },
+        : `${record.title}, ${this.recordRoleName(record, sourceData)}${source ? ` in ${source.baseName}` : ""}. Space selects; Enter opens; M adds to a collection; P pins.` },
     });
     title.addEventListener("click", () => {
-      if (record.isPlaceholder) this.openPlaceholderActions(record);
+      if (source && !sourceIsActive) this.run(() => this.activateSearchResult(source, record, record.isPlaceholder ? "placeholder" : "select"));
+      else if (record.isPlaceholder) this.openPlaceholderActions(record);
       else this.selectRecord(record.path);
     });
     title.addEventListener("keydown", (event) => {
       if (!shouldHandleRowShortcut(true, event.key) && event.key !== " ") return;
-      if (event.key === "Enter") { event.preventDefault(); this.run(() => this.openRecord(record.path)); }
-      if (event.key === " ") { event.preventDefault(); this.selectRecord(record.path); }
-      if (event.key.toLowerCase() === "m" && !event.metaKey && !event.ctrlKey) { event.preventDefault(); this.openCollectionPicker(record.path); }
-      if (event.key.toLowerCase() === "p" && !event.metaKey && !event.ctrlKey) { event.preventDefault(); this.run(() => this.togglePin(record.path)); }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        this.run(() => source && !sourceIsActive
+          ? this.activateSearchResult(source, record, record.isPlaceholder ? "placeholder" : "open")
+          : this.openRecord(record.path));
+      }
+      if (event.key === " ") {
+        event.preventDefault();
+        if (source && !sourceIsActive) this.run(() => this.activateSearchResult(source, record, "select"));
+        else this.selectRecord(record.path);
+      }
+      if (event.key.toLowerCase() === "m" && !event.metaKey && !event.ctrlKey) {
+        event.preventDefault();
+        if (source && !sourceIsActive) this.run(() => this.activateSearchResult(source, record, "collection"));
+        else this.openCollectionPicker(record.path);
+      }
+      if (event.key.toLowerCase() === "p" && !event.metaKey && !event.ctrlKey) {
+        event.preventDefault();
+        this.run(() => source && !sourceIsActive
+          ? this.activateSearchResult(source, record, "pin")
+          : this.togglePin(record.path));
+      }
     });
-    this.attachHoverPreview(title, record);
+    this.attachHoverPreview(title, record, sourceData.settings);
     row.createSpan({
-      text: record.isPlaceholder ? "No note yet" : record.curriculumId || (this.plugin.isClinicalMode()
+      text: record.isPlaceholder ? "No note yet" : record.curriculumId || (sourceData.settings.workspaceMode === "ent-clinical"
         ? record.role === "supporting" ? "supporting" : record.role === "proposal" ? "proposal" : record.role === "vault-note" ? "vault note" : record.kind
-        : record.role === "proposal" ? this.plugin.data.settings.inboxLabel : record.role === "vault-note" ? "vault note" : this.plugin.data.settings.itemSingular),
+        : record.role === "proposal" ? sourceData.settings.inboxLabel : record.role === "vault-note" ? "vault note" : sourceData.settings.itemSingular),
       cls: "ent-cc-subject-id",
       attr: { dir: "auto" },
     });
     const badges = row.createDiv({ cls: "ent-cc-row-badges" });
     if (record.isPlaceholder) badges.createSpan({ text: "No note", cls: "ent-cc-placeholder-badge" });
     if (record.priority) badges.createSpan({ text: record.priority, cls: `ent-cc-priority ${record.priority === "P1" ? "is-urgent" : ""}` });
-    if (this.plugin.isClinicalMode() && this.plugin.data.settings.showSafetyBadges && record.safetyCritical) {
+    if (sourceData.settings.workspaceMode === "ent-clinical" && sourceData.settings.showSafetyBadges && record.safetyCritical) {
       const safety = badges.createSpan({ cls: "ent-cc-safety-badge", attr: { title: "Safety-critical" } });
       setIcon(safety, "shield-alert");
     }
-    if (this.plugin.data.pinnedPaths.includes(record.path)) {
+    if (sourceData.pinnedPaths.includes(record.path)) {
       const pin = badges.createSpan({ cls: "ent-cc-pin-badge", attr: { title: "Pinned" } });
       setIcon(pin, "pin");
     }
@@ -1883,12 +2012,75 @@ export class EntVaultCommandCenterView extends ItemView {
       const lock = badges.createSpan({ cls: "ent-cc-lock-badge", attr: { title: "AI locked" } });
       setIcon(lock, "lock");
     }
-    iconButton(row, "ellipsis", `Actions for ${record.title}`, "ent-cc-row-more").addEventListener("click", (event) => this.showRecordMenu(event, record, membership));
-    row.addEventListener("dblclick", () => this.run(() => this.openRecord(record.path)));
+    iconButton(row, "ellipsis", `Actions for ${record.title}`, "ent-cc-row-more").addEventListener("click", (event) => {
+      if (source && !sourceIsActive) this.showCrossBaseRecordMenu(event, source, record);
+      else this.showRecordMenu(event, record, membership);
+    });
+    row.addEventListener("dblclick", () => this.run(() => source && !sourceIsActive
+      ? this.activateSearchResult(source, record, record.isPlaceholder ? "placeholder" : "open")
+      : this.openRecord(record.path)));
   }
 
-  private attachHoverPreview(element: HTMLElement, record: VaultRecord): void {
-    if (!this.plugin.data.settings.enableHoverPreview || record.isPlaceholder) return;
+  private async activateSearchResult(
+    source: KnowledgeBaseSearchSource,
+    searchedRecord: VaultRecord,
+    action: "select" | "open" | "placeholder" | "collection" | "pin",
+  ): Promise<void> {
+    const query = this.query;
+    if (source.baseId !== this.plugin.getActiveKnowledgeBaseId()) {
+      await this.plugin.switchKnowledgeBase(source.baseId);
+      // switchKnowledgeBase reloads this view and intentionally clears stale
+      // base-local state. Restore only the global query so Back on mobile
+      // returns to the same all-base results.
+      this.cancelPendingGlobalSearch();
+      this.query = query;
+      this.parsedQuery = parseQuery(query);
+      this.render();
+    }
+    const record = this.plugin.getRecord(searchedRecord.path);
+    if (!record) throw new Error(`“${searchedRecord.title}” is no longer available in ${source.baseName}.`);
+    if (action === "placeholder" || (action === "open" && record.isPlaceholder)) {
+      this.openPlaceholderActions(record);
+      return;
+    }
+    if (action === "open") {
+      await this.openRecord(record.path);
+      return;
+    }
+    if (action === "collection") {
+      this.openCollectionPicker(record.path);
+      return;
+    }
+    if (action === "pin") {
+      await this.togglePin(record.path);
+      return;
+    }
+    this.selectRecord(record.path);
+  }
+
+  private showCrossBaseRecordMenu(event: MouseEvent, source: KnowledgeBaseSearchSource, record: VaultRecord): void {
+    const menu = new Menu();
+    menu.addItem((item) => item
+      .setTitle(`Switch to ${source.baseName} and select`)
+      .setIcon("library-big")
+      .onClick(() => this.run(() => this.activateSearchResult(source, record, "select"))));
+    menu.addItem((item) => item
+      .setTitle(record.isPlaceholder ? "Create or link note…" : "Open note")
+      .setIcon(record.isPlaceholder ? "file-question" : "external-link")
+      .onClick(() => this.run(() => this.activateSearchResult(source, record, record.isPlaceholder ? "placeholder" : "open"))));
+    menu.addItem((item) => item
+      .setTitle("Add to a collection…")
+      .setIcon("folder-plus")
+      .onClick(() => this.run(() => this.activateSearchResult(source, record, "collection"))));
+    menu.addItem((item) => item
+      .setTitle(source.data.pinnedPaths.includes(record.path) ? "Unpin" : "Pin")
+      .setIcon("pin")
+      .onClick(() => this.run(() => this.activateSearchResult(source, record, "pin"))));
+    menu.showAtMouseEvent(event);
+  }
+
+  private attachHoverPreview(element: HTMLElement, record: VaultRecord, settings = this.plugin.data.settings): void {
+    if (!settings.enableHoverPreview || record.isPlaceholder) return;
     element.addEventListener("mouseover", (event) => {
       this.app.workspace.trigger("hover-link", {
         event,
@@ -2857,7 +3049,7 @@ export class EntVaultCommandCenterView extends ItemView {
       }));
     }
     menu.addSeparator();
-    menu.addItem((item) => item.setTitle("Save organization snapshot").setIcon("archive").onClick(() => {
+    menu.addItem((item) => item.setTitle("Save organization snapshot").setIcon("archive").setDisabled(this.plugin.isDataReadOnly()).onClick(() => {
       if (ownsBase()) this.saveOrganizationSnapshot();
     }));
     if (this.plugin.data.layoutSnapshots.length > 0) {
@@ -2880,6 +3072,7 @@ export class EntVaultCommandCenterView extends ItemView {
       submitLabel: "Save snapshot",
       onSubmit: async (name) => {
         if (!ownsBase()) return;
+        this.plugin.assertDataWritable();
         const snapshot = snapshotPersonal(this.plugin.data, name, false, true);
         const candidates = [...this.plugin.data.layoutSnapshots, snapshot];
         const next = limitSnapshotStack(candidates, 10);
@@ -3093,6 +3286,7 @@ export class EntVaultCommandCenterView extends ItemView {
     for (const view of this.plugin.data.savedViews) {
       menu.addItem((item) => item.setTitle(view.name).setIcon("bookmark").onClick(() => this.run(async () => {
         if (!ownsBase()) return;
+        this.cancelPendingGlobalSearch();
         this.query = view.query;
         this.plugin.data.activeTab = view.tab;
         await this.plugin.savePluginData();
