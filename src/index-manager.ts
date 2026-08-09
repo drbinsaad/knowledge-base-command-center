@@ -326,29 +326,41 @@ export class IndexManagerModal extends Modal {
       submitLabel: mode === "move" ? "Move visually" : mode === "restore" ? "Restore to index" : "Add to index",
       onSubmit: async (group) => {
         if (!this.guardOpenedBase()) return;
-        await this.plugin.mutate(`${mode} ${paths.length} index note${paths.length === 1 ? "" : "s"}`, () => {
-          if (!this.plugin.data.indexGroupOrder.includes(group)) this.plugin.data.indexGroupOrder.push(group);
-          const manualPaths = new Set(this.plugin.data.manualIndexPaths);
-          if (mode !== "move") {
-            const selectedPaths = new Set(paths);
-            this.plugin.data.excludedIndexPaths = this.plugin.data.excludedIndexPaths.filter((candidate) => !selectedPaths.has(candidate));
-          }
-          for (const path of paths) {
+        if (mode === "restore") {
+          // The plugin API preflights the whole selection against protected ENT
+          // source classification before mutating any membership. Routing this
+          // branch through it prevents visual group selection from becoming a
+          // back door into the clinical Index.
+          await this.plugin.restoreRecordsToIndex(
+            paths,
+            `Restore ${paths.length} index note${paths.length === 1 ? "" : "s"}`,
+            group,
+          );
+        } else {
+          await this.plugin.mutate(`${mode} ${paths.length} index note${paths.length === 1 ? "" : "s"}`, () => {
+            if (!this.plugin.data.indexGroupOrder.includes(group)) this.plugin.data.indexGroupOrder.push(group);
+            const manualPaths = new Set(this.plugin.data.manualIndexPaths);
             if (mode !== "move") {
-              const portableId = this.plugin.getRecord(path)?.portableId;
-              if (portableId) {
-                const subject = this.plugin.getPortableSubject(portableId);
-                if (subject) subject.indexed = true;
-              }
-              if (!pathIsInsideFolder(path, this.plugin.data.settings.primaryFolder) && !manualPaths.has(path)) {
-                this.plugin.data.manualIndexPaths.push(path);
-                manualPaths.add(path);
-              }
+              const selectedPaths = new Set(paths);
+              this.plugin.data.excludedIndexPaths = this.plugin.data.excludedIndexPaths.filter((candidate) => !selectedPaths.has(candidate));
             }
-            this.plugin.data.indexGroupByPath[path] = group;
-            resetCurriculumVisualPath(this.plugin.data.curriculumVisual, path);
-          }
-        }, { includePortableIndex: updatesPortableMembership });
+            for (const path of paths) {
+              if (mode !== "move") {
+                const portableId = this.plugin.getRecord(path)?.portableId;
+                if (portableId) {
+                  const subject = this.plugin.getPortableSubject(portableId);
+                  if (subject) subject.indexed = true;
+                }
+                if (!pathIsInsideFolder(path, this.plugin.data.settings.primaryFolder) && !manualPaths.has(path)) {
+                  this.plugin.data.manualIndexPaths.push(path);
+                  manualPaths.add(path);
+                }
+              }
+              this.plugin.data.indexGroupByPath[path] = group;
+              resetCurriculumVisualPath(this.plugin.data.curriculumVisual, path);
+            }
+          }, { includePortableIndex: updatesPortableMembership });
+        }
         if (!this.guardOpenedBase()) return;
         this.selected.clear();
         this.tab = "indexed";
@@ -455,7 +467,7 @@ export class IndexManagerModal extends Modal {
         await this.plugin.mutate(`Create visual group “${group}”`, () => {
           this.plugin.data.indexGroupOrder.push(group);
           registerPortableGroup(this.plugin.data, group);
-        }, { includePortableIndex: true });
+        }, { includePortableIndex: true, requireUndo: true });
         if (!this.guardOpenedBase()) return;
         this.render();
       },
@@ -474,7 +486,7 @@ export class IndexManagerModal extends Modal {
         const [moved] = order.splice(from, 1);
         if (moved) order.splice(to, 0, moved);
         this.plugin.data.indexGroupOrder = order;
-      });
+      }, { requireUndo: true });
       if (!this.guardOpenedBase()) return;
       this.render();
     });
@@ -531,7 +543,7 @@ export class IndexManagerModal extends Modal {
           this.plugin.data.indexGroupOrder = [...new Set(groupOrder.map((candidate) => candidate === group ? next : candidate))];
           for (const source of new Set([group, ...sourceGroups])) renameOrMergePortableGroup(this.plugin.data, source, next);
           this.plugin.invalidateRecordCache();
-        }, { includePortableIndex: true });
+        }, { includePortableIndex: true, requireUndo: true });
         if (!this.guardOpenedBase()) return;
         this.render();
       },
@@ -565,7 +577,7 @@ export class IndexManagerModal extends Modal {
           this.plugin.data.indexGroupOrder = groupOrder.filter((group) => group !== source);
           for (const group of new Set([source, ...sourceGroups])) renameOrMergePortableGroup(this.plugin.data, group, target);
           this.plugin.invalidateRecordCache();
-        }, { includePortableIndex: true });
+        }, { includePortableIndex: true, requireUndo: true });
         if (!this.guardOpenedBase()) return;
         this.render();
       }).open();

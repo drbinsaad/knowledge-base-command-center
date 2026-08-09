@@ -81,5 +81,13 @@ export class WorkspaceLeaf {}
 export class BasesView {}
 export class QueryController {}
 export const Platform = { isMobile: false, isDesktopApp: true };
-export function setIcon(): void {}
+const ICON_IDS = [
+  "library", "book-open", "book-copy", "folder", "folders", "bookmark", "archive",
+  "clipboard-list", "pill", "dna", "stethoscope", "heart-pulse", "brain", "microscope",
+  "flask-conical", "syringe", "activity", "graduation-cap", "file-text", "notebook-tabs",
+] as const;
+export function getIconIds(): string[] { return [...ICON_IDS]; }
+export function setIcon(element?: { setAttribute?(name: string, value: string): void }, icon = ""): void {
+  element?.setAttribute?.("data-icon", icon);
+}
 export class App {}

@@ -57,7 +57,7 @@
   overscroll-behavior: contain;
 }
 
-.ent-cc-portability-center > .setting-item:last-child {
+.ent-cc-portability-panel > .setting-item:last-child {
   position: sticky;
   z-index: 2;
   bottom: 0;
@@ -90,6 +90,29 @@
 .ent-cc-portability-path-warning-text {
   color: var(--color-orange, var(--text-warning));
   font-weight: 600;
+}
+
+.ent-cc-portability-library-section {
+  margin: 4px 0 12px;
+  padding-inline-start: 14px;
+  border-inline-start: 2px solid var(--background-modifier-border);
+}
+
+.ent-cc-portability-library-section > h4 {
+  margin: 10px 0 4px;
+}
+
+.ent-cc-portability-library-section > p {
+  margin: 0 0 6px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.4;
+}
+
+.ent-cc-portability-library-note {
+  padding: 8px 10px;
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
 }
 
 @media (max-width: 600px) {
@@ -916,6 +939,17 @@
   line-height: 1.5;
 }
 
+.ent-cc-catalog-context {
+  margin: 0 0 14px;
+  padding: 9px 11px;
+  border-left: 3px solid var(--ent-cc-accent);
+  border-radius: 5px;
+  color: var(--text-muted);
+  background: var(--ent-cc-accent-soft);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .ent-cc-muted {
   color: var(--text-muted);
 }
@@ -1024,6 +1058,13 @@
 .ent-cc-tab svg {
   width: 14px;
   height: 14px;
+}
+
+.ent-cc-tab-label {
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ent-cc-tab-count {
@@ -1469,6 +1510,11 @@
   .ent-cc-subheading-row .ent-cc-row-title,
   .ent-cc-subject-row .ent-cc-subject-title {
     grid-column: 2;
+  }
+
+  .ent-cc-view .ent-cc-heading-row button.ent-cc-row-title,
+  .ent-cc-view .ent-cc-subheading-row button.ent-cc-row-title {
+    min-height: 44px;
   }
 
   .ent-cc-view .ent-cc-subject-row button.ent-cc-subject-title {
@@ -2081,6 +2127,10 @@
     padding-left: 9px;
   }
 
+  .ent-cc-tab-label {
+    max-width: 42vw;
+  }
+
   .ent-cc-tabs {
     scrollbar-width: none;
   }
@@ -2445,6 +2495,291 @@
 .ent-cc-base-switcher-icon svg {
   width: 13px;
   height: 13px;
+}
+
+/* User-managed libraries --------------------------------------------------
+   A library is a top-level category inside one knowledge base. The manager
+   intentionally mirrors the knowledge-base manager while keeping every
+   action touch-safe and independent of Markdown files. */
+.ent-cc-library-modal {
+  --ent-cc-accent: var(--interactive-accent, #39c5bb);
+  --ent-cc-accent-soft: color-mix(in srgb, var(--ent-cc-accent) 14%, transparent);
+  --ent-cc-border: var(--background-modifier-border, #31343a);
+  width: min(860px, calc(100vw - 32px));
+  max-width: 860px;
+  max-height: calc(100vh - 40px);
+  max-height: calc(100dvh - 40px);
+}
+
+.ent-cc-library-modal .ent-cc-modal {
+  max-height: calc(100vh - 100px);
+  max-height: calc(100dvh - 100px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.ent-cc-library-modal .ent-cc-modal > p {
+  margin: 0 0 14px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.ent-cc-library-terminology-note {
+  margin: -4px 0 16px;
+  padding: 9px 11px;
+  border-left: 3px solid var(--ent-cc-accent);
+  color: var(--text-muted);
+  background: var(--ent-cc-accent-soft);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.ent-cc-library-manager-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  margin-bottom: 14px;
+}
+
+.ent-cc-library-manager > h3 {
+  margin: 18px 0 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.ent-cc-library-manager-list {
+  display: grid;
+  gap: 8px;
+}
+
+.ent-cc-library-manager-empty,
+.ent-cc-library-delete-empty-note {
+  padding: 16px;
+  border: 1px dashed var(--ent-cc-border);
+  border-radius: 8px;
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  line-height: 1.45;
+}
+
+.ent-cc-library-manager-row {
+  display: grid;
+  align-items: center;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--ent-cc-border);
+  border-radius: 9px;
+  background: var(--background-secondary);
+}
+
+.ent-cc-library-manager-row.is-archived {
+  background: color-mix(in srgb, var(--background-secondary) 72%, transparent);
+}
+
+.ent-cc-library-manager-icon {
+  display: inline-grid;
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  color: var(--ent-cc-accent);
+  background: var(--ent-cc-accent-soft);
+  place-items: center;
+}
+
+.ent-cc-library-manager-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.ent-cc-library-manager-copy {
+  min-width: 0;
+}
+
+.ent-cc-library-manager-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  font-weight: 650;
+}
+
+.ent-cc-library-manager-title > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ent-cc-library-badge {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border: 1px solid var(--ent-cc-border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  background: var(--background-primary);
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.ent-cc-library-manager-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ent-cc-library-manager-action {
+  white-space: nowrap;
+}
+
+.ent-cc-library-icon-section {
+  margin: 14px 0 18px;
+}
+
+.ent-cc-library-icon-section h3,
+.ent-cc-library-icon-section p {
+  margin: 0 0 8px;
+}
+
+.ent-cc-library-icon-section p {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.ent-cc-library-icon-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
+  gap: 7px;
+}
+
+.ent-cc-library-icon-choice {
+  display: inline-grid;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  border: 1px solid var(--ent-cc-border);
+  border-radius: 8px;
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  box-shadow: none;
+  place-items: center;
+}
+
+.ent-cc-library-icon-choice:hover,
+.ent-cc-library-icon-choice:focus-visible {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+.ent-cc-library-icon-choice.is-selected {
+  border-color: var(--ent-cc-accent);
+  color: var(--ent-cc-accent);
+  background: var(--ent-cc-accent-soft);
+  box-shadow: inset 0 0 0 1px var(--ent-cc-accent);
+}
+
+.ent-cc-library-icon-choice:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+
+.ent-cc-library-icon-choice svg {
+  width: 18px;
+  height: 18px;
+}
+
+.ent-cc-library-form-feedback {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 20px;
+  margin: -4px 0 4px;
+  font-size: 10px;
+}
+
+.ent-cc-library-form-error {
+  color: var(--text-error);
+}
+
+.ent-cc-library-form-count {
+  margin-left: auto;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.ent-cc-library-editor input[aria-invalid="true"] {
+  border-color: var(--text-error);
+}
+
+@media (max-width: 1024px) {
+  .ent-cc-library-modal {
+    width: calc(100vw - 12px);
+    max-height: calc(100vh - 16px);
+    max-height: calc(100dvh - 16px);
+  }
+
+  .ent-cc-library-modal .ent-cc-modal {
+    max-height: calc(100vh - 76px);
+    max-height: calc(100dvh - 76px);
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+
+  .ent-cc-library-manager-toolbar .ent-cc-button,
+  .ent-cc-library-manager-action,
+  .ent-cc-library-modal .setting-item-control button,
+  .ent-cc-library-modal .setting-item-control select,
+  .ent-cc-library-modal .setting-item-control input {
+    min-height: 44px;
+  }
+
+  .ent-cc-library-manager-row {
+    align-items: start;
+    grid-template-columns: 44px minmax(0, 1fr);
+  }
+
+  .ent-cc-library-manager-icon {
+    width: 44px;
+    height: 44px;
+  }
+
+  .ent-cc-library-manager-actions {
+    grid-column: 1 / -1;
+    display: grid;
+    width: 100%;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ent-cc-library-manager-action {
+    width: 100%;
+    min-width: 0;
+    justify-content: center;
+  }
+
+  .ent-cc-library-editor .setting-item,
+  .ent-cc-library-delete-modal .setting-item {
+    display: block;
+  }
+
+  .ent-cc-library-editor .setting-item-control,
+  .ent-cc-library-delete-modal .setting-item-control {
+    width: 100%;
+    min-width: 0;
+    margin-top: 8px;
+  }
+
+  .ent-cc-library-editor .setting-item-control input,
+  .ent-cc-library-delete-modal .setting-item-control select {
+    width: 100%;
+    font-size: 16px;
+  }
 }
 
 .ent-cc-base-setting .setting-item-control {

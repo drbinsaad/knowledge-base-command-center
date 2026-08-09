@@ -2,9 +2,11 @@ import { Modal, Notice, Platform, Setting, TFile, normalizePath } from "obsidian
 import type EntVaultCommandCenterPlugin from "./main";
 import {
   assertPersonalBackupMatchesVault,
+  subjectLibraryId,
   validateProposalFolderPath,
   validateTemplateFilePath,
   validateWritableFolderPath,
+  type LibraryDefinition,
   type PluginData,
   type PortableIndexLocalState,
   type VaultRecord,
@@ -12,7 +14,8 @@ import {
 import { VaultFilePickerModal } from "./modals";
 import {
   applyPortableExport,
-  COMPLETE_PORTABLE_SELECTION,
+  assertPortableImportDestinationCompatible,
+  completePortableSelection,
   createPortableExport,
   EMPTY_PORTABLE_SELECTION,
   MAX_PORTABLE_PACKAGE_BYTES,
@@ -22,6 +25,7 @@ import {
   PortableExportSelection,
   PortableExportV1,
   PortableImportMode,
+  type PortableLibraryDefinition,
   selectionAvailableForExport,
   serializePortableExport,
   summarizePortableExport,
@@ -29,8 +33,18 @@ import {
 } from "./portability";
 
 type CenterMode = "export" | "import";
-type ComponentKey = keyof PortableExportSelection;
+type ComponentKey = "workspace" | "index" | "collections" | "study" | "savedViews" | "recovery";
 type BusyAction = "export" | "import" | "file";
+type LibraryDescriptor = Pick<PortableLibraryDefinition, "id" | "name" | "singularName" | "icon" | "order" | "sourceKind">;
+
+const CENTER_MODES: readonly CenterMode[] = ["export", "import"];
+let portabilityCenterSequence = 0;
+
+export function portabilityLibraryUnavailableText(importing: boolean, available: boolean): string {
+  return importing && !available
+    ? " Referenced by another selected section; this file does not declare the complete Library."
+    : "";
+}
 
 export interface PreparedPortableExport {
   value: PortableExportV1;
@@ -87,21 +101,6 @@ const COMPONENTS: Array<{
     description: "Subject names, groups, nested hierarchy, and visual order. Missing notes become actionable placeholders.",
   },
   {
-    key: "procedures",
-    label: "Procedures",
-    description: "Procedure names and portable identities only. Missing notes become actionable placeholders in a Procedures tab.",
-  },
-  {
-    key: "medications",
-    label: "Medications",
-    description: "Medication names and portable identities only. Doses, note bodies, and attachments are never included.",
-  },
-  {
-    key: "syndromes",
-    label: "Syndromes",
-    description: "Syndrome names and portable identities only. Missing notes become actionable placeholders in a Syndromes tab.",
-  },
-  {
     key: "collections",
     label: "Collections",
     description: "Collection and subheading structure plus membership by portable subject identity.",
@@ -124,20 +123,32 @@ const COMPONENTS: Array<{
 ];
 
 function cloneSelection(value: PortableExportSelection): PortableExportSelection {
-  return { ...value };
+  return { ...value, libraryIds: [...(value.libraryIds ?? [])] };
 }
 
 function selectionCount(selection: PortableExportSelection): number {
-  return COMPONENTS.filter(({ key }) => selection[key]).length;
+  const normalized = normalizePortableSelection(selection);
+  return COMPONENTS.filter(({ key }) => normalized[key]).length + normalized.libraryIds.length;
 }
 
 function selectionUsesSubjectCatalog(selection: PortableExportSelection): boolean {
-  return selection.index
-    || selection.procedures
-    || selection.medications
-    || selection.syndromes
-    || selection.collections
-    || selection.study;
+  const normalized = normalizePortableSelection(selection);
+  return normalized.index
+    || normalized.libraryIds.length > 0
+    || normalized.collections
+    || normalized.study;
+}
+
+function selectionWithLibraryIds(selection: PortableExportSelection, libraryIds: string[]): PortableExportSelection {
+  return normalizePortableSelection({
+    ...selection,
+    libraryIds,
+    // Clear the compatibility flags before normalizing so deselecting a
+    // built-in library cannot be undone by its legacy boolean alias.
+    procedures: false,
+    medications: false,
+    syndromes: false,
+  });
 }
 
 function errorMessage(error: unknown): string {
@@ -146,7 +157,7 @@ function errorMessage(error: unknown): string {
 
 export class ExportImportCenterModal extends Modal {
   private mode: CenterMode;
-  private exportSelection = cloneSelection(COMPLETE_PORTABLE_SELECTION);
+  private exportSelection = cloneSelection(EMPTY_PORTABLE_SELECTION);
   private importSelection = cloneSelection(EMPTY_PORTABLE_SELECTION);
   private importValue: PortableExportV1 | null = null;
   private importSourceLabel = "";
@@ -159,6 +170,8 @@ export class ExportImportCenterModal extends Modal {
   private dataChanged = false;
   private completionNotified = false;
   private pendingFocusKey: string | null = null;
+  private accessibilityInstanceId = `ent-cc-portability-${++portabilityCenterSequence}`;
+  private panelEl: HTMLElement | null = null;
   private openedBaseId = "";
   private openedDataEpoch = -1;
   private staleBaseNoticeShown = false;
@@ -177,6 +190,7 @@ export class ExportImportCenterModal extends Modal {
   ) {
     super(plugin.app);
     this.mode = initialMode;
+    this.exportSelection = completePortableSelection(this.activeExportLibraries().map((library) => library.id));
   }
 
   onOpen(): void {
@@ -206,14 +220,28 @@ export class ExportImportCenterModal extends Modal {
   private render(): void {
     if (!this.guardOpenedBase()) return;
     const scrollTop = this.contentEl.scrollTop;
+    this.panelEl = null;
     this.contentEl.empty();
     this.titleEl.setText("Export / import center");
     this.renderModePicker();
-    if (this.mode === "export") this.renderExport();
-    else this.renderImport();
+    this.renderModePanel();
     this.contentEl.scrollTop = scrollTop;
     this.updateBusyPresentation();
     this.restorePendingFocus();
+  }
+
+  private renderModePanel(): void {
+    this.panelEl = this.contentEl.createDiv({
+      cls: "ent-cc-portability-panel",
+      attr: {
+        id: this.modePanelId(this.mode),
+        role: "tabpanel",
+        "aria-labelledby": this.modeTabId(this.mode),
+        tabindex: "0",
+      },
+    });
+    if (this.mode === "export") this.renderExport();
+    else this.renderImport();
   }
 
   private rerenderFromControl(focusKey: string): void {
@@ -243,6 +271,25 @@ export class ExportImportCenterModal extends Modal {
     }
   }
 
+  private accessibilityId(): string {
+    if (!this.accessibilityInstanceId) {
+      this.accessibilityInstanceId = `ent-cc-portability-${++portabilityCenterSequence}`;
+    }
+    return this.accessibilityInstanceId;
+  }
+
+  private modeTabId(mode: CenterMode): string {
+    return `${this.accessibilityId()}-tab-${mode}`;
+  }
+
+  private modePanelId(mode: CenterMode): string {
+    return `${this.accessibilityId()}-panel-${mode}`;
+  }
+
+  private renderParent(): HTMLElement {
+    return this.panelEl ?? this.contentEl;
+  }
+
   private renderModePicker(): void {
     const tabs = this.contentEl.createDiv({
       cls: "ent-cc-manager-tabs ent-cc-portability-tabs",
@@ -254,9 +301,11 @@ export class ExportImportCenterModal extends Modal {
         cls: `ent-cc-manager-tab ${active ? "is-active" : ""}`,
         text: label,
         attr: {
+          id: this.modeTabId(mode),
           type: "button",
           role: "tab",
           "aria-selected": String(active),
+          "aria-controls": this.modePanelId(mode),
           tabindex: active ? "0" : "-1",
           "data-portability-focus": `mode-${mode}`,
           ...(this.busyAction ? { disabled: "" } : {}),
@@ -267,22 +316,38 @@ export class ExportImportCenterModal extends Modal {
         this.mode = mode;
         this.rerenderFromControl(`mode-${mode}`);
       });
+      button.addEventListener("keydown", (event) => {
+        if (this.busyAction) return;
+        const index = CENTER_MODES.indexOf(mode);
+        const nextIndex = event.key === "Home" ? 0
+          : event.key === "End" ? CENTER_MODES.length - 1
+            : event.key === "ArrowRight" ? (index + 1) % CENTER_MODES.length
+              : event.key === "ArrowLeft" ? (index - 1 + CENTER_MODES.length) % CENTER_MODES.length
+                : -1;
+        if (nextIndex < 0) return;
+        const nextMode = CENTER_MODES[nextIndex];
+        if (!nextMode) return;
+        event.preventDefault();
+        this.mode = nextMode;
+        this.rerenderFromControl(`mode-${nextMode}`);
+      });
     };
     addTab("export", "Export");
     addTab("import", "Import");
   }
 
   private renderExport(): void {
+    const parent = this.renderParent();
     const compatibilityReadOnly = this.plugin.isDataReadOnly();
     if (compatibilityReadOnly && this.exportSelection.recovery) {
       this.exportSelection = { ...this.exportSelection, recovery: false };
       this.exportRecoveryConfirmed = false;
     }
-    this.contentEl.createEl("p", {
+    parent.createEl("p", {
       text: "Choose exactly what to carry to another vault or device. Markdown note bodies and attachments are never included.",
     });
     if (compatibilityReadOnly) {
-      const warning = this.contentEl.createDiv({ cls: "ent-cc-manager-diagnostic", attr: { role: "alert" } });
+      const warning = parent.createDiv({ cls: "ent-cc-manager-diagnostic", attr: { role: "alert" } });
       warning.createEl("strong", { text: "Compatibility read-only salvage" });
       warning.createEl("p", {
         text: "Same-vault recovery is unavailable because this build cannot faithfully interpret the preserved data.json. Keep a copy of that raw file. Other sections may be exported for salvage; newly generated index identities cannot be saved and may differ in a later export.",
@@ -296,12 +361,12 @@ export class ExportImportCenterModal extends Modal {
 
     const selection = normalizePortableSelection(this.exportSelection);
     if (selection.recovery) {
-      const warning = this.contentEl.createDiv({ cls: "ent-cc-manager-diagnostic ent-cc-portability-path-warning", attr: { role: "alert" } });
+      const warning = parent.createDiv({ cls: "ent-cc-manager-diagnostic ent-cc-portability-path-warning", attr: { role: "alert" } });
       warning.createEl("strong", { text: "Exact vault paths will be included" });
       warning.createEl("p", {
         text: "Same-vault recovery contains exact folder and Markdown filenames from this vault. Treat the JSON as private. The plugin embeds this vault's identity and will reject it in every other vault.",
       });
-      const confirmation = new Setting(this.contentEl)
+      const confirmation = new Setting(parent)
         .setName("Confirm private recovery export")
         .setDesc("I understand this export contains exact vault-relative paths and is not a path-free package for sharing.")
         .addToggle((toggle) => {
@@ -337,7 +402,7 @@ export class ExportImportCenterModal extends Modal {
       this.renderEmptySummary("Choose at least one section to export.");
     }
 
-    new Setting(this.contentEl)
+    new Setting(parent)
       .addButton((button) => {
         button.buttonEl.dataset.portabilityFocus = "export-cancel";
         button.setButtonText("Cancel").setDisabled(Boolean(this.busyAction)).onClick(() => this.close());
@@ -353,14 +418,15 @@ export class ExportImportCenterModal extends Modal {
   }
 
   private renderExportPresets(): void {
+    const parent = this.renderParent();
     const compatibilityReadOnly = this.plugin.isDataReadOnly();
-    new Setting(this.contentEl)
+    new Setting(parent)
       .setName("Quick selection")
       .setDesc("Portable set is for cross-vault transfer. All + private recovery additionally creates exact-path recovery that is locked to this vault and requires separate confirmation.")
       .addButton((button) => {
         button.buttonEl.dataset.portabilityFocus = "preset-portable";
         button.setButtonText("Portable set").setDisabled(Boolean(this.busyAction)).onClick(() => {
-          this.exportSelection = cloneSelection(COMPLETE_PORTABLE_SELECTION);
+          this.exportSelection = completePortableSelection(this.activeExportLibraries().map((library) => library.id));
           this.exportRecoveryConfirmed = false;
           this.rerenderFromControl("preset-portable");
         });
@@ -369,14 +435,7 @@ export class ExportImportCenterModal extends Modal {
         button.buttonEl.dataset.portabilityFocus = "preset-everything";
         button.setButtonText("All + private recovery").setDisabled(Boolean(this.busyAction) || compatibilityReadOnly).onClick(() => {
           this.exportSelection = {
-            workspace: true,
-            index: true,
-            procedures: true,
-            medications: true,
-            syndromes: true,
-            collections: true,
-            study: true,
-            savedViews: true,
+            ...completePortableSelection(this.activeExportLibraries().map((library) => library.id)),
             recovery: true,
           };
           this.exportRecoveryConfirmed = false;
@@ -394,16 +453,17 @@ export class ExportImportCenterModal extends Modal {
   }
 
   private renderImport(): void {
-    this.contentEl.createEl("p", {
+    const parent = this.renderParent();
+    parent.createEl("p", {
       text: "Choose a command center portable export, older workspace export, or same-vault recovery backup. Import never writes, moves, or deletes Markdown notes.",
     });
     if (this.plugin.isDataReadOnly()) {
-      const warning = this.contentEl.createDiv({ cls: "ent-cc-manager-diagnostic", attr: { role: "alert" } });
+      const warning = parent.createDiv({ cls: "ent-cc-manager-diagnostic", attr: { role: "alert" } });
       warning.createEl("strong", { text: "Import unavailable in compatibility read-only mode" });
       warning.createEl("p", {
         text: "This build is preserving an unrecognized, newer, or unreadable data.json and will not overwrite it. Keep a copy of the raw file, then update the plugin or repair its data before importing.",
       });
-      new Setting(this.contentEl).addButton((button) => {
+      new Setting(parent).addButton((button) => {
         button.buttonEl.dataset.portabilityFocus = "import-close";
         button.setButtonText("Close").setDisabled(Boolean(this.busyAction)).onClick(() => this.close());
       });
@@ -411,7 +471,7 @@ export class ExportImportCenterModal extends Modal {
     }
 
     const chooseLabel = this.importValue ? "Choose another JSON…" : "Choose JSON export…";
-    new Setting(this.contentEl)
+    new Setting(parent)
       .setName("Import file")
       .setDesc(Platform.isMobile
         ? "Choose a JSON file stored inside this vault. Files larger than 10 MB are rejected."
@@ -427,7 +487,7 @@ export class ExportImportCenterModal extends Modal {
 
     if (!this.importValue) {
       this.renderEmptySummary("No import file selected.");
-      new Setting(this.contentEl).addButton((button) => {
+      new Setting(parent).addButton((button) => {
         button.buttonEl.dataset.portabilityFocus = "import-close";
         button.setButtonText("Close").setDisabled(Boolean(this.busyAction)).onClick(() => this.close());
       });
@@ -472,7 +532,7 @@ export class ExportImportCenterModal extends Modal {
     if (selection.recovery) {
       const recovery = this.importValue.components.recovery;
       const needsBaseOverride = recoveryCheck?.baseIdentity !== "verified";
-      const warning = this.contentEl.createDiv({ cls: "ent-cc-manager-diagnostic" });
+      const warning = parent.createDiv({ cls: "ent-cc-manager-diagnostic" });
       const legacyCheck = recoveryCheck?.identity === "legacy-unverified" ? recoveryCheck : null;
       const legacy = legacyCheck !== null;
       warning.createEl("strong", {
@@ -496,7 +556,7 @@ export class ExportImportCenterModal extends Modal {
               : `This v1–v6 recovery verifies this vault but has no embedded knowledge-base identity or preset. The plugin cannot prove that it belongs to “${this.plugin.data.settings.workspaceName}” or that its original preset matches.`,
       });
       if (needsBaseOverride) {
-        const baseConfirmation = new Setting(this.contentEl)
+        const baseConfirmation = new Setting(parent)
           .setName(recoveryCheck?.baseIdentity === "cross-base-override"
             ? "Confirm restore into a different base"
             : "Confirm base and preset are unverified")
@@ -515,7 +575,7 @@ export class ExportImportCenterModal extends Modal {
           });
         baseConfirmation.settingEl.addClass("ent-cc-portability-toggle");
       }
-      const confirmation = new Setting(this.contentEl)
+      const confirmation = new Setting(parent)
         .setName("Confirm destructive recovery restore")
         .setDesc(legacy
           ? `I know ${this.importSourceLabel || "this JSON file"} came from this vault despite its missing identity. Meeting the at-least-half (50%) path threshold is not proof. Restore replaces collections, pins, the next list, saved views, index organization, named snapshots, and portable bindings.`
@@ -532,7 +592,7 @@ export class ExportImportCenterModal extends Modal {
         });
       confirmation.settingEl.addClass("ent-cc-portability-toggle");
     } else {
-      new Setting(this.contentEl)
+      new Setting(parent)
         .setName("Import behavior")
         .setDesc(this.importMode === "merge"
           ? "Merge adds and updates the selected organization while keeping other local organization."
@@ -551,7 +611,7 @@ export class ExportImportCenterModal extends Modal {
         });
     }
 
-    new Setting(this.contentEl)
+    new Setting(parent)
       .addButton((button) => {
         button.buttonEl.dataset.portabilityFocus = "import-cancel";
         button.setButtonText("Cancel").setDisabled(Boolean(this.busyAction)).onClick(() => this.close());
@@ -577,9 +637,12 @@ export class ExportImportCenterModal extends Modal {
     recoveryBlockReason = "",
     workspaceBlockReason = "",
   ): void {
-    this.contentEl.createEl("h3", { text: available ? "Sections in this file" : "Sections to export" });
+    const parent = this.renderParent();
+    const normalizedSelection = normalizePortableSelection(selection);
+    const normalizedAvailable = available ? normalizePortableSelection(available) : undefined;
+    parent.createEl("h3", { text: available ? "Sections in this file" : "Sections to export" });
     for (const component of COMPONENTS) {
-      const isAvailable = available?.[component.key] ?? true;
+      const isAvailable = normalizedAvailable?.[component.key] ?? true;
       const unavailableInReadOnly = !available && component.key === "recovery" && this.plugin.isDataReadOnly();
       const unavailableText = available && !isAvailable
         ? component.key === "workspace" && workspaceBlockReason
@@ -590,16 +653,16 @@ export class ExportImportCenterModal extends Modal {
         : "";
       const readOnlyText = unavailableInReadOnly ? " Unavailable in compatibility read-only mode; preserve the raw data.json instead." : "";
       const focusKey = `${available ? "import" : "export"}-component-${component.key}`;
-      const setting = new Setting(this.contentEl)
+      const setting = new Setting(parent)
         .setName(component.label)
         .setDesc(`${component.description}${unavailableText}${readOnlyText}`)
         .addToggle((toggle) => {
           toggle.toggleEl.dataset.portabilityFocus = focusKey;
           toggle
-            .setValue(isAvailable && selection[component.key])
+            .setValue(isAvailable && normalizedSelection[component.key])
             .setDisabled(Boolean(this.busyAction) || !isAvailable || unavailableInReadOnly)
             .onChange((enabled) => {
-              let next = cloneSelection(selection);
+              let next = cloneSelection(normalizedSelection);
               if (available && component.key === "recovery" && enabled) {
                 next = { ...EMPTY_PORTABLE_SELECTION, recovery: true };
                 this.importMode = "replace";
@@ -623,11 +686,103 @@ export class ExportImportCenterModal extends Modal {
             });
         });
       setting.settingEl.addClass("ent-cc-portability-toggle");
+      if (component.key === "index") {
+        this.renderLibraryToggles(normalizedSelection, normalizedAvailable, onChange);
+      }
     }
   }
 
+  private renderLibraryToggles(
+    selection: PortableExportSelection,
+    available: PortableExportSelection | undefined,
+    onChange: (selection: PortableExportSelection) => void,
+  ): void {
+    const parent = this.renderParent();
+    const libraries = available ? this.importLibraryDescriptors() : this.activeExportLibraries();
+    const hasArchivedLibraries = !available
+      && this.plugin.getLibraries(true).some((library) => library.archivedAt !== null);
+    if (libraries.length === 0 && !hasArchivedLibraries) return;
+    const selectedIds = new Set(normalizePortableSelection(selection).libraryIds);
+    const availableIds = available ? new Set(normalizePortableSelection(available).libraryIds) : null;
+    const section = parent.createDiv({ cls: "ent-cc-portability-library-section" });
+    section.createEl("h4", { text: "Libraries" });
+    section.createEl("p", {
+      text: available
+        ? "Each enabled Library is an authoritative path-free section in this file. Dependency-only Libraries remain visible but cannot be selected for Replace."
+        : "Choose Libraries independently. Their stable identity, labels, icon, exact hierarchy, empty state, and subject names are included without note paths or contents.",
+    });
+    for (const library of libraries) {
+      const isAvailable = availableIds?.has(library.id) ?? true;
+      const focusKey = `${available ? "import" : "export"}-library-${library.id}`;
+      const count = this.librarySubjectCount(library.id, available !== undefined);
+      const label = library.sourceKind ? `${library.name} (built-in)` : library.name;
+      const unavailableText = portabilityLibraryUnavailableText(Boolean(available), isAvailable);
+      const setting = new Setting(section)
+        .setName(label)
+        .setDesc(`${count} ${count === 1 ? library.singularName : library.name}. Stable ID: ${library.id}.${unavailableText}`)
+        .addToggle((toggle) => {
+          toggle.toggleEl.dataset.portabilityFocus = focusKey;
+          toggle
+            .setValue(isAvailable && selectedIds.has(library.id))
+            .setDisabled(Boolean(this.busyAction) || !isAvailable)
+            .onChange((enabled) => {
+              const nextIds = new Set(normalizePortableSelection(selection).libraryIds);
+              if (enabled) nextIds.add(library.id);
+              else nextIds.delete(library.id);
+              let next = selectionWithLibraryIds(selection, [...nextIds]);
+              if (available && enabled && next.recovery) {
+                next = { ...next, recovery: false };
+                this.recoveryConfirmed = false;
+                this.crossBaseRecoveryConfirmed = false;
+              }
+              onChange(next);
+              this.rerenderFromControl(focusKey);
+            });
+        });
+      setting.settingEl.addClass("ent-cc-portability-toggle", "ent-cc-portability-library-toggle");
+    }
+    if (hasArchivedLibraries) {
+      section.createEl("p", {
+        cls: "ent-cc-portability-library-note",
+        text: "Archived libraries are not part of the portable set. Restore one before exporting it, or use confirmed private same-vault recovery to preserve archived state.",
+      });
+    }
+  }
+
+  private activeExportLibraries(): LibraryDefinition[] {
+    return this.plugin.getLibraries().map((library) => ({ ...library }));
+  }
+
+  private importLibraryDescriptors(): LibraryDescriptor[] {
+    const value = this.importValue;
+    const index = value?.components.index;
+    if (!value || !index) return [];
+    const definitions = new Map((index.libraries ?? []).map((library) => [library.id, library]));
+    for (const summary of summarizePortableExport(value).libraries) {
+      if (definitions.has(summary.id)) continue;
+      definitions.set(summary.id, {
+        id: summary.id,
+        name: summary.name,
+        singularName: "Item",
+        icon: "library",
+        order: definitions.size,
+        sourceKind: null,
+      });
+    }
+    return [...definitions.values()]
+      .sort((left, right) => left.order - right.order || left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+  }
+
+  private librarySubjectCount(libraryId: string, fromImport: boolean): number {
+    if (fromImport) {
+      return this.importValue?.components.index?.subjects
+        .filter((subject) => subjectLibraryId(subject) === libraryId).length ?? 0;
+    }
+    return this.plugin.librarySubjectCount(libraryId);
+  }
+
   private renderImportSource(value: PortableExportV1): void {
-    const details = this.contentEl.createDiv({ cls: "ent-cc-manager-diagnostic" });
+    const details = this.renderParent().createDiv({ cls: "ent-cc-manager-diagnostic" });
     details.createEl("strong", { text: value.sourceWorkspace || "Command Center export" });
     details.createEl("p", {
       cls: "ent-cc-portability-file-label",
@@ -659,34 +814,36 @@ export class ExportImportCenterModal extends Modal {
     selection: PortableExportSelection,
     heading: string,
   ): void {
-    const summary = summarizePortableExport(value, selection);
+    const normalized = normalizePortableSelection(selection);
+    const summary = summarizePortableExport(value, normalized);
     const parts: string[] = [];
-    if (selection.workspace) parts.push("workspace settings");
-    if (selection.index) parts.push(`${summary.groups} groups`, `${summary.indexSubjects} index subjects`);
-    if (selection.procedures) parts.push(`${summary.procedures} procedures`);
-    if (selection.medications) parts.push(`${summary.medications} medications`);
-    if (selection.syndromes) parts.push(`${summary.syndromes} syndromes`);
-    const explicitlyCountedSubjects = (selection.index ? summary.indexSubjects : 0)
-      + (selection.procedures ? summary.procedures : 0)
-      + (selection.medications ? summary.medications : 0)
-      + (selection.syndromes ? summary.syndromes : 0);
+    if (normalized.workspace) parts.push("workspace settings");
+    if (normalized.index) parts.push(`${summary.groups} groups`, `${summary.indexSubjects} index subjects`);
+    for (const library of summary.libraries) {
+      if (!normalized.libraryIds.includes(library.id)) continue;
+      parts.push(`${library.subjects} ${library.name}`);
+    }
+    const explicitlyCountedSubjects = (normalized.index ? summary.indexSubjects : 0)
+      + summary.libraries
+        .filter((library) => normalized.libraryIds.includes(library.id))
+        .reduce((total, library) => total + library.subjects, 0);
     if (summary.subjects > explicitlyCountedSubjects) {
       const dependencies = summary.subjects - explicitlyCountedSubjects;
       parts.push(`${dependencies} referenced subject ${dependencies === 1 ? "dependency" : "dependencies"}`);
     }
-    if (selection.collections) parts.push(`${summary.collections} collections`);
-    if (selection.study) parts.push(`${summary.pinned} pinned`, `${summary.next} in Next`);
-    if (selection.savedViews) parts.push(`${summary.views} saved views`);
-    if (selection.recovery && summary.hasRecovery) parts.push("same-vault recovery");
-    const box = this.contentEl.createDiv({ cls: "ent-cc-manager-diagnostic ent-cc-portability-summary" });
+    if (normalized.collections) parts.push(`${summary.collections} collections`);
+    if (normalized.study) parts.push(`${summary.pinned} pinned`, `${summary.next} in Next`);
+    if (normalized.savedViews) parts.push(`${summary.views} saved views`);
+    if (normalized.recovery && summary.hasRecovery) parts.push("same-vault recovery");
+    const box = this.renderParent().createDiv({ cls: "ent-cc-manager-diagnostic ent-cc-portability-summary" });
     box.createEl("strong", { text: heading });
     box.createEl("p", { text: parts.length ? parts.join(" · ") : "No sections selected." });
-    if (selectionUsesSubjectCatalog(selection) && summary.subjects > 0) {
+    if (selectionUsesSubjectCatalog(normalized) && summary.subjects > 0) {
       box.createEl("p", {
         text: "In another vault, subjects that do not match a note remain as placeholders in their selected index or library until you create or link a note.",
       });
     }
-    if (selection.recovery && summary.hasRecovery) {
+    if (normalized.recovery && summary.hasRecovery) {
       box.createEl("p", {
         cls: "ent-cc-portability-path-warning-text",
         text: "Privacy warning: same-vault recovery includes exact vault-relative folder and Markdown filenames.",
@@ -696,12 +853,12 @@ export class ExportImportCenterModal extends Modal {
   }
 
   private renderEmptySummary(message: string): void {
-    const box = this.contentEl.createDiv({ cls: "ent-cc-empty ent-cc-portability-summary" });
+    const box = this.renderParent().createDiv({ cls: "ent-cc-empty ent-cc-portability-summary" });
     box.setText(message);
   }
 
   private renderError(message: string): void {
-    const box = this.contentEl.createDiv({ cls: "ent-cc-manager-diagnostic" });
+    const box = this.renderParent().createDiv({ cls: "ent-cc-manager-diagnostic" });
     box.createEl("strong", { text: "Cannot continue" });
     box.createEl("p", { text: message });
   }
@@ -900,6 +1057,14 @@ export class ExportImportCenterModal extends Modal {
       );
     }
     const templateReset = this.validateWorkspaceComponent(value, selection);
+    // Reject an incompatible ENT Index package before mutate() creates Undo
+    // state or applies any component. applyPortableExport repeats this check
+    // defensively for non-UI callers.
+    assertPortableImportDestinationCompatible(
+      value,
+      selection,
+      this.plugin.data.settings.workspaceMode,
+    );
     let imported = {
       addedSubjects: 0,
       updatedSubjects: 0,
@@ -946,13 +1111,21 @@ export class ExportImportCenterModal extends Modal {
         if (portableSelectionHasAny(remainingSelection)) {
           imported = applyPortableExport(this.plugin.data, value, remainingSelection, this.importMode);
         }
+        // Incoming topic identities can match existing resolved identities.
+        // Recheck the effective source classification after application but
+        // before save; mutate() rolls the complete import back on failure.
+        this.plugin.assertClinicalIndexEligibility();
         this.plugin.invalidateRecordCache();
       },
       {
         includeSettings: selection.workspace,
-        includePortableIndex: selectionUsesSubjectCatalog(selection) || selection.recovery,
+        includePortableIndex: selectionUsesSubjectCatalog(selection)
+          || selection.workspace
+          || selection.savedViews
+          || selection.recovery,
         includeLayoutSnapshots: selection.recovery,
         requireUndo: true,
+        normalizeAfterRestore: selection.recovery,
       },
     );
     this.dataChanged = true;

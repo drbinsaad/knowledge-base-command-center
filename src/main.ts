@@ -8,6 +8,8 @@ import {
   buildCanonicalMarkdown,
   buildIndexDiagnostics,
   buildProposalMarkdown,
+  BUILTIN_LIBRARY_DEFINITIONS,
+  BUILTIN_LIBRARY_IDS,
   applyTemplateTokens,
   canonicalIdIsValid,
   canonicalHierarchyIssue,
@@ -25,27 +27,41 @@ import {
   genericNotePath,
   GenericNoteFormValue,
   isImmutableSourcePath,
+  isLibraryKind,
   isPortablePlaceholderPath,
   isLegacyDeterministicMigratedVaultId,
   isRecognizedPluginData,
   isRecognizedPluginStore,
   isRestrictedVaultPath,
+  LibraryDefinition,
+  LibraryKind,
+  libraryTabId,
+  subjectLibraryId,
+  LayoutHeading,
   limitSnapshotStack,
+  makeId,
   MAX_DELETED_KNOWLEDGE_BASE_IDS,
   MAX_KNOWLEDGE_BASES,
+  MAX_LIBRARIES,
   MEDICATION_ROOT,
   migrateData,
   migrateStore,
+  normalizeKnowledgeBaseLibrariesAndNavigation,
   normalizeWikiLink,
   parseQuery,
   pathIsInsideFolder,
   portablePlaceholderPath,
+  portableSubjectIdFromPath,
+  PortableSubjectDefinition,
   PluginData,
   PluginStore,
   KnowledgeBaseEntry,
   PROCEDURE_ROOT,
   proposalPath,
   reconcileCurriculumVisual,
+  reconcilePortableLibraryLayouts,
+  rebaseProvisionalVaultIdAfterDeterministicRepair,
+  recordBelongsToIndex,
   RecordKind,
   RecordRole,
   replacePathPrefix,
@@ -78,14 +94,26 @@ import {
 import { EntCommandCenterSettingsTab } from "./settings";
 import { EntVaultCommandCenterView, VIEW_TYPE } from "./view";
 import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge-base-modal";
+import { ManageLibrariesModal } from "./library-modal";
 import { mergeKnowledgeBaseStores } from "./store-merge";
 
 interface PluginDataLoadResult {
   recognizedStore: boolean;
   hasVaultId: boolean;
+  identityNeedsWriteback: boolean;
+  remediationNeedsWriteback: boolean;
   sourceVersion: number;
   compatible: boolean;
 }
+
+type PluginDataRead = { value: unknown } | { error: unknown };
+
+interface ExternalPluginDataCapture {
+  read: PluginDataRead;
+  adapterWriteGeneration: number;
+}
+
+class ExternalSettingsSupersededError extends Error {}
 
 export type { KnowledgeBaseSearchSource } from "./search";
 
@@ -94,6 +122,26 @@ export interface KnowledgeBaseSearchOptions {
   limit?: number;
   yieldEvery?: number;
 }
+
+export interface CatalogPlacementTarget {
+  headingId?: string;
+  subheadingId?: string;
+  headingTitle?: string;
+}
+
+export interface LibraryDefinitionInput {
+  name: string;
+  singularName: string;
+  icon: string;
+}
+
+export type LibraryRemovalDestination = "unassigned" | "index" | { libraryId: string };
+
+export const LIBRARY_ICON_IDS = [
+  "library", "book-open", "book-copy", "folder", "folders", "bookmark", "archive",
+  "clipboard-list", "pill", "dna", "stethoscope", "heart-pulse", "brain", "microscope",
+  "flask-conical", "syringe", "activity", "graduation-cap", "file-text", "notebook-tabs",
+] as const;
 
 interface KnowledgeBaseSearchVaultSnapshot {
   files: readonly TFile[];
@@ -104,12 +152,17 @@ interface KnowledgeBaseSearchVaultSnapshot {
 export default class EntVaultCommandCenterPlugin extends Plugin {
   data: PluginData = structuredClone(DEFAULT_DATA);
   private store: PluginStore = createDefaultStore(this.data);
+  private committedStoreSnapshot: PluginStore | null = null;
   private saveQueue: Promise<void> = Promise.resolve();
+  private adapterWriteGeneration = 0;
+  private externalChangeGeneration = 0;
   private baseOperationBusy = false;
   private dataTransactionBusy = false;
   private externalReloadBusy = false;
   private externalReloadPending = false;
   private externalReloadPromise: Promise<void> | null = null;
+  private externalReloadCaptures: Array<Promise<ExternalPluginDataCapture>> = [];
+  private retainedExternalSettingsPayload: unknown = null;
   private dataEpoch = 0;
   private operationIdleResolvers: Array<() => void> = [];
   private refreshTimer: number | null = null;
@@ -117,6 +170,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private knowledgeBaseSearchVaultSnapshot: KnowledgeBaseSearchVaultSnapshot | null = null;
   private recordsCacheByBase = new Map<string, VaultRecord[]>();
   private recordPathsCacheByBase = new Map<string, Set<string>>();
+  private librarySubjectCountsCacheByBase = new Map<string, ReadonlyMap<string, number>>();
   private referencedPathsCacheByBase = new Map<string, Set<string>>();
   private excludedPathsCacheByBase = new Map<string, Set<string>>();
   private recordLinkIndex = new Map<string, VaultRecord>();
@@ -140,6 +194,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.addCommand({ id: "new-knowledge-base", name: "New knowledge base…", callback: () => new CreateKnowledgeBaseModal(this).open() });
     this.addCommand({ id: "switch-knowledge-base", name: "Switch knowledge base…", callback: () => new ManageKnowledgeBasesModal(this).open() });
     this.addCommand({ id: "manage-knowledge-bases", name: "Manage knowledge bases…", callback: () => new ManageKnowledgeBasesModal(this).open() });
+    this.addCommand({ id: "manage-libraries", name: "Manage libraries…", callback: () => new ManageLibrariesModal(this, () => void this.refreshViews()).open() });
     this.addCommand({ id: "export-import-center", name: "Open export / import center", callback: () => void this.withView((view) => view.openPortabilityCenter()) });
     this.addCommand({ id: "create-knowledge-note", name: "Create note from template or empty note…", callback: () => void this.withView((view) => view.startCreateKnowledgeNote()) });
     this.addCommand({
@@ -290,10 +345,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return active;
   }
 
-  private replaceActiveData(next: PluginData): void {
+  private replaceActiveData(next: PluginData, restoredUpdatedAt?: number): void {
     const active = this.requireActiveBase();
     active.data = next;
-    this.bumpEntryUpdatedAt(active);
+    if (restoredUpdatedAt === undefined) this.bumpEntryUpdatedAt(active);
+    else active.updatedAt = restoredUpdatedAt;
     this.useActiveData(next);
   }
 
@@ -308,11 +364,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     entry.updatedAt = Math.max(timestamp, entry.updatedAt + 1);
   }
 
-  async loadPluginData(persistMigration = true): Promise<PluginDataLoadResult> {
+  async loadPluginData(persistMigration = true, capturedRead?: PluginDataRead): Promise<PluginDataLoadResult> {
     let loaded: unknown = null;
     this.dataCompatibilityWarning = "";
     try {
-      loaded = await this.loadData() as unknown;
+      if (capturedRead && "error" in capturedRead) throw capturedRead.error;
+      loaded = capturedRead ? capturedRead.value : await this.loadData() as unknown;
     } catch (error) {
       // A syntactically invalid data.json must not stop the plugin from loading.
       // Start from defaults and refuse to save so the original file survives.
@@ -320,7 +377,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.store = createDefaultStore(this.data);
       this.dataCompatibilityWarning = `Plugin data could not be parsed (${error instanceof Error ? error.message : String(error)}). Personal organization is read-only so the existing data.json is not overwritten; repair or remove that file to continue.`;
       new Notice(this.dataCompatibilityWarning, 10000);
-      return { recognizedStore: false, hasVaultId: false, sourceVersion: 0, compatible: false };
+      return { recognizedStore: false, hasVaultId: false, identityNeedsWriteback: false, remediationNeedsWriteback: false, sourceVersion: 0, compatible: false };
     }
     const sourceVersion = storedDataVersion(loaded);
     const loadedRecord = asUnknownRecord(loaded);
@@ -332,14 +389,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.store = createDefaultStore(this.data);
       this.dataCompatibilityWarning = "Plugin data has an unrecognized shape. Personal organization is read-only so the original data is not overwritten; export or repair data.json before continuing.";
       new Notice(this.dataCompatibilityWarning, 10000);
-      return { recognizedStore: false, hasVaultId: false, sourceVersion, compatible: false };
+      return { recognizedStore: false, hasVaultId: false, identityNeedsWriteback: false, remediationNeedsWriteback: false, sourceVersion, compatible: false };
     }
     if (!recognizedStore && sourceVersion > DATA_VERSION && isRecognizedPluginData(loaded)) {
       this.useActiveData(migrateData(loaded));
       this.store = createDefaultStore(this.data);
       this.dataCompatibilityWarning = `Plugin data version ${sourceVersion} is newer than this build (v${DATA_VERSION}). Personal organization is read-only to prevent data loss.`;
       new Notice(this.dataCompatibilityWarning, 10000);
-      return { recognizedStore: false, hasVaultId: false, sourceVersion, compatible: false };
+      return { recognizedStore: false, hasVaultId: false, identityNeedsWriteback: false, remediationNeedsWriteback: false, sourceVersion, compatible: false };
     }
     try {
       this.store = migrateStore(loaded);
@@ -349,19 +406,53 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.store = createDefaultStore(this.data);
       this.dataCompatibilityWarning = `Knowledge-base data could not be migrated (${error instanceof Error ? error.message : String(error)}). The existing data.json remains read-only and was not overwritten.`;
       new Notice(this.dataCompatibilityWarning, 10000);
-      return { recognizedStore, hasVaultId: hadFinalVaultId, sourceVersion, compatible: false };
+      return { recognizedStore, hasVaultId: hadFinalVaultId, identityNeedsWriteback: false, remediationNeedsWriteback: false, sourceVersion, compatible: false };
     }
     if (recognizedStore && sourceVersion > STORE_VERSION) {
       this.dataCompatibilityWarning = `Plugin data version ${sourceVersion} is newer than this build (v${STORE_VERSION}). All knowledge bases are read-only to prevent data loss.`;
       new Notice(this.dataCompatibilityWarning, 10000);
-      return { recognizedStore, hasVaultId: hadFinalVaultId, sourceVersion, compatible: false };
+      return { recognizedStore, hasVaultId: hadFinalVaultId, identityNeedsWriteback: false, remediationNeedsWriteback: false, sourceVersion, compatible: false };
     }
-    if (persistMigration && (!recognizedStore || !hadFinalVaultId || sourceVersion !== STORE_VERSION)) await this.saveStoreSnapshot();
+    const preRemediationStore = structuredClone(this.store);
+    const remediationNeedsWriteback = this.remediateInvalidClinicalIndexes();
+    if (remediationNeedsWriteback) {
+      // Migration identities fingerprint their pristine payload so two
+      // devices upgrading the same old data can converge. ENT invariant
+      // repair is deterministic and happens in the same atomic write, so
+      // rebase any still-pristine provisional identity to the repaired payload
+      // while retaining the device's random nonce. The helper rejects normal
+      // identities and any provisional store edited after migration.
+      rebaseProvisionalVaultIdAfterDeterministicRepair(preRemediationStore, this.store);
+      this.useActiveData(this.requireActiveBase().data);
+      this.invalidateRecordCache();
+    }
+    try {
+      if (persistMigration && (!recognizedStore || !hadFinalVaultId || sourceVersion !== STORE_VERSION || remediationNeedsWriteback)) {
+        // Migration and every-base clinical remediation share one atomic store
+        // write. A large vault therefore never receives one save per base.
+        await this.saveStoreSnapshot();
+      }
+    } catch (error) {
+      if (remediationNeedsWriteback) {
+        this.store = preRemediationStore;
+        this.useActiveData(this.requireActiveBase().data);
+        this.invalidateRecordCache();
+      }
+      throw error;
+    }
+    if (capturedRead === undefined) this.committedStoreSnapshot = structuredClone(this.store);
     // A recognized interim deterministic identity is usable after migrateStore
     // rotates it in memory. External Sync can therefore reconcile it with a
     // concurrently rotated pristine copy instead of misclassifying it as flat
     // identity-less data.
-    return { recognizedStore, hasVaultId: recognizedStore && Boolean(this.store.vaultId), sourceVersion, compatible: true };
+    return {
+      recognizedStore,
+      hasVaultId: recognizedStore && Boolean(this.store.vaultId),
+      identityNeedsWriteback: recognizedStore && !hadFinalVaultId,
+      remediationNeedsWriteback,
+      sourceVersion,
+      compatible: true,
+    };
   }
 
   async savePluginData(): Promise<void> {
@@ -385,14 +476,32 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     await this.saveStoreSnapshot();
   }
 
-  private async saveStoreSnapshot(allowDuringExternalReload = false): Promise<void> {
+  private async saveStoreSnapshot(
+    allowDuringExternalReload = false,
+    expectedExternalGeneration?: number,
+  ): Promise<void> {
     if (this.dataCompatibilityWarning) return;
     if (this.externalReloadBusy && !allowDuringExternalReload) {
       throw new Error("Knowledge-base data is reloading after a synced change. This overlapping edit was not saved; try it again now.");
     }
     const snapshot = structuredClone(this.store);
+    const externalGeneration = expectedExternalGeneration ?? this.externalChangeGeneration;
+    const guardExternalGeneration = !allowDuringExternalReload || expectedExternalGeneration !== undefined;
     const save = async (): Promise<void> => {
-      await this.saveData(snapshot);
+      if (guardExternalGeneration && externalGeneration !== this.externalChangeGeneration) {
+        throw new ExternalSettingsSupersededError("Knowledge-base data changed through Sync before this edit could be saved. The synced copy is being reloaded; try the local edit again afterward.");
+      }
+      try {
+        await this.saveData(snapshot);
+      } finally {
+        // Count settled adapter writes even when the adapter reports failure:
+        // a partially completed write can still have replaced data.json.
+        this.adapterWriteGeneration += 1;
+      }
+      if (guardExternalGeneration && externalGeneration !== this.externalChangeGeneration) {
+        throw new ExternalSettingsSupersededError("Knowledge-base data changed through Sync while this edit was saving. The local edit was rolled back; try it again after the synced copy reloads.");
+      }
+      this.committedStoreSnapshot = structuredClone(snapshot);
     };
     const operation = this.saveQueue.then(save, save);
     this.saveQueue = operation.then(() => undefined, () => undefined);
@@ -410,66 +519,222 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     for (const resolve of resolvers) resolve();
   }
 
+  private captureExternalPluginData(adapterWriteGeneration: number): Promise<ExternalPluginDataCapture> {
+    return (async (): Promise<ExternalPluginDataCapture> => {
+      try {
+        const value = await this.loadData() as unknown;
+        return { read: { value: structuredClone(value) }, adapterWriteGeneration };
+      } catch (error) {
+        return { read: { error }, adapterWriteGeneration };
+      }
+    })();
+  }
+
+  private async drainExternalPluginDataCaptures(): Promise<ExternalPluginDataCapture[]> {
+    const captures: ExternalPluginDataCapture[] = [];
+    while (this.externalReloadCaptures.length > 0) {
+      const pending = this.externalReloadCaptures.splice(0);
+      captures.push(...await Promise.all(pending));
+    }
+    return captures;
+  }
+
+  private async restoreCapturedPluginData(
+    capture: ExternalPluginDataCapture,
+    expectedExternalGeneration: number,
+  ): Promise<void> {
+    if ("error" in capture.read) throw capture.read.error;
+    const snapshot = structuredClone(capture.read.value);
+    const save = async (): Promise<void> => {
+      if (expectedExternalGeneration !== this.externalChangeGeneration) {
+        throw new ExternalSettingsSupersededError("A newer synced settings file arrived before the captured file could be restored.");
+      }
+      try {
+        await this.saveData(snapshot);
+      } finally {
+        this.adapterWriteGeneration += 1;
+      }
+      if (expectedExternalGeneration !== this.externalChangeGeneration) {
+        throw new ExternalSettingsSupersededError("A newer synced settings file arrived while the captured file was being restored.");
+      }
+    };
+    const operation = this.saveQueue.then(save, save);
+    this.saveQueue = operation.then(() => undefined, () => undefined);
+    await operation;
+  }
+
   async onExternalSettingsChange(): Promise<void> {
     // Sync services may update data.json while an adapter save or base switch is
-    // still in flight. Coalesce repeated callbacks, wait for the current local
-    // transaction and queued write, then load the latest file on disk exactly
-    // once more if another callback arrived during the reload.
+    // still in flight. Capture the incoming file immediately: waiting for a
+    // local write first could overwrite the only copy of that synced payload.
+    // Every capture records the adapter-write generation so a later local write
+    // forces the merged envelope back to disk even when it matches the capture.
+    this.externalChangeGeneration += 1;
+    this.externalReloadBusy = true;
+    this.externalReloadCaptures.push(this.captureExternalPluginData(this.adapterWriteGeneration));
     this.externalReloadPending = true;
     if (this.externalReloadPromise) return this.externalReloadPromise;
+    let operation: Promise<void>;
     const reload = async (): Promise<void> => {
-      do {
-        this.externalReloadPending = false;
-        await this.waitForOperationsIdle();
-        await this.saveQueue;
-        const localStore = structuredClone(this.store);
-        const preferredActiveId = this.store.activeBaseId;
-        const localWarning = this.dataCompatibilityWarning;
-        this.externalReloadBusy = true;
-        try {
-          const loaded = await this.loadPluginData(false);
-          const incomingWarning = this.dataCompatibilityWarning;
-          if (!loaded.compatible || incomingWarning) {
-            this.store = localStore;
-            this.useActiveData(this.requireActiveBase().data);
-            this.dataCompatibilityWarning = incomingWarning || localWarning;
-          } else if (!loaded.recognizedStore || !loaded.hasVaultId) {
-            this.store = localStore;
-            this.useActiveData(this.requireActiveBase().data);
-            this.dataCompatibilityWarning = "Synced plugin data was written by an older build without a vault identity. Update Knowledge Base Command Center on the other device before editing; local bases remain read-only so neither copy is overwritten.";
-            new Notice(this.dataCompatibilityWarning, 12000);
-          } else {
-            const incomingStore = this.store;
-            try {
-              const merged = mergeKnowledgeBaseStores(localStore, incomingStore, preferredActiveId);
-              this.store = merged.store;
+      // Yield once so `operation` is installed before any clone or migration can
+      // fail. Final cleanup below then owns both state fields atomically before
+      // this promise settles; no callback can attach to a worker that has
+      // already stopped draining captures.
+      await Promise.resolve();
+      try {
+        const initialCommittedStore = this.committedStoreSnapshot
+          ? structuredClone(this.committedStoreSnapshot)
+          : null;
+        const preferredActiveId = initialCommittedStore?.activeBaseId ?? this.store.activeBaseId;
+        let workingStore = structuredClone(initialCommittedStore ?? this.store);
+        let baselineTrust: "none" | "legacy-provisional" | "identified" = initialCommittedStore
+          ? "identified"
+          : "none";
+        do {
+          this.externalReloadPending = false;
+          await this.waitForOperationsIdle();
+          await this.saveQueue;
+          // Resolve the whole drained batch before any writeback. Otherwise a
+          // write for capture A could replace data.json before capture B's
+          // asynchronous loadData call has actually read it.
+          const captures = await this.drainExternalPluginDataCaptures();
+          // Every callback observed up to this point is represented in the
+          // drained array, including callbacks that arrived while a read was
+          // resolving. Only a later callback should defer this batch's write.
+          this.externalReloadPending = false;
+          let latestCapture: ExternalPluginDataCapture | null = null;
+          let latestCaptureCompatible = false;
+          let latestNeedsWriteback = false;
+          let latestBlockingWarning = "";
+          for (const capture of captures) {
+            latestCapture = capture;
+            latestCaptureCompatible = false;
+            latestNeedsWriteback = false;
+            latestBlockingWarning = "";
+            const fallbackStore = structuredClone(initialCommittedStore ?? workingStore);
+            const localWarning = this.dataCompatibilityWarning;
+            const loaded = await this.loadPluginData(false, capture.read);
+            const incomingWarning = this.dataCompatibilityWarning;
+            const recoverableLegacyCapture: boolean = baselineTrust !== "identified"
+              && !loaded.recognizedStore
+              && "value" in capture.read
+              && Object.keys(asUnknownRecord(capture.read.value)).length > 0
+              && isRecognizedPluginData(capture.read.value);
+            if (!loaded.compatible || incomingWarning) {
+              workingStore = fallbackStore;
+              this.store = workingStore;
               this.useActiveData(this.requireActiveBase().data);
-              this.dataCompatibilityWarning = "";
-              if (merged.incomingNeedsWriteback) {
-                try {
-                  await this.saveStoreSnapshot(true);
-                } catch (error) {
-                  this.dataCompatibilityWarning = `Synced knowledge bases were merged in memory, but the merged data could not be saved (${error instanceof Error ? error.message : String(error)}). Organization is read-only; export each base before restarting Obsidian.`;
-                  new Notice(this.dataCompatibilityWarning, 12000);
-                }
-              }
-            } catch (error) {
-              this.store = localStore;
+              latestBlockingWarning = incomingWarning || localWarning;
+              this.dataCompatibilityWarning = latestBlockingWarning;
+            } else if ((!loaded.recognizedStore || !loaded.hasVaultId) && !recoverableLegacyCapture) {
+              workingStore = fallbackStore;
+              this.store = workingStore;
               this.useActiveData(this.requireActiveBase().data);
-              this.dataCompatibilityWarning = `Synced knowledge-base data could not be merged (${error instanceof Error ? error.message : String(error)}). Local bases remain read-only and no synced base was discarded.`;
+              latestBlockingWarning = "Synced plugin data was written by an older build without a vault identity. Update Knowledge Base Command Center on the other device before editing; local bases remain read-only so neither copy is overwritten.";
+              this.dataCompatibilityWarning = latestBlockingWarning;
               new Notice(this.dataCompatibilityWarning, 12000);
+            } else {
+              const incomingStore = this.store;
+              try {
+                if (baselineTrust === "none") {
+                  // Startup can observe a transient partial data.json. Once a
+                  // complete identified store or substantial recognized
+                  // legacy payload arrives, adopt its migrated store directly
+                  // instead of comparing it with the random fallback identity.
+                  workingStore = structuredClone(incomingStore);
+                  baselineTrust = recoverableLegacyCapture || loaded.identityNeedsWriteback
+                    ? "legacy-provisional"
+                    : "identified";
+                  latestNeedsWriteback = recoverableLegacyCapture
+                    || loaded.sourceVersion !== STORE_VERSION
+                    || loaded.identityNeedsWriteback
+                    || loaded.remediationNeedsWriteback;
+                } else if (baselineTrust === "legacy-provisional"
+                  && loaded.recognizedStore
+                  && loaded.hasVaultId
+                  && !loaded.identityNeedsWriteback) {
+                  // A migrated flat payload is only provisional recovery state.
+                  // If Sync subsequently supplies a complete envelope, it is
+                  // the first authoritative baseline and must supersede the
+                  // provisional copy rather than fail a cross-vault merge.
+                  workingStore = structuredClone(incomingStore);
+                  baselineTrust = "identified";
+                  latestNeedsWriteback = loaded.sourceVersion !== STORE_VERSION
+                    || loaded.identityNeedsWriteback
+                    || loaded.remediationNeedsWriteback;
+                } else {
+                  const merged = mergeKnowledgeBaseStores(workingStore, incomingStore, preferredActiveId);
+                  workingStore = merged.store;
+                  latestNeedsWriteback = merged.incomingNeedsWriteback
+                    || loaded.remediationNeedsWriteback
+                    || recoverableLegacyCapture;
+                }
+                this.store = workingStore;
+                this.useActiveData(this.requireActiveBase().data);
+                this.dataCompatibilityWarning = "";
+                latestCaptureCompatible = true;
+                this.retainedExternalSettingsPayload = null;
+              } catch (error) {
+                workingStore = fallbackStore;
+                this.store = workingStore;
+                this.useActiveData(this.requireActiveBase().data);
+                latestBlockingWarning = `Synced knowledge-base data could not be merged (${error instanceof Error ? error.message : String(error)}). Local bases remain read-only and the captured synced payload will be preserved.`;
+                this.dataCompatibilityWarning = latestBlockingWarning;
+                new Notice(this.dataCompatibilityWarning, 12000);
+              }
+            }
+            this.invalidateRecordCache();
+          }
+
+          // A newer callback already owns data.json. Drain it before attempting
+          // any write for the batch we just processed.
+          if (this.externalReloadPending || this.externalReloadCaptures.length > 0) continue;
+
+          if (latestCapture && latestCaptureCompatible) {
+            const capturedFileMayHaveBeenOverwritten = this.adapterWriteGeneration !== latestCapture.adapterWriteGeneration;
+            if (latestNeedsWriteback || capturedFileMayHaveBeenOverwritten) {
+              const writebackGeneration = this.externalChangeGeneration;
+              try {
+                await this.saveStoreSnapshot(true, writebackGeneration);
+              } catch (error) {
+                if (error instanceof ExternalSettingsSupersededError) continue;
+                this.dataCompatibilityWarning = `Synced knowledge bases were merged in memory, but the merged data could not be saved (${error instanceof Error ? error.message : String(error)}). Organization is read-only; export each base before restarting Obsidian.`;
+                new Notice(this.dataCompatibilityWarning, 12000);
+              }
+            } else {
+              // The latest captured file already contains this payload.
+              this.committedStoreSnapshot = structuredClone(workingStore);
+            }
+          } else if (latestCapture && latestBlockingWarning) {
+            const capturedFileMayHaveBeenOverwritten = this.adapterWriteGeneration !== latestCapture.adapterWriteGeneration;
+            if (capturedFileMayHaveBeenOverwritten && "value" in latestCapture.read) {
+              this.retainedExternalSettingsPayload = structuredClone(latestCapture.read.value);
+              const restoreGeneration = this.externalChangeGeneration;
+              try {
+                await this.restoreCapturedPluginData(latestCapture, restoreGeneration);
+                this.retainedExternalSettingsPayload = null;
+              } catch (error) {
+                if (error instanceof ExternalSettingsSupersededError) continue;
+                this.dataCompatibilityWarning = `${latestBlockingWarning} The captured file is retained in memory, but restoring it to data.json failed (${error instanceof Error ? error.message : String(error)}). Do not restart Obsidian; copy the plugin data.json and contact support.`;
+                new Notice(this.dataCompatibilityWarning, 15000);
+              }
             }
           }
-          this.invalidateRecordCache();
-        } finally {
+          try {
+            await this.refreshViews(false);
+          } catch (error) {
+            console.error("Knowledge Base Command Center reloaded synced data but could not refresh its views", error);
+            new Notice("Synced knowledge-base data was reloaded, but the view could not refresh. Reopen the command center to update it.", 8000);
+          }
+        } while (this.externalReloadPending || this.externalReloadCaptures.length > 0);
+      } finally {
+        if (this.externalReloadPromise === operation) {
+          this.externalReloadPromise = null;
           this.externalReloadBusy = false;
         }
-        await this.refreshViews(false);
-      } while (this.externalReloadPending);
+      }
     };
-    const operation = reload().finally(() => {
-      if (this.externalReloadPromise === operation) this.externalReloadPromise = null;
-    });
+    operation = reload();
     this.externalReloadPromise = operation;
     return operation;
   }
@@ -693,6 +958,562 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   isClinicalMode(): boolean { return this.data.settings.workspaceMode === "ent-clinical"; }
   canVisuallyMoveAcrossGroups(): boolean { return !this.isClinicalMode() || this.data.settings.allowClinicalVisualGroupMoves; }
 
+  getLibraries(includeArchived = false): LibraryDefinition[] {
+    return (this.data.portableIndex.libraries ?? [])
+      .filter((library) => includeArchived || library.archivedAt === null)
+      .sort((left, right) => left.order - right.order || left.name.localeCompare(right.name))
+      .map((library) => ({ ...library }));
+  }
+
+  getLibrary(libraryId: string): LibraryDefinition | null {
+    const library = (this.data.portableIndex.libraries ?? []).find((candidate) => candidate.id === libraryId);
+    return library ? { ...library } : null;
+  }
+
+  private libraryDefinitions(): LibraryDefinition[] {
+    return this.data.portableIndex.libraries ??= [];
+  }
+
+  private cleanLibraryName(value: string, label: string): string {
+    const clean = value.normalize("NFC").trim();
+    if (!clean) throw new Error(`Enter a ${label}.`);
+    if (clean.length > 100) throw new Error(`Keep the ${label} to 100 characters or fewer.`);
+    if (/[\p{Cc}\p{Cf}]/u.test(clean)) throw new Error(`The ${label} contains an unsupported control character.`);
+    return clean;
+  }
+
+  private cleanLibraryIcon(icon: string): string {
+    return (LIBRARY_ICON_IDS as readonly string[]).includes(icon) ? icon : "library";
+  }
+
+  private normalizedOrganizationLabel(value: string): string {
+    return value.normalize("NFC").trim().toLowerCase();
+  }
+
+  private assertUniqueLibraryName(name: string, exceptId = ""): void {
+    const key = this.normalizedOrganizationLabel(name);
+    if ((this.data.portableIndex.libraries ?? []).some((library) => library.id !== exceptId
+      && this.normalizedOrganizationLabel(library.name) === key)) {
+      throw new Error(`A library named “${name}” already exists, including archived libraries.`);
+    }
+  }
+
+  private requireLibrary(libraryId: string, includeArchived = true): LibraryDefinition {
+    const library = (this.data.portableIndex.libraries ?? []).find((candidate) => candidate.id === libraryId);
+    if (!library || (!includeArchived && library.archivedAt !== null)) {
+      throw new Error("That library is no longer available.");
+    }
+    return library;
+  }
+
+  private normalizeLibraryOrder(): void {
+    this.libraryDefinitions()
+      .sort((left, right) => left.order - right.order || left.name.localeCompare(right.name))
+      .forEach((library, index) => { library.order = index; });
+  }
+
+  async createLibrary(input: LibraryDefinitionInput): Promise<string> {
+    const name = this.cleanLibraryName(input.name, "library name");
+    const singularName = this.cleanLibraryName(input.singularName, "singular item name");
+    this.assertUniqueLibraryName(name);
+    if ((this.data.portableIndex.libraries ?? []).length >= MAX_LIBRARIES) {
+      throw new Error(`A knowledge base can contain at most ${MAX_LIBRARIES} libraries.`);
+    }
+    let id = makeId("library");
+    while (this.getLibrary(id)) id = makeId("library");
+    await this.mutate(`Create library “${name}”`, () => {
+      this.assertUniqueLibraryName(name);
+      const libraries = this.libraryDefinitions();
+      libraries.push({
+        id,
+        name,
+        singularName,
+        icon: this.cleanLibraryIcon(input.icon),
+        order: libraries.length,
+        sourceKind: null,
+        archivedAt: null,
+      });
+      this.data.portableIndex.libraryLayouts[id] = [];
+      this.data.activeTab = libraryTabId(id);
+    }, { includePortableIndex: true, includeActiveTab: true, requireUndo: true });
+    return id;
+  }
+
+  async updateLibrary(libraryId: string, input: LibraryDefinitionInput): Promise<void> {
+    const name = this.cleanLibraryName(input.name, "library name");
+    const singularName = this.cleanLibraryName(input.singularName, "singular item name");
+    this.assertUniqueLibraryName(name, libraryId);
+    await this.mutate(`Update library “${name}”`, () => {
+      const library = this.requireLibrary(libraryId);
+      this.assertUniqueLibraryName(name, libraryId);
+      library.name = name;
+      library.singularName = singularName;
+      // Preserve a forward-compatible icon imported by an older/newer device
+      // when this edit changes only labels. A newly chosen icon must still be
+      // one of this build's curated, registered choices.
+      library.icon = input.icon === library.icon ? library.icon : this.cleanLibraryIcon(input.icon);
+    }, { includePortableIndex: true, requireUndo: true });
+  }
+
+  async reorderLibrary(libraryId: string, destinationIndex: number): Promise<void> {
+    const ordered = this.getLibraries(true);
+    const from = ordered.findIndex((library) => library.id === libraryId);
+    if (from < 0) throw new Error("That library is no longer available.");
+    const to = Math.max(0, Math.min(ordered.length - 1, Math.trunc(destinationIndex)));
+    if (from === to) return;
+    await this.mutate(`Reorder library “${ordered[from]?.name ?? "Library"}”`, () => {
+      const current = [...this.libraryDefinitions()]
+        .sort((left, right) => left.order - right.order || left.name.localeCompare(right.name));
+      const currentFrom = current.findIndex((library) => library.id === libraryId);
+      if (currentFrom < 0) throw new Error("That library is no longer available.");
+      const [library] = current.splice(currentFrom, 1);
+      if (!library) return;
+      current.splice(Math.max(0, Math.min(current.length, to)), 0, library);
+      current.forEach((candidate, index) => { candidate.order = index; });
+      this.data.portableIndex.libraries = current;
+    }, { includePortableIndex: true, requireUndo: true });
+  }
+
+  async archiveLibrary(libraryId: string): Promise<void> {
+    const current = this.requireLibrary(libraryId, false);
+    await this.mutate(`Archive library “${current.name}”`, () => {
+      const library = this.requireLibrary(libraryId, false);
+      library.archivedAt = Date.now();
+      const tab = libraryTabId(libraryId);
+      if (this.data.activeTab === tab) this.data.activeTab = "curriculum";
+      if (this.data.settings.defaultTab === tab) this.data.settings.defaultTab = "curriculum";
+    }, { includePortableIndex: true, includeSettings: true, includeActiveTab: true, requireUndo: true });
+  }
+
+  async restoreLibrary(libraryId: string): Promise<void> {
+    const current = this.requireLibrary(libraryId);
+    if (current.archivedAt === null) return;
+    await this.mutate(`Restore library “${current.name}”`, () => {
+      const library = this.requireLibrary(libraryId);
+      library.archivedAt = null;
+      this.normalizeLibraryOrder();
+    }, { includePortableIndex: true, requireUndo: true });
+  }
+
+  librarySubjectCount(libraryId: string): number {
+    const active = this.requireActiveBase();
+    let counts = this.librarySubjectCountsCacheByBase.get(active.id);
+    if (!counts) {
+      // Count the effective record projection rather than portable identities.
+      // Native ENT records belong to their built-in Library before one-time
+      // catalog initialization, while resolved identities and placeholders are
+      // already deduplicated by the projection. Cache one O(records) pass so a
+      // manager containing many Libraries does not rescan the vault per row.
+      const pathsByLibrary = new Map<string, Set<string>>();
+      for (const record of this.getRecordsForEntry(active)) {
+        if (!record.libraryId) continue;
+        const paths = pathsByLibrary.get(record.libraryId) ?? new Set<string>();
+        paths.add(record.path);
+        pathsByLibrary.set(record.libraryId, paths);
+      }
+      counts = new Map([...pathsByLibrary].map(([id, paths]) => [id, paths.size]));
+      this.librarySubjectCountsCacheByBase.set(active.id, counts);
+    }
+    return counts.get(libraryId) ?? 0;
+  }
+
+  /**
+   * Resolve immutable clinical source classification without allowing visual
+   * Index or Library membership to change it. A native topic parked in a custom
+   * Library is intentionally excluded from the Index; that exclusion must not
+   * make it look like a generic note when it returns to the Index.
+   */
+  private clinicalIndexClassification(
+    path: string,
+    subject: PortableSubjectDefinition | null,
+    fallbackKind: RecordKind,
+    data = this.data,
+    fileByPath?: ReadonlyMap<string, TFile>,
+  ): { kind: RecordKind; indexEligible: boolean } {
+    const file = isPortablePlaceholderPath(path)
+      ? null
+      : fileByPath
+        ? fileByPath.get(path) ?? null
+        : this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) {
+      const kind = subject?.recordKind ?? fallbackKind;
+      return { kind, indexEligible: kind === "topic" };
+    }
+    const frontmatter = asUnknownRecord(this.app.metadataCache.getFileCache(file)?.frontmatter);
+    const proposalFolder = normalizePath(data.settings.proposalFolder);
+    const detected = this.identityForFile(
+      file,
+      frontmatter,
+      data,
+      true,
+      new Set([file.path]),
+      proposalFolder ? `${proposalFolder}/` : "",
+      new Set(),
+      // Classification is source-derived. Ignore the visual exclusion created
+      // while a topic sits in a custom Library.
+      new Set(),
+    );
+    const kind = detected?.kind ?? subject?.recordKind ?? fallbackKind;
+    return {
+      kind,
+      // An imported topic may intentionally be backed by an Inbox proposal
+      // until promotion. This is the sole non-native-topic Index exception.
+      indexEligible: kind === "topic" || (kind === "proposal" && subject?.recordKind === "topic"),
+    };
+  }
+
+  /**
+   * Classify persisted clinical membership for upgrade repair without reading
+   * a TFile or metadata cache. Vault Sync can deliver plugin data before its
+   * Markdown files, so filesystem-dependent repair would produce different
+   * provisional fingerprints on otherwise identical devices.
+   */
+  private deterministicClinicalRepairClassification(
+    path: string,
+    subject: PortableSubjectDefinition | null,
+    fallbackKind: RecordKind,
+    data: PluginData,
+  ): { kind: RecordKind; indexEligible: boolean } {
+    if (isPortablePlaceholderPath(path)) {
+      const kind = subject?.recordKind ?? fallbackKind;
+      return { kind, indexEligible: kind === "topic" };
+    }
+    const normalized = normalizePath(path);
+    const proposalFolder = normalizePath(data.settings.proposalFolder);
+    let kind: RecordKind;
+    if (proposalFolder && pathIsInsideFolder(normalized, proposalFolder)) kind = "proposal";
+    else if (pathIsInsideFolder(normalized, data.settings.primaryFolder)) kind = "topic";
+    else {
+      const basename = normalized.split("/").at(-1)?.replace(/\.md$/i, "") ?? "";
+      if (pathIsInsideFolder(normalized, PROCEDURE_ROOT) && basename.startsWith("Procedure - ")) kind = "procedure";
+      else if (pathIsInsideFolder(normalized, MEDICATION_ROOT) && basename.startsWith("Drug - ")) kind = "medication";
+      else if (pathIsInsideFolder(normalized, SYNDROME_ROOT) && basename.startsWith("Syndrome - ")) kind = "syndrome";
+      else kind = "note";
+    }
+    return {
+      kind,
+      indexEligible: kind === "topic" || (kind === "proposal" && subject?.recordKind === "topic"),
+    };
+  }
+
+  /**
+   * Repair data written before the ENT Index destination guard existed. The
+   * pass is deterministic, touches plugin data only, and covers active,
+   * inactive, and archived bases before one store-level writeback.
+   */
+  private remediateInvalidClinicalIndexes(entries: readonly KnowledgeBaseEntry[] = this.store.bases): boolean {
+    let storeChanged = false;
+
+    for (const entry of entries) {
+      const data = entry.data;
+      if (data.settings.workspaceMode !== "ent-clinical") continue;
+      const subjectById = new Map(data.portableIndex.subjects.map((subject) => [subject.id, subject]));
+      const ownerIdsByPath = new Map<string, string[]>();
+      for (const [subjectId, path] of Object.entries(data.portableIndex.resolvedPathBySubjectId)) {
+        if (!path || !subjectById.has(subjectId)) continue;
+        const owners = ownerIdsByPath.get(path) ?? [];
+        owners.push(subjectId);
+        ownerIdsByPath.set(path, owners);
+      }
+      const changedSubjectIds = new Set<string>();
+      const removedIndexPaths = new Set<string>();
+      let entryChanged = false;
+
+      const rehome = (subject: PortableSubjectDefinition, path: string, kind: RecordKind): void => {
+        const libraryId = isLibraryKind(kind) ? BUILTIN_LIBRARY_IDS[kind] : null;
+        if (subject.indexed) { subject.indexed = false; entryChanged = true; }
+        if (subject.parentId !== null) { subject.parentId = null; entryChanged = true; }
+        if (subject.recordKind !== kind) { subject.recordKind = kind; entryChanged = true; }
+        if (subject.libraryId !== libraryId) { subject.libraryId = libraryId; entryChanged = true; }
+        changedSubjectIds.add(subject.id);
+        removedIndexPaths.add(path);
+      };
+
+      // First repair every explicitly indexed portable identity. Source
+      // classification wins over stale imported recordKind metadata.
+      for (const subject of data.portableIndex.subjects) {
+        if (!subject.indexed) continue;
+        const path = portableSubjectPath(data, subject.id);
+        const classification = this.deterministicClinicalRepairClassification(
+          path,
+          subject,
+          subject.recordKind,
+          data,
+        );
+        if (!classification.indexEligible) rehome(subject, path, classification.kind);
+      }
+
+      // Manual paths are a second historical entrance into the Index. Remove
+      // invalid paths and rehome all identities bound to a native clinical
+      // Library path, including source-kind collisions.
+      const nextManualPaths: string[] = [];
+      for (const path of data.manualIndexPaths) {
+        const placeholderId = portableSubjectIdFromPath(path);
+        const ownerIds = placeholderId ? [placeholderId] : ownerIdsByPath.get(path) ?? [];
+        const subjects = ownerIds.map((id) => subjectById.get(id)).filter((subject): subject is PortableSubjectDefinition => Boolean(subject));
+        const representative = subjects[0] ?? null;
+        const classification = this.deterministicClinicalRepairClassification(
+          path,
+          representative,
+          representative?.recordKind ?? "note",
+          data,
+        );
+        if (classification.indexEligible) {
+          nextManualPaths.push(path);
+          continue;
+        }
+        entryChanged = true;
+        removedIndexPaths.add(path);
+        for (const subject of subjects) rehome(subject, path, classification.kind);
+      }
+      if (nextManualPaths.length !== data.manualIndexPaths.length
+        || nextManualPaths.some((path, index) => path !== data.manualIndexPaths[index])) {
+        data.manualIndexPaths = nextManualPaths;
+        entryChanged = true;
+      }
+
+      if (!entryChanged) continue;
+      // A subject leaving the Index cannot remain a curriculum parent or in a
+      // stale custom Library layout. Reconciliation places protected records
+      // in their built-in Library as explicit or durable Unplaced entries.
+      for (const subject of data.portableIndex.subjects) {
+        if (subject.parentId && changedSubjectIds.has(subject.parentId)) subject.parentId = null;
+      }
+      for (const [path, parentPath] of Object.entries(data.curriculumVisual.parentByPath)) {
+        if (removedIndexPaths.has(path)) delete data.curriculumVisual.parentByPath[path];
+        else if (parentPath && removedIndexPaths.has(parentPath)) data.curriculumVisual.parentByPath[path] = null;
+      }
+      for (const [container, paths] of Object.entries(data.curriculumVisual.orderByContainer)) {
+        const next = paths.filter((path) => !removedIndexPaths.has(path));
+        if (next.length > 0) data.curriculumVisual.orderByContainer[container] = next;
+        else delete data.curriculumVisual.orderByContainer[container];
+      }
+      for (const path of removedIndexPaths) delete data.indexGroupByPath[path];
+      reconcilePortableLibraryLayouts(data.portableIndex);
+      // This is schema/invariant repair, not a user edit. Preserve updatedAt so
+      // a stale synced payload cannot become newest merely because this build
+      // repaired it before last-writer-wins merging.
+      storeChanged = true;
+    }
+    return storeChanged;
+  }
+
+  private normalizeActiveDataAfterRestore(): void {
+    if (this.data.settings.workspaceMode === "ent-clinical") {
+      normalizeKnowledgeBaseLibrariesAndNavigation(this.data);
+    }
+    this.remediateInvalidClinicalIndexes([this.requireActiveBase()]);
+  }
+
+  private clinicalIndexClassificationForPath(
+    path: string,
+  ): { kind: RecordKind; indexEligible: boolean; title: string } | { error: string } {
+    const placeholderId = portableSubjectIdFromPath(path);
+    const ownerIds = placeholderId
+      ? [placeholderId]
+      : Object.entries(this.data.portableIndex.resolvedPathBySubjectId)
+        .filter(([, resolvedPath]) => resolvedPath === path)
+        .map(([subjectId]) => subjectId);
+    if (ownerIds.length > 1) {
+      return { error: "That Markdown note has more than one portable identity. Repair the duplicate path owner before moving it." };
+    }
+    const subject = ownerIds[0] ? this.getPortableSubject(ownerIds[0]) : null;
+    if (placeholderId && !subject) return { error: "That portable subject is no longer available." };
+    const file = placeholderId ? null : this.app.vault.getAbstractFileByPath(path);
+    if (!placeholderId && (!(file instanceof TFile) || file.extension.toLowerCase() !== "md")) {
+      return { error: "Choose an existing Markdown note or portable placeholder." };
+    }
+    const record = this.getRecord(path);
+    const classification = this.clinicalIndexClassification(
+      path,
+      subject,
+      subject?.recordKind ?? record?.kind ?? "note",
+    );
+    return {
+      ...classification,
+      title: subject?.title ?? record?.title ?? (file instanceof TFile ? file.basename : "Untitled subject"),
+    };
+  }
+
+  /** Return why a record cannot enter the Index, without changing plugin data. */
+  getRecordIndexDestinationError(path: string): string | null {
+    if (!this.isClinicalMode()) return null;
+    const classification = this.clinicalIndexClassificationForPath(path);
+    if ("error" in classification) return classification.error;
+    if (classification.indexEligible) return null;
+    return `The ENT ${this.data.settings.indexLabel} accepts topic subjects only. “${classification.title}” is source-classified as ${classification.kind} and cannot be moved there.`;
+  }
+
+  /** Assert the complete active ENT Index invariant after a bulk/import apply. */
+  assertClinicalIndexEligibility(): void {
+    if (!this.isClinicalMode()) return;
+    const subjectById = new Map(this.data.portableIndex.subjects.map((subject) => [subject.id, subject]));
+    const ownerIdByPath = new Map<string, string | null>();
+    for (const [subjectId, path] of Object.entries(this.data.portableIndex.resolvedPathBySubjectId)) {
+      if (!path || !subjectById.has(subjectId)) continue;
+      ownerIdByPath.set(path, ownerIdByPath.has(path) ? null : subjectId);
+    }
+    const candidateSubjectIdByPath = new Map<string, string | null>();
+    for (const subject of this.data.portableIndex.subjects) {
+      if (subject.indexed) candidateSubjectIdByPath.set(portableSubjectPath(this.data, subject.id), subject.id);
+    }
+    for (const path of this.data.manualIndexPaths) {
+      if (candidateSubjectIdByPath.has(path)) continue;
+      const placeholderId = portableSubjectIdFromPath(path);
+      candidateSubjectIdByPath.set(path, placeholderId ?? ownerIdByPath.get(path) ?? null);
+    }
+    const fileByPath = new Map<string, TFile>();
+    for (const path of candidateSubjectIdByPath.keys()) {
+      if (isPortablePlaceholderPath(path)) continue;
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (file instanceof TFile && file.extension.toLowerCase() === "md") fileByPath.set(path, file);
+    }
+    let firstError = "";
+    let incompatibleCount = 0;
+    const reject = (message: string): void => {
+      if (!firstError) firstError = message;
+      incompatibleCount += 1;
+    };
+    for (const [path, subjectId] of candidateSubjectIdByPath) {
+      if (!isPortablePlaceholderPath(path) && ownerIdByPath.get(path) === null) {
+        reject("That Markdown note has more than one portable identity. Repair the duplicate path owner before moving it.");
+        continue;
+      }
+      const subject = subjectId ? subjectById.get(subjectId) ?? null : null;
+      if (isPortablePlaceholderPath(path) && !subject) {
+        reject("That portable subject is no longer available.");
+        continue;
+      }
+      const file = fileByPath.get(path) ?? null;
+      if (!isPortablePlaceholderPath(path) && !file) {
+        reject("Choose an existing Markdown note or portable placeholder.");
+        continue;
+      }
+      const classification = this.clinicalIndexClassification(
+        path,
+        subject,
+        subject?.recordKind ?? "note",
+        this.data,
+        fileByPath,
+      );
+      if (classification.indexEligible) continue;
+      const title = subject?.title ?? file?.basename ?? "Untitled subject";
+      reject(`The ENT ${this.data.settings.indexLabel} accepts topic subjects only. “${title}” is source-classified as ${classification.kind} and cannot be moved there.`);
+    }
+    if (incompatibleCount === 0) return;
+    const more = incompatibleCount > 1
+      ? ` ${incompatibleCount - 1} additional indexed subject${incompatibleCount === 2 ? " is" : "s are"} incompatible.`
+      : "";
+    throw new Error(`${firstError}${more} The ENT Index was not changed.`);
+  }
+
+  /** Removing a visual custom placement may reveal a protected native Library. */
+  getRecordUnassignedLibraryFallback(record: Pick<VaultRecord, "kind" | "role">): LibraryDefinition | null {
+    if (!this.isClinicalMode() || record.role !== "library") return null;
+    return this.getLibraries(true).find((library) => library.sourceKind === record.kind) ?? null;
+  }
+
+  private clinicalLibraryRemovalClassification(subject: PortableSubjectDefinition): {
+    kind: RecordKind;
+    indexEligible: boolean;
+  } {
+    const resolvedPath = this.data.portableIndex.resolvedPathBySubjectId[subject.id] ?? "";
+    return this.clinicalIndexClassification(
+      resolvedPath || portablePlaceholderPath(subject.id),
+      subject,
+      subject.recordKind,
+    );
+  }
+
+  /** Return why an archived custom library cannot be rehomed to a destination, without changing plugin data. */
+  getLibraryRemovalDestinationError(
+    libraryId: string,
+    destination: LibraryRemovalDestination,
+  ): string | null {
+    const source = (this.data.portableIndex.libraries ?? []).find((library) => library.id === libraryId);
+    if (!source) return "That library is no longer available.";
+    if (source.sourceKind !== null) return "Built-in clinical libraries cannot be permanently deleted.";
+    if (source.archivedAt === null) return "Archive this library before permanently deleting it.";
+    const targetLibraryId = typeof destination === "object" ? destination.libraryId : null;
+    if (targetLibraryId === libraryId) return "Choose a different destination library.";
+    const target = targetLibraryId
+      ? (this.data.portableIndex.libraries ?? []).find((library) => library.id === targetLibraryId)
+      : null;
+    if (targetLibraryId && (!target || target.archivedAt !== null)) return "That destination library is no longer available.";
+    if (!this.isClinicalMode() || destination === "unassigned" || target?.sourceKind === null) return null;
+
+    const classified = this.data.portableIndex.subjects
+      .filter((subject) => subjectLibraryId(subject) === libraryId)
+      .map((subject) => ({ subject, ...this.clinicalLibraryRemovalClassification(subject) }));
+    const incompatible = destination === "index"
+      ? classified.filter((item) => !item.indexEligible)
+      : classified.filter((item) => item.kind !== target?.sourceKind);
+    if (incompatible.length === 0) return null;
+
+    const kinds = [...new Set(incompatible.map((item) => item.kind))].sort().join(", ");
+    const examples = incompatible.slice(0, 3).map((item) => `“${item.subject.title}”`).join(", ");
+    const more = incompatible.length > 3 ? ` and ${incompatible.length - 3} more` : "";
+    const destinationRule = destination === "index"
+      ? "The ENT knowledge index accepts topic subjects only"
+      : `The built-in ${target?.name ?? "clinical"} library accepts ${target?.sourceKind ?? "matching"} subjects only`;
+    return `${destinationRule}. ${incompatible.length} incompatible subject${incompatible.length === 1 ? "" : "s"} (${kinds}): ${examples}${more}. No subjects were moved. Move incompatible records first, or choose Unassigned or a custom library.`;
+  }
+
+  /** Permanently remove one archived custom library without deleting or editing Markdown notes. */
+  async deleteLibrary(libraryId: string, destination: LibraryRemovalDestination = "unassigned"): Promise<void> {
+    const current = this.requireLibrary(libraryId);
+    const destinationError = this.getLibraryRemovalDestinationError(libraryId, destination);
+    if (destinationError) throw new Error(destinationError);
+    const targetLibraryId = typeof destination === "object" ? destination.libraryId : null;
+    await this.mutate(`Delete archived library “${current.name}”`, () => {
+      const library = this.requireLibrary(libraryId);
+      if (library.sourceKind !== null || library.archivedAt === null) {
+        throw new Error("That library can no longer be permanently deleted.");
+      }
+      const targetLibrary = targetLibraryId ? this.requireLibrary(targetLibraryId, false) : null;
+      const targetGroupId = targetLibrary
+        ? this.ensureCatalogPortableGroup(targetLibrary.id, targetLibrary.name)
+        : destination === "index" ? this.ensureTopicPortableGroup("Ungrouped") : null;
+      const sourceSubjects = this.data.portableIndex.subjects
+        .filter((subject) => subjectLibraryId(subject) === libraryId);
+      const sourceGroupIds = new Set(sourceSubjects.map((subject) => subject.groupId));
+      this.removePortableSubjectsFromLibraryLayouts(new Set(sourceSubjects.map((subject) => subject.id)));
+      for (const subject of sourceSubjects) {
+        const path = portableSubjectPath(this.data, subject.id);
+        subject.indexed = destination === "index";
+        subject.libraryId = targetLibraryId;
+        subject.parentId = null;
+        if (targetGroupId) subject.groupId = targetGroupId;
+        if (destination === "index") {
+          this.data.excludedIndexPaths = this.data.excludedIndexPaths.filter((candidate) => candidate !== path);
+          if (!pathIsInsideFolder(path, this.data.settings.primaryFolder) && !this.data.manualIndexPaths.includes(path)) {
+            this.data.manualIndexPaths.push(path);
+          }
+          this.data.indexGroupByPath[path] = "Ungrouped";
+        } else {
+          this.data.manualIndexPaths = this.data.manualIndexPaths.filter((candidate) => candidate !== path);
+          if (pathIsInsideFolder(path, this.data.settings.primaryFolder)
+            && !this.data.excludedIndexPaths.includes(path)) this.data.excludedIndexPaths.push(path);
+          delete this.data.indexGroupByPath[path];
+        }
+        resetCurriculumVisualPath(this.data.curriculumVisual, path);
+      }
+      const referencedGroupIds = new Set(this.data.portableIndex.subjects.map((subject) => subject.groupId));
+      this.data.portableIndex.groups = this.data.portableIndex.groups.filter((group) => (
+        !sourceGroupIds.has(group.id) || referencedGroupIds.has(group.id)
+      ));
+      delete this.data.portableIndex.libraryLayouts[libraryId];
+      this.data.portableIndex.libraries = this.libraryDefinitions()
+        .filter((candidate) => candidate.id !== libraryId);
+      this.normalizeLibraryOrder();
+      const tab = libraryTabId(libraryId);
+      if (this.data.activeTab === tab) this.data.activeTab = "curriculum";
+      if (this.data.settings.defaultTab === tab) this.data.settings.defaultTab = "curriculum";
+      this.data.savedViews = this.data.savedViews.filter((view) => view.tab !== tab);
+      this.dedupeActiveOrganizationPaths();
+    }, { includePortableIndex: true, includeSettings: true, includeActiveTab: true, requireUndo: true });
+  }
+
   private invalidateKnowledgeBaseSearchSnapshot(): void {
     this.searchGeneration += 1;
     this.knowledgeBaseSearchVaultSnapshot = null;
@@ -702,6 +1523,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.invalidateKnowledgeBaseSearchSnapshot();
     this.recordsCacheByBase.clear();
     this.recordPathsCacheByBase.clear();
+    this.librarySubjectCountsCacheByBase.clear();
     if (membershipChanged) {
       this.referencedPathsCacheByBase.clear();
       this.excludedPathsCacheByBase.clear();
@@ -874,6 +1696,28 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const portableIdByPath = new Map<string, string>();
     const portableSubjectById = new Map(data.portableIndex.subjects.map((subject) => [subject.id, subject]));
     const portableGroupById = new Map(data.portableIndex.groups.map((group) => [group.id, group]));
+    const relinkableSubjectIds = new Set(data.portableIndex.relinkableSubjectIds ?? []);
+    // Projecting a library can touch thousands of records. Resolve every
+    // subject's outer heading once instead of scanning the complete nested
+    // layout for each record (which made large catalogs quadratic).
+    const portableLibraryHeadingBySubject = new Map<string, string>();
+    const libraries = data.portableIndex.libraries ?? [];
+    const libraryById = new Map(libraries.map((library) => [library.id, library]));
+    const libraryHeadingKey = (libraryId: string, subjectId: string): string => `${libraryId}\0${subjectId}`;
+    for (const library of libraries) {
+      for (const heading of data.portableIndex.libraryLayouts?.[library.id] ?? []) {
+        for (const subjectId of heading.subjects) {
+          const key = libraryHeadingKey(library.id, subjectId);
+          if (!portableLibraryHeadingBySubject.has(key)) portableLibraryHeadingBySubject.set(key, heading.title);
+        }
+        for (const subheading of heading.subheadings) {
+          for (const subjectId of subheading.subjects) {
+            const key = libraryHeadingKey(library.id, subjectId);
+            if (!portableLibraryHeadingBySubject.has(key)) portableLibraryHeadingBySubject.set(key, heading.title);
+          }
+        }
+      }
+    }
     for (const [subjectId, path] of Object.entries(data.portableIndex.resolvedPathBySubjectId)) {
       if (path && !portableIdByPath.has(path)) portableIdByPath.set(path, subjectId);
     }
@@ -890,10 +1734,31 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       const portableId = portableIdByPath.get(file.path);
       const portableSubject = portableId ? portableSubjectById.get(portableId) : undefined;
       const portableGroup = portableSubject ? portableGroupById.get(portableSubject.groupId)?.title ?? "" : "";
-      const portableLibraryInGeneric = !clinicalMode
-        && (portableSubject?.recordKind === "procedure"
-          || portableSubject?.recordKind === "medication"
-          || portableSubject?.recordKind === "syndrome");
+      // In the ENT preset a native path is the authority for its catalog. A
+      // stale or colliding portable identity may organize that native record,
+      // but it must never reclassify a clinical topic as a medication (or any
+      // other cross-catalog combination). Imported topic placeholders backed
+      // by proposals remain the one intentional projection exception below.
+      const requestedLibraryId = portableSubject && !portableSubject.indexed ? subjectLibraryId(portableSubject) : null;
+      const requestedLibrary = requestedLibraryId ? libraryById.get(requestedLibraryId) : undefined;
+      // A custom library is visual-only and may contain any semantic type. A
+      // protected system library must still match the native clinical type.
+      const portableLibrary = requestedLibrary
+        && (!clinicalMode || requestedLibrary.sourceKind === null || requestedLibrary.sourceKind === detectedKind)
+        ? requestedLibrary
+        : undefined;
+      const nativeLibrary = clinicalMode && detectedRole === "library"
+        ? libraries.find((library) => library.sourceKind === detectedKind)
+        : undefined;
+      // Native clinical Library sources stay in their protected catalog even
+      // when stale data claims they are indexed. A valid custom Library can
+      // still provide a visual placement without changing source semantics.
+      const effectiveLibrary = portableLibrary ?? nativeLibrary;
+      const portableLibraryId = effectiveLibrary?.id ?? null;
+      const portableLibraryHeading = portableId && portableLibraryId
+        ? portableLibraryHeadingBySubject.get(libraryHeadingKey(portableLibraryId, portableId)) ?? ""
+        : "";
+      const portableLibraryInGeneric = !clinicalMode && portableLibraryId !== null;
       const role = portableLibraryInGeneric ? "library" : detectedRole;
       const entDomains = asStringList(frontmatter.ent_domains);
       const titleFallback = file.basename.replace(/^(Procedure|Drug|Syndrome)\s*-\s*/i, "");
@@ -912,8 +1777,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
               : detectedKind === "syndrome"
                 ? entDomains[0] || asText(frontmatter.syndrome_group, "Syndromes")
                 : asText(frontmatter.domain, file.parent?.path || "Vault notes");
-      const domain = portableLibraryInGeneric
-        ? portableGroup || sourceDomain
+      const domain = portableLibraryId
+        ? portableLibraryHeading || portableGroup || sourceDomain
         : detectedKind === "topic"
           ? visualGroup || asText(data.indexGroupAliases[sourceDomain], sourceDomain)
           : sourceDomain;
@@ -923,9 +1788,23 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       const proposalBacksIndexedSubject = detectedKind === "proposal"
         && portableSubject?.recordKind === "topic"
         && portableSubject.indexed;
+      const sourceIndexEligible = detectedKind === "topic" || proposalBacksIndexedSubject;
+      const portableMembershipApplies = Boolean(portableSubject && (
+        portableSubject.indexed
+          ? !clinicalMode || sourceIndexEligible
+          : portableLibrary
+            || requestedLibraryId === null && (!clinicalMode
+              || portableSubject.recordKind === detectedKind
+              || (portableSubject.recordKind === "topic" && detectedKind === "proposal"))
+      ));
+      const projectedPortableIndexed = portableSubject
+        ? portableMembershipApplies
+          ? Boolean(portableSubject.indexed && !portableLibraryId)
+          : portableSubject.indexed ? false : undefined
+        : clinicalMode && detectedKind === "topic" && excluded.has(file.path) ? false : undefined;
       const kind: RecordKind = proposalBacksIndexedSubject
         ? "topic"
-        : portableSubject?.recordKind ?? detectedKind;
+        : clinicalMode ? detectedKind : portableSubject?.recordKind ?? detectedKind;
       const sourceTitle = asText(frontmatter.title, asText(frontmatter.canonical_name, titleFallback));
       const displayTitle = asText(data.displayNameByPath[file.path]);
       const aliases = asStringList(frontmatter.aliases);
@@ -957,7 +1836,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         mtime: file.stat.mtime,
         aiLock: frontmatter.ai_lock === true,
         ...(portableId ? { portableId } : {}),
-        ...(portableSubject ? { portableIndexed: portableSubject.indexed } : {}),
+        ...(portableLibraryId ? { libraryId: portableLibraryId } : {}),
+        ...(projectedPortableIndexed !== undefined ? { portableIndexed: projectedPortableIndexed } : {}),
+        ...(portableId && relinkableSubjectIds.has(portableId) ? { portableRelinkable: true } : {}),
       };
       recordPaths.add(record.path);
       yield record;
@@ -974,14 +1855,21 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         continue;
       }
       const sourceGroup = portableGroupById.get(subject.groupId)?.title || "Ungrouped";
-      const domain = (canMoveAcrossGroups ? asText(data.indexGroupByPath[path]) : "")
+      const invalidClinicalIndexPlaceholder = clinicalMode && subject.indexed && subject.recordKind !== "topic";
+      const libraryId = invalidClinicalIndexPlaceholder && isLibraryKind(subject.recordKind)
+        ? BUILTIN_LIBRARY_IDS[subject.recordKind]
+        : subject.indexed ? null : subjectLibraryId(subject);
+      const libraryHeading = libraryId
+        ? portableLibraryHeadingBySubject.get(libraryHeadingKey(libraryId, subject.id)) ?? ""
+        : "";
+      const domain = libraryHeading || (canMoveAcrossGroups ? asText(data.indexGroupByPath[path]) : "")
         || asText(data.indexGroupAliases[sourceGroup], sourceGroup);
       const displayTitle = asText(data.displayNameByPath[path]);
       const record: VaultRecord = {
         path,
         title: displayTitle || subject.title,
         ...(displayTitle ? { sourceTitle: subject.title } : {}),
-        kind: subject.indexed ? "topic" : subject.recordKind,
+        kind: subject.recordKind,
         role: "placeholder",
         curriculumId: subject.configuredId,
         domain,
@@ -1002,8 +1890,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         mtime: 0,
         aiLock: false,
         portableId: subject.id,
+        ...(libraryId ? { libraryId } : {}),
         isPlaceholder: true,
-        portableIndexed: subject.indexed,
+        portableIndexed: invalidClinicalIndexPlaceholder ? false : subject.indexed,
       };
       recordPaths.add(path);
       yield record;
@@ -1023,10 +1912,18 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (!clinicalMode && manual.has(file.path)) return { kind: "topic", role: "canonical" };
     if ((proposalRoot && file.path.startsWith(proposalRoot)) || (clinicalMode && frontmatter.type === "topic-proposal")) return { kind: "proposal", role: "proposal" };
     if (pathIsInsideFolder(file.path, data.settings.primaryFolder)) {
-      if (excluded.has(file.path)) {
+      if (!clinicalMode && excluded.has(file.path)) {
         return referenced.has(file.path) ? { kind: "note", role: "vault-note" } : null;
       }
       if (!clinicalMode) return { kind: "topic", role: "canonical" };
+      // An explicitly hidden native topic should disappear from this base's
+      // record/search catalog unless another plugin feature still references
+      // it (collection, pin, queue, or portable custom-Library identity).
+      // Referenced records keep their source-derived topic semantics below.
+      if (excluded.has(file.path) && !referenced.has(file.path)) return null;
+      // Hidden membership and custom-Library placement are plugin state, not
+      // source semantics. Keep the native ENT kind/role stable and let the
+      // projected membership flag decide whether this topic enters the Index.
       return asText(frontmatter[data.settings.idProperty], asText(frontmatter.curriculum_id))
         ? { kind: "topic", role: "canonical" }
         : { kind: "topic", role: "supporting" };
@@ -1035,6 +1932,58 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (clinicalMode && file.path.startsWith(MEDICATION_ROOT) && file.basename.startsWith("Drug - ")) return { kind: "medication", role: "library" };
     if (clinicalMode && file.path.startsWith(SYNDROME_ROOT) && file.basename.startsWith("Syndrome - ")) return { kind: "syndrome", role: "library" };
     return referenced.has(file.path) ? { kind: "note", role: "vault-note" } : null;
+  }
+
+  private removePortableSubjectsFromLibraryLayouts(subjectIds: ReadonlySet<string>): void {
+    if (subjectIds.size === 0) return;
+    for (const layout of Object.values(this.data.portableIndex.libraryLayouts ?? {})) {
+      for (const heading of layout) {
+        heading.subjects = heading.subjects.filter((candidate) => !subjectIds.has(candidate));
+        for (const subheading of heading.subheadings) {
+          subheading.subjects = subheading.subjects.filter((candidate) => !subjectIds.has(candidate));
+        }
+      }
+    }
+  }
+
+  private removePortableSubjectFromLibraryLayouts(subjectId: string): void {
+    this.removePortableSubjectsFromLibraryLayouts(new Set([subjectId]));
+  }
+
+  private replacePortableSubjectInLibraryLayouts(oldSubjectId: string, subjectId: string): void {
+    if (oldSubjectId === subjectId) return;
+    const subject = this.getPortableSubject(subjectId);
+    const targetLibraryId = subject ? subjectLibraryId(subject) : null;
+    const targetAlreadyContainsSurvivor = targetLibraryId !== null
+      && (this.data.portableIndex.libraryLayouts?.[targetLibraryId] ?? []).some((heading) => (
+        heading.subjects.includes(subjectId)
+        || heading.subheadings.some((subheading) => subheading.subjects.includes(subjectId))
+      ));
+    for (const [libraryId, layout] of Object.entries(this.data.portableIndex.libraryLayouts ?? {})) {
+      let survivorPlaced = false;
+      for (const heading of layout) {
+        const replace = (subjects: string[]): string[] => {
+          const next: string[] = [];
+          for (const candidate of subjects) {
+            if (libraryId !== targetLibraryId) {
+              if (candidate !== oldSubjectId && candidate !== subjectId) next.push(candidate);
+              continue;
+            }
+            if (targetAlreadyContainsSurvivor && candidate === oldSubjectId) continue;
+            if (candidate !== oldSubjectId && candidate !== subjectId) {
+              next.push(candidate);
+              continue;
+            }
+            if (survivorPlaced) continue;
+            survivorPlaced = true;
+            next.push(subjectId);
+          }
+          return next;
+        };
+        heading.subjects = replace(heading.subjects);
+        for (const subheading of heading.subheadings) subheading.subjects = replace(subheading.subjects);
+      }
+    }
   }
 
   getRecord(path: string): VaultRecord | null { return this.getRecords().find((record) => record.path === path) ?? null; }
@@ -1072,6 +2021,348 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     new Notice(`Restored the source label “${sourceTitle}”. The Markdown note was not changed.`);
   }
 
+  private defaultLibraryHeadingTitle(libraryId: string): string {
+    return this.requireLibrary(libraryId).name;
+  }
+
+  private ensureLibraryHeading(libraryId: string, target: CatalogPlacementTarget): LayoutHeading {
+    const library = this.requireLibrary(libraryId, false);
+    this.data.portableIndex.libraryLayouts[libraryId] ??= [];
+    const layout = this.data.portableIndex.libraryLayouts[libraryId];
+    let heading = target.headingId
+      ? layout.find((candidate) => candidate.id === target.headingId)
+      : undefined;
+    if (target.headingId && !heading) throw new Error("That library heading is no longer available.");
+    if (!heading && target.subheadingId) {
+      heading = layout.find((candidate) => candidate.subheadings.some((subheading) => subheading.id === target.subheadingId));
+      if (!heading) throw new Error("That library subheading is no longer available.");
+    }
+    const requestedTitle = target.headingTitle?.trim() || library.name;
+    if (!heading) {
+      const normalizedTitle = this.normalizedOrganizationLabel(requestedTitle);
+      heading = layout.find((candidate) => this.normalizedOrganizationLabel(candidate.title) === normalizedTitle);
+    }
+    if (!heading) {
+      let id = makeId(`${libraryId}-heading`);
+      while (layout.some((candidate) => candidate.id === id)) id = makeId(`${libraryId}-heading`);
+      heading = { id, title: requestedTitle, collapsed: false, subjects: [], subheadings: [] };
+      layout.push(heading);
+    }
+    if (target.subheadingId && !heading.subheadings.some((subheading) => subheading.id === target.subheadingId)) {
+      throw new Error("That library subheading does not belong to the selected heading.");
+    }
+    return heading;
+  }
+
+  private ensureCatalogPortableGroup(libraryId: string, title: string): string {
+    const library = this.requireLibrary(libraryId);
+    const normalized = this.normalizedOrganizationLabel(title);
+    const otherKindGroupIds = new Set(this.data.portableIndex.subjects
+      .filter((subject) => subjectLibraryId(subject) !== libraryId)
+      .map((subject) => subject.groupId));
+    const targetKindGroupIds = new Set(this.data.portableIndex.subjects
+      .filter((subject) => subjectLibraryId(subject) === libraryId)
+      .map((subject) => subject.groupId));
+    const existing = this.data.portableIndex.groups.find((group) => targetKindGroupIds.has(group.id)
+      && !otherKindGroupIds.has(group.id)
+      && this.normalizedOrganizationLabel(group.title) === normalized);
+    if (existing) return existing.id;
+    let id = makeId(`${libraryId}-group`);
+    while (this.data.portableIndex.groups.some((group) => group.id === id)) id = makeId(`${libraryId}-group`);
+    this.data.portableIndex.groups.push({
+      id,
+      title: title.trim() || library.name,
+      order: this.data.portableIndex.groups.length,
+    });
+    return id;
+  }
+
+  private ensureTopicPortableGroup(title: string): string {
+    const cleanTitle = title.trim() || "Ungrouped";
+    const nonTopicGroupIds = new Set(this.data.portableIndex.subjects
+      .filter((subject) => !subject.indexed)
+      .map((subject) => subject.groupId));
+    const normalizedTitle = this.normalizedOrganizationLabel(cleanTitle);
+    const existing = this.data.portableIndex.groups.find((group) => !nonTopicGroupIds.has(group.id)
+      && this.normalizedOrganizationLabel(group.title) === normalizedTitle);
+    if (existing) return existing.id;
+    let id = makeId("group");
+    while (this.data.portableIndex.groups.some((group) => group.id === id)) id = makeId("group");
+    this.data.portableIndex.groups.push({ id, title: cleanTitle, order: this.data.portableIndex.groups.length });
+    return id;
+  }
+
+  private placePortableSubjectInLibrary(subjectId: string, libraryId: string, target: CatalogPlacementTarget): LayoutHeading {
+    this.removePortableSubjectFromLibraryLayouts(subjectId);
+    const heading = this.ensureLibraryHeading(libraryId, target);
+    const subheading = target.subheadingId
+      ? heading.subheadings.find((candidate) => candidate.id === target.subheadingId)
+      : undefined;
+    if (target.subheadingId && !subheading) throw new Error("That library subheading is no longer available.");
+    (subheading?.subjects ?? heading.subjects).push(subjectId);
+    return heading;
+  }
+
+  private detachPortableTopicChildren(subjectId: string, path: string): void {
+    for (const candidate of this.data.portableIndex.subjects) {
+      if (candidate.parentId !== subjectId) continue;
+      candidate.parentId = null;
+      this.data.curriculumVisual.parentByPath[portableSubjectPath(this.data, candidate.id)] = null;
+    }
+    for (const [childPath, parentPath] of Object.entries(this.data.curriculumVisual.parentByPath)) {
+      if (parentPath === path) this.data.curriculumVisual.parentByPath[childPath] = null;
+    }
+    delete this.data.curriculumVisual.orderByContainer[`parent:${path}`];
+  }
+
+  /**
+   * Assign one Markdown note or unresolved portable subject to the topic index
+   * or a visual library catalog. This changes plugin data only; source Markdown
+   * paths, frontmatter, content, aliases, collections, pins, and Next remain intact.
+   */
+  async assignRecordToCatalog(
+    path: string,
+    kind: "topic" | LibraryKind,
+    target: CatalogPlacementTarget = {},
+  ): Promise<void> {
+    return kind === "topic"
+      ? this.assignRecordToDestination(path, null, target)
+      : this.assignRecordToDestination(path, kind, target, kind);
+  }
+
+  async assignRecordToLibrary(
+    path: string,
+    libraryId: string,
+    target: CatalogPlacementTarget = {},
+  ): Promise<void> {
+    return this.assignRecordToDestination(path, libraryId, target);
+  }
+
+  private async assignRecordToDestination(
+    path: string,
+    libraryId: string | null,
+    target: CatalogPlacementTarget,
+    legacyBuiltinKind: LibraryKind | null = null,
+  ): Promise<void> {
+    this.assertDataWritable();
+    const existingDestination = libraryId ? this.getLibrary(libraryId) : null;
+    const pendingBuiltin = libraryId && !existingDestination && legacyBuiltinKind === libraryId
+      ? BUILTIN_LIBRARY_DEFINITIONS.find((library) => library.id === libraryId) ?? null
+      : null;
+    const destinationLibrary = existingDestination ?? pendingBuiltin;
+    if (libraryId && !destinationLibrary) throw new Error("That library is no longer available.");
+    if (destinationLibrary && destinationLibrary.archivedAt !== null) {
+      throw new Error("That library is archived. Restore it before adding records.");
+    }
+    if (pendingBuiltin && (this.data.portableIndex.libraries ?? []).length >= MAX_LIBRARIES) {
+      throw new Error(`A knowledge base can contain at most ${MAX_LIBRARIES} libraries.`);
+    }
+    const placeholderId = portableSubjectIdFromPath(path);
+    const file = placeholderId ? null : this.app.vault.getAbstractFileByPath(path);
+    if (!placeholderId && (!(file instanceof TFile) || file.extension.toLowerCase() !== "md")) {
+      throw new Error("Choose an existing Markdown note or portable placeholder.");
+    }
+    if (file instanceof TFile && isImmutableSourcePath(file.path)) {
+      throw new Error("Immutable source-book files cannot be assigned to a knowledge catalog.");
+    }
+    if (!destinationLibrary) {
+      const indexDestinationError = this.getRecordIndexDestinationError(path);
+      if (indexDestinationError) throw new Error(indexDestinationError);
+    }
+    const owners = placeholderId
+      ? [placeholderId]
+      : Object.entries(this.data.portableIndex.resolvedPathBySubjectId)
+        .filter(([, resolvedPath]) => resolvedPath === path)
+        .map(([subjectId]) => subjectId);
+    if (owners.length > 1) throw new Error("That Markdown note has more than one portable identity. Repair the duplicate path owner before moving it.");
+    const existingSubjectId = owners[0] ?? "";
+    const existingSubject = existingSubjectId ? this.getPortableSubject(existingSubjectId) : null;
+    if (placeholderId && !existingSubject) throw new Error("That portable subject is no longer available.");
+
+    const record = this.getRecord(path);
+    const frontmatter = file instanceof TFile
+      ? asUnknownRecord(this.app.metadataCache.getFileCache(file)?.frontmatter)
+      : {};
+    let detectedKind: RecordKind = existingSubject?.recordKind ?? record?.kind ?? "note";
+    if (this.isClinicalMode()) {
+      detectedKind = this.clinicalIndexClassification(
+        path,
+        existingSubject,
+        detectedKind,
+      ).kind;
+    }
+    if (this.isClinicalMode() && destinationLibrary?.sourceKind && detectedKind !== destinationLibrary.sourceKind) {
+      throw new Error(`Clinical source classification is fixed: this ${detectedKind} record cannot be placed in the built-in ${destinationLibrary.name} library.`);
+    }
+
+    const sourceTitle = existingSubject?.title
+      || record?.title
+      || asText(frontmatter.title, asText(frontmatter.canonical_name, file instanceof TFile ? file.basename : "Untitled subject"));
+    const configuredId = existingSubject?.configuredId
+      || record?.curriculumId
+      || asText(frontmatter[this.data.settings.idProperty]);
+    const newSubjectId = existingSubjectId || makeId("subject");
+    const wasIndexed = existingSubject?.indexed === true
+      || Boolean(record && recordBelongsToIndex(record, this.isClinicalMode()));
+    const topicGroupTitle = target.headingTitle?.trim()
+      || (file instanceof TFile ? this.suggestedIndexGroup(file) : "Ungrouped");
+    const destinationLabel = destinationLibrary?.name ?? "the knowledge index";
+
+    await this.mutate(`Move “${sourceTitle}” to ${destinationLabel}`, () => {
+      if (pendingBuiltin && !this.getLibrary(pendingBuiltin.id)) {
+        if (this.libraryDefinitions().length >= MAX_LIBRARIES) {
+          throw new Error(`A knowledge base can contain at most ${MAX_LIBRARIES} libraries.`);
+        }
+        const order = this.libraryDefinitions().reduce((maximum, library) => Math.max(maximum, library.order), -1) + 1;
+        this.libraryDefinitions().push({ ...pendingBuiltin, order, archivedAt: null });
+        this.data.portableIndex.libraryLayouts[pendingBuiltin.id] ??= [];
+      }
+      const currentLibrary = libraryId ? this.requireLibrary(libraryId, false) : null;
+      let subject = existingSubjectId ? this.getPortableSubject(existingSubjectId) : null;
+      if (!subject) {
+        const initialGroupId = !currentLibrary
+          ? this.ensureTopicPortableGroup(topicGroupTitle)
+          : this.ensureCatalogPortableGroup(currentLibrary.id, target.headingTitle?.trim() || currentLibrary.name);
+        const semanticKind: RecordKind = currentLibrary?.sourceKind
+          ? currentLibrary.sourceKind
+          : detectedKind === "note" && !currentLibrary ? "topic" : detectedKind;
+        subject = {
+          id: newSubjectId,
+          title: sourceTitle,
+          groupId: initialGroupId,
+          parentId: null,
+          order: this.data.portableIndex.subjects.length,
+          indexed: !currentLibrary,
+          configuredId,
+          recordKind: semanticKind,
+          libraryId: currentLibrary?.id ?? null,
+        };
+        this.data.portableIndex.subjects.push(subject);
+        if (file instanceof TFile) this.data.portableIndex.resolvedPathBySubjectId[subject.id] = file.path;
+      }
+
+      if (!currentLibrary) {
+        this.removePortableSubjectFromLibraryLayouts(subject.id);
+        subject.indexed = true;
+        subject.libraryId = null;
+        subject.parentId = null;
+        subject.groupId = this.ensureTopicPortableGroup(topicGroupTitle);
+        this.data.excludedIndexPaths = this.data.excludedIndexPaths.filter((candidate) => candidate !== path);
+        if (!pathIsInsideFolder(path, this.data.settings.primaryFolder) && !this.data.manualIndexPaths.includes(path)) {
+          this.data.manualIndexPaths.push(path);
+        }
+        this.data.indexGroupByPath[path] = topicGroupTitle;
+        resetCurriculumVisualPath(this.data.curriculumVisual, path);
+      } else {
+        if (wasIndexed) this.detachPortableTopicChildren(subject.id, path);
+        const heading = this.placePortableSubjectInLibrary(subject.id, currentLibrary.id, target);
+        const catalogGroupId = this.ensureCatalogPortableGroup(currentLibrary.id, heading.title);
+        // System libraries retain their clinical semantics. Custom libraries
+        // are visual containers and never rewrite a subject's semantic type.
+        if (!this.isClinicalMode() && currentLibrary.sourceKind) subject.recordKind = currentLibrary.sourceKind;
+        subject.indexed = false;
+        subject.libraryId = currentLibrary.id;
+        subject.parentId = null;
+        subject.groupId = catalogGroupId;
+        this.data.manualIndexPaths = this.data.manualIndexPaths.filter((candidate) => candidate !== path);
+        if (pathIsInsideFolder(path, this.data.settings.primaryFolder)
+          && !this.data.excludedIndexPaths.includes(path)) this.data.excludedIndexPaths.push(path);
+        delete this.data.indexGroupByPath[path];
+        resetCurriculumVisualPath(this.data.curriculumVisual, path);
+      }
+      this.data.selectedPath = path;
+      this.data.activeTab = currentLibrary ? libraryTabId(currentLibrary.id) : "curriculum";
+      this.dedupeActiveOrganizationPaths();
+    }, { includePortableIndex: true, requireUndo: true });
+  }
+
+  async removeRecordFromCatalog(path: string): Promise<void> {
+    return this.removeRecordFromLibrary(path);
+  }
+
+  async removeRecordFromLibrary(path: string): Promise<void> {
+    const record = this.getRecord(path);
+    if (!record?.portableId || !record.libraryId) throw new Error("That record has no editable library placement.");
+    await this.mutate(`Remove visual library placement for “${record.title}”`, () => {
+      const subject = this.getPortableSubject(record.portableId ?? "");
+      if (!subject) throw new Error("That portable subject is no longer available.");
+      this.removePortableSubjectFromLibraryLayouts(subject.id);
+      subject.libraryId = null;
+      subject.indexed = false;
+      subject.parentId = null;
+      this.data.manualIndexPaths = this.data.manualIndexPaths.filter((candidate) => candidate !== path);
+      if (pathIsInsideFolder(path, this.data.settings.primaryFolder)
+        && !this.data.excludedIndexPaths.includes(path)) this.data.excludedIndexPaths.push(path);
+      delete this.data.indexGroupByPath[path];
+      resetCurriculumVisualPath(this.data.curriculumVisual, path);
+      this.data.selectedPath = path;
+    }, { includePortableIndex: true, requireUndo: true });
+  }
+
+  /** Adopt an existing flat/native library into its editable path-free layout in one Undo-safe save. */
+  async initializeLibraryCatalog(libraryId: string): Promise<void> {
+    this.assertDataWritable();
+    const library = this.requireLibrary(libraryId, false);
+    const records = this.getRecords().filter((record) => record.libraryId === libraryId);
+    const ownerIdsByPath = new Map<string, string[]>();
+    for (const [subjectId, path] of Object.entries(this.data.portableIndex.resolvedPathBySubjectId)) {
+      const owners = ownerIdsByPath.get(path) ?? [];
+      owners.push(subjectId);
+      ownerIdsByPath.set(path, owners);
+    }
+    for (const record of records) {
+      if (!record.isPlaceholder && isImmutableSourcePath(record.path)) {
+        throw new Error("Immutable source-book files cannot be assigned to a knowledge catalog.");
+      }
+      if ((ownerIdsByPath.get(record.path)?.length ?? 0) > 1) {
+        throw new Error(`“${record.title}” has more than one portable identity. Repair the duplicate path owner before arranging this library.`);
+      }
+    }
+    const recordsToInitialize = records.filter((record) => {
+      const subjectId = record.portableId || portableSubjectIdFromPath(record.path);
+      // A portable subject with no layout membership is intentionally unplaced
+      // (for example after its heading was deleted). Only native records that
+      // have never acquired a portable identity need one-time adoption.
+      return !subjectId;
+    });
+    if (recordsToInitialize.length === 0) return;
+
+    await this.mutate(`Initialize editable ${library.name} headings`, () => {
+      const currentLibrary = this.requireLibrary(libraryId, false);
+      for (const record of recordsToInitialize) {
+        const placeholderId = portableSubjectIdFromPath(record.path);
+        const ownerId = record.portableId || placeholderId || ownerIdsByPath.get(record.path)?.[0] || "";
+        let subject = ownerId ? this.getPortableSubject(ownerId) : null;
+        if (!subject) {
+          let id = makeId("subject");
+          while (this.getPortableSubject(id)) id = makeId("subject");
+          const groupId = this.ensureCatalogPortableGroup(libraryId, record.domain || currentLibrary.name);
+          subject = {
+            id,
+            title: record.title,
+            groupId,
+            parentId: null,
+            order: this.data.portableIndex.subjects.length,
+            indexed: false,
+            configuredId: record.curriculumId,
+            recordKind: currentLibrary.sourceKind ?? record.kind,
+            libraryId,
+          };
+          this.data.portableIndex.subjects.push(subject);
+          if (!record.isPlaceholder) this.data.portableIndex.resolvedPathBySubjectId[id] = record.path;
+        }
+        if (currentLibrary.sourceKind && this.isClinicalMode() && subject.recordKind !== currentLibrary.sourceKind) {
+          throw new Error(`“${record.title}” belongs to ${subject.recordKind} and cannot be adopted into the built-in ${currentLibrary.name} library.`);
+        }
+        subject.indexed = false;
+        subject.libraryId = libraryId;
+        subject.parentId = null;
+        const heading = this.placePortableSubjectInLibrary(subject.id, libraryId, { headingTitle: record.domain || currentLibrary.name });
+        subject.groupId = this.ensureCatalogPortableGroup(libraryId, heading.title);
+      }
+    }, { includePortableIndex: true, requireUndo: true });
+  }
+
   async removeRecordsFromIndex(paths: string[], label = "Remove subjects from this knowledge base"): Promise<void> {
     const uniquePaths = [...new Set(paths)];
     if (uniquePaths.length === 0) return;
@@ -1101,22 +2392,46 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.invalidateRecordCache();
   }
 
-  async restoreRecordsToIndex(paths: string[], label = "Restore subjects to this knowledge base"): Promise<void> {
+  async restoreRecordsToIndex(
+    paths: string[],
+    label = "Restore subjects to this knowledge base",
+    targetGroup = "",
+  ): Promise<void> {
     const uniquePaths = [...new Set(paths)];
     if (uniquePaths.length === 0) return;
+    const incompatible = uniquePaths
+      .map((path) => ({ path, error: this.getRecordIndexDestinationError(path) }))
+      .filter((item): item is { path: string; error: string } => item.error !== null);
+    if (incompatible.length > 0) {
+      const first = incompatible[0];
+      const more = incompatible.length > 1
+        ? ` ${incompatible.length - 1} additional selected subject${incompatible.length === 2 ? " is" : "s are"} also incompatible.`
+        : "";
+      throw new Error(`${first?.error ?? "The selected subject cannot enter this Index."}${more} No subjects were restored.`);
+    }
+    const cleanTargetGroup = targetGroup.trim();
     const portableIdByPath = new Map(Object.entries(this.data.portableIndex.resolvedPathBySubjectId).map(([id, path]) => [path, id]));
     await this.mutate(label, () => {
+      if (cleanTargetGroup && !this.data.indexGroupOrder.includes(cleanTargetGroup)) {
+        this.data.indexGroupOrder.push(cleanTargetGroup);
+      }
       for (const path of uniquePaths) {
         const portableId = this.getRecord(path)?.portableId ?? portableIdByPath.get(path);
         if (portableId) {
           const subject = this.getPortableSubject(portableId);
-          if (subject) subject.indexed = true;
+          if (subject) {
+            this.removePortableSubjectFromLibraryLayouts(subject.id);
+            subject.libraryId = null;
+            subject.indexed = true;
+            if (cleanTargetGroup) subject.groupId = this.ensureTopicPortableGroup(cleanTargetGroup);
+          }
         }
         this.data.excludedIndexPaths = this.data.excludedIndexPaths.filter((candidate) => candidate !== path);
         if (!pathIsInsideFolder(path, this.data.settings.primaryFolder) && !this.data.manualIndexPaths.includes(path)) {
           this.data.manualIndexPaths.push(path);
         }
-        delete this.data.indexGroupByPath[path];
+        if (cleanTargetGroup) this.data.indexGroupByPath[path] = cleanTargetGroup;
+        else delete this.data.indexGroupByPath[path];
         resetCurriculumVisualPath(this.data.curriculumVisual, path);
       }
       this.invalidateRecordCache();
@@ -1143,7 +2458,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const subject = this.getPortableSubject(subjectId);
     if (!subject) throw new Error("The portable subject no longer exists.");
     const file = this.app.vault.getAbstractFileByPath(path);
-    if (!(file instanceof TFile) || file.extension.toLocaleLowerCase() !== "md") throw new Error("Choose an existing Markdown note.");
+    if (!(file instanceof TFile) || file.extension.toLowerCase() !== "md") throw new Error("Choose an existing Markdown note.");
     if (isImmutableSourcePath(file.path)) throw new Error("Immutable source-book files cannot be linked as portable subjects.");
     const existingOwnerId = Object.entries(this.data.portableIndex.resolvedPathBySubjectId)
       .find(([otherId, otherPath]) => otherId !== subjectId && otherPath === file.path)?.[0] ?? "";
@@ -1165,12 +2480,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const subjectGroupTitle = this.data.portableIndex.groups.find((group) => group.id === subject.groupId)?.title ?? "";
     const candidateDomain = candidateRecord?.domain.trim() ?? "";
     if (this.isClinicalMode() && !this.canVisuallyMoveAcrossGroups() && subjectGroupTitle && candidateDomain
-      && subjectGroupTitle.trim().toLocaleLowerCase() !== candidateDomain.toLocaleLowerCase()) {
+      && this.normalizedOrganizationLabel(subjectGroupTitle) !== this.normalizedOrganizationLabel(candidateDomain)) {
       throw new Error(`Clinical group mismatch: this subject belongs to ${subjectGroupTitle}, but the selected note belongs to ${candidateDomain}.`);
     }
     if (existingOwnerId && !mergeExistingIdentity) {
       throw new Error("That Markdown note already has a portable identity. Confirm identity reassignment before linking it to this subject.");
     }
+    const wasUnresolved = !this.data.portableIndex.resolvedPathBySubjectId[subjectId];
     if (existingOwnerId && mergeExistingIdentity) {
       const byId = new Map(this.data.portableIndex.subjects.map((candidate) => [candidate.id, candidate]));
       const isAncestor = (ancestorId: string, descendantId: string): boolean => {
@@ -1243,6 +2559,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         for (const candidate of this.data.portableIndex.subjects) {
           if (candidate.parentId === existingOwnerId && candidate.id !== subjectId) candidate.parentId = subjectId;
         }
+        this.replacePortableSubjectInLibraryLayouts(existingOwnerId, subjectId);
         this.data.portableIndex.subjects = this.data.portableIndex.subjects.filter((candidate) => candidate.id !== existingOwnerId);
         delete this.data.portableIndex.resolvedPathBySubjectId[existingOwnerId];
 
@@ -1275,6 +2592,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         if (mergedChildren.length > 0) this.data.curriculumVisual.orderByContainer[childContainer] = mergedChildren;
       }
       this.data.portableIndex.resolvedPathBySubjectId[subjectId] = file.path;
+      const relinkable = new Set(this.data.portableIndex.relinkableSubjectIds ?? []);
+      if (existingOwnerId) relinkable.delete(existingOwnerId);
+      if (wasUnresolved) relinkable.add(subjectId);
+      this.data.portableIndex.relinkableSubjectIds = [...relinkable];
       this.dedupeActiveOrganizationPaths();
       if (subject.indexed) {
         this.data.excludedIndexPaths = this.data.excludedIndexPaths.filter((candidate) => candidate !== file.path);
@@ -1298,6 +2619,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const subject = this.getPortableSubject(subjectId);
     const oldPath = this.data.portableIndex.resolvedPathBySubjectId[subjectId];
     if (!subject || !oldPath) throw new Error("This portable subject is not linked to a Markdown note.");
+    if (!(this.data.portableIndex.relinkableSubjectIds ?? []).includes(subjectId)) {
+      throw new Error("Only a note explicitly linked from a portable placeholder can be unlinked.");
+    }
     const placeholder = portablePlaceholderPath(subjectId);
     await this.mutate(`Unlink portable subject “${subject.title}”`, () => {
       rewriteActivePluginDataPathPrefix(this.data, oldPath, placeholder);
@@ -1308,10 +2632,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
   getCanonicalTopics(): VaultRecord[] { return this.getRecords().filter((record) => record.role === "canonical"); }
   getIndexRecords(): VaultRecord[] {
-    return this.getRecords().filter((record) => record.kind === "topic" && (record.role === "canonical"
-      || record.role === "supporting"
-      || (record.role === "placeholder" && record.portableIndexed !== false)
-      || record.portableIndexed === true));
+    const topicsOnly = this.isClinicalMode();
+    return this.getRecords().filter((record) => recordBelongsToIndex(record, topicsOnly));
   }
 
   getIndexCandidateFiles(): TFile[] {
@@ -1376,7 +2698,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         if (!existing.has(path) || (!indexed.has(path) && !excluded.has(path))) delete this.data.indexGroupByPath[path];
       }
       this.data.indexGroupOrder = [...new Set(this.data.indexGroupOrder.map((group) => group.trim()).filter(Boolean))];
-      reconcileCurriculumVisual(this.data.curriculumVisual, this.getRecords(), this.data.indexGroupByPath);
+      reconcileCurriculumVisual(
+        this.data.curriculumVisual,
+        this.getRecords(),
+        this.data.indexGroupByPath,
+        this.isClinicalMode(),
+      );
     });
   }
 
@@ -1431,6 +2758,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       relevant = true;
       this.recordsCacheByBase.delete(entry.id);
       this.recordPathsCacheByBase.delete(entry.id);
+      this.librarySubjectCountsCacheByBase.delete(entry.id);
       if (entry.id === this.store.activeBaseId) activeBaseInvalidated = true;
     }
     if (activeBaseInvalidated) {
@@ -1498,7 +2826,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       includeSettings?: boolean;
       includePortableIndex?: boolean;
       includeLayoutSnapshots?: boolean;
+      includeActiveTab?: boolean;
       requireUndo?: boolean;
+      normalizeAfterRestore?: boolean;
     } = {},
   ): Promise<void> {
     this.assertDataWritable();
@@ -1507,13 +2837,20 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (this.externalReloadBusy) throw new Error("Finish reloading synced knowledge-base data before changing its organization.");
     this.dataTransactionBusy = true;
     try {
+      const transactionUpdatedAt = this.requireActiveBase().updatedAt;
       const transactionBackup = options.requireUndo ? structuredClone(this.data) : null;
+      const previousUndoStack = [...this.data.undoStack];
+      const previousRedoStack = [...this.data.redoStack];
+      const previousSelectedPath = this.data.selectedPath;
+      const previousActiveTab = this.data.activeTab;
+      const previousCollapsed = structuredClone(this.data.collapsed);
       const snapshot = snapshotPersonal(
         this.data,
         label,
         options.includeSettings === true,
         options.includePortableIndex === true,
         options.includeLayoutSnapshots === true,
+        options.includeActiveTab === true,
       );
       const undoStack = limitSnapshotStack([...this.data.undoStack, snapshot]);
       if (!undoStack.includes(snapshot)) {
@@ -1524,6 +2861,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.data.redoStack = [];
       try {
         action();
+        if (options.normalizeAfterRestore === true) this.normalizeActiveDataAfterRestore();
         // All organization mutations can affect membership, display aliases,
         // portable subjects, or record grouping. Central invalidation keeps
         // warm record-cache hits O(1) without relying on a proportional JSON key.
@@ -1531,19 +2869,38 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         await this.savePluginData();
       } catch (error) {
         if (transactionBackup) {
-          this.replaceActiveData(transactionBackup);
-          this.invalidateRecordCache();
+          this.replaceActiveData(transactionBackup, transactionUpdatedAt);
+        } else {
+          // The already-created personal snapshot is also the lightweight
+          // rollback boundary for ordinary edits. Callers that change settings,
+          // portable identities, or saved snapshots opt those fields into it.
+          restoreSnapshot(this.data, snapshot);
+          this.data.undoStack = previousUndoStack;
+          this.data.redoStack = previousRedoStack;
+          this.data.selectedPath = previousSelectedPath;
+          this.data.activeTab = previousActiveTab;
+          this.data.collapsed = previousCollapsed;
+          // Replace the restored object only on failure. This invalidates stale
+          // dialogs without imposing a full-data clone on every small action.
+          this.replaceActiveData(structuredClone(this.data), transactionUpdatedAt);
+        }
+        this.invalidateRecordCache();
+        // If an external change interrupted the write, the incoming file was
+        // captured before the adapter save could replace it. Avoid writing a
+        // second stale rollback snapshot; the reload below will merge the
+        // restored in-memory store and persist the authoritative result.
+        if (!this.externalReloadBusy) {
           try {
             await this.savePluginData();
           } catch (rollbackError) {
-            console.error("Knowledge Base Command Center could not persist the import rollback", rollbackError);
-            throw new Error("The import failed and its rollback could not be saved. Restart Obsidian, then restore a same-vault recovery backup.");
+            console.error("Knowledge Base Command Center could not persist the organization rollback", rollbackError);
+            throw new Error("The organization change failed and its rollback could not be saved. Restart Obsidian, then restore a same-vault recovery backup.");
           }
-          try {
-            await this.refreshViews(false);
-          } catch (refreshError) {
-            console.error("Knowledge Base Command Center restored a failed organization change but could not refresh its view", refreshError);
-          }
+        }
+        try {
+          await this.refreshViews(false);
+        } catch (refreshError) {
+          console.error("Knowledge Base Command Center restored a failed organization change but could not refresh its view", refreshError);
         }
         throw error;
       }
@@ -1554,41 +2911,81 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
   }
 
-  async undo(): Promise<void> {
+  private async applyHistory(direction: "undo" | "redo"): Promise<void> {
     this.assertDataWritable();
-    const previous = this.data.undoStack.pop();
-    if (!previous) return;
-    this.data.redoStack = limitSnapshotStack([...this.data.redoStack, snapshotPersonal(
-      this.data,
-      previous.label,
-      Boolean(previous.settings),
-      Boolean(previous.portableIndex),
-      Boolean(previous.layoutSnapshots),
-    )]);
-    restoreSnapshot(this.data, previous);
-    this.invalidateRecordCache();
-    await this.savePluginData();
-    await this.refreshViews(false);
-    new Notice(`Undid: ${previous.label}`);
+    if (this.baseOperationBusy) throw new Error("Finish the current knowledge-base change before using history.");
+    if (this.dataTransactionBusy) throw new Error("Another organization change is still being saved.");
+    if (this.externalReloadBusy) throw new Error("Finish reloading synced knowledge-base data before using history.");
+    const source = direction === "undo" ? this.data.undoStack : this.data.redoStack;
+    if (source.length === 0) return;
+
+    this.dataTransactionBusy = true;
+    try {
+      // Clone after entering the guarded region so an allocation/serialization
+      // failure cannot leave organization history permanently marked busy.
+      const storeBackup = structuredClone(this.store);
+      const snapshot = (direction === "undo" ? this.data.undoStack : this.data.redoStack).pop();
+      if (!snapshot) return;
+      try {
+        const opposite = limitSnapshotStack([
+          ...(direction === "undo" ? this.data.redoStack : this.data.undoStack),
+          snapshotPersonal(
+            this.data,
+            snapshot.label,
+            Boolean(snapshot.settings),
+            Boolean(snapshot.portableIndex),
+            Boolean(snapshot.layoutSnapshots),
+            snapshot.activeTab !== undefined,
+          ),
+        ]);
+        if (direction === "undo") this.data.redoStack = opposite;
+        else this.data.undoStack = opposite;
+        restoreSnapshot(this.data, snapshot);
+        // Historical snapshots predate the ENT destination invariant. Repair
+        // the restored active payload before its first write so Undo/Redo cannot
+        // persist a medication, syndrome, or procedure back into the Index.
+        this.normalizeActiveDataAfterRestore();
+        this.invalidateRecordCache();
+        await this.savePluginData();
+      } catch (error) {
+        this.store = storeBackup;
+        this.useActiveData(this.requireActiveBase().data);
+        this.invalidateRecordCache();
+        if (!this.externalReloadBusy) {
+          try {
+            await this.saveStoreSnapshot();
+          } catch (rollbackError) {
+            console.error(`Knowledge Base Command Center could not persist the failed ${direction} rollback`, rollbackError);
+            try {
+              await this.refreshViews(false);
+            } catch (refreshError) {
+              console.error(`Knowledge Base Command Center restored a failed ${direction} in memory but could not refresh its view`, refreshError);
+            }
+            throw new Error(`The ${direction} failed and its rollback could not be saved. Restart Obsidian, then restore a same-vault recovery backup.`);
+          }
+        }
+        try {
+          await this.refreshViews(false);
+        } catch (refreshError) {
+          console.error(`Knowledge Base Command Center restored a failed ${direction} but could not refresh its view`, refreshError);
+        }
+        throw error;
+      }
+      try {
+        await this.refreshViews(false);
+      } catch (error) {
+        console.error(`Knowledge Base Command Center saved ${direction} but could not refresh its view`, error);
+        new Notice(`The ${direction} was saved, but the view could not refresh. Reopen the command center to update it.`, 8000);
+      }
+      new Notice(`${direction === "undo" ? "Undid" : "Redid"}: ${snapshot.label}`);
+    } finally {
+      this.dataTransactionBusy = false;
+      this.announceOperationsIdle();
+    }
   }
 
-  async redo(): Promise<void> {
-    this.assertDataWritable();
-    const next = this.data.redoStack.pop();
-    if (!next) return;
-    this.data.undoStack = limitSnapshotStack([...this.data.undoStack, snapshotPersonal(
-      this.data,
-      next.label,
-      Boolean(next.settings),
-      Boolean(next.portableIndex),
-      Boolean(next.layoutSnapshots),
-    )]);
-    restoreSnapshot(this.data, next);
-    this.invalidateRecordCache();
-    await this.savePluginData();
-    await this.refreshViews(false);
-    new Notice(`Redid: ${next.label}`);
-  }
+  async undo(): Promise<void> { await this.applyHistory("undo"); }
+  async redo(): Promise<void> { await this.applyHistory("redo"); }
 
   resolveLink(link: string, sourcePath: string, records: Map<string, VaultRecord>): VaultRecord | null {
     const clean = normalizeWikiLink(link);
@@ -1657,7 +3054,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   getPortableJsonFiles(): TFile[] {
     return this.app.vault.getFiles()
-      .filter((file) => file.extension.toLocaleLowerCase() === "json")
+      .filter((file) => file.extension.toLowerCase() === "json")
       .sort((a, b) => a.path.localeCompare(b.path));
   }
 
@@ -1683,7 +3080,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   async readPortableJson(file: TFile): Promise<unknown> {
-    if (file.extension.toLocaleLowerCase() !== "json") throw new Error("Choose a JSON export file.");
+    if (file.extension.toLowerCase() !== "json") throw new Error("Choose a JSON export file.");
     if (file.stat.size > MAX_PORTABLE_PACKAGE_BYTES) throw new Error("The selected JSON is larger than the 10 MB import limit.");
     return JSON.parse(await this.app.vault.read(file)) as unknown;
   }
@@ -1971,31 +3368,97 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private async handleRename(oldPath: string, newPath: string, folderRename = false): Promise<void> {
-    // A vault rename is an all-base mutation. If Sync is replacing the store,
-    // apply the path rewrite after that envelope has loaded rather than passing
-    // it through savePluginData's active-base-only conflict merge.
-    const pendingExternalReload = this.externalReloadPromise;
-    if (pendingExternalReload) await pendingExternalReload;
-    await this.waitForOperationsIdle();
-    const historyDepths = this.store.bases.map((entry) => [entry.data.layoutSnapshots.length, entry.data.undoStack.length, entry.data.redoStack.length]);
-    let changed = false;
-    for (const entry of this.store.bases) {
-      const pathsChanged = rewritePluginDataPathPrefix(entry.data, oldPath, newPath);
-      const folderStateChanged = folderRename && rewritePluginDataFolderRename(entry.data, oldPath, newPath);
-      const templatePathChanged = !folderRename && rewritePluginDataTemplatePathRename(entry.data, oldPath, newPath);
-      const entryChanged = pathsChanged || folderStateChanged || templatePathChanged;
-      if (entryChanged) {
-        this.bumpEntryUpdatedAt(entry);
-        changed = true;
+    // A vault rename is an all-base transaction. A Sync callback can begin in
+    // either await window below, so merely sampling externalReloadPromise once
+    // is insufficient: the rewrite could otherwise be rejected and the old
+    // paths would remain after the Markdown file has already moved.
+    for (;;) {
+      const pendingExternalReload = this.externalReloadPromise;
+      if (pendingExternalReload) {
+        await pendingExternalReload;
+        continue;
       }
+      await this.waitForOperationsIdle();
+      const reloadAfterIdle = this.externalReloadPromise;
+      if (reloadAfterIdle) {
+        await reloadAfterIdle;
+        continue;
+      }
+      // Another local operation can acquire the guard after the idle promise
+      // resolves but before this continuation runs. Retry rather than overlap.
+      if (this.baseOperationBusy || this.dataTransactionBusy || this.externalReloadBusy) continue;
+
+      this.assertDataWritable();
+      const storeBackup = structuredClone(this.store);
+      const attemptExternalGeneration = this.externalChangeGeneration;
+      this.baseOperationBusy = true;
+      let retryAfterExternalReload = false;
+      let historyWasTrimmed = false;
+      try {
+        const historyDepths = this.store.bases.map((entry) => [entry.data.layoutSnapshots.length, entry.data.undoStack.length, entry.data.redoStack.length]);
+        let changed = false;
+        for (const entry of this.store.bases) {
+          const pathsChanged = rewritePluginDataPathPrefix(entry.data, oldPath, newPath);
+          const folderStateChanged = folderRename && rewritePluginDataFolderRename(entry.data, oldPath, newPath);
+          const templatePathChanged = !folderRename && rewritePluginDataTemplatePathRename(entry.data, oldPath, newPath);
+          const entryChanged = pathsChanged || folderStateChanged || templatePathChanged;
+          if (entryChanged) {
+            this.bumpEntryUpdatedAt(entry);
+            changed = true;
+          }
+        }
+        const boundedDepths = this.store.bases.map((entry) => [entry.data.layoutSnapshots.length, entry.data.undoStack.length, entry.data.redoStack.length]);
+        historyWasTrimmed = boundedDepths.some((depths, baseIndex) => depths.some((depth, stackIndex) => depth < (historyDepths[baseIndex]?.[stackIndex] ?? 0)));
+        this.invalidateRecordCache();
+        if (changed) await this.saveStoreSnapshot();
+        // A callback can start after saveStoreSnapshot has committed but before
+        // this continuation resumes. Let that reload merge the committed rename,
+        // then run the idempotent rewrite once more against its final envelope.
+        retryAfterExternalReload = attemptExternalGeneration !== this.externalChangeGeneration
+          || this.externalReloadBusy;
+      } catch (error) {
+        const interruptedByExternalReload = attemptExternalGeneration !== this.externalChangeGeneration
+          || this.externalReloadBusy
+          || this.externalReloadPromise !== null;
+        this.store = storeBackup;
+        this.useActiveData(this.requireActiveBase().data);
+        this.invalidateRecordCache();
+        if (interruptedByExternalReload) {
+          retryAfterExternalReload = true;
+        } else {
+          try {
+            await this.saveStoreSnapshot();
+          } catch (rollbackError) {
+            // Sync can also begin during the compensating write. Release the
+            // operation guard and retry against that reload instead of waiting
+            // for it here (the reload is itself waiting for this guard).
+            if (attemptExternalGeneration !== this.externalChangeGeneration
+              || this.externalReloadBusy
+              || this.externalReloadPromise !== null) {
+              retryAfterExternalReload = true;
+            } else {
+              console.error("Knowledge Base Command Center could not persist the failed vault-rename rollback", rollbackError);
+              throw new Error("The vault rename was detected, but its organization update and rollback could not be saved. Restart Obsidian, then restore a same-vault recovery backup.");
+            }
+          }
+          if (!retryAfterExternalReload) throw error;
+        }
+      } finally {
+        this.baseOperationBusy = false;
+        this.announceOperationsIdle();
+      }
+
+      if (retryAfterExternalReload) {
+        const reload = this.externalReloadPromise;
+        if (reload) await reload;
+        continue;
+      }
+      if (historyWasTrimmed) {
+        new Notice("Some saved organization history no longer fit the plugin data budget after the rename and was removed. Current organization was preserved.", 8000);
+      }
+      this.scheduleRefresh();
+      return;
     }
-    const boundedDepths = this.store.bases.map((entry) => [entry.data.layoutSnapshots.length, entry.data.undoStack.length, entry.data.redoStack.length]);
-    this.invalidateRecordCache();
-    if (changed) await this.saveStoreSnapshot();
-    if (boundedDepths.some((depths, baseIndex) => depths.some((depth, stackIndex) => depth < (historyDepths[baseIndex]?.[stackIndex] ?? 0)))) {
-      new Notice("Some saved organization history no longer fit the plugin data budget after the rename and was removed. Current organization was preserved.", 8000);
-    }
-    this.scheduleRefresh();
   }
 
   scheduleRefresh(invalidateRecords = true): void {

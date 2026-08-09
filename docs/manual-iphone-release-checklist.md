@@ -25,7 +25,7 @@ Do not use private notes, patient information, or copyrighted source material in
 
 - Use a disposable or backed-up vault containing at least 8,000 Markdown notes.
 - Configure at least two available knowledge bases, with a uniquely named searchable note-backed record in the second base, plus one archived base.
-- Include Index, Inbox, Collections, Procedures, Medications, and Syndromes records where the profile supports them.
+- Include Index, Inbox, Collections, the built-in Procedures/Medications/Syndromes Libraries where the profile supports them, and at least two custom Libraries with distinct icons and long names.
 - Export a same-vault recovery for every test base and make a complete vault backup before starting.
 - Test portrait and landscape at default Dynamic Type and the largest accessibility text size. Record the CSS viewport width shown by the test device in each orientation; landscape coverage must include a width above the former 620 px phone breakpoint (current iPhones commonly report 844–956 px).
 
@@ -44,10 +44,12 @@ Record **Pass**, **Fail**, or **Not applicable** plus a short observation for ev
 9. Open **Create note from template or empty note…** with the keyboard visible. Confirm every field and action button is reachable by scrolling inside the modal.
 10. Create notes with an Arabic title and with literal replacement characters such as `$&` and `` $` ``. Confirm filenames and `{{title}}` substitutions preserve the intended text and do not overwrite an existing note.
 11. Enter Arrange mode and use the row **…** menu to Move under, Indent, Outdent, Move up/down, and Make top-level. Confirm each action works by touch and ordinary arrangement does not move or rewrite the Markdown file.
-12. Export a portable package and same-vault recovery. Confirm both land under `Knowledge Base Command Center Exports/`, privacy warnings are visible, and the recovery can be selected and restored on the same device.
-13. With base A active on the phone and base B active on desktop, make one organization edit in each after Sync is settled. Confirm both survive the next Sync. Do not use this test to imply that simultaneous edits to the same base are field-merged.
-14. Open base management, archive and restore a disposable base, and confirm long names, confirmations, safe areas, and the 50-base-limit message do not clip.
-15. Use Accessibility Inspector to confirm interactive controls meet a 44 × 44 point target, labels and modal focus are meaningful, and layout remains operable at the largest Dynamic Type setting.
+12. Open a custom Library. Use **Add → Add existing note** to classify a disposable Index topic, confirm it leaves the active base's Knowledge Index, then use the record **…** menu to move it to another custom Library and back. Confirm the Markdown path, file contents, Collection membership, pin, and Next status do not change. Repeat once with a valid built-in clinical destination where the source kind permits it.
+13. Open **Manage libraries**. Create a custom Library, edit its plural/singular labels and icon, reorder it, archive it, and restore it. In that Library create a heading and nested subheading, rename and reorder both, move a record between them, then delete the non-empty heading. Confirm the record remains under the explicit Unplaced section after leaving and reopening Arrange. Archive the Library again and verify permanent deletion requires an explicit record destination. Repeat the menu actions at the largest Dynamic Type setting.
+14. Export a portable format v4 package containing two selected custom Libraries, one unselected Library, an empty Library, empty headings, nested subheadings, placed records, and an unplaced record. Import it into another disposable base using Merge and then Replace; confirm only the selected Library IDs and exact layouts change. Export and restore a same-vault recovery v9 on the source base; confirm both files land under `Knowledge Base Command Center Exports/` and privacy warnings are visible.
+15. With base A active on the phone and base B active on desktop, make one organization edit in each after Sync is settled. Confirm both survive the next Sync. Do not use this test to imply that simultaneous edits to the same base are field-merged.
+16. Open base management, archive and restore a disposable base, and confirm long names, confirmations, safe areas, and the 50-base-limit message do not clip.
+17. Use Accessibility Inspector to confirm interactive controls meet a 44 × 44 point target, including Library tabs, Library-manager controls, heading/subheading titles, and their **…** menus; labels and modal focus are meaningful, and layout remains operable at the largest Dynamic Type setting.
 
 ## Sign-off
 

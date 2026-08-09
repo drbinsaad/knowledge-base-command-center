@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.10.0
+
+### Added
+
+- Added user-defined Libraries to every knowledge base. Create any top-level category, choose its name, singular item label, and icon, then organize its subjects with the same editable headings, nested subheadings, ordering, and unplaced state used by the built-in clinical libraries.
+- Added a searchable **Manage libraries** surface in plugin settings and the command center. Libraries can be renamed, reordered, archived, restored, and—after archival—permanently removed with an explicit destination for every remaining subject. These actions change plugin organization only and never delete, move, rename, or rewrite Markdown notes.
+- Added direct Create, Add existing note, Add current note, search-result classification, and Move to another section actions for arbitrary libraries. A subject has one primary Index/Library section per knowledge base; Collections remain the reusable cross-library lists.
+- Added portable-package format version 4 with stable library definitions, arbitrary selected library IDs, exact nested layouts, empty libraries, and intentionally unplaced subjects. Selective Merge or Replace applies only to the chosen Index and Libraries, while imports from versions 1–3 remain supported.
+- Added dynamic-library coverage for desktop drag-and-drop, touch menus, iPhone compact rows and focused search, Undo/Redo, Sync reloads, saved views, same-vault recovery, and cross-vault placeholder creation/linking.
+
+### Changed
+
+- Replaced the fixed Procedures/Medications/Syndromes navigation model with stable dynamic Library tabs. The ENT preset still supplies and protects those three built-in semantic libraries, while Generic and ENT bases can add independent custom libraries without changing their preset.
+- Advanced plugin data to schema version 12 and the multi-base store to version 13. Older builds recognize the newer store and open it read-only rather than overwriting custom-library data.
+- Made portable export summaries and component selection use each library's configured label instead of hard-coded clinical categories.
+
+### Fixed
+
+- Preserved custom library identity and hierarchy across export/import even when another library has the same visible name, and kept an explicitly selected empty library authoritative during Replace.
+- Prevented deleting a non-empty library without first choosing Index, another active Library, or Unassigned as the subject destination.
+- Kept archived or deleted library tabs out of active navigation and redirected stale active/default tabs safely to the Knowledge Index.
+- Made repeated registry synchronization and export idempotent, including same-title Index and Library groups, and preserved unselected empty Index or Library heading identities during selective Replace.
+- Captured incoming Sync data before any in-flight local save can overwrite it; overlapping local organization edits now roll back clearly and the authoritative merged envelope is written back safely.
+- Included navigation-only Library dependencies in mandatory import Undo snapshots, sanitized unavailable imported Library tabs and saved views, and kept legacy v1–v3 navigation dependencies compatible without inventing unknown identities.
+- Made Library names and heading/group matching locale-invariant across devices, including Turkish and Azeri host locales.
+
+## 0.9.0 (unpublished; folded into 0.10.0)
+
+This development version was not tagged or released. Its completed catalog-management work is included in 0.10.0.
+
+### Added
+
+- Added full Procedures, Medications, and Syndromes catalog management to generic knowledge bases: create headings and nested subheadings, rename/delete/reorder them, and place or reorder records with desktop drag-and-drop or touch-friendly row menus.
+- Added direct **Create**, **Add existing note**, and **Add current note** flows for each library. A note can also move between the Knowledge Index and any library without moving, renaming, or rewriting its Markdown file.
+- Added editable adoption of the ENT preset's existing clinical libraries. Entering Arrange creates stable path-free identities and visual headings in one Undo-safe transaction while keeping clinical source classification protected.
+- Added path-free nested library layouts to portable-package format version 3 and same-vault recovery format version 8. Imported catalogs preserve headings, subheadings, record order, intentionally unplaced records, and empty structure without exposing note paths or bodies.
+
+### Changed
+
+- Made catalog classification, display names, layouts, and Undo history independent for every knowledge base, so the same Markdown note can remain a topic in one base and a medication, procedure, or syndrome in another.
+- Kept empty configured library tabs visible and made catalog actions contextual to the active tab on desktop, iPhone, and iPad.
+- Advanced plugin data to schema version 11 and the multi-base store to version 12. Older builds recognize the newer store and open it read-only instead of overwriting it.
+
+### Fixed
+
+- Prevented a note added to Medications, Procedures, or Syndromes from remaining in the active base's Knowledge Index unless it is intentionally moved back there.
+- Made deletion of a non-empty library heading durable: its records remain explicitly unplaced, and reopening Arrange does not recreate the deleted heading.
+- Prevented local and native clinical records from exposing imported-placeholder unlink controls that could leave a duplicate placeholder beside the original note.
+- Preserved catalog kind and placement across portable merges, identity merges, Sync reloads, file/folder renames, Undo/Redo, and same-title groups used by different libraries.
+- Prevented selected-section imports from reclassifying unselected dependencies or bypassing the ENT preset's fixed clinical source classification.
+- Kept large-catalog projection and placement lookup bounded with indexed subject-to-heading maps instead of repeated full-layout scans.
+
 ## 0.8.3
 
 ### Added

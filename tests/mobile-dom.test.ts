@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { Notice, Platform } from "obsidian";
-import { migrateData, type PluginData, type VaultRecord } from "../src/model.ts";
+import {
+  libraryTabId,
+  migrateData,
+  parseQuery,
+  type LibraryDefinition,
+  type PluginData,
+  type VaultRecord,
+} from "../src/model.ts";
 import { EntVaultCommandCenterView, prepareKnowledgeBaseSearchResults } from "../src/view.ts";
 import { asHtmlElement, createFakeDom, type FakeWindow } from "./support/fake-dom.ts";
 
@@ -11,7 +19,9 @@ interface MobileViewHarness {
   treeEl: HTMLElement | null;
   query: string;
   renderGlobalSearchResults(parent: HTMLElement): number;
-  renderRecordRow(parent: HTMLElement, record: VaultRecord, level: number, membership?: { headingId: string }): void;
+  renderRecordRow(parent: HTMLElement, record: VaultRecord, level: number, membership?: { headingId: string }, searchContext?: unknown, libraryMembership?: { libraryId: string; headingId: string; subheadingId?: string }): void;
+  renderLibrary(parent: HTMLElement, records: VaultRecord[]): number;
+  renderTabs(parent: HTMLElement): void;
   renderSearch(parent: HTMLElement): void;
   reload(): Promise<void>;
 }
@@ -54,6 +64,27 @@ function record(path: string, title: string): VaultRecord {
   };
 }
 
+const CUSTOM_LIBRARY_ID = "reference-sets";
+
+function customLibrary(): LibraryDefinition {
+  return {
+    id: CUSTOM_LIBRARY_ID,
+    name: "Reference Sets",
+    singularName: "Reference",
+    icon: "book-open",
+    order: 0,
+    sourceKind: null,
+    archivedAt: null,
+  };
+}
+
+function installCustomLibrary(data: PluginData): LibraryDefinition {
+  const library = customLibrary();
+  data.portableIndex.libraries.push(library);
+  data.portableIndex.libraryLayouts[library.id] = [];
+  return library;
+}
+
 function installWindow(window: FakeWindow): () => void {
   const previous = Object.getOwnPropertyDescriptor(globalThis, "window");
   Object.defineProperty(globalThis, "window", { configurable: true, value: window, writable: true });
@@ -93,6 +124,10 @@ function createView(window: FakeWindow, inputSources: SearchSource[] = []): EntV
       options?.limit,
     ),
     isClinicalMode: () => false,
+    getLibraries: (includeArchived = false) => data.portableIndex.libraries
+      .filter((library) => includeArchived || library.archivedAt === null)
+      .map((library) => ({ ...library })),
+    getLibrary: (libraryId: string) => data.portableIndex.libraries.find((library) => library.id === libraryId) ?? null,
   };
   const ViewConstructor = EntVaultCommandCenterView as unknown as new (
     leaf: { app: Record<string, never> },
@@ -230,6 +265,266 @@ test("real record rendering suppresses desktop drag controls when Platform.isMob
     assert.equal(parent.querySelectorAll(".ent-cc-subject-row").length, 1);
     assert.equal(parent.querySelectorAll(".ent-cc-subject-title").length, 1);
     assert.equal(parent.querySelectorAll(".ent-cc-drag-handle").length, 0);
+  } finally {
+    mobilePlatform.isMobile = previousMobile;
+  }
+});
+
+test("mobile library hierarchy stays compact and exposes menu-based heading controls", () => {
+  const dom = createFakeDom();
+  const view = createView(dom.window) as unknown as MobileViewHarness & {
+    records: VaultRecord[];
+    recordByPath: Map<string, VaultRecord>;
+    parsedQuery: ReturnType<typeof parseQuery>;
+    editMode: boolean;
+    plugin: { data: PluginData };
+  };
+  const library = installCustomLibrary(view.plugin.data);
+  const reference: VaultRecord = {
+    ...record("Knowledge Base/Airway guideline.md", "Airway guideline"),
+    role: "library",
+    portableId: "subject-airway-guideline",
+    libraryId: library.id,
+  };
+  view.records = [reference];
+  view.recordByPath = new Map([[reference.path, reference]]);
+  view.parsedQuery = parseQuery("");
+  view.plugin.data.activeTab = libraryTabId(library.id);
+  view.plugin.data.portableIndex.subjects = [{
+    id: "subject-airway-guideline",
+    title: "Airway guideline",
+    groupId: "group-reference-sets",
+    parentId: null,
+    order: 0,
+    indexed: false,
+    configuredId: "",
+    recordKind: "topic",
+    libraryId: library.id,
+  }];
+  view.plugin.data.portableIndex.libraryLayouts[library.id] = [{
+    id: "heading-airway",
+    title: "Airway",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{ id: "subheading-guidelines", title: "Guidelines", collapsed: false, subjects: ["subject-airway-guideline"] }],
+  }];
+  view.editMode = true;
+  const parent = dom.document.body.createDiv();
+
+  const mobilePlatform = Platform as unknown as { isMobile: boolean };
+  const previousMobile = mobilePlatform.isMobile;
+  mobilePlatform.isMobile = true;
+  try {
+    assert.equal(view.renderLibrary(asHtmlElement(parent), [reference]), 1);
+    assert.equal(parent.querySelectorAll(".ent-cc-library-group").length, 1);
+    assert.equal(parent.querySelectorAll(".ent-cc-library-subheading").length, 1);
+    assert.equal(parent.querySelectorAll(".ent-cc-subject-row").length, 1);
+    assert.equal(parent.querySelectorAll(".ent-cc-drag-handle").length, 0, "touch uses the 44px ellipsis menus instead of desktop drag handles");
+    assert.ok(parent.querySelector(".ent-cc-heading-row .ent-cc-row-more"));
+    assert.ok(parent.querySelector(".ent-cc-subheading-row .ent-cc-row-more"));
+    assert.ok(parent.querySelector(".ent-cc-subject-row .ent-cc-row-more"));
+  } finally {
+    mobilePlatform.isMobile = previousMobile;
+  }
+});
+
+test("mobile library fallback uses one durable Unplaced section instead of stale source groups", () => {
+  const dom = createFakeDom();
+  const view = createView(dom.window) as unknown as MobileViewHarness & {
+    records: VaultRecord[];
+    recordByPath: Map<string, VaultRecord>;
+    parsedQuery: ReturnType<typeof parseQuery>;
+    plugin: { data: PluginData };
+  };
+  const library = installCustomLibrary(view.plugin.data);
+  const references: VaultRecord[] = [
+    { ...record("Knowledge Base/Airway guideline.md", "Airway guideline"), role: "library", domain: "Old Rhinology", libraryId: library.id },
+    { ...record("Knowledge Base/Otology guideline.md", "Otology guideline"), role: "library", domain: "Old Otology", libraryId: library.id },
+  ];
+  view.records = references;
+  view.recordByPath = new Map(references.map((item) => [item.path, item]));
+  view.parsedQuery = parseQuery("");
+  view.plugin.data.activeTab = libraryTabId(library.id);
+  const parent = dom.document.body.createDiv();
+
+  const mobilePlatform = Platform as unknown as { isMobile: boolean };
+  const previousMobile = mobilePlatform.isMobile;
+  mobilePlatform.isMobile = true;
+  try {
+    assert.equal(view.renderLibrary(asHtmlElement(parent), references), 2);
+    assert.equal(parent.querySelectorAll(".ent-cc-library-fallback").length, 1);
+    assert.equal(parent.querySelector(".ent-cc-library-fallback .ent-cc-row-title")?.textContent, "Unplaced Reference Sets");
+    assert.equal(parent.querySelectorAll(".ent-cc-library-fallback .ent-cc-subject-row").length, 2);
+    assert.doesNotMatch(parent.textContent, /Old Rhinology|Old Otology/);
+  } finally {
+    mobilePlatform.isMobile = previousMobile;
+  }
+});
+
+test("mobile renders and reveals an active custom-library tab without exposing archived libraries", () => {
+  const dom = createFakeDom();
+  const view = createView(dom.window) as unknown as MobileViewHarness & {
+    records: VaultRecord[];
+    plugin: { data: PluginData };
+  };
+  const library = installCustomLibrary(view.plugin.data);
+  view.plugin.data.portableIndex.libraries.push({
+    ...customLibrary(),
+    id: "archived-library",
+    name: "Archived Library",
+    order: 1,
+    archivedAt: Date.now(),
+  });
+  view.plugin.data.activeTab = libraryTabId(library.id);
+  view.records = [{ ...record("Reference/Airway.md", "Airway"), libraryId: library.id }];
+  const parent = dom.document.body.createDiv();
+
+  view.renderTabs(asHtmlElement(parent));
+
+  const active = parent.querySelector(`[data-tab="${libraryTabId(library.id)}"]`);
+  assert.ok(active);
+  assert.equal(active.getAttribute("aria-selected"), "true");
+  assert.match(active.textContent, /Reference Sets1/);
+  assert.equal(active.querySelector(".ent-cc-tab-label")?.textContent, "Reference Sets");
+  assert.equal((active as unknown as { scrollIntoViewCalls: number }).scrollIntoViewCalls, 1);
+  assert.doesNotMatch(parent.textContent, /Archived Library/);
+});
+
+test("mobile heading and subheading title controls retain a 44px touch target", () => {
+  const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+  assert.match(styles, /\.ent-cc-view \.ent-cc-heading-row button\.ent-cc-row-title,\s*\.ent-cc-view \.ent-cc-subheading-row button\.ent-cc-row-title\s*\{\s*min-height:\s*44px;/);
+  assert.match(styles, /\.ent-cc-tab-label\s*\{\s*max-width:\s*42vw;/);
+});
+
+test("desktop library drag and drop moves records across headings and reorders rows", async () => {
+  const dom = createFakeDom();
+  const view = createView(dom.window) as unknown as MobileViewHarness & {
+    records: VaultRecord[];
+    recordByPath: Map<string, VaultRecord>;
+    parsedQuery: ReturnType<typeof parseQuery>;
+    editMode: boolean;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    plugin: {
+      data: PluginData;
+      mutate(label: string, action: () => void, options?: { includePortableIndex?: boolean; requireUndo?: boolean }): Promise<void>;
+      assignRecordToLibrary(path: string, libraryId: string, target: { headingId: string }): Promise<void>;
+    };
+    writeLibraryDrag(event: DragEvent, payload: {
+      kind: "library-membership";
+      libraryId: string;
+      subjectId: string;
+      headingId: string;
+    }): void;
+    readLibraryDrag(event: DragEvent): {
+      kind: "library-membership";
+      libraryId: string;
+      subjectId: string;
+      headingId: string;
+      ownerViewId: string;
+      renderToken: string;
+      baseId: string;
+      dataEpoch: number;
+    } | null;
+  };
+  const library = installCustomLibrary(view.plugin.data);
+  const first: VaultRecord = {
+    ...record("Knowledge Base/Airway guideline.md", "Airway guideline"),
+    role: "library",
+    portableId: "subject-a",
+    libraryId: library.id,
+  };
+  const second: VaultRecord = {
+    ...record("Knowledge Base/Otology guideline.md", "Otology guideline"),
+    role: "library",
+    portableId: "subject-b",
+    libraryId: library.id,
+  };
+  view.records = [first, second];
+  view.recordByPath = new Map(view.records.map((item) => [item.path, item]));
+  view.parsedQuery = parseQuery("");
+  view.editMode = true;
+  view.loadedBaseId = "base-mobile";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+  view.plugin.data.activeTab = libraryTabId(library.id);
+  view.plugin.data.portableIndex.libraryLayouts[library.id] = [
+    { id: "heading-a", title: "Heading A", collapsed: false, subjects: ["subject-a", "subject-b"], subheadings: [] },
+    { id: "heading-b", title: "Heading B", collapsed: false, subjects: [], subheadings: [] },
+  ];
+  const assignments: Array<{ path: string; headingId: string }> = [];
+  view.plugin.assignRecordToLibrary = async (path, assignedLibraryId, target) => {
+    assert.equal(assignedLibraryId, library.id);
+    assignments.push({ path, headingId: target.headingId });
+  };
+  view.plugin.mutate = async (_label, action, options) => {
+    assert.deepEqual(options, { includePortableIndex: true, requireUndo: true });
+    action();
+  };
+
+  const payload = {
+    kind: "library-membership" as const,
+    libraryId: library.id,
+    subjectId: "subject-a",
+    headingId: "heading-a",
+  };
+  const transferValues = new Map<string, string>();
+  const dataTransfer = {
+    effectAllowed: "none",
+    dropEffect: "none",
+    setData(type: string, value: string) { transferValues.set(type, value); },
+    getData(type: string) { return transferValues.get(type) ?? ""; },
+  };
+  const dragEvent = { dataTransfer } as unknown as DragEvent;
+  view.writeLibraryDrag(dragEvent, payload);
+  assert.equal(dataTransfer.effectAllowed, "move");
+  const guardedPayload = view.readLibraryDrag(dragEvent);
+  assert.ok(guardedPayload);
+  assert.deepEqual({
+    kind: guardedPayload.kind,
+    libraryId: guardedPayload.libraryId,
+    subjectId: guardedPayload.subjectId,
+    headingId: guardedPayload.headingId,
+  }, payload);
+  assert.equal(typeof guardedPayload.ownerViewId, "string");
+  assert.equal(typeof guardedPayload.renderToken, "string");
+  assert.equal(guardedPayload.baseId, "base-mobile");
+  assert.equal(guardedPayload.dataEpoch, 0);
+
+  const parent = dom.document.body.createDiv();
+  const mobilePlatform = Platform as unknown as { isMobile: boolean };
+  const previousMobile = mobilePlatform.isMobile;
+  mobilePlatform.isMobile = false;
+  try {
+    assert.equal(view.renderLibrary(asHtmlElement(parent), view.records), 2);
+    assert.equal(parent.querySelectorAll(".ent-cc-drag-handle").length, 2);
+
+    const headingRows = parent.querySelectorAll(".ent-cc-heading-row");
+    assert.equal(headingRows.length, 2);
+    view.readLibraryDrag = () => ({ ...guardedPayload, renderToken: "stale-render-token" });
+    headingRows[1]?.dispatch("drop");
+    await Promise.resolve();
+    assert.deepEqual(assignments, [], "a drag created by an older render must not mutate the current layout");
+
+    view.readLibraryDrag = () => guardedPayload;
+    const headingDrop = headingRows[1]?.dispatch("dragover");
+    assert.equal(headingDrop?.defaultPrevented, true);
+    headingRows[1]?.dispatch("drop");
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepEqual(assignments, [{ path: first.path, headingId: "heading-b" }]);
+
+    const recordRows = parent.querySelectorAll(".ent-cc-subject-row");
+    assert.equal(recordRows.length, 2);
+    recordRows[1]?.setBoundingClientRect({ top: 0, height: 44, bottom: 44 });
+    const rowDrag = recordRows[1]?.dispatch("dragover", { clientY: 40 });
+    assert.equal(rowDrag?.defaultPrevented, true);
+    assert.equal(recordRows[1]?.hasClass("is-drop-after"), true);
+    recordRows[1]?.dispatch("drop", { clientY: 40 });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepEqual(view.plugin.data.portableIndex.libraryLayouts[library.id]?.[0]?.subjects, ["subject-b", "subject-a"]);
   } finally {
     mobilePlatform.isMobile = previousMobile;
   }

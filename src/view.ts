@@ -3,6 +3,8 @@ import type EntVaultCommandCenterPlugin from "./main";
 import { IndexManagerModal, type ManagerTab } from "./index-manager";
 import { ExportImportCenterModal } from "./portability-modal";
 import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge-base-modal";
+import { LibraryEditorModal, ManageLibrariesModal } from "./library-modal";
+import { resolveLibraryIconId } from "./library-icons";
 import {
   assertPersonalBackupMatchesVault,
   buildCurriculumTree,
@@ -19,9 +21,11 @@ import {
   emptyCurriculumTree,
   expectedParentCurriculumId,
   GenericNoteFormValue,
-  groupRecordsByGroup,
   isExtensionCurriculumId,
   LayoutHeading,
+  LibraryDefinition,
+  libraryIdFromTab,
+  libraryTabId,
   LayoutSubheading,
   limitSnapshotStack,
   MainTab,
@@ -30,6 +34,7 @@ import {
   metadataHasGap,
   ParsedQuery,
   parseQuery,
+  recordBelongsToIndex,
   moveCurriculumVisual,
   pathIsInsideFolder,
   parsePersonalBackup,
@@ -94,10 +99,27 @@ interface Membership {
   subheadingId?: string;
 }
 
+type CatalogDestination = "topic" | { libraryId: string };
+
+interface LibraryMembership extends Membership {
+  libraryId: string;
+}
+
 interface DragMembership extends Membership {
   kind: "membership";
   path: string;
 }
+
+interface LibraryDragMembership extends LibraryMembership {
+  kind: "library-membership";
+  subjectId: string;
+  ownerViewId: string;
+  renderToken: string;
+  baseId: string;
+  dataEpoch: number;
+}
+
+type NewLibraryDragMembership = Omit<LibraryDragMembership, "ownerViewId" | "renderToken" | "baseId" | "dataEpoch">;
 
 interface CurriculumDrag {
   kind: "curriculum-record";
@@ -112,6 +134,23 @@ interface QueueDefinition {
 }
 
 interface TabDefinition { id: MainTab; label: string; icon: string }
+
+const libraryIdForTab = (tab: MainTab): string | null => libraryIdFromTab(tab);
+
+/** Only identities explicitly completed from an imported placeholder may change or remove their local binding. */
+export function canRelinkPortableRecord(
+  record: Pick<VaultRecord, "portableId" | "portableRelinkable" | "isPlaceholder">,
+): boolean {
+  return Boolean(record.portableId && record.portableRelinkable && !record.isPlaceholder);
+}
+
+function libraryLabel(library: Pick<LibraryDefinition, "name" | "singularName">, plural = false): string {
+  return plural ? library.name : library.singularName;
+}
+
+function libraryIcon(library: Pick<LibraryDefinition, "icon">): string {
+  return resolveLibraryIconId(library.icon);
+}
 
 interface SearchRecordContext {
   source: KnowledgeBaseSearchSource;
@@ -168,7 +207,8 @@ export function calculateSearchViewportLayout(
 
 export function tabDefinitions(
   settings: PluginSettings,
-  records: ReadonlyArray<Pick<VaultRecord, "kind">> = [],
+  _records: ReadonlyArray<Pick<VaultRecord, "kind" | "libraryId">> = [],
+  configuredLibraries: ReadonlyArray<LibraryDefinition> = [],
 ): TabDefinition[] {
   const tabs: TabDefinition[] = [
     { id: "curriculum", label: settings.indexLabel, icon: "library" },
@@ -176,15 +216,10 @@ export function tabDefinitions(
     { id: "collections", label: "My Collections", icon: "folders" },
     { id: "queues", label: "Smart Queues", icon: "list-checks" },
   ];
-  const hasKind = (kind: VaultRecord["kind"]): boolean => records.some((record) => record.kind === kind);
-  if (settings.workspaceMode === "ent-clinical" || hasKind("procedure")) {
-    tabs.push({ id: "procedures", label: "Procedures", icon: "clipboard-list" });
-  }
-  if (settings.workspaceMode === "ent-clinical" || hasKind("medication")) {
-    tabs.push({ id: "medications", label: "Medications", icon: "pill" });
-  }
-  if (settings.workspaceMode === "ent-clinical" || hasKind("syndrome")) {
-    tabs.push({ id: "syndromes", label: "Syndromes", icon: "dna" });
+  for (const library of [...configuredLibraries]
+    .filter((candidate) => candidate.archivedAt === null)
+    .sort((left, right) => left.order - right.order || left.name.localeCompare(right.name))) {
+    tabs.push({ id: libraryTabId(library.id), label: library.name, icon: libraryIcon(library) });
   }
   return tabs;
 }
@@ -205,8 +240,13 @@ function disclosureButton(parent: HTMLElement, collapsed: boolean, label: string
   return button;
 }
 
-function titleForTab(tab: MainTab, settings: PluginSettings, records: VaultRecord[] = []): string {
-  return tabDefinitions(settings, records).find((item) => item.id === tab)?.label ?? "Records";
+function titleForTab(
+  tab: MainTab,
+  settings: PluginSettings,
+  records: VaultRecord[] = [],
+  libraries: LibraryDefinition[] = [],
+): string {
+  return tabDefinitions(settings, records, libraries).find((item) => item.id === tab)?.label ?? "Records";
 }
 
 function uniqueRecords(records: VaultRecord[]): VaultRecord[] {
@@ -277,6 +317,8 @@ export class EntVaultCommandCenterView extends ItemView {
   private collapsedCurriculumNodes = new Set<string>();
   private visualPlacementPaths = new Set<string>();
   private readonly viewInstanceId = makeId("view");
+  /** Invalidates an in-flight desktop drag whenever its rendered tree is replaced. */
+  private libraryDragRenderToken = makeId("library-drag-render");
   private setupPromptShown = false;
   private loadedBaseId = "";
   private loadedDataEpoch = 0;
@@ -369,14 +411,18 @@ export class EntVaultCommandCenterView extends ItemView {
       this.records = this.plugin.getRecords();
       this.recordByPath = new Map(this.records.map((record) => [record.path, record]));
     }
-    if (!tabDefinitions(this.plugin.data.settings, this.records)
+    if (!tabDefinitions(this.plugin.data.settings, this.records, this.plugin.getLibraries())
       .some((tab) => tab.id === this.plugin.data.activeTab)
       && !this.plugin.isDataReadOnly()) {
       this.plugin.data.activeTab = "curriculum";
       await this.plugin.savePluginData();
       if (!this.guardLoadedBase()) return;
     }
-    this.curriculum = buildCurriculumTree(this.records, this.plugin.data.curriculumVisual);
+    this.curriculum = buildCurriculumTree(
+      this.records,
+      this.plugin.data.curriculumVisual,
+      this.plugin.data.settings.workspaceMode === "ent-clinical",
+    );
     this.render();
   }
 
@@ -493,9 +539,24 @@ export class EntVaultCommandCenterView extends ItemView {
   public openAddActions(): void {
     const ownsBase = this.createOpenedBaseGuard();
     const settings = this.plugin.data.settings;
+    const activeLibraryId = libraryIdForTab(this.plugin.data.activeTab);
+    const activeLibrary = activeLibraryId ? this.plugin.getLibrary(activeLibraryId) : null;
+    const activeLibraryAcceptsManualAdd = Boolean(activeLibrary
+      && (!this.plugin.isClinicalMode() || activeLibrary.sourceKind === null));
+    const addableLibraries = this.plugin.getLibraries()
+      .filter((library) => !this.plugin.isClinicalMode() || library.sourceKind === null);
     const actions = [
+      ...(activeLibrary && activeLibraryAcceptsManualAdd ? [
+        { id: "create-active-library", title: `Create ${libraryLabel(activeLibrary)}`, description: `Create a Markdown note and classify it directly in ${libraryLabel(activeLibrary, true)}.`, icon: "file-plus-2" },
+        { id: "existing-active-library", title: `Add existing note to ${libraryLabel(activeLibrary, true)}`, description: "Classify an existing Markdown note without moving or rewriting it.", icon: "list-plus" },
+        { id: "current-active-library", title: `Add current note to ${libraryLabel(activeLibrary, true)}`, description: "Classify the open Markdown note without changing its file.", icon: "panel-top" },
+      ] : []),
       { id: "create-note", title: `Create ${settings.itemSingular}`, description: "Start with an empty note or choose a Markdown template and destination folder.", icon: "file-plus-2" },
       ...(!this.plugin.isClinicalMode() ? [{ id: "index-existing", title: `Add existing note to ${settings.indexLabel}`, description: `Index any eligible Markdown note without moving or editing its file.`, icon: "list-plus" }] : []),
+      ...(!activeLibraryAcceptsManualAdd && addableLibraries.length > 0 ? [
+        { id: "choose-library", title: "Add to library…", description: "Choose a library, then create, select, or use the current note without changing Markdown.", icon: "library" },
+      ] : []),
+      { id: "new-library", title: "New library…", description: "Create another top-level section with its own headings and subheadings.", icon: "library-big" },
       { id: "existing-topic", title: `Add indexed ${settings.itemSingular}`, description: `Choose from ${settings.indexLabel} and place it under any collection heading or subheading.`, icon: "library" },
       { id: "vault-note", title: "Link an existing vault note", description: "Add a Markdown note to a collection without moving or modifying the note.", icon: "file-plus-2" },
       { id: "current-note", title: "Add current note", description: "Place the currently open note in a collection.", icon: "panel-top" },
@@ -510,7 +571,12 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     new AddActionModal(this.app, actions, (action) => {
       if (!ownsBase()) return;
-      if (action.id === "create-note") this.startCreateKnowledgeNote();
+      if (action.id === "create-active-library" && activeLibrary) this.startCreateLibraryNote(activeLibrary.id);
+      else if (action.id === "existing-active-library" && activeLibrary) this.startAddExistingToLibrary(activeLibrary.id);
+      else if (action.id === "current-active-library" && activeLibrary) this.startAddCurrentToLibrary(activeLibrary.id);
+      else if (action.id === "choose-library") this.openLibraryAddPicker();
+      else if (action.id === "new-library") new LibraryEditorModal(this.plugin, null, () => this.render()).open();
+      else if (action.id === "create-note") this.startCreateKnowledgeNote();
       else if (action.id === "index-existing") this.startAddExistingToIndex();
       else if (action.id === "existing-topic") this.startAddExistingTopic();
       else if (action.id === "vault-note") this.startLinkVaultNote(false);
@@ -520,6 +586,98 @@ export class EntVaultCommandCenterView extends ItemView {
       else if (action.id === "canonical") this.startCreateCanonical();
       else if (action.id === "any-note") this.startLinkVaultNote(true);
     }, `Add to ${settings.workspaceName}`).open();
+  }
+
+  private openLibraryAddPicker(): void {
+    if (!this.guardLoadedBase()) return;
+    const libraries = this.plugin.getLibraries()
+      .filter((library) => !this.plugin.isClinicalMode() || library.sourceKind === null);
+    if (libraries.length === 0) {
+      new Notice("Create a custom library first, or add native clinical records through their existing source folders.");
+      return;
+    }
+    const ownsBase = this.createOpenedBaseGuard();
+    new AddActionModal(this.app, libraries.map((library) => ({
+      id: library.id,
+      title: library.name,
+      description: `Add a ${library.singularName.toLocaleLowerCase()} without moving or rewriting its Markdown note.`,
+      icon: libraryIcon(library),
+    })), (action) => {
+      if (ownsBase()) this.openCatalogAddActions(action.id);
+    }, "Choose a library").open();
+  }
+
+  private openCatalogAddActions(libraryId: string): void {
+    if (!this.guardLoadedBase()) return;
+    const library = this.plugin.getLibrary(libraryId);
+    if (!library || library.archivedAt !== null) return;
+    if (this.plugin.isClinicalMode() && library.sourceKind !== null) {
+      new Notice(`The built-in ${library.name} library follows native clinical source classification. Create a custom library for visual-only classification.`);
+      return;
+    }
+    const ownsBase = this.createOpenedBaseGuard();
+    new AddActionModal(this.app, [
+      { id: "create", title: `Create ${libraryLabel(library)}`, description: `Create a Markdown note and classify it directly in ${libraryLabel(library, true)}.`, icon: "file-plus-2" },
+      { id: "existing", title: "Add existing note", description: "Choose any eligible Markdown note; its path and contents will not change.", icon: "list-plus" },
+      { id: "current", title: "Add current note", description: "Use the currently open Markdown note without modifying it.", icon: "panel-top" },
+    ], (action) => {
+      if (!ownsBase()) return;
+      if (action.id === "create") this.startCreateLibraryNote(libraryId);
+      else if (action.id === "existing") this.startAddExistingToLibrary(libraryId);
+      else this.startAddCurrentToLibrary(libraryId);
+    }, `Add to ${library.name}`).open();
+  }
+
+  private startCreateLibraryNote(libraryId: string): void {
+    const library = this.plugin.getLibrary(libraryId);
+    if (!library || library.archivedAt !== null) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    this.startCreateKnowledgeNote({}, false, async (file) => {
+      if (!ownsBase()) return;
+      await this.plugin.assignRecordToLibrary(file.path, libraryId);
+    }, `${library.singularName} created and added to ${library.name}. The Markdown note was not rewritten.`, {
+      createLabel: library.singularName,
+      contextNotice: `This Markdown note will be classified in ${library.name} after creation. You can choose its heading or subheading from the record’s actions menu.`,
+    });
+  }
+
+  private startAddExistingToLibrary(libraryId: string): void {
+    if (!this.guardLoadedBase()) return;
+    const library = this.plugin.getLibrary(libraryId);
+    if (!library || library.archivedAt !== null) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const alreadyClassified = new Set(this.records
+      .filter((record) => record.libraryId === libraryId && !record.isPlaceholder)
+      .map((record) => record.path));
+    const files = this.plugin.getVaultNoteFiles(false).filter((file) => !alreadyClassified.has(file.path));
+    if (files.length === 0) {
+      new Notice(`Every eligible Markdown note is already classified in ${library.name}.`);
+      return;
+    }
+    new VaultFilePickerModal(this.app, files, `Add existing note to ${library.name}`, async (file) => {
+      if (!ownsBase()) return;
+      await this.plugin.assignRecordToLibrary(file.path, libraryId);
+      if (!ownsBase()) return;
+      new Notice(`Added “${file.basename}” to ${library.name}. The note stayed at ${file.path} and its contents were not changed.`);
+    }).open();
+  }
+
+  private startAddCurrentToLibrary(libraryId: string, explicitPath?: string): void {
+    if (!this.guardLoadedBase()) return;
+    const library = this.plugin.getLibrary(libraryId);
+    if (!library || library.archivedAt !== null) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const file = explicitPath ? this.app.vault.getAbstractFileByPath(explicitPath) : this.app.workspace.getActiveFile();
+    if (!(file instanceof TFile) || file.extension.toLocaleLowerCase() !== "md") {
+      new Notice(`Open a Markdown note first, then add it to ${library.name}.`);
+      return;
+    }
+    this.run(async () => {
+      if (!ownsBase()) return;
+      await this.plugin.assignRecordToLibrary(file.path, libraryId);
+      if (!ownsBase()) return;
+      new Notice(`Added “${file.basename}” to ${library.name}. The Markdown note was not changed.`);
+    });
   }
 
   public openIndexManager(initialTab: ManagerTab = "indexed"): void {
@@ -532,6 +690,10 @@ export class EntVaultCommandCenterView extends ItemView {
 
   public openKnowledgeBaseManager(): void {
     new ManageKnowledgeBasesModal(this.plugin).open();
+  }
+
+  public openLibraryManager(): void {
+    new ManageLibrariesModal(this.plugin, () => this.render()).open();
   }
 
   private showKnowledgeBaseMenu(event: MouseEvent): void {
@@ -665,12 +827,15 @@ export class EntVaultCommandCenterView extends ItemView {
     initial: Partial<GenericNoteFormValue> = {},
     indexAfterCreate = !this.plugin.isClinicalMode(),
     onCreated?: (file: TFile) => void | Promise<void>,
+    completionMessage?: string,
+    formContext?: { createLabel?: string; contextNotice?: string },
   ): void {
     if (!this.guardLoadedBase()) return;
     const ownsBase = this.createOpenedBaseGuard();
     const settings = this.plugin.data.settings;
     new KnowledgeNoteModal(this.app, {
       itemSingular: settings.itemSingular,
+      ...formContext,
       templates: this.plugin.getTemplateFiles(),
       initial: {
         title: initial.title ?? "",
@@ -705,9 +870,9 @@ export class EntVaultCommandCenterView extends ItemView {
           await this.reload();
           if (!ownsBase()) return;
         }
-        new Notice(onCreated
+        new Notice(completionMessage ?? (onCreated
           ? `${settings.itemSingular[0]?.toUpperCase() ?? "N"}${settings.itemSingular.slice(1)} created and linked to the imported subject.`
-          : `${settings.itemSingular[0]?.toUpperCase() ?? "N"}${settings.itemSingular.slice(1)} created${indexAfterCreate && !this.plugin.isClinicalMode() ? ` and added to ${settings.indexLabel}` : ""}. Existing notes were not changed.`);
+          : `${settings.itemSingular[0]?.toUpperCase() ?? "N"}${settings.itemSingular.slice(1)} created${indexAfterCreate && !this.plugin.isClinicalMode() ? ` and added to ${settings.indexLabel}` : ""}. Existing notes were not changed.`));
         if (value.addToCollection) this.openCollectionPicker(file.path);
         await this.plugin.openFile(file);
       },
@@ -1121,6 +1286,32 @@ export class EntVaultCommandCenterView extends ItemView {
       edit.createSpan({ text: this.editMode ? "Finish" : "Edit" });
       edit.addEventListener("click", () => { this.editMode = !this.editMode; this.render(); });
     }
+    const activeLibraryId = libraryIdForTab(this.plugin.data.activeTab);
+    const activeLibrary = activeLibraryId ? this.plugin.getLibrary(activeLibraryId) : null;
+    if (activeLibraryId && activeLibrary) {
+      const addHeading = actions.createEl("button", { cls: "ent-cc-button" });
+      setIcon(addHeading.createSpan(), "folder-plus");
+      addHeading.createSpan({ text: "New heading" });
+      addHeading.addEventListener("click", () => this.promptNewLibraryHeading(activeLibraryId));
+      const edit = actions.createEl("button", { cls: `ent-cc-button ${this.editMode ? "is-active" : ""}` });
+      setIcon(edit.createSpan(), this.editMode ? "check" : "list-tree");
+      edit.createSpan({ text: this.editMode ? "Done" : "Arrange" });
+      edit.addEventListener("click", () => {
+        if (this.editMode) {
+          this.editMode = false;
+          this.render();
+          return;
+        }
+        const ownsBase = this.createOpenedBaseGuard();
+        this.run(async () => {
+          if (!ownsBase()) return;
+          await this.plugin.initializeLibraryCatalog(activeLibraryId);
+          if (!ownsBase()) return;
+          this.editMode = true;
+          this.render();
+        });
+      });
+    }
     const undo = iconButton(actions, "undo-2", "Undo personal organization change", "ent-cc-history-action");
     undo.disabled = this.plugin.data.undoStack.length === 0;
     undo.addEventListener("click", () => this.run(() => this.plugin.undo()));
@@ -1163,7 +1354,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private renderTabs(parent: HTMLElement): void {
-    const tabs = tabDefinitions(this.plugin.data.settings, this.records);
+    const tabs = tabDefinitions(this.plugin.data.settings, this.records, this.plugin.getLibraries());
     const bar = parent.createDiv({ cls: "ent-cc-tabs", attr: { role: "tablist", "aria-label": "Command center sections" } });
     for (const tab of tabs) {
       const button = bar.createEl("button", {
@@ -1178,7 +1369,7 @@ export class EntVaultCommandCenterView extends ItemView {
         },
       });
       setIcon(button.createSpan(), tab.icon);
-      button.createSpan({ text: tab.label });
+      button.createSpan({ cls: "ent-cc-tab-label", text: tab.label });
       button.createSpan({ text: String(this.tabCount(tab.id)), cls: "ent-cc-tab-count" });
       button.addEventListener("click", () => this.run(() => this.changeTab(tab.id)));
       button.addEventListener("keydown", (event) => {
@@ -1220,14 +1411,15 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private tabCount(tab: MainTab): number {
-    if (tab === "curriculum") return this.records.filter((record) => record.kind === "topic" && (record.role === "canonical"
-      || record.role === "supporting"
-      || (record.role === "placeholder" && record.portableIndexed !== false)
-      || record.portableIndexed === true)).length;
+    if (tab === "curriculum") {
+      const topicsOnly = this.plugin.isClinicalMode();
+      return this.records.filter((record) => recordBelongsToIndex(record, topicsOnly)).length;
+    }
     if (tab === "inbox") return this.records.filter((record) => record.role === "proposal").length;
     if (tab === "collections") return new Set(collectionPaths(this.plugin.data.collections)).size;
     if (tab === "queues") return uniqueRecords(queueRecords(this.smartQueues())).length;
-    return this.records.filter((record) => record.kind === tab.slice(0, -1)).length;
+    const libraryId = libraryIdForTab(tab);
+    return libraryId ? this.records.filter((record) => record.libraryId === libraryId).length : 0;
   }
 
   private renderSearch(parent: HTMLElement): void {
@@ -1427,15 +1619,14 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private recordsForActiveTab(): VaultRecord[] {
     const tab = this.plugin.data.activeTab;
-    if (tab === "curriculum") return this.records.filter((record) => record.role === "canonical"
-      || record.role === "supporting"
-      || (record.role === "placeholder" && record.kind === "topic" && record.portableIndexed !== false)
-      || (record.kind === "topic" && record.portableIndexed === true));
+    if (tab === "curriculum") {
+      const topicsOnly = this.plugin.isClinicalMode();
+      return this.records.filter((record) => recordBelongsToIndex(record, topicsOnly));
+    }
     if (tab === "inbox") return this.records.filter((record) => record.role === "proposal");
     if (tab === "collections") return this.records;
-    if (tab === "procedures") return this.records.filter((record) => record.kind === "procedure");
-    if (tab === "medications") return this.records.filter((record) => record.kind === "medication");
-    if (tab === "syndromes") return this.records.filter((record) => record.kind === "syndrome");
+    const libraryId = libraryIdForTab(tab);
+    if (libraryId) return this.records.filter((record) => record.libraryId === libraryId);
     return this.records;
   }
 
@@ -1459,11 +1650,15 @@ export class EntVaultCommandCenterView extends ItemView {
       const settings = this.plugin.data.settings;
       this.countEl.createSpan({ text: `${visible} ${visible === 1 ? settings.itemSingular : settings.itemPlural}` });
     }
-    this.countEl.createSpan({ text: ` · ${titleForTab(this.plugin.data.activeTab, this.plugin.data.settings, this.records)}`, cls: "ent-cc-muted" });
+    this.countEl.createSpan({ text: ` · ${titleForTab(this.plugin.data.activeTab, this.plugin.data.settings, this.records, this.plugin.getLibraries(true))}`, cls: "ent-cc-muted" });
   }
 
   private renderTree(): void {
     if (!this.treeEl) return;
+    // A drag payload belongs to the exact tree that created it. Undo, Redo,
+    // Sync reloads, tab changes, and organization edits all replace this token
+    // through renderTree(), so a late drop cannot mutate newer organization.
+    this.libraryDragRenderToken = makeId("library-drag-render");
     // Parsed once per render; matchesParsedQuery is called O(n) times below.
     this.parsedQuery = parseQuery(this.query);
     this.visualPlacementPaths = visualPlacementPathSet(this.plugin.data.curriculumVisual, this.plugin.data.indexGroupByPath);
@@ -1501,7 +1696,10 @@ export class EntVaultCommandCenterView extends ItemView {
     if (visible === 0
       && !globalSearchPending
       && !(tab === "collections" && this.plugin.data.collections.length === 0)
-      && !(tab === "inbox" && !this.query)) {
+      && !(tab === "inbox" && !this.query)
+      // Library rendering owns its empty state so it can offer a direct
+      // catalog-specific Add action and explain that Markdown stays intact.
+      && !(libraryIdForTab(tab) && !this.query)) {
       if (tab === "curriculum" && !this.query && !this.plugin.isClinicalMode()) this.renderKnowledgeIndexEmpty(body);
       else body.createDiv({ cls: "ent-cc-empty", text: this.query ? "No records match this search." : "No records in this section." });
     }
@@ -1537,7 +1735,11 @@ export class EntVaultCommandCenterView extends ItemView {
     if (tab === "inbox") return this.plugin.isClinicalMode() ? "Unverified topic proposals / Capture" : `${settings.inboxLabel} / ${settings.itemSingular}`;
     if (tab === "collections") return `Collection / Subheading / ${settings.itemSingular}`;
     if (tab === "queues") return "Computed review queue / Subject";
-    return `${titleForTab(tab, this.plugin.data.settings)} / Knowledge record`;
+    const libraryId = libraryIdForTab(tab);
+    const library = libraryId ? this.plugin.getLibrary(libraryId) : null;
+    return library
+      ? `${library.singularName} / Heading / Subheading / Record`
+      : `${titleForTab(tab, this.plugin.data.settings, this.records, this.plugin.getLibraries(true))} / Knowledge record`;
   }
 
   private renderCollectionsEmpty(parent: HTMLElement): void {
@@ -1825,19 +2027,133 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private renderLibrary(parent: HTMLElement, input: VaultRecord[]): number {
     const records = input.filter((record) => matchesParsedQuery(record, this.parsedQuery));
-    const groups = groupRecordsByGroup(records, titleForTab(this.plugin.data.activeTab, this.plugin.data.settings));
-    for (const [group, grouped] of [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))) {
-      const section = parent.createDiv({ cls: "ent-cc-heading ent-cc-library-group" });
+    const libraryId = libraryIdForTab(this.plugin.data.activeTab);
+    const library = libraryId ? this.plugin.getLibrary(libraryId) : null;
+    if (!libraryId || !library) return 0;
+    const layout = this.libraryLayout(libraryId);
+    const bySubjectId = new Map<string, VaultRecord>();
+    for (const record of records) {
+      if (record.portableId) bySubjectId.set(record.portableId, record);
+    }
+    const placed = new Set<string>();
+
+    if (this.editMode) {
+      const hint = parent.createDiv({ cls: "ent-cc-arrange-hint", attr: { role: "note" } });
+      setIcon(hint.createSpan(), "list-tree");
+      hint.createSpan({ text: `Use each row’s … menu on iPhone. On desktop, drag records between headings or subheadings. This visual hierarchy is saved in plugin data; Markdown files are not moved or rewritten.` });
+    }
+
+    for (const heading of layout) {
+      for (const subjectId of heading.subjects) placed.add(subjectId);
+      for (const subheading of heading.subheadings) for (const subjectId of subheading.subjects) placed.add(subjectId);
+      this.renderLibraryHeading(parent, library, heading, bySubjectId);
+    }
+
+    const unplaced = records.filter((record) => !record.portableId || !placed.has(record.portableId));
+    if (unplaced.length > 0) {
+      const section = parent.createDiv({ cls: "ent-cc-heading ent-cc-library-group ent-cc-library-fallback" });
       const row = section.createDiv({ cls: "ent-cc-row ent-cc-heading-row" });
       row.createSpan({ cls: "ent-cc-disclosure" });
       const icon = row.createSpan({ cls: "ent-cc-leading-icon" });
-      setIcon(icon, this.plugin.data.activeTab === "medications" ? "pill" : this.plugin.data.activeTab === "syndromes" ? "dna" : "clipboard-list");
-      row.createSpan({ cls: "ent-cc-row-title", text: group });
-      row.createSpan({ cls: "ent-cc-row-count", text: String(grouped.length) });
+      setIcon(icon, libraryIcon(library));
+      row.createSpan({ cls: "ent-cc-row-title", text: `Unplaced ${library.name}` });
+      row.createSpan({ cls: "ent-cc-row-count", text: String(unplaced.length) });
       const content = section.createDiv({ cls: "ent-cc-heading-body" });
-      grouped.sort((a, b) => a.title.localeCompare(b.title)).forEach((record) => this.renderRecordRow(content, record, 1));
+      unplaced.sort((a, b) => a.title.localeCompare(b.title)).forEach((record) => this.renderRecordRow(content, record, 1));
+    }
+
+    if (!this.query && input.length === 0) {
+      const empty = parent.createDiv({ cls: "ent-cc-empty ent-cc-empty-action" });
+      setIcon(empty.createSpan(), libraryIcon(library));
+      empty.createEl("strong", { text: `No ${library.name.toLocaleLowerCase()} yet` });
+      empty.createEl("p", { text: this.plugin.isClinicalMode() && library.sourceKind !== null
+        ? `Records detected by the clinical profile will appear here. You can still create headings now for their visual organization.`
+        : `Create a note or classify an existing Markdown note directly in ${library.name}.` });
+      if (!this.plugin.isClinicalMode() || library.sourceKind === null) {
+        const button = empty.createEl("button", { cls: "ent-cc-button ent-cc-add-button" });
+        setIcon(button.createSpan(), "plus");
+        button.createSpan({ text: `Add first ${library.singularName.toLocaleLowerCase()}` });
+        button.addEventListener("click", () => this.openCatalogAddActions(libraryId));
+      }
     }
     return records.length;
+  }
+
+  private libraryLayout(libraryId: string): LayoutHeading[] {
+    return this.plugin.data.portableIndex.libraryLayouts[libraryId] ?? [];
+  }
+
+  private renderLibraryHeading(
+    parent: HTMLElement,
+    library: LibraryDefinition,
+    heading: LayoutHeading,
+    bySubjectId: Map<string, VaultRecord>,
+  ): void {
+    const recordsForSubjectIds = (subjectIds: string[]): Array<{ subjectId: string; record: VaultRecord }> => {
+      const resolved: Array<{ subjectId: string; record: VaultRecord }> = [];
+      for (const subjectId of subjectIds) {
+        const record = bySubjectId.get(subjectId);
+        if (record) resolved.push({ subjectId, record });
+      }
+      return resolved;
+    };
+    const direct = recordsForSubjectIds(heading.subjects);
+    const subheadings = heading.subheadings.map((subheading) => ({
+      subheading,
+      records: recordsForSubjectIds(subheading.subjects),
+    }));
+    const visibleCount = direct.length + subheadings.reduce((sum, item) => sum + item.records.length, 0);
+    const totalReferences = heading.subjects.length + heading.subheadings.reduce((sum, item) => sum + item.subjects.length, 0);
+    if (this.query && visibleCount === 0) return;
+
+    const collapsed = heading.collapsed && !this.query;
+    const section = parent.createDiv({ cls: "ent-cc-heading ent-cc-library-group" });
+    const row = section.createDiv({ cls: "ent-cc-row ent-cc-heading-row" });
+    disclosureButton(row, collapsed, heading.title).addEventListener("click", () => this.toggleLibraryHeading(heading));
+    const icon = row.createSpan({ cls: "ent-cc-leading-icon" });
+    setIcon(icon, libraryIcon(library));
+    const title = row.createEl("button", { cls: "ent-cc-row-title", text: heading.title });
+    title.addEventListener("click", () => this.toggleLibraryHeading(heading));
+    row.createSpan({ cls: "ent-cc-row-count", text: String(visibleCount) });
+    const missing = totalReferences - visibleCount;
+    if (missing > 0 && !this.query) row.createSpan({ cls: "ent-cc-row-missing", text: `${missing} missing` });
+    iconButton(row, "ellipsis", `Actions for ${heading.title}`, "ent-cc-row-more").addEventListener("click", (event) => this.showLibraryHeadingMenu(event, library.id, heading));
+    if (this.editMode) this.applyLibraryDrop(row, { libraryId: library.id, headingId: heading.id });
+    if (collapsed) return;
+
+    const content = section.createDiv({ cls: "ent-cc-heading-body" });
+    if (this.editMode) this.applyLibraryDrop(content, { libraryId: library.id, headingId: heading.id });
+    for (const { record } of direct) {
+      this.renderRecordRow(content, record, 1, undefined, undefined, { libraryId: library.id, headingId: heading.id });
+    }
+    for (const item of subheadings) this.renderLibrarySubheading(content, library, heading, item.subheading, item.records);
+  }
+
+  private renderLibrarySubheading(
+    parent: HTMLElement,
+    library: LibraryDefinition,
+    heading: LayoutHeading,
+    subheading: LayoutSubheading,
+    records: Array<{ subjectId: string; record: VaultRecord }>,
+  ): void {
+    if (this.query && records.length === 0) return;
+    const collapsed = subheading.collapsed && !this.query;
+    const section = parent.createDiv({ cls: "ent-cc-subheading ent-cc-library-subheading" });
+    const row = section.createDiv({ cls: "ent-cc-row ent-cc-subheading-row" });
+    disclosureButton(row, collapsed, subheading.title).addEventListener("click", () => this.toggleLibrarySubheading(heading, subheading));
+    const icon = row.createSpan({ cls: "ent-cc-leading-icon" });
+    setIcon(icon, "folder");
+    const title = row.createEl("button", { cls: "ent-cc-row-title", text: subheading.title });
+    title.addEventListener("click", () => this.toggleLibrarySubheading(heading, subheading));
+    row.createSpan({ cls: "ent-cc-row-count", text: String(records.length) });
+    iconButton(row, "ellipsis", `Actions for ${subheading.title}`, "ent-cc-row-more").addEventListener("click", (event) => this.showLibrarySubheadingMenu(event, library.id, heading, subheading));
+    if (this.editMode) this.applyLibraryDrop(row, { libraryId: library.id, headingId: heading.id, subheadingId: subheading.id });
+    if (collapsed) return;
+    const content = section.createDiv({ cls: "ent-cc-subheading-body" });
+    if (this.editMode) this.applyLibraryDrop(content, { libraryId: library.id, headingId: heading.id, subheadingId: subheading.id });
+    for (const { record } of records) {
+      this.renderRecordRow(content, record, 2, undefined, undefined, { libraryId: library.id, headingId: heading.id, subheadingId: subheading.id });
+    }
   }
 
   private renderGlobalSearchResults(parent: HTMLElement): number {
@@ -1873,16 +2189,21 @@ export class EntVaultCommandCenterView extends ItemView {
         {
           label: source.data.settings.indexLabel,
           icon: "library",
-          records: baseGroup.records.filter((record) => record.role !== "proposal" && record.kind === "topic"),
+          records: baseGroup.records.filter((record) => record.role !== "proposal"
+            && recordBelongsToIndex(record, source.data.settings.workspaceMode === "ent-clinical")),
         },
         {
           label: source.data.settings.inboxLabel,
           icon: "inbox",
           records: baseGroup.records.filter((record) => record.role === "proposal" || record.kind === "proposal"),
         },
-        { label: "Procedures", icon: "clipboard-list", records: baseGroup.records.filter((record) => record.kind === "procedure") },
-        { label: "Medications", icon: "pill", records: baseGroup.records.filter((record) => record.kind === "medication") },
-        { label: "Syndromes", icon: "dna", records: baseGroup.records.filter((record) => record.kind === "syndrome") },
+        ...[...source.data.portableIndex.libraries]
+          .sort((left, right) => left.order - right.order || left.name.localeCompare(right.name))
+          .map((library) => ({
+            label: `${library.name}${library.archivedAt === null ? "" : " (archived)"}`,
+            icon: libraryIcon(library),
+            records: baseGroup.records.filter((record) => record.libraryId === library.id),
+          })),
       ];
       const assigned = new Set<string>();
       for (const libraryGroup of libraryGroups) {
@@ -1922,6 +2243,10 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private recordRoleName(record: VaultRecord, data = this.plugin.data): string {
     if (record.isPlaceholder) return "No note yet";
+    if (record.libraryId) {
+      const library = data.portableIndex.libraries.find((candidate) => candidate.id === record.libraryId);
+      if (library) return `${library.singularName} in ${library.name}`;
+    }
     if (data.settings.workspaceMode === "ent-clinical") return roleLabel(record);
     if (record.kind === "topic") return `Indexed ${data.settings.itemSingular}`;
     if (record.role === "proposal") return `${data.settings.inboxLabel} ${data.settings.itemSingular}`;
@@ -1934,6 +2259,7 @@ export class EntVaultCommandCenterView extends ItemView {
     level: number,
     membership?: Membership,
     searchContext?: SearchRecordContext,
+    libraryMembership?: LibraryMembership,
   ): void {
     const source = searchContext?.source;
     const sourceData = source?.data ?? this.plugin.data;
@@ -1941,7 +2267,18 @@ export class EntVaultCommandCenterView extends ItemView {
     const row = parent.createDiv({
       cls: `ent-cc-row ent-cc-subject-row ent-cc-level-${level} ${record.isPlaceholder ? "ent-cc-placeholder-row" : ""} ${sourceIsActive && this.plugin.data.selectedPath === record.path ? "is-selected" : ""}`,
     });
-    if (membership && this.editMode && !Platform.isMobile) {
+    if (libraryMembership && record.portableId && this.editMode && !Platform.isMobile) {
+      const handle = iconButton(row, "grip-vertical", `Drag ${record.title}`, "ent-cc-drag-handle");
+      handle.draggable = true;
+      handle.addEventListener("dragstart", (event) => this.writeLibraryDrag(event, {
+        kind: "library-membership",
+        subjectId: record.portableId ?? "",
+        ...libraryMembership,
+      }));
+      handle.addEventListener("dragstart", () => row.addClass("is-dragging"));
+      handle.addEventListener("dragend", () => row.removeClass("is-dragging", "is-drop-before", "is-drop-after"));
+      this.applyLibraryRowDrop(row, libraryMembership, record.portableId);
+    } else if (membership && this.editMode && !Platform.isMobile) {
       const handle = iconButton(row, "grip-vertical", `Drag ${record.title}`, "ent-cc-drag-handle");
       handle.draggable = true;
       handle.addEventListener("dragstart", (event) => this.writeDrag(event, { kind: "membership", path: record.path, ...membership }));
@@ -2014,7 +2351,7 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     iconButton(row, "ellipsis", `Actions for ${record.title}`, "ent-cc-row-more").addEventListener("click", (event) => {
       if (source && !sourceIsActive) this.showCrossBaseRecordMenu(event, source, record);
-      else this.showRecordMenu(event, record, membership);
+      else this.showRecordMenu(event, record, membership, libraryMembership);
     });
     row.addEventListener("dblclick", () => this.run(() => source && !sourceIsActive
       ? this.activateSearchResult(source, record, record.isPlaceholder ? "placeholder" : "open")
@@ -2215,6 +2552,7 @@ export class EntVaultCommandCenterView extends ItemView {
       setIcon(add.createSpan(), "folder-plus"); add.createSpan({ text: "Add to collection" });
       add.addEventListener("click", () => this.openCollectionPicker(record.path));
       iconButton(actions, this.plugin.data.pinnedPaths.includes(record.path) ? "pin-off" : "pin", this.plugin.data.pinnedPaths.includes(record.path) ? "Unpin" : "Pin").addEventListener("click", () => this.run(() => this.togglePin(record.path)));
+      if (record.libraryId) this.inspectorField(body, "Library", this.plugin.getLibrary(record.libraryId)?.name || "Archived or missing library");
       this.inspectorField(body, this.plugin.data.settings.groupLabel, record.domain || "Ungrouped");
       this.inspectorField(body, "Portable subject ID", record.portableId || "—");
       this.inspectorField(body, "Note status", "Not created or linked");
@@ -2240,7 +2578,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const add = actions.createEl("button", { cls: "ent-cc-button" });
     setIcon(add.createSpan(), "folder-plus"); add.createSpan({ text: "Add to collection" });
     add.addEventListener("click", () => this.openCollectionPicker(record.path));
-    if (record.portableId) {
+    if (canRelinkPortableRecord(record)) {
       const changeLink = actions.createEl("button", { cls: "ent-cc-button" });
       setIcon(changeLink.createSpan(), "link"); changeLink.createSpan({ text: "Change linked note…" });
       changeLink.addEventListener("click", () => this.openPortableSubjectLinkPicker(record));
@@ -2248,7 +2586,9 @@ export class EntVaultCommandCenterView extends ItemView {
       setIcon(unlink.createSpan(), "link-2-off"); unlink.createSpan({ text: "Unlink note…" });
       unlink.addEventListener("click", () => this.confirmPortableSubjectUnlink(record));
     }
-    if (this.plugin.canVisuallyMoveAcrossGroups() && record.kind === "topic") {
+    if (!record.libraryId
+      && this.plugin.canVisuallyMoveAcrossGroups()
+      && recordBelongsToIndex(record, this.plugin.isClinicalMode())) {
       const moveGroup = actions.createEl("button", { cls: "ent-cc-button" });
       setIcon(moveGroup.createSpan(), "folder-input"); moveGroup.createSpan({ text: `Move ${this.plugin.data.settings.groupLabel.toLowerCase()}…` });
       moveGroup.addEventListener("click", () => this.openIndexGroupPicker(record));
@@ -2271,6 +2611,7 @@ export class EntVaultCommandCenterView extends ItemView {
 
     const settings = this.plugin.data.settings;
     this.inspectorField(body, this.plugin.isClinicalMode() ? "Curriculum ID" : `ID (${settings.idProperty})`, record.curriculumId || (record.role === "proposal" ? "Not assigned" : "—"));
+    if (record.libraryId) this.inspectorField(body, "Library", this.plugin.getLibrary(record.libraryId)?.name || "Archived or missing library");
     this.inspectorField(body, this.plugin.isClinicalMode() ? "Domain" : settings.groupLabel, record.domain || "—");
     this.inspectorField(body, "Knowledge type", record.topicKind || record.kind);
     if (this.plugin.isClinicalMode()) {
@@ -2521,6 +2862,284 @@ export class EntVaultCommandCenterView extends ItemView {
     }).open();
   }
 
+  private promptNewLibraryHeading(libraryId: string, addRecord?: VaultRecord): void {
+    if (!this.guardLoadedBase()) return;
+    const library = this.plugin.getLibrary(libraryId);
+    if (!library || library.archivedAt !== null) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    new TextPromptModal(this.app, {
+      title: `New ${library.singularName.toLocaleLowerCase()} heading`,
+      placeholder: `e.g. ${library.name} — key group`,
+      submitLabel: "Create heading",
+      onSubmit: async (title) => {
+        if (!ownsBase()) return;
+        const heading: LayoutHeading = { id: makeId(`library-${libraryId}`), title, collapsed: false, subjects: [], subheadings: [] };
+        await this.plugin.mutate(`Create ${library.singularName.toLocaleLowerCase()} heading “${title}”`, () => {
+          this.libraryLayout(libraryId).push(heading);
+        }, { includePortableIndex: true, requireUndo: true });
+        if (!ownsBase()) return;
+        if (addRecord) await this.plugin.assignRecordToLibrary(addRecord.path, libraryId, { headingId: heading.id });
+      },
+    }).open();
+  }
+
+  private promptNewLibrarySubheading(libraryId: string, heading: LayoutHeading): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const openedLayout = this.libraryLayout(libraryId);
+    const openedHeading = openedLayout.find((item) => item.id === heading.id);
+    if (!openedHeading) {
+      new Notice("That library heading is no longer available. Reopen the action and try again.");
+      return;
+    }
+    new TextPromptModal(this.app, {
+      title: `New subheading in ${openedHeading.title}`,
+      placeholder: "Subheading name",
+      submitLabel: "Create subheading",
+      onSubmit: async (title) => {
+        if (!ownsBase()) return;
+        if (this.libraryLayout(libraryId) !== openedLayout) throw new Error("The library organization changed. Reopen the action and try again.");
+        const currentHeading = openedLayout.find((item) => item.id === openedHeading.id);
+        if (!currentHeading) throw new Error("That library heading is no longer available. Reopen the action and try again.");
+        await this.plugin.mutate(`Create library subheading “${title}”`, () => {
+          currentHeading.subheadings.push({ id: makeId(`library-${libraryId}-subheading`), title, collapsed: false, subjects: [] });
+          currentHeading.collapsed = false;
+        }, { includePortableIndex: true, requireUndo: true });
+      },
+    }).open();
+  }
+
+  private toggleLibraryHeading(heading: LayoutHeading): void {
+    const ownsBase = this.createOpenedBaseGuard();
+    this.run(async () => {
+      if (!ownsBase()) return;
+      const libraryId = libraryIdForTab(this.plugin.data.activeTab);
+      const currentHeading = libraryId ? this.libraryLayout(libraryId).find((item) => item.id === heading.id) : null;
+      if (!currentHeading) return;
+      const previous = currentHeading.collapsed;
+      currentHeading.collapsed = !previous;
+      try {
+        await this.plugin.savePluginData();
+      } catch (error) {
+        currentHeading.collapsed = previous;
+        throw error;
+      }
+      if (ownsBase()) this.renderTree();
+    });
+  }
+
+  private toggleLibrarySubheading(heading: LayoutHeading, subheading: LayoutSubheading): void {
+    const ownsBase = this.createOpenedBaseGuard();
+    this.run(async () => {
+      if (!ownsBase()) return;
+      const libraryId = libraryIdForTab(this.plugin.data.activeTab);
+      const currentHeading = libraryId ? this.libraryLayout(libraryId).find((item) => item.id === heading.id) : null;
+      const currentSubheading = currentHeading?.subheadings.find((item) => item.id === subheading.id);
+      if (!currentHeading || !currentSubheading) return;
+      const previousSubheading = currentSubheading.collapsed;
+      const previousHeading = currentHeading.collapsed;
+      currentSubheading.collapsed = !previousSubheading;
+      currentHeading.collapsed = false;
+      try {
+        await this.plugin.savePluginData();
+      } catch (error) {
+        currentSubheading.collapsed = previousSubheading;
+        currentHeading.collapsed = previousHeading;
+        throw error;
+      }
+      if (ownsBase()) this.renderTree();
+    });
+  }
+
+  private libraryMembershipList(membership: LibraryMembership): string[] {
+    const heading = this.libraryLayout(membership.libraryId).find((item) => item.id === membership.headingId);
+    if (!heading) return [];
+    if (!membership.subheadingId) return heading.subjects;
+    return heading.subheadings.find((item) => item.id === membership.subheadingId)?.subjects ?? [];
+  }
+
+  private removeLibraryMembership(subjectId: string, libraryId: string): void {
+    for (const heading of this.libraryLayout(libraryId)) {
+      heading.subjects = heading.subjects.filter((item) => item !== subjectId);
+      for (const subheading of heading.subheadings) subheading.subjects = subheading.subjects.filter((item) => item !== subjectId);
+    }
+  }
+
+  private async moveLibraryHeading(libraryId: string, from: number, to: number): Promise<void> {
+    const layout = this.libraryLayout(libraryId);
+    if (from < 0 || to < 0 || from >= layout.length || to >= layout.length) return;
+    await this.plugin.mutate(`Reorder ${this.plugin.getLibrary(libraryId)?.singularName.toLocaleLowerCase() ?? "library"} heading`, () => {
+      const [heading] = layout.splice(from, 1);
+      if (heading) layout.splice(to, 0, heading);
+    }, { includePortableIndex: true, requireUndo: true });
+  }
+
+  private async moveLibrarySubheading(_libraryId: string, heading: LayoutHeading, from: number, to: number): Promise<void> {
+    if (from < 0 || to < 0 || from >= heading.subheadings.length || to >= heading.subheadings.length) return;
+    await this.plugin.mutate("Reorder library subheading", () => {
+      const [subheading] = heading.subheadings.splice(from, 1);
+      if (subheading) heading.subheadings.splice(to, 0, subheading);
+    }, { includePortableIndex: true, requireUndo: true });
+  }
+
+  private async moveLibraryRecordWithin(membership: LibraryMembership, from: number, to: number): Promise<void> {
+    const subjects = this.libraryMembershipList(membership);
+    if (from < 0 || to < 0 || from >= subjects.length || to >= subjects.length) return;
+    await this.plugin.mutate("Reorder library record", () => {
+      const [subjectId] = subjects.splice(from, 1);
+      if (subjectId) subjects.splice(to, 0, subjectId);
+    }, { includePortableIndex: true, requireUndo: true });
+  }
+
+  private openLibraryTargetPicker(record: VaultRecord, libraryId: string): void {
+    if (!this.guardLoadedBase()) return;
+    const library = this.plugin.getLibrary(libraryId);
+    if (!library) return;
+    const targets = collectionTargets(this.libraryLayout(libraryId));
+    if (targets.length === 0) {
+      this.promptNewLibraryHeading(libraryId, record);
+      return;
+    }
+    const ownsBase = this.createOpenedBaseGuard();
+    new CollectionPickerModal(this.app, targets, "Move", async (target) => {
+      if (!ownsBase()) return;
+      await this.plugin.assignRecordToLibrary(record.path, libraryId, target);
+      if (!ownsBase()) return;
+      new Notice(`Moved “${record.title}” within ${library.name}. The Markdown note was not changed.`);
+    }, "heading or subheading").open();
+  }
+
+  private openPlaceLibraryRecordPicker(libraryId: string, target: Membership): void {
+    const ownsBase = this.createOpenedBaseGuard();
+    const library = this.plugin.getLibrary(libraryId);
+    if (!library) return;
+    const records = this.records.filter((record) => record.libraryId === libraryId);
+    if (records.length === 0) {
+      new Notice(`No ${library.name.toLocaleLowerCase()} are available to place.`);
+      return;
+    }
+    new RecordPickerModal(this.app, records, `Place ${library.singularName.toLocaleLowerCase()} in heading`, "Search title, group, ID, or path…", async (record) => {
+      if (!ownsBase()) return;
+      await this.plugin.assignRecordToLibrary(record.path, libraryId, target);
+      if (!ownsBase()) return;
+      new Notice(`Placed “${record.title}” visually. The Markdown note was not changed.`);
+    }).open();
+  }
+
+  private showLibraryHeadingMenu(event: MouseEvent, libraryId: string, heading: LayoutHeading): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const library = this.plugin.getLibrary(libraryId);
+    if (!library) return;
+    const layout = this.libraryLayout(libraryId);
+    const layoutIsCurrent = (): boolean => layout === this.libraryLayout(libraryId);
+    const index = layout.findIndex((item) => item.id === heading.id);
+    const menu = new Menu();
+    menu.addItem((item) => item.setTitle("Move heading up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => {
+      if (!ownsBase() || !layoutIsCurrent()) return;
+      const currentIndex = this.libraryLayout(libraryId).findIndex((item) => item.id === heading.id);
+      if (currentIndex > 0) this.run(() => this.moveLibraryHeading(libraryId, currentIndex, currentIndex - 1));
+    }));
+    menu.addItem((item) => item.setTitle("Move heading down").setIcon("arrow-down").setDisabled(index < 0 || index >= layout.length - 1).onClick(() => {
+      if (!ownsBase() || !layoutIsCurrent()) return;
+      const currentLayout = this.libraryLayout(libraryId);
+      const currentIndex = currentLayout.findIndex((item) => item.id === heading.id);
+      if (currentIndex >= 0 && currentIndex < currentLayout.length - 1) this.run(() => this.moveLibraryHeading(libraryId, currentIndex, currentIndex + 1));
+    }));
+    menu.addSeparator();
+    menu.addItem((item) => item.setTitle("Place record here…").setIcon("file-input").onClick(() => {
+      if (ownsBase() && layoutIsCurrent()) this.openPlaceLibraryRecordPicker(libraryId, { headingId: heading.id });
+    }));
+    menu.addItem((item) => item.setTitle("Add subheading").setIcon("folder-plus").onClick(() => {
+      if (ownsBase() && layoutIsCurrent()) this.promptNewLibrarySubheading(libraryId, heading);
+    }));
+    menu.addItem((item) => item.setTitle("Rename heading").setIcon("pencil").onClick(() => {
+      if (!ownsBase() || !layoutIsCurrent()) return;
+      new TextPromptModal(this.app, {
+        title: "Rename library heading", placeholder: "Heading name", initialValue: heading.title,
+        onSubmit: async (title) => {
+          if (!ownsBase()) return;
+          if (!layoutIsCurrent()) throw new Error("The library organization changed. Reopen the action and try again.");
+          const currentHeading = this.libraryLayout(libraryId).find((item) => item.id === heading.id);
+          if (!currentHeading) throw new Error("That library heading is no longer available. Reopen the action and try again.");
+          await this.plugin.mutate(`Rename library heading “${currentHeading.title}”`, () => { currentHeading.title = title; }, { includePortableIndex: true, requireUndo: true });
+        },
+      }).open();
+    }));
+    menu.addSeparator();
+    menu.addItem((item) => item.setTitle("Delete heading").setIcon("trash-2").onClick(() => {
+      if (!ownsBase() || !layoutIsCurrent()) return;
+      new ConfirmModal(this.app, "Delete library heading?", `“${heading.title}” will be removed. Its records remain in ${library.name} as unplaced records. No Markdown note will be deleted, moved, or rewritten.`, "Delete heading", async () => {
+        if (!ownsBase()) return;
+        if (!layoutIsCurrent()) throw new Error("The library organization changed. Reopen the action and try again.");
+        const current = this.libraryLayout(libraryId);
+        const currentHeading = current.find((item) => item.id === heading.id);
+        if (!currentHeading) throw new Error("That library heading is no longer available. Reopen the action and try again.");
+        await this.plugin.mutate(`Delete library heading “${currentHeading.title}”`, () => {
+          const currentIndex = current.findIndex((item) => item.id === currentHeading.id);
+          if (currentIndex >= 0) current.splice(currentIndex, 1);
+        }, { includePortableIndex: true, requireUndo: true });
+      }).open();
+    }));
+    menu.showAtMouseEvent(event);
+  }
+
+  private showLibrarySubheadingMenu(event: MouseEvent, libraryId: string, heading: LayoutHeading, subheading: LayoutSubheading): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const openedLayout = this.libraryLayout(libraryId);
+    const layoutIsCurrent = (): boolean => openedLayout === this.libraryLayout(libraryId);
+    const index = heading.subheadings.findIndex((item) => item.id === subheading.id);
+    const menu = new Menu();
+    menu.addItem((item) => item.setTitle("Move subheading up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => {
+      if (!ownsBase() || !layoutIsCurrent()) return;
+      const currentHeading = this.libraryLayout(libraryId).find((item) => item.id === heading.id);
+      const currentIndex = currentHeading?.subheadings.findIndex((item) => item.id === subheading.id) ?? -1;
+      if (currentHeading && currentIndex > 0) this.run(() => this.moveLibrarySubheading(libraryId, currentHeading, currentIndex, currentIndex - 1));
+    }));
+    menu.addItem((item) => item.setTitle("Move subheading down").setIcon("arrow-down").setDisabled(index < 0 || index >= heading.subheadings.length - 1).onClick(() => {
+      if (!ownsBase() || !layoutIsCurrent()) return;
+      const currentHeading = this.libraryLayout(libraryId).find((item) => item.id === heading.id);
+      const currentIndex = currentHeading?.subheadings.findIndex((item) => item.id === subheading.id) ?? -1;
+      if (currentHeading && currentIndex >= 0 && currentIndex < currentHeading.subheadings.length - 1) {
+        this.run(() => this.moveLibrarySubheading(libraryId, currentHeading, currentIndex, currentIndex + 1));
+      }
+    }));
+    menu.addSeparator();
+    menu.addItem((item) => item.setTitle("Place record here…").setIcon("file-input").onClick(() => {
+      if (ownsBase() && layoutIsCurrent()) this.openPlaceLibraryRecordPicker(libraryId, { headingId: heading.id, subheadingId: subheading.id });
+    }));
+    menu.addItem((item) => item.setTitle("Rename subheading").setIcon("pencil").onClick(() => {
+      if (!ownsBase() || !layoutIsCurrent()) return;
+      new TextPromptModal(this.app, {
+        title: "Rename library subheading", placeholder: "Subheading name", initialValue: subheading.title,
+        onSubmit: async (title) => {
+          if (!ownsBase()) return;
+          if (!layoutIsCurrent()) throw new Error("The library organization changed. Reopen the action and try again.");
+          const currentHeading = this.libraryLayout(libraryId).find((item) => item.id === heading.id);
+          const currentSubheading = currentHeading?.subheadings.find((item) => item.id === subheading.id);
+          if (!currentSubheading) throw new Error("That library subheading is no longer available. Reopen the action and try again.");
+          await this.plugin.mutate(`Rename library subheading “${currentSubheading.title}”`, () => { currentSubheading.title = title; }, { includePortableIndex: true, requireUndo: true });
+        },
+      }).open();
+    }));
+    menu.addItem((item) => item.setTitle("Remove subheading").setIcon("trash-2").onClick(() => {
+      if (!ownsBase() || !layoutIsCurrent()) return;
+      new ConfirmModal(this.app, "Remove library subheading?", `Its records will remain directly under “${heading.title}”. No Markdown note will be changed.`, "Remove subheading", async () => {
+        if (!ownsBase()) return;
+        if (!layoutIsCurrent()) throw new Error("The library organization changed. Reopen the action and try again.");
+        const currentHeading = this.libraryLayout(libraryId).find((item) => item.id === heading.id);
+        const currentSubheading = currentHeading?.subheadings.find((item) => item.id === subheading.id);
+        if (!currentHeading || !currentSubheading) throw new Error("That library subheading is no longer available. Reopen the action and try again.");
+        await this.plugin.mutate(`Remove library subheading “${currentSubheading.title}”`, () => {
+          currentHeading.subjects.push(...currentSubheading.subjects.filter((subjectId) => !currentHeading.subjects.includes(subjectId)));
+          currentHeading.subheadings = currentHeading.subheadings.filter((item) => item.id !== currentSubheading.id);
+        }, { includePortableIndex: true, requireUndo: true });
+      }).open();
+    }));
+    menu.showAtMouseEvent(event);
+  }
+
   private openCollectionPicker(path: string, source?: Membership, move = false): void {
     if (!this.guardLoadedBase()) return;
     const ownsBase = this.createOpenedBaseGuard();
@@ -2710,11 +3329,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const ownsBase = this.createOpenedBaseGuard();
     const excluded = curriculumDescendantPaths(this.curriculum, record.path);
     excluded.add(record.path);
-    const candidates = this.records.filter((candidate) => candidate.kind === "topic"
-      && (candidate.role === "canonical"
-        || candidate.role === "supporting"
-        || (candidate.role === "placeholder" && candidate.portableIndexed !== false)
-        || candidate.portableIndexed === true)
+    const candidates = this.records.filter((candidate) => recordBelongsToIndex(candidate, this.plugin.isClinicalMode())
       && (this.plugin.canVisuallyMoveAcrossGroups() || candidate.domain === record.domain)
       && !excluded.has(candidate.path));
     new RecordPickerModal(this.app, candidates, `Move “${record.title}” under…`, `Search a parent ${this.plugin.data.settings.itemSingular}${this.plugin.isClinicalMode() ? ` in this ${this.plugin.data.settings.groupLabel.toLowerCase()}` : ""}…`, (parent) => {
@@ -2818,7 +3433,7 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private removeFromIndex(record: VaultRecord): void {
     const ownsBase = this.createOpenedBaseGuard();
-    if (record.kind !== "topic") return;
+    if (!recordBelongsToIndex(record, this.plugin.isClinicalMode())) return;
     const settings = this.plugin.data.settings;
     const action = "Remove from this knowledge base";
     new ConfirmModal(
@@ -2835,7 +3450,73 @@ export class EntVaultCommandCenterView extends ItemView {
     ).open();
   }
 
-  private showRecordMenu(event: MouseEvent, record: VaultRecord, membership?: Membership): void {
+  private openCatalogMoveActions(record: VaultRecord): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const settings = this.plugin.data.settings;
+    const indexDestinationError = this.plugin.getRecordIndexDestinationError(record.path);
+    const destinations: Array<{ destination: CatalogDestination; id: string; title: string; icon: string }> = [
+      ...(indexDestinationError
+        ? []
+        : [{ destination: "topic" as const, id: "index", title: settings.indexLabel, icon: "library" }]),
+      ...this.plugin.getLibraries()
+        .filter((library) => library.id !== record.libraryId)
+        .filter((library) => !this.plugin.isClinicalMode() || library.sourceKind === null || library.sourceKind === record.kind)
+        .map((library) => ({ destination: { libraryId: library.id }, id: libraryTabId(library.id), title: library.name, icon: libraryIcon(library) })),
+    ];
+    const availableDestinations = destinations.filter((destination) => !(destination.destination === "topic" && !record.libraryId));
+    if (availableDestinations.length === 0) {
+      new Notice(indexDestinationError ?? "No other compatible section is available for this record.", 8000);
+      return;
+    }
+    new AddActionModal(this.app, availableDestinations.map((destination) => ({
+      id: destination.id,
+      title: `Move to ${destination.title}`,
+      description: "Change this base’s classification and visual placement only; the Markdown note stays untouched.",
+      icon: destination.icon,
+    })), (action) => {
+      if (!ownsBase()) return;
+      const choice = destinations.find((destination) => destination.id === action.id);
+      if (!choice) return;
+      this.run(async () => {
+        if (!ownsBase()) return;
+        if (choice.destination === "topic") await this.plugin.assignRecordToCatalog(record.path, "topic");
+        else await this.plugin.assignRecordToLibrary(record.path, choice.destination.libraryId);
+        if (!ownsBase()) return;
+        new Notice(`Moved “${record.title}” to ${choice.title}. The Markdown note was not moved, renamed, or rewritten.`);
+      });
+    }, `Move “${record.title}”`).open();
+  }
+
+  private confirmRemoveFromCatalog(record: VaultRecord, libraryId: string): void {
+    const library = this.plugin.getLibrary(libraryId);
+    if (!library) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const fallbackLibrary = this.plugin.getRecordUnassignedLibraryFallback(record);
+    const indexEligible = this.plugin.getRecordIndexDestinationError(record.path) === null;
+    const outcome = fallbackLibrary
+      ? `return to the protected built-in ${fallbackLibrary.name} library`
+      : "become unclassified in this knowledge base";
+    const laterDestination = fallbackLibrary
+      ? "You can later place it in another compatible custom library."
+      : `You can later place it in a compatible library${indexEligible ? ` or return it to ${this.plugin.data.settings.indexLabel}` : ""}.`;
+    new ConfirmModal(
+      this.app,
+      `Remove from ${library.name}?`,
+      `“${record.title}” will leave this base’s ${library.name} library and ${outcome}. Its Markdown file, path, contents, metadata, collections, pins, and Next status will not change. ${laterDestination} Undo remains available.`,
+      "Remove from catalog",
+      async () => {
+        if (!ownsBase()) return;
+        await this.plugin.removeRecordFromLibrary(record.path);
+        if (!ownsBase()) return;
+        new Notice(fallbackLibrary
+          ? `Removed “${record.title}” from ${library.name}; its protected source classification returned it to ${fallbackLibrary.name}. The Markdown note was not changed.`
+          : `Removed “${record.title}” from ${library.name} in this knowledge base. The Markdown note was not changed.`);
+      },
+    ).open();
+  }
+
+  private showRecordMenu(event: MouseEvent, record: VaultRecord, membership?: Membership, libraryMembership?: LibraryMembership): void {
     if (!this.guardLoadedBase()) return;
     const ownsBase = this.createOpenedBaseGuard();
     const menu = new Menu();
@@ -2847,7 +3528,7 @@ export class EntVaultCommandCenterView extends ItemView {
         if (record.isPlaceholder) this.openPlaceholderActions(record);
         else this.run(() => this.openRecord(record.path));
       }));
-    if (record.portableId && !record.isPlaceholder) {
+    if (canRelinkPortableRecord(record)) {
       menu.addItem((item) => item.setTitle("Change linked note…").setIcon("link").onClick(() => {
         if (ownsBase()) this.openPortableSubjectLinkPicker(record);
       }));
@@ -2858,7 +3539,8 @@ export class EntVaultCommandCenterView extends ItemView {
     menu.addItem((item) => item.setTitle("Add to collection…").setIcon("folder-plus").onClick(() => {
       if (ownsBase()) this.openCollectionPicker(record.path);
     }));
-    if (record.kind === "topic") {
+    const recordLibrary = record.libraryId ? this.plugin.getLibrary(record.libraryId) : null;
+    if (record.kind === "topic" || recordLibrary || record.portableId) {
       menu.addItem((item) => item.setTitle("Rename display label…").setIcon("pencil").onClick(() => {
         if (!ownsBase()) return;
         new TextPromptModal(this.app, {
@@ -2880,14 +3562,45 @@ export class EntVaultCommandCenterView extends ItemView {
         }));
       }
     }
-    if (this.plugin.canVisuallyMoveAcrossGroups() && record.kind === "topic") {
+    const contextualLibraryId = libraryIdForTab(this.plugin.data.activeTab);
+    const contextualLibrary = contextualLibraryId ? this.plugin.getLibrary(contextualLibraryId) : null;
+    if (contextualLibrary && contextualLibrary.id !== record.libraryId
+      && (!this.plugin.isClinicalMode() || contextualLibrary.sourceKind === null || contextualLibrary.sourceKind === record.kind)) {
+      menu.addItem((item) => item
+        .setTitle(`Move to ${contextualLibrary.name}`)
+        .setIcon(libraryIcon(contextualLibrary))
+        .onClick(() => {
+          if (!ownsBase()) return;
+          this.run(async () => {
+            await this.plugin.assignRecordToLibrary(record.path, contextualLibrary.id);
+            if (!ownsBase()) return;
+            new Notice(`Moved “${record.title}” to ${contextualLibrary.name}. The Markdown note was not changed.`);
+          });
+        }));
+    }
+    if (recordBelongsToIndex(record, this.plugin.isClinicalMode()) && this.plugin.canVisuallyMoveAcrossGroups()) {
       menu.addItem((item) => item.setTitle(`Move to ${this.plugin.data.settings.groupLabel.toLowerCase()}…`).setIcon("folder-input").onClick(() => {
         if (ownsBase()) this.openIndexGroupPicker(record);
       }));
     }
-    if (record.kind === "topic") menu.addItem((item) => item.setTitle("Remove from this knowledge base…").setIcon("list-minus").onClick(() => {
+    if (recordBelongsToIndex(record, this.plugin.isClinicalMode())) menu.addItem((item) => item.setTitle("Remove from this knowledge base…").setIcon("list-minus").onClick(() => {
       if (ownsBase()) this.removeFromIndex(record);
     }));
+    if (recordLibrary) {
+      menu.addItem((item) => item.setTitle(`Move within ${recordLibrary.name}…`).setIcon("folder-input").onClick(() => {
+        if (ownsBase()) this.openLibraryTargetPicker(record, recordLibrary.id);
+      }));
+    }
+    if (recordBelongsToIndex(record, this.plugin.isClinicalMode()) || recordLibrary) {
+      menu.addItem((item) => item.setTitle("Move to another section…").setIcon("shuffle").onClick(() => {
+        if (ownsBase()) this.openCatalogMoveActions(record);
+      }));
+    }
+    if (recordLibrary && (!this.plugin.isClinicalMode() || recordLibrary.sourceKind === null)) {
+      menu.addItem((item) => item.setTitle(`Remove from ${recordLibrary.name}…`).setIcon("list-minus").onClick(() => {
+        if (ownsBase()) this.confirmRemoveFromCatalog(record, recordLibrary.id);
+      }));
+    }
     if (membership) {
       const list = this.membershipList(membership);
       const index = list.indexOf(record.path);
@@ -2905,7 +3618,26 @@ export class EntVaultCommandCenterView extends ItemView {
         this.run(() => this.plugin.mutate(`Remove ${this.plugin.data.settings.itemSingular} membership`, () => this.removeMembership(record.path, membership)));
       }));
     }
-    if (this.plugin.data.activeTab === "curriculum" && this.curriculumArrangeMode && record.kind === "topic") {
+    if (libraryMembership && record.portableId) {
+      const list = this.libraryMembershipList(libraryMembership);
+      const index = list.indexOf(record.portableId);
+      menu.addItem((item) => item.setTitle("Move up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => {
+        if (!ownsBase()) return;
+        const currentIndex = this.libraryMembershipList(libraryMembership).indexOf(record.portableId ?? "");
+        if (currentIndex > 0) this.run(() => this.moveLibraryRecordWithin(libraryMembership, currentIndex, currentIndex - 1));
+      }));
+      menu.addItem((item) => item.setTitle("Move down").setIcon("arrow-down").setDisabled(index < 0 || index >= list.length - 1).onClick(() => {
+        if (!ownsBase()) return;
+        const currentList = this.libraryMembershipList(libraryMembership);
+        const currentIndex = currentList.indexOf(record.portableId ?? "");
+        if (currentIndex >= 0 && currentIndex < currentList.length - 1) {
+          this.run(() => this.moveLibraryRecordWithin(libraryMembership, currentIndex, currentIndex + 1));
+        }
+      }));
+    }
+    if (this.plugin.data.activeTab === "curriculum"
+      && this.curriculumArrangeMode
+      && recordBelongsToIndex(record, this.plugin.isClinicalMode())) {
       const parentPath = this.curriculum.parentByPath.get(record.path) ?? null;
       const siblings = curriculumSiblingPaths(this.curriculum, record);
       const index = siblings.indexOf(record.path);
@@ -2969,6 +3701,9 @@ export class EntVaultCommandCenterView extends ItemView {
     menu.addItem((item) => item.setTitle(`Manage ${this.plugin.data.settings.indexLabel}`).setIcon("list-tree").onClick(() => {
       if (ownsBase()) this.openIndexManager();
     }));
+    menu.addItem((item) => item.setTitle("Manage libraries…").setIcon("library").onClick(() => {
+      if (ownsBase()) this.openLibraryManager();
+    }));
     if (!this.plugin.isClinicalMode()) menu.addItem((item) => item.setTitle(`Add existing note to ${this.plugin.data.settings.indexLabel}`).setIcon("list-plus").onClick(() => {
       if (ownsBase()) this.startAddExistingToIndex();
     }));
@@ -2983,13 +3718,19 @@ export class EntVaultCommandCenterView extends ItemView {
     menu.addItem((item) => item.setTitle("Expand all visible groups").setIcon("chevrons-down").onClick(() => this.run(async () => {
       if (!ownsBase()) return;
       this.collapsedQueues.clear();
+      const activeLibraryId = libraryIdForTab(this.plugin.data.activeTab);
       if (this.plugin.data.activeTab === "curriculum") {
         this.collapsedCurriculumDomains.clear();
         this.collapsedCurriculumNodes.clear();
       } else if (this.plugin.data.activeTab === "collections") {
         this.plugin.data.collections.forEach((heading) => { heading.collapsed = false; heading.subheadings.forEach((sub) => { sub.collapsed = false; }); });
+      } else if (activeLibraryId) {
+        this.libraryLayout(activeLibraryId).forEach((heading) => {
+          heading.collapsed = false;
+          heading.subheadings.forEach((subheading) => { subheading.collapsed = false; });
+        });
       }
-      if (this.plugin.data.activeTab === "collections") await this.plugin.savePluginData();
+      if (this.plugin.data.activeTab === "collections" || activeLibraryId) await this.plugin.savePluginData();
       else this.persistCollapseState();
       if (!ownsBase()) return;
       this.renderTree();
@@ -2997,14 +3738,20 @@ export class EntVaultCommandCenterView extends ItemView {
     menu.addItem((item) => item.setTitle("Collapse all visible groups").setIcon("chevrons-up").onClick(() => this.run(async () => {
       if (!ownsBase()) return;
       this.smartQueues().forEach((queue) => this.collapsedQueues.add(queue.id));
+      const activeLibraryId = libraryIdForTab(this.plugin.data.activeTab);
       if (this.plugin.data.activeTab === "curriculum") {
         this.curriculum.domains.forEach((domain) => this.collapsedCurriculumDomains.add(domain.domain));
         const visit = (node: CurriculumTreeNode): void => { if (node.children.length > 0) this.collapsedCurriculumNodes.add(node.record.path); node.children.forEach(visit); };
         this.curriculum.domains.forEach((domain) => domain.roots.forEach(visit));
       } else if (this.plugin.data.activeTab === "collections") {
         this.plugin.data.collections.forEach((heading) => { heading.collapsed = true; heading.subheadings.forEach((sub) => { sub.collapsed = true; }); });
+      } else if (activeLibraryId) {
+        this.libraryLayout(activeLibraryId).forEach((heading) => {
+          heading.collapsed = true;
+          heading.subheadings.forEach((subheading) => { subheading.collapsed = true; });
+        });
       }
-      if (this.plugin.data.activeTab === "collections") await this.plugin.savePluginData();
+      if (this.plugin.data.activeTab === "collections" || activeLibraryId) await this.plugin.savePluginData();
       else this.persistCollapseState();
       if (!ownsBase()) return;
       this.renderTree();
@@ -3017,7 +3764,9 @@ export class EntVaultCommandCenterView extends ItemView {
       if (this.app.vault.getAbstractFileByPath(reviewQueueBase) instanceof TFile) {
         menu.addItem((item) => item.setTitle("Open clinical review queue base").setIcon("layout-list").onClick(() => this.run(() => this.openRecord(reviewQueueBase))));
       }
-      if (this.app.vault.getAbstractFileByPath(this.currentBasePath()) instanceof TFile) {
+      const activeLibraryId = libraryIdForTab(this.plugin.data.activeTab);
+      const activeSourceKind = activeLibraryId ? this.plugin.getLibrary(activeLibraryId)?.sourceKind : null;
+      if (activeSourceKind && this.app.vault.getAbstractFileByPath(this.currentBasePath()) instanceof TFile) {
         menu.addItem((item) => item.setTitle("Open current library base").setIcon("database").onClick(() => this.run(() => this.openCurrentBase())));
       }
     }
@@ -3104,7 +3853,14 @@ export class EntVaultCommandCenterView extends ItemView {
           await this.plugin.mutate(
             `Restore snapshot “${snapshot.label}”`,
             () => restoreSnapshot(this.plugin.data, snapshot),
-            { includePortableIndex: Boolean(snapshot.portableIndex) },
+            {
+              includeSettings: Boolean(snapshot.settings),
+              includePortableIndex: Boolean(snapshot.portableIndex),
+              includeLayoutSnapshots: Boolean(snapshot.layoutSnapshots),
+              includeActiveTab: snapshot.activeTab !== undefined,
+              requireUndo: true,
+              normalizeAfterRestore: true,
+            },
           );
           if (!ownsBase()) return;
           new Notice(`Restored organization snapshot “${snapshot.label}”.`);
@@ -3239,7 +3995,12 @@ export class EntVaultCommandCenterView extends ItemView {
               this.plugin.data.indexGroupOrder = backup.indexGroupOrder;
               this.plugin.data.layoutSnapshots = limitSnapshotStack(backup.layoutSnapshots, 10);
               this.plugin.data.portableIndex = backup.portableIndex;
-            }, { includePortableIndex: true, includeLayoutSnapshots: true, requireUndo: true });
+            }, {
+              includePortableIndex: true,
+              includeLayoutSnapshots: true,
+              requireUndo: true,
+              normalizeAfterRestore: true,
+            });
             if (!ownsBase()) return;
             new Notice("Organization backup imported. Undo is available.");
           },
@@ -3288,7 +4049,12 @@ export class EntVaultCommandCenterView extends ItemView {
         if (!ownsBase()) return;
         this.cancelPendingGlobalSearch();
         this.query = view.query;
-        this.plugin.data.activeTab = view.tab;
+        const libraryId = libraryIdForTab(view.tab);
+        const library = libraryId ? this.plugin.getLibrary(libraryId) : null;
+        this.plugin.data.activeTab = libraryId && library?.archivedAt !== null ? "curriculum" : view.tab;
+        if (libraryId && (!library || library.archivedAt !== null)) {
+          new Notice("That saved view points to an archived or removed library. Opened the knowledge index instead; the saved search text was preserved.");
+        }
         await this.plugin.savePluginData();
         if (!ownsBase()) return;
         this.render();
@@ -3421,6 +4187,101 @@ export class EntVaultCommandCenterView extends ItemView {
     } catch { return null; }
   }
 
+  private writeLibraryDrag(event: DragEvent, payload: NewLibraryDragMembership): void {
+    if (!event.dataTransfer) return;
+    event.dataTransfer.effectAllowed = "move";
+    const guardedPayload: LibraryDragMembership = {
+      ...payload,
+      ownerViewId: this.viewInstanceId,
+      renderToken: this.libraryDragRenderToken,
+      baseId: this.plugin.getActiveKnowledgeBaseId(),
+      dataEpoch: this.currentDataEpoch(),
+    };
+    event.dataTransfer.setData("application/x-ent-command-center-library-membership", JSON.stringify(guardedPayload));
+  }
+
+  private readLibraryDrag(event: DragEvent): LibraryDragMembership | null {
+    const raw = event.dataTransfer?.getData("application/x-ent-command-center-library-membership");
+    if (!raw) return null;
+    try {
+      const value = JSON.parse(raw) as LibraryDragMembership;
+      return value.kind === "library-membership"
+        && typeof value.libraryId === "string"
+        && this.plugin.getLibrary(value.libraryId) !== null
+        && typeof value.subjectId === "string"
+        && typeof value.headingId === "string"
+        && typeof value.ownerViewId === "string"
+        && typeof value.renderToken === "string"
+        && typeof value.baseId === "string"
+        && typeof value.dataEpoch === "number"
+        ? value
+        : null;
+    } catch { return null; }
+  }
+
+  private libraryDragIsCurrent(payload: LibraryDragMembership): boolean {
+    return payload.ownerViewId === this.viewInstanceId
+      && payload.renderToken === this.libraryDragRenderToken
+      && payload.baseId === this.plugin.getActiveKnowledgeBaseId()
+      && payload.dataEpoch === this.currentDataEpoch()
+      && this.guardLoadedBase();
+  }
+
+  private applyLibraryDrop(element: HTMLElement, target: LibraryMembership): void {
+    element.addEventListener("dragover", (event) => {
+      const payload = this.readLibraryDrag(event);
+      if (!payload || payload.libraryId !== target.libraryId || !this.libraryDragIsCurrent(payload)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      element.addClass("is-drop-target");
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    });
+    element.addEventListener("dragleave", (event) => {
+      if (!element.contains(event.relatedTarget as Node | null)) element.removeClass("is-drop-target");
+    });
+    element.addEventListener("drop", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      element.removeClass("is-drop-target");
+      const payload = this.readLibraryDrag(event);
+      if (!payload || payload.libraryId !== target.libraryId || !this.libraryDragIsCurrent(payload)) return;
+      const record = this.records.find((candidate) => candidate.portableId === payload.subjectId);
+      if (!record) return;
+      this.run(() => this.plugin.assignRecordToLibrary(record.path, target.libraryId, target));
+    });
+  }
+
+  private applyLibraryRowDrop(row: HTMLElement, target: LibraryMembership, targetSubjectId: string): void {
+    row.addEventListener("dragover", (event) => {
+      const payload = this.readLibraryDrag(event);
+      if (!payload || payload.libraryId !== target.libraryId || payload.subjectId === targetSubjectId || !this.libraryDragIsCurrent(payload)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const rect = row.getBoundingClientRect();
+      const after = event.clientY > rect.top + rect.height / 2;
+      row.toggleClass("is-drop-before", !after);
+      row.toggleClass("is-drop-after", after);
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    });
+    row.addEventListener("dragleave", (event) => {
+      if (!row.contains(event.relatedTarget as Node | null)) row.removeClass("is-drop-before", "is-drop-after");
+    });
+    row.addEventListener("drop", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const after = row.hasClass("is-drop-after");
+      row.removeClass("is-drop-before", "is-drop-after");
+      const payload = this.readLibraryDrag(event);
+      if (!payload || payload.libraryId !== target.libraryId || payload.subjectId === targetSubjectId || !this.libraryDragIsCurrent(payload)) return;
+      this.run(() => this.plugin.mutate("Place record in library order", () => {
+        this.removeLibraryMembership(payload.subjectId, target.libraryId);
+        const subjects = this.libraryMembershipList(target);
+        const targetIndex = subjects.indexOf(targetSubjectId);
+        subjects.splice(Math.max(0, targetIndex + (after ? 1 : 0)), 0, payload.subjectId);
+      }, { includePortableIndex: true, requireUndo: true }));
+    });
+  }
+
   private applyDrop(element: HTMLElement, target: Membership): void {
     element.addEventListener("dragover", (event) => {
       event.preventDefault();
@@ -3494,12 +4355,11 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private currentBasePath(): string {
-    return this.plugin.data.activeTab === "procedures"
-      ? "04 Procedures/Procedures.base"
-      : this.plugin.data.activeTab === "medications"
-        ? "06 Clinical Tools/Medications/Medications.base"
-        : this.plugin.data.activeTab === "syndromes"
-          ? "06 Clinical Tools/Syndromes/Syndromes.base"
-          : "02 Maps of Content/Clinical Topics.base";
+    const libraryId = libraryIdForTab(this.plugin.data.activeTab);
+    const sourceKind = libraryId ? this.plugin.getLibrary(libraryId)?.sourceKind : null;
+    if (sourceKind === "procedure") return "04 Procedures/Procedures.base";
+    if (sourceKind === "medication") return "06 Clinical Tools/Medications/Medications.base";
+    if (sourceKind === "syndrome") return "06 Clinical Tools/Syndromes/Syndromes.base";
+    return "02 Maps of Content/Clinical Topics.base";
   }
 }

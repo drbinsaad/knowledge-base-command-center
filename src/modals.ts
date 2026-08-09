@@ -128,9 +128,10 @@ export class CollectionPickerModal extends FuzzySuggestModal<CollectionTarget> {
     private readonly targets: CollectionTarget[],
     private readonly action: "Add" | "Move",
     private readonly onChoose: (target: CollectionTarget) => void | Promise<void>,
+    private readonly targetLabel = "collection",
   ) {
     super(app);
-    this.setPlaceholder(`${action} to collection…`);
+    this.setPlaceholder(`${action} to ${targetLabel}…`);
   }
 
   getItems(): CollectionTarget[] { return this.targets; }
@@ -140,7 +141,7 @@ export class CollectionPickerModal extends FuzzySuggestModal<CollectionTarget> {
   onOpen(): void {
     void super.onOpen();
     this.modalEl.addClass("ent-cc-modal");
-    this.titleEl.setText(`${this.action} to collection`);
+    this.titleEl.setText(`${this.action} to ${this.targetLabel}`);
   }
 }
 
@@ -320,6 +321,10 @@ export class IndexGroupModal extends Modal {
 
 export interface KnowledgeNoteModalOptions {
   itemSingular: string;
+  /** Optional workflow-specific label, such as Medication, while still creating a Markdown note. */
+  createLabel?: string;
+  /** Visible workflow context that remains available in the compact mobile sheet. */
+  contextNotice?: string;
   templates: TFile[];
   initial: GenericNoteFormValue;
   validate: (value: GenericNoteFormValue) => string | null;
@@ -377,21 +382,29 @@ export class KnowledgeNoteModal extends Modal {
     this.contentEl.empty();
     this.modalEl.addClass("ent-cc-topic-editor-modal", "ent-cc-knowledge-note-modal");
     this.contentEl.addClass("ent-cc-modal", "ent-cc-topic-editor", "ent-cc-knowledge-note-content");
-    this.titleEl.setText(`Create ${this.options.itemSingular}`);
+    const createLabel = this.options.createLabel?.trim() || this.options.itemSingular;
+    this.titleEl.setText(`Create ${createLabel}`);
     const formBody = this.contentEl.createDiv({ cls: "ent-cc-note-form-body" });
     formBody.createEl("p", {
       cls: "ent-cc-modal-lead",
       text: "Choose a destination and start with a truly empty note or a copied Markdown template. Existing files are never overwritten.",
     });
+    if (this.options.contextNotice) {
+      formBody.createDiv({
+        cls: "ent-cc-catalog-context",
+        text: this.options.contextNotice,
+        attr: { role: "note" },
+      });
+    }
 
     new Setting(formBody)
       .setName("Title")
       .addText((text) => {
-        text.setPlaceholder(`New ${this.options.itemSingular}`).setValue(this.value.title).onChange((value) => {
+        text.setPlaceholder(`New ${createLabel.toLocaleLowerCase()}`).setValue(this.value.title).onChange((value) => {
           this.value.title = value;
           this.updatePreview();
         });
-        text.inputEl.setAttribute("aria-label", `${this.options.itemSingular} title`);
+        text.inputEl.setAttribute("aria-label", `${createLabel} title`);
         text.inputEl.enterKeyHint = "done";
         text.inputEl.addEventListener("keydown", (event) => {
           if (event.key !== "Enter" || event.isComposing) return;
@@ -467,7 +480,7 @@ export class KnowledgeNoteModal extends Modal {
         button.setButtonText("Cancel").onClick(() => this.close());
         button.buttonEl.addClass("ent-cc-note-cancel-button");
       })
-      .addButton((button) => button.setButtonText(`Create ${this.options.itemSingular}`).setCta().onClick(() => void this.submit()))
+      .addButton((button) => button.setButtonText(`Create ${createLabel}`).setCta().onClick(() => void this.submit()))
       .settingEl.addClass("ent-cc-modal-footer");
 
     this.bindViewportLayout();

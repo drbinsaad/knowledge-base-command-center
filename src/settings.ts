@@ -1,12 +1,15 @@
 import { App, Notice, Plugin, PluginSettingTab, Setting, SettingDefinitionItem, SettingDefinitionRender, TFile, TFolder } from "obsidian";
 import { ManageKnowledgeBasesModal } from "./knowledge-base-modal";
+import { ManageLibrariesModal } from "./library-modal";
 import type EntVaultCommandCenterPlugin from "./main";
 import {
   asUnknownRecord,
   DEFAULT_PROPOSAL_FOLDER,
+  libraryTabId,
   pathIsInsideFolder,
   validateProposalFolderPath,
   validateWritableFolderPath,
+  type LibraryDefinition,
   type MainTab,
   type NewNoteMode,
   type OpenNoteBehavior,
@@ -29,6 +32,8 @@ interface SettingsHost extends Plugin {
   getDataEpoch?(): number;
   switchKnowledgeBase(id: string): Promise<void>;
   renameKnowledgeBase(id: string, name: string): Promise<void>;
+  getLibraries(includeArchived?: boolean): LibraryDefinition[];
+  librarySubjectCount(id: string): number;
 }
 
 function renderSetting(
@@ -141,6 +146,40 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
       ],
     });
 
+    const activeLibraries = this.host.getLibraries();
+    const allLibraries = this.host.getLibraries(true);
+    const archivedLibraryCount = allLibraries.length - activeLibraries.length;
+    const libraryRecordCount = activeLibraries.reduce(
+      (total, library) => total + this.host.librarySubjectCount(library.id),
+      0,
+    );
+    definitions.push({
+      type: "group",
+      heading: "Libraries",
+      items: [
+        {
+          name: "Top-level libraries",
+          desc: "Libraries are top-level tabs inside this knowledge base. Each has its own headings and subheadings. They are not separate knowledge bases, Obsidian .base files, or Collections.",
+          aliases: ["categories", "sections", "tabs", "medications", "procedures", "syndromes"],
+        },
+        renderSetting(
+          "Manage libraries",
+          `${activeLibraries.length} active · ${archivedLibraryCount} archived · ${libraryRecordCount} classified ${libraryRecordCount === 1 ? settings.itemSingular : settings.itemPlural}. Library actions never move, rewrite, or delete Markdown notes.`,
+          (row) => {
+            row.addButton((button) => button
+              .setButtonText("Manage…")
+              .setIcon("library")
+              .setDisabled(readOnly)
+              .onClick(() => {
+                if (!ownsConfiguredBase()) return;
+                new ManageLibrariesModal(this.host as EntVaultCommandCenterPlugin, () => this.update()).open();
+              }));
+          },
+          ["create", "rename", "icon", "reorder", "archive", "restore", "delete", "library"],
+        ),
+      ],
+    });
+
     const folderPaths = (): string[] => this.host.app.vault.getAllLoadedFiles()
       .filter((file): file is TFolder => file instanceof TFolder && !file.isRoot())
       .map((folder) => folder.path)
@@ -231,11 +270,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
       collections: "My Collections",
       queues: "Smart Queues",
     };
-    if (settings.workspaceMode === "ent-clinical") {
-      defaultTabs.procedures = "Procedures";
-      defaultTabs.medications = "Medications";
-      defaultTabs.syndromes = "Syndromes";
-    }
+    for (const library of activeLibraries) defaultTabs[libraryTabId(library.id)] = library.name;
 
     definitions.push(
       {

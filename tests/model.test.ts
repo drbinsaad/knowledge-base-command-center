@@ -13,11 +13,19 @@ import {
   canonicalPath,
   canonicalPathInputsUnchanged,
   cloneCollections,
+  cleanPortableIndex,
+  BUILTIN_LIBRARY_DEFINITIONS,
+  BUILTIN_LIBRARY_IDS,
+  cleanLibraryDefinitions,
+  cloneLibraryLayouts,
+  emptyLibraryLayouts,
+  ensureSystemLibraries,
   configuredGroupFromPath,
   createDefaultStore,
   createKnowledgeBaseEntry,
   createPersonalBackup,
   createWorkspaceConfig,
+  DATA_VERSION,
   curriculumContainerKey,
   expectedParentCurriculumId,
   genericNotePath,
@@ -26,6 +34,9 @@ import {
   isExtensionCurriculumId,
   isRecognizedPluginData,
   isSafeObjectKey,
+  isValidLibraryId,
+  libraryIdFromTab,
+  libraryTabId,
   limitSnapshotStack,
   matchesQuery,
   matchesParsedQuery,
@@ -66,20 +77,24 @@ import {
   STORE_KIND,
   STORE_VERSION,
   storedDataVersion,
+  subjectLibraryId,
   unknownQueryTokens,
   validateWritableFolderPath,
   validateProposalFolderPath,
   validateTemplateFilePath,
   visualPlacementPathSet,
+  type LayoutHeading,
   type VaultRecord,
 } from "../src/model.ts";
 import {
   applyPortableExport,
   createPortableExport,
   EMPTY_PORTABLE_SELECTION,
+  normalizePortableSelection,
   parseAnyCommandCenterExport,
   parsePortableExport,
   PORTABLE_EXPORT_KIND,
+  portableSubjectIdForPath,
   registerPortableGroup,
   removePortableGroup,
   renameOrMergePortableGroup,
@@ -120,7 +135,7 @@ function record(overrides: Partial<VaultRecord> = {}): VaultRecord {
 }
 
 function portableSelection(overrides: Partial<PortableExportSelection>): PortableExportSelection {
-  return { ...EMPTY_PORTABLE_SELECTION, ...overrides };
+  return normalizePortableSelection({ ...EMPTY_PORTABLE_SELECTION, ...overrides });
 }
 
 function portableFixture(): PortableExportV1 {
@@ -164,14 +179,14 @@ test("migrates only custom v1 headings and keeps a recovery backup", () => {
       { id: "my-airway", title: "My Airway", kind: "custom", subjects: ["topic.md"], subheadings: [] },
     ],
   });
-  assert.equal(data.version, 10);
+  assert.equal(data.version, DATA_VERSION);
   assert.deepEqual(data.collections.map((item) => item.title), ["My Airway"]);
   assert.equal(data.migrationBackup?.headings.length, 2);
   assert.equal(data.selectedPath, "topic.md");
   assert.deepEqual(data.layoutSnapshots, []);
 });
 
-test("flat v10 data wraps into one v11 base without losing workspace state", () => {
+test("flat v10 data migrates into one v12 store without losing workspace state", () => {
   const flat = migrateData(null);
   flat.settings.workspaceName = "Surgical Knowledge";
   flat.collections = [{
@@ -225,11 +240,7 @@ test("flat v10 data wraps into one v11 base without losing workspace state", () 
   assert.equal(store.bases.length, 1);
   assert.equal(store.bases[0]?.id, "base-default");
   assert.equal(store.bases[0]?.archivedAt, null);
-  assert.deepEqual(
-    JSON.parse(JSON.stringify(store.bases[0]?.data)) as unknown,
-    JSON.parse(JSON.stringify(before)) as unknown,
-    "the persisted v10 JSON payload must be preserved exactly",
-  );
+  assert.deepEqual(store.bases[0]?.data, migrateData(before));
   assert.deepEqual(flat, before, "wrapping must not mutate the source v10 object");
 });
 
@@ -253,6 +264,14 @@ test("legacy migration creates distinct random provisional IDs with the same con
     provisionalMigratedVaultFingerprint(firstDevice.vaultId),
     provisionalMigratedVaultFingerprint(otherVault.vaultId),
   );
+});
+
+test("a v11 multi-base envelope migrates to v12 without being mistaken for damaged flat data", () => {
+  const current = createDefaultStore(migrateData(null), 100, "vault-existing");
+  const migrated = migrateStore({ ...structuredClone(current), version: 11 }, 200);
+  assert.equal(migrated.version, STORE_VERSION);
+  assert.equal(migrated.vaultId, "vault-existing");
+  assert.equal(migrated.bases[0]?.data.version, DATA_VERSION);
 });
 
 test("a valid v11 store migrates multiple bases as isolated workspace payloads", () => {
@@ -477,13 +496,43 @@ test("personal organization snapshots restore collections, pins, queues, and sav
   assert.deepEqual(data.indexGroupOrder, ["Airway", "Research"]);
 });
 
-test("v2 data migrates to v10 with the ENT clinical preset and safe settings", () => {
+test("tab-changing snapshots opt into one lean navigation field and survive cleaning", () => {
+  const data = migrateData(null);
+  const libraryId = "library-research";
+  const tab = libraryTabId(libraryId);
+  data.portableIndex.libraries.push({
+    id: libraryId,
+    name: "Research",
+    singularName: "Paper",
+    icon: "microscope",
+    order: data.portableIndex.libraries.length,
+    sourceKind: null,
+    archivedAt: null,
+  });
+  data.portableIndex.libraryLayouts[libraryId] = [];
+  data.activeTab = tab;
+
+  const ordinary = snapshotPersonal(data, "Pin a note");
+  const navigation = snapshotPersonal(data, "Archive Research", false, false, false, true);
+  assert.equal(Object.prototype.hasOwnProperty.call(ordinary, "activeTab"), false);
+  assert.equal(navigation.activeTab, tab);
+
+  data.activeTab = "queues";
+  restoreSnapshot(data, navigation);
+  assert.equal(data.activeTab, tab);
+
+  data.undoStack = [navigation];
+  const cleaned = migrateData(structuredClone(data));
+  assert.equal(cleaned.undoStack[0]?.activeTab, tab);
+});
+
+test("v2 data migrates to v11 with the ENT clinical preset and safe settings", () => {
   const data = migrateData({
     version: 2,
     collections: [], pinnedPaths: [], nextStudyPaths: [], savedViews: [],
     settings: { defaultTab: "collections", recentLimit: 25, enableHoverPreview: true, showSafetyBadges: true },
   });
-  assert.equal(data.version, 10);
+  assert.equal(data.version, DATA_VERSION);
   assert.equal(data.settings.workspaceMode, "ent-clinical");
   assert.equal(data.settings.setupComplete, true);
   assert.equal(data.settings.proposalFolder, "01 Inbox/ENT Topic Proposals");
@@ -501,7 +550,7 @@ test("future plugin data is interpreted as the latest compatible shape, never as
     settings: { defaultTab: "collections", openNoteBehavior: "split" },
   });
   assert.equal(storedDataVersion({ version: 99 }), 99);
-  assert.equal(data.version, 10);
+  assert.equal(data.version, DATA_VERSION);
   assert.equal(data.collections[0]?.title, "Future collection");
   assert.equal(data.settings.openNoteBehavior, "split");
   assert.equal(data.migrationBackup, undefined);
@@ -509,14 +558,14 @@ test("future plugin data is interpreted as the latest compatible shape, never as
 
 test("v4 data gains an empty visual curriculum overlay", () => {
   const data = migrateData({ version: 4, collections: [], settings: {} });
-  assert.equal(data.version, 10);
+  assert.equal(data.version, DATA_VERSION);
   assert.equal(data.settings.workspaceMode, "ent-clinical");
   assert.deepEqual(data.curriculumVisual, { parentByPath: {}, orderByContainer: {} });
 });
 
 test("fresh installs start as a configurable generic knowledge base", () => {
   const data = migrateData(null);
-  assert.equal(data.version, 10);
+  assert.equal(data.version, DATA_VERSION);
   assert.equal(data.settings.workspaceMode, "generic");
   assert.equal(data.settings.setupComplete, false);
   assert.equal(data.settings.workspaceName, "Knowledge Base Command Center");
@@ -526,6 +575,169 @@ test("fresh installs start as a configurable generic knowledge base", () => {
   assert.deepEqual(data.excludedIndexPaths, []);
   assert.deepEqual(data.indexGroupByPath, {});
   assert.deepEqual(data.indexGroupOrder, []);
+  assert.equal(data.portableIndex.version, 3);
+  assert.deepEqual(data.portableIndex.libraries, []);
+  assert.deepEqual(data.portableIndex.libraryLayouts, {});
+});
+
+test("legacy portable library groups migrate into isolated flat catalog layouts", () => {
+  const state = cleanPortableIndex({
+    version: 1,
+    groups: [
+      { id: "group-procedure-general", title: "General", order: 1 },
+      { id: "group-medication-general", title: "General", order: 0 },
+    ],
+    subjects: [
+      { id: "procedure-one", title: "Procedure", groupId: "group-procedure-general", parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "procedure" },
+      { id: "medication-one", title: "Medication", groupId: "group-medication-general", parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "medication" },
+    ],
+    resolvedPathBySubjectId: {},
+  });
+
+  assert.equal(state.version, 3);
+  assert.deepEqual(state.libraryLayouts.procedure.map((heading) => [heading.title, heading.subjects]), [["General", ["procedure-one"]]]);
+  assert.deepEqual(state.libraryLayouts.medication.map((heading) => [heading.title, heading.subjects]), [["General", ["medication-one"]]]);
+  assert.notEqual(state.libraryLayouts.procedure[0]?.id, state.libraryLayouts.medication[0]?.id);
+});
+
+test("explicit library layouts reject cross-catalog placement, deduplicate, and preserve unplaced subjects", () => {
+  const state = cleanPortableIndex({
+    version: 2,
+    groups: [{ id: "group-general", title: "General", order: 0 }],
+    subjects: [
+      { id: "medication-one", title: "One", groupId: "group-general", parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "medication" },
+      { id: "medication-unplaced", title: "Unplaced", groupId: "group-general", parentId: null, order: 1, indexed: false, configuredId: "", recordKind: "medication" },
+      { id: "procedure-one", title: "Procedure", groupId: "group-general", parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "procedure" },
+    ],
+    resolvedPathBySubjectId: {},
+    libraryLayouts: {
+      procedure: [],
+      medication: [{
+        id: "medications",
+        title: "Medications",
+        collapsed: false,
+        subjects: ["medication-one", "medication-one", "procedure-one"],
+        subheadings: [{ id: "nasal", title: "Nasal", collapsed: false, subjects: ["medication-one"] }],
+      }],
+      syndrome: [],
+    },
+  });
+
+  assert.deepEqual(state.libraryLayouts.medication[0]?.subjects, ["medication-one"]);
+  assert.deepEqual(state.libraryLayouts.medication[0]?.subheadings[0]?.subjects, []);
+  assert.equal(JSON.stringify(state.libraryLayouts).includes("procedure-one"), false);
+  assert.equal(JSON.stringify(state.libraryLayouts).includes("medication-unplaced"), false);
+  assert.deepEqual(cleanPortableIndex(state).libraryLayouts, state.libraryLayouts);
+});
+
+test("dynamic library helpers use safe stable IDs and reversible tab identities", () => {
+  assert.deepEqual(BUILTIN_LIBRARY_IDS, { procedure: "procedure", medication: "medication", syndrome: "syndrome" });
+  assert.equal(BUILTIN_LIBRARY_DEFINITIONS.length, 3);
+  assert.equal(libraryTabId("research-notes"), "library:research-notes");
+  assert.equal(libraryIdFromTab("library:research-notes"), "research-notes");
+  assert.equal(libraryIdFromTab("library:__proto__"), null);
+  assert.equal(isValidLibraryId("research-notes"), true);
+  assert.equal(isValidLibraryId("__proto__"), false);
+  assert.equal(isValidLibraryId("bad id"), false);
+  assert.throws(() => libraryTabId("bad id"), /invalid stable ID/i);
+});
+
+test("v2 fixed catalogs migrate losslessly into stable dynamic libraries", () => {
+  const state = cleanPortableIndex({
+    version: 2,
+    groups: [
+      { id: "group-medications", title: "Medication source group", order: 0 },
+      { id: "group-topics", title: "Topics", order: 1 },
+    ],
+    subjects: [
+      { id: "placed", title: "Placed", groupId: "group-medications", parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "medication" },
+      { id: "unplaced", title: "Unplaced", groupId: "group-medications", parentId: null, order: 1, indexed: false, configuredId: "", recordKind: "medication" },
+      { id: "indexed", title: "Indexed", groupId: "group-topics", parentId: null, order: 2, indexed: true, configuredId: "", recordKind: "medication" },
+    ],
+    resolvedPathBySubjectId: {},
+    libraryLayouts: {
+      medication: [{
+        id: "medication-heading",
+        title: "Intranasal",
+        collapsed: true,
+        subjects: [],
+        subheadings: [{ id: "antihistamines", title: "Antihistamines", collapsed: false, subjects: ["placed"] }],
+      }],
+    },
+  });
+
+  assert.equal(state.version, 3);
+  assert.deepEqual(state.libraries.map((library) => library.id), ["medication"]);
+  assert.equal(subjectLibraryId(state.subjects.find((subject) => subject.id === "placed")!), "medication");
+  assert.equal(subjectLibraryId(state.subjects.find((subject) => subject.id === "unplaced")!), "medication");
+  assert.equal(subjectLibraryId(state.subjects.find((subject) => subject.id === "indexed")!), null);
+  assert.deepEqual(state.libraryLayouts.medication, [{
+    id: "medication-heading",
+    title: "Intranasal",
+    collapsed: true,
+    subjects: [],
+    subheadings: [{ id: "antihistamines", title: "Antihistamines", collapsed: false, subjects: ["placed"] }],
+  }]);
+  assert.equal(JSON.stringify(state.libraryLayouts).includes("unplaced"), false);
+});
+
+test("custom empty libraries and layouts survive cleaning and clone independently", () => {
+  const state = cleanPortableIndex({
+    version: 3,
+    groups: [{ id: "group", title: "Group", order: 0 }],
+    subjects: [{
+      id: "paper",
+      title: "Paper",
+      groupId: "group",
+      parentId: null,
+      order: 0,
+      indexed: false,
+      configuredId: "",
+      recordKind: "note",
+      libraryId: "research",
+    }],
+    resolvedPathBySubjectId: {},
+    libraries: [{ id: "research", name: "Research", singularName: "Paper", icon: "flask-conical", order: 4, sourceKind: null, archivedAt: null }],
+    libraryLayouts: { research: [] },
+  });
+
+  assert.deepEqual(state.libraries, [{ id: "research", name: "Research", singularName: "Paper", icon: "flask-conical", order: 4, sourceKind: null, archivedAt: null }]);
+  assert.deepEqual(state.libraryLayouts, { research: [] });
+  assert.equal(subjectLibraryId(state.subjects[0]), "research");
+  const clone = cloneLibraryLayouts(state.libraryLayouts);
+  clone.research.push({ id: "heading", title: "Heading", collapsed: false, subjects: [], subheadings: [] });
+  assert.deepEqual(state.libraryLayouts.research, []);
+});
+
+test("system-library ensuring is idempotent and legacy plural tabs migrate", () => {
+  const genericState = cleanPortableIndex({ version: 3, groups: [], subjects: [], resolvedPathBySubjectId: {}, libraries: [], libraryLayouts: {} });
+  assert.deepEqual(cleanLibraryDefinitions([], {}, []), []);
+  assert.deepEqual(emptyLibraryLayouts(), {});
+  ensureSystemLibraries(genericState);
+  ensureSystemLibraries(genericState);
+  assert.deepEqual(genericState.libraries.map((library) => library.id), ["procedure", "medication", "syndrome"]);
+  assert.deepEqual(Object.keys(genericState.libraryLayouts), ["procedure", "medication", "syndrome"]);
+
+  const data = migrateData({
+    version: 11,
+    activeTab: "medications",
+    savedViews: [{ id: "meds", name: "My medications", tab: "medications", query: "" }],
+    settings: { workspaceMode: "ent-clinical", defaultTab: "procedures" },
+    portableIndex: { version: 2, groups: [], subjects: [], resolvedPathBySubjectId: {}, libraryLayouts: { procedure: [], medication: [], syndrome: [] } },
+  });
+  assert.equal(data.activeTab, "library:medication");
+  assert.equal(data.settings.defaultTab, "library:procedure");
+  assert.equal(data.savedViews[0]?.tab, "library:medication");
+  assert.deepEqual(data.portableIndex.libraries.map((library) => library.id), ["procedure", "medication", "syndrome"]);
+
+  const genericLegacyTab = migrateData({
+    version: 11,
+    activeTab: "syndromes",
+    settings: { workspaceMode: "generic" },
+    portableIndex: { version: 2, groups: [], subjects: [], resolvedPathBySubjectId: {}, libraryLayouts: { procedure: [], medication: [], syndrome: [] } },
+  });
+  assert.equal(genericLegacyTab.activeTab, "library:syndrome");
+  assert.deepEqual(genericLegacyTab.portableIndex.libraries.map((library) => library.id), ["syndrome"]);
 });
 
 test("v7 generic organization migrates with manual index controls intact", () => {
@@ -537,7 +749,7 @@ test("v7 generic organization migrates with manual index controls intact", () =>
     indexGroupOrder: ["Research", "Projects"],
     settings: { workspaceMode: "generic", setupComplete: true, workspaceName: "My KB" },
   });
-  assert.equal(data.version, 10);
+  assert.equal(data.version, DATA_VERSION);
   assert.equal(data.settings.workspaceMode, "generic");
   assert.equal(data.settings.workspaceName, "My KB");
   assert.deepEqual(data.manualIndexPaths, ["Research/Outside.md"]);
@@ -702,10 +914,49 @@ test("organization backup round-trips without clinical content", () => {
   data.displayNameByPath["Outside/Topic.md"] = "Airway overview";
   data.indexGroupAliases.airway = "Airway";
   data.indexGroupOrder = ["Airway"];
+  data.portableIndex = cleanPortableIndex({
+    version: 2,
+    groups: [{ id: "medication-group", title: "Medication", order: 0 }],
+    subjects: [{ id: "medication-subject", title: "Allergodil", groupId: "medication-group", parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "medication" }],
+    resolvedPathBySubjectId: {},
+    libraryLayouts: {
+      procedure: [],
+      medication: [{ id: "medication-heading", title: "Nasal", collapsed: false, subjects: ["medication-subject"], subheadings: [] }],
+      syndrome: [],
+    },
+  });
+  data.portableIndex.libraries.push({
+    id: "library-reading",
+    name: "Reading",
+    singularName: "Article",
+    icon: "book-open",
+    order: data.portableIndex.libraries.length,
+    sourceKind: null,
+    archivedAt: null,
+  });
+  data.portableIndex.groups.push({ id: "reading-group", title: "Reading", order: 1 });
+  data.portableIndex.subjects.push({
+    id: "reading-subject",
+    title: "Airway review",
+    groupId: "reading-group",
+    parentId: null,
+    order: 0,
+    indexed: false,
+    configuredId: "",
+    recordKind: "note",
+    libraryId: "library-reading",
+  });
+  data.portableIndex.libraryLayouts["library-reading"] = [{
+    id: "reading-heading",
+    title: "To read",
+    collapsed: true,
+    subjects: ["reading-subject"],
+    subheadings: [],
+  }];
   const backup = createPersonalBackup(data, "2026-08-07T00:00:00.000Z", "vault-ent-main", "base-ent", "ENT");
   const parsed = parsePersonalBackup(JSON.parse(JSON.stringify(backup)) as unknown);
-  assert.equal(backup.version, 7);
-  assert.equal(parsed.version, 7);
+  assert.equal(backup.version, 9);
+  assert.equal(parsed.version, 9);
   assert.equal(parsed.sourceVaultId, "vault-ent-main");
   assert.equal(parsed.sourceBaseId, "base-ent");
   assert.equal(parsed.sourceBaseName, "ENT");
@@ -719,6 +970,15 @@ test("organization backup round-trips without clinical content", () => {
   assert.equal(parsed.displayNameByPath["Outside/Topic.md"], "Airway overview");
   assert.equal(parsed.indexGroupAliases.airway, "Airway");
   assert.deepEqual(parsed.indexGroupOrder, ["Airway"]);
+  assert.deepEqual(parsed.portableIndex.libraryLayouts.medication, data.portableIndex.libraryLayouts.medication);
+  assert.equal(parsed.portableIndex.libraries.some((library) => library.id === "library-reading"), true);
+  assert.deepEqual(parsed.portableIndex.libraryLayouts["library-reading"], data.portableIndex.libraryLayouts["library-reading"]);
+  const versionEight = structuredClone(backup) as unknown as { version: number };
+  versionEight.version = 8;
+  const migratedVersionEight = parsePersonalBackup(versionEight);
+  assert.equal(migratedVersionEight.version, 9);
+  assert.equal(migratedVersionEight.portableIndex.libraries.some((library) => library.id === "library-reading"), true);
+  assert.deepEqual(migratedVersionEight.portableIndex.libraryLayouts["library-reading"], data.portableIndex.libraryLayouts["library-reading"]);
   assert.equal("settings" in parsed, false);
 });
 
@@ -734,7 +994,7 @@ test("version 1 organization backups remain readable but carry no trusted vault 
     curriculumVisual: { parentByPath: {}, orderByContainer: {} },
     layoutSnapshots: [],
   });
-  assert.equal(parsed.version, 7);
+  assert.equal(parsed.version, 9);
   assert.equal(parsed.sourceVaultId, "");
   assert.equal(parsed.sourceBaseId, "");
   assert.equal(parsed.sourceWorkspaceMode, "");
@@ -775,6 +1035,141 @@ test("workspace imports preserve the destination knowledge-base identity", () =>
   assert.equal(target.settings.workspaceName, "Research");
   assert.equal(target.settings.indexLabel, "ENT master index");
   assert.deepEqual(target.indexGroupOrder, ["Pediatric", "Otology"]);
+});
+
+test("legacy v1-v3 workspace-only imports synthesize a referenced built-in library in a generic base", () => {
+  const source = migrateData(null);
+  source.settings.workspaceMode = "generic";
+  source.settings.defaultTab = libraryTabId(BUILTIN_LIBRARY_IDS.medication);
+  const workspace = createWorkspaceConfig(source, "2026-08-09T00:00:00.000Z");
+
+  for (const version of [1, 2, 3] as const) {
+    const value = parsePortableExport({
+      kind: PORTABLE_EXPORT_KIND,
+      version,
+      exportedAt: "2026-08-09T00:00:00.000Z",
+      sourceWorkspace: "Legacy generic KB",
+      components: { workspace },
+    });
+    const target = migrateData(null);
+    target.settings.workspaceMode = "generic";
+
+    applyPortableExport(target, value, portableSelection({ workspace: true }), "replace");
+
+    const medication = target.portableIndex.libraries.find((library) => library.id === BUILTIN_LIBRARY_IDS.medication);
+    assert.equal(medication?.sourceKind, "medication", `portable v${version}`);
+    assert.equal(medication?.archivedAt, null, `portable v${version}`);
+    assert.deepEqual(target.portableIndex.libraryLayouts[BUILTIN_LIBRARY_IDS.medication], [], `portable v${version}`);
+    assert.equal(target.settings.defaultTab, libraryTabId(BUILTIN_LIBRARY_IDS.medication), `portable v${version}`);
+  }
+
+  const unknownWorkspace = structuredClone(workspace);
+  unknownWorkspace.settings.defaultTab = libraryTabId("library-without-a-legacy-descriptor");
+  const unknownValue = parsePortableExport({
+    kind: PORTABLE_EXPORT_KIND,
+    version: 1,
+    exportedAt: "2026-08-09T00:00:00.000Z",
+    sourceWorkspace: "Legacy generic KB",
+    components: { workspace: unknownWorkspace },
+  });
+  const unknownTarget = migrateData(null);
+  applyPortableExport(unknownTarget, unknownValue, portableSelection({ workspace: true }), "replace");
+  assert.equal(unknownTarget.settings.defaultTab, "curriculum", "unknown legacy library identities are sanitized, not invented");
+});
+
+test("legacy v1-v3 saved-view-only imports synthesize built-in navigation dependencies in a generic base", () => {
+  for (const version of [1, 2, 3] as const) {
+    const value = parsePortableExport({
+      kind: PORTABLE_EXPORT_KIND,
+      version,
+      exportedAt: "2026-08-09T00:00:00.000Z",
+      sourceWorkspace: "",
+      components: {
+        savedViews: {
+          version: 1,
+          views: [
+            { id: "syndromes", name: "Syndrome review", tab: "syndromes", query: "image:missing" },
+            { id: "unknown", name: "Unknown custom library", tab: "library:unknown-legacy", query: "" },
+          ],
+        },
+      },
+    });
+    const target = migrateData(null);
+    target.settings.workspaceMode = "generic";
+
+    const result = applyPortableExport(target, value, portableSelection({ savedViews: true }), "replace");
+
+    const syndrome = target.portableIndex.libraries.find((library) => library.id === BUILTIN_LIBRARY_IDS.syndrome);
+    assert.equal(syndrome?.sourceKind, "syndrome", `portable v${version}`);
+    assert.equal(syndrome?.archivedAt, null, `portable v${version}`);
+    assert.equal(target.savedViews[0]?.tab, libraryTabId(BUILTIN_LIBRARY_IDS.syndrome), `portable v${version}`);
+    assert.equal(target.savedViews.some((view) => view.id === "unknown"), false, `portable v${version}`);
+    assert.equal(result.importedViews, 1, `portable v${version}`);
+  }
+});
+
+test("workspace-only dependency imports preserve a local archive decision and sanitize the default tab", () => {
+  const medication = BUILTIN_LIBRARY_DEFINITIONS.find((library) => library.id === BUILTIN_LIBRARY_IDS.medication);
+  assert.ok(medication);
+  const source = migrateData(null);
+  source.settings.workspaceMode = "generic";
+  source.settings.defaultTab = libraryTabId(medication.id);
+  source.portableIndex.libraries = [{ ...medication, archivedAt: null }];
+  source.portableIndex.libraryLayouts = { [medication.id]: [] };
+  const value = parsePortableExport(createPortableExport(
+    source,
+    [],
+    portableSelection({ workspace: true }),
+    "2026-08-09T00:00:00.000Z",
+  ));
+
+  const target = migrateData(null);
+  target.settings.workspaceMode = "generic";
+  target.settings.defaultTab = "collections";
+  target.portableIndex.libraries = [{ ...medication, name: "Local medications", archivedAt: 1234 }];
+  target.portableIndex.libraryLayouts = { [medication.id]: [] };
+
+  applyPortableExport(target, value, portableSelection({ workspace: true }), "replace");
+
+  const retained = target.portableIndex.libraries.find((library) => library.id === medication.id);
+  assert.equal(retained?.name, "Local medications", "a dependency descriptor is not authoritative metadata");
+  assert.equal(retained?.archivedAt, 1234, "workspace import must not restore a locally archived library");
+  assert.equal(target.settings.defaultTab, "curriculum", "an archived default is replaced with a usable core tab");
+});
+
+test("saved-view-only dependency imports omit views aimed at a locally archived library", () => {
+  const medication = BUILTIN_LIBRARY_DEFINITIONS.find((library) => library.id === BUILTIN_LIBRARY_IDS.medication);
+  assert.ok(medication);
+  const source = migrateData(null);
+  source.settings.workspaceMode = "generic";
+  source.portableIndex.libraries = [{ ...medication, archivedAt: null }];
+  source.portableIndex.libraryLayouts = { [medication.id]: [] };
+  source.savedViews = [{
+    id: "medications",
+    name: "Medication review",
+    tab: libraryTabId(medication.id),
+    query: "dose:missing",
+  }];
+  const value = parsePortableExport(createPortableExport(
+    source,
+    [],
+    portableSelection({ savedViews: true }),
+    "2026-08-09T00:00:00.000Z",
+  ));
+
+  const target = migrateData(null);
+  target.settings.workspaceMode = "generic";
+  target.portableIndex.libraries = [{ ...medication, name: "Local medications", archivedAt: 5678 }];
+  target.portableIndex.libraryLayouts = { [medication.id]: [] };
+  target.savedViews = [{ id: "local", name: "Local collection", tab: "collections", query: "local" }];
+
+  const result = applyPortableExport(target, value, portableSelection({ savedViews: true }), "replace");
+
+  const retained = target.portableIndex.libraries.find((library) => library.id === medication.id);
+  assert.equal(retained?.name, "Local medications");
+  assert.equal(retained?.archivedAt, 5678);
+  assert.deepEqual(target.savedViews, [], "the view is omitted instead of silently pointing its name at another tab");
+  assert.equal(result.importedViews, 0);
 });
 
 test("workspace import bounds its group-order list", () => {
@@ -917,6 +1312,11 @@ test("portable export carries exact procedure, medication, and syndrome catalogs
     procedures: 21,
     medications: 44,
     syndromes: 25,
+    libraries: [
+      { id: "procedure", name: "Procedures", subjects: 21, headings: 1 },
+      { id: "medication", name: "Medications", subjects: 44, headings: 1 },
+      { id: "syndrome", name: "Syndromes", subjects: 25, headings: 1 },
+    ],
     placeholders: 91,
     collections: 0,
     pinned: 0,
@@ -1048,6 +1448,116 @@ test("library-only replace preserves unrelated local topic identities and replac
   assert.equal(target.portableIndex.subjects.some((subject) => subject.id === "subject-old-syndrome"), false);
   assert.equal(Object.prototype.hasOwnProperty.call(target.portableIndex.resolvedPathBySubjectId, "subject-old-syndrome"), false);
   assert.deepEqual(target.portableIndex.subjects.filter((subject) => subject.recordKind === "syndrome").map((subject) => subject.title), ["CHARGE syndrome"]);
+});
+
+test("library-only Replace preserves an unrelated empty Index group through a same-ID same-title collision", () => {
+  const medicationLibrary = BUILTIN_LIBRARY_DEFINITIONS.find((library) => library.id === BUILTIN_LIBRARY_IDS.medication);
+  assert.ok(medicationLibrary);
+  const medication = record({
+    path: "Source/Medications/Single medication.md",
+    title: "Single medication",
+    kind: "medication",
+    role: "library",
+    domain: "General",
+    curriculumId: "",
+  });
+  const source = migrateData(null);
+  source.portableIndex.libraries = [{ ...medicationLibrary, archivedAt: null }];
+  source.portableIndex.groups = [{ id: "group-general", title: "General", order: 0 }];
+  source.portableIndex.subjects = [{
+    id: "subject-medication",
+    title: medication.title,
+    groupId: "group-general",
+    parentId: null,
+    order: 0,
+    indexed: false,
+    configuredId: "",
+    recordKind: "medication",
+    libraryId: BUILTIN_LIBRARY_IDS.medication,
+  }];
+  source.portableIndex.resolvedPathBySubjectId = { "subject-medication": medication.path };
+  source.portableIndex.libraryLayouts = {
+    [BUILTIN_LIBRARY_IDS.medication]: [{
+      id: "heading-general",
+      title: "General",
+      collapsed: false,
+      subjects: ["subject-medication"],
+      subheadings: [],
+    }],
+  };
+  const incoming = parsePortableExport(createPortableExport(
+    source,
+    [medication],
+    portableSelection({ medications: true }),
+    "2026-08-09T00:00:00.000Z",
+  ));
+  assert.deepEqual(incoming.components.index?.groups.map((group) => group.id), ["group-general"]);
+
+  const target = migrateData(null);
+  target.portableIndex.libraries = [{ ...medicationLibrary, archivedAt: null }];
+  // This subject-free identity is an explicit Index heading. The incoming
+  // medication deliberately collides on both stable ID and title.
+  target.portableIndex.groups = [{ id: "group-general", title: "General", order: 0 }];
+  target.portableIndex.subjects = [];
+  target.portableIndex.resolvedPathBySubjectId = {};
+  target.portableIndex.libraryLayouts = { [BUILTIN_LIBRARY_IDS.medication]: [] };
+  target.indexGroupOrder = ["General"];
+
+  applyPortableExport(target, incoming, portableSelection({ medications: true }), "replace");
+
+  const importedMedication = target.portableIndex.subjects.find((subject) => subject.id === "subject-medication");
+  assert.ok(importedMedication);
+  assert.notEqual(importedMedication.groupId, "group-general", "the selected library must fork around the unselected Index identity");
+  assert.equal(target.portableIndex.groups.find((group) => group.id === "group-general")?.title, "General");
+  assert.equal(target.portableIndex.groups.filter((group) => group.title === "General").length, 2);
+
+  const indexOnly = createPortableExport(
+    target,
+    [],
+    portableSelection({ index: true }),
+    "2026-08-09T00:01:00.000Z",
+  );
+  assert.deepEqual(indexOnly.components.index?.indexGroupIds, ["group-general"]);
+  assert.deepEqual(indexOnly.components.index?.groups.map((group) => group.id), ["group-general"]);
+});
+
+test("Index-only Replace preserves unrelated empty library layout identities", () => {
+  const source = migrateData(null);
+  const incoming = parsePortableExport(createPortableExport(
+    source,
+    [record({ path: "Source/Topic.md", title: "Topic", domain: "Topics", curriculumId: "" })],
+    portableSelection({ index: true }),
+    "2026-08-09T00:00:00.000Z",
+  ));
+  const target = migrateData(null);
+  target.portableIndex.libraries = [{
+    id: "library-reading",
+    name: "Reading",
+    singularName: "Paper",
+    icon: "book-open",
+    order: 0,
+    sourceKind: null,
+    archivedAt: null,
+  }];
+  target.portableIndex.libraryLayouts = {
+    "library-reading": [{
+      id: "heading-empty-reading",
+      title: "Future reading",
+      collapsed: true,
+      subjects: [],
+      subheadings: [{
+        id: "subheading-empty-guidelines",
+        title: "Guidelines",
+        collapsed: false,
+        subjects: [],
+      }],
+    }],
+  };
+  const expectedLayout = structuredClone(target.portableIndex.libraryLayouts["library-reading"]);
+
+  applyPortableExport(target, incoming, portableSelection({ index: true }), "replace");
+
+  assert.deepEqual(target.portableIndex.libraryLayouts["library-reading"], expectedLayout);
 });
 
 test("older v1 topic-only packages remain index blueprints after library selections are introduced", () => {
@@ -1320,6 +1830,71 @@ test("portable group merge and delete remove stale headings without orphaning su
   assert.equal(exported.components.index?.subjects[0]?.groupId, target.id);
 });
 
+test("index group edits never merge, rename, delete, or reassign same-title library groups", () => {
+  const data = migrateData(null);
+  const sharedGeneral = { id: "group-general-shared", title: "General", order: 0 };
+  const procedureGeneral = { id: "group-general-procedure", title: "General", order: 1 };
+  const medicationTarget = { id: "group-target-medication", title: "Target", order: 2 };
+  const medicationDelete = { id: "group-delete-medication", title: "Delete me", order: 3 };
+  data.portableIndex.groups = [sharedGeneral, procedureGeneral, medicationTarget, medicationDelete];
+  data.portableIndex.subjects = [
+    { id: "topic-general", title: "Index topic", groupId: sharedGeneral.id, parentId: null, order: 0, indexed: true, configuredId: "", recordKind: "topic" },
+    { id: "medication-general", title: "General drug", groupId: sharedGeneral.id, parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "medication" },
+    { id: "procedure-general", title: "General procedure", groupId: procedureGeneral.id, parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "procedure" },
+    { id: "medication-target", title: "Target drug", groupId: medicationTarget.id, parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "medication" },
+    { id: "medication-delete", title: "Delete drug", groupId: medicationDelete.id, parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "medication" },
+  ];
+  data.indexGroupOrder = ["General", "Target", "Delete me"];
+
+  const indexGeneral = registerPortableGroup(data, "General");
+  assert.notEqual(indexGeneral.id, sharedGeneral.id, "a legacy shared identity must remain owned by the library");
+  assert.equal(data.portableIndex.subjects.find((subject) => subject.id === "topic-general")?.groupId, indexGeneral.id);
+  assert.equal(data.portableIndex.subjects.find((subject) => subject.id === "medication-general")?.groupId, sharedGeneral.id);
+  assert.equal(data.portableIndex.subjects.find((subject) => subject.id === "procedure-general")?.groupId, procedureGeneral.id);
+
+  const indexTarget = registerPortableGroup(data, "Target");
+  assert.notEqual(indexTarget.id, medicationTarget.id);
+  renameOrMergePortableGroup(data, "General", "Target");
+  assert.equal(data.portableIndex.subjects.find((subject) => subject.id === "topic-general")?.groupId, indexTarget.id);
+  assert.equal(data.portableIndex.subjects.find((subject) => subject.id === "medication-general")?.groupId, sharedGeneral.id);
+  assert.equal(data.portableIndex.groups.find((group) => group.id === sharedGeneral.id)?.title, "General");
+  assert.equal(data.portableIndex.groups.find((group) => group.id === procedureGeneral.id)?.title, "General");
+  assert.equal(data.portableIndex.groups.find((group) => group.id === medicationTarget.id)?.title, "Target");
+
+  const emptyIndexDelete = registerPortableGroup(data, "Delete me");
+  assert.notEqual(emptyIndexDelete.id, medicationDelete.id);
+  removePortableGroup(data, "Delete me");
+  assert.equal(data.portableIndex.groups.some((group) => group.id === emptyIndexDelete.id), false);
+  assert.equal(data.portableIndex.groups.find((group) => group.id === medicationDelete.id)?.title, "Delete me");
+  assert.equal(data.portableIndex.subjects.find((subject) => subject.id === "medication-delete")?.groupId, medicationDelete.id);
+});
+
+test("index-only export selects the empty index group instead of same-title library groups", () => {
+  const data = migrateData(null);
+  const medicationGroup = { id: "group-general-medication", title: "General", order: 0 };
+  const procedureGroup = { id: "group-general-procedure", title: "General", order: 1 };
+  data.portableIndex.groups = [medicationGroup, procedureGroup];
+  data.portableIndex.subjects = [
+    { id: "medication-general", title: "General drug", groupId: medicationGroup.id, parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "medication" },
+    { id: "procedure-general", title: "General procedure", groupId: procedureGroup.id, parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "procedure" },
+  ];
+  data.indexGroupOrder = ["General"];
+
+  const exported = createPortableExport(data, [], portableSelection({ index: true }), "2026-08-09T00:00:00.000Z");
+  const index = exported.components.index;
+  assert.ok(index);
+  assert.equal(index.subjects.length, 0);
+  assert.equal(index.groups.length, 1);
+  const exportedIndexGroup = index.groups[0];
+  assert.ok(exportedIndexGroup);
+  assert.equal(exportedIndexGroup.title, "General");
+  assert.notEqual(exportedIndexGroup.id, medicationGroup.id);
+  assert.notEqual(exportedIndexGroup.id, procedureGroup.id);
+  assert.deepEqual(index.indexGroupIds, [exportedIndexGroup.id]);
+  assert.equal(data.portableIndex.subjects.find((subject) => subject.id === "medication-general")?.groupId, medicationGroup.id);
+  assert.equal(data.portableIndex.subjects.find((subject) => subject.id === "procedure-general")?.groupId, procedureGroup.id);
+});
+
 test("a deliberately-created empty portable group survives synchronization and export", () => {
   const data = migrateData(null);
   data.indexGroupOrder = ["Future topics"];
@@ -1458,6 +2033,16 @@ test("same-vault recovery bounds lists, aggregate references, saved views, and s
   oversizedList.pinnedPaths = Array(MAX_TRANSFER_LIST_ITEMS + 1).fill("Note.md") as string[];
   assert.ok(new TextEncoder().encode(JSON.stringify(oversizedList)).byteLength < 10 * 1024 * 1024);
   assert.throws(() => parsePersonalBackup(oversizedList), /too many references/i);
+
+  const oversizedLibraryLayout = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-ent-main", "base-ent", "ENT");
+  oversizedLibraryLayout.portableIndex.libraryLayouts.medication = [{
+    id: "medication-heading",
+    title: "Medication",
+    collapsed: false,
+    subjects: Array(MAX_TRANSFER_LIST_ITEMS + 1).fill("medication-subject") as string[],
+    subheadings: [],
+  }];
+  assert.throws(() => parsePersonalBackup(oversizedLibraryLayout), /medication layout.*too many references/i);
 
   const aggregate = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-ent-main", "base-ent", "ENT");
   const referencesPerList = MAX_TRANSFER_LIST_ITEMS;
@@ -2219,7 +2804,7 @@ test("versionless modern data is preserved instead of being mistaken for legacy 
       pinnedPaths: ["Notes/Paper.md"],
       settings: { workspaceMode: "generic", workspaceName: "My research KB", setupComplete: true },
     });
-    assert.equal(data.version, 10);
+    assert.equal(data.version, DATA_VERSION);
     assert.equal(data.settings.workspaceMode, "generic");
     assert.equal(data.settings.workspaceName, "My research KB");
     assert.equal(data.collections[0]?.title, "Research");
@@ -2902,7 +3487,7 @@ test("unchanged canonical path inputs preserve a legacy filename after sanitizat
   assert.equal(canonicalPathInputsUnchanged(legacy, { ...unchanged, title: "VPI updated" }), false);
 });
 
-test("portable v2 declares every selected catalog while legacy v1 packages remain readable", () => {
+test("portable v4 declares every selected library while legacy v1 packages remain readable", () => {
   const source = migrateData(null);
   const medication = record({
     path: "Source/Medications/Salipax.md",
@@ -2919,14 +3504,13 @@ test("portable v2 declares every selected catalog while legacy v1 packages remai
     "2026-08-08T00:00:00.000Z",
   );
 
-  assert.equal(current.version, 2);
-  assert.equal(current.components.index?.version, 2);
+  assert.equal(current.version, 4);
+  assert.equal(current.components.index?.version, 4);
   assert.deepEqual(current.components.index?.includedSections, {
     index: false,
-    procedures: false,
-    medications: true,
-    syndromes: false,
+    libraryIds: ["medication"],
   });
+  assert.deepEqual(current.components.index?.libraries?.map((library) => library.id), ["medication"]);
   assert.deepEqual(selectionAvailableForExport(parsePortableExport(structuredClone(current))), portableSelection({ medications: true }));
 
   const legacy = portableFixture();
@@ -2935,6 +3519,674 @@ test("portable v2 declares every selected catalog while legacy v1 packages remai
   assert.equal(parsedLegacy.components.index?.version, 1);
   assert.equal(parsedLegacy.components.index?.includedSections, undefined);
   assert.deepEqual(selectionAvailableForExport(parsedLegacy), portableSelection({ index: true }));
+});
+
+test("portable v4 preserves nested library organization by stable subject ID", () => {
+  const source = migrateData(null);
+  const medication = record({
+    path: "Source/Medications/Allergodil.md",
+    title: "Allergodil",
+    kind: "medication",
+    role: "library",
+    domain: "Nasal medications",
+    curriculumId: "",
+  });
+  synchronizePortableRegistry(source, [medication]);
+  const subjectId = Object.entries(source.portableIndex.resolvedPathBySubjectId)
+    .find(([, path]) => path === medication.path)?.[0] ?? "";
+  assert.ok(subjectId);
+  source.portableIndex.libraryLayouts.medication = [{
+    id: "medication-heading",
+    title: "Topical medication",
+    collapsed: true,
+    subjects: [],
+    subheadings: [{
+      id: "medication-subheading",
+      title: "Intranasal",
+      collapsed: false,
+      subjects: [subjectId],
+    }],
+  }];
+
+  const exported = createPortableExport(
+    source,
+    [medication],
+    portableSelection({ medications: true }),
+    "2026-08-08T00:00:00.000Z",
+  );
+  assert.equal(JSON.stringify(exported).includes(medication.path), false);
+  assert.deepEqual(exported.components.index?.libraryLayouts?.medication[0]?.subheadings[0]?.subjects, [subjectId]);
+  assert.equal(exported.components.index?.libraryLayouts?.procedure, undefined);
+
+  const parsed = parsePortableExport(structuredClone(exported));
+  const target = migrateData(null);
+  applyPortableExport(target, parsed, portableSelection({ medications: true }), "replace");
+  assert.deepEqual(target.portableIndex.libraryLayouts.medication, exported.components.index?.libraryLayouts?.medication);
+  assert.equal(target.portableIndex.libraryLayouts.procedure, undefined);
+});
+
+test("portable v3 merge and replace translate layout references to a matched local subject ID", () => {
+  const source = migrateData(null);
+  const medication = record({
+    path: "Source/Medications/Allergodil.md",
+    title: "Allergodil",
+    kind: "medication",
+    role: "library",
+    domain: "Nasal medications",
+    curriculumId: "",
+  });
+  synchronizePortableRegistry(source, [medication]);
+  const incomingSubjectId = Object.keys(source.portableIndex.resolvedPathBySubjectId)[0] ?? "";
+  source.portableIndex.libraryLayouts.medication = [{
+    id: "imported-medications",
+    title: "Topical medication",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{ id: "imported-nasal", title: "Intranasal", collapsed: false, subjects: [incomingSubjectId] }],
+  }];
+  const exported = parsePortableExport(createPortableExport(
+    source,
+    [medication],
+    portableSelection({ medications: true }),
+    "2026-08-08T00:00:00.000Z",
+  ));
+
+  for (const mode of ["merge", "replace"] as const) {
+    const target = migrateData(null);
+    target.portableIndex = cleanPortableIndex({
+      version: 2,
+      groups: [{ id: "local-group", title: "Nasal medications", order: 0 }],
+      subjects: [{
+        id: "local-medication",
+        title: "Allergodil",
+        groupId: "local-group",
+        parentId: null,
+        order: 0,
+        indexed: false,
+        configuredId: "",
+        recordKind: "medication",
+      }],
+      resolvedPathBySubjectId: {},
+      libraryLayouts: {
+        procedure: [],
+        medication: [{ id: "local-heading", title: "Local", collapsed: false, subjects: ["local-medication"], subheadings: [] }],
+        syndrome: [],
+      },
+    });
+
+    applyPortableExport(target, exported, portableSelection({ medications: true }), mode);
+    const importedHeading = target.portableIndex.libraryLayouts.medication
+      .find((heading) => heading.id === "imported-medications");
+    assert.deepEqual(importedHeading?.subheadings[0]?.subjects, ["local-medication"], mode);
+    assert.equal(JSON.stringify(target.portableIndex.libraryLayouts).includes(incomingSubjectId), false, mode);
+  }
+});
+
+test("registry synchronization keeps same-title groups independent across library catalogs", () => {
+  const data = migrateData(null);
+  const medication = record({
+    path: "Reference/Medication.md",
+    title: "Medication",
+    kind: "medication",
+    role: "library",
+    domain: "General",
+    curriculumId: "",
+  });
+  const procedure = record({
+    path: "Reference/Procedure.md",
+    title: "Procedure",
+    kind: "procedure",
+    role: "library",
+    domain: "General",
+    curriculumId: "",
+  });
+  data.portableIndex.groups = [
+    { id: "medication-general", title: "General", order: 0 },
+    { id: "procedure-general", title: "General", order: 1 },
+  ];
+  data.portableIndex.subjects = [
+    { id: "medication-subject", title: medication.title, groupId: "medication-general", parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "medication" },
+    { id: "procedure-subject", title: procedure.title, groupId: "procedure-general", parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "procedure" },
+  ];
+  data.portableIndex.resolvedPathBySubjectId = {
+    "medication-subject": medication.path,
+    "procedure-subject": procedure.path,
+  };
+
+  synchronizePortableRegistry(data, [medication, procedure]);
+
+  const medicationGroupId = data.portableIndex.subjects.find((subject) => subject.id === "medication-subject")?.groupId;
+  const procedureGroupId = data.portableIndex.subjects.find((subject) => subject.id === "procedure-subject")?.groupId;
+  assert.ok(medicationGroupId && procedureGroupId);
+  assert.notEqual(medicationGroupId, procedureGroupId);
+  assert.equal(data.portableIndex.groups.find((group) => group.id === medicationGroupId)?.title, "General");
+  assert.equal(data.portableIndex.groups.find((group) => group.id === procedureGroupId)?.title, "General");
+
+  const once = structuredClone(data.portableIndex);
+  synchronizePortableRegistry(data, [procedure, medication]);
+  assert.deepEqual(data.portableIndex, once, "reversing record enumeration does not collapse or churn scoped groups");
+});
+
+test("one-record same-title registry synchronization and export stay idempotent across repeated passes", () => {
+  const data = migrateData(null);
+  const topic = record({
+    path: "Knowledge Base/General/Single topic.md",
+    title: "Single topic",
+    kind: "topic",
+    role: "canonical",
+    domain: "General",
+    curriculumId: "",
+  });
+  data.indexGroupOrder = ["General"];
+  data.portableIndex.groups = [{ id: "group-general", title: "General", order: 0 }];
+  data.portableIndex.subjects = [{
+    id: "subject-single-topic",
+    title: topic.title,
+    groupId: "group-general",
+    parentId: null,
+    order: 0,
+    indexed: true,
+    configuredId: "",
+    recordKind: "topic",
+    libraryId: null,
+  }];
+  data.portableIndex.resolvedPathBySubjectId = { "subject-single-topic": topic.path };
+
+  // Allow one normalization pass for unrelated derived fields, then require
+  // every later synchronization and export to be a true fixed point.
+  synchronizePortableRegistry(data, [topic]);
+  assert.equal(data.portableIndex.subjects[0]?.groupId, "group-general");
+  assert.equal(data.portableIndex.groups.filter((group) => group.title === "General").length, 1);
+  const expectedRegistry = structuredClone(data.portableIndex);
+  for (let pass = 0; pass < 5; pass += 1) {
+    assert.equal(synchronizePortableRegistry(data, [topic]), false, `synchronization pass ${pass + 1}`);
+    assert.deepEqual(data.portableIndex, expectedRegistry, `registry pass ${pass + 1}`);
+    assert.equal(data.portableIndex.groups.filter((group) => group.title === "General").length, 1);
+
+    const exported = createPortableExport(
+      data,
+      [topic],
+      portableSelection({ index: true }),
+      "2026-08-09T00:00:00.000Z",
+    );
+    assert.deepEqual(data.portableIndex, expectedRegistry, `export pass ${pass + 1}`);
+    assert.deepEqual(exported.components.index?.groups.map((group) => group.id), ["group-general"]);
+    assert.deepEqual(exported.components.index?.subjects.map((subject) => subject.id), ["subject-single-topic"]);
+    assert.equal(exported.components.index?.subjects[0]?.groupId, "group-general");
+  }
+});
+
+test("registry synchronization preserves explicit custom and unassigned library identities", () => {
+  const data = migrateData(null);
+  data.portableIndex.libraries = [{
+    id: "library-custom",
+    name: "Custom",
+    singularName: "Item",
+    icon: "library",
+    order: 0,
+    sourceKind: null,
+    archivedAt: null,
+  }];
+  data.portableIndex.groups = [
+    { id: "group-custom", title: "Custom", order: 0 },
+    { id: "group-unassigned", title: "Unassigned", order: 1 },
+  ];
+  data.portableIndex.subjects = [
+    {
+      id: "subject-custom-topic",
+      title: "Custom topic",
+      groupId: "group-custom",
+      parentId: null,
+      order: 0,
+      indexed: false,
+      configuredId: "",
+      recordKind: "topic",
+      libraryId: "library-custom",
+    },
+    {
+      id: "subject-unassigned-medication",
+      title: "Unassigned medication",
+      groupId: "group-unassigned",
+      parentId: null,
+      order: 0,
+      indexed: false,
+      configuredId: "",
+      recordKind: "medication",
+      libraryId: null,
+    },
+  ];
+  data.portableIndex.resolvedPathBySubjectId = {
+    "subject-custom-topic": "Knowledge Base/Custom topic.md",
+    "subject-unassigned-medication": "Knowledge Base/Unassigned medication.md",
+  };
+  data.portableIndex.libraryLayouts = {
+    "library-custom": [{
+      id: "custom-heading",
+      title: "Custom",
+      collapsed: false,
+      subjects: ["subject-custom-topic"],
+      subheadings: [],
+    }],
+  };
+  const customTopic = record({
+    path: "Knowledge Base/Custom topic.md",
+    title: "Custom topic",
+    kind: "topic",
+    role: "canonical",
+    curriculumId: "",
+    domain: "Topics",
+    libraryId: "library-custom",
+  });
+  const unassignedMedication = record({
+    path: "Knowledge Base/Unassigned medication.md",
+    title: "Unassigned medication",
+    kind: "medication",
+    role: "library",
+    curriculumId: "",
+    domain: "Unassigned",
+  });
+
+  synchronizePortableRegistry(data, [customTopic, unassignedMedication]);
+
+  const custom = data.portableIndex.subjects.find((subject) => subject.id === "subject-custom-topic");
+  const unassigned = data.portableIndex.subjects.find((subject) => subject.id === "subject-unassigned-medication");
+  assert.equal(custom?.indexed, false);
+  assert.equal(custom?.libraryId, "library-custom");
+  assert.equal(custom?.parentId, null);
+  assert.equal(unassigned?.indexed, false);
+  assert.equal(unassigned?.libraryId, null);
+  assert.equal(data.portableIndex.libraries.some((library) => library.id === BUILTIN_LIBRARY_IDS.medication), false);
+});
+
+test("selective imports fork cross-catalog stable-ID collisions instead of reclassifying local subjects", () => {
+  const source = migrateData(null);
+  source.portableIndex.groups = [{ id: "shared-group", title: "General", order: 0 }];
+  source.portableIndex.subjects = [{
+    id: "shared-subject",
+    title: "Imported medication",
+    groupId: "shared-group",
+    parentId: null,
+    order: 0,
+    indexed: false,
+    configuredId: "",
+    recordKind: "medication",
+  }];
+  source.portableIndex.libraryLayouts.medication = [{
+    id: "imported-medications",
+    title: "Imported medications",
+    collapsed: false,
+    subjects: ["shared-subject"],
+    subheadings: [],
+  }];
+  const exported = parsePortableExport(createPortableExport(
+    source,
+    [],
+    portableSelection({ medications: true }),
+    "2026-08-08T00:00:00.000Z",
+  ));
+
+  const target = migrateData(null);
+  target.settings.workspaceMode = "ent-clinical";
+  target.portableIndex.groups = [{ id: "shared-group", title: "General", order: 0 }];
+  target.portableIndex.subjects = [{
+    id: "shared-subject",
+    title: "Local clinical topic",
+    groupId: "shared-group",
+    parentId: null,
+    order: 0,
+    indexed: true,
+    configuredId: "ENT-PED-001",
+    recordKind: "topic",
+  }];
+  target.portableIndex.resolvedPathBySubjectId = {
+    "shared-subject": "03 Clinical Topics/01 Pediatric/ENT-PED-001 - Local clinical topic.md",
+  };
+
+  applyPortableExport(target, exported, portableSelection({ medications: true }), "merge");
+
+  const local = target.portableIndex.subjects.find((subject) => subject.id === "shared-subject");
+  const imported = target.portableIndex.subjects.find((subject) => subject.recordKind === "medication");
+  assert.equal(local?.recordKind, "topic");
+  assert.equal(local?.title, "Local clinical topic");
+  assert.equal(target.portableIndex.resolvedPathBySubjectId["shared-subject"], "03 Clinical Topics/01 Pediatric/ENT-PED-001 - Local clinical topic.md");
+  assert.ok(imported && imported.id !== "shared-subject");
+  assert.equal(target.portableIndex.resolvedPathBySubjectId[imported.id], undefined);
+  assert.notEqual(imported.groupId, local?.groupId);
+  assert.deepEqual(target.portableIndex.libraryLayouts.medication[0]?.subjects, [imported.id]);
+});
+
+test("a cross-catalog dependency collision gets a distinct placeholder for imported collections", () => {
+  const source = migrateData(null);
+  source.portableIndex.groups = [{ id: "shared-group", title: "General", order: 0 }];
+  source.portableIndex.subjects = [{
+    id: "shared-subject",
+    title: "Imported medication dependency",
+    groupId: "shared-group",
+    parentId: null,
+    order: 0,
+    indexed: false,
+    configuredId: "",
+    recordKind: "medication",
+  }];
+  source.collections = [{
+    id: "imported-collection",
+    title: "Medication reading",
+    collapsed: false,
+    subjects: [portablePlaceholderPath("shared-subject")],
+    subheadings: [],
+  }];
+  const exported = parsePortableExport(createPortableExport(
+    source,
+    [],
+    portableSelection({ collections: true }),
+    "2026-08-08T00:00:00.000Z",
+  ));
+
+  const target = migrateData(null);
+  target.portableIndex.groups = [{ id: "shared-group", title: "General", order: 0 }];
+  target.portableIndex.subjects = [{
+    id: "shared-subject",
+    title: "Local topic",
+    groupId: "shared-group",
+    parentId: null,
+    order: 4,
+    indexed: true,
+    configuredId: "LOCAL-001",
+    recordKind: "topic",
+  }];
+  target.portableIndex.resolvedPathBySubjectId = { "shared-subject": "Knowledge Base/Local topic.md" };
+
+  applyPortableExport(target, exported, portableSelection({ collections: true }), "merge");
+
+  const local = target.portableIndex.subjects.find((subject) => subject.id === "shared-subject");
+  const dependency = target.portableIndex.subjects.find((subject) => subject.recordKind === "medication");
+  assert.deepEqual(local, {
+    id: "shared-subject",
+    title: "Local topic",
+    groupId: "shared-group",
+    parentId: null,
+    order: 4,
+    indexed: true,
+    configuredId: "LOCAL-001",
+    recordKind: "topic",
+  });
+  assert.ok(dependency && dependency.id !== "shared-subject");
+  assert.deepEqual(target.collections[0]?.subjects, [portablePlaceholderPath(dependency.id)]);
+});
+
+test("library merge treats same-ID different-title headings and subheadings as independent", () => {
+  const source = migrateData(null);
+  source.portableIndex.groups = [{ id: "medications", title: "Medications", order: 0 }];
+  source.portableIndex.subjects = [{
+    id: "incoming-medication",
+    title: "Imported medication",
+    groupId: "medications",
+    parentId: null,
+    order: 0,
+    indexed: false,
+    configuredId: "",
+    recordKind: "medication",
+  }];
+  source.portableIndex.libraryLayouts.medication = [{
+    id: "default-heading",
+    title: "Imported medications",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{ id: "default-subheading", title: "Imported subgroup", collapsed: false, subjects: ["incoming-medication"] }],
+  }];
+  const exported = parsePortableExport(createPortableExport(
+    source,
+    [],
+    portableSelection({ medications: true }),
+    "2026-08-08T00:00:00.000Z",
+  ));
+
+  const target = migrateData(null);
+  target.portableIndex.groups = [{ id: "medications", title: "Medications", order: 0 }];
+  target.portableIndex.subjects = [{
+    id: "local-medication",
+    title: "Local medication",
+    groupId: "medications",
+    parentId: null,
+    order: 0,
+    indexed: false,
+    configuredId: "",
+    recordKind: "medication",
+  }];
+  target.portableIndex.libraryLayouts.medication = [{
+    id: "default-heading",
+    title: "Local medications",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{ id: "default-subheading", title: "Local subgroup", collapsed: false, subjects: ["local-medication"] }],
+  }];
+
+  applyPortableExport(target, exported, portableSelection({ medications: true }), "merge");
+
+  const localHeading = target.portableIndex.libraryLayouts.medication.find((heading) => heading.title === "Local medications");
+  const importedHeading = target.portableIndex.libraryLayouts.medication.find((heading) => heading.title === "Imported medications");
+  assert.equal(target.portableIndex.libraryLayouts.medication.length, 2);
+  assert.equal(localHeading?.id, "default-heading");
+  assert.ok(importedHeading && importedHeading.id !== "default-heading");
+  assert.deepEqual(localHeading?.subheadings[0]?.subjects, ["local-medication"]);
+  assert.deepEqual(importedHeading.subheadings[0]?.subjects, ["incoming-medication"]);
+  assert.equal(localHeading?.subheadings[0]?.id, "default-subheading");
+  assert.notEqual(importedHeading.subheadings[0]?.id, "default-subheading");
+});
+
+test("library merge preserves repeated heading and subheading titles as distinct stable identities", () => {
+  const source = migrateData(null);
+  source.portableIndex.groups = [{ id: "source-medications", title: "Medications", order: 0 }];
+  source.portableIndex.subjects = [
+    {
+      id: "incoming-one",
+      title: "Incoming one",
+      groupId: "source-medications",
+      parentId: null,
+      order: 0,
+      indexed: false,
+      configuredId: "",
+      recordKind: "medication",
+    },
+    {
+      id: "incoming-two",
+      title: "Incoming two",
+      groupId: "source-medications",
+      parentId: null,
+      order: 1,
+      indexed: false,
+      configuredId: "",
+      recordKind: "medication",
+    },
+    {
+      id: "incoming-three",
+      title: "Incoming three",
+      groupId: "source-medications",
+      parentId: null,
+      order: 2,
+      indexed: false,
+      configuredId: "",
+      recordKind: "medication",
+    },
+  ];
+  source.portableIndex.libraryLayouts.medication = [
+    {
+      id: "incoming-heading-one",
+      title: "Repeated heading",
+      collapsed: false,
+      subjects: [],
+      subheadings: [
+        { id: "incoming-subheading-one", title: "Repeated subheading", collapsed: false, subjects: ["incoming-one"] },
+        { id: "incoming-subheading-two", title: "Repeated subheading", collapsed: false, subjects: ["incoming-two"] },
+      ],
+    },
+    {
+      id: "incoming-heading-two",
+      title: "Repeated heading",
+      collapsed: false,
+      subjects: ["incoming-three"],
+      subheadings: [],
+    },
+  ];
+  const exported = parsePortableExport(createPortableExport(
+    source,
+    [],
+    portableSelection({ medications: true }),
+    "2026-08-08T00:00:00.000Z",
+  ));
+
+  const target = migrateData(null);
+  target.portableIndex.groups = [{ id: "local-medications", title: "Medications", order: 0 }];
+  target.portableIndex.subjects = [{
+    id: "local-medication",
+    title: "Local medication",
+    groupId: "local-medications",
+    parentId: null,
+    order: 0,
+    indexed: false,
+    configuredId: "",
+    recordKind: "medication",
+  }];
+  target.portableIndex.libraryLayouts.medication = [{
+    id: "local-heading",
+    title: "Repeated heading",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{
+      id: "local-subheading",
+      title: "Repeated subheading",
+      collapsed: false,
+      subjects: ["local-medication"],
+    }],
+  }];
+
+  applyPortableExport(target, exported, portableSelection({ medications: true }), "merge");
+
+  const headings = target.portableIndex.libraryLayouts.medication;
+  assert.equal(headings.length, 2);
+  const matchedHeading = headings.find((heading) => heading.id === "local-heading");
+  const distinctHeading = headings.find((heading) => heading.id === "incoming-heading-two");
+  assert.ok(matchedHeading);
+  assert.ok(distinctHeading);
+  assert.deepEqual(distinctHeading.subjects, ["incoming-three"]);
+  assert.equal(matchedHeading.subheadings.length, 2);
+  assert.deepEqual(
+    matchedHeading.subheadings.find((subheading) => subheading.id === "local-subheading")?.subjects,
+    ["local-medication", "incoming-one"],
+  );
+  assert.deepEqual(
+    matchedHeading.subheadings.find((subheading) => subheading.id === "incoming-subheading-two")?.subjects,
+    ["incoming-two"],
+  );
+});
+
+test("portable v2 catalogs migrate to flat library layouts while v3 rejects duplicate placement", () => {
+  const source = migrateData(null);
+  const medication = record({
+    path: "Source/Medications/Dependency.md",
+    title: "Dependency",
+    kind: "medication",
+    role: "library",
+    domain: "Nasal medications",
+    curriculumId: "",
+  });
+  const v4 = createPortableExport(
+    source,
+    [medication],
+    portableSelection({ medications: true }),
+    "2026-08-08T00:00:00.000Z",
+  );
+  const v2 = structuredClone(v4) as unknown as {
+    version: number;
+    components: { index: { version: number; libraries?: unknown; libraryLayouts?: unknown; includedSections: unknown; subjects: Array<{ id: string }> } };
+  };
+  v2.version = 2;
+  v2.components.index.version = 2;
+  delete v2.components.index.libraries;
+  delete v2.components.index.libraryLayouts;
+  v2.components.index.includedSections = { index: false, procedures: false, medications: true, syndromes: false };
+  const parsedV2 = parsePortableExport(v2);
+  assert.equal(parsedV2.version, 2);
+  assert.equal(parsedV2.components.index?.libraryLayouts?.medication[0]?.title, "Nasal medications");
+  assert.deepEqual(
+    parsedV2.components.index?.libraryLayouts?.medication[0]?.subjects,
+    [v2.components.index.subjects[0]?.id],
+  );
+  const incompleteV2 = structuredClone(v2) as unknown as {
+    components: { index: { includedSections: Record<string, unknown> } };
+  };
+  delete incompleteV2.components.index.includedSections.medications;
+  assert.throws(() => parsePortableExport(incompleteV2), /includedSections\.medications must be true or false/i);
+
+  const duplicate = structuredClone(v4) as unknown as {
+    version: number;
+    components: {
+      index: {
+        version: number;
+        libraries?: unknown;
+        includedSections: unknown;
+        subjects: Array<{ id: string }>;
+        libraryLayouts: Record<string, LayoutHeading[]>;
+      };
+    };
+  };
+  duplicate.version = 3;
+  duplicate.components.index.version = 3;
+  delete duplicate.components.index.libraries;
+  duplicate.components.index.includedSections = { index: false, procedures: false, medications: true, syndromes: false };
+  duplicate.components.index.libraryLayouts.procedure = [];
+  duplicate.components.index.libraryLayouts.syndrome = [];
+  const subjectId = duplicate.components.index?.subjects[0]?.id ?? "";
+  assert.ok(duplicate.components.index?.libraryLayouts && subjectId);
+  duplicate.components.index.libraryLayouts.medication = [{
+    id: "duplicate-heading",
+    title: "Duplicate",
+    collapsed: false,
+    subjects: [subjectId],
+    subheadings: [{ id: "duplicate-subheading", title: "Duplicate", collapsed: false, subjects: [subjectId] }],
+  }];
+  assert.throws(() => parsePortableExport(duplicate), /appears more than once/i);
+});
+
+test("portable v4 keeps Generic indexes flexible but rejects indexed non-topics from ENT atomically", () => {
+  const source = migrateData(null);
+  const sourceRecord = record({
+    path: "Knowledge Base/Imported reference.md",
+    title: "Imported reference",
+    kind: "topic",
+    role: "supporting",
+    domain: "References",
+    curriculumId: "",
+  });
+  const exported = createPortableExport(
+    source,
+    [sourceRecord],
+    portableSelection({ index: true }),
+    "2026-08-09T00:00:00.000Z",
+  );
+  const raw = structuredClone(exported);
+  const incomingSubject = raw.components.index?.subjects[0];
+  assert.ok(incomingSubject);
+  incomingSubject.recordKind = "note";
+  const parsed = parsePortableExport(raw);
+
+  const generic = migrateData(null);
+  applyPortableExport(generic, parsed, portableSelection({ index: true }), "merge");
+  const genericSubject = generic.portableIndex.subjects.find((subject) => subject.title === "Imported reference");
+  assert.equal(genericSubject?.recordKind, "note");
+  assert.equal(genericSubject?.indexed, true);
+
+  for (const mode of ["merge", "replace"] as const) {
+    const clinical = migrateData(null);
+    clinical.settings.workspaceMode = "ent-clinical";
+    clinical.settings.primaryFolder = "03 Clinical Topics";
+    const before = structuredClone(clinical);
+    assert.throws(
+      () => applyPortableExport(clinical, parsed, portableSelection({ index: true }), mode),
+      /ENT knowledge index accepts topic subjects only/i,
+    );
+    assert.deepEqual(clinical, before, `${mode} must reject before changing destination data`);
+  }
 });
 
 test("a v1 medication dependency is not advertised as a full catalog and replace preserves unrelated medications", () => {
@@ -2976,7 +4228,7 @@ test("a v1 medication dependency is not advertised as a full catalog and replace
   const available = selectionAvailableForExport(parsed);
   assert.equal(available.collections, true);
   assert.equal(available.index, false);
-  assert.equal(available.medications, false);
+  assert.equal(available.libraryIds.includes(BUILTIN_LIBRARY_IDS.medication), false);
   assert.throws(
     () => applyPortableExport(migrateData(null), parsed, portableSelection({ medications: true }), "replace"),
     /does not contain the selected medications component/i,
@@ -3008,7 +4260,7 @@ test("a v1 medication dependency is not advertised as a full catalog and replace
   assert.deepEqual(target.collections[0]?.subjects, [portablePlaceholderPath("subject-imported-medication")]);
 });
 
-test("a v2 collection-only export carries a medication solely as a referenced dependency", () => {
+test("a v4 collection-only export carries a medication solely as a referenced dependency", () => {
   const source = migrateData(null);
   const medication = record({
     path: "Source/Medications/Dependency.md",
@@ -3037,10 +4289,9 @@ test("a v2 collection-only export carries a medication solely as a referenced de
   assert.ok(index);
   assert.deepEqual(index.includedSections, {
     index: false,
-    procedures: false,
-    medications: false,
-    syndromes: false,
+    libraryIds: [],
   });
+  assert.deepEqual(index.libraries?.map((library) => library.id), ["medication"]);
   assert.deepEqual(index.subjects.map((subject) => subject.recordKind), ["medication"]);
   assert.deepEqual(selectionAvailableForExport(parsed), portableSelection({ collections: true }));
 
@@ -3091,7 +4342,7 @@ test("an explicitly selected empty medication catalog is available and replace c
   assert.equal(target.portableIndex.groups.some((group) => group.id === "group-medications"), false);
 });
 
-test("portable v2 rejects missing, contradictory, and undeclared catalog provenance", () => {
+test("portable v4 rejects malformed, contradictory, and undeclared library provenance", () => {
   const source = migrateData(null);
   const medication = record({
     path: "Source/Medications/Medication.md",
@@ -3112,21 +4363,40 @@ test("portable v2 rejects missing, contradictory, and undeclared catalog provena
   delete missing.components.index.includedSections;
   assert.throws(() => parsePortableExport(missing), /must declare includedSections/i);
 
-  const nonBoolean = structuredClone(valid) as unknown as {
+  const nonList = structuredClone(valid) as unknown as {
     components: { index: { includedSections: Record<string, unknown> } };
   };
-  nonBoolean.components.index.includedSections.medications = "yes";
-  assert.throws(() => parsePortableExport(nonBoolean), /includedSections\.medications must be true or false/i);
+  nonList.components.index.includedSections.libraryIds = "medication";
+  assert.throws(() => parsePortableExport(nonList), /includedSections\.libraryIds must be a list/i);
+
+  const duplicateSelection = structuredClone(valid) as unknown as {
+    components: { index: { includedSections: { libraryIds: string[] } } };
+  };
+  duplicateSelection.components.index.includedSections.libraryIds.push("medication");
+  assert.throws(() => parsePortableExport(duplicateSelection), /duplicate included library ID/i);
 
   const contradictory = structuredClone(valid) as unknown as { components: { index: { includeIndex: boolean } } };
   contradictory.components.index.includeIndex = true;
   assert.throws(() => parsePortableExport(contradictory), /includeIndex conflicts/i);
 
   const undeclared = structuredClone(valid) as unknown as {
-    components: { index: { includedSections: { medications: boolean } } };
+    components: { index: { includedSections: { libraryIds: string[] }; libraryLayouts: Record<string, LayoutHeading[]> } };
   };
-  undeclared.components.index.includedSections.medications = false;
+  undeclared.components.index.includedSections.libraryIds = [];
+  undeclared.components.index.libraryLayouts = {};
   assert.throws(() => parsePortableExport(undeclared), /undeclared catalog/i);
+
+  const unknownDefinition = structuredClone(valid) as unknown as {
+    components: { index: { subjects: Array<{ libraryId: string | null }> } };
+  };
+  unknownDefinition.components.index.subjects[0].libraryId = "missing-library";
+  assert.throws(() => parsePortableExport(unknownDefinition), /unknown library missing-library/i);
+
+  const spoofedBuiltin = structuredClone(valid) as unknown as {
+    components: { index: { libraries: Array<{ id: string; sourceKind: string | null }> } };
+  };
+  spoofedBuiltin.components.index.libraries[0].sourceKind = null;
+  assert.throws(() => parsePortableExport(spoofedBuiltin), /reserved built-in identity/i);
 
   const illegalIndexGroup = structuredClone(valid) as unknown as {
     components: { index: { groups: Array<{ id: string }>; indexGroupIds: string[] } };
@@ -3196,6 +4466,265 @@ test("selective import splits a shared group collision without changing the unse
   assert.equal(target.portableIndex.subjects.find((subject) => subject.id === "subject-imported-medication")?.groupId, splitGroupId);
   assert.equal(target.portableIndex.groups.filter((group) => group.title === "Imported medicines").length, 1);
   assert.equal(target.portableIndex.groups.find((group) => group.id === "group-shared")?.title, "Local topics");
+});
+
+test("portable v4 round-trips same-name custom libraries by stable ID without paths", () => {
+  const source = migrateData(null);
+  source.portableIndex.libraries = [
+    { id: "library-alpha", name: "Reference", singularName: "Article", icon: "book-open", order: 0, sourceKind: null, archivedAt: null },
+    { id: "library-beta", name: "Reference", singularName: "Paper", icon: "books", order: 1, sourceKind: null, archivedAt: null },
+  ];
+  source.portableIndex.libraryLayouts = { "library-alpha": [], "library-beta": [] };
+  const alpha = record({
+    path: "Private/Alpha.md",
+    title: "Alpha",
+    kind: "note",
+    role: "library",
+    domain: "Alpha shelf",
+    curriculumId: "",
+    libraryId: "library-alpha",
+  });
+  const beta = record({
+    path: "Private/Beta.md",
+    title: "Beta",
+    kind: "note",
+    role: "library",
+    domain: "Beta shelf",
+    curriculumId: "",
+    libraryId: "library-beta",
+  });
+  synchronizePortableRegistry(source, [alpha, beta]);
+  const alphaId = portableSubjectIdForPath(source, alpha.path);
+  const betaId = portableSubjectIdForPath(source, beta.path);
+  source.portableIndex.libraryLayouts["library-alpha"] = [{
+    id: "alpha-heading",
+    title: "Alpha heading",
+    collapsed: false,
+    subjects: [alphaId],
+    subheadings: [],
+  }];
+  source.portableIndex.libraryLayouts["library-beta"] = [{
+    id: "beta-heading",
+    title: "Beta heading",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{ id: "beta-subheading", title: "Nested", collapsed: true, subjects: [betaId] }],
+  }];
+
+  const exported = createPortableExport(
+    source,
+    [alpha, beta],
+    portableSelection({ libraryIds: ["library-alpha", "library-beta"] }),
+    "2026-08-09T00:00:00.000Z",
+  );
+  const serialized = serializePortableExport(exported);
+  const parsed = parsePortableExport(JSON.parse(serialized) as unknown);
+
+  assert.deepEqual(parsed.components.index?.includedSections, {
+    index: false,
+    libraryIds: ["library-alpha", "library-beta"],
+  });
+  assert.deepEqual(parsed.components.index?.libraries?.map((library) => [library.id, library.name]), [
+    ["library-alpha", "Reference"],
+    ["library-beta", "Reference"],
+  ]);
+  assert.equal(
+    parsed.components.index?.libraries?.find((library) => library.id === "library-beta")?.icon,
+    "books",
+    "portable parsing retains a syntactically valid future icon ID",
+  );
+  assert.deepEqual(parsed.components.index?.subjects.map((subject) => subject.libraryId).sort(), ["library-alpha", "library-beta"]);
+  assert.equal(serialized.includes(alpha.path), false);
+  assert.equal(serialized.includes(beta.path), false);
+
+  const target = migrateData(null);
+  applyPortableExport(
+    target,
+    parsed,
+    portableSelection({ libraryIds: ["library-alpha", "library-beta"] }),
+    "replace",
+  );
+  assert.deepEqual(target.portableIndex.libraries.map((library) => library.id).sort(), ["library-alpha", "library-beta"]);
+  assert.equal(target.portableIndex.libraries.every((library) => library.name === "Reference"), true);
+  assert.equal(
+    target.portableIndex.libraries.find((library) => library.id === "library-beta")?.icon,
+    "books",
+    "import retains the stored icon while rendering applies the fallback",
+  );
+  assert.deepEqual(target.portableIndex.libraryLayouts["library-alpha"]?.[0]?.subjects, [alphaId]);
+  assert.deepEqual(target.portableIndex.libraryLayouts["library-beta"]?.[0]?.subheadings[0]?.subjects, [betaId]);
+});
+
+test("portable v4 keeps dependency-only custom libraries non-authoritative", () => {
+  const source = migrateData(null);
+  source.portableIndex.libraries = [
+    { id: "library-selected", name: "Selected", singularName: "Item", icon: "library", order: 0, sourceKind: null, archivedAt: null },
+    { id: "library-dependency", name: "Source dependency", singularName: "Item", icon: "bookmark", order: 1, sourceKind: null, archivedAt: null },
+  ];
+  source.portableIndex.groups = [
+    { id: "group-selected", title: "Selected", order: 0 },
+    { id: "group-dependency", title: "Dependency", order: 1 },
+  ];
+  source.portableIndex.subjects = [
+    { id: "subject-selected", title: "Selected subject", groupId: "group-selected", parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "note", libraryId: "library-selected" },
+    { id: "subject-dependency", title: "Dependency subject", groupId: "group-dependency", parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "note", libraryId: "library-dependency" },
+  ];
+  source.portableIndex.libraryLayouts = {
+    "library-selected": [{ id: "selected-heading", title: "Selected", collapsed: false, subjects: ["subject-selected"], subheadings: [] }],
+    "library-dependency": [{ id: "source-heading", title: "Source", collapsed: false, subjects: ["subject-dependency"], subheadings: [] }],
+  };
+  source.collections = [{
+    id: "reading",
+    title: "Reading",
+    collapsed: false,
+    subjects: [portablePlaceholderPath("subject-dependency")],
+    subheadings: [],
+  }];
+  const parsed = parsePortableExport(createPortableExport(
+    source,
+    [],
+    portableSelection({ libraryIds: ["library-selected"], collections: true }),
+    "2026-08-09T00:00:00.000Z",
+  ));
+  assert.deepEqual(parsed.components.index?.includedSections?.libraryIds, ["library-selected"]);
+  assert.deepEqual(parsed.components.index?.libraries?.map((library) => library.id).sort(), ["library-dependency", "library-selected"]);
+  assert.equal(parsed.components.index?.libraryLayouts?.["library-dependency"], undefined);
+
+  const target = migrateData(null);
+  target.portableIndex.libraries = [{
+    id: "library-dependency",
+    name: "Local dependency",
+    singularName: "Local item",
+    icon: "archive",
+    order: 0,
+    sourceKind: null,
+    archivedAt: null,
+  }];
+  target.portableIndex.groups = [{ id: "local-group", title: "Local", order: 0 }];
+  target.portableIndex.subjects = [{
+    id: "local-dependency",
+    title: "Local dependency",
+    groupId: "local-group",
+    parentId: null,
+    order: 0,
+    indexed: false,
+    configuredId: "",
+    recordKind: "note",
+    libraryId: "library-dependency",
+  }];
+  target.portableIndex.libraryLayouts = {
+    "library-dependency": [{ id: "local-heading", title: "Local", collapsed: false, subjects: ["local-dependency"], subheadings: [] }],
+  };
+  applyPortableExport(
+    target,
+    parsed,
+    portableSelection({ libraryIds: ["library-selected"], collections: true }),
+    "replace",
+  );
+  assert.equal(target.portableIndex.libraries.find((library) => library.id === "library-dependency")?.name, "Local dependency");
+  assert.deepEqual(target.portableIndex.libraryLayouts["library-dependency"]?.[0]?.subjects, ["local-dependency"]);
+  assert.deepEqual(target.collections[0]?.subjects, [portablePlaceholderPath("subject-dependency")]);
+});
+
+test("replacing an empty custom library clears only that library and retains its definition", () => {
+  const source = migrateData(null);
+  source.portableIndex.libraries = [{
+    id: "library-empty",
+    name: "Empty library",
+    singularName: "Item",
+    icon: "library",
+    order: 0,
+    sourceKind: null,
+    archivedAt: null,
+  }];
+  source.portableIndex.libraryLayouts = { "library-empty": [] };
+  const incoming = parsePortableExport(createPortableExport(
+    source,
+    [],
+    portableSelection({ libraryIds: ["library-empty"] }),
+    "2026-08-09T00:00:00.000Z",
+  ));
+
+  const target = migrateData(null);
+  target.portableIndex.libraries = [
+    { id: "library-empty", name: "Old empty", singularName: "Item", icon: "archive", order: 0, sourceKind: null, archivedAt: null },
+    { id: "library-other", name: "Other", singularName: "Item", icon: "books", order: 1, sourceKind: null, archivedAt: null },
+  ];
+  target.portableIndex.groups = [
+    { id: "group-empty", title: "Empty", order: 0 },
+    { id: "group-other", title: "Other", order: 1 },
+  ];
+  target.portableIndex.subjects = [
+    { id: "subject-empty", title: "Remove me", groupId: "group-empty", parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "note", libraryId: "library-empty" },
+    { id: "subject-other", title: "Keep me", groupId: "group-other", parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "note", libraryId: "library-other" },
+  ];
+  target.portableIndex.libraryLayouts = {
+    "library-empty": [{ id: "empty-heading", title: "Old", collapsed: false, subjects: ["subject-empty"], subheadings: [] }],
+    "library-other": [{ id: "other-heading", title: "Other", collapsed: false, subjects: ["subject-other"], subheadings: [] }],
+  };
+
+  applyPortableExport(target, incoming, portableSelection({ libraryIds: ["library-empty"] }), "replace");
+  assert.equal(target.portableIndex.libraries.some((library) => library.id === "library-empty"), true);
+  assert.equal(target.portableIndex.subjects.some((subject) => subject.id === "subject-empty"), false);
+  assert.deepEqual(target.portableIndex.libraryLayouts["library-empty"], []);
+  assert.equal(target.portableIndex.subjects.some((subject) => subject.id === "subject-other"), true);
+  assert.deepEqual(target.portableIndex.libraryLayouts["library-other"]?.[0]?.subjects, ["subject-other"]);
+});
+
+test("custom-library stable-ID collisions fork by library and remain idempotent", () => {
+  const source = migrateData(null);
+  source.portableIndex.libraries = [{ id: "library-incoming", name: "Incoming", singularName: "Item", icon: "library", order: 0, sourceKind: null, archivedAt: null }];
+  source.portableIndex.groups = [{ id: "shared-group", title: "Shared", order: 0 }];
+  source.portableIndex.subjects = [{
+    id: "shared-subject",
+    title: "Shared title",
+    groupId: "shared-group",
+    parentId: null,
+    order: 0,
+    indexed: false,
+    configuredId: "",
+    recordKind: "note",
+    libraryId: "library-incoming",
+  }];
+  source.portableIndex.libraryLayouts = {
+    "library-incoming": [{ id: "incoming-heading", title: "Incoming", collapsed: false, subjects: ["shared-subject"], subheadings: [] }],
+  };
+  const incoming = parsePortableExport(createPortableExport(
+    source,
+    [],
+    portableSelection({ libraryIds: ["library-incoming"] }),
+    "2026-08-09T00:00:00.000Z",
+  ));
+
+  const target = migrateData(null);
+  target.portableIndex.libraries = [{ id: "library-local", name: "Local", singularName: "Item", icon: "archive", order: 0, sourceKind: null, archivedAt: null }];
+  target.portableIndex.groups = [{ id: "shared-group", title: "Shared", order: 0 }];
+  target.portableIndex.subjects = [{
+    id: "shared-subject",
+    title: "Shared title",
+    groupId: "shared-group",
+    parentId: null,
+    order: 0,
+    indexed: false,
+    configuredId: "",
+    recordKind: "note",
+    libraryId: "library-local",
+  }];
+  target.portableIndex.libraryLayouts = {
+    "library-local": [{ id: "local-heading", title: "Local", collapsed: false, subjects: ["shared-subject"], subheadings: [] }],
+  };
+
+  const first = applyPortableExport(target, incoming, portableSelection({ libraryIds: ["library-incoming"] }), "merge");
+  const imported = target.portableIndex.subjects.find((subject) => subject.libraryId === "library-incoming");
+  assert.ok(imported && imported.id !== "shared-subject");
+  assert.equal(first.addedSubjects, 1);
+  assert.deepEqual(target.portableIndex.libraryLayouts["library-local"]?.[0]?.subjects, ["shared-subject"]);
+  assert.deepEqual(target.portableIndex.libraryLayouts["library-incoming"]?.[0]?.subjects, [imported.id]);
+
+  const second = applyPortableExport(target, incoming, portableSelection({ libraryIds: ["library-incoming"] }), "merge");
+  assert.equal(second.addedSubjects, 0);
+  assert.equal(target.portableIndex.subjects.filter((subject) => subject.libraryId === "library-incoming").length, 1);
+  assert.deepEqual(target.portableIndex.libraryLayouts["library-incoming"]?.[0]?.subjects, [imported.id]);
 });
 
 test("portable summaries count only selected catalogs while retaining selected organization dependencies", () => {

@@ -1,8 +1,11 @@
 import {
   asUnknownRecord,
   assertPersonalBackupMatchesVault,
+  BUILTIN_LIBRARY_DEFINITIONS,
+  BUILTIN_LIBRARY_IDS,
   buildCurriculumTree,
   canonicalIdIsValid,
+  cleanLibraryLayouts,
   cloneCollections,
   cloneCurriculumVisual,
   createPersonalBackup,
@@ -10,9 +13,17 @@ import {
   curriculumContainerKey,
   isPortablePlaceholderPath,
   isSafeObjectKey,
+  isValidLibraryId,
+  LIBRARY_KINDS,
+  LibraryDefinition,
+  LibraryKind,
+  LibraryLayouts,
+  libraryIdFromTab,
+  libraryTabId,
   LayoutHeading,
   MainTab,
   makeId,
+  MAX_LIBRARIES,
   MAX_TRANSFER_COLLECTIONS,
   MAX_TRANSFER_LIST_ITEMS,
   MAX_TRANSFER_TOTAL_REFERENCES,
@@ -26,19 +37,29 @@ import {
   PortableSubjectDefinition,
   portableSubjectIdFromPath,
   RecordKind,
+  reconcilePortableLibraryLayouts,
+  recordBelongsToIndex,
   SavedView,
+  subjectLibraryId,
   VaultRecord,
   WorkspaceConfig,
+  WorkspaceMode,
 } from "./model";
 
 export const PORTABLE_EXPORT_KIND = "knowledge-base-command-center-portable-export" as const;
 /**
- * Version 2 makes the selected subject catalogs explicit. Older builds reject
- * it instead of misreading a library-only package as an authoritative index.
- * The importer continues to accept the original version 1 format.
+ * Version 4 carries stable, user-defined library identities. Older builds
+ * reject it rather than flattening dynamic libraries or silently discarding
+ * their hierarchy. The importer continues to accept versions 1 through 3.
  */
-export const PORTABLE_EXPORT_VERSION = 2 as const;
+export const PORTABLE_EXPORT_VERSION = 4 as const;
+const LIBRARY_LAYOUT_PORTABLE_EXPORT_VERSION = 3 as const;
+const CATALOG_PORTABLE_EXPORT_VERSION = 2 as const;
 const LEGACY_PORTABLE_EXPORT_VERSION = 1 as const;
+type PortableExportVersion = typeof LEGACY_PORTABLE_EXPORT_VERSION
+  | typeof CATALOG_PORTABLE_EXPORT_VERSION
+  | typeof LIBRARY_LAYOUT_PORTABLE_EXPORT_VERSION
+  | typeof PORTABLE_EXPORT_VERSION;
 export const MAX_PORTABLE_PACKAGE_BYTES = 10 * 1024 * 1024;
 const MAX_PORTABLE_GROUPS = 10_000;
 const MAX_PORTABLE_SUBJECTS = 50_000;
@@ -51,18 +72,26 @@ const MAX_SAVED_VIEW_QUERY_LENGTH = 10_000;
 export interface PortableExportSelection {
   workspace: boolean;
   index: boolean;
-  procedures: boolean;
-  medications: boolean;
-  syndromes: boolean;
+  /** Stable IDs of authoritative visual libraries selected for transfer. */
+  libraryIds?: string[];
+  /** @deprecated Compatibility inputs for callers that predate portable v4. */
+  procedures?: boolean;
+  /** @deprecated Compatibility inputs for callers that predate portable v4. */
+  medications?: boolean;
+  /** @deprecated Compatibility inputs for callers that predate portable v4. */
+  syndromes?: boolean;
   collections: boolean;
   study: boolean;
   savedViews: boolean;
   recovery: boolean;
 }
 
+type NormalizedPortableExportSelection = Omit<PortableExportSelection, "libraryIds"> & { libraryIds: string[] };
+
 export const COMPLETE_PORTABLE_SELECTION: PortableExportSelection = {
   workspace: true,
   index: true,
+  libraryIds: [...LIBRARY_KINDS.map((kind) => BUILTIN_LIBRARY_IDS[kind])],
   procedures: true,
   medications: true,
   syndromes: true,
@@ -75,6 +104,7 @@ export const COMPLETE_PORTABLE_SELECTION: PortableExportSelection = {
 export const EMPTY_PORTABLE_SELECTION: PortableExportSelection = {
   workspace: false,
   index: false,
+  libraryIds: [],
   procedures: false,
   medications: false,
   syndromes: false,
@@ -84,18 +114,40 @@ export const EMPTY_PORTABLE_SELECTION: PortableExportSelection = {
   recovery: false,
 };
 
-export interface PortableCatalogSelection {
+export interface PortableCatalogSelectionV1V3 {
   index: boolean;
   procedures: boolean;
   medications: boolean;
   syndromes: boolean;
 }
 
+export interface PortableCatalogSelection {
+  index: boolean;
+  libraryIds: string[];
+  /** Legacy compatibility fields are populated only while parsing v1-v3. */
+  procedures?: boolean;
+  medications?: boolean;
+  syndromes?: boolean;
+}
+
+export interface PortableLibraryDefinition {
+  id: string;
+  name: string;
+  singularName: string;
+  icon: string;
+  order: number;
+  sourceKind: LibraryKind | null;
+}
+
 export interface PortableIndexV1 {
-  version: 1 | 2;
+  version: PortableExportVersion;
   groups: PortableGroupDefinition[];
   subjects: PortableSubjectDefinition[];
-  /** Version 2 packages declare exactly which catalogs are authoritative. */
+  /** Version 4 stable library definitions, including dependency descriptors. */
+  libraries?: PortableLibraryDefinition[];
+  /** Version 3+ path-free organization. Versions 1/2 are migrated to a flat layout on parse. */
+  libraryLayouts?: LibraryLayouts;
+  /** Version 2+ packages declare exactly which catalogs are authoritative. */
   includedSections?: PortableCatalogSelection;
   /** Transitional v1 exporters may declare whether the topic-index blueprint was selected. Older v1 packages imply true. */
   includeIndex?: boolean;
@@ -140,7 +192,7 @@ export interface PortableSavedViewsV1 {
 
 export interface PortableExportV1 {
   kind: typeof PORTABLE_EXPORT_KIND;
-  version: typeof LEGACY_PORTABLE_EXPORT_VERSION | typeof PORTABLE_EXPORT_VERSION;
+  version: PortableExportVersion;
   exportedAt: string;
   sourceWorkspace: string;
   components: {
@@ -171,6 +223,12 @@ export interface PortableExportSummary {
   procedures: number;
   medications: number;
   syndromes: number;
+  libraries: Array<{
+    id: string;
+    name: string;
+    subjects: number;
+    headings: number;
+  }>;
   placeholders: number;
   collections: number;
   pinned: number;
@@ -197,7 +255,7 @@ export function serializePortableExport(value: PortableExportV1): string {
 }
 
 function normalizeText(value: string): string {
-  return value.trim().normalize("NFC").toLocaleLowerCase();
+  return value.trim().normalize("NFC").toLowerCase();
 }
 
 function safeId(value: unknown, label: string): string {
@@ -227,45 +285,132 @@ function isRecordKind(value: unknown): value is RecordKind {
 }
 
 function isMainTab(value: unknown): value is MainTab {
-  return ["curriculum", "inbox", "collections", "queues", "procedures", "medications", "syndromes"].includes(String(value));
+  return ["curriculum", "inbox", "collections", "queues"].includes(String(value))
+    || libraryIdFromTab(value) !== null;
 }
 
 function unique(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))];
 }
 
-export function normalizePortableSelection(selection: PortableExportSelection): PortableExportSelection {
-  // The explicit defaults also keep older callers/tests that predate a newly
-  // added section from emitting `undefined` provenance fields.
-  return { ...EMPTY_PORTABLE_SELECTION, ...selection };
+export function normalizePortableSelection(selection: PortableExportSelection): NormalizedPortableExportSelection {
+  const rawSelection = asUnknownRecord(selection);
+  const legacyIds = LIBRARY_KINDS
+    .filter((kind) => rawSelection[`${kind}s`] === true)
+    .map((kind) => BUILTIN_LIBRARY_IDS[kind]);
+  const requestedIds = Array.isArray(selection.libraryIds) ? selection.libraryIds : [];
+  const libraryIds = unique([...requestedIds, ...legacyIds].map((id) => {
+    if (!isValidLibraryId(id)) throw new Error("The selected library has an invalid stable ID.");
+    return id;
+  }));
+  const selected = new Set(libraryIds);
+  return {
+    ...EMPTY_PORTABLE_SELECTION,
+    ...selection,
+    libraryIds,
+    procedures: selected.has(BUILTIN_LIBRARY_IDS.procedure),
+    medications: selected.has(BUILTIN_LIBRARY_IDS.medication),
+    syndromes: selected.has(BUILTIN_LIBRARY_IDS.syndrome),
+  };
 }
 
-function selectionNeedsSubjectCatalog(selection: PortableExportSelection): boolean {
+export function completePortableSelection(libraryIds: readonly string[]): NormalizedPortableExportSelection {
+  return normalizePortableSelection({
+    ...COMPLETE_PORTABLE_SELECTION,
+    libraryIds: [...libraryIds],
+    procedures: false,
+    medications: false,
+    syndromes: false,
+  });
+}
+
+function selectionNeedsSubjectCatalog(selection: NormalizedPortableExportSelection): boolean {
   return selection.index
-    || selection.procedures
-    || selection.medications
-    || selection.syndromes
+    || selection.libraryIds.length > 0
     || selection.collections
     || selection.study;
 }
 
-function libraryKindIsSelected(kind: RecordKind, selection: PortableExportSelection): boolean {
-  return (kind === "procedure" && selection.procedures)
-    || (kind === "medication" && selection.medications)
-    || (kind === "syndrome" && selection.syndromes);
+function libraryIdIsSelected(libraryId: string | null, selection: NormalizedPortableExportSelection): boolean {
+  return Boolean(libraryId && selection.libraryIds.includes(libraryId));
 }
 
-function catalogSelectionFromExport(selection: PortableExportSelection): PortableCatalogSelection {
+type PortableCatalogScope = "index" | `library:${string}` | "other";
+
+function portableCatalogScope(
+  value: RecordKind | Pick<PortableSubjectDefinition, "indexed" | "libraryId" | "recordKind">,
+): PortableCatalogScope {
+  if (typeof value !== "string") {
+    if (value.indexed) return "index";
+    const libraryId = subjectLibraryId(value);
+    return libraryId ? `library:${libraryId}` : "other";
+  }
+  if (value === "topic") return "index";
+  if ((LIBRARY_KINDS as readonly RecordKind[]).includes(value)) {
+    return `library:${BUILTIN_LIBRARY_IDS[value as LibraryKind]}`;
+  }
+  return "other";
+}
+
+function portableGroupScopes(
+  subjects: readonly PortableSubjectDefinition[],
+): Map<string, Set<PortableCatalogScope>> {
+  const scopes = new Map<string, Set<PortableCatalogScope>>();
+  for (const subject of subjects) {
+    const groupScopes = scopes.get(subject.groupId) ?? new Set<PortableCatalogScope>();
+    groupScopes.add(portableCatalogScope(subject));
+    scopes.set(subject.groupId, groupScopes);
+  }
+  return scopes;
+}
+
+function catalogSelectionFromExport(selection: NormalizedPortableExportSelection): PortableCatalogSelection {
   return {
     index: selection.index,
-    procedures: selection.procedures,
-    medications: selection.medications,
-    syndromes: selection.syndromes,
+    libraryIds: [...selection.libraryIds],
   };
 }
 
+function packageDeclaresCatalogs(version: PortableExportVersion): boolean {
+  return version >= CATALOG_PORTABLE_EXPORT_VERSION;
+}
+
+function selectedLibraryLayout(
+  layouts: LibraryLayouts,
+  libraryId: string,
+  includedIds: Set<string>,
+): LayoutHeading[] {
+  return (layouts[libraryId] ?? []).map((heading) => ({
+    ...heading,
+    subjects: heading.subjects.filter((subjectId) => includedIds.has(subjectId)),
+    subheadings: heading.subheadings.map((subheading) => ({
+      ...subheading,
+      subjects: subheading.subjects.filter((subjectId) => includedIds.has(subjectId)),
+    })),
+  }));
+}
+
+function portableLibraryLayoutsForSelection(
+  layouts: LibraryLayouts,
+  selection: NormalizedPortableExportSelection,
+  includedIds: Set<string>,
+): LibraryLayouts {
+  const selected: LibraryLayouts = {};
+  for (const libraryId of selection.libraryIds) {
+    selected[libraryId] = selectedLibraryLayout(layouts, libraryId, includedIds);
+  }
+  return selected;
+}
+
 export function portableSelectionHasAny(selection: PortableExportSelection): boolean {
-  return Object.values(selection).some(Boolean);
+  const normalized = normalizePortableSelection(selection);
+  return normalized.workspace
+    || normalized.index
+    || normalized.libraryIds.length > 0
+    || normalized.collections
+    || normalized.study
+    || normalized.savedViews
+    || normalized.recovery;
 }
 
 export function portableSubjectPath(data: PluginData, subjectId: string): string {
@@ -283,27 +428,56 @@ export function portableSubjectIdForPath(data: PluginData, path: string): string
   return "";
 }
 
-function ensureGroup(
-  data: PluginData,
-  title: string,
-  byNormalizedTitle: Map<string, PortableGroupDefinition>,
-): PortableGroupDefinition {
-  const cleanTitle = title.trim() || "Ungrouped";
-  const normalized = normalizeText(cleanTitle);
-  const existing = byNormalizedTitle.get(normalized);
-  if (existing) return existing;
-  const group = { id: makeId("group"), title: cleanTitle, order: data.portableIndex.groups.length };
-  data.portableIndex.groups.push(group);
-  byNormalizedTitle.set(normalized, group);
-  return group;
-}
-
 function portableGroupsWithTitle(data: PluginData, title: string): PortableGroupDefinition[] {
   const normalized = normalizeText(title);
   return data.portableIndex.groups.filter((group) => normalizeText(group.title) === normalized);
 }
 
-function collapsePortableGroups(
+function makePortableGroup(data: PluginData, title: string): PortableGroupDefinition {
+  let id = makeId("group");
+  const existingIds = new Set(data.portableIndex.groups.map((group) => group.id));
+  while (existingIds.has(id)) id = makeId("group");
+  const order = data.indexGroupOrder.findIndex((group) => normalizeText(group) === normalizeText(title));
+  const group = {
+    id,
+    title,
+    order: order >= 0 ? order : data.portableIndex.groups.length,
+  };
+  data.portableIndex.groups.push(group);
+  return group;
+}
+
+function portableIndexGroupsWithTitle(data: PluginData, title: string): PortableGroupDefinition[] {
+  const matches = portableGroupsWithTitle(data, title);
+  const subjectsByGroup = new Map<string, PortableSubjectDefinition[]>();
+  for (const subject of data.portableIndex.subjects) {
+    const subjects = subjectsByGroup.get(subject.groupId) ?? [];
+    subjects.push(subject);
+    subjectsByGroup.set(subject.groupId, subjects);
+  }
+  const indexGroups: PortableGroupDefinition[] = [];
+  for (const group of matches) {
+    const subjects = subjectsByGroup.get(group.id) ?? [];
+    const indexSubjects = subjects.filter((subject) => portableCatalogScope(subject) === "index");
+    const nonIndexSubjects = subjects.filter((subject) => portableCatalogScope(subject) !== "index");
+    if (indexSubjects.length > 0 && nonIndexSubjects.length > 0) {
+      // Legacy packages could make the topic index and a library share one
+      // group identity. The library keeps that historical identity; only topic
+      // subjects move to a new index-owned group before an index edit proceeds.
+      const split = makePortableGroup(data, group.title);
+      for (const subject of indexSubjects) subject.groupId = split.id;
+      indexGroups.push(split);
+    } else if (indexSubjects.length > 0 || subjects.length === 0) {
+      // A subject-free group is an explicitly created empty index heading.
+      // Library headings live in libraryLayouts and do not allocate empty
+      // PortableGroupDefinition entries.
+      indexGroups.push(group);
+    }
+  }
+  return indexGroups;
+}
+
+function collapsePortableIndexGroups(
   data: PluginData,
   keep: PortableGroupDefinition,
   duplicates: PortableGroupDefinition[],
@@ -311,37 +485,35 @@ function collapsePortableGroups(
   const duplicateIds = new Set(duplicates.filter((group) => group.id !== keep.id).map((group) => group.id));
   if (duplicateIds.size === 0) return;
   for (const subject of data.portableIndex.subjects) {
-    if (duplicateIds.has(subject.groupId)) subject.groupId = keep.id;
+    if (duplicateIds.has(subject.groupId) && portableCatalogScope(subject) === "index") {
+      subject.groupId = keep.id;
+    }
   }
-  data.portableIndex.groups = data.portableIndex.groups.filter((group) => !duplicateIds.has(group.id));
+  const stillReferenced = new Set(data.portableIndex.subjects.map((subject) => subject.groupId));
+  data.portableIndex.groups = data.portableIndex.groups.filter((group) => (
+    !duplicateIds.has(group.id) || stillReferenced.has(group.id)
+  ));
 }
 
 /** Register a user-created visual group even when it has no subjects yet. */
 export function registerPortableGroup(data: PluginData, title: string): PortableGroupDefinition {
   const cleanTitle = title.trim() || "Ungrouped";
-  const existing = portableGroupsWithTitle(data, cleanTitle);
+  const existing = portableIndexGroupsWithTitle(data, cleanTitle);
   if (existing[0]) {
-    collapsePortableGroups(data, existing[0], existing.slice(1));
+    collapsePortableIndexGroups(data, existing[0], existing.slice(1));
     return existing[0];
   }
-  const order = data.indexGroupOrder.findIndex((group) => normalizeText(group) === normalizeText(cleanTitle));
-  const group = {
-    id: makeId("group"),
-    title: cleanTitle,
-    order: order >= 0 ? order : data.portableIndex.groups.length,
-  };
-  data.portableIndex.groups.push(group);
-  return group;
+  return makePortableGroup(data, cleanTitle);
 }
 
 /** Rename a stable group, or merge it into an existing target group. */
 export function renameOrMergePortableGroup(data: PluginData, sourceTitle: string, targetTitle: string): void {
-  const source = portableGroupsWithTitle(data, sourceTitle);
+  const source = portableIndexGroupsWithTitle(data, sourceTitle);
   const sourceIds = new Set(source.map((group) => group.id));
-  const target = portableGroupsWithTitle(data, targetTitle).filter((group) => !sourceIds.has(group.id));
+  const target = portableIndexGroupsWithTitle(data, targetTitle).filter((group) => !sourceIds.has(group.id));
   const keep = target[0] ?? source[0] ?? registerPortableGroup(data, targetTitle);
   keep.title = targetTitle.trim() || "Ungrouped";
-  collapsePortableGroups(data, keep, [...source, ...target.slice(1)]);
+  collapsePortableIndexGroups(data, keep, [...source, ...target.slice(1)]);
 }
 
 /**
@@ -350,29 +522,25 @@ export function renameOrMergePortableGroup(data: PluginData, sourceTitle: string
  * export omits it unless that subject or the group itself is selected.
  */
 export function removePortableGroup(data: PluginData, title: string): void {
-  const matches = portableGroupsWithTitle(data, title);
+  const matches = portableIndexGroupsWithTitle(data, title);
   if (matches.length === 0) return;
   const matchingIds = new Set(matches.map((group) => group.id));
   const referencedIds = new Set(data.portableIndex.subjects
-    .filter((subject) => matchingIds.has(subject.groupId))
+    .filter((subject) => matchingIds.has(subject.groupId) && portableCatalogScope(subject) === "index")
     .map((subject) => subject.groupId));
   const keep = matches.find((group) => referencedIds.has(group.id));
   if (keep) {
-    collapsePortableGroups(data, keep, matches.filter((group) => group.id !== keep.id));
+    collapsePortableIndexGroups(data, keep, matches.filter((group) => group.id !== keep.id));
     return;
   }
-  data.portableIndex.groups = data.portableIndex.groups.filter((group) => !matchingIds.has(group.id));
+  const allReferencedIds = new Set(data.portableIndex.subjects.map((subject) => subject.groupId));
+  data.portableIndex.groups = data.portableIndex.groups.filter((group) => (
+    !matchingIds.has(group.id) || allReferencedIds.has(group.id)
+  ));
 }
 
 function fallbackTitle(path: string): string {
   return path.split("/").pop()?.replace(/\.md$/i, "").trim() || "Untitled subject";
-}
-
-function recordIsIndexed(record: VaultRecord): boolean {
-  return record.kind === "topic" && (record.role === "canonical"
-    || record.role === "supporting"
-    || (record.role === "placeholder" && record.portableIndexed !== false)
-    || record.portableIndexed === true);
 }
 
 /**
@@ -382,12 +550,16 @@ function recordIsIndexed(record: VaultRecord): boolean {
 export function synchronizePortableRegistry(data: PluginData, records: VaultRecord[]): boolean {
   const before = JSON.stringify(data.portableIndex);
   const recordByPath = new Map(records.map((record) => [record.path, record]));
-  const indexedPaths = new Set(records.filter(recordIsIndexed).map((record) => record.path));
+  const topicsOnly = data.settings.workspaceMode === "ent-clinical";
+  const indexedPaths = new Set(records.filter((record) => recordBelongsToIndex(record, topicsOnly)).map((record) => record.path));
   for (const path of data.manualIndexPaths) if (isPortablePlaceholderPath(path)) indexedPaths.add(path);
   const requiredPaths = new Set<string>([
     ...indexedPaths,
     ...records
-      .filter((record) => record.kind === "procedure" || record.kind === "medication" || record.kind === "syndrome")
+      .filter((record) => Boolean(record.libraryId)
+        || record.kind === "procedure"
+        || record.kind === "medication"
+        || record.kind === "syndrome")
       .map((record) => record.path),
     ...data.pinnedPaths,
     ...data.nextStudyPaths,
@@ -398,6 +570,13 @@ export function synchronizePortableRegistry(data: PluginData, records: VaultReco
   }
 
   const subjectById = new Map(data.portableIndex.subjects.map((subject) => [subject.id, subject]));
+  // Group ownership must be claimed from the pre-scan catalog state. Clearing
+  // index membership first makes every existing topic look like an unassigned
+  // subject, so its group is claimed as `other` and a duplicate index group is
+  // allocated below. That caused same-title group IDs to alternate on every
+  // synchronization/export pass.
+  const previousScopeBySubjectId = new Map(data.portableIndex.subjects
+    .map((subject) => [subject.id, portableCatalogScope(subject)] as const));
   for (const subject of data.portableIndex.subjects) subject.indexed = false;
   const pathToId = new Map<string, string>();
   for (const [subjectId, path] of Object.entries(data.portableIndex.resolvedPathBySubjectId)) {
@@ -408,39 +587,102 @@ export function synchronizePortableRegistry(data: PluginData, records: VaultReco
     pathToId.set(path, subjectId);
   }
 
-  const groupByNormalizedTitle = new Map<string, PortableGroupDefinition>();
   const groupById = new Map<string, PortableGroupDefinition>();
+  const unclaimedGroupsByTitle = new Map<string, PortableGroupDefinition[]>();
   for (const group of data.portableIndex.groups) {
     groupById.set(group.id, group);
     const key = normalizeText(group.title);
-    if (!groupByNormalizedTitle.has(key)) groupByNormalizedTitle.set(key, group);
+    const candidates = unclaimedGroupsByTitle.get(key) ?? [];
+    candidates.push(group);
+    unclaimedGroupsByTitle.set(key, candidates);
   }
-  const getGroup = (title: string): PortableGroupDefinition => ensureGroup(data, title, groupByNormalizedTitle);
+  const groupScopeById = new Map<string, PortableCatalogScope>();
+  const groupByScopeAndTitle = new Map<string, PortableGroupDefinition>();
+  const scopedGroupKey = (scope: PortableCatalogScope, title: string): string => `${scope}\0${normalizeText(title)}`;
+  const claimGroup = (scope: PortableCatalogScope, group: PortableGroupDefinition): boolean => {
+    const claimedScope = groupScopeById.get(group.id);
+    if (claimedScope && claimedScope !== scope) return false;
+    const key = scopedGroupKey(scope, group.title);
+    const existing = groupByScopeAndTitle.get(key);
+    if (existing && existing.id !== group.id) return false;
+    groupScopeById.set(group.id, scope);
+    groupByScopeAndTitle.set(key, group);
+    return true;
+  };
+  // Existing subjects claim their groups first. If legacy data shares one
+  // group across catalogs, only the first catalog can keep that identity; the
+  // other catalog receives a distinct same-title group below.
+  for (const subject of data.portableIndex.subjects) {
+    const group = groupById.get(subject.groupId);
+    if (group) claimGroup(previousScopeBySubjectId.get(subject.id) ?? portableCatalogScope(subject), group);
+  }
+  const getGroup = (scope: PortableCatalogScope, title: string): PortableGroupDefinition => {
+    const cleanTitle = title.trim() || "Ungrouped";
+    const key = scopedGroupKey(scope, cleanTitle);
+    const existing = groupByScopeAndTitle.get(key);
+    if (existing) return existing;
+    const unclaimed = unclaimedGroupsByTitle.get(normalizeText(cleanTitle));
+    let reusable: PortableGroupDefinition | undefined;
+    while (unclaimed && unclaimed.length > 0 && !reusable) {
+      const candidate = unclaimed.shift();
+      if (candidate && !groupScopeById.has(candidate.id)) reusable = candidate;
+    }
+    if (reusable) {
+      claimGroup(scope, reusable);
+      return reusable;
+    }
+    let id = makeId("group");
+    while (groupById.has(id)) id = makeId("group");
+    const group = { id, title: cleanTitle, order: data.portableIndex.groups.length };
+    data.portableIndex.groups.push(group);
+    groupById.set(group.id, group);
+    claimGroup(scope, group);
+    return group;
+  };
 
-  const allGroupTitles = unique([
-    ...data.indexGroupOrder,
-    ...records.map((record) => record.domain),
-    ...data.portableIndex.groups.map((group) => group.title),
-  ]);
-  allGroupTitles.forEach((title) => getGroup(title));
+  // Normalize every retained identity, including unresolved placeholders that
+  // are not part of this scan, so same-title groups never remain shared by two
+  // independent catalogs.
+  for (const subject of data.portableIndex.subjects) {
+    const title = groupById.get(subject.groupId)?.title || "Ungrouped";
+    subject.groupId = getGroup(previousScopeBySubjectId.get(subject.id) ?? portableCatalogScope(subject), title).id;
+  }
+  for (const title of data.indexGroupOrder) getGroup("index", title);
 
   for (const path of requiredPaths) {
     const placeholderId = portableSubjectIdFromPath(path);
     if (placeholderId && subjectById.has(placeholderId)) {
       const subject = subjectById.get(placeholderId);
-      if (subject) subject.indexed = indexedPaths.has(path);
+      if (subject) {
+        const libraryId = subjectLibraryId(subject);
+        subject.indexed = !libraryId && subject.recordKind === "topic" && indexedPaths.has(path);
+        subject.libraryId = libraryId;
+        if (libraryId || subject.recordKind !== "topic") subject.parentId = null;
+      }
       continue;
     }
     const record = recordByPath.get(path);
     let subjectId = pathToId.get(path);
     const boundSubject = subjectId ? subjectById.get(subjectId) : undefined;
+    const boundDeclaresLibrary = Boolean(boundSubject
+      && Object.prototype.hasOwnProperty.call(boundSubject, "libraryId"));
+    const desiredLibraryId = record?.libraryId
+      || (boundDeclaresLibrary && boundSubject
+        ? subjectLibraryId(boundSubject)
+        : record && (LIBRARY_KINDS as readonly RecordKind[]).includes(record.kind)
+          ? BUILTIN_LIBRARY_IDS[record.kind as LibraryKind]
+          : boundSubject ? subjectLibraryId(boundSubject) : null);
     const preserveGenericLibraryGroup = data.settings.workspaceMode === "generic"
       && boundSubject
-      && (boundSubject.recordKind === "procedure"
-        || boundSubject.recordKind === "medication"
-        || boundSubject.recordKind === "syndrome");
+      && Boolean(subjectLibraryId(boundSubject));
     const stableGroupTitle = preserveGenericLibraryGroup ? groupById.get(boundSubject.groupId)?.title ?? "" : "";
-    const group = getGroup(stableGroupTitle || record?.domain || data.indexGroupByPath[path] || "Ungrouped");
+    const recordKind = record?.kind || boundSubject?.recordKind || "note";
+    const group = getGroup(
+      desiredLibraryId
+        ? `library:${desiredLibraryId}`
+        : indexedPaths.has(path) && recordKind === "topic" ? "index" : "other",
+      stableGroupTitle || record?.domain || data.indexGroupByPath[path] || "Ungrouped",
+    );
     // Never auto-bind an unresolved imported subject to a file merely because
     // metadata happens to match. Linking is an explicit user action; silently
     // binding here would leave placeholder memberships pointing at a dead path.
@@ -455,6 +697,7 @@ export function synchronizePortableRegistry(data: PluginData, records: VaultReco
         indexed: indexedPaths.has(path),
         configuredId: record?.curriculumId || "",
         recordKind: record?.kind || "note",
+        libraryId: desiredLibraryId,
       };
       data.portableIndex.subjects.push(subject);
       subjectById.set(subject.id, subject);
@@ -465,17 +708,26 @@ export function synchronizePortableRegistry(data: PluginData, records: VaultReco
     pathToId.set(path, subject.id);
     subject.title = record?.title || subject.title || fallbackTitle(path);
     subject.groupId = group.id;
-    subject.indexed = indexedPaths.has(path);
+    subject.indexed = !desiredLibraryId && indexedPaths.has(path);
     subject.configuredId = record?.curriculumId || subject.configuredId;
     subject.recordKind = record?.kind || subject.recordKind;
-    if (subject.recordKind !== "topic") {
+    subject.libraryId = desiredLibraryId;
+    if (desiredLibraryId || subject.recordKind !== "topic") {
       subject.indexed = false;
       subject.parentId = null;
     }
   }
 
   // Refresh parent identities and sibling order from the effective visual tree.
-  const tree = buildCurriculumTree(records, data.curriculumVisual);
+  // A topic can be deliberately classified into a custom library. The visual
+  // curriculum builder only understands source semantics, so feed it the
+  // effective index set or it would silently pull that topic back into the
+  // index and erase its explicit library assignment during export.
+  const tree = buildCurriculumTree(
+    records.filter((record) => recordBelongsToIndex(record, topicsOnly)),
+    data.curriculumVisual,
+    topicsOnly,
+  );
   for (const domain of tree.domains) {
     const visit = (nodes: typeof domain.roots, parentId: string | null): void => {
       nodes.forEach((node, order) => {
@@ -485,7 +737,8 @@ export function synchronizePortableRegistry(data: PluginData, records: VaultReco
           subject.parentId = parentId;
           subject.order = order;
           subject.indexed = true;
-          subject.groupId = getGroup(node.record.domain).id;
+          subject.libraryId = null;
+          subject.groupId = getGroup("index", node.record.domain).id;
         }
         visit(node.children, subject?.id ?? parentId);
       });
@@ -541,10 +794,15 @@ export function synchronizePortableRegistry(data: PluginData, records: VaultReco
   for (const subjectId of Object.keys(data.portableIndex.resolvedPathBySubjectId)) {
     if (!activeIds.has(subjectId)) delete data.portableIndex.resolvedPathBySubjectId[subjectId];
   }
+  const survivingSubjectIds = new Set(data.portableIndex.subjects.map((subject) => subject.id));
+  data.portableIndex.relinkableSubjectIds = [...new Set(data.portableIndex.relinkableSubjectIds ?? [])]
+    .filter((subjectId) => survivingSubjectIds.has(subjectId)
+      && Boolean(data.portableIndex.resolvedPathBySubjectId[subjectId]));
   const retainedGroupIds = new Set(data.portableIndex.subjects.map((subject) => subject.groupId));
   const retainedEmptyGroupTitles = new Set(data.indexGroupOrder.map(normalizeText));
   data.portableIndex.groups = data.portableIndex.groups.filter((group) => retainedGroupIds.has(group.id)
     || retainedEmptyGroupTitles.has(normalizeText(group.title)));
+  reconcilePortableLibraryLayouts(data.portableIndex);
   return before !== JSON.stringify(data.portableIndex);
 }
 
@@ -556,6 +814,27 @@ function pathMapForExport(data: PluginData): Map<string, string> {
     if (path) map.set(path, subject.id);
   }
   return map;
+}
+
+function portableIndexGroupIdsForExport(data: PluginData): Set<string> {
+  const subjectsByGroup = new Map<string, PortableSubjectDefinition[]>();
+  for (const subject of data.portableIndex.subjects) {
+    const subjects = subjectsByGroup.get(subject.groupId) ?? [];
+    subjects.push(subject);
+    subjectsByGroup.set(subject.groupId, subjects);
+  }
+  const selected = new Set(data.portableIndex.subjects
+    .filter((subject) => subject.indexed)
+    .map((subject) => subject.groupId));
+  for (const title of data.indexGroupOrder) {
+    const matches = portableGroupsWithTitle(data, title);
+    const topicGroup = matches.find((group) => (subjectsByGroup.get(group.id) ?? [])
+      .some((subject) => portableCatalogScope(subject) === "index"));
+    const emptyGroup = matches.find((group) => !subjectsByGroup.has(group.id));
+    const group = topicGroup ?? emptyGroup;
+    if (group) selected.add(group.id);
+  }
+  return selected;
 }
 
 export function createPortableExport(
@@ -570,6 +849,16 @@ export function createPortableExport(
   const selection = normalizePortableSelection(requestedSelection);
   if (!portableSelectionHasAny(selection)) throw new Error("Choose at least one export component.");
   if (selectionNeedsSubjectCatalog(selection)) synchronizePortableRegistry(data, records);
+  const libraryById = new Map(data.portableIndex.libraries.map((library) => [library.id, library]));
+  for (const libraryId of selection.libraryIds) {
+    let library = libraryById.get(libraryId);
+    const builtin = BUILTIN_LIBRARY_DEFINITIONS.find((definition) => definition.id === libraryId);
+    if (!library && builtin) {
+      library = { ...builtin };
+      libraryById.set(library.id, library);
+    }
+    if (!library || library.archivedAt !== null) throw new Error(`Selected library ${libraryId} is not available in this knowledge base.`);
+  }
   const pathToId = pathMapForExport(data);
   const referencedIds = new Set<string>();
   const addPaths = (paths: string[]): void => paths.forEach((path) => {
@@ -588,7 +877,7 @@ export function createPortableExport(
   }
   const includedIds = new Set(data.portableIndex.subjects
     .filter((subject) => (selection.index && subject.indexed)
-      || libraryKindIsSelected(subject.recordKind, selection)
+      || libraryIdIsSelected(subjectLibraryId(subject), selection)
       || referencedIds.has(subject.id))
     .map((subject) => subject.id));
   const subjectById = new Map(data.portableIndex.subjects.map((subject) => [subject.id, subject]));
@@ -606,8 +895,9 @@ export function createPortableExport(
     .filter((subject) => includedIds.has(subject.id))
     .map((subject) => ({
       ...subject,
-      parentId: selection.index && subject.recordKind === "topic" ? subject.parentId : null,
-      indexed: selection.index && subject.recordKind === "topic" && subject.indexed,
+      parentId: selection.index && subject.indexed ? subject.parentId : null,
+      indexed: selection.index && subject.indexed,
+      libraryId: subject.indexed ? null : subjectLibraryId(subject),
       // Generic ID properties are user-configurable and may contain paths or
       // private values. Only the fixed clinical curriculum ID is portable.
       configuredId: data.settings.workspaceMode === "ent-clinical"
@@ -618,33 +908,58 @@ export function createPortableExport(
     }))
     .sort((a, b) => a.groupId.localeCompare(b.groupId) || a.parentId?.localeCompare(b.parentId ?? "") || a.order - b.order || a.title.localeCompare(b.title));
   const includedGroupIds = new Set(subjects.map((subject) => subject.groupId));
-  const selectedEmptyGroupTitles = new Set(data.indexGroupOrder.map(normalizeText));
+  const selectedIndexGroupIds = selection.index ? portableIndexGroupIdsForExport(data) : new Set<string>();
   const groups = data.portableIndex.groups
     .filter((group) => includedGroupIds.has(group.id)
-      || (selection.index && selectedEmptyGroupTitles.has(normalizeText(group.title))))
+      || selectedIndexGroupIds.has(group.id))
     .map((group) => ({ ...group }))
     .sort((a, b) => a.order - b.order || a.title.localeCompare(b.title));
-  const indexedSubjectGroupIds = new Set(subjects
-    .filter((subject) => subject.indexed)
-    .map((subject) => subject.groupId));
   const indexGroupIds = selection.index ? groups
-    .filter((group) => indexedSubjectGroupIds.has(group.id) || selectedEmptyGroupTitles.has(normalizeText(group.title)))
+    .filter((group) => selectedIndexGroupIds.has(group.id))
     .map((group) => group.id) : [];
-  const groupIdByTitle = new Map(groups.map((group) => [normalizeText(group.title), group.id]));
   const indexGroupIdSet = new Set(indexGroupIds);
+  const groupById = new Map(groups.map((group) => [group.id, group]));
+  const groupIdByTitle = new Map(indexGroupIds.map((groupId) => {
+    const group = groupById.get(groupId);
+    return [normalizeText(group?.title ?? ""), groupId] as const;
+  }));
   const collapsedGroupIds = unique(data.collapsed.curriculumDomains
     .map((title) => groupIdByTitle.get(normalizeText(title)) ?? "")
     .filter((id) => selection.index && indexGroupIdSet.has(id)));
   const collapsedSubjectIds = selection.index ? unique(data.collapsed.curriculumNodes
     .map((path) => pathToId.get(path) ?? "")
     .filter((id) => includedIds.has(id) && subjectById.get(id)?.indexed)) : [];
+  const dependencyLibraryIds = new Set<string>();
+  for (const subject of subjects) {
+    const libraryId = subjectLibraryId(subject);
+    if (libraryId) dependencyLibraryIds.add(libraryId);
+  }
+  if (selection.workspace) {
+    const libraryId = libraryIdFromTab(data.settings.defaultTab);
+    if (libraryId) dependencyLibraryIds.add(libraryId);
+  }
+  if (selection.savedViews) {
+    for (const view of data.savedViews) {
+      const libraryId = libraryIdFromTab(view.tab);
+      if (libraryId) dependencyLibraryIds.add(libraryId);
+    }
+  }
+  selection.libraryIds.forEach((libraryId) => dependencyLibraryIds.add(libraryId));
+  const libraries: PortableLibraryDefinition[] = [...dependencyLibraryIds]
+    .map((libraryId) => libraryById.get(libraryId))
+    .filter((library): library is LibraryDefinition => Boolean(library))
+    .map(({ id, name, singularName, icon, order, sourceKind }) => ({ id, name, singularName, icon, order, sourceKind }))
+    .sort((left, right) => left.order - right.order || left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+  const needsIndexComponent = selectionNeedsSubjectCatalog(selection) || libraries.length > 0;
   const components: PortableExportV1["components"] = {};
   if (selection.workspace) components.workspace = createWorkspaceConfig(data, exportedAt);
-  if (selectionNeedsSubjectCatalog(selection)) {
+  if (needsIndexComponent) {
     components.index = {
-      version: 2,
+      version: PORTABLE_EXPORT_VERSION,
       groups,
       subjects,
+      libraries,
+      libraryLayouts: portableLibraryLayoutsForSelection(data.portableIndex.libraryLayouts, selection, includedIds),
       includedSections: catalogSelectionFromExport(selection),
       includeIndex: selection.index,
       indexGroupIds,
@@ -689,15 +1004,70 @@ export function createPortableExport(
   };
 }
 
+function portableLibraryDefinition(definition: LibraryDefinition): PortableLibraryDefinition {
+  const { id, name, singularName, icon, order, sourceKind } = definition;
+  return { id, name, singularName, icon, order, sourceKind };
+}
+
+function legacyPortableLibraries(
+  subjects: readonly PortableSubjectDefinition[],
+  selectedIds: readonly string[],
+  includeAllBuiltins: boolean,
+): PortableLibraryDefinition[] {
+  const needed = new Set(selectedIds);
+  for (const subject of subjects) {
+    const libraryId = subjectLibraryId(subject);
+    if (libraryId) needed.add(libraryId);
+  }
+  return BUILTIN_LIBRARY_DEFINITIONS
+    .filter((definition) => includeAllBuiltins || needed.has(definition.id))
+    .map((definition) => portableLibraryDefinition(definition));
+}
+
+function parsePortableLibraries(input: unknown): PortableLibraryDefinition[] {
+  if (!Array.isArray(input)) throw new Error("Portable version 4 subject catalogs are missing library definitions.");
+  if (input.length > MAX_LIBRARIES) throw new Error(`A portable package can contain at most ${MAX_LIBRARIES} libraries.`);
+  const libraries: PortableLibraryDefinition[] = [];
+  const ids = new Set<string>();
+  for (const [index, raw] of input.entries()) {
+    const value = asUnknownRecord(raw);
+    const id = safeId(value.id, `Library ${index + 1} ID`);
+    if (!isValidLibraryId(id)) throw new Error(`Library ${index + 1} ID is invalid.`);
+    if (ids.has(id)) throw new Error(`Duplicate library ID: ${id}`);
+    ids.add(id);
+    const name = safeTitle(value.name, `Library ${id} name`);
+    const singularName = safeTitle(value.singularName, `Library ${id} singular name`);
+    if (name.length > 100 || singularName.length > 100) throw new Error(`Library ${id} name is too long.`);
+    if (typeof value.icon !== "string" || !/^[a-z0-9-]{1,64}$/i.test(value.icon)) {
+      throw new Error(`Library ${id} icon is invalid.`);
+    }
+    const sourceKind = value.sourceKind === null
+      ? null
+      : (LIBRARY_KINDS as readonly unknown[]).includes(value.sourceKind)
+        ? value.sourceKind as LibraryKind
+        : undefined;
+    if (sourceKind === undefined) throw new Error(`Library ${id} source kind is invalid.`);
+    const builtinKind = LIBRARY_KINDS.find((kind) => BUILTIN_LIBRARY_IDS[kind] === id) ?? null;
+    if ((builtinKind && sourceKind !== builtinKind) || (!builtinKind && sourceKind !== null)) {
+      throw new Error(`Library ${id} conflicts with a reserved built-in identity.`);
+    }
+    libraries.push({ id, name, singularName, icon: value.icon, order: safeOrder(value.order, index), sourceKind });
+  }
+  return libraries;
+}
+
 function parsePortableIndex(
   input: unknown,
-  packageVersion: typeof LEGACY_PORTABLE_EXPORT_VERSION | typeof PORTABLE_EXPORT_VERSION,
+  packageVersion: PortableExportVersion,
+  referenceBudget: PortableReferenceBudget,
 ): PortableIndexV1 {
   const value = asUnknownRecord(input);
   if (value.version !== packageVersion || !Array.isArray(value.groups) || !Array.isArray(value.subjects)) {
     throw new Error("Unsupported portable index blueprint.");
   }
-  if (value.groups.length > MAX_PORTABLE_GROUPS || value.subjects.length > MAX_PORTABLE_SUBJECTS) throw new Error("The portable index is too large.");
+  if (value.groups.length > MAX_PORTABLE_GROUPS || value.subjects.length > MAX_PORTABLE_SUBJECTS) {
+    throw new Error("The portable index is too large.");
+  }
   const groups: PortableGroupDefinition[] = [];
   const groupIds = new Set<string>();
   for (const [index, raw] of value.groups.entries()) {
@@ -707,6 +1077,7 @@ function parsePortableIndex(
     groupIds.add(id);
     groups.push({ id, title: safeTitle(group.title, `Group ${index + 1} title`), order: safeOrder(group.order, index) });
   }
+  let libraries = packageVersion === PORTABLE_EXPORT_VERSION ? parsePortableLibraries(value.libraries) : [];
   const subjects: PortableSubjectDefinition[] = [];
   const subjectIds = new Set<string>();
   for (const [index, raw] of value.subjects.entries()) {
@@ -715,23 +1086,50 @@ function parsePortableIndex(
     if (subjectIds.has(id)) throw new Error(`Duplicate subject ID: ${id}`);
     const groupId = safeId(subject.groupId, `Subject ${index + 1} group ID`);
     if (!groupIds.has(groupId)) throw new Error(`Subject ${id} references an unknown group.`);
-    const parentId = subject.parentId === null || subject.parentId === undefined ? null : safeId(subject.parentId, `Subject ${id} parent ID`);
-    if (subject.recordKind !== undefined && !isRecordKind(subject.recordKind)) throw new Error(`Subject ${id} has an unsupported record kind.`);
+    const rawParentId = subject.parentId === null || subject.parentId === undefined
+      ? null
+      : safeId(subject.parentId, `Subject ${id} parent ID`);
+    if (packageVersion === PORTABLE_EXPORT_VERSION && !isRecordKind(subject.recordKind)) {
+      throw new Error(`Subject ${id} has an unsupported record kind.`);
+    }
+    if (subject.recordKind !== undefined && !isRecordKind(subject.recordKind)) {
+      throw new Error(`Subject ${id} has an unsupported record kind.`);
+    }
     const recordKind = isRecordKind(subject.recordKind) ? subject.recordKind : "topic";
     const configuredId = typeof subject.configuredId === "string" ? subject.configuredId.trim() : "";
     if (configuredId.length > MAX_PORTABLE_TITLE_LENGTH) throw new Error(`Subject ${id} configured ID is too long.`);
+    let libraryId: string | null;
+    let indexed: boolean;
+    if (packageVersion === PORTABLE_EXPORT_VERSION) {
+      if (!Object.prototype.hasOwnProperty.call(subject, "libraryId")) {
+        throw new Error(`Subject ${id} must declare libraryId in portable version 4.`);
+      }
+      if (subject.libraryId === null) libraryId = null;
+      else {
+        libraryId = safeId(subject.libraryId, `Subject ${id} library ID`);
+        if (!isValidLibraryId(libraryId)) throw new Error(`Subject ${id} library ID is invalid.`);
+      }
+      if (typeof subject.indexed !== "boolean") throw new Error(`Subject ${id} indexed must be true or false.`);
+      indexed = subject.indexed;
+      if (indexed && libraryId) throw new Error(`Subject ${id} cannot belong to the index and a library.`);
+      if (!indexed && rawParentId) throw new Error(`Non-index subject ${id} cannot declare a parent.`);
+    } else {
+      libraryId = (LIBRARY_KINDS as readonly RecordKind[]).includes(recordKind)
+        ? BUILTIN_LIBRARY_IDS[recordKind as LibraryKind]
+        : null;
+      indexed = recordKind === "topic" && subject.indexed !== false;
+    }
     subjectIds.add(id);
     subjects.push({
       id,
       title: safeTitle(subject.title, `Subject ${index + 1} title`),
       groupId,
-      parentId: recordKind === "topic" ? parentId : null,
+      parentId: indexed ? rawParentId : null,
       order: safeOrder(subject.order, index),
-      // Library identities never participate in the topic curriculum, even if
-      // a malformed or older producer marks them indexed.
-      indexed: recordKind === "topic" && subject.indexed !== false,
+      indexed,
       configuredId,
       recordKind,
+      libraryId,
     });
   }
   const byId = new Map(subjects.map((subject) => [subject.id, subject]));
@@ -741,6 +1139,7 @@ function parsePortableIndex(
     if (!parent) throw new Error(`Subject ${subject.id} references an unknown parent.`);
     if (parent.id === subject.id) throw new Error(`Subject ${subject.id} cannot be its own parent.`);
     if (parent.groupId !== subject.groupId) throw new Error(`Subject ${subject.id} and its parent are in different groups.`);
+    if (!parent.indexed) throw new Error(`Subject ${subject.id} references a parent outside the index.`);
   }
   const done = new Set<string>();
   for (const subject of subjects) {
@@ -758,7 +1157,7 @@ function parsePortableIndex(
     }
     chain.forEach((id) => done.add(id));
   }
-  const parseCollapsedIds = (
+  const parseKnownIds = (
     inputIds: unknown,
     knownIds: Set<string>,
     label: string,
@@ -778,28 +1177,54 @@ function parsePortableIndex(
     }
     return ids;
   };
-  const collapsedGroupIds = parseCollapsedIds(value.collapsedGroupIds, groupIds, "Collapsed index groups", MAX_PORTABLE_GROUPS);
-  const collapsedSubjectIds = parseCollapsedIds(value.collapsedSubjectIds, subjectIds, "Collapsed index subjects", MAX_PORTABLE_SUBJECTS);
+  const collapsedGroupIds = parseKnownIds(value.collapsedGroupIds, groupIds, "Collapsed index groups", MAX_PORTABLE_GROUPS);
+  const collapsedSubjectIds = parseKnownIds(value.collapsedSubjectIds, subjectIds, "Collapsed index subjects", MAX_PORTABLE_SUBJECTS);
   if (value.includeIndex !== undefined && typeof value.includeIndex !== "boolean") {
     throw new Error("Portable index includeIndex must be true or false.");
   }
-  const indexGroupIds = parseCollapsedIds(value.indexGroupIds, groupIds, "Index blueprint groups", MAX_PORTABLE_GROUPS);
+  const indexGroupIds = parseKnownIds(value.indexGroupIds, groupIds, "Index blueprint groups", MAX_PORTABLE_GROUPS);
   let includedSections: PortableCatalogSelection | undefined;
-  if (packageVersion === PORTABLE_EXPORT_VERSION) {
+  if (packageDeclaresCatalogs(packageVersion)) {
     if (!value.includedSections || typeof value.includedSections !== "object" || Array.isArray(value.includedSections)) {
-      throw new Error("Portable version 2 subject catalogs must declare includedSections.");
+      throw new Error(`Portable version ${packageVersion} subject catalogs must declare includedSections.`);
     }
     const rawSections = value.includedSections as Record<string, unknown>;
-    const readSection = (key: keyof PortableCatalogSelection): boolean => {
-      if (typeof rawSections[key] !== "boolean") throw new Error(`Portable includedSections.${key} must be true or false.`);
-      return rawSections[key];
-    };
-    includedSections = {
-      index: readSection("index"),
-      procedures: readSection("procedures"),
-      medications: readSection("medications"),
-      syndromes: readSection("syndromes"),
-    };
+    if (typeof rawSections.index !== "boolean") throw new Error("Portable includedSections.index must be true or false.");
+    if (packageVersion === PORTABLE_EXPORT_VERSION) {
+      if (!Array.isArray(rawSections.libraryIds)) throw new Error("Portable includedSections.libraryIds must be a list.");
+      if (rawSections.libraryIds.length > MAX_LIBRARIES) throw new Error("Portable includedSections.libraryIds has too many entries.");
+      const libraryIds: string[] = [];
+      const seen = new Set<string>();
+      const knownLibraryIds = new Set(libraries.map((library) => library.id));
+      for (const [index, rawId] of rawSections.libraryIds.entries()) {
+        const id = safeId(rawId, `Included library ${index + 1} ID`);
+        if (!isValidLibraryId(id)) throw new Error("An included library has an invalid stable ID.");
+        if (seen.has(id)) throw new Error(`Duplicate included library ID: ${id}`);
+        if (!knownLibraryIds.has(id)) throw new Error(`Included library ${id} has no definition.`);
+        seen.add(id);
+        libraryIds.push(id);
+      }
+      includedSections = { index: rawSections.index, libraryIds };
+    } else {
+      const readLegacy = (key: keyof Omit<PortableCatalogSelectionV1V3, "index">): boolean => {
+        if (typeof rawSections[key] !== "boolean") throw new Error(`Portable includedSections.${key} must be true or false.`);
+        return rawSections[key];
+      };
+      const procedures = readLegacy("procedures");
+      const medications = readLegacy("medications");
+      const syndromes = readLegacy("syndromes");
+      includedSections = {
+        index: rawSections.index,
+        libraryIds: [
+          ...(procedures ? [BUILTIN_LIBRARY_IDS.procedure] : []),
+          ...(medications ? [BUILTIN_LIBRARY_IDS.medication] : []),
+          ...(syndromes ? [BUILTIN_LIBRARY_IDS.syndrome] : []),
+        ],
+        procedures,
+        medications,
+        syndromes,
+      };
+    }
     if (typeof value.includeIndex === "boolean" && value.includeIndex !== includedSections.index) {
       throw new Error("Portable index includeIndex conflicts with includedSections.index.");
     }
@@ -807,10 +1232,61 @@ function parsePortableIndex(
       throw new Error("A package without the index blueprint cannot declare index groups.");
     }
   }
+  const selectedLibraryIds = includedSections?.libraryIds ?? [];
+  if (packageVersion !== PORTABLE_EXPORT_VERSION) {
+    libraries = legacyPortableLibraries(
+      subjects,
+      selectedLibraryIds,
+      packageVersion === LIBRARY_LAYOUT_PORTABLE_EXPORT_VERSION,
+    );
+  }
+  const knownLibraryIds = new Set(libraries.map((library) => library.id));
+  for (const subject of subjects) {
+    const libraryId = subjectLibraryId(subject);
+    if (libraryId && !knownLibraryIds.has(libraryId)) {
+      throw new Error(`Subject ${subject.id} references unknown library ${libraryId}.`);
+    }
+  }
+  if (packageVersion === PORTABLE_EXPORT_VERSION) {
+    for (const [groupId, scopes] of portableGroupScopes(subjects)) {
+      if (scopes.size > 1) throw new Error(`Group ${groupId} is shared by more than one catalog scope.`);
+    }
+  }
+  let libraryLayouts: LibraryLayouts;
+  if (packageVersion === PORTABLE_EXPORT_VERSION) {
+    libraryLayouts = parsePortableLibraryLayouts(
+      value.libraryLayouts,
+      subjects,
+      selectedLibraryIds,
+      referenceBudget,
+      true,
+    );
+  } else if (packageVersion === LIBRARY_LAYOUT_PORTABLE_EXPORT_VERSION) {
+    libraryLayouts = parsePortableLibraryLayouts(
+      value.libraryLayouts,
+      subjects,
+      LIBRARY_KINDS.map((kind) => BUILTIN_LIBRARY_IDS[kind]),
+      referenceBudget,
+      true,
+    );
+    for (const libraryId of Object.keys(libraryLayouts)) {
+      if (!selectedLibraryIds.includes(libraryId)) libraryLayouts[libraryId] = [];
+    }
+  } else {
+    const localDefinitions: LibraryDefinition[] = libraries.map((library) => ({ ...library, archivedAt: null }));
+    libraryLayouts = cleanLibraryLayouts(undefined, groups, subjects, localDefinitions);
+    if (includedSections) {
+      for (const libraryId of Object.keys(libraryLayouts)) {
+        if (!selectedLibraryIds.includes(libraryId)) libraryLayouts[libraryId] = [];
+      }
+    }
+  }
   return {
     version: packageVersion,
     groups,
     subjects,
+    libraries,
+    libraryLayouts,
     ...(includedSections ? { includedSections } : {}),
     ...(typeof value.includeIndex === "boolean" ? { includeIndex: value.includeIndex } : {}),
     ...(indexGroupIds ? { indexGroupIds } : {}),
@@ -840,6 +1316,90 @@ function parseSubjectIds(input: unknown, known: Set<string>, label: string, budg
     ids.push(id);
   }
   return ids;
+}
+
+function parsePortableLibraryLayouts(
+  input: unknown,
+  subjects: PortableSubjectDefinition[],
+  libraryIds: readonly string[],
+  budget: PortableReferenceBudget,
+  requireExactKeys: boolean,
+): LibraryLayouts {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("Portable subject catalogs are missing libraryLayouts.");
+  }
+  const value = input as Record<string, unknown>;
+  const knownSubjects = new Set(subjects.map((subject) => subject.id));
+  const libraryBySubjectId = new Map(subjects.map((subject) => [subject.id, subjectLibraryId(subject)]));
+  const expectedLibraryIds = new Set(libraryIds);
+  if (requireExactKeys) {
+    for (const key of Object.keys(value)) {
+      if (!isValidLibraryId(key) || !expectedLibraryIds.has(key)) {
+        throw new Error(`Portable library layout ${key} is not an included library.`);
+      }
+    }
+  }
+  let structureCount = 0;
+  const parsed: LibraryLayouts = {};
+  for (const libraryId of libraryIds) {
+    const rawLayout = value[libraryId];
+    if (!Array.isArray(rawLayout)) throw new Error(`Portable ${libraryId} layout must be a list.`);
+    if (rawLayout.length > MAX_PORTABLE_COLLECTIONS) throw new Error(`Portable ${libraryId} layout has too many headings.`);
+    const structureIds = new Set<string>();
+    const placed = new Set<string>();
+    parsed[libraryId] = rawLayout.map((rawHeading, headingIndex) => {
+      structureCount += 1;
+      if (structureCount > MAX_PORTABLE_COLLECTIONS) throw new Error("Portable library layouts have too many headings and subheadings.");
+      const heading = asUnknownRecord(rawHeading);
+      const id = safeId(heading.id, `${libraryId} heading ${headingIndex + 1} ID`);
+      if (structureIds.has(id)) throw new Error(`Duplicate ${libraryId} layout ID: ${id}`);
+      structureIds.add(id);
+      if (!Array.isArray(heading.subheadings)) throw new Error(`${libraryId} heading ${id} subheadings must be a list.`);
+      const directSubjects = parseSubjectIds(heading.subjects, knownSubjects, `${libraryId} heading ${id} subjects`, budget)
+        .filter((subjectId) => {
+          if (libraryBySubjectId.get(subjectId) !== libraryId) {
+            throw new Error(`${libraryId} heading ${id} references a subject from another library.`);
+          }
+          if (placed.has(subjectId)) throw new Error(`${libraryId} subject ${subjectId} appears more than once in its library layout.`);
+          placed.add(subjectId);
+          return true;
+        });
+      const subheadings = heading.subheadings.map((rawSubheading, subheadingIndex) => {
+        structureCount += 1;
+        if (structureCount > MAX_PORTABLE_COLLECTIONS) throw new Error("Portable library layouts have too many headings and subheadings.");
+        const subheading = asUnknownRecord(rawSubheading);
+        const subheadingId = safeId(subheading.id, `${libraryId} heading ${id} subheading ${subheadingIndex + 1} ID`);
+        if (structureIds.has(subheadingId)) throw new Error(`Duplicate ${libraryId} layout ID: ${subheadingId}`);
+        structureIds.add(subheadingId);
+        return {
+          id: subheadingId,
+          title: safeTitle(subheading.title, `${libraryId} subheading ${subheadingId} title`),
+          collapsed: subheading.collapsed === true,
+          subjects: parseSubjectIds(
+            subheading.subjects,
+            knownSubjects,
+            `${libraryId} subheading ${subheadingId} subjects`,
+            budget,
+          ).filter((subjectId) => {
+            if (libraryBySubjectId.get(subjectId) !== libraryId) {
+              throw new Error(`${libraryId} subheading ${subheadingId} references a subject from another library.`);
+            }
+            if (placed.has(subjectId)) throw new Error(`${libraryId} subject ${subjectId} appears more than once in its library layout.`);
+            placed.add(subjectId);
+            return true;
+          }),
+        };
+      });
+      return {
+        id,
+        title: safeTitle(heading.title, `${libraryId} heading ${id} title`),
+        collapsed: heading.collapsed === true,
+        subjects: directSubjects,
+        subheadings,
+      };
+    });
+  }
+  return parsed;
 }
 
 function parsePortableCollections(input: unknown, known: Set<string>, budget: PortableReferenceBudget): PortableCollectionsV1 {
@@ -880,7 +1440,7 @@ function parsePortableCollections(input: unknown, known: Set<string>, budget: Po
   return { version: 1, collections };
 }
 
-function parseSavedViews(input: unknown): PortableSavedViewsV1 {
+function parseSavedViews(input: unknown, packageVersion: PortableExportVersion): PortableSavedViewsV1 {
   const value = asUnknownRecord(input);
   if (value.version !== 1 || !Array.isArray(value.views) || value.views.length > MAX_PORTABLE_COLLECTIONS) throw new Error("Unsupported saved views component.");
   const ids = new Set<string>();
@@ -889,10 +1449,17 @@ function parseSavedViews(input: unknown): PortableSavedViewsV1 {
     const id = safeId(view.id, `Saved view ${index + 1} ID`);
     if (ids.has(id)) throw new Error(`Duplicate saved view ID: ${id}`);
     ids.add(id);
-    if (!isMainTab(view.tab)) throw new Error(`Saved view ${id} has an unsupported tab.`);
+    const legacyLibraryId = packageVersion < PORTABLE_EXPORT_VERSION
+      ? view.tab === "procedures" ? BUILTIN_LIBRARY_IDS.procedure
+        : view.tab === "medications" ? BUILTIN_LIBRARY_IDS.medication
+          : view.tab === "syndromes" ? BUILTIN_LIBRARY_IDS.syndrome
+            : null
+      : null;
+    const tab = legacyLibraryId ? libraryTabId(legacyLibraryId) : view.tab;
+    if (!isMainTab(tab)) throw new Error(`Saved view ${id} has an unsupported tab.`);
     const query = typeof view.query === "string" ? view.query : "";
     if (query.length > MAX_SAVED_VIEW_QUERY_LENGTH) throw new Error(`Saved view ${id} query is too long.`);
-    return { id, name: safeTitle(view.name, `Saved view ${index + 1} name`), tab: view.tab, query };
+    return { id, name: safeTitle(view.name, `Saved view ${index + 1} name`), tab, query };
   });
   return { version: 1, views };
 }
@@ -901,7 +1468,10 @@ export function parsePortableExport(input: unknown): PortableExportV1 {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("The selected file is not a Command Center portable export.");
   const value = input as Record<string, unknown>;
   if (value.kind !== PORTABLE_EXPORT_KIND
-    || (value.version !== LEGACY_PORTABLE_EXPORT_VERSION && value.version !== PORTABLE_EXPORT_VERSION)) {
+    || (value.version !== LEGACY_PORTABLE_EXPORT_VERSION
+      && value.version !== CATALOG_PORTABLE_EXPORT_VERSION
+      && value.version !== LIBRARY_LAYOUT_PORTABLE_EXPORT_VERSION
+      && value.version !== PORTABLE_EXPORT_VERSION)) {
     throw new Error("Unsupported Command Center portable export.");
   }
   const packageVersion = value.version;
@@ -909,7 +1479,7 @@ export function parsePortableExport(input: unknown): PortableExportV1 {
   const components: PortableExportV1["components"] = {};
   const referenceBudget: PortableReferenceBudget = { total: 0 };
   if (rawComponents.workspace !== undefined) components.workspace = parseWorkspaceConfig(rawComponents.workspace);
-  if (rawComponents.index !== undefined) components.index = parsePortableIndex(rawComponents.index, packageVersion);
+  if (rawComponents.index !== undefined) components.index = parsePortableIndex(rawComponents.index, packageVersion, referenceBudget);
   const knownSubjects = new Set(components.index?.subjects.map((subject) => subject.id) ?? []);
   if (rawComponents.collections !== undefined) {
     if (!components.index) throw new Error("Portable collections require an index subject catalog.");
@@ -925,9 +1495,10 @@ export function parsePortableExport(input: unknown): PortableExportV1 {
       nextSubjectIds: parseSubjectIds(study.nextSubjectIds, knownSubjects, "Next-list subjects", referenceBudget),
     };
   }
-  if (packageVersion === PORTABLE_EXPORT_VERSION && components.index) {
+  if (rawComponents.savedViews !== undefined) components.savedViews = parseSavedViews(rawComponents.savedViews, packageVersion);
+  if (packageDeclaresCatalogs(packageVersion) && components.index) {
     const sections = components.index.includedSections;
-    if (!sections) throw new Error("Portable version 2 subject catalogs are missing includedSections.");
+    if (!sections) throw new Error(`Portable version ${packageVersion} subject catalogs are missing includedSections.`);
     const referenced = new Set<string>();
     for (const collection of components.collections?.collections ?? []) {
       collection.subjectIds.forEach((id) => referenced.add(id));
@@ -936,16 +1507,31 @@ export function parsePortableExport(input: unknown): PortableExportV1 {
     components.study?.pinnedSubjectIds.forEach((id) => referenced.add(id));
     components.study?.nextSubjectIds.forEach((id) => referenced.add(id));
     for (const subject of components.index.subjects) {
-      const explicitlyIncluded = (subject.recordKind === "topic" && sections.index)
-        || (subject.recordKind === "procedure" && sections.procedures)
-        || (subject.recordKind === "medication" && sections.medications)
-        || (subject.recordKind === "syndrome" && sections.syndromes);
+      const explicitlyIncluded = (subject.indexed && sections.index)
+        || libraryIdIsSelected(subjectLibraryId(subject), {
+          ...EMPTY_PORTABLE_SELECTION,
+          libraryIds: sections.libraryIds,
+        });
       if (!explicitlyIncluded && !referenced.has(subject.id)) {
         throw new Error(`Portable subject ${subject.id} belongs to an undeclared catalog and is not referenced by an included section.`);
       }
     }
   }
-  if (rawComponents.savedViews !== undefined) components.savedViews = parseSavedViews(rawComponents.savedViews);
+  if (packageVersion === PORTABLE_EXPORT_VERSION) {
+    const knownLibraries = new Set(components.index?.libraries?.map((library) => library.id) ?? []);
+    const referencedLibraryIds = new Set<string>();
+    const defaultLibraryId = components.workspace ? libraryIdFromTab(components.workspace.settings.defaultTab) : null;
+    if (defaultLibraryId) referencedLibraryIds.add(defaultLibraryId);
+    for (const view of components.savedViews?.views ?? []) {
+      const libraryId = libraryIdFromTab(view.tab);
+      if (libraryId) referencedLibraryIds.add(libraryId);
+    }
+    for (const libraryId of referencedLibraryIds) {
+      if (!knownLibraries.has(libraryId)) {
+        throw new Error(`Portable component references library ${libraryId} without a definition.`);
+      }
+    }
+  }
   if (rawComponents.recovery !== undefined) components.recovery = parsePersonalBackup(rawComponents.recovery);
   if (Object.keys(components).length === 0) throw new Error("This portable export contains no supported components.");
   const sourceWorkspace = typeof value.sourceWorkspace === "string" ? value.sourceWorkspace : "";
@@ -976,20 +1562,21 @@ export function parseAnyCommandCenterExport(input: unknown): PortableExportV1 {
 
 export function selectionAvailableForExport(value: PortableExportV1): PortableExportSelection {
   const index = value.components.index;
-  const sections = value.version === PORTABLE_EXPORT_VERSION ? index?.includedSections : undefined;
-  return {
+  const sections = packageDeclaresCatalogs(value.version) ? index?.includedSections : undefined;
+  return normalizePortableSelection({
     workspace: Boolean(value.components.workspace),
     // Version 1 never declared full clinical-library catalogs; any non-topic
     // subjects in it are dependencies of Collections or Study state.
     index: Boolean(index) && (sections ? sections.index : index?.includeIndex !== false),
-    procedures: sections?.procedures === true,
-    medications: sections?.medications === true,
-    syndromes: sections?.syndromes === true,
+    libraryIds: sections?.libraryIds ?? [],
+    procedures: false,
+    medications: false,
+    syndromes: false,
     collections: Boolean(value.components.collections),
     study: Boolean(value.components.study),
     savedViews: Boolean(value.components.savedViews),
     recovery: Boolean(value.components.recovery),
-  };
+  });
 }
 
 export function summarizePortableExport(
@@ -999,13 +1586,26 @@ export function summarizePortableExport(
   const index = requestedSelection
     ? portableIndexForSelection(value, normalizePortableSelection(requestedSelection))
     : value.components.index;
+  const libraryDefinitions = new Map((index?.libraries ?? []).map((library) => [library.id, library]));
+  const libraryIds = index?.includedSections?.libraryIds
+    ?? [...new Set(index?.subjects.map((subject) => subjectLibraryId(subject)).filter((id): id is string => Boolean(id)) ?? [])];
+  const libraries = libraryIds.map((id) => {
+    const layout = index?.libraryLayouts?.[id] ?? [];
+    return {
+      id,
+      name: libraryDefinitions.get(id)?.name ?? id,
+      subjects: index?.subjects.filter((subject) => subjectLibraryId(subject) === id).length ?? 0,
+      headings: layout.reduce((count, heading) => count + 1 + heading.subheadings.length, 0),
+    };
+  });
   return {
     groups: index?.indexGroupIds?.length ?? (index?.includeIndex === false ? 0 : index?.groups.length ?? 0),
     subjects: index?.subjects.length ?? 0,
     indexSubjects: index?.subjects.filter((subject) => subject.recordKind === "topic" && subject.indexed).length ?? 0,
-    procedures: index?.subjects.filter((subject) => subject.recordKind === "procedure").length ?? 0,
-    medications: index?.subjects.filter((subject) => subject.recordKind === "medication").length ?? 0,
-    syndromes: index?.subjects.filter((subject) => subject.recordKind === "syndrome").length ?? 0,
+    procedures: index?.subjects.filter((subject) => subjectLibraryId(subject) === BUILTIN_LIBRARY_IDS.procedure).length ?? 0,
+    medications: index?.subjects.filter((subject) => subjectLibraryId(subject) === BUILTIN_LIBRARY_IDS.medication).length ?? 0,
+    syndromes: index?.subjects.filter((subject) => subjectLibraryId(subject) === BUILTIN_LIBRARY_IDS.syndrome).length ?? 0,
+    libraries,
     placeholders: index?.subjects.length ?? 0,
     collections: value.components.collections?.collections.length ?? 0,
     pinned: value.components.study?.pinnedSubjectIds.length ?? 0,
@@ -1020,12 +1620,144 @@ function mergeOrdered(existing: string[], incoming: string[]): string[] {
   return unique([...incoming, ...existing.filter((value) => !incomingSet.has(value))]);
 }
 
+function translateLibraryLayout(layout: LayoutHeading[], subjectIdMap: Map<string, string>): LayoutHeading[] {
+  const translate = (ids: string[]): string[] => unique(ids.map((id) => subjectIdMap.get(id) || id));
+  return layout.map((heading) => ({
+    ...heading,
+    subjects: translate(heading.subjects),
+    subheadings: heading.subheadings.map((subheading) => ({
+      ...subheading,
+      subjects: translate(subheading.subjects),
+    })),
+  }));
+}
+
+function mergeLibraryLayout(existing: LayoutHeading[], incoming: LayoutHeading[]): LayoutHeading[] {
+  const incomingSubjectIds = new Set<string>();
+  for (const heading of incoming) {
+    heading.subjects.forEach((id) => incomingSubjectIds.add(id));
+    heading.subheadings.forEach((subheading) => subheading.subjects.forEach((id) => incomingSubjectIds.add(id)));
+  }
+  const merged = cloneCollections(existing).map((heading) => ({
+    ...heading,
+    subjects: heading.subjects.filter((id) => !incomingSubjectIds.has(id)),
+    subheadings: heading.subheadings.map((subheading) => ({
+      ...subheading,
+      subjects: subheading.subjects.filter((id) => !incomingSubjectIds.has(id)),
+    })),
+  }));
+  const usedStructureIds = new Set<string>();
+  for (const heading of merged) {
+    usedStructureIds.add(heading.id);
+    for (const subheading of heading.subheadings) usedStructureIds.add(subheading.id);
+  }
+  const allocateStructureId = (preferredId: string, prefix: string): string => {
+    let id = preferredId;
+    if (usedStructureIds.has(id)) {
+      id = makeId(prefix);
+      while (usedStructureIds.has(id)) id = makeId(prefix);
+    }
+    usedStructureIds.add(id);
+    return id;
+  };
+  const byId = new Map(merged.map((heading) => [heading.id, heading]));
+  const titleCandidates = new Map<string, LayoutHeading[]>();
+  for (const heading of merged) {
+    const candidates = titleCandidates.get(normalizeText(heading.title)) ?? [];
+    candidates.push(heading);
+    titleCandidates.set(normalizeText(heading.title), candidates);
+  }
+  // Stable IDs distinguish intentionally repeated labels. A title fallback is
+  // only a best-effort match to one pre-existing destination heading; it must
+  // never consume a heading created (or already claimed) by another incoming
+  // sibling, otherwise two valid same-title headings collapse into one.
+  const claimedHeadingIds = new Set<string>();
+  for (const incomingHeading of incoming) {
+    let target = byId.get(incomingHeading.id);
+    if (target && (claimedHeadingIds.has(target.id)
+      || normalizeText(target.title) !== normalizeText(incomingHeading.title))) target = undefined;
+    if (!target) {
+      const candidates = (titleCandidates.get(normalizeText(incomingHeading.title)) ?? [])
+        .filter((candidate) => !claimedHeadingIds.has(candidate.id));
+      if (candidates.length === 1) target = candidates[0];
+    }
+    if (!target) {
+      target = {
+        id: allocateStructureId(incomingHeading.id, "library-heading"),
+        title: incomingHeading.title,
+        collapsed: incomingHeading.collapsed,
+        subjects: [],
+        subheadings: [],
+      };
+      merged.push(target);
+      byId.set(target.id, target);
+    }
+    claimedHeadingIds.add(target.id);
+    target.title = incomingHeading.title;
+    target.subjects = unique([...target.subjects, ...incomingHeading.subjects]);
+    const subheadingById = new Map(target.subheadings.map((subheading) => [subheading.id, subheading]));
+    const subheadingsByTitle = new Map<string, typeof target.subheadings>();
+    for (const subheading of target.subheadings) {
+      const candidates = subheadingsByTitle.get(normalizeText(subheading.title)) ?? [];
+      candidates.push(subheading);
+      subheadingsByTitle.set(normalizeText(subheading.title), candidates);
+    }
+    const claimedSubheadingIds = new Set<string>();
+    for (const incomingSubheading of incomingHeading.subheadings) {
+      let targetSubheading = subheadingById.get(incomingSubheading.id);
+      if (targetSubheading && (claimedSubheadingIds.has(targetSubheading.id)
+        || normalizeText(targetSubheading.title) !== normalizeText(incomingSubheading.title))) targetSubheading = undefined;
+      if (!targetSubheading) {
+        const candidates = (subheadingsByTitle.get(normalizeText(incomingSubheading.title)) ?? [])
+          .filter((candidate) => !claimedSubheadingIds.has(candidate.id));
+        if (candidates.length === 1) targetSubheading = candidates[0];
+      }
+      if (targetSubheading) {
+        claimedSubheadingIds.add(targetSubheading.id);
+        targetSubheading.title = incomingSubheading.title;
+        targetSubheading.subjects = unique([...targetSubheading.subjects, ...incomingSubheading.subjects]);
+      } else {
+        const created = {
+          ...incomingSubheading,
+          id: allocateStructureId(incomingSubheading.id, "library-subheading"),
+          subjects: [...incomingSubheading.subjects],
+        };
+        target.subheadings.push(created);
+        subheadingById.set(created.id, created);
+        claimedSubheadingIds.add(created.id);
+      }
+    }
+  }
+  return merged;
+}
+
+function navigationLibraryIdsForSelection(
+  value: PortableExportV1,
+  selection: NormalizedPortableExportSelection,
+): Set<string> {
+  const libraryIds = new Set<string>();
+  if (selection.workspace && value.components.workspace) {
+    const libraryId = libraryIdFromTab(value.components.workspace.settings.defaultTab);
+    if (libraryId) libraryIds.add(libraryId);
+  }
+  if (selection.savedViews) {
+    for (const view of value.components.savedViews?.views ?? []) {
+      const libraryId = libraryIdFromTab(view.tab);
+      if (libraryId) libraryIds.add(libraryId);
+    }
+  }
+  return libraryIds;
+}
+
 function portableIndexForSelection(
   value: PortableExportV1,
-  selection: PortableExportSelection,
+  selection: NormalizedPortableExportSelection,
 ): PortableIndexV1 | undefined {
   const index = value.components.index;
-  if (!index || !selectionNeedsSubjectCatalog(selection)) return undefined;
+  if (!index) return undefined;
+
+  const descriptorLibraryIds = navigationLibraryIdsForSelection(value, selection);
+  if (!selectionNeedsSubjectCatalog(selection) && descriptorLibraryIds.size === 0) return undefined;
 
   const referencedIds = new Set<string>();
   if (selection.collections) {
@@ -1040,9 +1772,12 @@ function portableIndexForSelection(
   }
 
   const subjectById = new Map(index.subjects.map((subject) => [subject.id, subject]));
+  const legacyIndexSubject = (subject: PortableSubjectDefinition): boolean => (
+    index.version < PORTABLE_EXPORT_VERSION && subject.recordKind === "topic" && !subjectLibraryId(subject)
+  );
   const includedIds = new Set(index.subjects
-    .filter((subject) => (selection.index && subject.recordKind === "topic")
-      || libraryKindIsSelected(subject.recordKind, selection)
+    .filter((subject) => (selection.index && (subject.indexed || legacyIndexSubject(subject)))
+      || libraryIdIsSelected(subjectLibraryId(subject), selection)
       || referencedIds.has(subject.id))
     .map((subject) => subject.id));
   if (selection.index) {
@@ -1059,9 +1794,19 @@ function portableIndexForSelection(
     .filter((subject) => includedIds.has(subject.id))
     .map((subject) => ({
       ...subject,
-      parentId: selection.index && subject.recordKind === "topic" ? subject.parentId : null,
-      indexed: selection.index && subject.recordKind === "topic" && subject.indexed,
+      parentId: selection.index && (subject.indexed || legacyIndexSubject(subject)) ? subject.parentId : null,
+      indexed: selection.index && subject.indexed,
+      libraryId: subject.indexed ? null : subjectLibraryId(subject),
     }));
+  const neededLibraryIds = new Set(selection.libraryIds);
+  descriptorLibraryIds.forEach((id) => neededLibraryIds.add(id));
+  for (const subject of subjects) {
+    const libraryId = subjectLibraryId(subject);
+    if (libraryId) neededLibraryIds.add(libraryId);
+  }
+  const libraries = (index.libraries ?? [])
+    .filter((library) => neededLibraryIds.has(library.id))
+    .map((library) => ({ ...library }));
   const subjectGroupIds = new Set(subjects.map((subject) => subject.groupId));
   const sourceIndexGroupIds = selection.index
     ? new Set(index.indexGroupIds ?? (index.includeIndex === false ? [] : index.groups.map((group) => group.id)))
@@ -1075,7 +1820,13 @@ function portableIndexForSelection(
     version: index.version,
     groups,
     subjects,
-    ...(index.version === 2 ? { includedSections: catalogSelectionFromExport(selection) } : {}),
+    libraries,
+    libraryLayouts: portableLibraryLayoutsForSelection(
+      index.libraryLayouts ?? cleanLibraryLayouts(undefined, index.groups, index.subjects),
+      selection,
+      includedIds,
+    ),
+    ...(packageDeclaresCatalogs(index.version) ? { includedSections: catalogSelectionFromExport(selection) } : {}),
     includeIndex: selection.index,
     indexGroupIds: selectedIndexGroupIds,
     ...(index.collapsedGroupIds ? {
@@ -1085,6 +1836,28 @@ function portableIndexForSelection(
       collapsedSubjectIds: index.collapsedSubjectIds.filter((id) => includedIds.has(id) && subjectById.get(id)?.indexed),
     } : {}),
   };
+}
+
+function assertEntPortableIndexSubjectsAreTopics(
+  incomingIndex: PortableIndexV1 | undefined,
+  destinationMode: WorkspaceMode,
+): void {
+  if (destinationMode !== "ent-clinical" || !incomingIndex) return;
+  const incompatible = incomingIndex.subjects.filter((subject) => subject.indexed && subject.recordKind !== "topic");
+  if (incompatible.length === 0) return;
+  const examples = incompatible.slice(0, 3).map((subject) => `“${subject.title}” (${subject.recordKind})`).join(", ");
+  const more = incompatible.length > 3 ? ` and ${incompatible.length - 3} more` : "";
+  throw new Error(`The ENT knowledge index accepts topic subjects only. This package would index ${examples}${more}. No portable data was imported.`);
+}
+
+/** Destination-aware preflight; parsing remains intentionally preset-neutral. */
+export function assertPortableImportDestinationCompatible(
+  value: PortableExportV1,
+  requestedSelection: PortableExportSelection,
+  destinationMode: WorkspaceMode,
+): void {
+  const selection = normalizePortableSelection(requestedSelection);
+  assertEntPortableIndexSubjectsAreTopics(portableIndexForSelection(value, selection), destinationMode);
 }
 
 function applyRecovery(data: PluginData, backup: PersonalBackup): void {
@@ -1116,12 +1889,27 @@ export function applyPortableExport(
   allowCrossBaseRecovery = false,
 ): PortableImportResult {
   const selection = normalizePortableSelection(requestedSelection);
-  const available = selectionAvailableForExport(value);
-  for (const key of Object.keys(selection) as Array<keyof PortableExportSelection>) {
+  const available = normalizePortableSelection(selectionAvailableForExport(value));
+  const staticKeys = ["workspace", "index", "collections", "study", "savedViews", "recovery"] as const;
+  for (const key of staticKeys) {
     if (selection[key] && !available[key]) throw new Error(`The export does not contain the selected ${key} component.`);
   }
+  const availableLibraryIds = new Set(available.libraryIds);
+  for (const libraryId of selection.libraryIds) {
+    if (availableLibraryIds.has(libraryId)) continue;
+    const legacyLabel = libraryId === BUILTIN_LIBRARY_IDS.procedure ? "procedures"
+      : libraryId === BUILTIN_LIBRARY_IDS.medication ? "medications"
+        : libraryId === BUILTIN_LIBRARY_IDS.syndrome ? "syndromes"
+          : `library ${libraryId}`;
+    throw new Error(`The export does not contain the selected ${legacyLabel} component.`);
+  }
   if (selection.recovery) {
-    const otherSelected = Object.entries(selection).some(([key, enabled]) => key !== "recovery" && enabled);
+    const otherSelected = selection.workspace
+      || selection.index
+      || selection.libraryIds.length > 0
+      || selection.collections
+      || selection.study
+      || selection.savedViews;
     if (otherSelected) throw new Error("Same-vault recovery must be restored by itself.");
     if (mode !== "replace") throw new Error("Same-vault recovery is a restore operation, not a merge.");
     if (value.components.recovery) {
@@ -1150,7 +1938,69 @@ export function applyPortableExport(
     throw new Error(`This package uses the ${incomingWorkspace.settings.workspaceMode === "ent-clinical" ? "ENT clinical" : "Generic"} preset. Create or switch to a matching knowledge base before importing Workspace settings.`);
   }
 
+  const incomingIndex = portableIndexForSelection(value, selection);
+  assertEntPortableIndexSubjectsAreTopics(incomingIndex, data.settings.workspaceMode);
+  const state = data.portableIndex;
+  const existingLibraries = Array.isArray(state.libraries)
+    ? state.libraries
+    : legacyPortableLibraries(state.subjects, [], false).map((library) => ({ ...library, archivedAt: null }));
+  const existingLibraryIds = new Set(existingLibraries.map((library) => library.id));
+  const incomingLibraries = incomingIndex?.libraries ?? [];
+  const navigationLibraryIds = navigationLibraryIdsForSelection(value, selection);
+  // Versions 1–3 predate portable library descriptors. Their only stable
+  // navigation targets were the three built-in IDs, which can be recreated
+  // without guessing a user-defined library's identity or semantics.
+  const legacyNavigationLibraries = value.version < PORTABLE_EXPORT_VERSION
+    ? BUILTIN_LIBRARY_DEFINITIONS.filter((library) => navigationLibraryIds.has(library.id))
+    : [];
+  const missingLibraryIds = new Set([
+    ...incomingLibraries.map((library) => library.id),
+    ...legacyNavigationLibraries.map((library) => library.id),
+  ].filter((libraryId) => !existingLibraryIds.has(libraryId)));
+  if (existingLibraries.length + missingLibraryIds.size > MAX_LIBRARIES) {
+    throw new Error(`Importing these catalogs would exceed the ${MAX_LIBRARIES}-library limit.`);
+  }
+
   if (selection.recovery && value.components.recovery) applyRecovery(data, value.components.recovery);
+  if (incomingIndex || legacyNavigationLibraries.length > 0) {
+    state.libraries = existingLibraries;
+    state.libraryLayouts ??= cleanLibraryLayouts(undefined, state.groups, state.subjects, state.libraries);
+    const localLibraryById = new Map(state.libraries.map((library) => [library.id, library]));
+    for (const incoming of incomingLibraries) {
+      const existing = localLibraryById.get(incoming.id);
+      const authoritative = selection.libraryIds.includes(incoming.id);
+      if (existing) {
+        if (authoritative) {
+          existing.name = incoming.name;
+          existing.singularName = incoming.singularName;
+          existing.icon = incoming.icon;
+          existing.order = incoming.order;
+          existing.archivedAt = null;
+        }
+        continue;
+      }
+      const created: LibraryDefinition = { ...incoming, archivedAt: null };
+      state.libraries.push(created);
+      state.libraryLayouts[created.id] ??= [];
+      localLibraryById.set(created.id, created);
+    }
+    for (const legacyDependency of legacyNavigationLibraries) {
+      // A local archive decision is authoritative. Leave it archived and let
+      // the navigation sanitizer below remove the unusable imported target.
+      if (localLibraryById.has(legacyDependency.id)) continue;
+      const created: LibraryDefinition = { ...legacyDependency, archivedAt: null };
+      state.libraries.push(created);
+      state.libraryLayouts[created.id] ??= [];
+      localLibraryById.set(created.id, created);
+    }
+  }
+  const availableNavigationLibraryIds = new Set(state.libraries
+    .filter((library) => library.archivedAt === null)
+    .map((library) => library.id));
+  const navigationTabIsAvailable = (tab: MainTab): boolean => {
+    const libraryId = libraryIdFromTab(tab);
+    return libraryId === null || availableNavigationLibraryIds.has(libraryId);
+  };
   if (incomingWorkspace) {
     // A portable package configures the active base; it must never change the
     // destination base's stable identity. Otherwise importing an ENT package
@@ -1159,8 +2009,10 @@ export function applyPortableExport(
     const destinationWorkspaceName = data.settings.workspaceName;
     const destinationMode = data.settings.workspaceMode;
     const protectedPrimaryFolder = data.settings.primaryFolder;
+    const incomingSettings = structuredClone(incomingWorkspace.settings);
+    if (!navigationTabIsAvailable(incomingSettings.defaultTab)) incomingSettings.defaultTab = "curriculum";
     data.settings = {
-      ...structuredClone(incomingWorkspace.settings),
+      ...incomingSettings,
       workspaceName: destinationWorkspaceName,
       workspaceMode: destinationMode,
       ...(destinationMode === "ent-clinical" ? { primaryFolder: protectedPrimaryFolder } : {}),
@@ -1169,18 +2021,41 @@ export function applyPortableExport(
     if (!selection.index) data.indexGroupOrder = [...incomingWorkspace.indexGroupOrder];
   }
 
-  const incomingIndex = portableIndexForSelection(value, selection);
   const subjectIdMap = new Map<string, string>();
   if (incomingIndex) {
-    const state = data.portableIndex;
+    state.libraryLayouts ??= cleanLibraryLayouts(undefined, state.groups, state.subjects, state.libraries);
     const oldSubjects = state.subjects.map((subject) => ({ ...subject }));
     const subjectSectionIsSelected = (subject: PortableSubjectDefinition): boolean => (
-      (selection.index && subject.recordKind === "topic")
-      || libraryKindIsSelected(subject.recordKind, selection)
+      (selection.index && (subject.indexed
+        || (incomingIndex.version < PORTABLE_EXPORT_VERSION
+          && subject.recordKind === "topic"
+          && !subjectLibraryId(subject))))
+      || libraryIdIsSelected(subjectLibraryId(subject), selection)
     );
+    // Empty Index headings have no subject from which to infer ownership.
+    // Their stable identity is carried by indexGroupOrder, so a library-only
+    // Replace must treat those groups as belonging to the unselected Index.
+    const unselectedIndexGroupIds = selection.index
+      ? new Set<string>()
+      : portableIndexGroupIdsForExport(data);
+    const localGroupScopes = portableGroupScopes(oldSubjects);
+    for (const groupId of unselectedIndexGroupIds) {
+      const scopes = localGroupScopes.get(groupId) ?? new Set<PortableCatalogScope>();
+      scopes.add("index");
+      localGroupScopes.set(groupId, scopes);
+    }
+    const incomingGroupScopes = portableGroupScopes(incomingIndex.subjects);
+    const groupScopesEqual = (
+      left: ReadonlySet<PortableCatalogScope> | undefined,
+      right: ReadonlySet<PortableCatalogScope> | undefined,
+    ): boolean => {
+      if (!left || left.size === 0 || !right || right.size === 0) return true;
+      return left.size === right.size && [...left].every((scope) => right.has(scope));
+    };
     const groupsUsedByUnselectedSections = new Set(oldSubjects
       .filter((subject) => !subjectSectionIsSelected(subject))
       .map((subject) => subject.groupId));
+    for (const groupId of unselectedIndexGroupIds) groupsUsedByUnselectedSections.add(groupId);
     const replacedOldPaths = oldSubjects
       .filter(subjectSectionIsSelected)
       .map((subject) => portableSubjectPath(data, subject.id));
@@ -1229,9 +2104,14 @@ export function applyPortableExport(
       ids.add(group.id);
       groupsByTitle.set(key, ids);
     };
-    const uniqueUnclaimedTitleMatch = (title: string): PortableGroupDefinition | undefined => {
+    const uniqueUnclaimedTitleMatch = (
+      title: string,
+      incomingGroupId: string,
+    ): PortableGroupDefinition | undefined => {
+      const expectedScopes = incomingGroupScopes.get(incomingGroupId);
       const candidates = [...(groupsByTitle.get(normalizeText(title)) ?? [])]
-        .filter((id) => !claimedGroupIds.has(id));
+        .filter((id) => !claimedGroupIds.has(id)
+          && groupScopesEqual(localGroupScopes.get(id), expectedScopes));
       return candidates.length === 1 ? groupById.get(candidates[0] ?? "") : undefined;
     };
     const createMappedGroup = (incoming: PortableGroupDefinition, preserveIncomingId: boolean): PortableGroupDefinition => {
@@ -1247,14 +2127,16 @@ export function applyPortableExport(
       let local = groupById.get(incoming.id);
       if (local
         && groupsUsedByUnselectedSections.has(local.id)
-        && normalizeText(local.title) !== normalizeText(incoming.title)) {
+        && (normalizeText(local.title) !== normalizeText(incoming.title)
+          || !groupScopesEqual(localGroupScopes.get(local.id), incomingGroupScopes.get(incoming.id)))) {
         // A selective import must not rename a group still owned by an
-        // unselected catalog. Reuse a prior split on repeat imports, otherwise
-        // fork a local group for the selected subjects.
-        local = uniqueUnclaimedTitleMatch(incoming.title)
+        // unselected catalog or make two independent catalogs share one group.
+        // Reuse a prior compatible split on repeat imports, otherwise fork a
+        // local group for the selected subjects.
+        local = uniqueUnclaimedTitleMatch(incoming.title, incoming.id)
           ?? createMappedGroup(incoming, false);
       } else if (!local) {
-        local = uniqueUnclaimedTitleMatch(incoming.title);
+        local = uniqueUnclaimedTitleMatch(incoming.title, incoming.id);
       }
       if (!local) {
         local = createMappedGroup(incoming, true);
@@ -1279,12 +2161,12 @@ export function applyPortableExport(
     const incomingSubjectIds = new Set(incomingIndex.subjects.map((subject) => subject.id));
     const configuredKey = (subject: PortableSubjectDefinition): string => [
       normalizeText(subject.configuredId),
-      subject.recordKind,
+      portableCatalogScope(subject),
       normalizeText(localGroupTitle(subject.groupId)),
     ].join("\0");
     const titleKey = (subject: PortableSubjectDefinition): string => [
       normalizeText(subject.title),
-      subject.recordKind,
+      portableCatalogScope(subject),
       normalizeText(localGroupTitle(subject.groupId)),
     ].join("\0");
     const addToPool = (pool: Map<string, Set<string>>, key: string, id: string): void => {
@@ -1310,7 +2192,23 @@ export function applyPortableExport(
     };
     for (const incoming of incomingIndex.subjects) {
       const mappedGroupId = groupIdMap.get(incoming.groupId) || incoming.groupId;
+      const incomingIsAuthoritative = subjectSectionIsSelected(incoming);
       let local = byId.get(incoming.id);
+      const scopeDiffers = local && portableCatalogScope(local) !== portableCatalogScope(incoming);
+      const mayReclassify = local
+        && mode === "replace"
+        && incomingIsAuthoritative
+        && subjectSectionIsSelected(local)
+        && !(data.settings.workspaceMode === "ent-clinical" && oldResolvedPathById.has(local.id));
+      if (local && scopeDiffers && !mayReclassify) {
+        // A selected catalog may not repurpose the stable identity of an
+        // unselected catalog. In the ENT preset a bound native identity is
+        // additionally fixed by its source folder. A dependency from an
+        // unselected catalog also needs its own unresolved identity so an
+        // imported collection cannot silently point at an unrelated local
+        // subject. In every case both catalogs survive intact.
+        local = undefined;
+      }
       if (!local && incoming.configuredId) {
         local = uniquePoolMatch(configuredPools, configuredKey({ ...incoming, groupId: mappedGroupId }));
       }
@@ -1318,7 +2216,9 @@ export function applyPortableExport(
         local = uniquePoolMatch(titlePools, titleKey({ ...incoming, groupId: mappedGroupId }));
       }
       if (!local) {
-        local = { ...incoming, groupId: mappedGroupId, parentId: null };
+        let id = incoming.id;
+        while (byId.has(id)) id = makeId("subject");
+        local = { ...incoming, id, groupId: mappedGroupId, parentId: null };
         localSubjects.push(local);
         byId.set(local.id, local);
         result.addedSubjects += 1;
@@ -1326,12 +2226,15 @@ export function applyPortableExport(
         removeFromPools(local);
         result.matchedSubjects += 1;
         if (local.id === incoming.id) result.updatedSubjects += 1;
-        local.title = incoming.title;
-        local.groupId = mappedGroupId;
-        local.order = incoming.order;
-        local.indexed = mode === "merge" ? local.indexed || incoming.indexed : incoming.indexed;
-        local.configuredId = incoming.configuredId;
-        local.recordKind = incoming.recordKind;
+        if (incomingIsAuthoritative) {
+          local.title = incoming.title;
+          local.groupId = mappedGroupId;
+          local.order = incoming.order;
+          local.indexed = incoming.indexed;
+          local.configuredId = incoming.configuredId;
+          local.recordKind = incoming.recordKind;
+          local.libraryId = subjectLibraryId(incoming);
+        }
       }
       subjectIdMap.set(incoming.id, local.id);
     }
@@ -1339,6 +2242,7 @@ export function applyPortableExport(
       const localId = subjectIdMap.get(incoming.id);
       const local = localId ? byId.get(localId) : undefined;
       if (!local) continue;
+      if (!subjectSectionIsSelected(incoming)) continue;
       local.parentId = incoming.parentId ? subjectIdMap.get(incoming.parentId) ?? null : null;
     }
     if (mode === "replace") {
@@ -1349,6 +2253,8 @@ export function applyPortableExport(
         if (!subjectSectionIsSelected(subject)) continue;
         if (protectedLocalIds.has(subject.id)) {
           subject.indexed = false;
+          subject.libraryId = null;
+          subject.parentId = null;
           continue;
         }
         localSubjects.splice(index, 1);
@@ -1361,10 +2267,28 @@ export function applyPortableExport(
     for (const subjectId of Object.keys(state.resolvedPathBySubjectId)) {
       if (!survivingIds.has(subjectId)) delete state.resolvedPathBySubjectId[subjectId];
     }
+    state.relinkableSubjectIds = [...new Set(state.relinkableSubjectIds ?? [])]
+      .filter((subjectId) => survivingIds.has(subjectId)
+        && Boolean(state.resolvedPathBySubjectId[subjectId]));
     const retainedGroupIds = new Set(localSubjects.map((subject) => subject.groupId));
     for (const localId of groupIdMap.values()) retainedGroupIds.add(localId);
+    for (const groupId of unselectedIndexGroupIds) retainedGroupIds.add(groupId);
     state.groups = mode === "replace" ? localGroups.filter((group) => retainedGroupIds.has(group.id)) : localGroups;
     state.subjects = localSubjects;
+    const incomingLibraryLayouts = incomingIndex.libraryLayouts
+      ?? cleanLibraryLayouts(
+        undefined,
+        incomingIndex.groups,
+        incomingIndex.subjects,
+        incomingLibraries.map((library) => ({ ...library, archivedAt: null })),
+      );
+    for (const libraryId of selection.libraryIds) {
+      const translated = translateLibraryLayout(incomingLibraryLayouts[libraryId] ?? [], subjectIdMap);
+      state.libraryLayouts[libraryId] = mode === "replace"
+        ? translated
+        : mergeLibraryLayout(state.libraryLayouts[libraryId] ?? [], translated);
+    }
+    reconcilePortableLibraryLayouts(state);
 
     if (mode === "replace") {
       const oldSet = new Set(replacedOldPaths);
@@ -1400,6 +2324,10 @@ export function applyPortableExport(
       const local = localId ? byId.get(localId) : undefined;
       if (!local) continue;
       const path = portableSubjectPath(data, local.id);
+      if (!subjectSectionIsSelected(incoming)) {
+        if (isPortablePlaceholderPath(path)) result.unresolvedSubjects += 1;
+        continue;
+      }
       const groupTitle = localGroupTitle(local.groupId);
       if (local.indexed) {
         data.indexGroupByPath[path] = groupTitle;
@@ -1527,11 +2455,16 @@ export function applyPortableExport(
     data.nextStudyPaths = mode === "merge" ? unique([...data.nextStudyPaths, ...next]) : next;
   }
   if (selection.savedViews && value.components.savedViews) {
-    result.importedViews = value.components.savedViews.views.length;
-    if (mode === "replace") data.savedViews = value.components.savedViews.views.map((view) => ({ ...view }));
+    // Do not retarget a named view to another tab: that would preserve the
+    // label while silently changing its meaning. Omit only incoming views whose
+    // dependency is missing or locally archived.
+    const incomingViews = value.components.savedViews.views
+      .filter((view) => navigationTabIsAvailable(view.tab));
+    result.importedViews = incomingViews.length;
+    if (mode === "replace") data.savedViews = incomingViews.map((view) => ({ ...view }));
     else {
       const viewById = new Map(data.savedViews.map((view) => [view.id, view]));
-      for (const incoming of value.components.savedViews.views) {
+      for (const incoming of incomingViews) {
         const existing = viewById.get(incoming.id);
         if (existing) Object.assign(existing, incoming);
         else {
