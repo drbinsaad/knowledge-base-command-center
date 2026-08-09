@@ -6,6 +6,7 @@ import {
   IndexDiagnostic,
   isSafeObjectKey,
   isPortablePlaceholderPath,
+  normalizeSearchText,
   parseWorkspaceConfig,
   pathIsInsideFolder,
   resetCurriculumVisualPath,
@@ -145,10 +146,11 @@ export class IndexManagerModal extends Modal {
   }
 
   private indexedNotes(): ManagerNote[] {
+    const manualPaths = new Set(this.plugin.data.manualIndexPaths);
     return this.plugin.getIndexRecords().map((record) => ({
       path: record.path,
       title: record.title,
-      meta: [record.domain, this.plugin.data.manualIndexPaths.includes(record.path) ? "manual membership" : "folder index", record.path].join(" · "),
+      meta: [record.domain, manualPaths.has(record.path) ? "manual membership" : "folder index", record.path].join(" · "),
     }));
   }
 
@@ -272,8 +274,8 @@ export class IndexManagerModal extends Modal {
   }
 
   private filterNotes(notes: ManagerNote[]): ManagerNote[] {
-    const query = this.query.trim().toLowerCase();
-    return (query ? notes.filter((note) => `${note.title} ${note.meta}`.toLowerCase().includes(query)) : notes)
+    const query = normalizeSearchText(this.query.trim());
+    return (query ? notes.filter((note) => normalizeSearchText(`${note.title} ${note.meta}`).includes(query)) : notes)
       .sort((a, b) => a.title.localeCompare(b.title));
   }
 
@@ -326,6 +328,11 @@ export class IndexManagerModal extends Modal {
         if (!this.guardOpenedBase()) return;
         await this.plugin.mutate(`${mode} ${paths.length} index note${paths.length === 1 ? "" : "s"}`, () => {
           if (!this.plugin.data.indexGroupOrder.includes(group)) this.plugin.data.indexGroupOrder.push(group);
+          const manualPaths = new Set(this.plugin.data.manualIndexPaths);
+          if (mode !== "move") {
+            const selectedPaths = new Set(paths);
+            this.plugin.data.excludedIndexPaths = this.plugin.data.excludedIndexPaths.filter((candidate) => !selectedPaths.has(candidate));
+          }
           for (const path of paths) {
             if (mode !== "move") {
               const portableId = this.plugin.getRecord(path)?.portableId;
@@ -333,8 +340,10 @@ export class IndexManagerModal extends Modal {
                 const subject = this.plugin.getPortableSubject(portableId);
                 if (subject) subject.indexed = true;
               }
-              this.plugin.data.excludedIndexPaths = this.plugin.data.excludedIndexPaths.filter((candidate) => candidate !== path);
-              if (!pathIsInsideFolder(path, this.plugin.data.settings.primaryFolder) && !this.plugin.data.manualIndexPaths.includes(path)) this.plugin.data.manualIndexPaths.push(path);
+              if (!pathIsInsideFolder(path, this.plugin.data.settings.primaryFolder) && !manualPaths.has(path)) {
+                this.plugin.data.manualIndexPaths.push(path);
+                manualPaths.add(path);
+              }
             }
             this.plugin.data.indexGroupByPath[path] = group;
             resetCurriculumVisualPath(this.plugin.data.curriculumVisual, path);
@@ -519,7 +528,7 @@ export class IndexManagerModal extends Modal {
             for (const record of members) this.plugin.data.indexGroupByPath[record.path] = next;
           }
           this.transferRootOrder(group, next, false);
-          this.plugin.data.indexGroupOrder = groupOrder.map((candidate) => candidate === group ? next : candidate).filter((candidate, index, all) => all.indexOf(candidate) === index);
+          this.plugin.data.indexGroupOrder = [...new Set(groupOrder.map((candidate) => candidate === group ? next : candidate))];
           for (const source of new Set([group, ...sourceGroups])) renameOrMergePortableGroup(this.plugin.data, source, next);
           this.plugin.invalidateRecordCache();
         }, { includePortableIndex: true });

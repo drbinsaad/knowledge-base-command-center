@@ -1,6 +1,6 @@
 {
   "name": "knowledge-base-command-center",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "private": true,
   "type": "module",
   "description": "Configurable visual knowledge index, note creator, collections, and smart queues for Obsidian.",
@@ -18,11 +18,11 @@
     "typecheck": "tsc -noEmit -skipLibCheck",
     "build": "npm run typecheck && node esbuild.config.mjs production",
     "lint": "eslint . --max-warnings 0 && node scripts/validate-json.mjs",
-    "test": "node --import tsx --import ./tests/support/register.mjs --test tests/model.test.ts tests/main.test.ts tests/view.test.ts tests/store-merge.test.ts",
+    "test": "node --import tsx --import ./tests/support/register.mjs --test tests/model.test.ts tests/main.test.ts tests/view.test.ts tests/mobile-dom.test.ts tests/store-merge.test.ts",
     "test:release": "node --experimental-strip-types --test tests/release.test.ts",
     "verify-release": "npm run test:release",
     "verify-community": "node scripts/verify-community.mjs",
-    "review": "npm run typecheck && npm run lint && npm test && npm run verify-community && npm run build && npm run verify-release",
+    "review": "npm run typecheck && npm run lint && npm test && npm run build && npm run verify-community && npm run verify-release",
     "check": "npm run review",
     "release:bundle": "npm run review && node scripts/package-release.mjs"
   },

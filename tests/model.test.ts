@@ -42,6 +42,7 @@ import {
   curriculumChildPaths,
   curriculumDescendantPaths,
   curriculumSiblingPaths,
+  normalizeSearchText,
   parseQuery,
   parsePersonalBackup,
   parseWorkspaceConfig,
@@ -397,6 +398,19 @@ test("visual curriculum moves reorder and reparent without mutating records", ()
   assert.deepEqual(tree.domains[0]?.roots.map((node) => node.record.path), [family.path, airway.path]);
   assert.equal(tree.parentByPath.get(cleft.path), airway.path);
   assert.equal(cleft.parentTopic, "");
+});
+
+test("visual ordering deduplicates paths in stable first-seen order", () => {
+  const first = record({ path: "first.md", title: "First" });
+  const moved = record({ path: "moved.md", title: "Moved" });
+  const last = record({ path: "last.md", title: "Last" });
+  const state = { parentByPath: {} as Record<string, string | null>, orderByContainer: {} as Record<string, string[]> };
+  moveCurriculumVisual(state, moved, null, [first.path, first.path, moved.path, last.path, first.path], 1);
+  assert.deepEqual(state.orderByContainer[curriculumContainerKey(moved.domain, null)], [first.path, moved.path, last.path]);
+
+  state.orderByContainer[curriculumContainerKey(moved.domain, null)] = [last.path, first.path, last.path, first.path];
+  assert.equal(reconcileCurriculumVisual(state, [first, moved, last]), true);
+  assert.deepEqual(state.orderByContainer[curriculumContainerKey(moved.domain, null)], [last.path, first.path]);
 });
 
 test("curriculum tree safely breaks visual cycles", () => {
@@ -2137,6 +2151,22 @@ test("index diagnostics distinguish missing, duplicate, parent, and orphaned gro
   assert.deepEqual(new Set(diagnostics.map((item) => item.kind)), new Set(["missing-note", "duplicate-membership", "broken-parent", "orphaned-group"]));
 });
 
+test("index diagnostics pre-index hidden paths instead of probing the array per visual override", () => {
+  const data = migrateData(null);
+  const hiddenPaths = ["Hidden.md"];
+  let linearProbes = 0;
+  const includes = hiddenPaths.includes.bind(hiddenPaths);
+  hiddenPaths.includes = (path, fromIndex) => {
+    linearProbes += 1;
+    return includes(path, fromIndex);
+  };
+  data.excludedIndexPaths = hiddenPaths;
+  data.indexGroupByPath["Hidden.md"] = "Research";
+
+  assert.deepEqual(buildIndexDiagnostics(data, [], new Set(hiddenPaths)), []);
+  assert.equal(linearProbes, 0);
+});
+
 test("disabled clinical visual groups retain valid latent cross-domain parent state", () => {
   const child = record({ path: "Child.md", domain: "Pediatric" });
   const parent = record({ path: "Parent.md", domain: "Laryngology" });
@@ -2663,22 +2693,41 @@ test("a parsed query matches identically to the string form but is reusable", ()
   }
 });
 
-test("search stays responsive across a ten-thousand record render pass", () => {
+test("search normalization is locale-invariant and folds careful Arabic/Persian variants", () => {
+  assert.equal(normalizeSearchText("LARYNGITIS"), "laryngitis");
+  assert.equal(normalizeSearchText("حـنـجـرة"), normalizeSearchText("حنجرة"), "tatweel is presentation-only");
+  assert.equal(normalizeSearchText("مستشفى"), normalizeSearchText("مستشفي"), "alef maqsura folds to Arabic yeh");
+  assert.equal(normalizeSearchText("علی"), normalizeSearchText("علي"), "Farsi yeh folds to Arabic yeh");
+  assert.equal(normalizeSearchText("کاف"), normalizeSearchText("كاف"), "Persian keheh folds to Arabic kaf");
+  assert.equal(normalizeSearchText("مدرسة"), normalizeSearchText("مدرسه"), "ta marbuta folds to common keyboard ha");
+  assert.equal(normalizeSearchText("ENT-٠١٢ / ۱۲"), normalizeSearchText("ENT-012 / 12"), "Arabic and Persian digits fold to ASCII digits");
+
+  const arabic = record({ title: "مستشفى", aliases: ["حـنـجـرة", "کاف"] });
+  for (const query of ["مستشفي", "حنجرة", "كاف"]) assert.equal(matchesQuery(arabic, query), true, query);
+});
+
+test("search keeps both a cold ten-thousand-record pass and cached render passes responsive", () => {
   const records = Array.from({ length: 10_000 }, (_, index) => record({
     path: `Knowledge Base/Group ${index % 20}/Note ${index}.md`,
     title: `Sample note ${index} with Ünïcödé and عربي text`,
     aliases: [`alias ${index}`],
   }));
   const parsed = parseQuery("sample uni");
-  const start = performance.now();
-  // renderCurriculum evaluates each node for filtering, counting and rendering.
-  let matched = 0;
+  const coldStart = performance.now();
+  let matched = records.filter((item) => matchesParsedQuery(item, parsed)).length;
+  const coldElapsed = performance.now() - coldStart;
+
+  // renderCurriculum can evaluate each already-normalized node again for
+  // filtering, counting, and rendering. Measure this cached path separately so
+  // shared-runner cold-start noise cannot hide a memoization regression.
+  const cachedStart = performance.now();
   for (let pass = 0; pass < 3; pass += 1) {
     for (const item of records) if (matchesParsedQuery(item, parsed)) matched += 1;
   }
-  const elapsed = performance.now() - start;
-  assert.equal(matched, records.length * 3);
-  assert.ok(elapsed < 250, `three match passes over 10,000 records took ${elapsed.toFixed(1)} ms`);
+  const cachedElapsed = performance.now() - cachedStart;
+  assert.equal(matched, records.length * 4);
+  assert.ok(coldElapsed < 750, `cold match pass over 10,000 records took ${coldElapsed.toFixed(1)} ms`);
+  assert.ok(cachedElapsed < 250, `three cached match passes over 10,000 records took ${cachedElapsed.toFixed(1)} ms`);
 });
 
 test("the curriculum tree exposes cached child and descendant lookups", () => {

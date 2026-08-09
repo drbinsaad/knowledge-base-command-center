@@ -125,14 +125,16 @@ Workspace folder paths are validated against the destination vault. If an export
 
 On iPhone and iPad, Export saves JSON under `Knowledge Base Command Center Exports/` inside the vault so it can sync or be shared through the Files app. Import uses an in-vault JSON picker, displays the selected vault path during review and confirmation, and applies the same 10 MB, per-list, and aggregate-reference limits as desktop. Export also enforces 10 MB and validates the exact JSON before saving it, so the plugin never creates a portable package that it will refuse to re-import. Desktop uses the operating system download and file picker.
 
-Portable packages created by version 0.8.1 or later use format version 2 with explicit Index, Procedures, Medications, and Syndromes provenance. Older plugin builds reject that format instead of guessing destructively, so update Knowledge Base Command Center on every importing device first. Version 0.8.1 continues to read legacy version 1 packages; non-topic identities in those older files are treated conservatively as collection or study dependencies rather than complete replacement catalogs.
+Portable packages created by version 0.8.2 or later use format version 2 with explicit Index, Procedures, Medications, and Syndromes provenance. Older plugin builds reject that format instead of guessing destructively, so update Knowledge Base Command Center on every importing device first. Version 0.8.2 continues to read legacy version 1 packages; non-topic identities in those older files are treated conservatively as collection or study dependencies rather than complete replacement catalogs. The work prepared as 0.8.1 was folded into the published 0.8.2 release; there was no separate 0.8.1 tag or GitHub release.
 
 > [!warning] Same-vault recovery privacy
 > Same-vault recovery is not a path-free portable blueprint. It contains exact vault-relative note paths, including folder and file names, for collections, pins, queues, and visual organization. Treat that JSON as private and do not share it publicly. Current v7 files carry source-vault, source-base, and source-preset identities. A different vault or preset is hard-rejected; a different same-preset base requires a second explicit confirmation. The legacy at-least-half (50%) unique-path threshold is only a compatibility preflight, not proof of origin.
 
 ## Search
 
-Plain text uses Unicode-aware fuzzy matching across titles, aliases, paths, configured IDs, and groups, including diacritic folding. Advanced filters are: `domain:`, `priority:`, `kind:`, `type:`, `status:`, `review:`, `source:`, `safety:`, `dose:`, and `image:`. Saved views retain the current section and query.
+A non-empty search covers every available, non-archived knowledge base. Results from the active base appear first; the remaining bases are ordered by workspace name. Results are grouped first by knowledge base and then by library section, so similarly named records retain their context. Activating a result from another base switches the plugin-wide active base. A note-backed result is selected in the Command Center; a **No note** placeholder opens its create/link actions.
+
+Plain text uses locale-invariant, Unicode-aware fuzzy matching across titles, aliases, paths, configured IDs, and groups. Normalization folds diacritics, removes Arabic tatweel, unifies common Arabic/Persian ya and kaf forms, treats `ة` and the commonly typed `ه` as equivalent for lookup, and converts Arabic/Persian digits to ASCII digits. Advanced filters are: `domain:`, `priority:`, `kind:`, `type:`, `status:`, `review:`, `source:`, `safety:`, `dose:`, and `image:`. Saved views retain the current section and query. The interface reports the full match count but renders at most the first 300 matching rows; when capped, it says **Showing the first 300 of _N_ results.** Refine the query to reach a result outside that rendered set.
 
 ## Commands
 
@@ -179,9 +181,19 @@ For iPhone or iPad, install and enable the plugin in a desktop-synced vault firs
 
 For manual updates, download all three files from the same newer release and replace the existing copies while Obsidian is closed or the plugin is disabled. Do not mix asset versions.
 
+### Updating on iPhone and iPad
+
+Let vault and configuration sync finish before updating, and avoid changing the same knowledge base on another device during the update.
+
+- **Community Plugins:** Open the target vault on the iPhone or iPad, go to **Settings → Community plugins**, choose **Check for updates**, install the Knowledge Base Command Center update, then reload Obsidian if prompted.
+- **BRAT:** Open the mobile Command palette and run **BRAT: Check for updates to all beta plugins and UPDATE**. Wait for its completion notice, then reload Obsidian.
+- **Manual installation:** Disable the plugin on mobile. On a computer, replace `main.js`, `manifest.json`, and `styles.css` together in `.obsidian/plugins/ent-vault-command-center/`, using one matching GitHub release. Let the sync method that includes the vault's `.obsidian` configuration finish on the mobile device, then re-enable the plugin. Never mix files from different releases.
+
+After any update, open **Settings → Community plugins** on the mobile device and confirm Knowledge Base Command Center is enabled before opening the workspace. When upgrading the old single-base format on several devices, follow the first-upgrade Sync precautions under [Multiple knowledge bases](#multiple-knowledge-bases).
+
 ### Uninstall
 
-Before uninstalling, export **Same-vault recovery** separately from every available knowledge base you may want to restore. Restore each archived base temporarily and export it too; one active-base export does not contain sibling or archived bases. Store these private exact-path JSON files securely. Disable the plugin, then remove it through Community Plugins (or remove `.obsidian/plugins/ent-vault-command-center/` for a manual install). Removing the plugin folder also removes `data.json`, including the base list, settings, collections, pins, visual hierarchy, snapshots, and undo history. Markdown notes are not removed.
+Complete the [backup checklist](#backup-and-recovery) first. Disable the plugin, then remove it through Community Plugins (or remove `.obsidian/plugins/ent-vault-command-center/` for a manual install). Removing the plugin folder also removes `data.json`, including the base list, settings, collections, pins, visual hierarchy, snapshots, and undo history. Markdown notes are not removed.
 
 ### Troubleshooting
 
@@ -211,9 +223,33 @@ npm run release:bundle
 
 This creates a three-file install ZIP and SHA-256 checksum under `dist/`. The release task runs unit tests, performs a production build, then verifies release metadata, mobile compatibility, exact archive contents, and absence of local absolute workspace paths. It never includes `data.json` or note content.
 
+Before tagging a release, also complete the [manual real-iPhone release checklist](docs/manual-iphone-release-checklist.md). Automated layout checks do not reproduce a real iPhone's WebKit viewport, software keyboard, safe areas, Dynamic Type, or device performance.
+
+## Backup and recovery
+
+Same-vault recovery protects plugin-owned organization for one knowledge base. It does not back up Markdown note bodies or attachments, and it is not a substitute for a complete vault backup.
+
+### Back up
+
+1. Let Obsidian Sync or your other sync service finish, and stop editing the same knowledge base on other devices.
+2. Make a normal backup of the complete vault, including its hidden `.obsidian` configuration. For an additional raw plugin-state copy, close Obsidian or disable the plugin before copying `.obsidian/plugins/ent-vault-command-center/data.json`.
+3. Switch to each available knowledge base in turn and open **Export / import center → Export**.
+4. Select **Same-vault recovery** (or **All + private recovery**), review the counts, acknowledge that the file contains exact private vault paths, then choose **Export selected sections**. Keep one clearly named recovery JSON per base.
+5. For every archived base you may need, restore it temporarily, switch to it, export its recovery JSON, and archive it again. An active-base recovery does not contain sibling or archived bases.
+6. Store the vault backup, raw `data.json` copy, and recovery JSON files securely. Do not publish recovery JSON because it contains folder and Markdown filenames.
+
+### Restore
+
+1. Work in the original vault and update Knowledge Base Command Center on every device first. Use a **Portable set**, not same-vault recovery, for an intentional cross-vault transfer.
+2. Back up the vault's current state and export a fresh recovery for the destination base before replacing anything.
+3. Switch to the exact knowledge base that created the recovery, open **Export / import center → Import**, and choose its JSON file. On iPhone or iPad, first place the JSON anywhere inside the vault.
+4. Select **Same-vault recovery** only, verify the displayed source vault, base, and preset, complete the destructive-restore confirmation, then choose **Restore private recovery**. Recovery is a standalone replacement and is never merged with portable sections.
+5. Do not use the different-base or legacy-identity override unless you intentionally accept the displayed identity uncertainty. A cross-preset recovery is always rejected.
+6. Verify the base name, headings, subject count, collections, pins, queues, and saved views. If the result is wrong, use Undo before doing further organization, then restore the backup made in step 2 if necessary.
+
 ## Data safety
 
-- Index and collection actions never move or rewrite source notes.
+- Ordinary index, visual-arrangement, membership, and collection actions never move or rewrite source notes.
 - Hiding or removing an index membership never deletes the underlying Markdown note.
 - Each knowledge base’s visual hierarchy and personal organization live in the plugin’s `data.json` envelope.
 - No export option contains Markdown note bodies or attachments.
@@ -223,15 +259,28 @@ This creates a three-file install ZIP and SHA-256 checksum under `dist/`. The re
 - Merge and replace imports change only selected plugin-owned state; neither operation deletes, moves, or rewrites Markdown notes.
 - Plugin data from a newer schema opens read-only to prevent downgrade data loss.
 - The ENT preset respects `ai_lock: true` and never assigns clinical review approval.
+- Two deliberate ENT-only workflows are exceptions to the ordinary no-file-change rule: proposal promotion moves the selected proposal and updates its frontmatter and top-level heading; advanced canonical placement may move the selected canonical note and updates the same structural fields. Both refuse `ai_lock: true` and attempt to restore the original content and path if an operation fails. Review the destination preview and make a backup before using either workflow.
 
 ## Privacy and permissions
 
 - The plugin has no analytics, telemetry, advertising, accounts, payments, or network requests.
-- It enumerates Markdown file paths and reads Markdown metadata inside the current vault to build the index, offer existing-note and template pickers, and repair missing plugin references.
+- It enumerates whole-vault Markdown file paths and cached Markdown metadata to build and reconcile indexes, offer existing-note and template choices, and diagnose missing plugin references. It also enumerates all loaded vault entries before retaining folder paths for settings pickers, and enumerates all vault file paths before retaining JSON packages for the in-vault picker. Path enumeration alone does not read those file bodies; content reads are targeted to an explicitly selected template or JSON import and to the disclosed ENT proposal-promotion and canonical-placement workflows.
 - Copy buttons write only the plugin-generated command, wikilink, or vault-relative path shown by that action to the clipboard after you click; the plugin never reads clipboard contents.
 - It stores settings and personal organization in Obsidian's plugin data file.
-- It writes only when you explicitly create a note, organize plugin state, promote an ENT proposal, or edit canonical placement through the protected advanced workflow.
+- Markdown files are created or changed only after you explicitly create a note, promote an ENT proposal, or submit canonical placement through the protected advanced workflow. Ordinary indexing and organization do not edit Markdown.
+- The plugin's `data.json` is written for settings, UI state, organization, snapshots, and imports, and may also be updated automatically for schema migration, Sync reconciliation, or vault file/folder renames. An iPhone/iPad export writes its JSON inside the vault only after you choose Export.
 - It never reads or writes files outside the vault on its own. On desktop, JSON export and import use your operating system's own download and file-picker dialogs, so those files go exactly where you choose. On iPhone and iPad, exported JSON stays inside the vault unless you explicitly share it.
+
+## Known limitations
+
+- At most 50 available and archived knowledge bases can be retained in one plugin installation.
+- The active base is plugin-wide. Switching it directly—or selecting a cross-base search result—switches every open Command Center view.
+- Archived bases are excluded from cross-base search. The full match count is shown, but only the first 300 result rows are rendered; refine broad queries to reach later matches.
+- Export, import, snapshots, and Undo history are base-local. Switch bases and export each one separately; archived bases must be restored temporarily before export.
+- Concurrent or offline edits to the same base use whole-base last-write-wins reconciliation, not field-level merging. Let Sync finish and avoid editing the same base on two devices at once.
+- Desktop supports drag-and-drop arrangement. Touch devices use the row **…** action menu instead.
+- Same-vault recovery is deliberately not portable: current recovery files are locked to their source vault and preset, and normally to their source base. Use the path-free portable components for another vault.
+- Real-iPhone keyboard, safe-area, Dynamic Type, and large-vault performance behavior requires manual device testing; automated checks are not a substitute for the [real-iPhone release checklist](docs/manual-iphone-release-checklist.md).
 
 ## Contributing and license
 

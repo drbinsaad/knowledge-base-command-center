@@ -16,7 +16,7 @@ import {
 import { createPortableExport, parsePortableExport, synchronizePortableRegistry } from "../src/portability.ts";
 import { IndexManagerModal } from "../src/index-manager.ts";
 import { ConfirmModal, IndexGroupModal } from "../src/modals.ts";
-import { Notice, Plugin, TFile } from "obsidian";
+import { Notice, Plugin, TFile, TFolder, type TAbstractFile } from "obsidian";
 
 interface TestPluginBase {
   loadedData: unknown;
@@ -47,9 +47,11 @@ function pluginWithFiles(
   frontmatterByPath: Record<string, Record<string, unknown>>,
 ): {
   plugin: EntVaultCommandCenterPlugin & TestPluginBase;
+  metadataReadCount: () => number;
   sourceMutationCount: () => number;
   vaultEnumerationCount: () => number;
 } {
+  let metadataReads = 0;
   let sourceMutations = 0;
   let vaultEnumerations = 0;
   const forbiddenSourceMutation = (): never => {
@@ -72,7 +74,10 @@ function pluginWithFiles(
     },
     workspace: { getLeavesOfType: () => [] },
     metadataCache: {
-      getFileCache: (file: TFile) => ({ frontmatter: frontmatterByPath[file.path] ?? {} }),
+      getFileCache: (file: TFile) => {
+        metadataReads += 1;
+        return { frontmatter: frontmatterByPath[file.path] ?? {} };
+      },
       resolvedLinks: {},
     },
     fileManager: {
@@ -84,8 +89,58 @@ function pluginWithFiles(
   plugin.loadedData = data;
   return {
     plugin,
+    metadataReadCount: () => metadataReads,
     sourceMutationCount: () => sourceMutations,
     vaultEnumerationCount: () => vaultEnumerations,
+  };
+}
+
+function trackedVaultTree(initial: TAbstractFile[]): {
+  entries: Map<string, TAbstractFile>;
+  createdFolders: string[];
+  trashedFolders: string[];
+  createFolder(path: string): Promise<void>;
+  renameFile(file: TFile, destination: string): Promise<void>;
+  trashFile(file: TAbstractFile): Promise<void>;
+  markdownFiles(): TFile[];
+} {
+  const entries = new Map<string, TAbstractFile>();
+  const createdFolders: string[] = [];
+  const trashedFolders: string[] = [];
+  const parentPath = (path: string): string => path.includes("/") ? path.substring(0, path.lastIndexOf("/")) : "";
+  const attach = (file: TAbstractFile): void => {
+    entries.set(file.path, file);
+    const parent = entries.get(parentPath(file.path));
+    if (parent instanceof TFolder && !parent.children.includes(file)) parent.children.push(file);
+  };
+  const detach = (file: TAbstractFile): void => {
+    entries.delete(file.path);
+    const parent = entries.get(parentPath(file.path));
+    if (parent instanceof TFolder) parent.children = parent.children.filter((child) => child !== file);
+  };
+  for (const entry of initial) attach(entry);
+  return {
+    entries,
+    createdFolders,
+    trashedFolders,
+    async createFolder(path): Promise<void> {
+      const folder = new TFolder(path);
+      attach(folder);
+      createdFolders.push(path);
+    },
+    async renameFile(file, destination): Promise<void> {
+      detach(file);
+      file.path = destination;
+      attach(file);
+    },
+    async trashFile(file): Promise<void> {
+      if (!(file instanceof TFolder) || file.children.length > 0) throw new Error("Only an empty folder can be trashed by this fixture.");
+      trashedFolders.push(file.path);
+      detach(file);
+    },
+    markdownFiles(): TFile[] {
+      return [...entries.values()].filter((entry): entry is TFile => entry instanceof TFile && entry.extension === "md");
+    },
   };
 }
 
@@ -2122,4 +2177,636 @@ test("unlink rolls back in memory and on disk when its first save fails", async 
   } | undefined;
   const persistedActive = persisted?.bases?.find((entry) => entry.id === persisted.activeBaseId);
   assert.equal(persistedActive?.data?.portableIndex?.resolvedPathBySubjectId?.subject, linkedFile.path);
+});
+
+test("failed note creation removes only folders created by that operation", async () => {
+  const existing = new TFolder("Existing");
+  const tree = trackedVaultTree([existing]);
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getAbstractFileByPath: (path: string) => tree.entries.get(path) ?? null,
+      getMarkdownFiles: () => tree.markdownFiles(),
+      createFolder: (path: string) => tree.createFolder(path),
+      create: async (): Promise<never> => { throw new Error("simulated note write failure"); },
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+    fileManager: { trashFile: (file: TAbstractFile) => tree.trashFile(file) },
+  };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-create-cleanup-test");
+  await plugin.loadPluginData();
+
+  await assert.rejects(plugin.createKnowledgeNote({
+    title: "Failure",
+    folder: "Existing/New/Deep",
+    mode: "empty",
+    templatePath: "",
+    addToCollection: false,
+  }), /simulated note write failure/);
+
+  assert.deepEqual(tree.createdFolders, ["Existing/New", "Existing/New/Deep"]);
+  assert.deepEqual(tree.trashedFolders, ["Existing/New/Deep", "Existing/New"]);
+  assert.equal(tree.entries.get("Existing"), existing, "the pre-existing parent is preserved");
+  assert.equal(tree.entries.has("Existing/New"), false);
+  assert.equal(tree.entries.has("Existing/New/Deep"), false);
+});
+
+test("portable JSON serialization fails before creating an export folder", async () => {
+  const tree = trackedVaultTree([]);
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getAbstractFileByPath: (path: string) => tree.entries.get(path) ?? null,
+      getMarkdownFiles: () => [],
+      createFolder: (path: string) => tree.createFolder(path),
+      create: async (): Promise<never> => { throw new Error("create must not run"); },
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+    fileManager: { trashFile: (file: TAbstractFile) => tree.trashFile(file) },
+  };
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(migrateData(null), 1, "vault-export-serialization-test");
+  await plugin.loadPluginData();
+  const circular: { self?: unknown } = {};
+  circular.self = circular;
+
+  await assert.rejects(plugin.writePortableJson("workspace", circular), /circular/i);
+
+  assert.deepEqual(tree.createdFolders, []);
+  assert.deepEqual(tree.trashedFolders, []);
+  assert.equal(tree.entries.has("Knowledge Base Command Center Exports"), false);
+});
+
+test("proposal promotion restores the original note and removes its empty destination folder when rewriting fails", async () => {
+  const proposalsRoot = new TFolder("01 Inbox");
+  const proposalFolder = new TFolder("01 Inbox/Topic Proposals");
+  const clinicalRoot = new TFolder("03 Clinical Topics");
+  const sourcePath = "01 Inbox/Topic Proposals/Laryngeal cleft.md";
+  const source = new TFile(sourcePath);
+  const tree = trackedVaultTree([proposalsRoot, proposalFolder, clinicalRoot, source]);
+  const originalContent = "---\ntype: topic-proposal\ntitle: Laryngeal cleft\nreview_status: unverified\n---\n# Laryngeal cleft\n\nOriginal proposal body.\n";
+  let content = originalContent;
+  const originalFrontmatter: Record<string, unknown> = {
+    type: "topic-proposal",
+    title: "Laryngeal cleft",
+    review_status: "unverified",
+  };
+  const frontmatter = structuredClone(originalFrontmatter);
+  let processCalls = 0;
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getAbstractFileByPath: (path: string) => tree.entries.get(path) ?? null,
+      getMarkdownFiles: () => tree.markdownFiles(),
+      createFolder: (path: string) => tree.createFolder(path),
+      read: async () => content,
+      process: async (_file: TFile, update: (current: string) => string): Promise<void> => {
+        processCalls += 1;
+        if (processCalls === 1) throw new Error("simulated heading rewrite failure");
+        content = update(content);
+        for (const key of Object.keys(frontmatter)) delete frontmatter[key];
+        Object.assign(frontmatter, originalFrontmatter);
+      },
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => ({ frontmatter }), resolvedLinks: {} },
+    fileManager: {
+      renameFile: (file: TFile, destination: string) => tree.renameFile(file, destination),
+      processFrontMatter: async (_file: TFile, update: (metadata: Record<string, unknown>) => void) => { update(frontmatter); },
+      trashFile: (file: TAbstractFile) => tree.trashFile(file),
+    },
+  };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  data.settings.primaryFolder = "03 Clinical Topics";
+  data.settings.proposalFolder = "01 Inbox/Topic Proposals";
+  data.settings.idProperty = "curriculum_id";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-promotion-rollback-test");
+  await plugin.loadPluginData();
+
+  await assert.rejects(plugin.promoteProposal(sourcePath, {
+    title: "Laryngeal cleft",
+    domain: "Laryngology",
+    parentPath: "",
+    topicKind: "condition",
+    priority: "P1",
+    safetyCritical: true,
+    curriculumId: "ENT-LAR-010",
+    addToCollection: false,
+  }), /simulated heading rewrite failure/);
+
+  assert.equal(source.path, sourcePath);
+  assert.equal(tree.entries.get(sourcePath), source);
+  assert.equal(content, originalContent);
+  assert.deepEqual(frontmatter, originalFrontmatter);
+  assert.deepEqual(tree.trashedFolders, ["03 Clinical Topics/03 Laryngology"]);
+  assert.equal(tree.entries.has("03 Clinical Topics/03 Laryngology/ENT-LAR-010 - Laryngeal cleft.md"), false);
+});
+
+test("proposal promotion rollback never overwrites a destination created concurrently by Sync", async () => {
+  const proposalFolder = new TFolder("01 Inbox/Topic Proposals");
+  const clinicalRoot = new TFolder("03 Clinical Topics");
+  const laryngologyFolder = new TFolder("03 Clinical Topics/03 Laryngology");
+  const sourcePath = "01 Inbox/Topic Proposals/Laryngeal cleft.md";
+  const destination = "03 Clinical Topics/03 Laryngology/ENT-LAR-010 - Laryngeal cleft.md";
+  const source = new TFile(sourcePath);
+  const tree = trackedVaultTree([proposalFolder, clinicalRoot, laryngologyFolder, source]);
+  const originalContent = "---\ntype: topic-proposal\ntitle: Laryngeal cleft\nreview_status: unverified\n---\n# Laryngeal cleft\n\nOriginal proposal body.\n";
+  const concurrentContent = "# Unrelated note created by Sync\n\nDo not overwrite.\n";
+  let sourceContent = originalContent;
+  let destinationContent = concurrentContent;
+  let concurrentFile: TFile | null = null;
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getAbstractFileByPath: (path: string) => tree.entries.get(path) ?? null,
+      getMarkdownFiles: () => tree.markdownFiles(),
+      createFolder: (path: string) => tree.createFolder(path),
+      read: async (file: TFile) => file === source ? sourceContent : destinationContent,
+      process: async (file: TFile, update: (current: string) => string): Promise<void> => {
+        if (file === source) sourceContent = update(sourceContent);
+        else if (file === concurrentFile) destinationContent = update(destinationContent);
+        else throw new Error("Unexpected file passed to rollback processing.");
+      },
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: {
+      getFileCache: (file: TFile) => ({ frontmatter: file === source
+        ? { type: "topic-proposal", title: "Laryngeal cleft", review_status: "unverified" }
+        : { title: "Unrelated note created by Sync" } }),
+      resolvedLinks: {},
+    },
+    fileManager: {
+      renameFile: async (): Promise<void> => {
+        concurrentFile = new TFile(destination);
+        tree.entries.set(destination, concurrentFile);
+        laryngologyFolder.children.push(concurrentFile);
+        throw new Error("simulated concurrent destination conflict");
+      },
+      processFrontMatter: async (): Promise<never> => { throw new Error("frontmatter processing must not run after rename rejection"); },
+      trashFile: (file: TAbstractFile) => tree.trashFile(file),
+    },
+  };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  data.settings.primaryFolder = "03 Clinical Topics";
+  data.settings.proposalFolder = "01 Inbox/Topic Proposals";
+  data.settings.idProperty = "curriculum_id";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-promotion-sync-race-test");
+  await plugin.loadPluginData();
+
+  await assert.rejects(plugin.promoteProposal(sourcePath, {
+    title: "Laryngeal cleft",
+    domain: "Laryngology",
+    parentPath: "",
+    topicKind: "condition",
+    priority: "P1",
+    safetyCritical: true,
+    curriculumId: "ENT-LAR-010",
+    addToCollection: false,
+  }), /simulated concurrent destination conflict/);
+
+  assert.equal(source.path, sourcePath);
+  assert.equal(tree.entries.get(sourcePath), source);
+  assert.equal(sourceContent, originalContent);
+  assert.equal(tree.entries.get(destination), concurrentFile);
+  assert.equal(destinationContent, concurrentContent, "rollback must not process the concurrently created destination");
+  assert.deepEqual(tree.trashedFolders, [], "pre-existing folders remain untouched");
+});
+
+test("proposal promotion reports a combined recovery error if content rollback fails", async () => {
+  const proposalFolder = new TFolder("01 Inbox/Topic Proposals");
+  const clinicalRoot = new TFolder("03 Clinical Topics");
+  const sourcePath = "01 Inbox/Topic Proposals/Laryngeal cleft.md";
+  const source = new TFile(sourcePath);
+  const tree = trackedVaultTree([proposalFolder, clinicalRoot, source]);
+  const frontmatter: Record<string, unknown> = { type: "topic-proposal", title: "Laryngeal cleft", review_status: "unverified" };
+  let processCalls = 0;
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getAbstractFileByPath: (path: string) => tree.entries.get(path) ?? null,
+      getMarkdownFiles: () => tree.markdownFiles(),
+      createFolder: (path: string) => tree.createFolder(path),
+      read: async () => "# Original proposal\n",
+      process: async (): Promise<void> => {
+        processCalls += 1;
+        throw new Error(processCalls === 1 ? "simulated promotion failure" : "simulated rollback write failure");
+      },
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => ({ frontmatter }), resolvedLinks: {} },
+    fileManager: {
+      renameFile: (file: TFile, destination: string) => tree.renameFile(file, destination),
+      processFrontMatter: async (_file: TFile, update: (metadata: Record<string, unknown>) => void) => { update(frontmatter); },
+      trashFile: (file: TAbstractFile) => tree.trashFile(file),
+    },
+  };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  data.settings.primaryFolder = "03 Clinical Topics";
+  data.settings.proposalFolder = "01 Inbox/Topic Proposals";
+  data.settings.idProperty = "curriculum_id";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-promotion-rollback-failure-test");
+  await plugin.loadPluginData();
+
+  const loggedRollbackErrors: unknown[][] = [];
+  const originalConsoleError = console.error;
+  console.error = (...values: unknown[]): void => { loggedRollbackErrors.push(values); };
+  try {
+    await assert.rejects(plugin.promoteProposal(sourcePath, {
+      title: "Laryngeal cleft",
+      domain: "Laryngology",
+      parentPath: "",
+      topicKind: "condition",
+      priority: "P1",
+      safetyCritical: true,
+      curriculumId: "ENT-LAR-010",
+      addToCollection: false,
+    }), (error: unknown) => {
+      assert.match(String(error), /simulated promotion failure/);
+      assert.match(String(error), /Automatic promotion rollback also failed/);
+      assert.match(String(error), /simulated rollback write failure/);
+      assert.match(String(error), /Inspect .*Laryngeal cleft\.md/);
+      return true;
+    });
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.equal(loggedRollbackErrors.length, 1, "the failed automatic rollback is logged once for diagnosis");
+  assert.equal(source.path, sourcePath, "path restoration is still attempted after content restoration fails");
+  assert.equal(tree.entries.get(sourcePath), source);
+  assert.deepEqual(tree.trashedFolders, ["03 Clinical Topics/03 Laryngology"]);
+});
+
+test("failed canonical placement restores the original path and content", async () => {
+  const clinicalRoot = new TFolder("03 Clinical Topics");
+  const laryngologyFolder = new TFolder("03 Clinical Topics/03 Laryngology");
+  const sourcePath = "03 Clinical Topics/03 Laryngology/ENT-LAR-010 - Original title.md";
+  const source = new TFile(sourcePath);
+  const tree = trackedVaultTree([clinicalRoot, laryngologyFolder, source]);
+  const originalContent = "---\ntype: clinical-topic\ntitle: Original title\ncurriculum_id: ENT-LAR-010\ndomain: Laryngology\nreview_status: unverified\n---\n# Original title\n\nClinical body.\n";
+  let content = originalContent;
+  const originalFrontmatter: Record<string, unknown> = {
+    type: "clinical-topic",
+    title: "Original title",
+    curriculum_id: "ENT-LAR-010",
+    domain: "Laryngology",
+    topic_kind: "condition",
+    priority: "P2",
+    review_status: "unverified",
+  };
+  const frontmatter = structuredClone(originalFrontmatter);
+  let processCalls = 0;
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getAbstractFileByPath: (path: string) => tree.entries.get(path) ?? null,
+      getMarkdownFiles: () => tree.markdownFiles(),
+      createFolder: (path: string) => tree.createFolder(path),
+      read: async () => content,
+      process: async (_file: TFile, update: (current: string) => string): Promise<void> => {
+        processCalls += 1;
+        if (processCalls === 1) throw new Error("simulated placement rewrite failure");
+        content = update(content);
+        for (const key of Object.keys(frontmatter)) delete frontmatter[key];
+        Object.assign(frontmatter, originalFrontmatter);
+      },
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => ({ frontmatter }), resolvedLinks: {} },
+    fileManager: {
+      renameFile: (file: TFile, destination: string) => tree.renameFile(file, destination),
+      processFrontMatter: async (_file: TFile, update: (metadata: Record<string, unknown>) => void) => { update(frontmatter); },
+      trashFile: (file: TAbstractFile) => tree.trashFile(file),
+    },
+  };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  data.settings.primaryFolder = "03 Clinical Topics";
+  data.settings.idProperty = "curriculum_id";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-placement-rollback-test");
+  await plugin.loadPluginData();
+
+  await assert.rejects(plugin.editCanonicalPlacement(sourcePath, {
+    title: "Updated title",
+    domain: "Laryngology",
+    parentPath: "",
+    topicKind: "condition",
+    priority: "P1",
+    safetyCritical: false,
+    curriculumId: "ENT-LAR-010",
+    addToCollection: false,
+  }), /simulated placement rewrite failure/);
+
+  assert.equal(source.path, sourcePath);
+  assert.equal(tree.entries.get(sourcePath), source);
+  assert.equal(content, originalContent);
+  assert.deepEqual(frontmatter, originalFrontmatter);
+  assert.equal(tree.entries.has("03 Clinical Topics/03 Laryngology/ENT-LAR-010 - Updated title.md"), false);
+  assert.deepEqual(tree.trashedFolders, [], "the pre-existing canonical folder is never removed");
+});
+
+test("canonical placement rollback never overwrites a destination created concurrently by Sync", async () => {
+  const clinicalRoot = new TFolder("03 Clinical Topics");
+  const laryngologyFolder = new TFolder("03 Clinical Topics/03 Laryngology");
+  const sourcePath = "03 Clinical Topics/03 Laryngology/ENT-LAR-010 - Original title.md";
+  const destination = "03 Clinical Topics/03 Laryngology/ENT-LAR-010 - Updated title.md";
+  const source = new TFile(sourcePath);
+  const tree = trackedVaultTree([clinicalRoot, laryngologyFolder, source]);
+  const originalContent = "---\ntype: clinical-topic\ntitle: Original title\ncurriculum_id: ENT-LAR-010\ndomain: Laryngology\nreview_status: unverified\n---\n# Original title\n\nClinical body.\n";
+  const concurrentContent = "# Synced destination\n\nUnrelated content.\n";
+  let sourceContent = originalContent;
+  let destinationContent = concurrentContent;
+  let concurrentFile: TFile | null = null;
+  const originalFrontmatter: Record<string, unknown> = {
+    type: "clinical-topic",
+    title: "Original title",
+    curriculum_id: "ENT-LAR-010",
+    domain: "Laryngology",
+    topic_kind: "condition",
+    priority: "P2",
+    review_status: "unverified",
+  };
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getAbstractFileByPath: (path: string) => tree.entries.get(path) ?? null,
+      getMarkdownFiles: () => tree.markdownFiles(),
+      createFolder: (path: string) => tree.createFolder(path),
+      read: async (file: TFile) => file === source ? sourceContent : destinationContent,
+      process: async (file: TFile, update: (current: string) => string): Promise<void> => {
+        if (file === source) sourceContent = update(sourceContent);
+        else if (file === concurrentFile) destinationContent = update(destinationContent);
+        else throw new Error("Unexpected file passed to rollback processing.");
+      },
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: {
+      getFileCache: (file: TFile) => ({ frontmatter: file === source
+        ? originalFrontmatter
+        : { title: "Synced destination" } }),
+      resolvedLinks: {},
+    },
+    fileManager: {
+      renameFile: async (): Promise<void> => {
+        concurrentFile = new TFile(destination);
+        tree.entries.set(destination, concurrentFile);
+        laryngologyFolder.children.push(concurrentFile);
+        throw new Error("simulated concurrent placement conflict");
+      },
+      processFrontMatter: async (): Promise<never> => { throw new Error("frontmatter processing must not run after rename rejection"); },
+      trashFile: (file: TAbstractFile) => tree.trashFile(file),
+    },
+  };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  data.settings.primaryFolder = "03 Clinical Topics";
+  data.settings.idProperty = "curriculum_id";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-placement-sync-race-test");
+  await plugin.loadPluginData();
+
+  await assert.rejects(plugin.editCanonicalPlacement(sourcePath, {
+    title: "Updated title",
+    domain: "Laryngology",
+    parentPath: "",
+    topicKind: "condition",
+    priority: "P1",
+    safetyCritical: false,
+    curriculumId: "ENT-LAR-010",
+    addToCollection: false,
+  }), /simulated concurrent placement conflict/);
+
+  assert.equal(source.path, sourcePath);
+  assert.equal(tree.entries.get(sourcePath), source);
+  assert.equal(sourceContent, originalContent);
+  assert.equal(tree.entries.get(destination), concurrentFile);
+  assert.equal(destinationContent, concurrentContent, "rollback must not process the concurrently created destination");
+  assert.deepEqual(tree.trashedFolders, []);
+});
+
+test("cross-base search records retain each inactive base's own display aliases", async () => {
+  const file = new TFile("Shared/Topic.md");
+  const first = migrateData(null);
+  first.settings.workspaceMode = "generic";
+  first.settings.workspaceName = "First base";
+  first.settings.primaryFolder = "Shared";
+  first.displayNameByPath[file.path] = "First display";
+  const second = migrateData(null);
+  second.settings.workspaceMode = "generic";
+  second.settings.workspaceName = "Second base";
+  second.settings.primaryFolder = "Shared";
+  second.displayNameByPath[file.path] = "Second display";
+  const store = createDefaultStore(first, 1, "vault-cross-base-alias-test");
+  store.bases.push(createKnowledgeBaseEntry(second, "base-second", 2));
+  const { plugin } = pluginWithFiles(store, [file], { [file.path]: { title: "Source title" } });
+  await plugin.loadPluginData();
+
+  const results = await plugin.searchKnowledgeBases("source", { yieldEvery: Number.MAX_SAFE_INTEGER });
+
+  assert.ok(results);
+  assert.deepEqual(results.groups.map((group) => [group.source.baseName, group.records[0]?.title]), [
+    ["First base", "First display"],
+    ["Second base", "Second display"],
+  ]);
+  assert.equal(results.groups[1]?.records[0]?.sourceTitle, "Source title");
+});
+
+test("cross-base search streams uncached bases through one bounded catalog without warming their record caches", async () => {
+  const files = Array.from({ length: 40 }, (_, index) => new TFile(`Shared/Topic ${index + 1}.md`));
+  const frontmatterByPath = Object.fromEntries(files.map((file, index) => [file.path, { title: `Topic ${index + 1}` }]));
+  const first = migrateData(null);
+  first.settings.workspaceMode = "generic";
+  first.settings.workspaceName = "Base 1";
+  first.settings.primaryFolder = "Shared";
+  const store = createDefaultStore(first, 1, "vault-cross-base-snapshot-test");
+  for (let index = 2; index <= 12; index += 1) {
+    const data = migrateData(null);
+    data.settings.workspaceMode = "generic";
+    data.settings.workspaceName = `Base ${index}`;
+    data.settings.primaryFolder = "Shared";
+    store.bases.push(createKnowledgeBaseEntry(data, `base-${index}`, index));
+  }
+  const archivedData = migrateData(null);
+  archivedData.settings.workspaceMode = "generic";
+  archivedData.settings.workspaceName = "Archived base";
+  archivedData.settings.primaryFolder = "Shared";
+  const archivedEntry = createKnowledgeBaseEntry(archivedData, "base-archived-search", 13);
+  archivedEntry.archivedAt = 14;
+  archivedEntry.updatedAt = 14;
+  store.bases.push(archivedEntry);
+  const { plugin, metadataReadCount, vaultEnumerationCount } = pluginWithFiles(store, files, frontmatterByPath);
+  const internal = plugin as unknown as { recordsCacheByBase: Map<string, unknown[]> };
+  await plugin.loadPluginData();
+  plugin.getRecords();
+
+  const firstResults = await plugin.searchKnowledgeBases("topic", { yieldEvery: Number.MAX_SAFE_INTEGER });
+
+  assert.ok(firstResults);
+  assert.equal(firstResults.total, 12 * files.length);
+  assert.equal(firstResults.counts.length, 12);
+  assert.equal(firstResults.counts.every(({ total }) => total === files.length), true);
+  assert.equal(firstResults.rendered, 300);
+  assert.equal(firstResults.stats.peakRetainedCandidates, 300);
+  assert.equal(firstResults.stats.sortedCandidates, 300);
+  assert.deepEqual([...internal.recordsCacheByBase.keys()], ["base-default"], "search does not retain full inactive-base records");
+  assert.equal(vaultEnumerationCount(), 2, "the active cache and lazy cross-base catalog each enumerate once");
+  assert.equal(metadataReadCount(), files.length * 2, "the catalog reads each file once, not once per base");
+
+  const secondResults = await plugin.searchKnowledgeBases("topic 1", { yieldEvery: Number.MAX_SAFE_INTEGER });
+
+  assert.ok(secondResults);
+  assert.equal(vaultEnumerationCount(), 2, "later queries reuse the bounded catalog generation");
+  assert.equal(metadataReadCount(), files.length * 2, "later queries do not reread unchanged metadata");
+  assert.deepEqual([...internal.recordsCacheByBase.keys()], ["base-default"]);
+});
+
+test("an invalidated yielded search never publishes a deleted inactive out-of-folder proposal", async () => {
+  const proposal = new TFile("Notes/Adhoc proposal.md");
+  const files = [proposal];
+  const frontmatterByPath: Record<string, Record<string, unknown>> = {
+    [proposal.path]: { type: "topic-proposal", title: "Adhoc proposal" },
+  };
+  const active = migrateData(null);
+  active.settings.workspaceMode = "generic";
+  active.settings.primaryFolder = "Active";
+  const inactive = migrateData(null);
+  inactive.settings.workspaceMode = "ent-clinical";
+  inactive.settings.primaryFolder = "Clinical Topics";
+  inactive.settings.proposalFolder = "Inbox/Topic Proposals";
+  const store = createDefaultStore(active, 1, "vault-cross-base-cancel-test");
+  store.bases.push(createKnowledgeBaseEntry(inactive, "base-inactive-clinical", 2));
+  const { plugin } = pluginWithFiles(store, files, frontmatterByPath);
+  const internal = plugin as unknown as {
+    invalidateKnowledgeBaseSearchSnapshot(): void;
+    recordsCacheByBase: Map<string, unknown[]>;
+  };
+  await plugin.loadPluginData();
+  plugin.getRecords();
+
+  const staleSearch = plugin.searchKnowledgeBases("adhoc", { yieldEvery: 1 });
+  files.splice(0, files.length);
+  delete frontmatterByPath[proposal.path];
+  internal.invalidateKnowledgeBaseSearchSnapshot();
+
+  assert.equal(await staleSearch, null, "generation invalidation cancels rather than publishing a partial stale result");
+  const current = await plugin.searchKnowledgeBases("adhoc", { yieldEvery: Number.MAX_SAFE_INTEGER });
+  assert.ok(current);
+  assert.equal(current.total, 0);
+  assert.deepEqual([...internal.recordsCacheByBase.keys()], ["base-default"], "the inactive clinical base remains lazy");
+});
+
+test("path-scoped vault-event invalidation preserves unrelated base caches and active links", async () => {
+  const activeFile = new TFile("Active/Topic.md");
+  const inactiveFile = new TFile("Inactive/Topic.md");
+  const frontmatterByPath: Record<string, Record<string, unknown>> = {
+    [activeFile.path]: { title: "Active topic", aliases: ["Active alias"] },
+    [inactiveFile.path]: { title: "Inactive topic" },
+  };
+  const first = migrateData(null);
+  first.settings.workspaceMode = "generic";
+  first.settings.primaryFolder = "Active";
+  const second = migrateData(null);
+  second.settings.workspaceMode = "generic";
+  second.settings.primaryFolder = "Inactive";
+  const store = createDefaultStore(first, 1, "vault-cross-base-relevance-test");
+  store.bases.push(createKnowledgeBaseEntry(second, "base-second", 2));
+  const { plugin, metadataReadCount, vaultEnumerationCount } = pluginWithFiles(
+    store,
+    [activeFile, inactiveFile],
+    frontmatterByPath,
+  );
+  const internal = plugin as unknown as {
+    excludedPathsCacheByBase: Map<string, Set<string>>;
+    invalidateRecordCachesForPath(path: string): boolean;
+    recordLinkIndex: Map<string, { title: string }>;
+    recordLinkIndexBaseId: string;
+    recordPathsCacheByBase: Map<string, Set<string>>;
+    recordsCacheByBase: Map<string, unknown[]>;
+    referencedPathsCacheByBase: Map<string, Set<string>>;
+  };
+  await plugin.loadPluginData();
+  const activeRecords = plugin.getRecords();
+  internal.recordsCacheByBase.set("base-second", []);
+  internal.recordPathsCacheByBase.set("base-second", new Set([inactiveFile.path]));
+  internal.referencedPathsCacheByBase.set("base-second", new Set());
+  internal.excludedPathsCacheByBase.set("base-second", new Set());
+  const activeReferenced = internal.referencedPathsCacheByBase.get("base-default");
+  const inactiveReferenced = internal.referencedPathsCacheByBase.get("base-second");
+  const activeExcluded = internal.excludedPathsCacheByBase.get("base-default");
+  const inactiveExcluded = internal.excludedPathsCacheByBase.get("base-second");
+
+  assert.equal(plugin.isRelevant("Inactive/Changed.md"), false, "the active-base helper remains base-local");
+  assert.equal(internal.recordLinkIndexBaseId, "base-default");
+  assert.equal(internal.recordLinkIndex.get("active alias")?.title, "Active topic");
+  assert.equal(internal.invalidateRecordCachesForPath("Inactive/Changed.md"), true);
+  assert.equal(internal.recordsCacheByBase.get("base-default"), activeRecords, "the active cache survives an inactive-only event");
+  assert.equal(internal.recordsCacheByBase.has("base-second"), false, "only the affected inactive cache is evicted");
+  assert.equal(plugin.getRecords(), activeRecords, "reading the active base remains a cache hit");
+  assert.equal(internal.recordLinkIndexBaseId, "base-default", "the active link index remains valid");
+  assert.equal(internal.recordLinkIndex.get("active alias")?.title, "Active topic");
+  assert.equal(vaultEnumerationCount(), 1);
+  assert.equal(metadataReadCount(), 1);
+  assert.equal(internal.referencedPathsCacheByBase.get("base-default"), activeReferenced);
+  assert.equal(internal.referencedPathsCacheByBase.get("base-second"), inactiveReferenced);
+  assert.equal(internal.excludedPathsCacheByBase.get("base-default"), activeExcluded);
+  assert.equal(internal.excludedPathsCacheByBase.get("base-second"), inactiveExcluded);
+
+  frontmatterByPath[activeFile.path] = { title: "Updated active topic", aliases: ["Updated active alias"] };
+  assert.equal(internal.invalidateRecordCachesForPath("Active/Changed.md"), true);
+  assert.equal(internal.recordLinkIndexBaseId, "", "evicting the active base also invalidates its derived link index");
+  assert.equal(internal.recordLinkIndex.size, 0);
+  plugin.getRecords();
+  assert.equal(internal.recordLinkIndexBaseId, "base-default");
+  assert.equal(internal.recordLinkIndex.has("active alias"), false);
+  assert.equal(internal.recordLinkIndex.get("updated active alias")?.title, "Updated active topic");
+  assert.equal(internal.referencedPathsCacheByBase.get("base-default"), activeReferenced, "file events retain membership caches");
+  assert.equal(internal.excludedPathsCacheByBase.get("base-default"), activeExcluded, "file events retain exclusion caches");
+  assert.equal(internal.invalidateRecordCachesForPath("Outside/Changed.md"), false);
+});
+
+test("path-scoped invalidation tracks clinical proposals outside the configured Inbox", async () => {
+  const files: TFile[] = [];
+  const frontmatterByPath: Record<string, Record<string, unknown>> = {};
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  data.settings.primaryFolder = "Clinical Topics";
+  data.settings.proposalFolder = "Inbox/Topic Proposals";
+  const store = createDefaultStore(data, 1, "vault-outside-proposal-event-test");
+  const { plugin } = pluginWithFiles(store, files, frontmatterByPath);
+  const internal = plugin as unknown as {
+    invalidateRecordCachesForPath(path: string): boolean;
+  };
+  await plugin.loadPluginData();
+
+  assert.deepEqual(plugin.getRecords(), [], "the initial empty cache is established");
+
+  const file = new TFile("Notes/Adhoc proposal.md");
+  files.push(file);
+  frontmatterByPath[file.path] = { type: "topic-proposal", title: "Adhoc proposal" };
+  assert.equal(internal.invalidateRecordCachesForPath(file.path), true, "a newly created out-of-folder proposal invalidates clinical caches");
+  assert.deepEqual(plugin.getRecords().map((record) => [record.path, record.role]), [[file.path, "proposal"]]);
+
+  frontmatterByPath[file.path] = { title: "Ordinary note" };
+  assert.equal(internal.invalidateRecordCachesForPath(file.path), true, "the cached proposal path invalidates when its type is removed");
+  assert.deepEqual(plugin.getRecords(), [], "the former proposal does not remain as a ghost record");
+
+  frontmatterByPath[file.path] = { type: "topic-proposal", title: "Adhoc proposal" };
+  assert.equal(internal.invalidateRecordCachesForPath(file.path), true);
+  assert.equal(plugin.getRecords().length, 1);
+  files.splice(files.indexOf(file), 1);
+  delete frontmatterByPath[file.path];
+  assert.equal(internal.invalidateRecordCachesForPath(file.path), true, "deleting the cached outside proposal invalidates by its prior record path");
+  assert.deepEqual(plugin.getRecords(), []);
 });

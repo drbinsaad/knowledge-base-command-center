@@ -1,14 +1,32 @@
 # Changelog
 
-## 0.8.2
+## 0.8.3
+
+### Added
+
+- Added grouped cross-base search across every available, non-archived knowledge base. The active base appears first, other bases are ordered by workspace name, and each base is subdivided by library section; activating a result switches to its base, then selects the note-backed record or opens a placeholder's create/link actions.
+- Added a required manual physical-iPhone release checklist plus explicit mobile-update, per-base backup/restore, privacy, advanced ENT file-change, and known-limitations documentation.
+- Added dependency-free fake-DOM integration tests for iPhone keyboard viewport sizing, search scroll reset, mobile drag-control suppression, and the 300-row search render cap; real-device iPhone behavior still requires the release checklist.
+
+### Changed
+
+- Rebuilt cross-base search as a cancellable, time-sliced scan with an exact-count bounded collector: only the 300 strongest matches are retained and sorted, results are regrouped in active-first visual order, and every base's full match count remains visible.
+- Built cross-base search from one shared Markdown/frontmatter snapshot while retaining only the active base's full record cache; file events cancel stale searches and invalidate only affected record caches, including clinical proposals outside their configured Inbox, while active-base link lookup remains correct.
+- Replaced repeated array membership and position scans in Index Manager, organization diagnostics, and repair paths with stable set-based lookups for large indexes.
+- Extended Community-policy verification to inspect the built `main.js` bundle as well as TypeScript source, added Obsidian network-API and external-module checks, and made the review sequence build before that bundle check.
+- Corrected the path-enumeration disclosure to distinguish whole-vault Markdown paths, the all-entry pass used to derive folder-picker choices, and the all-file pass used to list in-vault JSON packages.
 
 ### Fixed
 
-- Made non-empty search queries cover every record in the active knowledge base instead of only the last selected tab. Results are grouped by library and rank title, alias, ID, and path matches ahead of broad group or domain matches.
-- Kept focused iPhone search results inside the keyboard-reduced visual viewport, retained a nonzero results pane, disabled WebKit scroll anchoring for that route, and reset all result scroll owners again after layout settles.
-- Restored the selected tab to view after leaving focused mobile search, so a previously selected off-screen library tab is visible again.
+- Disabled and guarded organization-snapshot saving in compatibility read-only mode before changing in-memory state, preventing a false success notice when `data.json` cannot be written.
+- Cleaned up only newly created, still-empty destination folders after failed note creation, mobile export, proposal promotion, or canonical placement; pre-existing and non-empty folders remain untouched.
+- Hardened ENT proposal-promotion and canonical-placement rollback to track the exact file object moved by the operation, so a destination created concurrently by Sync is never selected or overwritten; rollback failures now surface an explicit recovery error.
+- Made search normalization locale-invariant, removed Arabic tatweel, unified Arabic/Persian ya and kaf variants, treated `ة`/`ه` as equivalent lookup forms, and normalized Arabic/Persian digits; this also prevents Turkish/Azeri host locale from changing indexed keys.
+- Kept focused search responsive at iPhone-class mobile landscape widths through 1024 CSS pixels and compensated for iOS visual-viewport panning when the software keyboard moves below the command-center shell; the physical-device release gate remains required.
 
-## 0.8.1
+## 0.8.2
+
+Version 0.8.1 was not published as a tag or GitHub release. Its completed work was folded into 0.8.2 and is included below.
 
 ### Added
 
@@ -17,6 +35,9 @@
 
 ### Fixed
 
+- Made non-empty search queries cover every record in the active knowledge base instead of only the last selected tab. Results are grouped by library and rank title, alias, ID, and path matches ahead of broad group or domain matches.
+- Kept focused iPhone search results inside the keyboard-reduced visual viewport, retained a nonzero results pane, disabled WebKit scroll anchoring for that route, and reset all result scroll owners again after layout settles.
+- Restored the selected tab to view after leaving focused mobile search, so a previously selected off-screen library tab is visible again.
 - Kept a created or linked generic library note bound to its imported procedure, medication, or syndrome identity after cache rebuild, reload, restart, and Sync instead of reverting to a false placeholder or disappearing.
 - Kept library-only groups out of the topic index and made Replace operate only on the selected portable catalogs, preserving unrelated local topic and library identities.
 - Added portable-package format version 2 with explicit catalog provenance. Older plugin builds reject the new format safely; the current importer still reads version 1 and treats its non-topic records as dependencies rather than complete catalogs.
