@@ -17,7 +17,7 @@ The visible product name is **Knowledge Base Command Center**. Its stable plugin
 1. In Obsidian, open **Settings → Community plugins → Browse**.
 2. Search for **Knowledge Base Command Center**.
 3. Choose **Install**, then **Enable**.
-4. Open the Command Center from the ribbon or Command palette.
+4. Open the Command Center from the desktop ribbon or Command palette. On mobile, use Obsidian's **Open** menu.
 
 The current Community listing is at [community.obsidian.md/plugins/ent-vault-command-center](https://community.obsidian.md/plugins/ent-vault-command-center).
 
@@ -83,6 +83,20 @@ Use **Add → Create note** or **Create note from template or empty note…**. F
 Templates can use <code>{{title}}</code>, <code>{{date}}</code>, and <code>{{time}}</code>. Other template text is copied unchanged. The plugin previews the destination, creates missing folders safely, and refuses to overwrite an existing file.
 
 In a Generic base, **Add → Add existing note to Index** can include an eligible note from elsewhere in the vault without moving it. In a Library, Add actions can classify an existing note, the current note, or a newly created note in that Library.
+
+## Set up Quick entry
+
+Quick entry opens one focused hub for the active knowledge base. It can switch bases, create a No note subject, create Index/Collection/Library headings or subheadings, create an empty or template-based note, and add the current or an existing note.
+
+- **Desktop ribbon:** choose the lightning-bolt **Open quick entry** action. On mobile, Obsidian places ribbon actions in the **Open** menu.
+- **Inside the Command Center:** choose **Quick entry** in the header.
+- **Keyboard:** open **Settings → Hotkeys**, search for `Quick entry`, and assign only the combinations you want. The plugin installs no default hotkeys.
+- **iPhone or iPad toolbar:** open **Settings → Mobile → Manage toolbar options**, scroll to the bottom, choose **Add global command**, then search for and select **Quick entry…** or any focused Quick Entry command.
+- **Apple Shortcuts:** use **Open URLs** with exactly `obsidian://kbcc-quick-entry`.
+
+When a Library is the destination, Quick Entry asks for its heading or subheading before continuing. If that Library has no headings yet, it asks you to create the first heading and then continues with the selected action.
+
+The URL is action-only. Do not add query fields. A URL with `?title=`, `?path=`, `?content=`, or any other parameter is rejected and does not open the hub. The form always requires local, visible user input before an entry can be created.
 
 ## Add another knowledge base
 

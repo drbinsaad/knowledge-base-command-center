@@ -1,5 +1,6 @@
 import { ItemView, Menu, Notice, Platform, setIcon, TFile, WorkspaceLeaf, normalizePath } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
+import type { CatalogPlacementTarget } from "./main";
 import { IndexManagerModal, type ManagerTab } from "./index-manager";
 import { ExportImportCenterModal } from "./portability-modal";
 import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge-base-modal";
@@ -232,6 +233,18 @@ function iconButton(parent: HTMLElement, icon: string, label: string, className 
     attr: { "aria-label": label, title: label },
   });
   setIcon(button, icon);
+  return button;
+}
+
+/** Accessible in-view entry point shared by desktop and compact mobile layouts. */
+export function createQuickEntryButton(parent: HTMLElement, onActivate: () => void): HTMLButtonElement {
+  const button = parent.createEl("button", {
+    cls: "ent-cc-button ent-cc-quick-entry-button",
+    attr: { type: "button", "aria-label": "Open quick entry", title: "Open quick entry" },
+  });
+  setIcon(button.createSpan(), "zap");
+  button.createSpan({ cls: "ent-cc-quick-entry-label", text: "Quick entry" });
+  button.addEventListener("click", onActivate);
   return button;
 }
 
@@ -593,6 +606,422 @@ export class EntVaultCommandCenterView extends ItemView {
     this.run(() => this.plugin.savePluginData());
   }
 
+  public openQuickEntry(explicitCurrentPath?: string): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const settings = this.plugin.data.settings;
+    const bases = this.plugin.getKnowledgeBases();
+    const actions = [
+      ...(bases.length > 1 ? [{
+        id: "switch-base",
+        title: `Knowledge base: ${settings.workspaceName}`,
+        description: "Choose which independent knowledge base receives this entry.",
+        icon: "library-big",
+      }] : []),
+      { id: "create-subject", title: "Create subject without a note", description: `Add a portable No note subject to ${settings.indexLabel}; create or link its Markdown note later.`, icon: "bookmark-plus" },
+      { id: "create-note", title: "Create note", description: "Choose the Index or a Library, a visual group, and empty or template-based content.", icon: "file-plus-2" },
+      { id: "add-current", title: "Add current note", description: "Use the note that was active when Quick Entry opened; its file is not moved or rewritten.", icon: "panel-top" },
+      { id: "add-existing", title: "Add existing note", description: "Choose an existing Markdown note, then its Index, Library, or Collection destination.", icon: "list-plus" },
+      { id: "create-heading", title: "Create heading", description: "Create an Index group, Collection heading, or Library heading.", icon: "folder-plus" },
+      { id: "create-subheading", title: "Create subheading", description: "Create a nested Index subject, Collection subheading, or Library subheading.", icon: "list-tree" },
+      { id: "more", title: "More add actions", description: "Open the full Add or create menu for proposals, advanced workflows, and other actions.", icon: "ellipsis" },
+    ];
+    new AddActionModal(this.app, actions, (action) => {
+      if (!ownsBase()) return;
+      if (action.id === "switch-base") this.openQuickEntryBasePicker(explicitCurrentPath);
+      else if (action.id === "create-subject") this.startQuickCreatePlaceholder();
+      else if (action.id === "create-note") this.startQuickCreateNote();
+      else if (action.id === "add-current") this.startQuickAddCurrentNote(explicitCurrentPath);
+      else if (action.id === "add-existing") this.startQuickAddExistingNote();
+      else if (action.id === "create-heading") this.startQuickCreateHeading();
+      else if (action.id === "create-subheading") this.startQuickCreateSubheading();
+      else this.openAddActions();
+    }, `Quick Entry — ${settings.workspaceName}`).open();
+  }
+
+  private openQuickEntryBasePicker(explicitCurrentPath?: string): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const activeId = this.plugin.getActiveKnowledgeBaseId();
+    const bases = this.plugin.getKnowledgeBases();
+    new AddActionModal(this.app, bases.map((entry) => ({
+      id: entry.id,
+      title: entry.data.settings.workspaceName,
+      description: entry.id === activeId
+        ? "Current knowledge base"
+        : `Switch to this ${entry.data.settings.workspaceMode === "ent-clinical" ? "ENT clinical" : "Generic"} knowledge base.`,
+      icon: entry.id === activeId ? "check" : "library-big",
+    })), (action) => {
+      if (!ownsBase()) return;
+      this.run(async () => {
+        // The guard is checked immediately before the intentional switch. A
+        // Sync replacement or another base switch while the picker was open
+        // must never be mistaken for the user's explicit destination choice.
+        if (!ownsBase()) return;
+        if (action.id !== this.plugin.getActiveKnowledgeBaseId()) await this.plugin.switchKnowledgeBase(action.id);
+        // Switching invalidates this view's original data guard. Re-acquire the
+        // active view after the committed switch before opening another form.
+        const activeView = await this.plugin.activateView();
+        activeView.openQuickEntry(explicitCurrentPath);
+      });
+    }, "Choose knowledge base").open();
+  }
+
+  public startQuickCreatePlaceholder(): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    new TextPromptModal(this.app, {
+      title: "Create subject without a note",
+      placeholder: "Subject name",
+      submitLabel: "Choose group",
+      onSubmit: (title) => {
+        if (!ownsBase()) return;
+        new IndexGroupModal(this.app, {
+          title: `Place “${title}” in ${this.plugin.data.settings.indexLabel}`,
+          groupLabel: this.plugin.data.settings.groupLabel,
+          initialValue: this.plugin.getIndexGroups()[0] ?? "Ungrouped",
+          existingGroups: this.plugin.getIndexGroups(),
+          submitLabel: "Create placeholder",
+          onSubmit: async (group) => {
+            if (!ownsBase()) return;
+            await this.plugin.createQuickEntryPlaceholder({ title, group });
+            if (!ownsBase()) return;
+            new Notice(`Created “${title}” as a No note subject. No Markdown file was created.`);
+          },
+        }).open();
+      },
+    }).open();
+  }
+
+  public startQuickCreateHeading(): void {
+    if (!this.guardLoadedBase()) return;
+    const libraries = this.plugin.getLibraries();
+    const actions = [
+      { id: "index", title: `${this.plugin.data.settings.indexLabel} group`, description: "Create a stable visual group that can remain empty until subjects are added.", icon: "library" },
+      { id: "collection", title: "Collection heading", description: "Create a reusable cross-category list.", icon: "folders" },
+      ...libraries.map((library) => ({
+        id: `library:${library.id}`,
+        title: `${library.name} heading`,
+        description: `Create an empty visual heading inside ${library.name}.`,
+        icon: libraryIcon(library),
+      })),
+    ];
+    const ownsBase = this.createOpenedBaseGuard();
+    new AddActionModal(this.app, actions, (action) => {
+      if (!ownsBase()) return;
+      if (action.id === "index") {
+        new TextPromptModal(this.app, {
+          title: `Create ${this.plugin.data.settings.groupLabel.toLocaleLowerCase()}`,
+          placeholder: `${this.plugin.data.settings.groupLabel} name`,
+          submitLabel: "Create heading",
+          onSubmit: async (title) => {
+            if (!ownsBase()) return;
+            await this.plugin.createQuickEntryIndexGroup(title);
+          },
+        }).open();
+      } else if (action.id === "collection") {
+        new TextPromptModal(this.app, {
+          title: "Create collection heading",
+          placeholder: "Collection name",
+          submitLabel: "Create heading",
+          onSubmit: async (title) => {
+            if (!ownsBase()) return;
+            await this.plugin.createQuickEntryCollectionHeading(title);
+          },
+        }).open();
+      } else {
+        const libraryId = action.id.slice("library:".length);
+        const library = this.plugin.getLibrary(libraryId);
+        if (!library) return;
+        new TextPromptModal(this.app, {
+          title: `Create heading in ${library.name}`,
+          placeholder: "Heading name",
+          submitLabel: "Create heading",
+          onSubmit: async (title) => {
+            if (!ownsBase()) return;
+            await this.plugin.createQuickEntryLibraryHeading(libraryId, title);
+          },
+        }).open();
+      }
+    }, "Create heading").open();
+  }
+
+  public startQuickCreateSubheading(): void {
+    if (!this.guardLoadedBase()) return;
+    const actions = [
+      ...(this.plugin.getIndexRecords().length > 0 ? [{
+        id: "index",
+        title: `Nested ${this.plugin.data.settings.itemSingular}`,
+        description: `Create a No note subject beneath an existing ${this.plugin.data.settings.indexLabel} subject.`,
+        icon: "list-tree",
+      }] : []),
+      ...(this.plugin.data.collections.length > 0 ? [{
+        id: "collection",
+        title: "Collection subheading",
+        description: "Choose a Collection heading, then create one nested subheading.",
+        icon: "folders",
+      }] : []),
+      ...this.plugin.getLibraries()
+        .filter((library) => (this.plugin.data.portableIndex.libraryLayouts[library.id] ?? []).length > 0)
+        .map((library) => ({
+          id: `library:${library.id}`,
+          title: `${library.name} subheading`,
+          description: `Choose a heading inside ${library.name}.`,
+          icon: libraryIcon(library),
+        })),
+    ];
+    if (actions.length === 0) {
+      new Notice("Create a parent index subject, collection heading, or library heading first.");
+      return;
+    }
+    const ownsBase = this.createOpenedBaseGuard();
+    new AddActionModal(this.app, actions, (action) => {
+      if (!ownsBase()) return;
+      if (action.id === "index") this.openQuickIndexParentPicker();
+      else if (action.id === "collection") this.openQuickCollectionHeadingPicker();
+      else this.openQuickLibraryHeadingPicker(action.id.slice("library:".length));
+    }, "Create subheading").open();
+  }
+
+  private openQuickIndexParentPicker(): void {
+    const ownsBase = this.createOpenedBaseGuard();
+    new RecordPickerModal(
+      this.app,
+      this.plugin.getIndexRecords(),
+      "Choose parent subject",
+      "Search indexed subjects…",
+      (parent) => {
+        if (!ownsBase()) return;
+        new TextPromptModal(this.app, {
+          title: `New subject under ${parent.title}`,
+          placeholder: "Subheading or subject name",
+          submitLabel: "Create placeholder",
+          onSubmit: async (title) => {
+            if (!ownsBase()) return;
+            await this.plugin.createQuickEntryPlaceholder({ title, group: parent.domain || "Ungrouped", parentPath: parent.path });
+            if (!ownsBase()) return;
+            new Notice(`Created “${title}” under “${parent.title}” without creating a Markdown file.`);
+          },
+        }).open();
+      },
+    ).open();
+  }
+
+  private openQuickCollectionHeadingPicker(): void {
+    const ownsBase = this.createOpenedBaseGuard();
+    new AddActionModal(this.app, this.plugin.data.collections.map((heading) => ({
+      id: heading.id,
+      title: heading.title,
+      description: `${heading.subheadings.length} nested subheading${heading.subheadings.length === 1 ? "" : "s"}`,
+      icon: "folder",
+    })), (action) => {
+      if (!ownsBase()) return;
+      const heading = this.plugin.data.collections.find((candidate) => candidate.id === action.id);
+      if (!heading) return;
+      new TextPromptModal(this.app, {
+        title: `New subheading in ${heading.title}`,
+        placeholder: "Subheading name",
+        submitLabel: "Create subheading",
+        onSubmit: async (title) => {
+          if (!ownsBase()) return;
+          await this.plugin.createQuickEntryCollectionSubheading(heading.id, title);
+        },
+      }).open();
+    }, "Choose Collection heading").open();
+  }
+
+  private openQuickLibraryHeadingPicker(libraryId: string): void {
+    const library = this.plugin.getLibrary(libraryId);
+    if (!library) return;
+    const layout = this.plugin.data.portableIndex.libraryLayouts[libraryId] ?? [];
+    if (layout.length === 0) {
+      new Notice(`Create a heading in ${library.name} first.`);
+      return;
+    }
+    const ownsBase = this.createOpenedBaseGuard();
+    new AddActionModal(this.app, layout.map((heading) => ({
+      id: heading.id,
+      title: heading.title,
+      description: `${heading.subheadings.length} nested subheading${heading.subheadings.length === 1 ? "" : "s"}`,
+      icon: "folder",
+    })), (action) => {
+      if (!ownsBase()) return;
+      const heading = (this.plugin.data.portableIndex.libraryLayouts[libraryId] ?? []).find((candidate) => candidate.id === action.id);
+      if (!heading) return;
+      new TextPromptModal(this.app, {
+        title: `New subheading in ${heading.title}`,
+        placeholder: "Subheading name",
+        submitLabel: "Create subheading",
+        onSubmit: async (title) => {
+          if (!ownsBase()) return;
+          await this.plugin.createQuickEntryLibrarySubheading(libraryId, heading.id, title);
+        },
+      }).open();
+    }, `Choose heading in ${library.name}`).open();
+  }
+
+  public startQuickCreateNote(): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const libraries = this.plugin.getLibraries()
+      .filter((library) => !this.plugin.isClinicalMode() || library.sourceKind === null);
+    const actions = [
+      ...(!this.plugin.isClinicalMode() ? [{
+        id: "index",
+        title: `Create in ${this.plugin.data.settings.indexLabel}`,
+        description: `Choose a ${this.plugin.data.settings.groupLabel.toLocaleLowerCase()}, destination folder, and empty or template content.`,
+        icon: "library",
+      }] : [{
+        id: "proposal",
+        title: "Create unverified topic proposal",
+        description: "Use the protected clinical Inbox workflow; Quick Entry never bypasses review safeguards.",
+        icon: "shield-alert",
+      }]),
+      ...libraries.map((library) => ({
+        id: `library:${library.id}`,
+        title: `Create ${library.singularName}`,
+        description: `Create a note and classify it in ${library.name}.`,
+        icon: libraryIcon(library),
+      })),
+      ...(!this.plugin.isClinicalMode() ? [{
+        id: "inbox",
+        title: `Create in ${this.plugin.data.settings.inboxLabel}`,
+        description: "Create an empty or template-based note without adding it to the Index.",
+        icon: "inbox",
+      }] : []),
+    ];
+    new AddActionModal(this.app, actions, (action) => {
+      if (!ownsBase()) return;
+      if (action.id === "index") this.openQuickCreateIndexNote();
+      else if (action.id === "proposal") this.startCreateProposal();
+      else if (action.id === "inbox") this.startCreateKnowledgeNote({ folder: this.plugin.data.settings.proposalFolder }, false);
+      else {
+        const libraryId = action.id.slice("library:".length);
+        this.openQuickLibraryPlacementPicker(libraryId, (target) => this.startCreateLibraryNote(libraryId, target));
+      }
+    }, "Quick create note").open();
+  }
+
+  private openQuickCreateIndexNote(): void {
+    const ownsBase = this.createOpenedBaseGuard();
+    new IndexGroupModal(this.app, {
+      title: `Choose ${this.plugin.data.settings.groupLabel.toLocaleLowerCase()}`,
+      groupLabel: this.plugin.data.settings.groupLabel,
+      initialValue: this.plugin.getIndexGroups()[0] ?? "Ungrouped",
+      existingGroups: this.plugin.getIndexGroups(),
+      submitLabel: "Continue to note",
+      onSubmit: (group) => {
+        if (!ownsBase()) return;
+        this.startCreateKnowledgeNote({}, false, async (file) => {
+          if (!ownsBase()) return;
+          await this.plugin.assignRecordToCatalog(file.path, "topic", { headingTitle: group });
+        }, `${this.plugin.data.settings.itemSingular} created in ${this.plugin.data.settings.indexLabel} under ${group}. Existing notes were not changed.`);
+      },
+    }).open();
+  }
+
+  public startQuickAddExistingNote(): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const libraries = this.plugin.getLibraries()
+      .filter((library) => !this.plugin.isClinicalMode() || library.sourceKind === null);
+    const actions = [
+      ...(!this.plugin.isClinicalMode() ? [{ id: "index", title: `Add to ${this.plugin.data.settings.indexLabel}`, description: "Choose an eligible Markdown note and its visual group.", icon: "library" }] : []),
+      ...libraries.map((library) => ({ id: `library:${library.id}`, title: `Add to ${library.name}`, description: "Classify an existing note without changing its file.", icon: libraryIcon(library) })),
+      { id: "collection", title: "Add to a Collection", description: "Choose an existing note, then a Collection heading or subheading.", icon: "folders" },
+    ];
+    new AddActionModal(this.app, actions, (action) => {
+      if (!ownsBase()) return;
+      if (action.id === "index") this.startAddExistingToIndex();
+      else if (action.id === "collection") this.startLinkVaultNote(false);
+      else {
+        const libraryId = action.id.slice("library:".length);
+        this.openQuickLibraryPlacementPicker(libraryId, (target) => this.startAddExistingToLibrary(libraryId, target));
+      }
+    }, "Add existing note").open();
+  }
+
+  public startQuickAddCurrentNote(explicitPath?: string): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const file = explicitPath ? this.app.vault.getAbstractFileByPath(explicitPath) : this.app.workspace.getActiveFile();
+    if (!(file instanceof TFile) || file.extension.toLocaleLowerCase() !== "md") {
+      new Notice("Open a Markdown note first, then run quick entry: add current note.");
+      return;
+    }
+    const libraries = this.plugin.getLibraries()
+      .filter((library) => !this.plugin.isClinicalMode() || library.sourceKind === null);
+    const actions = [
+      ...(!this.plugin.isClinicalMode() ? [{ id: "index", title: `Add to ${this.plugin.data.settings.indexLabel}`, description: "Choose a visual group; the current note stays in place.", icon: "library" }] : []),
+      ...libraries.map((library) => ({ id: `library:${library.id}`, title: `Add to ${library.name}`, description: "Classify the current note without changing it.", icon: libraryIcon(library) })),
+      { id: "collection", title: "Add to a Collection", description: "Place the current note in a reusable list.", icon: "folders" },
+    ];
+    new AddActionModal(this.app, actions, (action) => {
+      if (!ownsBase()) return;
+      if (action.id === "index") this.startQuickAddCurrentToIndex(file.path);
+      else if (action.id === "collection") this.startAddCurrentNote(file.path);
+      else {
+        const libraryId = action.id.slice("library:".length);
+        this.openQuickLibraryPlacementPicker(
+          libraryId,
+          (target) => this.startAddCurrentToLibrary(libraryId, file.path, target),
+        );
+      }
+    }, `Add “${file.basename}”`).open();
+  }
+
+  private openQuickLibraryPlacementPicker(
+    libraryId: string,
+    onChoose: (target: CatalogPlacementTarget) => void | Promise<void>,
+  ): void {
+    if (!this.guardLoadedBase()) return;
+    const library = this.plugin.getLibrary(libraryId);
+    if (!library || library.archivedAt !== null) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const layout = this.plugin.data.portableIndex.libraryLayouts[libraryId] ?? [];
+    if (layout.length === 0) {
+      new TextPromptModal(this.app, {
+        title: `Create the first heading in ${library.name}`,
+        placeholder: "Heading name",
+        submitLabel: "Create heading and continue",
+        onSubmit: async (title) => {
+          if (!ownsBase()) return;
+          const headingId = await this.plugin.createQuickEntryLibraryHeading(libraryId, title);
+          if (!ownsBase()) return;
+          await onChoose({ headingId });
+        },
+      }).open();
+      return;
+    }
+    const targets = collectionTargets(layout);
+    new CollectionPickerModal(this.app, targets, "Add", async (target) => {
+      if (!ownsBase()) return;
+      await onChoose({ headingId: target.headingId, subheadingId: target.subheadingId });
+    }, `heading or subheading in ${library.name}`).open();
+  }
+
+  private startQuickAddCurrentToIndex(path: string): void {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) {
+      new Notice("The previously active Markdown note could not be found.");
+      return;
+    }
+    const ownsBase = this.createOpenedBaseGuard();
+    new IndexGroupModal(this.app, {
+      title: `Place “${file.basename}” in ${this.plugin.data.settings.indexLabel}`,
+      groupLabel: this.plugin.data.settings.groupLabel,
+      initialValue: this.plugin.suggestedIndexGroup(file),
+      existingGroups: this.plugin.getIndexGroups(),
+      submitLabel: `Add to ${this.plugin.data.settings.indexLabel}`,
+      onSubmit: async (group) => {
+        if (!ownsBase()) return;
+        await this.plugin.assignRecordToCatalog(file.path, "topic", { headingTitle: group });
+        if (!ownsBase()) return;
+        new Notice(`Added “${file.basename}” under ${group}. The Markdown note was not changed.`);
+      },
+    }).open();
+  }
+
   public openAddActions(): void {
     const ownsBase = this.createOpenedBaseGuard();
     const settings = this.plugin.data.settings;
@@ -685,20 +1114,22 @@ export class EntVaultCommandCenterView extends ItemView {
     }, `Add to ${library.name}`).open();
   }
 
-  private startCreateLibraryNote(libraryId: string): void {
+  private startCreateLibraryNote(libraryId: string, target: CatalogPlacementTarget = {}): void {
     const library = this.plugin.getLibrary(libraryId);
     if (!library || library.archivedAt !== null) return;
     const ownsBase = this.createOpenedBaseGuard();
     this.startCreateKnowledgeNote({}, false, async (file) => {
       if (!ownsBase()) return;
-      await this.plugin.assignRecordToLibrary(file.path, libraryId);
+      await this.plugin.assignRecordToLibrary(file.path, libraryId, target);
     }, `${library.singularName} created and added to ${library.name}. The Markdown note was not rewritten.`, {
       createLabel: library.singularName,
-      contextNotice: `This Markdown note will be classified in ${library.name} after creation. You can choose its heading or subheading from the record’s actions menu.`,
+      contextNotice: target.headingId
+        ? `This Markdown note will be classified in the selected heading or subheading in ${library.name} after creation.`
+        : `This Markdown note will be classified in ${library.name} after creation. You can choose its heading or subheading from the record’s actions menu.`,
     });
   }
 
-  private startAddExistingToLibrary(libraryId: string): void {
+  private startAddExistingToLibrary(libraryId: string, target: CatalogPlacementTarget = {}): void {
     if (!this.guardLoadedBase()) return;
     const library = this.plugin.getLibrary(libraryId);
     if (!library || library.archivedAt !== null) return;
@@ -713,13 +1144,17 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     new VaultFilePickerModal(this.app, files, `Add existing note to ${library.name}`, async (file) => {
       if (!ownsBase()) return;
-      await this.plugin.assignRecordToLibrary(file.path, libraryId);
+      await this.plugin.assignRecordToLibrary(file.path, libraryId, target);
       if (!ownsBase()) return;
       new Notice(`Added “${file.basename}” to ${library.name}. The note stayed at ${file.path} and its contents were not changed.`);
     }).open();
   }
 
-  private startAddCurrentToLibrary(libraryId: string, explicitPath?: string): void {
+  private startAddCurrentToLibrary(
+    libraryId: string,
+    explicitPath?: string,
+    target: CatalogPlacementTarget = {},
+  ): void {
     if (!this.guardLoadedBase()) return;
     const library = this.plugin.getLibrary(libraryId);
     if (!library || library.archivedAt !== null) return;
@@ -731,7 +1166,7 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     this.run(async () => {
       if (!ownsBase()) return;
-      await this.plugin.assignRecordToLibrary(file.path, libraryId);
+      await this.plugin.assignRecordToLibrary(file.path, libraryId, target);
       if (!ownsBase()) return;
       new Notice(`Added “${file.basename}” to ${library.name}. The Markdown note was not changed.`);
     });
@@ -1308,6 +1743,7 @@ export class EntVaultCommandCenterView extends ItemView {
       setup.createSpan({ text: "Set up" });
       setup.addEventListener("click", () => this.openSetupWizard());
     }
+    createQuickEntryButton(actions, () => this.openQuickEntry(this.app.workspace.getActiveFile()?.path));
     const globalAdd = actions.createEl("button", { cls: "ent-cc-button ent-cc-add-button" });
     setIcon(globalAdd.createSpan(), "plus");
     globalAdd.createSpan({ text: "Add" });

@@ -53,6 +53,8 @@ The plugin has no intended analytics, telemetry, advertising, account, payment, 
 
 Portable Index and Library sections exclude source note paths and note bodies. Workspace settings can contain configured vault-relative folders; saved queries are literal. Same-vault recovery, conflict rescues, and raw <code>data.json</code> contain exact vault-relative paths and must remain private.
 
+The Quick entry protocol route is action-only. It accepts only Obsidian's intrinsic <code>action=kbcc-quick-entry</code> dispatch; any additional query key fails closed before the hub opens. URLs cannot prefill a title, note path, content, or other entry field, and rejected query values are not retained or logged.
+
 Two ENT-only workflows—proposal promotion and advanced canonical placement—can move a selected note and update structural frontmatter and its top-level heading after explicit action. They refuse <code>ai_lock: true</code>, preview their destination, and attempt rollback.
 
 ## Coordinated disclosure

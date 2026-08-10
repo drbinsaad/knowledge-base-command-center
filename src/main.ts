@@ -86,7 +86,12 @@ import {
   VaultRecord,
   WorkspaceMode,
 } from "./model";
-import { MAX_PORTABLE_PACKAGE_BYTES, portableSubjectPath } from "./portability";
+import { MAX_PORTABLE_PACKAGE_BYTES, portableSubjectPath, registerPortableGroup } from "./portability";
+import {
+  createQuickEntryCommands,
+  privacySafeQuickEntryRequest,
+  QUICK_ENTRY_PROTOCOL_ACTIONS,
+} from "./quick-entry";
 import {
   BoundedKnowledgeBaseSearchCollector,
   DEFAULT_CROSS_BASE_SEARCH_LIMIT,
@@ -140,6 +145,12 @@ export interface CatalogPlacementTarget {
   headingId?: string;
   subheadingId?: string;
   headingTitle?: string;
+}
+
+export interface QuickEntryPlaceholderInput {
+  title: string;
+  group: string;
+  parentPath?: string;
 }
 
 export interface LibraryDefinitionInput {
@@ -210,6 +221,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     });
 
     this.addRibbonIcon("library-big", "Open knowledge base command center", () => this.run(() => this.activateView()));
+    this.addRibbonIcon("zap", "Open quick entry", () => {
+      const currentPath = this.app.workspace.getActiveFile()?.path;
+      void this.withView((view) => view.openQuickEntry(currentPath));
+    });
     this.addCommand({ id: "open-workspace", name: "Open workspace", callback: () => this.run(() => this.activateView()) });
     this.addCommand({ id: "add-or-create", name: "Add or create…", callback: () => void this.withView((view) => view.openAddActions()) });
     this.addCommand({ id: "manage-knowledge-index", name: "Manage index…", callback: () => void this.withView((view) => view.openIndexManager()) });
@@ -219,6 +234,31 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.addCommand({ id: "manage-libraries", name: "Manage libraries…", callback: () => new ManageLibrariesModal(this, () => void this.refreshViews()).open() });
     this.addCommand({ id: "export-import-center", name: "Open export / import center", callback: () => void this.withView((view) => view.openPortabilityCenter()) });
     this.addCommand({ id: "create-knowledge-note", name: "Create note from template or empty note…", callback: () => void this.withView((view) => view.startCreateKnowledgeNote()) });
+    for (const command of createQuickEntryCommands({
+      openHub: () => {
+        const currentPath = this.app.workspace.getActiveFile()?.path;
+        void this.withView((view) => view.openQuickEntry(currentPath));
+      },
+      createSubject: () => void this.withView((view) => view.startQuickCreatePlaceholder()),
+      createHeading: () => void this.withView((view) => view.startQuickCreateHeading()),
+      createSubheading: () => void this.withView((view) => view.startQuickCreateSubheading()),
+      createNote: () => void this.withView((view) => view.startQuickCreateNote()),
+      addCurrentNote: () => {
+        const currentPath = this.app.workspace.getActiveFile()?.path;
+        void this.withView((view) => view.startQuickAddCurrentNote(currentPath));
+      },
+      addExistingNote: () => void this.withView((view) => view.startQuickAddExistingNote()),
+    })) this.addCommand(command);
+
+    for (const action of QUICK_ENTRY_PROTOCOL_ACTIONS) {
+      this.registerObsidianProtocolHandler(action, (parameters) => {
+        // Only Obsidian's intrinsic action field is accepted. Any query field
+        // fails closed, so URLs cannot prefill or execute an entry.
+        if (!privacySafeQuickEntryRequest(parameters).openHub) return;
+        const currentPath = this.app.workspace.getActiveFile()?.path;
+        void this.withView((view) => view.openQuickEntry(currentPath));
+      });
+    }
     this.addCommand({
       id: "create-topic-proposal",
       name: "Create topic proposal in inbox",
@@ -2231,6 +2271,141 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   getRecord(path: string): VaultRecord | null { return this.getRecords().find((record) => record.path === path) ?? null; }
   getPortableSubject(subjectId: string) { return this.data.portableIndex.subjects.find((subject) => subject.id === subjectId) ?? null; }
   getPortableSubjectPath(subjectId: string): string { return portableSubjectPath(this.data, subjectId); }
+
+  private cleanQuickEntryLabel(value: string, label: string): string {
+    const clean = value.normalize("NFC").trim();
+    if (!clean) throw new Error(`Enter a ${label}.`);
+    if (clean.length > 1_000) throw new Error(`Keep the ${label} to 1,000 characters or fewer.`);
+    if (/[\p{Cc}\p{Cf}]/u.test(clean) || /[\u202A-\u202E\u2066-\u2069]/u.test(clean)) {
+      throw new Error(`The ${label} contains an unsupported control character.`);
+    }
+    return clean;
+  }
+
+  /** Create a stable, possibly empty visual Index group without touching Markdown. */
+  async createQuickEntryIndexGroup(title: string): Promise<string> {
+    const cleanTitle = this.cleanQuickEntryLabel(title, this.data.settings.groupLabel.toLocaleLowerCase());
+    if (this.getIndexGroups().some((candidate) => this.normalizedOrganizationLabel(candidate) === this.normalizedOrganizationLabel(cleanTitle))) {
+      throw new Error(`${cleanTitle} already exists.`);
+    }
+    await this.mutate(`Create visual group “${cleanTitle}”`, () => {
+      this.data.indexGroupOrder.push(cleanTitle);
+      registerPortableGroup(this.data, cleanTitle);
+      this.data.activeTab = "curriculum";
+    }, { includePortableIndex: true, includeActiveTab: true, requireUndo: true });
+    return cleanTitle;
+  }
+
+  /**
+   * Create an unresolved portable Index subject. The path is the plugin's
+   * established placeholder identity; no vault file is created or fabricated.
+   */
+  async createQuickEntryPlaceholder(input: QuickEntryPlaceholderInput): Promise<string> {
+    const title = this.cleanQuickEntryLabel(input.title, "subject name");
+    const requestedGroup = this.cleanQuickEntryLabel(input.group, this.data.settings.groupLabel.toLocaleLowerCase());
+    const parent = input.parentPath ? this.getRecord(input.parentPath) : null;
+    if (input.parentPath && (!parent || !recordBelongsToIndex(parent, this.isClinicalMode()))) {
+      throw new Error("Choose an indexed parent subject that is still available.");
+    }
+    if (parent && this.normalizedOrganizationLabel(parent.domain) !== this.normalizedOrganizationLabel(requestedGroup)) {
+      throw new Error(`A subheading must stay in its parent’s ${this.data.settings.groupLabel.toLocaleLowerCase()} (${parent.domain}).`);
+    }
+    let subjectId = makeId("subject");
+    while (this.getPortableSubject(subjectId)) subjectId = makeId("subject");
+    const path = portablePlaceholderPath(subjectId);
+    await this.mutate(`Create placeholder subject “${title}”`, () => {
+      const group = registerPortableGroup(this.data, requestedGroup);
+      if (!this.data.indexGroupOrder.some((candidate) => this.normalizedOrganizationLabel(candidate) === this.normalizedOrganizationLabel(group.title))) {
+        this.data.indexGroupOrder.push(group.title);
+      }
+      const parentSubject = parent?.portableId ? this.getPortableSubject(parent.portableId) : null;
+      this.data.portableIndex.subjects.push({
+        id: subjectId,
+        title,
+        groupId: group.id,
+        parentId: parentSubject?.id ?? null,
+        order: this.data.portableIndex.subjects.length,
+        indexed: true,
+        configuredId: "",
+        recordKind: "topic",
+        libraryId: null,
+      });
+      const parentPath = parent?.path ?? null;
+      this.data.curriculumVisual.parentByPath[path] = parentPath;
+      const container = curriculumContainerKey(group.title, parentPath);
+      const siblings = (this.data.curriculumVisual.orderByContainer[container] ?? []).filter((candidate) => candidate !== path);
+      this.data.curriculumVisual.orderByContainer[container] = [...siblings, path];
+      this.data.activeTab = "curriculum";
+      this.data.selectedPath = path;
+    }, { includePortableIndex: true, includeActiveTab: true, requireUndo: true });
+    return path;
+  }
+
+  async createQuickEntryCollectionHeading(title: string): Promise<string> {
+    const cleanTitle = this.cleanQuickEntryLabel(title, "collection heading");
+    let id = makeId("collection");
+    while (this.data.collections.some((heading) => heading.id === id)) id = makeId("collection");
+    await this.mutate(`Create collection “${cleanTitle}”`, () => {
+      this.data.collections.push({ id, title: cleanTitle, collapsed: false, subjects: [], subheadings: [] });
+      this.data.activeTab = "collections";
+    }, { includeActiveTab: true, requireUndo: true });
+    return id;
+  }
+
+  async createQuickEntryCollectionSubheading(headingId: string, title: string): Promise<string> {
+    const cleanTitle = this.cleanQuickEntryLabel(title, "collection subheading");
+    let id = makeId("subheading");
+    while (this.data.collections.some((heading) => heading.subheadings.some((subheading) => subheading.id === id))) {
+      id = makeId("subheading");
+    }
+    await this.mutate(`Create collection subheading “${cleanTitle}”`, () => {
+      const heading = this.data.collections.find((candidate) => candidate.id === headingId);
+      if (!heading) throw new Error("That collection heading is no longer available.");
+      heading.subheadings.push({ id, title: cleanTitle, collapsed: false, subjects: [] });
+      heading.collapsed = false;
+      this.data.activeTab = "collections";
+    }, { includeActiveTab: true, requireUndo: true });
+    return id;
+  }
+
+  async createQuickEntryLibraryHeading(libraryId: string, title: string): Promise<string> {
+    const library = this.requireLibrary(libraryId, false);
+    const cleanTitle = this.cleanQuickEntryLabel(title, `${library.singularName.toLocaleLowerCase()} heading`);
+    const layout = this.data.portableIndex.libraryLayouts[libraryId] ??= [];
+    let id = makeId(`library-${libraryId}`);
+    while (layout.some((heading) => heading.id === id)) id = makeId(`library-${libraryId}`);
+    await this.mutate(`Create ${library.singularName.toLocaleLowerCase()} heading “${cleanTitle}”`, () => {
+      this.requireLibrary(libraryId, false);
+      (this.data.portableIndex.libraryLayouts[libraryId] ??= []).push({
+        id,
+        title: cleanTitle,
+        collapsed: false,
+        subjects: [],
+        subheadings: [],
+      });
+      this.data.activeTab = libraryTabId(libraryId);
+    }, { includePortableIndex: true, includeActiveTab: true, requireUndo: true });
+    return id;
+  }
+
+  async createQuickEntryLibrarySubheading(libraryId: string, headingId: string, title: string): Promise<string> {
+    const library = this.requireLibrary(libraryId, false);
+    const cleanTitle = this.cleanQuickEntryLabel(title, "library subheading");
+    const layout = this.data.portableIndex.libraryLayouts[libraryId] ??= [];
+    let id = makeId(`library-${libraryId}-subheading`);
+    while (layout.some((heading) => heading.subheadings.some((subheading) => subheading.id === id))) {
+      id = makeId(`library-${libraryId}-subheading`);
+    }
+    await this.mutate(`Create ${library.singularName.toLocaleLowerCase()} subheading “${cleanTitle}”`, () => {
+      this.requireLibrary(libraryId, false);
+      const heading = (this.data.portableIndex.libraryLayouts[libraryId] ?? []).find((candidate) => candidate.id === headingId);
+      if (!heading) throw new Error("That library heading is no longer available.");
+      heading.subheadings.push({ id, title: cleanTitle, collapsed: false, subjects: [] });
+      heading.collapsed = false;
+      this.data.activeTab = libraryTabId(libraryId);
+    }, { includePortableIndex: true, includeActiveTab: true, requireUndo: true });
+    return id;
+  }
 
   async renameRecordDisplay(path: string, title: string): Promise<void> {
     const record = this.getRecord(path);

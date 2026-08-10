@@ -18,7 +18,7 @@ Knowledge Base Command Center is available in the [Obsidian Community Plugins di
 1. Open **Settings → Community plugins → Browse**.
 2. Search for **Knowledge Base Command Center**.
 3. Choose **Install**, then **Enable**.
-4. Open the Command Center from the ribbon or Command palette and complete the setup wizard.
+4. Open the Command Center from the desktop ribbon or Command palette and complete the setup wizard. On mobile, use Obsidian's **Open** menu.
 
 Requires Obsidian 1.13.0 or newer. The stable internal ID `ent-vault-command-center` is intentionally retained so upgrades preserve existing plugin data.
 
@@ -42,6 +42,7 @@ _Real iPhone portrait capture from version 0.10.0 showing one search state with 
 - **Separate contexts cleanly.** Keep research, study, projects, or another subject area in independent knowledge bases within one installation.
 - **Organize without file churn.** Nest, reorder, group, classify, pin, and collect records in plugin data without moving or rewriting ordinary Markdown notes.
 - **Create consistently.** Start empty notes or copy a chosen template into a safely previewed destination.
+- **Capture from anywhere.** Open Quick entry from the desktop ribbon, the mobile **Open** menu, the Command Center header, a user-assigned hotkey, the mobile toolbar, or an action-only Obsidian URL.
 - **Transfer organization deliberately.** Export path-free index and Library blueprints, selected personal organization, or a private same-vault recovery package.
 - **Work on desktop and mobile.** Use drag-and-drop on desktop and labelled action menus on touch devices.
 
@@ -61,7 +62,7 @@ Typical uses include a research library with Methods and Papers, a project index
 2. **Review the Index.** Notes below the configured folder appear automatically. Use **Add → Add existing note to Index** for an eligible note elsewhere in the vault.
 3. **Shape the view.** Choose **Arrange** to group, nest, and reorder records visually. These changes remain in plugin data.
 4. **Add Libraries and Collections.** Use Libraries for primary categories such as Papers or Projects; use Collections for reusable lists that cross categories.
-5. **Create safely.** Use **Add → Create note** to choose a destination and either an empty note or local template.
+5. **Create safely.** Use **Quick entry** to choose a knowledge base, Index/Library destination, visual group, and either an empty note or local template.
 6. **Back up organization.** Export a current same-vault recovery for each knowledge base and keep it private.
 
 The [Getting started guide](docs/GETTING_STARTED.md) covers installation, first-device Sync precautions, updates, and uninstall behavior.
@@ -83,6 +84,14 @@ The ENT preset supplies protected Procedures, Medications, and Syndromes Librari
 A non-empty search covers every available, non-archived knowledge base. Results are grouped by knowledge base and Library, with the active base first. Selecting a result from another base switches the plugin-wide active base before opening or selecting it.
 
 Search is Unicode-aware and normalizes common diacritic, apostrophe, Arabic, and Persian keyboard variants. Advanced filters include <code>domain:</code>, <code>priority:</code>, <code>kind:</code>, <code>type:</code>, <code>status:</code>, <code>review:</code>, <code>source:</code>, <code>safety:</code>, <code>dose:</code>, and <code>image:</code>. Broad searches report the full count and state **Showing the first 300 of _N_ results.** Browse views expose **Show more** instead of building an unbounded mobile DOM.
+
+### Quick entry, hotkeys, and mobile toolbar
+
+Quick entry is available from the lightning-bolt desktop ribbon action and the Command Center header. On mobile, Obsidian exposes ribbon actions in its **Open** menu. Its focused commands can create a No note subject, heading, subheading, or note, and can add the current or an existing note. Library capture asks for the exact heading or subheading before it creates or classifies a note. The hub can switch the active knowledge base before opening an entry form.
+
+The plugin assigns no default key combinations. Choose your own under **Settings → Hotkeys**. On iPhone or iPad, open **Settings → Mobile → Manage toolbar options**, scroll to the bottom, choose **Add global command**, then search for and select **Quick entry…** or another focused command.
+
+Apple Shortcuts can open the hub with the action-only URL <code>obsidian://kbcc-quick-entry</code>. Query fields are not supported: a URL containing <code>?title=</code>, <code>?path=</code>, or any other parameter fails closed and does not open Quick entry. A URL can never prefill or submit note data.
 
 ### Note creation and placeholders
 
@@ -125,6 +134,7 @@ The ENT preset is an organization workflow, not medical advice, a medical record
 - Content reads are targeted to an explicitly chosen template or JSON import and to the disclosed ENT proposal-promotion and canonical-placement workflows.
 - Copy buttons write only the plugin-generated command, wikilink, or path you selected; the plugin never reads clipboard contents.
 - Settings and organization are stored in Obsidian's plugin <code>data.json</code>. Sync reconciliation, schema migration, and vault renames can update that file automatically.
+- The Quick entry Obsidian protocol accepts only its intrinsic action. Any query parameter is rejected before a form opens; titles, paths, and content cannot be supplied by URL.
 - No export contains Markdown note bodies or attachments. Workspace settings can contain configured vault-relative folders, and saved searches preserve literal query text.
 - Same-vault recovery and automatic conflict rescues contain exact vault-relative paths. Keep them private.
 - The plugin itself does not read or write outside the vault. On desktop, export and import use operating-system download/file-picker surfaces, so files go where the user chooses.
@@ -157,6 +167,7 @@ Recovery is a standalone replacement, never a merge with portable sections. Curr
 - Desktop offers drag-and-drop; touch devices use labelled row action menus.
 - Same-vault recovery is intentionally not portable.
 - Real-iPhone keyboard, safe-area, Dynamic Type, landscape, import/export, and destructive recovery behavior needs explicit physical-device evidence. Automated DOM checks are not a substitute.
+- Version 0.11.0 adds automated compact-layout coverage for Quick entry, but its complete physical-iPhone toolbar and Apple Shortcuts matrix still requires manual release evidence.
 
 ## Other installation methods
 

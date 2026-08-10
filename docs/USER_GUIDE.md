@@ -126,6 +126,50 @@ Templates may use <code>{{title}}</code>, <code>{{date}}</code>, and <code>{{tim
 
 Notes created through the primary action join the active Index or Library as requested, even when their destination is outside the automatically indexed folder and the profile permits manual membership.
 
+## Quick entry and shortcuts
+
+Open Quick entry from the lightning-bolt desktop ribbon action or the Command Center header. On mobile, Obsidian places ribbon actions in its **Open** menu. The hub shows the active knowledge base and offers:
+
+- switch knowledge base;
+- create a portable **No note** subject;
+- create an Index group, Collection heading, or Library heading;
+- create a nested Index subject, Collection subheading, or Library subheading;
+- create a note after choosing its Index/Library destination, visual group, destination folder, and empty or template content;
+- add the note that was active when Quick entry opened; and
+- choose and add another existing Markdown note.
+
+Placeholder and visual-structure changes are transactional, stay in plugin data, and participate in Undo. Creating a note remains the only ordinary Quick entry action that writes a Markdown file. The ENT preset continues to route topic creation through the unverified proposal workflow and does not expose manual protected-Library classification.
+
+Creating or adding a note to a Library always asks for a heading or subheading first. If the Library is empty, Quick Entry asks you to create its first heading before the note form or file picker opens.
+
+### Assign keyboard shortcuts
+
+Open **Settings → Hotkeys**, search for `Quick entry`, and assign any preferred combination. No default hotkey is installed, which avoids conflicts with other plugins and user shortcuts.
+
+Available focused commands are:
+
+- Quick entry…
+- Quick entry: Create subject without a note…
+- Quick entry: Create heading…
+- Quick entry: Create subheading…
+- Quick entry: Create note…
+- Quick entry: Add current note…
+- Quick entry: Add existing note…
+
+### Add a mobile toolbar button
+
+On iPhone or iPad, open **Settings → Mobile → Manage toolbar options**, scroll to the bottom, choose **Add global command**, then search for and select **Quick entry…**. Any focused Quick Entry command can be selected instead. Command icons are supplied for the mobile toolbar, but the plugin does not force a toolbar layout.
+
+### Use Apple Shortcuts safely
+
+Create an Apple Shortcut with **Open URLs** and use exactly:
+
+~~~text
+obsidian://kbcc-quick-entry
+~~~
+
+This URL can only open the hub. It cannot create an entry, select a note, or prefill a title, path, content, or clinical field. The protocol accepts only Obsidian's intrinsic `action=kbcc-quick-entry` value. Any additional query key—including `title`, `path`, `content`, or an unknown key—fails closed and the hub does not open.
+
 ## Portable placeholders
 
 A portable Index or Library blueprint can describe a subject without exposing its original Markdown path. If no local note is linked after import, the subject appears as **No note**.
@@ -218,6 +262,13 @@ The ENT preset also exposes safety-badge display and optional advanced canonical
 - Add or create…
 - Create note from template or empty note…
 - Add current note to a collection
+- Quick entry…
+- Quick entry: Create subject without a note…
+- Quick entry: Create heading…
+- Quick entry: Create subheading…
+- Quick entry: Create note…
+- Quick entry: Add current note…
+- Quick entry: Add existing note…
 - Undo / redo personal organization
 
 The ENT preset adds proposal-promotion and advanced canonical-placement commands where applicable.
