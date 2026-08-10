@@ -1,4 +1,4 @@
-import { App, FuzzyMatch, FuzzySuggestModal, Modal, Notice, Setting, TFile, setIcon } from "obsidian";
+import { App, FuzzyMatch, FuzzySuggestModal, Modal, Notice, prepareFuzzySearch, Setting, TFile, setIcon } from "obsidian";
 import {
   canonicalPath,
   DOMAIN_DEFINITIONS,
@@ -8,6 +8,7 @@ import {
   isExtensionCurriculumId,
   LayoutHeading,
   NewNoteMode,
+  normalizeSearchText,
   pathIsInsideFolder,
   proposalPath,
   TOPIC_KINDS,
@@ -15,6 +16,34 @@ import {
   PluginSettings,
   VaultRecord,
 } from "./model";
+
+/**
+ * Obsidian's picker matcher lowercases text but does not fold accents, Arabic
+ * keyboard variants, or presentation forms. Use the same lookup key as the
+ * command-center search so a note can be found consistently in either place.
+ * Suggestions render their original text; normalized match offsets are never
+ * applied to the user-visible string because decomposition can change length.
+ */
+abstract class NormalizedFuzzySuggestModal<T> extends FuzzySuggestModal<T> {
+  getSuggestions(query: string): FuzzyMatch<T>[] {
+    const normalizedQuery = normalizeSearchText(query);
+    if (!normalizedQuery.trim()) {
+      return this.getItems().map((item) => ({ item, match: { score: 0, matches: [] } }));
+    }
+    const search = prepareFuzzySearch(normalizedQuery);
+    const suggestions: FuzzyMatch<T>[] = [];
+    for (const item of this.getItems()) {
+      const match = search(normalizeSearchText(this.getItemText(item)));
+      if (match) suggestions.push({ item, match });
+    }
+    suggestions.sort((left, right) => right.match.score - left.match.score);
+    return suggestions;
+  }
+
+  renderSuggestion(match: FuzzyMatch<T>, element: HTMLElement): void {
+    element.setText(this.getItemText(match.item));
+  }
+}
 
 function reportAsyncError(error: unknown): void {
   console.error("ENT Command Center action failed", error);
@@ -122,7 +151,7 @@ export function collectionTargets(collections: LayoutHeading[]): CollectionTarge
   return targets;
 }
 
-export class CollectionPickerModal extends FuzzySuggestModal<CollectionTarget> {
+export class CollectionPickerModal extends NormalizedFuzzySuggestModal<CollectionTarget> {
   constructor(
     app: App,
     private readonly targets: CollectionTarget[],
@@ -152,7 +181,7 @@ export interface AddAction {
   icon: string;
 }
 
-export class AddActionModal extends FuzzySuggestModal<AddAction> {
+export class AddActionModal extends NormalizedFuzzySuggestModal<AddAction> {
   constructor(
     app: App,
     private readonly actions: AddAction[],
@@ -184,7 +213,7 @@ export class AddActionModal extends FuzzySuggestModal<AddAction> {
   }
 }
 
-export class RecordPickerModal extends FuzzySuggestModal<VaultRecord> {
+export class RecordPickerModal extends NormalizedFuzzySuggestModal<VaultRecord> {
   constructor(
     app: App,
     private readonly records: VaultRecord[],
@@ -213,7 +242,7 @@ export class RecordPickerModal extends FuzzySuggestModal<VaultRecord> {
   }
 }
 
-export class VaultFilePickerModal extends FuzzySuggestModal<TFile> {
+export class VaultFilePickerModal extends NormalizedFuzzySuggestModal<TFile> {
   constructor(
     app: App,
     private readonly files: TFile[],
@@ -241,7 +270,7 @@ export class VaultFilePickerModal extends FuzzySuggestModal<TFile> {
   }
 }
 
-export class StringPickerModal extends FuzzySuggestModal<string> {
+export class StringPickerModal extends NormalizedFuzzySuggestModal<string> {
   constructor(
     app: App,
     private readonly values: string[],
@@ -680,7 +709,7 @@ export interface TopicEditorOptions {
   onSubmit: (value: TopicFormValue) => void | Promise<void>;
 }
 
-class ParentTopicPickerModal extends FuzzySuggestModal<VaultRecord> {
+class ParentTopicPickerModal extends NormalizedFuzzySuggestModal<VaultRecord> {
   constructor(app: App, private readonly records: VaultRecord[], private readonly onChoose: (record: VaultRecord) => void) {
     super(app);
     this.setPlaceholder("Search canonical parent topics…");

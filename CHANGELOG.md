@@ -18,6 +18,18 @@
 
 ### Fixed
 
+- Prevented a newly enabled device whose plugin data has not synced yet from publishing an authoritative empty store. Fresh-device state stays provisional, harmless first-open saves yield to an established synced store in either Sync direction, meaningful offline work receives a private in-vault conflict rescue, and temporarily missing Markdown files retain their bindings.
+- Serialized adapter reads and writes across old and replacement plugin instances during reload so the replacement cannot read stale data or let an older in-flight write land last.
+- Allowed first-upgrade identities with the same legacy origin to converge when exactly one copy was edited, while continuing to reject two independently edited copies; repeated duplicate-name merges no longer nest generated `(synced N)` suffixes.
+- Bounded ordinary browse rendering to 300 record rows and 300 structural sections per page, retained prior results while a replacement search runs, added an explicit retryable error state, preserved focused mobile queries across safe same-base reloads, and cached a bounded set of inactive-base search projections between keystrokes.
+- Made search and every fuzzy picker fold clinical apostrophes, wrapper quotes, Arabic alef wasla, lam-alef presentation forms, diacritics, and existing Arabic/Persian keyboard variants consistently.
+- Recovered portable subjects whose group was missing into a deterministic Ungrouped section, repaired invalid/cyclic parent links without dropping bindings, enforced hierarchy depth independent of input order, bounded imported history by UTF-8 bytes, and rejected malformed or visually spoofed portable titles.
+- Validated retained v1/v2 migration backups, limited each to 2 MiB and at most one of each per store, and stopped new or duplicated knowledge bases from copying historical recovery payloads.
+- Prevented title-only portable matching from conflating distinct resolved same-title notes; weak title matching remains available for unresolved placeholders.
+- Routed Index Manager Add/Restore through the guarded membership API, kept Library-assigned records out of misleading Available/Hidden lists, and preserved group collapse state through rename and merge.
+- Made direct settings controls restore their prior in-memory value and report a clear notice when Sync or an adapter rejects the save.
+- Raised mobile tabs, chips, paging, and retry controls to 44-point targets, replaced the smallest fixed-pixel labels with scalable units, and made subject alignment direction-aware.
+- Made local release ZIP creation use PATH-resolved tools with a PowerShell fallback on Windows and verify archive entries directly in Node.
 - Preserved custom library identity and hierarchy across export/import even when another library has the same visible name, and kept an explicitly selected empty library authoritative during Replace.
 - Prevented deleting a non-empty library without first choosing Index, another active Library, or Unassigned as the subject destination.
 - Kept archived or deleted library tabs out of active navigation and redirected stale active/default tabs safely to the Knowledge Index.

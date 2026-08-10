@@ -28,6 +28,10 @@ function clippedSyncedName(name: string, suffix: string): string {
   return `${prefix}${suffix}`;
 }
 
+function nameWithoutGeneratedSyncSuffix(name: string): string {
+  return name.trim().replace(/(?:\s+\(synced \d+\))+$/i, "").trim() || "Knowledge base";
+}
+
 function canonicalJsonValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map((item) => canonicalJsonValue(item) ?? null);
   if (!value || typeof value !== "object") return value;
@@ -65,10 +69,11 @@ function makeAvailableNamesUnique(entries: KnowledgeBaseEntry[]): boolean {
   for (const entry of entries) {
     if (entry.archivedAt !== null) continue;
     const original = entry.data.settings.workspaceName.trim() || "Knowledge base";
+    const suffixRoot = nameWithoutGeneratedSyncSuffix(original);
     let candidate = original;
     let suffixNumber = 2;
     while (used.has(normalizedName(candidate))) {
-      candidate = clippedSyncedName(original, ` (synced ${suffixNumber})`);
+      candidate = clippedSyncedName(suffixRoot, ` (synced ${suffixNumber})`);
       suffixNumber += 1;
     }
     if (candidate !== entry.data.settings.workspaceName) {
@@ -97,6 +102,8 @@ export function mergeKnowledgeBaseStores(
 ): StoreMergeResult {
   let vaultId = local.vaultId;
   if (local.vaultId !== incoming.vaultId) {
+    const localLegacyOrigin = provisionalMigratedVaultFingerprint(local.vaultId);
+    const incomingLegacyOrigin = provisionalMigratedVaultFingerprint(incoming.vaultId);
     const localLegacyFingerprint = pristineProvisionalMigratedStoreFingerprint(local);
     const incomingLegacyFingerprint = pristineProvisionalMigratedStoreFingerprint(incoming);
     if (localLegacyFingerprint && localLegacyFingerprint === incomingLegacyFingerprint) {
@@ -107,6 +114,15 @@ export function mergeKnowledgeBaseStores(
         .filter((id) => provisionalMigratedVaultFingerprint(id) !== null)
         .sort((left, right) => left.localeCompare(right));
       vaultId = fullIds[0] ?? [local.vaultId, incoming.vaultId].sort((left, right) => left.localeCompare(right))[0];
+    } else if (localLegacyOrigin
+      && localLegacyOrigin === incomingLegacyOrigin
+      && Boolean(localLegacyFingerprint) !== Boolean(incomingLegacyFingerprint)) {
+      // Both copies came from the same flat legacy payload, but exactly one was
+      // edited before first-upgrade Sync converged. The pristine copy has no
+      // unique work to preserve, so converge on the edited copy's identity.
+      // If both copies were edited, neither side is privileged and the normal
+      // cross-vault rejection below remains in force.
+      vaultId = localLegacyFingerprint ? incoming.vaultId : local.vaultId;
     } else {
       const localEnvelopeFingerprint = pristineProvisionalInterimEnvelopeStoreFingerprint(local);
       const incomingEnvelopeFingerprint = pristineProvisionalInterimEnvelopeStoreFingerprint(incoming);

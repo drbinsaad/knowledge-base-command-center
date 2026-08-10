@@ -31,6 +31,10 @@ export const MAX_TRANSFER_LIST_ITEMS = 50_000;
 export const MAX_TRANSFER_TOTAL_REFERENCES = 250_000;
 export const MAX_TRANSFER_COLLECTIONS = 10_000;
 export const MAX_TRANSFER_SNAPSHOTS = 10;
+/** Per retained legacy backup; a store keeps at most one v1 and one v2 payload. */
+export const MAX_MIGRATION_BACKUP_BYTES = 2 * 1024 * 1024;
+const MAX_MIGRATION_BACKUP_DEPTH = 16;
+const MAX_MIGRATION_BACKUP_NODES = MAX_TRANSFER_TOTAL_REFERENCES;
 
 export type RecordKind = "topic" | "procedure" | "medication" | "syndrome" | "proposal" | "note";
 export const LIBRARY_KINDS = ["procedure", "medication", "syndrome"] as const;
@@ -505,8 +509,10 @@ function fingerprintText(text: string): string {
 
 function migrationFingerprint(data: PluginData): string {
   const comparable = structuredClone(data);
-  if (comparable.migrationBackup) comparable.migrationBackup.migratedAt = 0;
-  if (comparable.v2MigrationBackup) comparable.v2MigrationBackup.migratedAt = 0;
+  const migrationBackup = asUnknownRecord(comparable.migrationBackup);
+  const v2MigrationBackup = asUnknownRecord(comparable.v2MigrationBackup);
+  if (migrationBackup.version === 1) migrationBackup.migratedAt = 0;
+  if (v2MigrationBackup.version === 2) v2MigrationBackup.migratedAt = 0;
   return fingerprintText(JSON.stringify(canonicalMigrationValue(comparable)));
 }
 
@@ -517,6 +523,37 @@ function randomMigrationNonce(): string {
     return Array.from(values, (value) => value.toString(16).padStart(8, "0")).join("");
   }
   return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function freshVaultId(): string {
+  return `vault-fresh-${randomMigrationNonce()}`;
+}
+
+/** A data-less device keeps this provisional identity until Sync establishes the vault identity. */
+export function isFreshVaultId(vaultId: string): boolean {
+  return /^vault-fresh-[a-z0-9]{12,64}$/i.test(vaultId.trim());
+}
+
+/**
+ * Whether a fresh-device store contains only harmless view/bootstrap state.
+ * These fields may be saved automatically when the command center first opens;
+ * they must not stop an existing identified Sync store from becoming the
+ * authority. Settings, organization, histories, and every other field remain
+ * significant so actual offline work is never silently discarded.
+ */
+export function freshStoreHasOnlyBootstrapChanges(store: PluginStore): boolean {
+  if (!isFreshVaultId(store.vaultId)
+    || store.activeBaseId !== DEFAULT_KNOWLEDGE_BASE_ID
+    || store.bases.length !== 1
+    || Object.keys(store.deletedBaseIds).length !== 0) return false;
+  const entry = store.bases[0];
+  if (!entry || entry.id !== DEFAULT_KNOWLEDGE_BASE_ID || entry.archivedAt !== null) return false;
+  const comparable = structuredClone(entry.data);
+  comparable.selectedPath = DEFAULT_DATA.selectedPath;
+  comparable.activeTab = DEFAULT_DATA.activeTab;
+  comparable.collapsed = structuredClone(DEFAULT_DATA.collapsed);
+  return JSON.stringify(canonicalMigrationValue(comparable))
+    === JSON.stringify(canonicalMigrationValue(DEFAULT_DATA));
 }
 
 function migratedVaultId(data: PluginData): string {
@@ -1025,13 +1062,68 @@ export function isPortablePlaceholderPath(path: string): boolean {
  * mutate snapshots in place must invalidate the corresponding cache entry.
  */
 const snapshotByteCache = new WeakMap<PersonalSnapshot, number>();
+const snapshotUtf8Encoder = new TextEncoder();
 
 function snapshotByteLength(snapshot: PersonalSnapshot): number {
   const cached = snapshotByteCache.get(snapshot);
   if (cached !== undefined) return cached;
-  const bytes = JSON.stringify(snapshot).length;
+  const bytes = snapshotUtf8Encoder.encode(JSON.stringify(snapshot)).byteLength;
   snapshotByteCache.set(snapshot, bytes);
   return bytes;
+}
+
+interface MigrationBackupBudget {
+  nodes: number;
+}
+
+/** Clone only the JSON subset that plugin data can actually persist. */
+function cloneBoundedMigrationJson(value: unknown, depth: number, budget: MigrationBackupBudget): unknown {
+  budget.nodes += 1;
+  if (budget.nodes > MAX_MIGRATION_BACKUP_NODES) throw new Error("Migration backup has too many values.");
+  if (depth > MAX_MIGRATION_BACKUP_DEPTH) throw new Error("Migration backup is nested too deeply.");
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("Migration backup contains a non-finite number.");
+    return value;
+  }
+  if (typeof value === "string") {
+    // UTF-8 is never shorter than a JavaScript string's code-unit length, so
+    // this avoids allocating an encoder buffer for an obviously oversized value.
+    if (value.length > MAX_MIGRATION_BACKUP_BYTES) throw new Error("Migration backup contains oversized text.");
+    return value;
+  }
+  if (Array.isArray(value)) {
+    if (value.length > MAX_TRANSFER_LIST_ITEMS) throw new Error("Migration backup contains an oversized list.");
+    return value.map((item) => cloneBoundedMigrationJson(item, depth + 1, budget));
+  }
+  if (!value || typeof value !== "object") throw new Error("Migration backup contains a non-JSON value.");
+  const keys = Object.keys(value).sort();
+  if (keys.length > MAX_TRANSFER_LIST_ITEMS) throw new Error("Migration backup contains an oversized object.");
+  const output: Record<string, unknown> = {};
+  for (const key of keys) {
+    if (!isSafeObjectKey(key)) throw new Error("Migration backup contains an unsafe object key.");
+    output[key] = cloneBoundedMigrationJson((value as Record<string, unknown>)[key], depth + 1, budget);
+  }
+  return output;
+}
+
+function boundedMigrationBackup<T>(value: T): T | undefined {
+  try {
+    const cloned = cloneBoundedMigrationJson(value, 0, { nodes: 0 });
+    const measured = cloned && typeof cloned === "object" && !Array.isArray(cloned)
+      ? { ...(cloned as Record<string, unknown>), migratedAt: Number.MAX_SAFE_INTEGER }
+      : cloned;
+    const serialized = JSON.stringify(measured);
+    if (snapshotUtf8Encoder.encode(serialized).byteLength > MAX_MIGRATION_BACKUP_BYTES) return undefined;
+    return cloned as T;
+  } catch {
+    return undefined;
+  }
+}
+
+function cleanMigrationTimestamp(value: unknown): number {
+  const timestamp = Number(value);
+  return Number.isSafeInteger(timestamp) && timestamp > 0 ? timestamp : 1;
 }
 
 export function limitSnapshotStack(
@@ -1501,21 +1593,25 @@ export function restoreSnapshot(data: PluginData, snapshot: PersonalSnapshot): v
   if (snapshot.layoutSnapshots) data.layoutSnapshots = snapshot.layoutSnapshots.map((item) => structuredClone(item));
 }
 
+function recoveredLegacyId(prefix: string, parts: unknown[]): string {
+  return `${prefix}-recovered-${fingerprintText(JSON.stringify(canonicalMigrationValue(parts)))}`;
+}
+
 function cleanLayout(input: unknown): LayoutHeading[] {
   if (!Array.isArray(input)) return [];
   const headings: LayoutHeading[] = [];
-  for (const raw of input as unknown[]) {
+  for (const [headingIndex, raw] of (input as unknown[]).entries()) {
     const value = asUnknownRecord(raw);
     const title = asText(value.title);
     if (!title) continue;
     const subheadings: LayoutSubheading[] = [];
     if (Array.isArray(value.subheadings)) {
-      for (const rawSub of value.subheadings as unknown[]) {
+      for (const [subheadingIndex, rawSub] of (value.subheadings as unknown[]).entries()) {
         const sub = asUnknownRecord(rawSub);
         const subTitle = asText(sub.title);
         if (!subTitle) continue;
         subheadings.push({
-          id: asText(sub.id, makeId("subheading")),
+          id: asText(sub.id) || recoveredLegacyId("subheading", [headingIndex, subheadingIndex, subTitle]),
           title: subTitle,
           collapsed: sub.collapsed === true,
           subjects: asStringList(sub.subjects),
@@ -1523,7 +1619,7 @@ function cleanLayout(input: unknown): LayoutHeading[] {
       }
     }
     headings.push({
-      id: asText(value.id, makeId("collection")),
+      id: asText(value.id) || recoveredLegacyId("collection", [headingIndex, title]),
       title,
       collapsed: value.collapsed === true,
       subjects: asStringList(value.subjects),
@@ -1552,13 +1648,19 @@ function isNewNoteMode(value: unknown): value is NewNoteMode {
 function cleanSavedViews(input: unknown): SavedView[] {
   if (!Array.isArray(input)) return [];
   const views: SavedView[] = [];
-  for (const raw of input as unknown[]) {
+  for (const [viewIndex, raw] of (input as unknown[]).entries()) {
     const view = asUnknownRecord(raw);
     const name = asText(view.name);
     if (!isMainTab(view.tab) && !legacyLibraryIdFromTab(view.tab)) continue;
     const tab = migrateMainTab(view.tab, "curriculum");
     if (!name) continue;
-    views.push({ id: asText(view.id, makeId("view")), name, tab, query: asText(view.query) });
+    const query = asText(view.query);
+    views.push({
+      id: asText(view.id) || recoveredLegacyId("view", [viewIndex, name, tab, query]),
+      name,
+      tab,
+      query,
+    });
   }
   return views;
 }
@@ -1576,6 +1678,59 @@ function isRecordKind(value: unknown): value is RecordKind {
   return ["topic", "procedure", "medication", "syndrome", "proposal", "note"].includes(String(value));
 }
 
+const RECOVERED_PORTABLE_GROUP_ID = "group-recovered-ungrouped";
+const RECOVERED_PORTABLE_GROUP_TITLE = "Recovered / Ungrouped";
+
+/**
+ * Repair parent links from locally persisted data without discarding subjects.
+ * Portable imports are rejected strictly, but historical or hand-edited plugin
+ * data is recovered conservatively: invalid edges are detached and one stable
+ * edge is removed from every cycle.
+ */
+function repairPortableParentLinks(
+  subjects: PortableSubjectDefinition[],
+  sourceGroupIdBySubjectId: ReadonlyMap<string, string>,
+): void {
+  const byId = new Map(subjects.map((subject) => [subject.id, subject]));
+  for (const subject of subjects) {
+    const parent = subject.parentId ? byId.get(subject.parentId) : undefined;
+    const sourceGroupId = sourceGroupIdBySubjectId.get(subject.id) ?? subject.groupId;
+    const parentSourceGroupId = parent
+      ? sourceGroupIdBySubjectId.get(parent.id) ?? parent.groupId
+      : "";
+    if (!subject.indexed
+      || !parent
+      || parent.id === subject.id
+      || !parent.indexed
+      || parent.groupId !== subject.groupId
+      || parentSourceGroupId !== sourceGroupId) subject.parentId = null;
+  }
+
+  const completed = new Set<string>();
+  for (const subject of subjects) {
+    if (completed.has(subject.id)) continue;
+    const chain: string[] = [];
+    const positions = new Map<string, number>();
+    let cursor: PortableSubjectDefinition | undefined = subject;
+    while (cursor && !completed.has(cursor.id)) {
+      const position = positions.get(cursor.id);
+      if (position !== undefined) {
+        const cycleIds = chain.slice(position);
+        const detachId = cycleIds.reduce((greatest, id) => id > greatest ? id : greatest, "");
+        if (detachId) {
+          const detached = byId.get(detachId);
+          if (detached) detached.parentId = null;
+        }
+        break;
+      }
+      positions.set(cursor.id, chain.length);
+      chain.push(cursor.id);
+      cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
+    }
+    chain.forEach((id) => completed.add(id));
+  }
+}
+
 export function cleanPortableIndex(input: unknown): PortableIndexLocalState {
   const value = asUnknownRecord(input);
   const groups: PortableGroupDefinition[] = [];
@@ -1590,19 +1745,41 @@ export function cleanPortableIndex(input: unknown): PortableIndexLocalState {
       groups.push({ id, title, order: Number.isFinite(Number(group.order)) ? Number(group.order) : groups.length });
     }
   }
+  let recoveredGroupId = "";
+  const ensureRecoveredGroup = (): string => {
+    if (recoveredGroupId) return recoveredGroupId;
+    const existing = groups.find((group) => group.title === RECOVERED_PORTABLE_GROUP_TITLE);
+    if (existing) {
+      recoveredGroupId = existing.id;
+      return recoveredGroupId;
+    }
+    let candidate = RECOVERED_PORTABLE_GROUP_ID;
+    let suffix = 2;
+    while (groupIds.has(candidate)) {
+      candidate = `${RECOVERED_PORTABLE_GROUP_ID}-${suffix}`;
+      suffix += 1;
+    }
+    recoveredGroupId = candidate;
+    groupIds.add(candidate);
+    groups.push({ id: candidate, title: RECOVERED_PORTABLE_GROUP_TITLE, order: groups.length });
+    return recoveredGroupId;
+  };
   const subjects: PortableSubjectDefinition[] = [];
   const subjectIds = new Set<string>();
+  const sourceGroupIdBySubjectId = new Map<string, string>();
   if (Array.isArray(value.subjects)) {
     for (const raw of value.subjects as unknown[]) {
       const subject = asUnknownRecord(raw);
       const id = asText(subject.id);
       const title = asText(subject.title);
-      const groupId = asText(subject.groupId);
-      if (!id || !title || !groupIds.has(groupId) || !isSafeObjectKey(id) || subjectIds.has(id)) continue;
+      const requestedGroupId = asText(subject.groupId);
+      if (!id || !title || !isSafeObjectKey(id) || subjectIds.has(id)) continue;
+      const groupId = groupIds.has(requestedGroupId) ? requestedGroupId : ensureRecoveredGroup();
       const parentId = subject.parentId === null ? null : asText(subject.parentId) || null;
       const indexed = subject.indexed !== false;
       const hasLibraryId = subject.libraryId !== undefined;
       subjectIds.add(id);
+      sourceGroupIdBySubjectId.set(id, requestedGroupId);
       subjects.push({
         id,
         title,
@@ -1616,10 +1793,8 @@ export function cleanPortableIndex(input: unknown): PortableIndexLocalState {
       });
     }
   }
+  repairPortableParentLinks(subjects, sourceGroupIdBySubjectId);
   const validSubjects = new Set(subjects.map((subject) => subject.id));
-  for (const subject of subjects) {
-    if (subject.parentId && (!validSubjects.has(subject.parentId) || subject.parentId === subject.id)) subject.parentId = null;
-  }
   const resolvedPathBySubjectId: Record<string, string> = {};
   const usedPaths = new Set<string>();
   const rawBindings = asUnknownRecord(value.resolvedPathBySubjectId);
@@ -1690,14 +1865,17 @@ function cleanPathMap(input: unknown): Record<string, string> {
   return output;
 }
 
-function cleanSnapshots(input: unknown, allowNested = true): PersonalSnapshot[] {
+function cleanSnapshots(input: unknown, allowNested = true, maxCount = 20): PersonalSnapshot[] {
   if (!Array.isArray(input)) return [];
   const snapshots: PersonalSnapshot[] = [];
-  for (const raw of input as unknown[]) {
+  // Histories are untrusted synced input. Limit the raw entries before cloning
+  // nested structures, then apply the same byte budget used by local writes.
+  for (const [snapshotIndex, raw] of (input as unknown[]).slice(-maxCount).entries()) {
     const snapshot = asUnknownRecord(raw);
+    const rawAt = Number(snapshot.at);
     snapshots.push({
       label: asText(snapshot.label, "Saved organization"),
-      at: Number(snapshot.at) || Date.now(),
+      at: Number.isFinite(rawAt) && rawAt > 0 ? rawAt : snapshotIndex + 1,
       ...(snapshot.activeTab === undefined
         ? {}
         : { activeTab: migrateMainTab(snapshot.activeTab, "curriculum") }),
@@ -1715,11 +1893,51 @@ function cleanSnapshots(input: unknown, allowNested = true): PersonalSnapshot[] 
       portableIndex: snapshot.portableIndex === undefined ? undefined : cleanPortableIndex(snapshot.portableIndex),
       settings: snapshot.settings === undefined ? undefined : cleanSettings(snapshot.settings),
       layoutSnapshots: allowNested && snapshot.layoutSnapshots !== undefined
-        ? cleanSnapshots(snapshot.layoutSnapshots, false)
+        ? cleanSnapshots(snapshot.layoutSnapshots, false, MAX_TRANSFER_SNAPSHOTS)
         : undefined,
     });
   }
-  return snapshots;
+  return limitSnapshotStack(snapshots, maxCount);
+}
+
+function cleanMigrationBackup(input: unknown): MigrationBackup | undefined {
+  try {
+    const value = asUnknownRecord(input);
+    if (value.version !== 1
+      || !Array.isArray(value.headings)
+      || value.headings.length > MAX_TRANSFER_COLLECTIONS) return undefined;
+    return boundedMigrationBackup<MigrationBackup>({
+      version: 1,
+      headings: value.headings,
+      migratedAt: cleanMigrationTimestamp(value.migratedAt),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function cleanV2MigrationBackup(input: unknown): V2MigrationBackup | undefined {
+  try {
+    const value = asUnknownRecord(input);
+    if (value.version !== 2) return undefined;
+    const budget: TransferValidationBudget = { references: 0, collectionStructures: 0, snapshots: 0 };
+    validateRecoveryCollections(value.collections, "V2 migration backup collections", budget);
+    validateRecoveryReferenceList(value.pinnedPaths, "V2 migration backup pins", budget);
+    validateRecoveryReferenceList(value.nextStudyPaths, "V2 migration backup Next list", budget);
+    transferArrayLength(value.savedViews, "V2 migration backup saved views", MAX_TRANSFER_COLLECTIONS);
+    ownEntryCount(value.settings, "V2 migration backup settings");
+    return boundedMigrationBackup<V2MigrationBackup>({
+      version: 2,
+      migratedAt: cleanMigrationTimestamp(value.migratedAt),
+      collections: cleanLayout(value.collections),
+      pinnedPaths: asStringList(value.pinnedPaths),
+      nextStudyPaths: asStringList(value.nextStudyPaths),
+      savedViews: cleanSavedViews(value.savedViews),
+      settings: asUnknownRecord(value.settings),
+    });
+  } catch {
+    return undefined;
+  }
 }
 
 function cleanSettings(input: unknown, legacyEnt = false): PluginSettings {
@@ -1794,13 +2012,38 @@ function cleanTimestamp(input: unknown, fallback: number): number {
 }
 
 export function createKnowledgeBaseEntry(data: PluginData, id = makeId("base"), now = Date.now()): KnowledgeBaseEntry {
+  // These raw legacy payloads exist only to recover the base that underwent
+  // migration. Copying them into every duplicated base adds no recovery value
+  // and can multiply hidden plugin-data size by the 50-base limit.
+  const entryData = data.migrationBackup || data.v2MigrationBackup ? { ...data } : data;
+  if (entryData !== data) {
+    delete entryData.migrationBackup;
+    delete entryData.v2MigrationBackup;
+  }
   return {
     id: cleanKnowledgeBaseId(id, "Knowledge base"),
     createdAt: now,
     updatedAt: now,
     archivedAt: null,
-    data,
+    data: entryData,
   };
+}
+
+/** Retain one bounded copy of each historical migration payload store-wide. */
+function limitStoreMigrationBackups(bases: KnowledgeBaseEntry[]): void {
+  let keptV1 = false;
+  let keptV2 = false;
+  const oldestFirst = [...bases].sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+  for (const entry of oldestFirst) {
+    if (entry.data.migrationBackup) {
+      if (keptV1) delete entry.data.migrationBackup;
+      else keptV1 = true;
+    }
+    if (entry.data.v2MigrationBackup) {
+      if (keptV2) delete entry.data.v2MigrationBackup;
+      else keptV2 = true;
+    }
+  }
 }
 
 export function isRecognizedPluginStore(input: unknown): boolean {
@@ -1825,7 +2068,7 @@ export function migrateStore(input: unknown, now = Date.now()): PluginStore {
     const hasLegacyData = Boolean(input && typeof input === "object" && !Array.isArray(input)
       && Object.keys(input as Record<string, unknown>).length > 0);
     const migrated = migrateData(input);
-    return createDefaultStore(migrated, now, hasLegacyData ? migratedVaultId(migrated) : makeId("vault"));
+    return createDefaultStore(migrated, now, hasLegacyData ? migratedVaultId(migrated) : freshVaultId());
   }
 
   const value = input as Record<string, unknown>;
@@ -1850,6 +2093,7 @@ export function migrateStore(input: unknown, now = Date.now()): PluginStore {
       : cleanTimestamp(archivedValue, now);
     return { id, createdAt, updatedAt, archivedAt, data: migrateData(entry.data) };
   });
+  limitStoreMigrationBackups(bases);
   const rawDeletedBaseIds = value.deletedBaseIds;
   if (rawDeletedBaseIds !== undefined && (!rawDeletedBaseIds || typeof rawDeletedBaseIds !== "object" || Array.isArray(rawDeletedBaseIds))) {
     throw new Error("Deleted knowledge-base IDs must be a timestamp map.");
@@ -1942,12 +2186,12 @@ export function migrateData(input: unknown): PluginData {
       selectedPath: asText(loaded.selectedPath),
       activeTab: migrateMainTab(loaded.activeTab, settings.defaultTab),
       settings,
-      layoutSnapshots: cleanSnapshots(loaded.layoutSnapshots),
+      layoutSnapshots: cleanSnapshots(loaded.layoutSnapshots, true, MAX_TRANSFER_SNAPSHOTS),
       undoStack: cleanSnapshots(loaded.undoStack),
       redoStack: cleanSnapshots(loaded.redoStack),
       collapsed: cleanCollapseState(loaded.collapsed),
-      migrationBackup: loaded.migrationBackup as MigrationBackup | undefined,
-      v2MigrationBackup: loaded.v2MigrationBackup as V2MigrationBackup | undefined,
+      migrationBackup: cleanMigrationBackup(loaded.migrationBackup),
+      v2MigrationBackup: cleanV2MigrationBackup(loaded.v2MigrationBackup),
     };
     return normalizeKnowledgeBaseLibrariesAndNavigation(data);
   }
@@ -1976,12 +2220,12 @@ export function migrateData(input: unknown): PluginData {
       selectedPath: asText(loaded.selectedPath),
       activeTab: migrateMainTab(loaded.activeTab, settings.defaultTab),
       settings,
-      layoutSnapshots: cleanSnapshots(loaded.layoutSnapshots),
+      layoutSnapshots: cleanSnapshots(loaded.layoutSnapshots, true, MAX_TRANSFER_SNAPSHOTS),
       undoStack: [],
       redoStack: [],
       collapsed: cleanCollapseState(loaded.collapsed),
-      migrationBackup: loaded.migrationBackup as MigrationBackup | undefined,
-      v2MigrationBackup: {
+      migrationBackup: cleanMigrationBackup(loaded.migrationBackup),
+      v2MigrationBackup: cleanV2MigrationBackup({
         version: 2,
         migratedAt: Date.now(),
         collections: cloneCollections(collections),
@@ -1989,7 +2233,7 @@ export function migrateData(input: unknown): PluginData {
         nextStudyPaths: [...nextStudyPaths],
         savedViews: savedViews.map((view) => ({ ...view })),
         settings: structuredClone(rawSettings),
-      },
+      }),
     };
     return normalizeKnowledgeBaseLibrariesAndNavigation(data);
   }
@@ -2008,7 +2252,7 @@ export function migrateData(input: unknown): PluginData {
     collections: cleanLayout(custom),
     selectedPath: asText(loaded.selectedPath),
     settings: { ...ENT_CLINICAL_SETTINGS },
-    migrationBackup: { version: 1, headings: structuredClone(oldHeadings), migratedAt: Date.now() },
+    migrationBackup: cleanMigrationBackup({ version: 1, headings: oldHeadings, migratedAt: Date.now() }),
   };
   return normalizeKnowledgeBaseLibrariesAndNavigation(data);
 }
@@ -2287,9 +2531,17 @@ export function normalizeSearchText(value: string): string {
   // Search is intentionally forgiving of common Arabic/Persian keyboard and
   // presentation variants. This is a lookup key only; source text is untouched.
   return value
-    .normalize("NFD")
+    // Compatibility decomposition also expands Arabic presentation forms such
+    // as lam-alef, while canonical decomposition keeps Latin accent folding.
+    .normalize("NFKD")
     .replace(/\p{M}/gu, "")
     .replace(/\u0640/gu, "")
+    // Apostrophes are commonly omitted or entered with a different keyboard
+    // glyph in clinical eponyms. Wrapper quotes should not turn a free-text
+    // search into an impossible literal punctuation match.
+    .replace(/['\u2018\u2019\u02bc\u02bb\u02b9"]/gu, "")
+    .replace(/[\u201c\u201d\u201e\u201f]/gu, "")
+    .replace(/\u0671/gu, "\u0627")
     .replace(/[\u0649\u06cc]/gu, "\u064a")
     .replace(/\u06a9/gu, "\u0643")
     .replace(/\u0629/gu, "\u0647")
@@ -3002,7 +3254,7 @@ export function createPersonalBackup(
     displayNameByPath: clonePathMap(data.displayNameByPath),
     indexGroupAliases: clonePathMap(data.indexGroupAliases),
     indexGroupOrder: [...data.indexGroupOrder],
-    layoutSnapshots: cleanSnapshots(data.layoutSnapshots),
+    layoutSnapshots: cleanSnapshots(data.layoutSnapshots, true, MAX_TRANSFER_SNAPSHOTS),
     portableIndex: clonePortableIndex(data.portableIndex),
   };
 }
@@ -3171,7 +3423,7 @@ export function parsePersonalBackup(input: unknown): PersonalBackup {
     displayNameByPath: cleanPathMap(value.displayNameByPath),
     indexGroupAliases: cleanPathMap(value.indexGroupAliases),
     indexGroupOrder: [...new Set(asStringList(value.indexGroupOrder))],
-    layoutSnapshots: cleanSnapshots(value.layoutSnapshots),
+    layoutSnapshots: cleanSnapshots(value.layoutSnapshots, true, MAX_TRANSFER_SNAPSHOTS),
     portableIndex: cleanPortableIndex(value.portableIndex),
   };
 }

@@ -154,14 +154,43 @@ test("provisional migrations with different legacy fingerprints never converge",
   assert.throws(() => mergeKnowledgeBaseStores(left, right), /different Obsidian vault/i);
 });
 
-test("a post-migration edit disables provisional cross-ID convergence", () => {
+test("one edited first-upgrade copy wins the provisional identity symmetrically", () => {
+  const legacy = migrateData(null);
+  const pristine = migrateStore(structuredClone(legacy), 100);
+  const edited = migrateStore(structuredClone(legacy), 100);
+  edited.bases[0].data.pinnedPaths = ["Knowledge/Edited.md"];
+  edited.bases[0].updatedAt += 1;
+
+  assert.equal(
+    provisionalMigratedVaultFingerprint(pristine.vaultId),
+    provisionalMigratedVaultFingerprint(edited.vaultId),
+  );
+  const pristineFirst = mergeKnowledgeBaseStores(pristine, edited);
+  const editedFirst = mergeKnowledgeBaseStores(edited, pristine);
+
+  assert.deepEqual(pristineFirst.store, editedFirst.store);
+  assert.equal(pristineFirst.store.vaultId, edited.vaultId);
+  assert.deepEqual(pristineFirst.store.bases[0]?.data.pinnedPaths, ["Knowledge/Edited.md"]);
+  assert.equal(pristineFirst.incomingNeedsWriteback, false);
+  assert.equal(editedFirst.incomingNeedsWriteback, true);
+
+  const repeated = mergeKnowledgeBaseStores(pristineFirst.store, pristine);
+  assert.deepEqual(repeated.store, pristineFirst.store);
+  assert.equal(repeated.incomingNeedsWriteback, true);
+  assert.deepEqual(mergeKnowledgeBaseStores(repeated.store, repeated.store).store, repeated.store);
+});
+
+test("two edited first-upgrade copies still reject provisional cross-ID convergence", () => {
   const legacy = migrateData(null);
   const left = migrateStore(structuredClone(legacy), 100);
   const right = migrateStore(structuredClone(legacy), 100);
-  right.bases[0].data.pinnedPaths = ["Knowledge/Edited.md"];
-  right.bases[0].updatedAt += 1;
+  left.bases[0].data.pinnedPaths = ["Knowledge/Left.md"];
+  left.bases[0].updatedAt += 1;
+  right.bases[0].data.pinnedPaths = ["Knowledge/Right.md"];
+  right.bases[0].updatedAt += 2;
 
   assert.throws(() => mergeKnowledgeBaseStores(left, right), /different Obsidian vault/i);
+  assert.throws(() => mergeKnowledgeBaseStores(right, left), /different Obsidian vault/i);
 });
 
 test("the interim deterministic migrated ID reconciles into a full random provisional ID", () => {
@@ -318,6 +347,33 @@ test("concurrent duplicate names are made unique deterministically", () => {
   const two = mergeKnowledgeBaseStores(incoming, local, "base-a").store;
   assert.deepEqual(one, two);
   assert.deepEqual(one.bases.map((item) => item.data.settings.workspaceName), ["Research", "research (synced 2)"]);
+});
+
+test("independently deduplicated names converge without nesting generated suffixes", () => {
+  const first = entry("base-a", "Research", 100);
+  const second = entry("base-b", "Research", 200);
+  const third = entry("base-c", "Research", 300);
+  const firstBranch = mergeKnowledgeBaseStores(
+    store([structuredClone(first)]),
+    store([structuredClone(second)]),
+    "base-a",
+  ).store;
+  const secondBranch = mergeKnowledgeBaseStores(
+    store([structuredClone(first)]),
+    store([structuredClone(third)]),
+    "base-a",
+  ).store;
+
+  const forward = mergeKnowledgeBaseStores(firstBranch, secondBranch, "base-a").store;
+  const reverse = mergeKnowledgeBaseStores(secondBranch, firstBranch, "base-a").store;
+  const expectedNames = ["Research", "Research (synced 2)", "Research (synced 3)"];
+
+  assert.deepEqual(forward, reverse);
+  assert.deepEqual(forward.bases.map((item) => item.data.settings.workspaceName), expectedNames);
+  assert.equal(forward.bases.some((item) => /\(synced \d+\).*\(synced \d+\)/i.test(item.data.settings.workspaceName)), false);
+  const repeated = mergeKnowledgeBaseStores(forward, forward, "base-a");
+  assert.deepEqual(repeated.store, forward);
+  assert.equal(repeated.incomingNeedsWriteback, false);
 });
 
 test("store merge rejects an over-cap union without mutating either input", () => {

@@ -26,7 +26,9 @@ import {
   ENT_CLINICAL_SETTINGS,
   genericNotePath,
   GenericNoteFormValue,
+  freshStoreHasOnlyBootstrapChanges,
   isImmutableSourcePath,
+  isFreshVaultId,
   isLibraryKind,
   isPortablePlaceholderPath,
   isLegacyDeterministicMigratedVaultId,
@@ -97,11 +99,15 @@ import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge
 import { ManageLibrariesModal } from "./library-modal";
 import { mergeKnowledgeBaseStores } from "./store-merge";
 
+const MAX_INACTIVE_SEARCH_BASE_CACHES = 4;
+
 interface PluginDataLoadResult {
   recognizedStore: boolean;
   hasVaultId: boolean;
   identityNeedsWriteback: boolean;
   remediationNeedsWriteback: boolean;
+  /** True only when no persisted plugin payload existed at read time. */
+  sourceWasMissing: boolean;
   sourceVersion: number;
   compatible: boolean;
 }
@@ -114,6 +120,13 @@ interface ExternalPluginDataCapture {
 }
 
 class ExternalSettingsSupersededError extends Error {}
+
+const APP_WRITE_BARRIER_KEY = Symbol.for("knowledge-base-command-center.adapter-write-barrier.v1");
+
+interface AppWriteBarrier {
+  generation: number;
+  tail: Promise<void>;
+}
 
 export type { KnowledgeBaseSearchSource } from "./search";
 
@@ -154,6 +167,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private store: PluginStore = createDefaultStore(this.data);
   private committedStoreSnapshot: PluginStore | null = null;
   private saveQueue: Promise<void> = Promise.resolve();
+  private appWriteBarrier: AppWriteBarrier | null = null;
+  private appReadBarrier: Promise<void> = Promise.resolve();
+  private appWriteGeneration = 0;
+  private unloaded = false;
   private adapterWriteGeneration = 0;
   private externalChangeGeneration = 0;
   private baseOperationBusy = false;
@@ -163,12 +180,16 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private externalReloadPromise: Promise<void> | null = null;
   private externalReloadCaptures: Array<Promise<ExternalPluginDataCapture>> = [];
   private retainedExternalSettingsPayload: unknown = null;
+  private lastConflictRescueStore = "";
+  private lastConflictRescuePath = "";
   private dataEpoch = 0;
   private operationIdleResolvers: Array<() => void> = [];
   private refreshTimer: number | null = null;
   private searchGeneration = 0;
   private knowledgeBaseSearchVaultSnapshot: KnowledgeBaseSearchVaultSnapshot | null = null;
   private recordsCacheByBase = new Map<string, VaultRecord[]>();
+  /** Bounded search-only projections avoid rebuilding every inactive base on each keystroke. */
+  private inactiveSearchRecordsCache = new Map<string, { generation: number; records: VaultRecord[] }>();
   private recordPathsCacheByBase = new Map<string, Set<string>>();
   private librarySubjectCountsCacheByBase = new Map<string, ReadonlyMap<string, number>>();
   private referencedPathsCacheByBase = new Map<string, Set<string>>();
@@ -180,6 +201,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   dataCompatibilityWarning = "";
 
   async onload(): Promise<void> {
+    this.activateAppWriteBarrier();
     await this.loadPluginData();
     this.registerView(VIEW_TYPE, (leaf) => new EntVaultCommandCenterView(leaf, this));
     this.registerHoverLinkSource("ent-vault-command-center", {
@@ -313,6 +335,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   onunload(): void {
+    this.unloaded = true;
     if (this.refreshTimer !== null) window.activeWindow.clearTimeout(this.refreshTimer);
   }
 
@@ -365,6 +388,15 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   async loadPluginData(persistMigration = true, capturedRead?: PluginDataRead): Promise<PluginDataLoadResult> {
+    if (capturedRead === undefined) {
+      if (!this.appWriteBarrier) this.activateAppWriteBarrier();
+      // A replacement instance must not read data.json while the instance it
+      // replaced is still finishing an adapter write. Ordering only the later
+      // writes would let this instance snapshot stale data and overwrite that
+      // final old-instance edit with its first save.
+      await this.appReadBarrier;
+      if (this.unloaded) throw new Error("This plugin instance was unloaded before its data could be read.");
+    }
     let loaded: unknown = null;
     this.dataCompatibilityWarning = "";
     try {
@@ -377,8 +409,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.store = createDefaultStore(this.data);
       this.dataCompatibilityWarning = `Plugin data could not be parsed (${error instanceof Error ? error.message : String(error)}). Personal organization is read-only so the existing data.json is not overwritten; repair or remove that file to continue.`;
       new Notice(this.dataCompatibilityWarning, 10000);
-      return { recognizedStore: false, hasVaultId: false, identityNeedsWriteback: false, remediationNeedsWriteback: false, sourceVersion: 0, compatible: false };
+      return { recognizedStore: false, hasVaultId: false, identityNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing: false, sourceVersion: 0, compatible: false };
     }
+    const sourceWasMissing = loaded === null
+      || loaded === undefined
+      || (typeof loaded === "object" && !Array.isArray(loaded) && Object.keys(loaded).length === 0);
     const sourceVersion = storedDataVersion(loaded);
     const loadedRecord = asUnknownRecord(loaded);
     const recognizedStore = isRecognizedPluginStore(loaded);
@@ -389,14 +424,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.store = createDefaultStore(this.data);
       this.dataCompatibilityWarning = "Plugin data has an unrecognized shape. Personal organization is read-only so the original data is not overwritten; export or repair data.json before continuing.";
       new Notice(this.dataCompatibilityWarning, 10000);
-      return { recognizedStore: false, hasVaultId: false, identityNeedsWriteback: false, remediationNeedsWriteback: false, sourceVersion, compatible: false };
+      return { recognizedStore: false, hasVaultId: false, identityNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing, sourceVersion, compatible: false };
     }
     if (!recognizedStore && sourceVersion > DATA_VERSION && isRecognizedPluginData(loaded)) {
       this.useActiveData(migrateData(loaded));
       this.store = createDefaultStore(this.data);
       this.dataCompatibilityWarning = `Plugin data version ${sourceVersion} is newer than this build (v${DATA_VERSION}). Personal organization is read-only to prevent data loss.`;
       new Notice(this.dataCompatibilityWarning, 10000);
-      return { recognizedStore: false, hasVaultId: false, identityNeedsWriteback: false, remediationNeedsWriteback: false, sourceVersion, compatible: false };
+      return { recognizedStore: false, hasVaultId: false, identityNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing, sourceVersion, compatible: false };
     }
     try {
       this.store = migrateStore(loaded);
@@ -406,12 +441,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.store = createDefaultStore(this.data);
       this.dataCompatibilityWarning = `Knowledge-base data could not be migrated (${error instanceof Error ? error.message : String(error)}). The existing data.json remains read-only and was not overwritten.`;
       new Notice(this.dataCompatibilityWarning, 10000);
-      return { recognizedStore, hasVaultId: hadFinalVaultId, identityNeedsWriteback: false, remediationNeedsWriteback: false, sourceVersion, compatible: false };
+      return { recognizedStore, hasVaultId: hadFinalVaultId, identityNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing, sourceVersion, compatible: false };
     }
     if (recognizedStore && sourceVersion > STORE_VERSION) {
       this.dataCompatibilityWarning = `Plugin data version ${sourceVersion} is newer than this build (v${STORE_VERSION}). All knowledge bases are read-only to prevent data loss.`;
       new Notice(this.dataCompatibilityWarning, 10000);
-      return { recognizedStore, hasVaultId: hadFinalVaultId, identityNeedsWriteback: false, remediationNeedsWriteback: false, sourceVersion, compatible: false };
+      return { recognizedStore, hasVaultId: hadFinalVaultId, identityNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing, sourceVersion, compatible: false };
     }
     const preRemediationStore = structuredClone(this.store);
     const remediationNeedsWriteback = this.remediateInvalidClinicalIndexes();
@@ -427,7 +462,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.invalidateRecordCache();
     }
     try {
-      if (persistMigration && (!recognizedStore || !hadFinalVaultId || sourceVersion !== STORE_VERSION || remediationNeedsWriteback)) {
+      if (persistMigration && !sourceWasMissing
+        && (!recognizedStore || !hadFinalVaultId || sourceVersion !== STORE_VERSION || remediationNeedsWriteback)) {
         // Migration and every-base clinical remediation share one atomic store
         // write. A large vault therefore never receives one save per base.
         await this.saveStoreSnapshot();
@@ -440,7 +476,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       }
       throw error;
     }
-    if (capturedRead === undefined) this.committedStoreSnapshot = structuredClone(this.store);
+    // A missing data.json is an untrusted bootstrap state, not an authoritative
+    // empty store. Do not persist or commit it merely because this device
+    // enabled the plugin before Obsidian Sync delivered the existing payload.
+    if (capturedRead === undefined && !sourceWasMissing) this.committedStoreSnapshot = structuredClone(this.store);
     // A recognized interim deterministic identity is usable after migrateStore
     // rotates it in memory. External Sync can therefore reconcile it with a
     // concurrently rotated pristine copy instead of misclassifying it as flat
@@ -450,12 +489,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       hasVaultId: recognizedStore && Boolean(this.store.vaultId),
       identityNeedsWriteback: recognizedStore && !hadFinalVaultId,
       remediationNeedsWriteback,
+      sourceWasMissing,
       sourceVersion,
       compatible: true,
     };
   }
 
   async savePluginData(): Promise<void> {
+    if (this.unloaded) throw new Error("This plugin instance was unloaded before the change could be saved.");
     if (this.dataCompatibilityWarning) return;
     if (this.externalReloadBusy) {
       // An opaque PluginData snapshot cannot be safely merged with a synced
@@ -472,8 +513,19 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const entry = this.store.bases.find((candidate) => candidate.id === baseId);
     if (!entry) throw new Error("The knowledge base being saved is unavailable.");
     entry.data = this.data;
+    const previousUpdatedAt = entry.updatedAt;
     this.bumpEntryUpdatedAt(entry);
-    await this.saveStoreSnapshot();
+    const attemptedUpdatedAt = entry.updatedAt;
+    try {
+      await this.saveStoreSnapshot();
+    } catch (error) {
+      // Direct settings controls can fail before any higher-level transaction
+      // owns rollback. Do not leave a rejected save looking newer than the
+      // committed base; a later overlapping call owns a different timestamp
+      // and must not be clobbered here.
+      if (entry.updatedAt === attemptedUpdatedAt) entry.updatedAt = previousUpdatedAt;
+      throw error;
+    }
   }
 
   private async saveStoreSnapshot(
@@ -503,7 +555,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       }
       this.committedStoreSnapshot = structuredClone(snapshot);
     };
-    const operation = this.saveQueue.then(save, save);
+    const operation = this.saveQueue.then(
+      () => this.enqueueAppAdapterWrite(save),
+      () => this.enqueueAppAdapterWrite(save),
+    );
     this.saveQueue = operation.then(() => undefined, () => undefined);
     await operation;
   }
@@ -511,6 +566,47 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private waitForOperationsIdle(): Promise<void> {
     if (!this.baseOperationBusy && !this.dataTransactionBusy) return Promise.resolve();
     return new Promise((resolve) => this.operationIdleResolvers.push(resolve));
+  }
+
+  /**
+   * Obsidian can construct a replacement plugin instance while an adapter save
+   * from the old instance is still running. A Symbol.for barrier stored on the
+   * shared App object orders writes across both bundles; the replacement waits
+   * for the old write, then becomes the final writer.
+   */
+  private activateAppWriteBarrier(): void {
+    if (this.appWriteBarrier) return;
+    const host = this.app as unknown as Record<PropertyKey, unknown>;
+    const existing = host[APP_WRITE_BARRIER_KEY];
+    const barrier: AppWriteBarrier = existing
+      && typeof existing === "object"
+      && "generation" in existing
+      && "tail" in existing
+      ? existing as AppWriteBarrier
+      : { generation: 0, tail: Promise.resolve() };
+    const priorTail = barrier.tail;
+    barrier.generation += 1;
+    host[APP_WRITE_BARRIER_KEY] = barrier;
+    this.appWriteBarrier = barrier;
+    this.appReadBarrier = priorTail.then(() => undefined, () => undefined);
+    this.appWriteGeneration = barrier.generation;
+    this.unloaded = false;
+  }
+
+  private enqueueAppAdapterWrite(write: () => Promise<void>): Promise<void> {
+    if (!this.appWriteBarrier) this.activateAppWriteBarrier();
+    const barrier = this.appWriteBarrier;
+    if (!barrier) throw new Error("The cross-instance adapter-write barrier is unavailable.");
+    const generation = this.appWriteGeneration;
+    const guardedWrite = async (): Promise<void> => {
+      if (this.unloaded || barrier.generation !== generation) {
+        throw new Error("This plugin instance was replaced before its queued write could start.");
+      }
+      await write();
+    };
+    const operation = barrier.tail.then(guardedWrite, guardedWrite);
+    barrier.tail = operation.then(() => undefined, () => undefined);
+    return operation;
   }
 
   private announceOperationsIdle(): void {
@@ -558,12 +654,16 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         throw new ExternalSettingsSupersededError("A newer synced settings file arrived while the captured file was being restored.");
       }
     };
-    const operation = this.saveQueue.then(save, save);
+    const operation = this.saveQueue.then(
+      () => this.enqueueAppAdapterWrite(save),
+      () => this.enqueueAppAdapterWrite(save),
+    );
     this.saveQueue = operation.then(() => undefined, () => undefined);
     await operation;
   }
 
   async onExternalSettingsChange(): Promise<void> {
+    if (this.unloaded) return;
     // Sync services may update data.json while an adapter save or base switch is
     // still in flight. Capture the incoming file immediately: waiting for a
     // local write first could overwrite the only copy of that synced payload.
@@ -587,8 +687,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           : null;
         const preferredActiveId = initialCommittedStore?.activeBaseId ?? this.store.activeBaseId;
         let workingStore = structuredClone(initialCommittedStore ?? this.store);
-        let baselineTrust: "none" | "legacy-provisional" | "identified" = initialCommittedStore
-          ? "identified"
+        let baselineTrust: "none" | "fresh" | "legacy-provisional" | "identified" = initialCommittedStore
+          ? isFreshVaultId(initialCommittedStore.vaultId) ? "fresh" : "identified"
           : "none";
         do {
           this.externalReloadPending = false;
@@ -606,12 +706,19 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           let latestCaptureCompatible = false;
           let latestNeedsWriteback = false;
           let latestBlockingWarning = "";
+          let latestAccumulatedRescueStore: PluginStore | null = null;
           for (const capture of captures) {
             latestCapture = capture;
             latestCaptureCompatible = false;
             latestNeedsWriteback = false;
             latestBlockingWarning = "";
-            const fallbackStore = structuredClone(initialCommittedStore ?? workingStore);
+            latestAccumulatedRescueStore = null;
+            // Roll back only this capture. Earlier captures in the same drained
+            // batch may already have contributed valid remote changes to the
+            // working envelope and must not be discarded by a later transient
+            // missing, incompatible, or conflicting payload.
+            const fallbackStore = structuredClone(workingStore);
+            const fallbackBaselineTrust: "none" | "fresh" | "legacy-provisional" | "identified" = baselineTrust;
             const localWarning = this.dataCompatibilityWarning;
             const loaded = await this.loadPluginData(false, capture.read);
             const incomingWarning = this.dataCompatibilityWarning;
@@ -620,11 +727,30 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
               && "value" in capture.read
               && Object.keys(asUnknownRecord(capture.read.value)).length > 0
               && isRecognizedPluginData(capture.read.value);
-            if (!loaded.compatible || incomingWarning) {
+            if (loaded.sourceWasMissing) {
+              // Sync and filesystem adapters can briefly report a missing
+              // data.json while replacing it. With no trusted baseline, wait
+              // for a later complete capture and never publish an empty store.
+              // With a committed baseline, restore that known-good envelope so
+              // a transient deletion cannot become the next restart state.
+              workingStore = fallbackStore;
+              this.store = workingStore;
+              this.useActiveData(this.requireActiveBase().data);
+              this.dataCompatibilityWarning = localWarning;
+              if (baselineTrust !== "none") {
+                latestCaptureCompatible = true;
+                latestNeedsWriteback = true;
+              }
+            } else if (!loaded.compatible || incomingWarning) {
               workingStore = fallbackStore;
               this.store = workingStore;
               this.useActiveData(this.requireActiveBase().data);
               latestBlockingWarning = incomingWarning || localWarning;
+              // The last compatible committed/accumulated envelope may not be
+              // part of the incompatible file that must remain authoritative for
+              // a newer build. Preserve it before this instance settles into
+              // read-only mode. The rescue helper deduplicates identical stores.
+              if (baselineTrust !== "none") latestAccumulatedRescueStore = structuredClone(fallbackStore);
               this.dataCompatibilityWarning = latestBlockingWarning;
             } else if ((!loaded.recognizedStore || !loaded.hasVaultId) && !recoverableLegacyCapture) {
               workingStore = fallbackStore;
@@ -642,13 +768,93 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
                   // legacy payload arrives, adopt its migrated store directly
                   // instead of comparing it with the random fallback identity.
                   workingStore = structuredClone(incomingStore);
-                  baselineTrust = recoverableLegacyCapture || loaded.identityNeedsWriteback
-                    ? "legacy-provisional"
-                    : "identified";
+                  baselineTrust = isFreshVaultId(incomingStore.vaultId)
+                    ? "fresh"
+                    : recoverableLegacyCapture || loaded.identityNeedsWriteback
+                      ? "legacy-provisional"
+                      : "identified";
                   latestNeedsWriteback = recoverableLegacyCapture
                     || loaded.sourceVersion !== STORE_VERSION
                     || loaded.identityNeedsWriteback
                     || loaded.remediationNeedsWriteback;
+                } else if (baselineTrust === "fresh") {
+                  const localBootstrapOnly = freshStoreHasOnlyBootstrapChanges(workingStore);
+                  if (isFreshVaultId(incomingStore.vaultId)) {
+                    const incomingBootstrapOnly = freshStoreHasOnlyBootstrapChanges(incomingStore);
+                    const localWins = workingStore.vaultId.localeCompare(incomingStore.vaultId) <= 0;
+                    if (workingStore.vaultId === incomingStore.vaultId) {
+                      const merged = mergeKnowledgeBaseStores(workingStore, incomingStore, preferredActiveId);
+                      workingStore = merged.store;
+                      latestNeedsWriteback = merged.incomingNeedsWriteback || loaded.remediationNeedsWriteback;
+                    } else if (localBootstrapOnly && !incomingBootstrapOnly) {
+                      workingStore = structuredClone(incomingStore);
+                    } else if (!localBootstrapOnly && incomingBootstrapOnly) {
+                      // Local work is the only meaningful fresh-device payload.
+                      // Keep it and overwrite the empty incoming bootstrap.
+                      latestNeedsWriteback = true;
+                    } else if (localBootstrapOnly && incomingBootstrapOnly) {
+                      // Two empty devices converge symmetrically on one
+                      // provisional identity; their view-only differences are
+                      // deliberately disposable.
+                      workingStore = structuredClone(localWins ? workingStore : incomingStore);
+                      latestNeedsWriteback = workingStore.vaultId !== incomingStore.vaultId;
+                    } else if (localWins) {
+                      const rescuePath = await this.writeConflictRescueStore(
+                        incomingStore,
+                        "Two fresh devices contained independent changes before Sync converged; this is the non-authoritative incoming copy.",
+                      );
+                      if (!rescuePath) throw new Error("Independent fresh-device changes could not be preserved before convergence.");
+                      latestNeedsWriteback = true;
+                      new Notice(`Independent changes from another fresh device were preserved at ${rescuePath}. The local fresh copy remains active.`, 12000);
+                    } else {
+                      const rescuePath = await this.writeConflictRescueStore(
+                        workingStore,
+                        "Two fresh devices contained independent changes before Sync converged; this is the non-authoritative local copy.",
+                      );
+                      if (!rescuePath) throw new Error("Independent fresh-device changes could not be preserved before convergence.");
+                      workingStore = structuredClone(incomingStore);
+                      new Notice(`Independent local changes were preserved at ${rescuePath} before the other fresh device became active.`, 12000);
+                    }
+                    baselineTrust = "fresh";
+                  } else {
+                    // A fresh identity means this device started before Sync
+                    // supplied the vault's established store. The identified
+                    // envelope is authoritative. Preserve any real local work
+                    // first; view-only bootstrap state can be discarded.
+                    if (!localBootstrapOnly) {
+                      const rescuePath = await this.writeConflictRescueStore(
+                        workingStore,
+                        "This device was edited before the established synced knowledge-base store arrived.",
+                      );
+                      if (!rescuePath) throw new Error("Fresh-device changes could not be preserved before adopting synced data.");
+                      new Notice(`Fresh-device changes were preserved at ${rescuePath} before the established synced store was adopted.`, 12000);
+                    }
+                    workingStore = structuredClone(incomingStore);
+                    baselineTrust = recoverableLegacyCapture || loaded.identityNeedsWriteback
+                      ? "legacy-provisional"
+                      : "identified";
+                    latestNeedsWriteback = recoverableLegacyCapture
+                      || loaded.sourceVersion !== STORE_VERSION
+                      || loaded.identityNeedsWriteback
+                      || loaded.remediationNeedsWriteback;
+                  }
+                } else if ((baselineTrust === "identified" || baselineTrust === "legacy-provisional")
+                  && isFreshVaultId(incomingStore.vaultId)) {
+                  // This is the mirror of fresh-local adoption above. A device
+                  // that already has identified (or recovered legacy) vault
+                  // organization remains authoritative when another device
+                  // briefly publishes its pre-Sync fresh identity. Empty
+                  // bootstrap state is disposable; meaningful offline work is
+                  // rescued before the authoritative envelope is written back.
+                  if (!freshStoreHasOnlyBootstrapChanges(incomingStore)) {
+                    const rescuePath = await this.writeConflictRescueStore(
+                      incomingStore,
+                      "A fresh device contained offline changes before it received this vault's established knowledge-base identity.",
+                    );
+                    if (!rescuePath) throw new Error("Incoming fresh-device changes could not be preserved before restoring established synced data.");
+                    new Notice(`Incoming fresh-device changes were preserved at ${rescuePath}. The established synced store remains active.`, 12000);
+                  }
+                  latestNeedsWriteback = true;
                 } else if (baselineTrust === "legacy-provisional"
                   && loaded.recognizedStore
                   && loaded.hasVaultId
@@ -675,10 +881,15 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
                 latestCaptureCompatible = true;
                 this.retainedExternalSettingsPayload = null;
               } catch (error) {
+                baselineTrust = fallbackBaselineTrust;
                 workingStore = fallbackStore;
                 this.store = workingStore;
                 this.useActiveData(this.requireActiveBase().data);
-                latestBlockingWarning = `Synced knowledge-base data could not be merged (${error instanceof Error ? error.message : String(error)}). Local bases remain read-only and the captured synced payload will be preserved.`;
+                const rescuePath = await this.writeConflictRescueStore(
+                  fallbackStore,
+                  `Synced knowledge-base data could not be merged: ${error instanceof Error ? error.message : String(error)}`,
+                );
+                latestBlockingWarning = `Synced knowledge-base data could not be merged (${error instanceof Error ? error.message : String(error)}). Local bases remain read-only and the captured synced payload will be preserved.${rescuePath ? ` A private local rescue was saved at ${rescuePath}.` : " Automatic local rescue failed; export every base before restarting Obsidian."}`;
                 this.dataCompatibilityWarning = latestBlockingWarning;
                 new Notice(this.dataCompatibilityWarning, 12000);
               }
@@ -706,6 +917,17 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
               this.committedStoreSnapshot = structuredClone(workingStore);
             }
           } else if (latestCapture && latestBlockingWarning) {
+            if (latestAccumulatedRescueStore) {
+              const rescuePath = await this.writeConflictRescueStore(
+                latestAccumulatedRescueStore,
+                "A valid synced update was followed by an incompatible or unreadable plugin-data capture; this is the last compatible accumulated state.",
+              );
+              latestBlockingWarning = rescuePath
+                ? `${latestBlockingWarning} The prior valid synced state was preserved in a private rescue at ${rescuePath}.`
+                : `${latestBlockingWarning} Automatic rescue of the prior valid synced state failed; do not restart Obsidian until you export every base or copy the plugin data.json.`;
+              this.dataCompatibilityWarning = latestBlockingWarning;
+              new Notice(latestBlockingWarning, 15000);
+            }
             const capturedFileMayHaveBeenOverwritten = this.adapterWriteGeneration !== latestCapture.adapterWriteGeneration;
             if (capturedFileMayHaveBeenOverwritten && "value" in latestCapture.read) {
               this.retainedExternalSettingsPayload = structuredClone(latestCapture.read.value);
@@ -1522,6 +1744,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   invalidateRecordCache(membershipChanged = true): void {
     this.invalidateKnowledgeBaseSearchSnapshot();
     this.recordsCacheByBase.clear();
+    this.inactiveSearchRecordsCache.clear();
     this.recordPathsCacheByBase.clear();
     this.librarySubjectCountsCacheByBase.clear();
     if (membershipChanged) {
@@ -1622,7 +1845,17 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     };
     if (cancelled()) return null;
 
-    const needsVaultSnapshot = entries.some((entry) => !this.recordsCacheByBase.has(entry.id));
+    // Vault events advance the search generation without necessarily clearing
+    // every path-scoped inactive projection. Remove those stale generations
+    // before enforcing the bounded cache size; otherwise four dead entries can
+    // occupy all slots forever and force every later keystroke to rescan.
+    for (const [baseId, cache] of this.inactiveSearchRecordsCache) {
+      if (cache.generation !== requestGeneration) this.inactiveSearchRecordsCache.delete(baseId);
+    }
+    const needsVaultSnapshot = entries.some((entry) => {
+      const searchCache = this.inactiveSearchRecordsCache.get(entry.id);
+      return !this.recordsCacheByBase.has(entry.id) && searchCache?.generation !== requestGeneration;
+    });
     let vaultSnapshot = this.knowledgeBaseSearchVaultSnapshot;
     if (needsVaultSnapshot && vaultSnapshot?.generation !== requestGeneration) vaultSnapshot = null;
     if (needsVaultSnapshot && !vaultSnapshot) {
@@ -1643,11 +1876,20 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (cancelled()) return null;
       const entry = entries[baseIndex];
       if (!entry) continue;
-      const cached = this.recordsCacheByBase.get(entry.id);
+      const inactiveCache = this.inactiveSearchRecordsCache.get(entry.id);
+      const cached = this.recordsCacheByBase.get(entry.id)
+        ?? (inactiveCache?.generation === requestGeneration ? inactiveCache.records : undefined);
+      const scannedRecords: VaultRecord[] | null = cached ? null : [];
       const scan: Iterable<VaultRecord | null> = cached ?? this.iterateRecordScanForEntry(entry, files, frontmatterByPath);
       for (const record of scan) {
+        if (record && scannedRecords) scannedRecords.push(record);
         if (record) collector.consider(baseIndex, record);
         if (!await checkpoint()) return null;
+      }
+      if (scannedRecords
+        && entry.id !== activeBaseId
+        && this.inactiveSearchRecordsCache.size < MAX_INACTIVE_SEARCH_BASE_CACHES) {
+        this.inactiveSearchRecordsCache.set(entry.id, { generation: requestGeneration, records: scannedRecords });
       }
     }
     return cancelled() ? null : collector.finish();
@@ -2757,6 +2999,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (!wasCachedRecord && !isClinicalProposal && !this.isRelevantToBase(path, entry.data, entry.id)) continue;
       relevant = true;
       this.recordsCacheByBase.delete(entry.id);
+      this.inactiveSearchRecordsCache.delete(entry.id);
       this.recordPathsCacheByBase.delete(entry.id);
       this.librarySubjectCountsCacheByBase.delete(entry.id);
       if (entry.id === this.store.activeBaseId) activeBaseInvalidated = true;
@@ -2772,13 +3015,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const valid = new Set(records.map((record) => record.path));
     const markdownPaths = new Set(this.app.vault.getMarkdownFiles().map((file) => file.path));
     let changed = false;
-    for (const [subjectId, path] of Object.entries(this.data.portableIndex.resolvedPathBySubjectId)) {
-      if (!path || markdownPaths.has(path)) continue;
-      const placeholder = portablePlaceholderPath(subjectId);
-      rewriteActivePluginDataPathPrefix(this.data, path, placeholder);
-      delete this.data.portableIndex.resolvedPathBySubjectId[subjectId];
-      changed = true;
-    }
+    // Preserve bindings whose Markdown file is temporarily unavailable. Sync
+    // may deliver plugin data before notes; retaining the vault-relative path
+    // lets the subject resolve automatically when the note arrives and avoids
+    // propagating an irreversible placeholder conversion to other devices.
     const unique = (paths: string[]): string[] => [...new Set(paths)];
     const manual = unique(this.data.manualIndexPaths);
     const manualSet = new Set(manual);
@@ -3058,7 +3298,35 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       .sort((a, b) => a.path.localeCompare(b.path));
   }
 
-  async writePortableJson(kind: "backup" | "workspace" | "portable", value: unknown): Promise<TFile> {
+  /**
+   * Preserve a complete local plugin envelope before Sync conflict handling can
+   * replace it. The rescue is intentionally private and contains no note
+   * bodies, but it does contain exact vault-relative paths and organization.
+   */
+  private async writeConflictRescueStore(store: PluginStore, reason: string): Promise<string> {
+    try {
+      const serializedStore = JSON.stringify(store);
+      if (serializedStore === this.lastConflictRescueStore && this.lastConflictRescuePath) {
+        return this.lastConflictRescuePath;
+      }
+      const file = await this.writePortableJson("conflict", {
+        kind: "knowledge-base-command-center-conflict-rescue",
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        reason,
+        privacy: "Contains plugin organization and exact vault-relative paths; note contents are not included.",
+        store,
+      });
+      this.lastConflictRescueStore = serializedStore;
+      this.lastConflictRescuePath = file.path;
+      return file.path;
+    } catch (error) {
+      console.error("Knowledge Base Command Center could not write a Sync conflict rescue", error);
+      return "";
+    }
+  }
+
+  async writePortableJson(kind: "backup" | "workspace" | "portable" | "conflict", value: unknown): Promise<TFile> {
     const folder = "Knowledge Base Command Center Exports";
     const content = `${JSON.stringify(value, null, 2)}\n`;
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");

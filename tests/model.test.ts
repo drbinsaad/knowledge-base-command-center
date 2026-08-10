@@ -42,6 +42,7 @@ import {
   matchesParsedQuery,
   MAX_CURRICULUM_DEPTH,
   MAX_DELETED_KNOWLEDGE_BASE_IDS,
+  MAX_MIGRATION_BACKUP_BYTES,
   MAX_TRANSFER_LIST_ITEMS,
   MAX_TRANSFER_SNAPSHOTS,
   MAX_TRANSFER_TOTAL_REFERENCES,
@@ -264,6 +265,46 @@ test("legacy migration creates distinct random provisional IDs with the same con
     provisionalMigratedVaultFingerprint(firstDevice.vaultId),
     provisionalMigratedVaultFingerprint(otherVault.vaultId),
   );
+});
+
+test("hand-edited legacy records missing IDs and snapshot times still converge deterministically", () => {
+  const malformed = structuredClone(migrateData(null)) as unknown as Record<string, unknown>;
+  malformed.collections = [{
+    title: "Reading",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{ title: "Airway", collapsed: false, subjects: [] }],
+  }];
+  malformed.savedViews = [{ name: "Review", tab: "curriculum", query: "airway" }];
+  malformed.undoStack = [{
+    label: "Recovered history",
+    collections: malformed.collections,
+    pinnedPaths: [],
+    nextStudyPaths: [],
+    savedViews: malformed.savedViews,
+    curriculumVisual: { parentByPath: {}, groupByPath: {}, orderByContainer: {} },
+    manualIndexPaths: [],
+    excludedIndexPaths: [],
+    indexGroupByPath: {},
+    displayNameByPath: {},
+    indexGroupAliases: {},
+    indexGroupOrder: [],
+  }];
+
+  const firstDevice = migrateStore(structuredClone(malformed), 100);
+  const secondDevice = migrateStore(structuredClone(malformed), 999);
+  const firstData = firstDevice.bases[0]?.data;
+  const secondData = secondDevice.bases[0]?.data;
+
+  assert.equal(
+    provisionalMigratedVaultFingerprint(firstDevice.vaultId),
+    provisionalMigratedVaultFingerprint(secondDevice.vaultId),
+  );
+  assert.equal(firstData?.collections[0]?.id, secondData?.collections[0]?.id);
+  assert.equal(firstData?.collections[0]?.subheadings[0]?.id, secondData?.collections[0]?.subheadings[0]?.id);
+  assert.equal(firstData?.savedViews[0]?.id, secondData?.savedViews[0]?.id);
+  assert.equal(firstData?.undoStack[0]?.at, 1);
+  assert.equal(firstData?.undoStack[0]?.at, secondData?.undoStack[0]?.at);
 });
 
 test("a v11 multi-base envelope migrates to v12 without being mistaken for damaged flat data", () => {
@@ -542,6 +583,157 @@ test("v2 data migrates to v11 with the ENT clinical preset and safe settings", (
   assert.equal(data.v2MigrationBackup?.version, 2);
 });
 
+test("ordinary legacy migration backups remain deterministic and isolated after cleaning", () => {
+  const source = migrateData(null);
+  source.migrationBackup = {
+    version: 1,
+    migratedAt: 123,
+    headings: [{ id: "legacy-airway", title: "Airway", kind: "automatic", subjects: ["ENT/Airway.md"] }],
+  };
+  source.v2MigrationBackup = {
+    version: 2,
+    migratedAt: 456,
+    collections: [{
+      id: "collection-reading",
+      title: "Reading",
+      collapsed: false,
+      subjects: ["ENT/Airway.md"],
+      subheadings: [],
+    }],
+    pinnedPaths: ["ENT/Airway.md"],
+    nextStudyPaths: ["ENT/Cleft.md"],
+    savedViews: [{ id: "view-airway", name: "Airway", tab: "curriculum", query: "airway" }],
+    settings: { workspaceName: "Legacy ENT", recentLimit: 25 },
+  };
+
+  const cleaned = migrateData(source);
+  assert.deepEqual(cleaned.migrationBackup, source.migrationBackup);
+  assert.deepEqual(cleaned.v2MigrationBackup, source.v2MigrationBackup);
+  assert.deepEqual(migrateData(structuredClone(cleaned)), cleaned);
+
+  (source.migrationBackup.headings[0] as { title: string }).title = "Changed later";
+  source.v2MigrationBackup.collections[0].title = "Changed later";
+  assert.equal((cleaned.migrationBackup?.headings[0] as { title: string }).title, "Airway");
+  assert.equal(cleaned.v2MigrationBackup?.collections[0]?.title, "Reading");
+});
+
+test("hostile synced migration backups are dropped before they can bloat every save", () => {
+  const source = migrateData(null);
+  source.collections = [{ id: "kept", title: "Kept", collapsed: false, subjects: [], subheadings: [] }];
+  const multibytePayload = "界".repeat(Math.floor(MAX_MIGRATION_BACKUP_BYTES / 3) + 1);
+  source.migrationBackup = {
+    version: 1,
+    migratedAt: 123,
+    headings: [{ title: multibytePayload }],
+  };
+  source.v2MigrationBackup = {
+    version: 2,
+    migratedAt: 456,
+    collections: [],
+    pinnedPaths: [],
+    nextStudyPaths: [],
+    savedViews: [],
+    settings: { payload: multibytePayload },
+  };
+
+  assert.ok(JSON.stringify(source.migrationBackup).length < MAX_MIGRATION_BACKUP_BYTES);
+  assert.ok(new TextEncoder().encode(JSON.stringify(source.migrationBackup)).byteLength > MAX_MIGRATION_BACKUP_BYTES);
+  const cleaned = migrateData(source);
+  assert.equal(cleaned.migrationBackup, undefined);
+  assert.equal(cleaned.v2MigrationBackup, undefined);
+  assert.equal(cleaned.collections[0]?.title, "Kept");
+});
+
+test("legacy migration backup structure limits fail closed without blocking primary data", () => {
+  const source = migrateData(null) as unknown as Record<string, unknown>;
+  source.migrationBackup = {
+    version: 1,
+    migratedAt: 1,
+    headings: Array.from({ length: 10_001 }, () => null),
+  };
+  source.v2MigrationBackup = {
+    version: 2,
+    migratedAt: 1,
+    collections: Array.from({ length: 10_001 }, () => null),
+    pinnedPaths: [],
+    nextStudyPaths: [],
+    savedViews: [],
+    settings: {},
+  };
+
+  const cleaned = migrateData(source);
+  assert.equal(cleaned.migrationBackup, undefined);
+  assert.equal(cleaned.v2MigrationBackup, undefined);
+  assert.equal(cleaned.version, DATA_VERSION);
+});
+
+test("new or duplicated knowledge-base entries do not multiply historical migration backups", () => {
+  const source = migrateData(null);
+  source.migrationBackup = {
+    version: 1,
+    migratedAt: 1,
+    headings: [{ title: "Legacy" }],
+  };
+  source.v2MigrationBackup = {
+    version: 2,
+    migratedAt: 2,
+    collections: [],
+    pinnedPaths: [],
+    nextStudyPaths: [],
+    savedViews: [],
+    settings: {},
+  };
+
+  const created = createKnowledgeBaseEntry(source, "base-copy", 100);
+  assert.equal(created.data.migrationBackup, undefined);
+  assert.equal(created.data.v2MigrationBackup, undefined);
+  assert.ok(source.migrationBackup, "creating an entry must not mutate the source base");
+  assert.ok(source.v2MigrationBackup, "creating an entry must not mutate the source base");
+});
+
+test("multi-base store cleaning retains at most one bounded backup of each legacy generation", () => {
+  const withBackups = (label: string) => {
+    const data = migrateData(null);
+    data.settings.workspaceName = label;
+    data.migrationBackup = {
+      version: 1,
+      migratedAt: 1,
+      headings: [{ title: `${label} legacy` }],
+    };
+    data.v2MigrationBackup = {
+      version: 2,
+      migratedAt: 2,
+      collections: [],
+      pinnedPaths: [],
+      nextStudyPaths: [],
+      savedViews: [],
+      settings: { workspaceName: label },
+    };
+    return data;
+  };
+  const store = {
+    kind: STORE_KIND,
+    version: STORE_VERSION,
+    vaultId: "vault-existing",
+    activeBaseId: "base-newer",
+    bases: [
+      { id: "base-newer", createdAt: 200, updatedAt: 200, archivedAt: null, data: withBackups("Newer") },
+      { id: "base-older", createdAt: 100, updatedAt: 100, archivedAt: null, data: withBackups("Older") },
+    ],
+    deletedBaseIds: {},
+  };
+
+  const cleaned = migrateStore(store, 999);
+  const older = cleaned.bases.find((entry) => entry.id === "base-older");
+  const newer = cleaned.bases.find((entry) => entry.id === "base-newer");
+  assert.equal(older?.data.migrationBackup?.headings[0] && (older.data.migrationBackup.headings[0] as { title: string }).title, "Older legacy");
+  assert.equal(older?.data.v2MigrationBackup?.settings.workspaceName, "Older");
+  assert.equal(newer?.data.migrationBackup, undefined);
+  assert.equal(newer?.data.v2MigrationBackup, undefined);
+  assert.equal(cleaned.bases.filter((entry) => entry.data.migrationBackup).length, 1);
+  assert.equal(cleaned.bases.filter((entry) => entry.data.v2MigrationBackup).length, 1);
+});
+
 test("future plugin data is interpreted as the latest compatible shape, never as v1", () => {
   const data = migrateData({
     version: 99,
@@ -578,6 +770,49 @@ test("fresh installs start as a configurable generic knowledge base", () => {
   assert.equal(data.portableIndex.version, 3);
   assert.deepEqual(data.portableIndex.libraries, []);
   assert.deepEqual(data.portableIndex.libraryLayouts, {});
+});
+
+test("portable store cleaning recovers missing groups and repairs parent invariants idempotently", () => {
+  const state = cleanPortableIndex({
+    version: 3,
+    groups: [
+      { id: "group-a", title: "Group A", order: 0 },
+      { id: "group-b", title: "Group B", order: 1 },
+    ],
+    subjects: [
+      { id: "root", title: "Root", groupId: "group-a", parentId: null, order: 0, indexed: true, recordKind: "topic" },
+      { id: "valid-child", title: "Valid child", groupId: "group-a", parentId: "root", order: 1, indexed: true, recordKind: "topic" },
+      { id: "missing-group", title: "Recovered subject", groupId: "group-missing", parentId: "root", order: 2, indexed: true, recordKind: "topic" },
+      { id: "missing-group-peer", title: "Recovered peer", groupId: "group-missing", parentId: "missing-group", order: 3, indexed: true, recordKind: "topic" },
+      { id: "other-missing-group", title: "Other recovered subject", groupId: "group-other-missing", parentId: "missing-group", order: 4, indexed: true, recordKind: "topic" },
+      { id: "self-parent", title: "Self parent", groupId: "group-a", parentId: "self-parent", order: 3, indexed: true, recordKind: "topic" },
+      { id: "missing-parent", title: "Missing parent", groupId: "group-a", parentId: "not-present", order: 4, indexed: true, recordKind: "topic" },
+      { id: "non-index-parent", title: "Non-index parent", groupId: "group-a", parentId: "root", order: 5, indexed: false, recordKind: "note", libraryId: null },
+      { id: "child-of-non-index", title: "Child of non-index", groupId: "group-a", parentId: "non-index-parent", order: 6, indexed: true, recordKind: "topic" },
+      { id: "cross-group", title: "Cross group", groupId: "group-b", parentId: "root", order: 7, indexed: true, recordKind: "topic" },
+      { id: "cycle-a", title: "Cycle A", groupId: "group-a", parentId: "cycle-b", order: 8, indexed: true, recordKind: "topic" },
+      { id: "cycle-b", title: "Cycle B", groupId: "group-a", parentId: "cycle-a", order: 9, indexed: true, recordKind: "topic" },
+    ],
+    resolvedPathBySubjectId: {
+      "missing-group": "Knowledge Base/Recovered subject.md",
+      "valid-child": "Knowledge Base/Valid child.md",
+    },
+    libraries: [],
+    libraryLayouts: {},
+  });
+
+  assert.equal(state.subjects.length, 12);
+  const recovered = state.subjects.find((subject) => subject.id === "missing-group");
+  assert.ok(recovered);
+  assert.equal(state.groups.find((group) => group.id === recovered.groupId)?.title, "Recovered / Ungrouped");
+  assert.equal(state.resolvedPathBySubjectId[recovered.id], "Knowledge Base/Recovered subject.md");
+  assert.equal(state.subjects.find((subject) => subject.id === "valid-child")?.parentId, "root");
+  assert.equal(state.subjects.find((subject) => subject.id === "missing-group-peer")?.parentId, "missing-group");
+  for (const id of ["missing-group", "other-missing-group", "self-parent", "missing-parent", "non-index-parent", "child-of-non-index", "cross-group", "cycle-b"]) {
+    assert.equal(state.subjects.find((subject) => subject.id === id)?.parentId, null, id);
+  }
+  assert.equal(state.subjects.find((subject) => subject.id === "cycle-a")?.parentId, "cycle-b");
+  assert.deepEqual(cleanPortableIndex(state), state);
 });
 
 test("legacy portable library groups migrate into isolated flat catalog layouts", () => {
@@ -1954,6 +2189,51 @@ test("portable parser rejects wrong envelopes, duplicate IDs, cycles, and protot
   }
 });
 
+test("portable hierarchy depth validation is independent of subject order", () => {
+  const hierarchyFixture = (count: number, childFirst: boolean): PortableExportV1 => {
+    const value = portableFixture();
+    const index = value.components.index;
+    assert.ok(index);
+    const subjects = Array.from({ length: count }, (_, subjectIndex) => ({
+      id: `subject-depth-${subjectIndex}`,
+      title: `Depth ${subjectIndex}`,
+      groupId: "group-airway",
+      parentId: subjectIndex === 0 ? null : `subject-depth-${subjectIndex - 1}`,
+      order: subjectIndex,
+      indexed: true,
+      configuredId: "",
+      recordKind: "topic" as const,
+    }));
+    index.subjects = childFirst ? subjects.reverse() : subjects;
+    return value;
+  };
+
+  assert.doesNotThrow(() => parsePortableExport(hierarchyFixture(64, false)));
+  assert.doesNotThrow(() => parsePortableExport(hierarchyFixture(64, true)));
+  assert.throws(() => parsePortableExport(hierarchyFixture(65, false)), /exceeds 64 levels/i);
+  assert.throws(() => parsePortableExport(hierarchyFixture(65, true)), /exceeds 64 levels/i);
+});
+
+test("portable titles reject malformed Unicode and bidirectional spoofing controls", () => {
+  for (const unsafeTitle of ["Lone high \uD800", "Lone low \uDC00", "Airway \u202Etxt", "Airway \u2066isolated\u2069"]) {
+    const value = portableFixture();
+    const subject = value.components.index?.subjects[0];
+    assert.ok(subject);
+    subject.title = unsafeTitle;
+    assert.throws(() => parsePortableExport(value), /invalid Unicode|bidirectional controls/i);
+  }
+
+  const spoofedSource = portableFixture();
+  spoofedSource.sourceWorkspace = "ENT \u202Etxt";
+  assert.throws(() => parsePortableExport(spoofedSource), /bidirectional controls/i);
+
+  const valid = portableFixture();
+  const subject = valid.components.index?.subjects[0];
+  assert.ok(subject);
+  subject.title = "\u200Fمتلازمة العائلة 👨‍👩‍👧";
+  assert.equal(parsePortableExport(valid).components.index?.subjects[0]?.title, subject.title);
+});
+
 test("same-vault recovery drops portable identities that collide with Object.prototype", () => {
   const inheritedKeys = ["toString", "valueOf", "hasOwnProperty", "isPrototypeOf"];
   const parsed = parsePersonalBackup({
@@ -2220,7 +2500,7 @@ test("replace index hides dropped primary notes and retains protected and import
   assert.equal(target.excludedIndexPaths.includes(importedPath), true);
 });
 
-test("ambiguous metadata never collapses distinct incoming subjects", () => {
+test("title fallback never conflates incoming identities with a resolved local subject", () => {
   const target = migrateData(null);
   target.portableIndex = {
     version: 1,
@@ -2238,10 +2518,37 @@ test("ambiguous metadata never collapses distinct incoming subjects", () => {
     ],
   };
 
+  const parsed = parsePortableExport(incoming);
+  const result = applyPortableExport(target, parsed, portableSelection({ index: true }), "merge");
+  assert.equal(result.matchedSubjects, 0);
+  assert.equal(result.addedSubjects, 2);
+  assert.equal(new Set(target.portableIndex.subjects.map((subject) => subject.id)).size, 3);
+
+  const repeated = applyPortableExport(target, parsed, portableSelection({ index: true }), "merge");
+  assert.equal(repeated.addedSubjects, 0);
+  assert.equal(repeated.matchedSubjects, 2);
+  assert.equal(new Set(target.portableIndex.subjects.map((subject) => subject.id)).size, 3);
+});
+
+test("title fallback still matches one unique unresolved local placeholder", () => {
+  const target = migrateData(null);
+  target.portableIndex = {
+    version: 1,
+    groups: [{ id: "group-local", title: "Airway", order: 0 }],
+    subjects: [{ id: "subject-local", title: "Shared title", groupId: "group-local", parentId: null, order: 0, indexed: true, configuredId: "", recordKind: "topic" }],
+    resolvedPathBySubjectId: {},
+  };
+  const incoming = portableFixture();
+  incoming.components.index = {
+    version: 1,
+    groups: [{ id: "group-source", title: "Airway", order: 0 }],
+    subjects: [{ id: "subject-source", title: "Shared title", groupId: "group-source", parentId: null, order: 0, indexed: true, configuredId: "", recordKind: "topic" }],
+  };
+
   const result = applyPortableExport(target, parsePortableExport(incoming), portableSelection({ index: true }), "merge");
   assert.equal(result.matchedSubjects, 1);
-  assert.equal(result.addedSubjects, 1);
-  assert.equal(new Set(target.portableIndex.subjects.map((subject) => subject.id)).size, 2);
+  assert.equal(result.addedSubjects, 0);
+  assert.deepEqual(target.portableIndex.subjects.map((subject) => subject.id), ["subject-local"]);
 });
 
 test("clinical configured-ID conflicts do not fall back to title-only matching", () => {
@@ -3208,6 +3515,41 @@ test("snapshot history is bounded by count and serialized size", () => {
   assert.equal(preserved.at(-1)?.label, "Snapshot 49");
 });
 
+test("loading synced plugin data bounds named, Undo, Redo, and nested snapshot histories", () => {
+  const source = migrateData(null);
+  const snapshots = Array.from({ length: 30 }, (_, index) => snapshotPersonal(source, `Imported ${index}`));
+  snapshots[29].layoutSnapshots = Array.from(
+    { length: 15 },
+    (_, index) => snapshotPersonal(source, `Nested ${index}`),
+  );
+  source.layoutSnapshots = structuredClone(snapshots);
+  source.undoStack = structuredClone(snapshots);
+  source.redoStack = structuredClone(snapshots);
+
+  const cleaned = migrateData(source);
+
+  assert.deepEqual(cleaned.layoutSnapshots.map((snapshot) => snapshot.label), snapshots.slice(-10).map((snapshot) => snapshot.label));
+  assert.deepEqual(cleaned.undoStack.map((snapshot) => snapshot.label), snapshots.slice(-20).map((snapshot) => snapshot.label));
+  assert.deepEqual(cleaned.redoStack.map((snapshot) => snapshot.label), snapshots.slice(-20).map((snapshot) => snapshot.label));
+  assert.deepEqual(
+    cleaned.layoutSnapshots.at(-1)?.layoutSnapshots?.map((snapshot) => snapshot.label),
+    Array.from({ length: 10 }, (_, index) => `Nested ${index + 5}`),
+  );
+  assert.ok(new TextEncoder().encode(JSON.stringify(cleaned.undoStack)).byteLength <= MAX_UNDO_BYTES);
+  assert.ok(new TextEncoder().encode(JSON.stringify(cleaned.redoStack)).byteLength <= MAX_UNDO_BYTES);
+});
+
+test("synced history limits count UTF-8 bytes rather than JavaScript code units", () => {
+  const source = migrateData(null);
+  const oversized = snapshotPersonal(source, "Multibyte history");
+  oversized.pinnedPaths = ["界".repeat(MAX_UNDO_BYTES / 2)];
+  source.undoStack = [oversized];
+
+  assert.ok(JSON.stringify(oversized).length < MAX_UNDO_BYTES);
+  assert.ok(new TextEncoder().encode(JSON.stringify(oversized)).byteLength > MAX_UNDO_BYTES);
+  assert.deepEqual(migrateData(source).undoStack, []);
+});
+
 test("ordinary Undo snapshots stay lean after a large portable registry is allocated", () => {
   const data = migrateData(null);
   data.portableIndex = {
@@ -3280,7 +3622,11 @@ test("a parsed query matches identically to the string form but is reusable", ()
 
 test("search normalization is locale-invariant and folds careful Arabic/Persian variants", () => {
   assert.equal(normalizeSearchText("LARYNGITIS"), "laryngitis");
+  assert.equal(normalizeSearchText("Ménière’s"), normalizeSearchText("Menieres"), "apostrophe variants and accents fold together");
+  assert.equal(normalizeSearchText("\"vertigo\""), normalizeSearchText("vertigo"), "free-text wrapper quotes are ignored");
   assert.equal(normalizeSearchText("حـنـجـرة"), normalizeSearchText("حنجرة"), "tatweel is presentation-only");
+  assert.equal(normalizeSearchText("ٱلحنجرة"), normalizeSearchText("الحنجرة"), "alef wasla folds to bare alef");
+  assert.equal(normalizeSearchText("ﻻرنجومالاسيا"), normalizeSearchText("لارنجومالاسيا"), "lam-alef presentation forms decompose");
   assert.equal(normalizeSearchText("مستشفى"), normalizeSearchText("مستشفي"), "alef maqsura folds to Arabic yeh");
   assert.equal(normalizeSearchText("علی"), normalizeSearchText("علي"), "Farsi yeh folds to Arabic yeh");
   assert.equal(normalizeSearchText("کاف"), normalizeSearchText("كاف"), "Persian keheh folds to Arabic kaf");
@@ -3289,6 +3635,9 @@ test("search normalization is locale-invariant and folds careful Arabic/Persian 
 
   const arabic = record({ title: "مستشفى", aliases: ["حـنـجـرة", "کاف"] });
   for (const query of ["مستشفي", "حنجرة", "كاف"]) assert.equal(matchesQuery(arabic, query), true, query);
+
+  const eponym = record({ title: "Ménière’s disease", aliases: ["Vertigo syndrome"] });
+  for (const query of ["menieres", "meniere's", "\"vertigo\""]) assert.equal(matchesQuery(eponym, query), true, query);
 });
 
 test("search keeps both a cold ten-thousand-record pass and cached render passes responsive", () => {

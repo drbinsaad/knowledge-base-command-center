@@ -26,6 +26,14 @@ interface MobileViewHarness {
   reload(): Promise<void>;
 }
 
+interface SearchStateHarness extends MobileViewHarness {
+  plugin: {
+    getDataEpoch(): number;
+    searchKnowledgeBases(query: string, options?: { limit?: number }): Promise<ReturnType<typeof prepareKnowledgeBaseSearchResults>>;
+  };
+  cancelPendingGlobalSearch(): void;
+}
+
 interface ClipboardViewHarness extends MobileViewHarness {
   copyAction(parent: HTMLElement, icon: string, label: string, command: string): void;
 }
@@ -394,6 +402,12 @@ test("mobile heading and subheading title controls retain a 44px touch target", 
   const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
   assert.match(styles, /\.ent-cc-view \.ent-cc-heading-row button\.ent-cc-row-title,\s*\.ent-cc-view \.ent-cc-subheading-row button\.ent-cc-row-title\s*\{\s*min-height:\s*44px;/);
   assert.match(styles, /\.ent-cc-tab-label\s*\{\s*max-width:\s*42vw;/);
+  assert.match(styles, /\.ent-cc-tab\s*\{[^}]*min-height:\s*44px;[^}]*font-size:\s*0\.8125rem;/s);
+  assert.match(styles, /\.ent-cc-filter-chip\s*\{[^}]*min-height:\s*44px;[^}]*font-size:\s*0\.75rem;/s);
+  assert.match(styles, /\.ent-cc-view button\.ent-cc-row-title\s*\{[^}]*display:\s*block;[^}]*text-align:\s*start;/s);
+  assert.match(styles, /\.ent-cc-view button\.ent-cc-subject-title\s*\{[^}]*text-align:\s*start;/s);
+  assert.doesNotMatch(styles, /font-size:\s*(?:8|9)px/);
+  assert.doesNotMatch(styles, /text-align:\s*(?:left|right)/);
 });
 
 test("desktop library drag and drop moves records across headings and reorders rows", async () => {
@@ -565,6 +579,166 @@ test("real cross-base search rendering caps mobile DOM rows while preserving the
   } finally {
     mobilePlatform.isMobile = previousMobile;
   }
+});
+
+test("browse rendering pages a large mobile library instead of building every record row", async () => {
+  const dom = createFakeDom();
+  const source = searchSource("base-large", "Large base", []);
+  const library = installCustomLibrary(source.data);
+  source.data.settings.setupComplete = true;
+  source.data.activeTab = libraryTabId(library.id);
+  source.records.push(...Array.from({ length: 1_000 }, (_, index) => ({
+    ...record(`Reference/Record ${index.toString().padStart(4, "0")}.md`, `Record ${index}`),
+    role: "library" as const,
+    libraryId: library.id,
+    portableId: `subject-${index}`,
+  })));
+  const view = createView(dom.window, [source]) as unknown as MobileViewHarness;
+  const content = dom.document.body.createDiv({ cls: "view-content" });
+  view.contentEl = asHtmlElement(content);
+
+  await view.reload();
+
+  assert.equal(content.querySelectorAll(".ent-cc-subject-row").length, 300);
+  assert.match(content.querySelector(".ent-cc-browse-limit")?.textContent ?? "", /300 records.*700 more/i);
+  const showMore = content.querySelector(".ent-cc-browse-limit button");
+  assert.ok(showMore);
+  showMore.dispatch("click");
+  assert.equal(content.querySelectorAll(".ent-cc-subject-row").length, 600);
+  assert.match(content.querySelector(".ent-cc-browse-limit")?.textContent ?? "", /600 records.*400 more/i);
+});
+
+test("browse rendering also caps a 10,000-heading library DOM and pages complete sections", async () => {
+  const dom = createFakeDom();
+  const source = searchSource("base-many-headings", "Many headings", []);
+  const library = installCustomLibrary(source.data);
+  source.data.settings.setupComplete = true;
+  source.data.activeTab = libraryTabId(library.id);
+  source.records.push(...Array.from({ length: 10_000 }, (_, index) => ({
+    ...record(`Reference/Record ${index.toString().padStart(5, "0")}.md`, `Record ${index}`),
+    role: "library" as const,
+    libraryId: library.id,
+    portableId: `subject-${index}`,
+  })));
+  source.data.portableIndex.libraryLayouts[library.id] = Array.from({ length: 10_000 }, (_, index) => ({
+    id: `heading-${index}`,
+    title: `Heading ${index}`,
+    collapsed: false,
+    subjects: [`subject-${index}`],
+    subheadings: [],
+  }));
+  const view = createView(dom.window, [source]) as unknown as MobileViewHarness;
+  const content = dom.document.body.createDiv({ cls: "view-content" });
+  view.contentEl = asHtmlElement(content);
+
+  await view.reload();
+
+  assert.equal(content.querySelectorAll(".ent-cc-library-group").length, 300);
+  assert.equal(content.querySelectorAll(".ent-cc-subject-row").length, 300);
+  assert.ok(content.querySelectorAll("button").length < 2_000, "the first page keeps total interactive DOM bounded");
+  assert.match(content.querySelector(".ent-cc-browse-limit")?.textContent ?? "", /300 records across 300 sections.*9,700 more records.*9,700 more sections/i);
+
+  const showMore = content.querySelector(".ent-cc-browse-limit button");
+  assert.ok(showMore);
+  showMore.dispatch("click");
+  assert.equal(content.querySelectorAll(".ent-cc-library-group").length, 600);
+  assert.equal(content.querySelectorAll(".ent-cc-subject-row").length, 600);
+  assert.ok(content.querySelectorAll("button").length < 4_000, "the second page remains proportional to the explicit page size");
+  assert.match(content.querySelector(".ent-cc-browse-limit")?.textContent ?? "", /600 records across 600 sections.*9,400 more records.*9,400 more sections/i);
+});
+
+test("a failed global search shows one explicit retry state without an automatic retry loop", async () => {
+  Notice.messages.length = 0;
+  const dom = createFakeDom();
+  const view = createView(dom.window) as unknown as SearchStateHarness;
+  const parent = dom.document.body.createDiv();
+  let attempts = 0;
+  view.plugin.searchKnowledgeBases = async () => {
+    attempts += 1;
+    throw new Error("Search service unavailable");
+  };
+  view.query = "laryn";
+
+  assert.equal(view.renderGlobalSearchResults(asHtmlElement(parent)), 0);
+  await Promise.resolve();
+  await Promise.resolve();
+  parent.empty();
+  assert.equal(view.renderGlobalSearchResults(asHtmlElement(parent)), 0);
+  assert.equal(attempts, 1, "rendering the error state must not immediately retry");
+  assert.match(parent.querySelector(".ent-cc-search-error")?.textContent ?? "", /could not finish.*service unavailable/i);
+
+  parent.querySelector(".ent-cc-search-error button")?.dispatch("click");
+  parent.empty();
+  view.renderGlobalSearchResults(asHtmlElement(parent));
+  assert.equal(attempts, 2, "Retry starts exactly one fresh request");
+});
+
+test("changing a global query keeps prior rows dimmed until the replacement result arrives", async () => {
+  const dom = createFakeDom();
+  const source = searchSource("base-mobile", "Mobile base", [record("KB/Laryngomalacia.md", "Laryngomalacia")]);
+  const view = createView(dom.window, [source]) as unknown as SearchStateHarness;
+  const parent = dom.document.body.createDiv();
+  const pending: Array<(result: ReturnType<typeof prepareKnowledgeBaseSearchResults>) => void> = [];
+  view.plugin.searchKnowledgeBases = (query, options) => new Promise((resolve) => {
+    pending.push(() => resolve(prepareKnowledgeBaseSearchResults([source], query, options?.limit)));
+  });
+
+  view.query = "laryn";
+  view.renderGlobalSearchResults(asHtmlElement(parent));
+  pending.shift()?.(prepareKnowledgeBaseSearchResults([source], "laryn"));
+  await Promise.resolve();
+  await Promise.resolve();
+  parent.empty();
+  assert.equal(view.renderGlobalSearchResults(asHtmlElement(parent)), 1);
+  assert.equal(parent.querySelectorAll(".ent-cc-subject-row").length, 1);
+
+  view.cancelPendingGlobalSearch();
+  view.query = "laryngo";
+  parent.empty();
+  assert.equal(view.renderGlobalSearchResults(asHtmlElement(parent)), 1, "the previous exact total remains visible while updating");
+  assert.equal(parent.querySelectorAll(".ent-cc-subject-row").length, 1);
+  assert.ok(parent.querySelector(".ent-cc-search-updating"));
+  assert.ok(parent.querySelector(".ent-cc-search-base-group.is-stale"));
+});
+
+test("same-base reloads preserve the focused search and its query across ordinary and Sync refreshes", async () => {
+  const dom = createFakeDom();
+  const source = searchSource("base-mobile", "Mobile base", [record("KB/Laryngomalacia.md", "Laryngomalacia")]);
+  source.data.settings.setupComplete = true;
+  const view = createView(dom.window, [source]) as unknown as SearchStateHarness;
+  const content = dom.document.body.createDiv({ cls: "view-content" });
+  view.contentEl = asHtmlElement(content);
+  let epoch = 0;
+  view.plugin.getDataEpoch = () => epoch;
+  await view.reload();
+
+  view.query = "laryn";
+  const original = content.querySelector('input[type="search"]');
+  assert.ok(original);
+  const originalActiveTabCount = content.querySelector(".ent-cc-tab.is-active .ent-cc-tab-count");
+  const originalHealth = content.querySelector(".ent-cc-health-summary");
+  assert.equal(originalActiveTabCount?.textContent, "1");
+  assert.match(originalHealth?.textContent ?? "", /1 index entries/);
+  original.value = view.query;
+  original.focus({ preventScroll: true });
+  source.records.push(record("KB/Laryngeal cleft.md", "Laryngeal cleft"));
+  await view.reload();
+  assert.equal(content.querySelector('input[type="search"]'), original, "an ordinary vault event keeps the input node alive");
+  assert.equal(dom.document.activeElement, original);
+  assert.equal(view.query, "laryn");
+  assert.equal(content.querySelector(".ent-cc-tab.is-active .ent-cc-tab-count"), originalActiveTabCount, "count refresh keeps the existing tab chrome");
+  assert.equal(originalActiveTabCount?.textContent, "2");
+  assert.equal(content.querySelector(".ent-cc-health-summary"), originalHealth, "health refresh keeps the existing header chrome");
+  assert.match(originalHealth?.textContent ?? "", /2 index entries/);
+
+  epoch += 1;
+  await view.reload();
+  const replacement = content.querySelector('input[type="search"]');
+  assert.ok(replacement);
+  assert.notEqual(replacement, original, "a Sync data replacement rebuilds the shell");
+  assert.equal(dom.document.activeElement, replacement, "focus is restored after rebuilding the same base");
+  assert.equal(replacement.value, "laryn");
+  assert.equal(view.query, "laryn");
 });
 
 test("the production copy action writes to the clipboard only after its button is clicked", async () => {

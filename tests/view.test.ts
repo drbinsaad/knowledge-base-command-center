@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Menu, Notice, TFile } from "obsidian";
-import { AddActionModal, calculateModalViewportLayout, ConfirmModal, IndexGroupModal, KnowledgeNoteModal, TextPromptModal, TopicEditorModal, VaultFilePickerModal } from "../src/modals.ts";
+import { AddActionModal, calculateModalViewportLayout, ConfirmModal, IndexGroupModal, KnowledgeNoteModal, RecordPickerModal, TextPromptModal, TopicEditorModal, VaultFilePickerModal } from "../src/modals.ts";
 import {
   canRelinkPortableRecord,
   calculateSearchViewportLayout,
@@ -465,6 +465,23 @@ test("the active-library Add menu dispatches both existing-note and current-note
     { path: existing.path, libraryId: library.id },
     { path: current.path, libraryId: library.id },
   ]);
+});
+
+test("record and vault-file pickers use the command center's normalized multilingual search", () => {
+  const records = [
+    record("Knowledge Base/Ménière’s disease.md", "Ménière’s disease"),
+    record("Knowledge Base/مدرسة الصوت.md", "مدرسة الصوت"),
+  ];
+  const recordPicker = Object.create(RecordPickerModal.prototype) as RecordPickerModal & { records: VaultRecord[] };
+  recordPicker.records = records;
+  assert.equal(recordPicker.getSuggestions("").length, records.length, "opening a picker still lists every item");
+  assert.deepEqual(recordPicker.getSuggestions("menieres").map((match) => match.item.title), ["Ménière’s disease"]);
+  assert.deepEqual(recordPicker.getSuggestions("مدرسه").map((match) => match.item.title), ["مدرسة الصوت"]);
+
+  const files = [new TFile("Reference/ٱلحنجرة.md")];
+  const filePicker = Object.create(VaultFilePickerModal.prototype) as VaultFilePickerModal & { files: TFile[] };
+  filePicker.files = files;
+  assert.deepEqual(filePicker.getSuggestions("الحنجرة").map((match) => match.item.path), [files[0]?.path]);
 });
 
 test("a built-in clinical tab still exposes custom libraries through Add", () => {
@@ -2195,6 +2212,156 @@ test("settings callbacks stay bound to the knowledge base that rendered them", (
   assert.equal(ownsBase(), false);
   assert.equal(ownsBase(), false);
   assert.equal(Notice.messages.filter((message) => message.includes("active knowledge base changed")).length, 1);
+});
+
+test("a rejected direct setting save restores memory and reports the failure", async () => {
+  Notice.messages.length = 0;
+  const data = migrateData(null);
+  data.settings.workspaceSubtitle = "Persisted subtitle";
+  let refreshes = 0;
+  let updates = 0;
+  const settingsTab = Object.create(EntCommandCenterSettingsTab.prototype) as {
+    host: {
+      data: typeof data;
+      savePluginData(): Promise<void>;
+      refreshViews(): Promise<void>;
+    };
+    persistedDataSnapshot: typeof data;
+    settingsSaveRevision: number;
+    persistedSettingsRevision: number;
+    pendingSettingsSaves: number;
+    update(): void;
+    save(refresh?: boolean, directDataFields?: Array<"activeTab" | "indexGroupOrder">): Promise<boolean>;
+  };
+  settingsTab.host = {
+    data,
+    savePluginData: async () => { throw new Error("Sync reload won the race"); },
+    refreshViews: async () => { refreshes += 1; },
+  };
+  settingsTab.persistedDataSnapshot = structuredClone(data);
+  settingsTab.settingsSaveRevision = 0;
+  settingsTab.persistedSettingsRevision = 0;
+  settingsTab.pendingSettingsSaves = 0;
+  settingsTab.update = () => { updates += 1; };
+  data.settings.workspaceSubtitle = "Unsaved subtitle";
+
+  assert.equal(await settingsTab.save(), false);
+  assert.equal(data.settings.workspaceSubtitle, "Persisted subtitle");
+  assert.equal(refreshes, 1);
+  assert.equal(updates, 1);
+  assert.equal(Notice.messages.some((message) => message.includes("not saved") && message.includes("Sync reload")), true);
+});
+
+test("overlapping direct setting saves roll back to the latest successful attempt", async () => {
+  Notice.messages.length = 0;
+  const data = migrateData(null);
+  data.settings.workspaceSubtitle = "Initial subtitle";
+  let releaseFirst: () => void = () => {};
+  let rejectSecond: (error: Error) => void = () => {};
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const secondGate = new Promise<void>((_resolve, reject) => { rejectSecond = reject; });
+  const persisted: PluginData[] = [];
+  let saveCalls = 0;
+  const settingsTab = Object.create(EntCommandCenterSettingsTab.prototype) as {
+    host: {
+      data: typeof data;
+      savePluginData(): Promise<void>;
+      refreshViews(): Promise<void>;
+    };
+    persistedDataSnapshot: typeof data;
+    settingsSaveRevision: number;
+    persistedSettingsRevision: number;
+    pendingSettingsSaves: number;
+    update(): void;
+    save(refresh?: boolean, directDataFields?: Array<"activeTab" | "indexGroupOrder">): Promise<boolean>;
+  };
+  settingsTab.host = {
+    data,
+    savePluginData: async () => {
+      saveCalls += 1;
+      const attempted = structuredClone(data);
+      if (saveCalls === 1) {
+        await firstGate;
+        persisted.push(attempted);
+      } else {
+        await secondGate;
+      }
+    },
+    refreshViews: async () => {},
+  };
+  settingsTab.persistedDataSnapshot = structuredClone(data);
+  settingsTab.settingsSaveRevision = 0;
+  settingsTab.persistedSettingsRevision = 0;
+  settingsTab.pendingSettingsSaves = 0;
+  settingsTab.update = () => {};
+
+  data.settings.workspaceSubtitle = "First edit";
+  const firstSave = settingsTab.save(false);
+  data.settings.workspaceSubtitle = "Second edit";
+  const secondSave = settingsTab.save(false);
+  releaseFirst();
+  assert.equal(await firstSave, true);
+  rejectSecond(new Error("second adapter write failed"));
+  assert.equal(await secondSave, false);
+
+  assert.equal(persisted[0]?.settings.workspaceSubtitle, "First edit");
+  assert.equal(data.settings.workspaceSubtitle, "First edit", "memory follows the newest successful disk snapshot");
+  assert.equal(settingsTab.persistedDataSnapshot.settings.workspaceSubtitle, "First edit");
+  assert.equal(settingsTab.pendingSettingsSaves, 0);
+});
+
+test("a failed setting save preserves concurrent organization and newer view changes", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceSubtitle = "Persisted subtitle";
+  let rejectSave: (error: Error) => void = () => {};
+  const saveGate = new Promise<void>((_resolve, reject) => { rejectSave = reject; });
+  const settingsTab = Object.create(EntCommandCenterSettingsTab.prototype) as {
+    host: {
+      data: typeof data;
+      savePluginData(): Promise<void>;
+      refreshViews(): Promise<void>;
+    };
+    persistedDataSnapshot: typeof data;
+    settingsSaveRevision: number;
+    persistedSettingsRevision: number;
+    pendingSettingsSaves: number;
+    update(): void;
+    save(refresh?: boolean, directDataFields?: Array<"activeTab" | "indexGroupOrder">): Promise<boolean>;
+  };
+  settingsTab.host = {
+    data,
+    savePluginData: async () => { await saveGate; },
+    refreshViews: async () => {},
+  };
+  settingsTab.persistedDataSnapshot = structuredClone(data);
+  settingsTab.settingsSaveRevision = 0;
+  settingsTab.persistedSettingsRevision = 0;
+  settingsTab.pendingSettingsSaves = 0;
+  settingsTab.update = () => {};
+
+  data.settings.workspaceSubtitle = "Rejected subtitle";
+  data.settings.defaultTab = "queues";
+  data.activeTab = "queues";
+  data.settings.allowClinicalVisualGroupMoves = true;
+  data.indexGroupOrder = ["Attempted default group"];
+  const pending = settingsTab.save(false, ["activeTab", "indexGroupOrder"]);
+
+  // A separate organization/view action commits while the settings adapter
+  // request is pending. Its fields were not part of the attempted settings
+  // delta (or have since changed again) and must survive the rollback.
+  data.pinnedPaths = ["Concurrent organization.md"];
+  data.selectedPath = "Concurrent selection.md";
+  data.indexGroupOrder = ["Concurrent group"];
+  rejectSave(new Error("settings adapter failed"));
+
+  assert.equal(await pending, false);
+  assert.equal(data.settings.workspaceSubtitle, "Persisted subtitle");
+  assert.equal(data.settings.defaultTab, "curriculum");
+  assert.equal(data.activeTab, "curriculum");
+  assert.equal(data.settings.allowClinicalVisualGroupMoves, false);
+  assert.deepEqual(data.pinnedPaths, ["Concurrent organization.md"]);
+  assert.equal(data.selectedPath, "Concurrent selection.md");
+  assert.deepEqual(data.indexGroupOrder, ["Concurrent group"]);
 });
 
 test("a create-note form cannot submit into a different active knowledge base", async () => {

@@ -268,8 +268,27 @@ function safeId(value: unknown, label: string): string {
   return id;
 }
 
+function hasUnpairedSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xDC00 && next <= 0xDFFF)) return true;
+      index += 1;
+    } else if (code >= 0xDC00 && code <= 0xDFFF) return true;
+  }
+  return false;
+}
+
 function safeTitle(value: unknown, label: string): string {
   if (typeof value !== "string") throw new Error(`${label} must be text.`);
+  if (hasUnpairedSurrogate(value)) throw new Error(`${label} contains invalid Unicode.`);
+  // Embedding, override, and isolate controls can visually reorder a title so
+  // it appears to be a different record. Ordinary RTL text and direction marks
+  // remain supported.
+  if (/[\u202A-\u202E\u2066-\u2069]/u.test(value)) {
+    throw new Error(`${label} contains unsupported bidirectional controls.`);
+  }
   const title = value.trim().normalize("NFC");
   if (!title || title.length > MAX_PORTABLE_TITLE_LENGTH) throw new Error(`${label} is empty or too long.`);
   return title;
@@ -1141,21 +1160,27 @@ function parsePortableIndex(
     if (parent.groupId !== subject.groupId) throw new Error(`Subject ${subject.id} and its parent are in different groups.`);
     if (!parent.indexed) throw new Error(`Subject ${subject.id} references a parent outside the index.`);
   }
-  const done = new Set<string>();
+  const depthById = new Map<string, number>();
   for (const subject of subjects) {
-    if (done.has(subject.id)) continue;
+    if (depthById.has(subject.id)) continue;
     const chain: string[] = [];
     const positions = new Map<string, number>();
     let cursor: PortableSubjectDefinition | undefined = subject;
-    while (cursor && !done.has(cursor.id)) {
+    while (cursor && !depthById.has(cursor.id)) {
       const position = positions.get(cursor.id);
       if (position !== undefined) throw new Error(`Portable index hierarchy contains a cycle at ${cursor.id}.`);
       positions.set(cursor.id, chain.length);
       chain.push(cursor.id);
-      if (chain.length > MAX_PORTABLE_DEPTH) throw new Error(`Portable index hierarchy exceeds ${MAX_PORTABLE_DEPTH} levels.`);
       cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
     }
-    chain.forEach((id) => done.add(id));
+    let depth = cursor ? depthById.get(cursor.id) ?? 0 : 0;
+    for (let index = chain.length - 1; index >= 0; index -= 1) {
+      const id = chain[index];
+      if (!id) continue;
+      depth += 1;
+      if (depth > MAX_PORTABLE_DEPTH) throw new Error(`Portable index hierarchy exceeds ${MAX_PORTABLE_DEPTH} levels.`);
+      depthById.set(id, depth);
+    }
   }
   const parseKnownIds = (
     inputIds: unknown,
@@ -1534,8 +1559,10 @@ export function parsePortableExport(input: unknown): PortableExportV1 {
   }
   if (rawComponents.recovery !== undefined) components.recovery = parsePersonalBackup(rawComponents.recovery);
   if (Object.keys(components).length === 0) throw new Error("This portable export contains no supported components.");
-  const sourceWorkspace = typeof value.sourceWorkspace === "string" ? value.sourceWorkspace : "";
-  if (sourceWorkspace.length > MAX_PORTABLE_TITLE_LENGTH) throw new Error("Source workspace name is too long.");
+  const rawSourceWorkspace = typeof value.sourceWorkspace === "string" ? value.sourceWorkspace : "";
+  const sourceWorkspace = rawSourceWorkspace.trim()
+    ? safeTitle(rawSourceWorkspace, "Source workspace name")
+    : "";
   return {
     kind: PORTABLE_EXPORT_KIND,
     version: packageVersion,
@@ -2179,7 +2206,10 @@ export function applyPortableExport(
       // regardless of the order subjects happen to appear in the package.
       if (incomingSubjectIds.has(subject.id)) continue;
       if (subject.configuredId) addToPool(configuredPools, configuredKey(subject), subject.id);
-      addToPool(titlePools, titleKey(subject), subject.id);
+      // A title is not an identity for a real, resolved Markdown note. Keep
+      // weak title matching only for unresolved placeholders so two distinct
+      // same-titled notes imported from different vaults cannot be conflated.
+      if (!oldResolvedPathById.has(subject.id)) addToPool(titlePools, titleKey(subject), subject.id);
     }
     const removeFromPools = (subject: PortableSubjectDefinition): void => {
       if (subject.configuredId) configuredPools.get(configuredKey(subject))?.delete(subject.id);

@@ -69,6 +69,30 @@ export class FuzzySuggestModal extends Modal {
   setPlaceholder(): void {}
   setInstructions(): void {}
 }
+export interface SearchResult {
+  score: number;
+  matches: Array<[number, number]>;
+}
+export function prepareFuzzySearch(query: string): (text: string) => SearchResult | null {
+  return (text: string): SearchResult | null => {
+    if (!query) return { score: 0, matches: [] };
+    const matches: Array<[number, number]> = [];
+    let cursor = 0;
+    let first = -1;
+    let previous = -1;
+    let gapCost = 0;
+    for (const character of query) {
+      const index = text.indexOf(character, cursor);
+      if (index < 0) return null;
+      if (first < 0) first = index;
+      if (previous >= 0) gapCost += index - previous - 1;
+      matches.push([index, index + 1]);
+      previous = index;
+      cursor = index + 1;
+    }
+    return { score: -(first + gapCost), matches };
+  };
+}
 export class Menu {}
 export class Setting {}
 export class PluginSettingTab {

@@ -78,6 +78,8 @@ import {
 
 export const VIEW_TYPE = "ent-vault-command-center-view";
 export const MAX_RENDERED_SEARCH_RESULTS = DEFAULT_CROSS_BASE_SEARCH_LIMIT;
+export const MAX_RENDERED_BROWSE_RECORDS = 300;
+export const MAX_RENDERED_BROWSE_STRUCTURES = 300;
 export type KnowledgeBaseSearchGroup = BoundedKnowledgeBaseSearchGroup<KnowledgeBaseSearchSourceIdentity>;
 export type KnowledgeBaseSearchResultSet = BoundedKnowledgeBaseSearchResultSet<KnowledgeBaseSearchSourceIdentity>;
 
@@ -308,8 +310,17 @@ export class EntVaultCommandCenterView extends ItemView {
   private searchStatusEl: HTMLElement | null = null;
   private globalSearchResult: BoundedKnowledgeBaseSearchResultSet<KnowledgeBaseSearchSource> | null = null;
   private globalSearchResultKey = "";
+  private globalSearchResultScopeKey = "";
   private globalSearchPendingKey = "";
+  private globalSearchErrorKey = "";
+  private globalSearchErrorMessage = "";
   private globalSearchRequestGeneration = 0;
+  private browseRowLimit = MAX_RENDERED_BROWSE_RECORDS;
+  private browseStructureLimit = MAX_RENDERED_BROWSE_STRUCTURES;
+  private browseRowsRendered = 0;
+  private browseRowsOmitted = 0;
+  private browseStructuresRendered = 0;
+  private browseStructuresOmitted = 0;
   private viewClosed = false;
   private searchViewportWindow: Window | null = null;
   private collapsedQueues = new Set<string>();
@@ -378,7 +389,13 @@ export class EntVaultCommandCenterView extends ItemView {
   async reload(): Promise<void> {
     const activeBaseId = this.plugin.getActiveKnowledgeBaseId();
     const dataEpoch = this.currentDataEpoch();
-    if (this.loadedBaseId !== activeBaseId || this.loadedDataEpoch !== dataEpoch) {
+    const baseChanged = this.loadedBaseId !== activeBaseId;
+    const dataChanged = this.loadedDataEpoch !== dataEpoch;
+    const focusedSearch = this.contentEl?.querySelector?.('.ent-cc-search-box input[type="search"]') as HTMLInputElement | null | undefined;
+    const searchWasFocused = Boolean(focusedSearch && focusedSearch.ownerDocument.activeElement === focusedSearch);
+    const searchSelectionStart = focusedSearch?.selectionStart ?? null;
+    const searchSelectionEnd = focusedSearch?.selectionEnd ?? null;
+    if (baseChanged || dataChanged) {
       // Delayed work was scheduled by the previously rendered base. Once this
       // view adopts the replacement data object, those callbacks would appear
       // current again and could save/search the wrong base.
@@ -388,13 +405,20 @@ export class EntVaultCommandCenterView extends ItemView {
       this.selectionSaveTimer = null;
       this.globalSearchResult = null;
       this.globalSearchResultKey = "";
+      this.globalSearchResultScopeKey = "";
       this.globalSearchPendingKey = "";
+      this.globalSearchErrorKey = "";
+      this.globalSearchErrorMessage = "";
       this.globalSearchRequestGeneration += 1;
       this.loadedBaseId = activeBaseId;
       this.loadedDataEpoch = dataEpoch;
       this.staleViewNoticeShown = false;
-      this.query = "";
-      this.parsedQuery = parseQuery("");
+      // A Sync refresh of the same base must not erase what the user is typing.
+      // A real base switch intentionally starts from that base's clean route.
+      if (baseChanged) {
+        this.query = "";
+        this.parsedQuery = parseQuery("");
+      }
       this.editMode = false;
       this.curriculumArrangeMode = false;
       this.mobileInspectorOpen = false;
@@ -423,7 +447,22 @@ export class EntVaultCommandCenterView extends ItemView {
       this.plugin.data.curriculumVisual,
       this.plugin.data.settings.workspaceMode === "ent-clinical",
     );
+    // Ordinary vault changes can refresh only the result tree. Keeping the
+    // input node alive prevents iOS from dismissing the software keyboard.
+    if (searchWasFocused && !baseChanged && !dataChanged && this.treeEl) {
+      this.refreshChromeCounts();
+      this.renderTree();
+      return;
+    }
     this.render();
+    if (searchWasFocused && !baseChanged) {
+      const replacement = this.contentEl.querySelector<HTMLInputElement>('.ent-cc-search-box input[type="search"]');
+      replacement?.focus({ preventScroll: true });
+      if (replacement && searchSelectionStart !== null && searchSelectionEnd !== null
+        && typeof replacement.setSelectionRange === "function") {
+        replacement.setSelectionRange(searchSelectionStart, searchSelectionEnd);
+      }
+    }
   }
 
   /** Runs a fire-and-forget action, surfacing failures (for example read-only data) as a Notice. */
@@ -470,15 +509,27 @@ export class EntVaultCommandCenterView extends ItemView {
     ].join("\u0000");
   }
 
+  private globalSearchScopeKey(): string {
+    return [
+      this.plugin.getActiveKnowledgeBaseId(),
+      this.currentDataEpoch(),
+      this.currentSearchGeneration(),
+    ].join("\u0000");
+  }
+
   private cancelPendingGlobalSearch(): void {
     this.globalSearchRequestGeneration += 1;
     this.globalSearchPendingKey = "";
+    this.globalSearchErrorKey = "";
+    this.globalSearchErrorMessage = "";
   }
 
   private requestGlobalSearch(key: string, query: string): void {
     if (this.globalSearchPendingKey === key) return;
     const requestGeneration = ++this.globalSearchRequestGeneration;
     this.globalSearchPendingKey = key;
+    this.globalSearchErrorKey = "";
+    this.globalSearchErrorMessage = "";
     const cancelled = (): boolean => this.viewClosed
       || requestGeneration !== this.globalSearchRequestGeneration
       || this.globalSearchKey(query) !== key;
@@ -494,13 +545,19 @@ export class EntVaultCommandCenterView extends ItemView {
       }
       this.globalSearchResult = result;
       this.globalSearchResultKey = key;
+      this.globalSearchResultScopeKey = this.globalSearchScopeKey();
       this.globalSearchPendingKey = "";
       this.renderTree();
       this.resetSearchScrollPosition();
     }).catch((error) => {
       if (cancelled()) return;
       this.globalSearchPendingKey = "";
-      new Notice(error instanceof Error ? error.message : String(error));
+      this.globalSearchErrorKey = key;
+      this.globalSearchErrorMessage = error instanceof Error ? error.message : String(error);
+      new Notice(this.globalSearchErrorMessage);
+      // renderGlobalSearchResults recognizes the error key and will not retry
+      // until the user explicitly chooses Retry or changes the query.
+      this.renderTree();
     });
   }
 
@@ -1188,6 +1245,10 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private render(): void {
+    // A full route/tab render returns to the bounded initial page. Incremental
+    // "Show more" actions use renderTree() and therefore preserve their limit.
+    this.browseRowLimit = MAX_RENDERED_BROWSE_RECORDS;
+    this.browseStructureLimit = MAX_RENDERED_BROWSE_STRUCTURES;
     const compact = this.isCompactInspectorLayout();
     if (compact && this.mobileInspectorOpen) {
       const currentBody = this.inspectorEl?.querySelector<HTMLElement>(".ent-cc-inspector-body");
@@ -1238,19 +1299,7 @@ export class EntVaultCommandCenterView extends ItemView {
     titleBlock.createEl("h1", { text: this.plugin.data.settings.workspaceName, attr: { dir: "auto" } });
     titleBlock.createEl("p", { text: this.plugin.data.settings.workspaceSubtitle });
     const health = titleBlock.createDiv({ cls: "ent-cc-health-summary", attr: { "aria-label": "Vault knowledge summary" } });
-    const indexCount = this.plugin.getIndexRecords().length;
-    const reviewedCount = this.records.filter((record) => record.reviewStatus === "reviewed").length;
-    const proposalCount = this.records.filter((record) => record.role === "proposal").length;
-    if (this.plugin.isClinicalMode()) {
-      health.createSpan({ text: `${indexCount} index entries` });
-      health.createSpan({ text: `${reviewedCount} human-reviewed` });
-      health.createSpan({ text: `${proposalCount} inbox` });
-    } else {
-      health.createSpan({ text: `${indexCount} index entries` });
-      health.createSpan({ text: `${proposalCount} inbox` });
-      health.createSpan({ text: `${this.plugin.data.collections.length} collections` });
-      health.createSpan({ text: `${this.plugin.data.pinnedPaths.length} pinned` });
-    }
+    this.populateHealthSummary(health);
 
     const actions = header.createDiv({ cls: "ent-cc-header-actions" });
     if (!this.plugin.data.settings.setupComplete) {
@@ -1422,6 +1471,39 @@ export class EntVaultCommandCenterView extends ItemView {
     return libraryId ? this.records.filter((record) => record.libraryId === libraryId).length : 0;
   }
 
+  private populateHealthSummary(health: HTMLElement): void {
+    health.empty();
+    const indexCount = this.plugin.getIndexRecords().length;
+    const proposalCount = this.records.filter((record) => record.role === "proposal").length;
+    if (this.plugin.isClinicalMode()) {
+      const reviewedCount = this.records.filter((record) => record.reviewStatus === "reviewed").length;
+      health.createSpan({ text: `${indexCount} index entries` });
+      health.createSpan({ text: `${reviewedCount} human-reviewed` });
+      health.createSpan({ text: `${proposalCount} inbox` });
+      return;
+    }
+    health.createSpan({ text: `${indexCount} index entries` });
+    health.createSpan({ text: `${proposalCount} inbox` });
+    health.createSpan({ text: `${this.plugin.data.collections.length} collections` });
+    health.createSpan({ text: `${this.plugin.data.pinnedPaths.length} pinned` });
+  }
+
+  /** Refresh count-only chrome without replacing the focused mobile search input. */
+  private refreshChromeCounts(): void {
+    const health = this.contentEl.querySelector<HTMLElement>(".ent-cc-health-summary");
+    if (health) this.populateHealthSummary(health);
+    const availableTabs = new Set(tabDefinitions(
+      this.plugin.data.settings,
+      this.records,
+      this.plugin.getLibraries(),
+    ).map((tab) => tab.id));
+    this.contentEl.querySelectorAll<HTMLElement>(".ent-cc-tab").forEach((tab) => {
+      const id = tab.getAttribute("data-tab") as MainTab | null;
+      if (!id || !availableTabs.has(id)) return;
+      tab.querySelector<HTMLElement>(".ent-cc-tab-count")?.setText(String(this.tabCount(id)));
+    });
+  }
+
   private renderSearch(parent: HTMLElement): void {
     const searchRow = parent.createDiv({ cls: "ent-cc-search-row" });
     const box = searchRow.createDiv({ cls: "ent-cc-search-box" });
@@ -1513,7 +1595,11 @@ export class EntVaultCommandCenterView extends ItemView {
     });
     const save = iconButton(searchRow, "bookmark-plus", "Save this search");
     save.addEventListener("click", () => this.saveCurrentSearch());
-    bulkButton = iconButton(searchRow, "folder-plus", "Add matching records to a collection");
+    bulkButton = iconButton(
+      searchRow,
+      "folder-plus",
+      `Add current-base matches from ${this.plugin.data.settings.workspaceName} to a collection`,
+    );
     bulkButton.disabled = !this.query.trim();
     bulkButton.addEventListener("click", () => this.addMatchingRecordsToCollection());
     const saved = searchRow.createEl("button", { cls: "ent-cc-button ent-cc-saved-button" });
@@ -1634,6 +1720,11 @@ export class EntVaultCommandCenterView extends ItemView {
     if (!this.countEl) return;
     this.countEl.empty();
     if (this.query.trim()) {
+      if (this.globalSearchErrorKey === this.globalSearchKey()) {
+        this.countEl.createSpan({ text: "Search failed" });
+        this.countEl.createSpan({ text: " · All available bases", cls: "ent-cc-muted" });
+        return;
+      }
       if (this.globalSearchPendingKey === this.globalSearchKey()) {
         this.countEl.createSpan({ text: "Searching…" });
         this.countEl.createSpan({ text: " · All available bases", cls: "ent-cc-muted" });
@@ -1678,6 +1769,12 @@ export class EntVaultCommandCenterView extends ItemView {
 
     let visible = 0;
     const tab = this.plugin.data.activeTab;
+    if (!this.query.trim()) {
+      this.browseRowsRendered = 0;
+      this.browseRowsOmitted = 0;
+      this.browseStructuresRendered = 0;
+      this.browseStructuresOmitted = 0;
+    }
     if (this.query.trim()) {
       visible = this.renderGlobalSearchResults(body);
     } else if (tab === "curriculum") {
@@ -1692,9 +1789,14 @@ export class EntVaultCommandCenterView extends ItemView {
     } else {
       visible = this.renderLibrary(body, this.recordsForActiveTab());
     }
+    if (!this.query.trim() && (this.browseRowsOmitted > 0 || this.browseStructuresOmitted > 0)) {
+      this.renderBrowseLimit(body);
+    }
     const globalSearchPending = Boolean(this.query.trim() && this.globalSearchPendingKey === this.globalSearchKey());
+    const globalSearchFailed = Boolean(this.query.trim() && this.globalSearchErrorKey === this.globalSearchKey());
     if (visible === 0
       && !globalSearchPending
+      && !globalSearchFailed
       && !(tab === "collections" && this.plugin.data.collections.length === 0)
       && !(tab === "inbox" && !this.query)
       // Library rendering owns its empty state so it can offer a direct
@@ -1704,7 +1806,55 @@ export class EntVaultCommandCenterView extends ItemView {
       else body.createDiv({ cls: "ent-cc-empty", text: this.query ? "No records match this search." : "No records in this section." });
     }
     this.updateCount(visible);
-    if (this.query) resultCount.setText(globalSearchPending ? "Searching…" : `${visible} ${visible === 1 ? "result" : "results"}`);
+    if (this.query) resultCount.setText(globalSearchPending
+      ? "Searching…"
+      : globalSearchFailed ? "Search failed" : `${visible} ${visible === 1 ? "result" : "results"}`);
+  }
+
+  private renderBrowseLimit(parent: HTMLElement): void {
+    const hiddenParts: string[] = [];
+    if (this.browseRowsOmitted > 0) {
+      hiddenParts.push(`${this.browseRowsOmitted.toLocaleString()} more ${this.browseRowsOmitted === 1 ? "record" : "records"}`);
+    }
+    if (this.browseStructuresOmitted > 0) {
+      hiddenParts.push(`${this.browseStructuresOmitted.toLocaleString()} more ${this.browseStructuresOmitted === 1 ? "section" : "sections"}`);
+    }
+    const message = parent.createDiv({
+      cls: "ent-cc-browse-limit",
+      attr: { role: "status" },
+    });
+    message.createSpan({
+      text: `Showing ${this.browseRowsRendered.toLocaleString()} records across ${this.browseStructuresRendered.toLocaleString()} sections. ${hiddenParts.join(" and ")} are hidden to keep this view responsive.`,
+    });
+    const nextRecords = Math.min(MAX_RENDERED_BROWSE_RECORDS, this.browseRowsOmitted);
+    const nextStructures = Math.min(MAX_RENDERED_BROWSE_STRUCTURES, this.browseStructuresOmitted);
+    const showMore = message.createEl("button", {
+      cls: "ent-cc-button",
+      text: nextRecords > 0
+        ? `Show ${nextRecords.toLocaleString()} more`
+        : `Show ${nextStructures.toLocaleString()} more sections`,
+    });
+    showMore.addEventListener("click", () => {
+      this.browseRowLimit += MAX_RENDERED_BROWSE_RECORDS;
+      this.browseStructureLimit += MAX_RENDERED_BROWSE_STRUCTURES;
+      this.renderTree();
+    });
+  }
+
+  /**
+   * Reserve one visible heading/subheading row. Once either browse budget is
+   * exhausted, skip the complete remaining section instead of rendering an
+   * expanded-but-empty shell whose records cannot appear on this page.
+   */
+  private beginBrowseStructure(visibleRecordCount: number, visibleStructureCount = 1): boolean {
+    if (this.browseStructuresRendered >= this.browseStructureLimit
+      || (visibleRecordCount > 0 && this.browseRowsRendered >= this.browseRowLimit)) {
+      this.browseRowsOmitted += visibleRecordCount;
+      this.browseStructuresOmitted += visibleStructureCount;
+      return false;
+    }
+    this.browseStructuresRendered += 1;
+    return true;
   }
 
   private renderKnowledgeIndexEmpty(parent: HTMLElement): void {
@@ -1768,6 +1918,7 @@ export class EntVaultCommandCenterView extends ItemView {
         : this.startCreateKnowledgeNote({ folder: this.plugin.data.settings.proposalFolder }, false));
       return 0;
     }
+    if (!this.beginBrowseStructure(proposals.length)) return proposals.length;
     const section = parent.createDiv({ cls: "ent-cc-heading ent-cc-inbox-group" });
     const row = section.createDiv({ cls: "ent-cc-row ent-cc-heading-row" });
     row.createSpan({ cls: "ent-cc-disclosure" });
@@ -1776,7 +1927,7 @@ export class EntVaultCommandCenterView extends ItemView {
     row.createSpan({ cls: "ent-cc-row-title", text: this.plugin.isClinicalMode() ? "Awaiting curriculum decision" : this.plugin.data.settings.inboxLabel });
     row.createSpan({ cls: "ent-cc-row-count", text: String(proposals.length) });
     const content = section.createDiv({ cls: "ent-cc-heading-body" });
-    proposals.sort((a, b) => b.mtime - a.mtime).forEach((record) => this.renderRecordRow(content, record, 1));
+    proposals.sort((a, b) => b.mtime - a.mtime).forEach((record) => this.renderBrowseRecordRow(content, record, 1));
     return proposals.length;
   }
 
@@ -1786,6 +1937,11 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private curriculumNodeCount(node: CurriculumTreeNode): number {
     return 1 + node.children.reduce((sum, child) => sum + this.curriculumNodeCount(child), 0);
+  }
+
+  private visibleCurriculumNodeCount(node: CurriculumTreeNode): number {
+    if (this.collapsedCurriculumNodes.has(node.record.path) && !this.query) return 1;
+    return 1 + node.children.reduce((sum, child) => sum + this.visibleCurriculumNodeCount(child), 0);
   }
 
   private renderCurriculum(parent: HTMLElement): number {
@@ -1817,6 +1973,10 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private renderCurriculumDomain(parent: HTMLElement, domain: CurriculumDomainTree, roots: CurriculumTreeNode[]): void {
     const collapsed = this.collapsedCurriculumDomains.has(domain.domain) && !this.query;
+    const visibleRecordCount = collapsed
+      ? 0
+      : roots.reduce((sum, node) => sum + this.visibleCurriculumNodeCount(node), 0);
+    if (!this.beginBrowseStructure(visibleRecordCount)) return;
     const section = parent.createDiv({ cls: "ent-cc-heading ent-cc-curriculum-domain" });
     const row = section.createDiv({ cls: "ent-cc-row ent-cc-heading-row" });
     const disclosure = disclosureButton(row, collapsed, domain.domain);
@@ -1827,7 +1987,7 @@ export class EntVaultCommandCenterView extends ItemView {
     });
     const leading = row.createSpan({ cls: "ent-cc-leading-icon" });
     setIcon(leading, "library");
-    const title = row.createEl("button", { cls: "ent-cc-row-title", text: domain.domain });
+    const title = row.createEl("button", { cls: "ent-cc-row-title", text: domain.domain, attr: { dir: "auto" } });
     title.addEventListener("click", () => {
       if (collapsed) this.collapsedCurriculumDomains.delete(domain.domain); else this.collapsedCurriculumDomains.add(domain.domain);
       this.persistCollapseState();
@@ -1844,6 +2004,11 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private renderCurriculumNode(parent: HTMLElement, node: CurriculumTreeNode, depth: number): void {
     if (this.query && !this.curriculumNodeMatches(node)) return;
+    if (this.browseRowsRendered >= this.browseRowLimit) {
+      this.browseRowsOmitted += this.visibleCurriculumNodeCount(node);
+      return;
+    }
+    this.browseRowsRendered += 1;
     const record = node.record;
     const collapsed = this.collapsedCurriculumNodes.has(record.path) && !this.query;
     const section = parent.createDiv({ cls: "ent-cc-curriculum-node" });
@@ -1927,9 +2092,18 @@ export class EntVaultCommandCenterView extends ItemView {
     const total = matchingDirect.length + matchingSubs.reduce((sum, item) => sum + item.paths.length, 0);
     if (this.query && total === 0) return 0;
 
+    const collapsed = heading.collapsed && !this.query;
+    const visibleRecordCount = collapsed
+      ? 0
+      : matchingDirect.length + matchingSubs.reduce((sum, item) => (
+        sum + (item.subheading.collapsed && !this.query ? 0 : item.paths.length)
+      ), 0);
+    const visibleStructureCount = collapsed ? 1 : 1 + matchingSubs.length;
+    if (!this.beginBrowseStructure(visibleRecordCount, visibleStructureCount)) return total;
+
     const section = parent.createDiv({ cls: "ent-cc-heading" });
     const row = section.createDiv({ cls: "ent-cc-row ent-cc-heading-row" });
-    const disclosure = disclosureButton(row, heading.collapsed && !this.query, heading.title);
+    const disclosure = disclosureButton(row, collapsed, heading.title);
     disclosure.addEventListener("click", () => this.run(async () => {
       heading.collapsed = !heading.collapsed;
       if (mutable) await this.plugin.savePluginData();
@@ -1937,7 +2111,7 @@ export class EntVaultCommandCenterView extends ItemView {
     }));
     const leading = row.createSpan({ cls: "ent-cc-leading-icon" });
     setIcon(leading, mutable ? "folders" : "library");
-    const title = row.createEl("button", { cls: "ent-cc-row-title", text: heading.title });
+    const title = row.createEl("button", { cls: "ent-cc-row-title", text: heading.title, attr: { dir: "auto" } });
     title.addEventListener("click", () => this.run(async () => {
       heading.collapsed = !heading.collapsed;
       if (mutable) await this.plugin.savePluginData();
@@ -1956,21 +2130,23 @@ export class EntVaultCommandCenterView extends ItemView {
     if (mutable) iconButton(row, "ellipsis", `Actions for ${heading.title}`, "ent-cc-row-more").addEventListener("click", (event) => this.showHeadingMenu(event, heading));
     if (mutable && this.editMode) this.applyDrop(row, { headingId: heading.id });
 
-    if (heading.collapsed && !this.query) return total;
+    if (collapsed) return total;
     const content = section.createDiv({ cls: "ent-cc-heading-body" });
     if (mutable && this.editMode) this.applyDrop(content, { headingId: heading.id });
     matchingDirect.forEach((path) => {
       const record = this.recordByPath.get(path);
-      if (record) this.renderRecordRow(content, record, 1, mutable ? { headingId: heading.id } : undefined);
+      if (record) this.renderBrowseRecordRow(content, record, 1, mutable ? { headingId: heading.id } : undefined);
     });
     for (const item of matchingSubs) this.renderSubheading(content, heading, item.subheading, item.paths, mutable);
     return total;
   }
 
   private renderSubheading(parent: HTMLElement, heading: LayoutHeading, subheading: LayoutSubheading, paths: string[], mutable: boolean): void {
+    const collapsed = subheading.collapsed && !this.query;
+    if (!this.beginBrowseStructure(collapsed ? 0 : paths.length)) return;
     const section = parent.createDiv({ cls: "ent-cc-subheading" });
     const row = section.createDiv({ cls: "ent-cc-row ent-cc-subheading-row" });
-    const disclosure = disclosureButton(row, subheading.collapsed && !this.query, subheading.title);
+    const disclosure = disclosureButton(row, collapsed, subheading.title);
     disclosure.addEventListener("click", () => this.run(async () => {
       subheading.collapsed = !subheading.collapsed;
       if (mutable) await this.plugin.savePluginData();
@@ -1978,7 +2154,7 @@ export class EntVaultCommandCenterView extends ItemView {
     }));
     const leading = row.createSpan({ cls: "ent-cc-leading-icon" });
     setIcon(leading, "folder");
-    const title = row.createEl("button", { cls: "ent-cc-row-title", text: subheading.title });
+    const title = row.createEl("button", { cls: "ent-cc-row-title", text: subheading.title, attr: { dir: "auto" } });
     title.addEventListener("click", () => this.run(async () => {
       subheading.collapsed = !subheading.collapsed;
       if (mutable) await this.plugin.savePluginData();
@@ -1987,12 +2163,12 @@ export class EntVaultCommandCenterView extends ItemView {
     row.createSpan({ text: String(subheading.subjects.filter((path) => this.recordByPath.has(path)).length), cls: "ent-cc-row-count" });
     if (mutable) iconButton(row, "ellipsis", `Actions for ${subheading.title}`, "ent-cc-row-more").addEventListener("click", (event) => this.showSubheadingMenu(event, heading, subheading));
     if (mutable && this.editMode) this.applyDrop(row, { headingId: heading.id, subheadingId: subheading.id });
-    if (subheading.collapsed && !this.query) return;
+    if (collapsed) return;
     const content = section.createDiv({ cls: "ent-cc-subheading-body" });
     if (mutable && this.editMode) this.applyDrop(content, { headingId: heading.id, subheadingId: subheading.id });
     for (const path of paths) {
       const record = this.recordByPath.get(path);
-      if (record) this.renderRecordRow(content, record, 2, mutable ? { headingId: heading.id, subheadingId: subheading.id } : undefined);
+      if (record) this.renderBrowseRecordRow(content, record, 2, mutable ? { headingId: heading.id, subheadingId: subheading.id } : undefined);
     }
   }
 
@@ -2000,6 +2176,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const records = queue.records.filter((record) => matchesParsedQuery(record, this.parsedQuery));
     if (this.query && records.length === 0) return 0;
     const collapsed = this.collapsedQueues.has(queue.id);
+    if (!this.beginBrowseStructure(collapsed ? 0 : records.length)) return records.length;
     const section = parent.createDiv({ cls: "ent-cc-heading ent-cc-queue" });
     const row = section.createDiv({ cls: "ent-cc-row ent-cc-heading-row" });
     const disclosure = disclosureButton(row, collapsed, queue.title);
@@ -2010,7 +2187,7 @@ export class EntVaultCommandCenterView extends ItemView {
     });
     const leading = row.createSpan({ cls: "ent-cc-leading-icon" });
     setIcon(leading, queue.id === "next" ? "list-checks" : queue.id === "pinned" ? "pin" : "sparkles");
-    const title = row.createEl("button", { cls: "ent-cc-row-title", text: queue.title, attr: { title: queue.description } });
+    const title = row.createEl("button", { cls: "ent-cc-row-title", text: queue.title, attr: { title: queue.description, dir: "auto" } });
     title.addEventListener("click", () => {
       if (collapsed) this.collapsedQueues.delete(queue.id); else this.collapsedQueues.add(queue.id);
       this.persistCollapseState();
@@ -2020,7 +2197,7 @@ export class EntVaultCommandCenterView extends ItemView {
     if (!collapsed) {
       const content = section.createDiv({ cls: "ent-cc-heading-body" });
       content.createDiv({ cls: "ent-cc-queue-description", text: queue.description });
-      for (const record of records) this.renderRecordRow(content, record, 1);
+      for (const record of records) this.renderBrowseRecordRow(content, record, 1);
     }
     return records.length;
   }
@@ -2050,7 +2227,7 @@ export class EntVaultCommandCenterView extends ItemView {
     }
 
     const unplaced = records.filter((record) => !record.portableId || !placed.has(record.portableId));
-    if (unplaced.length > 0) {
+    if (unplaced.length > 0 && this.beginBrowseStructure(unplaced.length)) {
       const section = parent.createDiv({ cls: "ent-cc-heading ent-cc-library-group ent-cc-library-fallback" });
       const row = section.createDiv({ cls: "ent-cc-row ent-cc-heading-row" });
       row.createSpan({ cls: "ent-cc-disclosure" });
@@ -2059,7 +2236,7 @@ export class EntVaultCommandCenterView extends ItemView {
       row.createSpan({ cls: "ent-cc-row-title", text: `Unplaced ${library.name}` });
       row.createSpan({ cls: "ent-cc-row-count", text: String(unplaced.length) });
       const content = section.createDiv({ cls: "ent-cc-heading-body" });
-      unplaced.sort((a, b) => a.title.localeCompare(b.title)).forEach((record) => this.renderRecordRow(content, record, 1));
+      unplaced.sort((a, b) => a.title.localeCompare(b.title)).forEach((record) => this.renderBrowseRecordRow(content, record, 1));
     }
 
     if (!this.query && input.length === 0) {
@@ -2107,12 +2284,19 @@ export class EntVaultCommandCenterView extends ItemView {
     if (this.query && visibleCount === 0) return;
 
     const collapsed = heading.collapsed && !this.query;
+    const visibleRecordCount = collapsed
+      ? 0
+      : direct.length + subheadings.reduce((sum, item) => (
+        sum + (item.subheading.collapsed && !this.query ? 0 : item.records.length)
+      ), 0);
+    const visibleStructureCount = collapsed ? 1 : 1 + subheadings.length;
+    if (!this.beginBrowseStructure(visibleRecordCount, visibleStructureCount)) return;
     const section = parent.createDiv({ cls: "ent-cc-heading ent-cc-library-group" });
     const row = section.createDiv({ cls: "ent-cc-row ent-cc-heading-row" });
     disclosureButton(row, collapsed, heading.title).addEventListener("click", () => this.toggleLibraryHeading(heading));
     const icon = row.createSpan({ cls: "ent-cc-leading-icon" });
     setIcon(icon, libraryIcon(library));
-    const title = row.createEl("button", { cls: "ent-cc-row-title", text: heading.title });
+    const title = row.createEl("button", { cls: "ent-cc-row-title", text: heading.title, attr: { dir: "auto" } });
     title.addEventListener("click", () => this.toggleLibraryHeading(heading));
     row.createSpan({ cls: "ent-cc-row-count", text: String(visibleCount) });
     const missing = totalReferences - visibleCount;
@@ -2124,7 +2308,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const content = section.createDiv({ cls: "ent-cc-heading-body" });
     if (this.editMode) this.applyLibraryDrop(content, { libraryId: library.id, headingId: heading.id });
     for (const { record } of direct) {
-      this.renderRecordRow(content, record, 1, undefined, undefined, { libraryId: library.id, headingId: heading.id });
+      this.renderBrowseRecordRow(content, record, 1, undefined, undefined, { libraryId: library.id, headingId: heading.id });
     }
     for (const item of subheadings) this.renderLibrarySubheading(content, library, heading, item.subheading, item.records);
   }
@@ -2138,12 +2322,13 @@ export class EntVaultCommandCenterView extends ItemView {
   ): void {
     if (this.query && records.length === 0) return;
     const collapsed = subheading.collapsed && !this.query;
+    if (!this.beginBrowseStructure(collapsed ? 0 : records.length)) return;
     const section = parent.createDiv({ cls: "ent-cc-subheading ent-cc-library-subheading" });
     const row = section.createDiv({ cls: "ent-cc-row ent-cc-subheading-row" });
     disclosureButton(row, collapsed, subheading.title).addEventListener("click", () => this.toggleLibrarySubheading(heading, subheading));
     const icon = row.createSpan({ cls: "ent-cc-leading-icon" });
     setIcon(icon, "folder");
-    const title = row.createEl("button", { cls: "ent-cc-row-title", text: subheading.title });
+    const title = row.createEl("button", { cls: "ent-cc-row-title", text: subheading.title, attr: { dir: "auto" } });
     title.addEventListener("click", () => this.toggleLibrarySubheading(heading, subheading));
     row.createSpan({ cls: "ent-cc-row-count", text: String(records.length) });
     iconButton(row, "ellipsis", `Actions for ${subheading.title}`, "ent-cc-row-more").addEventListener("click", (event) => this.showLibrarySubheadingMenu(event, library.id, heading, subheading));
@@ -2152,14 +2337,34 @@ export class EntVaultCommandCenterView extends ItemView {
     const content = section.createDiv({ cls: "ent-cc-subheading-body" });
     if (this.editMode) this.applyLibraryDrop(content, { libraryId: library.id, headingId: heading.id, subheadingId: subheading.id });
     for (const { record } of records) {
-      this.renderRecordRow(content, record, 2, undefined, undefined, { libraryId: library.id, headingId: heading.id, subheadingId: subheading.id });
+      this.renderBrowseRecordRow(content, record, 2, undefined, undefined, { libraryId: library.id, headingId: heading.id, subheadingId: subheading.id });
     }
   }
 
   private renderGlobalSearchResults(parent: HTMLElement): number {
     const key = this.globalSearchKey();
+    if (this.globalSearchErrorKey === key) {
+      const error = parent.createDiv({ cls: "ent-cc-empty ent-cc-search-error", attr: { role: "alert" } });
+      error.createEl("strong", { text: "Search could not finish" });
+      error.createEl("p", { text: this.globalSearchErrorMessage || "An unexpected error interrupted this search." });
+      const retry = error.createEl("button", { cls: "ent-cc-button", text: "Try again" });
+      retry.addEventListener("click", () => {
+        this.globalSearchErrorKey = "";
+        this.globalSearchErrorMessage = "";
+        this.renderTree();
+      });
+      return 0;
+    }
     if (!this.globalSearchResult || this.globalSearchResultKey !== key) {
       this.requestGlobalSearch(key, this.query);
+      if (this.globalSearchResult && this.globalSearchResultScopeKey === this.globalSearchScopeKey()) {
+        parent.createDiv({
+          cls: "ent-cc-search-pending ent-cc-search-updating",
+          text: "Updating results…",
+          attr: { role: "status", "aria-live": "polite" },
+        });
+        return this.renderGlobalSearchResultSet(parent, this.globalSearchResult, true);
+      }
       parent.createDiv({
         cls: "ent-cc-empty ent-cc-search-pending",
         text: "Searching all available knowledge bases…",
@@ -2167,7 +2372,14 @@ export class EntVaultCommandCenterView extends ItemView {
       });
       return 0;
     }
-    const results = this.globalSearchResult;
+    return this.renderGlobalSearchResultSet(parent, this.globalSearchResult, false);
+  }
+
+  private renderGlobalSearchResultSet(
+    parent: HTMLElement,
+    results: BoundedKnowledgeBaseSearchResultSet<KnowledgeBaseSearchSource>,
+    stale: boolean,
+  ): number {
     if (results.total > results.rendered) {
       parent.createDiv({
         cls: "ent-cc-search-limit",
@@ -2177,7 +2389,7 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     for (const baseGroup of results.groups) {
       const source = baseGroup.source;
-      const baseSection = parent.createDiv({ cls: "ent-cc-heading ent-cc-search-base-group" });
+      const baseSection = parent.createDiv({ cls: `ent-cc-heading ent-cc-search-base-group${stale ? " is-stale" : ""}` });
       const baseRow = baseSection.createDiv({ cls: "ent-cc-row ent-cc-heading-row" });
       baseRow.createSpan({ cls: "ent-cc-disclosure" });
       const baseIcon = baseRow.createSpan({ cls: "ent-cc-leading-icon" });
@@ -2251,6 +2463,22 @@ export class EntVaultCommandCenterView extends ItemView {
     if (record.kind === "topic") return `Indexed ${data.settings.itemSingular}`;
     if (record.role === "proposal") return `${data.settings.inboxLabel} ${data.settings.itemSingular}`;
     return roleLabel(record);
+  }
+
+  private renderBrowseRecordRow(
+    parent: HTMLElement,
+    record: VaultRecord,
+    level: number,
+    membership?: Membership,
+    searchContext?: SearchRecordContext,
+    libraryMembership?: LibraryMembership,
+  ): void {
+    if (this.browseRowsRendered >= this.browseRowLimit) {
+      this.browseRowsOmitted += 1;
+      return;
+    }
+    this.browseRowsRendered += 1;
+    this.renderRecordRow(parent, record, level, membership, searchContext, libraryMembership);
   }
 
   private renderRecordRow(
@@ -2794,22 +3022,23 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private addMatchingRecordsToCollection(): void {
     const ownsBase = this.createOpenedBaseGuard();
+    const baseName = this.plugin.data.settings.workspaceName;
     if (!this.query.trim()) {
       new Notice("Enter a search or filter first.");
       return;
     }
     const records = this.matchingRecordsForCurrentView();
     if (records.length === 0) {
-      new Notice("No matching records to add.");
+      new Notice(`No matching records in ${baseName} to add.`);
       return;
     }
     const paths = records.map((record) => record.path);
     const targets = collectionTargets(this.plugin.data.collections);
     if (targets.length === 0) {
       new TextPromptModal(this.app, {
-        title: "Create collection for matching records",
+        title: `Create collection from matches in ${baseName}`,
         placeholder: "Collection name",
-        submitLabel: `Create with ${records.length} records`,
+        submitLabel: `Create with ${records.length} current-base records`,
         onSubmit: async (title) => {
           if (!ownsBase()) return;
           await this.plugin.mutate(`Create collection “${title}” from search`, () => {
@@ -2822,12 +3051,12 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     new CollectionPickerModal(this.app, targets, "Add", async (target) => {
       if (!ownsBase()) return;
-      await this.plugin.mutate(`Add ${records.length} matching records to collection`, () => {
+      await this.plugin.mutate(`Add ${records.length} matching records from ${baseName} to collection`, () => {
         for (const path of paths) this.addMembership(path, target);
       });
       if (!ownsBase()) return;
-      new Notice(`Added ${records.length} matching records. Source notes stayed in place.`);
-    }).open();
+      new Notice(`Added ${records.length} matching records from ${baseName}. Source notes stayed in place.`);
+    }, `collection in ${baseName} (${records.length} current-base matches)`).open();
   }
 
   private promptNewCollection(addPath?: string): void {
