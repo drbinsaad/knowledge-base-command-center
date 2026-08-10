@@ -1688,7 +1688,10 @@
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   overscroll-behavior: contain;
+  scroll-padding-block: 12px 88px;
+  -webkit-overflow-scrolling: touch;
 }
 
 .ent-cc-topic-editor {
@@ -2214,6 +2217,20 @@
     translate: 0 var(--ent-cc-modal-visual-shift, 0);
   }
 
+  .ent-cc-knowledge-note-modal > .modal-title {
+    flex: 0 0 auto;
+  }
+
+  .ent-cc-knowledge-note-modal > .modal-content.ent-cc-knowledge-note-content {
+    flex: 1 1 0;
+    width: 100%;
+    height: 0;
+    max-height: none;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+  }
+
   .ent-cc-knowledge-note-content .ent-cc-modal-lead {
     display: none;
   }
@@ -2223,7 +2240,15 @@
   }
 
   .ent-cc-knowledge-note-content > .ent-cc-modal-footer {
+    z-index: 6;
     padding-top: 10px;
+    border-top: 1px solid var(--background-modifier-border);
+    background: var(--modal-background, var(--background-primary));
+  }
+
+  .ent-cc-knowledge-note-modal.is-virtual-keyboard-open .ent-cc-note-form-body .setting-item {
+    padding-top: 8px;
+    padding-bottom: 8px;
   }
 
   .ent-cc-knowledge-note-content > .ent-cc-modal-footer .setting-item-control,

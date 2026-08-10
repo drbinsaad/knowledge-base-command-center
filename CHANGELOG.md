@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.11.1
+
+### Fixed
+
+- Kept Create Note and library-specific creation forms inside the visible iPhone viewport while the software keyboard is open. The modal now reconciles Obsidian's native keyboard inset with the browser visual viewport, keeps the action footer visible, and makes the form body the only scrolling region.
+- Resynchronized focused fields throughout the iOS keyboard animation and scrolled the active control into view without retaining listeners or timers after the modal closes.
+
 ## 0.11.0
 
 ### Added

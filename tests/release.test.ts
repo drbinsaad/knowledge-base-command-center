@@ -93,6 +93,11 @@ test("mobile flows keep primary actions visible and empty states actionable", as
   assert.match(styles, /ent-cc-library-manager-action/);
   assert.match(styles, /ent-cc-knowledge-note-content/);
   assert.match(styles, /--ent-cc-modal-visual-height/);
+  assert.match(styles, /\.ent-cc-knowledge-note-modal > \.modal-content\.ent-cc-knowledge-note-content\s*\{[^}]*flex: 1 1 0;[^}]*height: 0;/s);
+  assert.match(styles, /scroll-padding-block: 12px 88px/);
+  assert.match(modals, /handleViewportFocus/);
+  assert.match(modals, /\[0, 60, 180, 420\]/);
+  assert.match(modals, /--keyboard-height/);
   assert.match(view, /const backLabel = "Back to main page"/);
   assert.match(view, /"aria-label": backLabel, title: backLabel/);
   assert.match(view, /createSpan\(\{ text: backLabel \}\)/);

@@ -370,13 +370,27 @@ export function calculateModalViewportLayout(
   innerHeight: number,
   viewportHeight: number,
   viewportOffsetTop = 0,
+  keyboardHeight = 0,
 ): ModalViewportLayout {
-  const safeInnerHeight = Math.max(1, innerHeight);
-  const safeViewportHeight = Math.max(1, Math.min(viewportHeight, safeInnerHeight));
+  const safeInnerHeight = Number.isFinite(innerHeight) ? Math.max(1, innerHeight) : 1;
+  const safeOffsetTop = Number.isFinite(viewportOffsetTop)
+    ? Math.max(0, Math.min(viewportOffsetTop, safeInnerHeight - 1))
+    : 0;
+  const safeViewportHeight = Number.isFinite(viewportHeight)
+    ? Math.max(1, Math.min(viewportHeight, safeInnerHeight - safeOffsetTop))
+    : safeInnerHeight - safeOffsetTop;
+  const safeKeyboardHeight = Number.isFinite(keyboardHeight)
+    ? Math.max(0, Math.min(keyboardHeight, safeInnerHeight - 1))
+    : 0;
+  const visibleBottom = Math.max(safeOffsetTop + 1, Math.min(
+    safeOffsetTop + safeViewportHeight,
+    safeInnerHeight - safeKeyboardHeight,
+  ));
+  const visibleHeight = visibleBottom - safeOffsetTop;
   return {
-    height: Math.round(safeViewportHeight),
-    keyboardOpen: safeInnerHeight - safeViewportHeight > 100,
-    shift: Math.round(viewportOffsetTop + safeViewportHeight / 2 - safeInnerHeight / 2),
+    height: Math.round(visibleHeight),
+    keyboardOpen: safeKeyboardHeight > 100 || safeInnerHeight - safeViewportHeight > 100,
+    shift: Math.round(safeOffsetTop + visibleHeight / 2 - safeInnerHeight / 2),
   };
 }
 
@@ -387,19 +401,34 @@ export class KnowledgeNoteModal extends Modal {
   private templateSettingEl: HTMLElement | null = null;
   private errorEl: HTMLElement | null = null;
   private viewportWindow: Window | null = null;
+  private viewportSyncTimers: number[] = [];
 
   private readonly syncViewportLayout = (): void => {
     const viewWindow = this.viewportWindow;
     if (!viewWindow) return;
     const viewport = viewWindow.visualViewport;
+    const keyboardHeight = Number.parseFloat(
+      viewWindow.getComputedStyle(this.modalEl).getPropertyValue("--keyboard-height"),
+    );
     const layout = calculateModalViewportLayout(
       viewWindow.innerHeight,
       viewport?.height ?? viewWindow.innerHeight,
       viewport?.offsetTop ?? 0,
+      keyboardHeight,
     );
     this.modalEl.style.setProperty("--ent-cc-modal-visual-height", `${layout.height}px`);
     this.modalEl.style.setProperty("--ent-cc-modal-visual-shift", `${layout.shift}px`);
     this.modalEl.toggleClass("is-virtual-keyboard-open", layout.keyboardOpen);
+  };
+
+  private readonly handleViewportFocus = (event: FocusEvent): void => {
+    this.scheduleViewportSync();
+    const target = event.target as HTMLElement | null;
+    const viewWindow = this.viewportWindow;
+    if (!viewWindow || !target || typeof target.scrollIntoView !== "function") return;
+    this.viewportSyncTimers.push(viewWindow.setTimeout(() => {
+      target.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }, 80));
   };
 
   constructor(app: App, private readonly options: KnowledgeNoteModalOptions) {
@@ -521,6 +550,9 @@ export class KnowledgeNoteModal extends Modal {
     viewport?.removeEventListener("resize", this.syncViewportLayout);
     viewport?.removeEventListener("scroll", this.syncViewportLayout);
     viewWindow?.removeEventListener("resize", this.syncViewportLayout);
+    this.contentEl.removeEventListener("focusin", this.handleViewportFocus);
+    for (const timer of this.viewportSyncTimers) viewWindow?.clearTimeout(timer);
+    this.viewportSyncTimers = [];
     this.viewportWindow = null;
     this.modalEl.style.removeProperty("--ent-cc-modal-visual-height");
     this.modalEl.style.removeProperty("--ent-cc-modal-visual-shift");
@@ -534,7 +566,15 @@ export class KnowledgeNoteModal extends Modal {
     viewWindow.visualViewport?.addEventListener("resize", this.syncViewportLayout);
     viewWindow.visualViewport?.addEventListener("scroll", this.syncViewportLayout);
     viewWindow.addEventListener("resize", this.syncViewportLayout);
-    this.syncViewportLayout();
+    this.contentEl.addEventListener("focusin", this.handleViewportFocus);
+    this.scheduleViewportSync();
+  }
+
+  private scheduleViewportSync(): void {
+    const viewWindow = this.viewportWindow;
+    if (!viewWindow) return;
+    for (const timer of this.viewportSyncTimers) viewWindow.clearTimeout(timer);
+    this.viewportSyncTimers = [0, 60, 180, 420].map((delay) => viewWindow.setTimeout(this.syncViewportLayout, delay));
   }
 
   private updateTemplateButton(): void {

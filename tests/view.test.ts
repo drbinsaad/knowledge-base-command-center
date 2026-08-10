@@ -1511,6 +1511,21 @@ test("mobile note sheets follow the visual viewport when the keyboard opens", ()
     keyboardOpen: true,
     shift: -187,
   });
+  assert.deepEqual(calculateModalViewportLayout(844, 844, 0, 414), {
+    height: 430,
+    keyboardOpen: true,
+    shift: -207,
+  });
+  assert.deepEqual(calculateModalViewportLayout(844, 430, 20, 414), {
+    height: 410,
+    keyboardOpen: true,
+    shift: -197,
+  });
+  assert.deepEqual(calculateModalViewportLayout(844, 844, 0, Number.NaN), {
+    height: 844,
+    keyboardOpen: false,
+    shift: 0,
+  });
 });
 
 test("focused mobile search subtracts the iOS keyboard from the command-center height", () => {
