@@ -4,7 +4,23 @@
   "private": true,
   "type": "module",
   "description": "Configurable visual knowledge index, note creator, collections, and smart queues for Obsidian.",
+  "author": {
+    "name": "Dr. Ali Alshahrani",
+    "url": "https://github.com/drbinsaad"
+  },
   "license": "MIT",
+  "homepage": "https://community.obsidian.md/plugins/ent-vault-command-center",
+  "keywords": [
+    "obsidian",
+    "obsidian-plugin",
+    "knowledge-base",
+    "personal-knowledge-management",
+    "local-first",
+    "typescript"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/drbinsaad/knowledge-base-command-center.git"
