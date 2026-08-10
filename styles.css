@@ -2121,14 +2121,17 @@
 
   .ent-cc-header-actions {
     display: grid;
-    grid-template-columns: repeat(3, max-content) 44px;
+    grid-auto-columns: max-content;
+    grid-auto-flow: column;
+    grid-template-columns: none;
+    max-width: 100%;
     gap: 8px;
-    overflow: visible;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
   }
 
-  .ent-cc-header-actions > .ent-cc-icon-button:last-child {
-    grid-column: 4;
-  }
+  .ent-cc-header-actions::-webkit-scrollbar { display: none; }
 
   .ent-cc-header-actions .ent-cc-button {
     min-height: 44px;
@@ -2144,6 +2147,10 @@
 
   .ent-cc-header-actions .ent-cc-history-action {
     display: none;
+  }
+
+  .ent-cc-quick-entry-button {
+    min-width: 44px;
   }
 
   .ent-cc-tabs {
@@ -2400,6 +2407,18 @@
     width: 100%;
     min-width: 0;
     margin-top: 8px;
+  }
+}
+
+@media (max-width: 600px) {
+  .ent-cc-quick-entry-button {
+    width: 44px;
+    padding-right: 0;
+    padding-left: 0;
+  }
+
+  .ent-cc-quick-entry-label {
+    display: none;
   }
 }
 

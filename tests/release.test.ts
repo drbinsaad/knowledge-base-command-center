@@ -43,6 +43,8 @@ test("public repository metadata is present", async () => {
   assert.match(readme, /stable internal ID `ent-vault-command-center`/);
   assert.match(readme, /Portable packages created by version .* use format version 4/i);
   assert.match(readme, /Current v9 (?:snapshots|files)/i);
+  assert.match(readme, /obsidian:\/\/kbcc-quick-entry/);
+  assert.match(readme, /Settings → Mobile → Manage toolbar/);
   const latestChangelogVersion = /^##\s+(\d+\.\d+\.\d+)\s*$/m.exec(changelog)?.[1];
   assert.equal(latestChangelogVersion, manifest.version, "the first changelog release must match the release manifest");
   assert.match(changelog, /Version 0\.8\.1 was not published as a tag or GitHub release/);
@@ -77,7 +79,9 @@ test("mobile flows keep primary actions visible and empty states actionable", as
   assert.match(view, /ent-cc-history-action/);
   assert.match(manager, /Browse \$\{availableCount\} available/);
   assert.match(manager, /aria-selected/);
-  assert.match(styles, /grid-template-columns: repeat\(3, max-content\) 44px/);
+  assert.match(styles, /grid-auto-flow: column/);
+  assert.match(styles, /\.ent-cc-header-actions\s*\{[^}]*overflow-x: auto/s);
+  assert.match(styles, /\.ent-cc-quick-entry-button\s*\{[^}]*min-width: 44px/s);
   assert.match(styles, /scroll-snap-type: x proximity/);
   assert.match(styles, /height: calc\(100dvh - 16px\)/);
   assert.match(styles, /ent-cc-manager-bulk-actions\.is-idle/);

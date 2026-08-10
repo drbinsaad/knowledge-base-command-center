@@ -2,8 +2,14 @@
 
 ## Unreleased
 
+## 0.11.0
+
 ### Added
 
+- Added Quick entry from a dedicated desktop ribbon action (shown in Obsidian's **Open** menu on mobile) and the Command Center header, plus seven icon-bearing commands that users can assign under Hotkeys or add to Obsidian's mobile toolbar. No default key combinations are installed.
+- Added focused Quick entry flows to switch knowledge bases, create transactional No note subjects, create Index/Collection/Library headings and subheadings, choose note groups and templates, and add the current or an existing Markdown note. Library capture now requires an explicit heading or subheading and can create the first heading when the Library is empty.
+- Bound every delayed Quick Entry menu and picker to the knowledge-base ID and data epoch that opened it, while preserving the base picker as an explicit guarded switch.
+- Added the action-only <code>obsidian://kbcc-quick-entry</code> route for Apple Shortcuts. It opens only the hub; any query parameter fails closed and cannot prefill or submit a title, path, content value, or other data.
 - Added project artwork, real desktop and iPhone screenshots, focused getting
   started, user, portability/recovery, and troubleshooting guides, and an
   explicit 0.10.0 physical-iPhone evidence record.
