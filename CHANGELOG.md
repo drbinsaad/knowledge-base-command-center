@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Added project artwork, real desktop and iPhone screenshots, focused getting
+  started, user, portability/recovery, and troubleshooting guides, and an
+  explicit 0.10.0 physical-iPhone evidence record.
+- Added support and conduct policies, structured feature-request intake,
+  pull-request privacy/mobile checklists, and Dependabot configuration.
+
+### Changed
+
+- Reworked the public README around installation, the product model, common
+  workflows, privacy boundaries, known limitations, and recovery.
+- Added complete package metadata for the project homepage, author, topics, and
+  supported development runtime.
+
 ## 0.10.0
 
 ### Added

@@ -1,0 +1,70 @@
+name: Feature request
+description: Propose an outcome or workflow improvement for Knowledge Base Command Center.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Start with the user problem and desired outcome. Substantial behavior or data-model changes should be discussed before implementation.
+
+        Use synthetic names and paths. Do not include private notes, data.json, recovery files, patient information, credentials, or copyrighted source content.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or unmet workflow
+      description: Who encounters this, and what is difficult today?
+      placeholder: When I organize … I cannot …
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the observable result without requiring a particular implementation.
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Primary area
+      options:
+        - Knowledge Index or visual arrangement
+        - Libraries or Library management
+        - Collections, queues, pins, or saved views
+        - Search or record details
+        - Note creation or templates
+        - Export, import, or recovery
+        - Multiple knowledge bases or Sync
+        - Mobile or accessibility
+        - Documentation or contributor experience
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: current-workaround
+    attributes:
+      label: Current workaround or alternatives
+      description: Explain any workflow you use today and why it is insufficient.
+  - type: textarea
+    id: implications
+    attributes:
+      label: Data, migration, mobile, and privacy implications
+      description: Note any effect on existing plugin data, Sync, Markdown files, import/export, touch devices, or private vault information.
+  - type: textarea
+    id: examples
+    attributes:
+      label: Synthetic example or mockup
+      description: Use fictional notes and paths only. Label generated artwork or mockups honestly.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues for the same request.
+          required: true
+        - label: I described the problem and outcome, not only an implementation.
+          required: true
+        - label: I removed private vault content, patient information, credentials, and copyrighted source text.
+          required: true
