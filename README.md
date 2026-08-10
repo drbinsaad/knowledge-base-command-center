@@ -89,7 +89,7 @@ Search is Unicode-aware and normalizes common diacritic, apostrophe, Arabic, and
 
 Quick entry is available from the lightning-bolt desktop ribbon action and the Command Center header. On mobile, Obsidian exposes ribbon actions in its **Open** menu. Its focused commands can create a No note subject, heading, subheading, or note, and can add the current or an existing note. Library capture asks for the exact heading or subheading before it creates or classifies a note. The hub can switch the active knowledge base before opening an entry form.
 
-The plugin assigns no default key combinations. Choose your own under **Settings → Hotkeys**. On iPhone or iPad, open **Settings → Mobile → Manage toolbar**, scroll to the bottom, choose **Add global command**, then search for and select **Quick entry…** or another focused command.
+The plugin assigns no default key combinations. Choose your own under **Settings → Hotkeys**. On iPhone or iPad, open **Settings → Mobile → Manage toolbar options**, scroll to the bottom, choose **Add global command**, then search for and select **Quick entry…** or another focused command.
 
 Apple Shortcuts can open the hub with the action-only URL <code>obsidian://kbcc-quick-entry</code>. Query fields are not supported: a URL containing <code>?title=</code>, <code>?path=</code>, or any other parameter fails closed and does not open Quick entry. A URL can never prefill or submit note data.
 

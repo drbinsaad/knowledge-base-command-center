@@ -158,7 +158,7 @@ Available focused commands are:
 
 ### Add a mobile toolbar button
 
-On iPhone or iPad, open **Settings → Mobile → Manage toolbar**, scroll to the bottom, choose **Add global command**, then search for and select **Quick entry…**. Any focused Quick Entry command can be selected instead. Command icons are supplied for the mobile toolbar, but the plugin does not force a toolbar layout.
+On iPhone or iPad, open **Settings → Mobile → Manage toolbar options**, scroll to the bottom, choose **Add global command**, then search for and select **Quick entry…**. Any focused Quick Entry command can be selected instead. Command icons are supplied for the mobile toolbar, but the plugin does not force a toolbar layout.
 
 ### Use Apple Shortcuts safely
 

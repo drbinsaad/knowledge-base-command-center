@@ -44,7 +44,7 @@ test("public repository metadata is present", async () => {
   assert.match(readme, /Portable packages created by version .* use format version 4/i);
   assert.match(readme, /Current v9 (?:snapshots|files)/i);
   assert.match(readme, /obsidian:\/\/kbcc-quick-entry/);
-  assert.match(readme, /Settings → Mobile → Manage toolbar/);
+  assert.match(readme, /Settings → Mobile → Manage toolbar options/);
   const latestChangelogVersion = /^##\s+(\d+\.\d+\.\d+)\s*$/m.exec(changelog)?.[1];
   assert.equal(latestChangelogVersion, manifest.version, "the first changelog release must match the release manifest");
   assert.match(changelog, /Version 0\.8\.1 was not published as a tag or GitHub release/);

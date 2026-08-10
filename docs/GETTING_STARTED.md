@@ -91,7 +91,7 @@ Quick entry opens one focused hub for the active knowledge base. It can switch b
 - **Desktop ribbon:** choose the lightning-bolt **Open quick entry** action. On mobile, Obsidian places ribbon actions in the **Open** menu.
 - **Inside the Command Center:** choose **Quick entry** in the header.
 - **Keyboard:** open **Settings → Hotkeys**, search for `Quick entry`, and assign only the combinations you want. The plugin installs no default hotkeys.
-- **iPhone or iPad toolbar:** open **Settings → Mobile → Manage toolbar**, scroll to the bottom, choose **Add global command**, then search for and select **Quick entry…** or any focused Quick Entry command.
+- **iPhone or iPad toolbar:** open **Settings → Mobile → Manage toolbar options**, scroll to the bottom, choose **Add global command**, then search for and select **Quick entry…** or any focused Quick Entry command.
 - **Apple Shortcuts:** use **Open URLs** with exactly `obsidian://kbcc-quick-entry`.
 
 When a Library is the destination, Quick Entry asks for its heading or subheading before continuing. If that Library has no headings yet, it asks you to create the first heading and then continues with the selected action.
