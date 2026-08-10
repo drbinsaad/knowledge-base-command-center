@@ -1,12 +1,15 @@
 import { App, Notice, Plugin, PluginSettingTab, Setting, SettingDefinitionItem, SettingDefinitionRender, TFile, TFolder } from "obsidian";
 import { ManageKnowledgeBasesModal } from "./knowledge-base-modal";
+import { ManageLibrariesModal } from "./library-modal";
 import type EntVaultCommandCenterPlugin from "./main";
 import {
   asUnknownRecord,
   DEFAULT_PROPOSAL_FOLDER,
+  libraryTabId,
   pathIsInsideFolder,
   validateProposalFolderPath,
   validateWritableFolderPath,
+  type LibraryDefinition,
   type MainTab,
   type NewNoteMode,
   type OpenNoteBehavior,
@@ -29,7 +32,11 @@ interface SettingsHost extends Plugin {
   getDataEpoch?(): number;
   switchKnowledgeBase(id: string): Promise<void>;
   renameKnowledgeBase(id: string, name: string): Promise<void>;
+  getLibraries(includeArchived?: boolean): LibraryDefinition[];
+  librarySubjectCount(id: string): number;
 }
+
+type DirectSettingsDataField = "activeTab" | "indexGroupOrder";
 
 function renderSetting(
   name: string,
@@ -49,14 +56,98 @@ function renderSetting(
 }
 
 export class EntCommandCenterSettingsTab extends PluginSettingTab {
+  private persistedDataSnapshot: PluginData | null = null;
+  private settingsSaveRevision = 0;
+  private persistedSettingsRevision = 0;
+  private pendingSettingsSaves = 0;
+
   constructor(app: App, private readonly host: SettingsHost) {
     super(app, host);
   }
 
-  private async save(refresh = true): Promise<void> {
+  private rollbackAttemptedData(
+    baseline: PluginData,
+    attempted: PluginData,
+    directDataFields: readonly DirectSettingsDataField[],
+  ): void {
+    const live = this.host.data;
+    const liveSettings = live.settings as unknown as Record<string, unknown>;
+    const baselineSettings = baseline.settings as unknown as Record<string, unknown>;
+    const attemptedSettings = attempted.settings as unknown as Record<string, unknown>;
+    for (const key of Object.keys(attemptedSettings)) {
+      const before = baselineSettings[key];
+      const tried = attemptedSettings[key];
+      // Restore only fields this settings attempt changed, and only while the
+      // live field still contains that attempted value. This is a three-way
+      // rollback: a concurrent rename or other newer writer remains untouched.
+      if (!Object.is(before, tried) && Object.is(liveSettings[key], tried)) {
+        liveSettings[key] = before;
+      }
+    }
+    if (directDataFields.includes("activeTab")
+      && baseline.activeTab !== attempted.activeTab
+      && live.activeTab === attempted.activeTab) {
+      live.activeTab = baseline.activeTab;
+    }
+    const sameOrder = (left: readonly string[], right: readonly string[]): boolean => (
+      left.length === right.length && left.every((value, index) => value === right[index])
+    );
+    if (directDataFields.includes("indexGroupOrder")
+      && !sameOrder(baseline.indexGroupOrder, attempted.indexGroupOrder)
+      && sameOrder(live.indexGroupOrder, attempted.indexGroupOrder)) {
+      live.indexGroupOrder = [...baseline.indexGroupOrder];
+    }
+  }
+
+  /** Persist direct settings controls transactionally, including Sync rejections. */
+  private async save(
+    refresh = true,
+    directDataFields: readonly DirectSettingsDataField[] = [],
+  ): Promise<boolean> {
+    const revision = this.settingsSaveRevision + 1;
+    this.settingsSaveRevision = revision;
+    const fallbackRollback = structuredClone(this.persistedDataSnapshot ?? this.host.data);
     this.host.data.settings.setupComplete = true;
-    await this.host.savePluginData();
-    if (refresh) await this.host.refreshViews();
+    // savePluginData snapshots synchronously at call time. Keep that exact
+    // attempted value: a later input event may mutate the live object before
+    // this promise settles.
+    const attempted = structuredClone(this.host.data);
+    this.pendingSettingsSaves += 1;
+    try {
+      await this.host.savePluginData();
+    } catch (error) {
+      this.pendingSettingsSaves -= 1;
+      // Text controls can start another save while this one is in flight. An
+      // older rejection must not roll back the newer live value; the latest
+      // revision will either persist it or restore the last successful attempt.
+      if (revision !== this.settingsSaveRevision) return false;
+      this.rollbackAttemptedData(this.persistedDataSnapshot ?? fallbackRollback, attempted, directDataFields);
+      new Notice(`The setting was not saved and has been restored: ${error instanceof Error ? error.message : String(error)}`, 8000);
+      try {
+        await this.host.refreshViews();
+      } catch (refreshError) {
+        console.error("Knowledge Base Command Center restored a failed setting but could not refresh its view", refreshError);
+      }
+      this.update();
+      return false;
+    }
+    this.pendingSettingsSaves -= 1;
+    if (revision > this.persistedSettingsRevision) {
+      this.persistedDataSnapshot = attempted;
+      this.persistedSettingsRevision = revision;
+    }
+    // A later input owns the live value and the eventual refresh. Refreshing
+    // this superseded revision can make Obsidian rebuild controls mid-typing.
+    if (revision !== this.settingsSaveRevision) return true;
+    if (refresh) {
+      try {
+        await this.host.refreshViews();
+      } catch (error) {
+        console.error("Knowledge Base Command Center saved a setting but could not refresh its view", error);
+        new Notice("The setting was saved, but the command center could not refresh. Reopen it to see the change.", 8000);
+      }
+    }
+    return true;
   }
 
   private createOpenedBaseGuard(openedBaseId = this.host.getActiveKnowledgeBaseId()): () => boolean {
@@ -74,6 +165,9 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
   }
 
   getSettingDefinitions(): SettingDefinitionItem[] {
+    // Settings search can ask for definitions while an onChange save is still
+    // pending. Never bless that uncommitted live value as the rollback point.
+    if (this.pendingSettingsSaves === 0) this.persistedDataSnapshot = structuredClone(this.host.data);
     const settings = this.host.data.settings;
     const readOnly = this.host.isDataReadOnly();
     const definitions: SettingDefinitionItem[] = [{
@@ -137,6 +231,40 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
             });
           },
           ["switch", "manage", "rename", "duplicate", "archive", "restore", "base", "profile"],
+        ),
+      ],
+    });
+
+    const activeLibraries = this.host.getLibraries();
+    const allLibraries = this.host.getLibraries(true);
+    const archivedLibraryCount = allLibraries.length - activeLibraries.length;
+    const libraryRecordCount = activeLibraries.reduce(
+      (total, library) => total + this.host.librarySubjectCount(library.id),
+      0,
+    );
+    definitions.push({
+      type: "group",
+      heading: "Libraries",
+      items: [
+        {
+          name: "Top-level libraries",
+          desc: "Libraries are top-level tabs inside this knowledge base. Each has its own headings and subheadings. They are not separate knowledge bases, Obsidian .base files, or Collections.",
+          aliases: ["categories", "sections", "tabs", "medications", "procedures", "syndromes"],
+        },
+        renderSetting(
+          "Manage libraries",
+          `${activeLibraries.length} active · ${archivedLibraryCount} archived · ${libraryRecordCount} classified ${libraryRecordCount === 1 ? settings.itemSingular : settings.itemPlural}. Library actions never move, rewrite, or delete Markdown notes.`,
+          (row) => {
+            row.addButton((button) => button
+              .setButtonText("Manage…")
+              .setIcon("library")
+              .setDisabled(readOnly)
+              .onClick(() => {
+                if (!ownsConfiguredBase()) return;
+                new ManageLibrariesModal(this.host as EntVaultCommandCenterPlugin, () => this.update()).open();
+              }));
+          },
+          ["create", "rename", "icon", "reorder", "archive", "restore", "delete", "library"],
         ),
       ],
     });
@@ -231,11 +359,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
       collections: "My Collections",
       queues: "Smart Queues",
     };
-    if (settings.workspaceMode === "ent-clinical") {
-      defaultTabs.procedures = "Procedures";
-      defaultTabs.medications = "Medications";
-      defaultTabs.syndromes = "Syndromes";
-    }
+    for (const library of activeLibraries) defaultTabs[libraryTabId(library.id)] = library.name;
 
     definitions.push(
       {
@@ -419,7 +543,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
               if (!ownsConfiguredBase()) return;
               settings.defaultTab = value as MainTab;
               this.host.data.activeTab = value as MainTab;
-              await this.save();
+              await this.save(true, ["activeTab"]);
             }));
           }, ["tab", "start page"]),
           renderSetting("Recent changes limit", "Maximum entries in the Recently changed smart queue (5–100).", (row) => {
@@ -489,7 +613,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
               if (!ownsConfiguredBase()) return;
               if (value && this.host.data.indexGroupOrder.length === 0) this.host.data.indexGroupOrder = this.host.getIndexGroups();
               settings.allowClinicalVisualGroupMoves = value;
-              await this.save();
+              await this.save(true, ["indexGroupOrder"]);
             }));
           }, ["clinical", "groups", "arrange"]),
         ],

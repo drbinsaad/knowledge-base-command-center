@@ -3,10 +3,12 @@ export const PROCEDURE_ROOT = "04 Procedures/";
 export const MEDICATION_ROOT = "06 Clinical Tools/Medications/";
 export const SYNDROME_ROOT = "06 Clinical Tools/Syndromes/";
 export const DEFAULT_PROPOSAL_FOLDER = "01 Inbox/ENT Topic Proposals";
-export const DATA_VERSION = 10;
-export const STORE_VERSION = 11;
+export const DATA_VERSION = 12;
+export const STORE_VERSION = 13;
+export const MIN_RECOGNIZED_STORE_VERSION = 11;
 export const STORE_KIND = "knowledge-base-command-center-store";
 export const MAX_KNOWLEDGE_BASES = 50;
+export const MAX_LIBRARIES = 50;
 /** Permanent base-deletion tombstones are small, but remain bounded and are never silently evicted. */
 export const MAX_DELETED_KNOWLEDGE_BASE_IDS = 10_000;
 export const DEFAULT_KNOWLEDGE_BASE_ID = "base-default";
@@ -29,10 +31,38 @@ export const MAX_TRANSFER_LIST_ITEMS = 50_000;
 export const MAX_TRANSFER_TOTAL_REFERENCES = 250_000;
 export const MAX_TRANSFER_COLLECTIONS = 10_000;
 export const MAX_TRANSFER_SNAPSHOTS = 10;
+/** Per retained legacy backup; a store keeps at most one v1 and one v2 payload. */
+export const MAX_MIGRATION_BACKUP_BYTES = 2 * 1024 * 1024;
+const MAX_MIGRATION_BACKUP_DEPTH = 16;
+const MAX_MIGRATION_BACKUP_NODES = MAX_TRANSFER_TOTAL_REFERENCES;
 
 export type RecordKind = "topic" | "procedure" | "medication" | "syndrome" | "proposal" | "note";
+export const LIBRARY_KINDS = ["procedure", "medication", "syndrome"] as const;
+export type LibraryKind = typeof LIBRARY_KINDS[number];
+export const BUILTIN_LIBRARY_IDS: Readonly<Record<LibraryKind, LibraryKind>> = {
+  procedure: "procedure",
+  medication: "medication",
+  syndrome: "syndrome",
+};
+export interface LibraryDefinition {
+  id: string;
+  name: string;
+  singularName: string;
+  icon: string;
+  order: number;
+  sourceKind: LibraryKind | null;
+  archivedAt: number | null;
+}
+export const BUILTIN_LIBRARY_DEFINITIONS: readonly LibraryDefinition[] = [
+  { id: "procedure", name: "Procedures", singularName: "Procedure", icon: "clipboard-list", order: 0, sourceKind: "procedure", archivedAt: null },
+  { id: "medication", name: "Medications", singularName: "Medication", icon: "pill", order: 1, sourceKind: "medication", archivedAt: null },
+  { id: "syndrome", name: "Syndromes", singularName: "Syndrome", icon: "dna", order: 2, sourceKind: "syndrome", archivedAt: null },
+];
+export type LibraryLayouts = Record<string, LayoutHeading[]>;
 export type RecordRole = "canonical" | "supporting" | "library" | "proposal" | "vault-note" | "placeholder";
-export type MainTab = "curriculum" | "inbox" | "collections" | "queues" | "procedures" | "medications" | "syndromes";
+export type CoreTab = "curriculum" | "inbox" | "collections" | "queues";
+export type LibraryTab = `library:${string}`;
+export type MainTab = CoreTab | LibraryTab;
 export type OpenNoteBehavior = "new-tab" | "same-tab" | "split";
 export type WorkspaceMode = "generic" | "ent-clinical";
 export type NewNoteMode = "empty" | "template";
@@ -94,6 +124,27 @@ export interface VaultRecord {
   isPlaceholder?: boolean;
   /** Effective index membership for an unresolved portable subject. */
   portableIndexed?: boolean;
+  /** Stable visual library identity, independent of the record's semantic kind. */
+  libraryId?: string;
+  /** True only when a note was explicitly linked from a portable placeholder. */
+  portableRelinkable?: boolean;
+}
+
+/**
+ * One defensive boundary for effective Index membership. Source semantics and
+ * visual placement are deliberately independent: a native topic remains a
+ * topic while Hidden or parked in a Library, but neither state belongs to the
+ * Index. Conversely, stale portable data cannot force a non-topic source into
+ * the Index merely by setting `portableIndexed: true`.
+ */
+export function recordBelongsToIndex(
+  record: Pick<VaultRecord, "kind" | "role" | "libraryId" | "portableIndexed">,
+  topicsOnly = false,
+): boolean {
+  if (record.libraryId || record.portableIndexed === false) return false;
+  if (record.portableIndexed === true) return !topicsOnly || record.kind === "topic";
+  return record.kind === "topic"
+    && (record.role === "canonical" || record.role === "supporting" || record.role === "placeholder");
 }
 
 export interface PortableGroupDefinition {
@@ -111,6 +162,8 @@ export interface PortableSubjectDefinition {
   indexed: boolean;
   configuredId: string;
   recordKind: RecordKind;
+  /** Undefined is accepted only while migrating v2 data; null means deliberately unassigned. */
+  libraryId?: string | null;
 }
 
 /**
@@ -118,10 +171,16 @@ export interface PortableSubjectDefinition {
  * vault state and is deliberately omitted by the portable export serializer.
  */
 export interface PortableIndexLocalState {
-  version: 1;
+  version: 3;
   groups: PortableGroupDefinition[];
   subjects: PortableSubjectDefinition[];
   resolvedPathBySubjectId: Record<string, string>;
+  /** Local-only identities whose bindings were explicitly completed from placeholders. */
+  relinkableSubjectIds?: string[];
+  /** Ordered, base-local top-level libraries. Names never act as identities. */
+  libraries: LibraryDefinition[];
+  /** Visual-only, path-free organization. Subjects are stable portable subject IDs. */
+  libraryLayouts: LibraryLayouts;
 }
 
 export interface TopicFormValue {
@@ -203,6 +262,8 @@ export interface SavedView {
 export interface PersonalSnapshot {
   label: string;
   at: number;
+  /** Included only when the operation can change the selected workspace tab. */
+  activeTab?: MainTab;
   collections: LayoutHeading[];
   pinnedPaths: string[];
   nextStudyPaths: string[];
@@ -275,7 +336,7 @@ export interface V2MigrationBackup {
 }
 
 export interface PluginData {
-  version: 10;
+  version: 12;
   collections: LayoutHeading[];
   pinnedPaths: string[];
   nextStudyPaths: string[];
@@ -304,7 +365,7 @@ export interface KnowledgeBaseEntry {
   createdAt: number;
   updatedAt: number;
   archivedAt: number | null;
-  /** Existing v10 workspace payload, deliberately kept intact per base. */
+  /** Existing v12 workspace payload, deliberately kept intact per base. */
   data: PluginData;
 }
 
@@ -370,7 +431,7 @@ export const ENT_CLINICAL_SETTINGS: PluginSettings = {
 };
 
 export const DEFAULT_DATA: PluginData = {
-  version: 10,
+  version: 12,
   collections: [],
   pinnedPaths: [],
   nextStudyPaths: [],
@@ -382,7 +443,15 @@ export const DEFAULT_DATA: PluginData = {
   displayNameByPath: {},
   indexGroupAliases: {},
   indexGroupOrder: [],
-  portableIndex: { version: 1, groups: [], subjects: [], resolvedPathBySubjectId: {} },
+  portableIndex: {
+    version: 3,
+    groups: [],
+    subjects: [],
+    resolvedPathBySubjectId: {},
+    relinkableSubjectIds: [],
+    libraries: [],
+    libraryLayouts: {},
+  },
   selectedPath: "",
   activeTab: "curriculum",
   settings: { ...DEFAULT_SETTINGS },
@@ -440,8 +509,10 @@ function fingerprintText(text: string): string {
 
 function migrationFingerprint(data: PluginData): string {
   const comparable = structuredClone(data);
-  if (comparable.migrationBackup) comparable.migrationBackup.migratedAt = 0;
-  if (comparable.v2MigrationBackup) comparable.v2MigrationBackup.migratedAt = 0;
+  const migrationBackup = asUnknownRecord(comparable.migrationBackup);
+  const v2MigrationBackup = asUnknownRecord(comparable.v2MigrationBackup);
+  if (migrationBackup.version === 1) migrationBackup.migratedAt = 0;
+  if (v2MigrationBackup.version === 2) v2MigrationBackup.migratedAt = 0;
   return fingerprintText(JSON.stringify(canonicalMigrationValue(comparable)));
 }
 
@@ -452,6 +523,37 @@ function randomMigrationNonce(): string {
     return Array.from(values, (value) => value.toString(16).padStart(8, "0")).join("");
   }
   return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function freshVaultId(): string {
+  return `vault-fresh-${randomMigrationNonce()}`;
+}
+
+/** A data-less device keeps this provisional identity until Sync establishes the vault identity. */
+export function isFreshVaultId(vaultId: string): boolean {
+  return /^vault-fresh-[a-z0-9]{12,64}$/i.test(vaultId.trim());
+}
+
+/**
+ * Whether a fresh-device store contains only harmless view/bootstrap state.
+ * These fields may be saved automatically when the command center first opens;
+ * they must not stop an existing identified Sync store from becoming the
+ * authority. Settings, organization, histories, and every other field remain
+ * significant so actual offline work is never silently discarded.
+ */
+export function freshStoreHasOnlyBootstrapChanges(store: PluginStore): boolean {
+  if (!isFreshVaultId(store.vaultId)
+    || store.activeBaseId !== DEFAULT_KNOWLEDGE_BASE_ID
+    || store.bases.length !== 1
+    || Object.keys(store.deletedBaseIds).length !== 0) return false;
+  const entry = store.bases[0];
+  if (!entry || entry.id !== DEFAULT_KNOWLEDGE_BASE_ID || entry.archivedAt !== null) return false;
+  const comparable = structuredClone(entry.data);
+  comparable.selectedPath = DEFAULT_DATA.selectedPath;
+  comparable.activeTab = DEFAULT_DATA.activeTab;
+  comparable.collapsed = structuredClone(DEFAULT_DATA.collapsed);
+  return JSON.stringify(canonicalMigrationValue(comparable))
+    === JSON.stringify(canonicalMigrationValue(DEFAULT_DATA));
 }
 
 function migratedVaultId(data: PluginData): string {
@@ -536,6 +638,58 @@ export function pristineProvisionalMigratedStoreFingerprint(store: PluginStore):
   return fingerprint;
 }
 
+function sameMigrationEnvelopeMetadata(before: PluginStore, after: PluginStore): boolean {
+  if (before.activeBaseId !== after.activeBaseId
+    || before.bases.length !== after.bases.length
+    || canonicalMigrationValue(before.deletedBaseIds) === undefined
+    || JSON.stringify(canonicalMigrationValue(before.deletedBaseIds))
+      !== JSON.stringify(canonicalMigrationValue(after.deletedBaseIds))) return false;
+  return before.bases.every((entry, index) => {
+    const repaired = after.bases[index];
+    return Boolean(repaired
+      && entry.id === repaired.id
+      && entry.createdAt === repaired.createdAt
+      && entry.updatedAt === repaired.updatedAt
+      && entry.archivedAt === repaired.archivedAt);
+  });
+}
+
+/**
+ * Rebase a still-pristine provisional migration identity after a deterministic
+ * schema repair changes only knowledge-base payload data. The original random
+ * nonce remains intact, so independently upgraded devices stay distinct while
+ * carrying the same repaired fingerprint and can converge through Sync.
+ *
+ * The caller must provide the snapshot from immediately before the repair.
+ * Normal identities, edited provisional stores, and metadata-changing repairs
+ * are deliberately rejected.
+ */
+export function rebaseProvisionalVaultIdAfterDeterministicRepair(
+  before: PluginStore,
+  after: PluginStore,
+): boolean {
+  if (before.vaultId !== after.vaultId || !sameMigrationEnvelopeMetadata(before, after)) return false;
+
+  const flatMatch = /^vault-migrated-([0-9a-f]{16})-([a-z0-9]{12,64})$/i.exec(before.vaultId.trim());
+  if (flatMatch && pristineProvisionalMigratedStoreFingerprint(before)) {
+    const entry = after.bases[0];
+    if (!entry) return false;
+    const nextVaultId = `vault-migrated-${migrationFingerprint(entry.data)}-${flatMatch[2]}`;
+    if (nextVaultId === after.vaultId) return false;
+    after.vaultId = nextVaultId;
+    return true;
+  }
+
+  const envelopeMatch = /^vault-envelope-migrated-([0-9a-f]{16})-([a-z0-9]{12,64})$/i.exec(before.vaultId.trim());
+  if (envelopeMatch && pristineProvisionalInterimEnvelopeStoreFingerprint(before)) {
+    const nextVaultId = `vault-envelope-migrated-${interimEnvelopeFingerprint(after)}-${envelopeMatch[2]}`;
+    if (nextVaultId === after.vaultId) return false;
+    after.vaultId = nextVaultId;
+    return true;
+  }
+  return false;
+}
+
 export function asText(value: unknown, fallback = ""): string {
   return typeof value === "string" ? value.trim() : fallback;
 }
@@ -579,6 +733,288 @@ export function cloneCollections(collections: LayoutHeading[]): LayoutHeading[] 
   }));
 }
 
+export function isLibraryKind(value: unknown): value is LibraryKind {
+  return LIBRARY_KINDS.includes(value as LibraryKind);
+}
+
+export function isValidLibraryId(value: unknown): value is string {
+  const id = asText(value);
+  return Boolean(id
+    && id.length <= 128
+    && /^[a-z0-9][a-z0-9._:@+-]*$/i.test(id)
+    && isSafeObjectKey(id));
+}
+
+export function libraryTabId(id: string): LibraryTab {
+  if (!isValidLibraryId(id)) throw new Error("The library has an invalid stable ID.");
+  return `library:${id}`;
+}
+
+export function libraryIdFromTab(tab: unknown): string | null {
+  if (typeof tab !== "string" || !tab.startsWith("library:")) return null;
+  const id = tab.slice("library:".length);
+  return isValidLibraryId(id) ? id : null;
+}
+
+function legacyLibraryIdFromTab(tab: unknown): LibraryKind | null {
+  if (tab === "procedures") return BUILTIN_LIBRARY_IDS.procedure;
+  if (tab === "medications") return BUILTIN_LIBRARY_IDS.medication;
+  if (tab === "syndromes") return BUILTIN_LIBRARY_IDS.syndrome;
+  return null;
+}
+
+function migrateMainTab(tab: unknown, fallback: MainTab): MainTab {
+  const legacyId = legacyLibraryIdFromTab(tab);
+  if (legacyId) return libraryTabId(legacyId);
+  return isMainTab(tab) ? tab : fallback;
+}
+
+export function subjectLibraryId(subject: Pick<PortableSubjectDefinition, "indexed" | "libraryId" | "recordKind">): string | null {
+  if (subject.indexed) return null;
+  if (Object.prototype.hasOwnProperty.call(subject, "libraryId")) {
+    return isValidLibraryId(subject.libraryId) ? subject.libraryId : null;
+  }
+  return isLibraryKind(subject.recordKind) ? BUILTIN_LIBRARY_IDS[subject.recordKind] : null;
+}
+
+export function emptyLibraryLayouts(
+  values: readonly (string | Pick<LibraryDefinition, "id">)[] = [],
+): LibraryLayouts {
+  const layouts: LibraryLayouts = {};
+  for (const value of values) {
+    const id = typeof value === "string" ? value : value.id;
+    if (isValidLibraryId(id) && !Object.prototype.hasOwnProperty.call(layouts, id)) layouts[id] = [];
+  }
+  return layouts;
+}
+
+export function cloneLibraryLayouts(layouts: LibraryLayouts | undefined): LibraryLayouts {
+  const output: LibraryLayouts = {};
+  if (!layouts) return output;
+  for (const [id, layout] of Object.entries(layouts)) {
+    if (isValidLibraryId(id) && Array.isArray(layout)) output[id] = cloneCollections(layout);
+  }
+  return output;
+}
+
+function clippedLibraryText(input: unknown, fallback: string): string {
+  return asText(input, fallback).normalize("NFC").slice(0, 100).trim() || fallback;
+}
+
+function builtinLibraryDefinition(kind: LibraryKind): LibraryDefinition {
+  return { ...(BUILTIN_LIBRARY_DEFINITIONS.find((definition) => definition.id === BUILTIN_LIBRARY_IDS[kind])
+    ?? { id: kind, name: `${kind}s`, singularName: kind, icon: "library", order: 0, sourceKind: kind, archivedAt: null }) };
+}
+
+/**
+ * Parse stable top-level library identities. Legacy fixed layouts and
+ * non-indexed semantic subjects opt the matching built-in library in without
+ * making empty generic workspaces acquire clinical tabs.
+ */
+export function cleanLibraryDefinitions(
+  input: unknown,
+  legacyLayouts: unknown,
+  subjects: PortableSubjectDefinition[],
+): LibraryDefinition[] {
+  const definitions: LibraryDefinition[] = [];
+  const ids = new Set<string>();
+  if (Array.isArray(input)) {
+    for (const raw of input) {
+      if (definitions.length >= MAX_LIBRARIES) break;
+      const value = asUnknownRecord(raw);
+      const id = asText(value.id);
+      if (!isValidLibraryId(id) || ids.has(id)) continue;
+      const builtinKind = isLibraryKind(id) ? id : null;
+      const sourceKind = builtinKind && BUILTIN_LIBRARY_IDS[builtinKind] === id ? builtinKind : null;
+      const builtin = sourceKind ? builtinLibraryDefinition(sourceKind) : null;
+      const archivedValue = Number(value.archivedAt);
+      definitions.push({
+        id,
+        name: clippedLibraryText(value.name, builtin?.name ?? "Library"),
+        singularName: clippedLibraryText(value.singularName, builtin?.singularName ?? "Item"),
+        icon: /^[a-z0-9-]{1,64}$/i.test(asText(value.icon)) ? asText(value.icon) : builtin?.icon ?? "library",
+        order: Number.isFinite(Number(value.order)) ? Number(value.order) : definitions.length,
+        sourceKind,
+        archivedAt: value.archivedAt === null || value.archivedAt === undefined
+          ? null
+          : Number.isFinite(archivedValue) && archivedValue > 0 ? archivedValue : null,
+      });
+      ids.add(id);
+    }
+  }
+  const layouts = asUnknownRecord(legacyLayouts);
+  for (const kind of LIBRARY_KINDS) {
+    const id = BUILTIN_LIBRARY_IDS[kind];
+    const usedByLayout = Array.isArray(layouts[id]) && layouts[id].length > 0;
+    const usedBySubject = subjects.some((subject) => !subject.indexed
+      && (subjectLibraryId(subject) === id || (!Object.prototype.hasOwnProperty.call(subject, "libraryId") && subject.recordKind === kind)));
+    if ((usedByLayout || usedBySubject) && !ids.has(id) && definitions.length < MAX_LIBRARIES) {
+      definitions.push(builtinLibraryDefinition(kind));
+      ids.add(id);
+    }
+  }
+  return definitions.sort((left, right) => left.order - right.order || left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+}
+
+/** Ensure the ENT preset exposes all three system libraries without touching layouts or Markdown. */
+export function ensureSystemLibraries(state: PortableIndexLocalState): void {
+  const ids = new Set(state.libraries.map((definition) => definition.id));
+  for (const kind of LIBRARY_KINDS) {
+    const id = BUILTIN_LIBRARY_IDS[kind];
+    if (!ids.has(id)) {
+      state.libraries.push(builtinLibraryDefinition(kind));
+      ids.add(id);
+    }
+    state.libraryLayouts[id] ??= [];
+  }
+  state.libraries.sort((left, right) => left.order - right.order || left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+}
+
+function deterministicLayoutId(preferred: string, used: Set<string>): string {
+  const base = preferred.trim() || "layout";
+  let candidate = base;
+  let suffix = 2;
+  while (used.has(candidate)) {
+    candidate = `${base}-${suffix}`;
+    suffix += 1;
+  }
+  used.add(candidate);
+  return candidate;
+}
+
+function librarySubjectsById(subjects: PortableSubjectDefinition[], libraryId: string): PortableSubjectDefinition[] {
+  return subjects
+    .filter((subject) => subjectLibraryId(subject) === libraryId)
+    .sort((left, right) => left.order - right.order || left.title.localeCompare(right.title) || left.id.localeCompare(right.id));
+}
+
+function deriveFlatLibraryLayout(
+  libraryId: string,
+  groups: PortableGroupDefinition[],
+  subjects: PortableSubjectDefinition[],
+): LayoutHeading[] {
+  const groupById = new Map(groups.map((group) => [group.id, group]));
+  const byGroup = new Map<string, PortableSubjectDefinition[]>();
+  for (const subject of librarySubjectsById(subjects, libraryId)) {
+    const values = byGroup.get(subject.groupId) ?? [];
+    values.push(subject);
+    byGroup.set(subject.groupId, values);
+  }
+  return [...byGroup.entries()]
+    .sort(([leftId], [rightId]) => {
+      const left = groupById.get(leftId);
+      const right = groupById.get(rightId);
+      return (left?.order ?? Number.MAX_SAFE_INTEGER) - (right?.order ?? Number.MAX_SAFE_INTEGER)
+        || (left?.title ?? "Ungrouped").localeCompare(right?.title ?? "Ungrouped")
+        || leftId.localeCompare(rightId);
+    })
+    .map(([groupId, values]) => ({
+      id: `library-${libraryId}-${groupId}`,
+      title: groupById.get(groupId)?.title || "Ungrouped",
+      collapsed: false,
+      subjects: values.map((subject) => subject.id),
+      subheadings: [],
+    }));
+}
+
+function cleanLibraryLayout(
+  input: unknown,
+  libraryId: string,
+  subjects: PortableSubjectDefinition[],
+): LayoutHeading[] {
+  const allowed = new Set(librarySubjectsById(subjects, libraryId).map((subject) => subject.id));
+  const placed = new Set<string>();
+  const structureIds = new Set<string>();
+  const headings: LayoutHeading[] = [];
+  if (Array.isArray(input)) {
+    for (const [headingIndex, rawHeading] of input.entries()) {
+      const heading = asUnknownRecord(rawHeading);
+      const title = asText(heading.title);
+      if (!title) continue;
+      const headingId = deterministicLayoutId(
+        isSafeObjectKey(asText(heading.id)) && asText(heading.id)
+          ? asText(heading.id)
+          : `library-${libraryId}-heading-${headingIndex + 1}`,
+        structureIds,
+      );
+      const takeSubjects = (rawSubjects: unknown): string[] => {
+        const output: string[] = [];
+        for (const subjectId of asStringList(rawSubjects)) {
+          if (!allowed.has(subjectId) || placed.has(subjectId)) continue;
+          placed.add(subjectId);
+          output.push(subjectId);
+        }
+        return output;
+      };
+      const directSubjects = takeSubjects(heading.subjects);
+      const subheadings: LayoutSubheading[] = [];
+      if (Array.isArray(heading.subheadings)) {
+        for (const [subheadingIndex, rawSubheading] of heading.subheadings.entries()) {
+          const subheading = asUnknownRecord(rawSubheading);
+          const subheadingTitle = asText(subheading.title);
+          if (!subheadingTitle) continue;
+          subheadings.push({
+            id: deterministicLayoutId(
+              isSafeObjectKey(asText(subheading.id)) && asText(subheading.id)
+                ? asText(subheading.id)
+                : `${headingId}-subheading-${subheadingIndex + 1}`,
+              structureIds,
+            ),
+            title: subheadingTitle,
+            collapsed: subheading.collapsed === true,
+            subjects: takeSubjects(subheading.subjects),
+          });
+        }
+      }
+      headings.push({
+        id: headingId,
+        title,
+        collapsed: heading.collapsed === true,
+        subjects: directSubjects,
+        subheadings,
+      });
+    }
+  }
+  return headings;
+}
+
+/**
+ * Cleans path-free library organization against the canonical subject catalog.
+ * A missing catalog is migrated from legacy group metadata; an explicit layout
+ * is authoritative, with invalid/duplicate references removed. Explicitly
+ * unplaced subjects remain unplaced so deleting a heading is stable.
+ */
+export function cleanLibraryLayouts(
+  input: unknown,
+  groups: PortableGroupDefinition[],
+  subjects: PortableSubjectDefinition[],
+  libraries?: readonly LibraryDefinition[],
+): LibraryLayouts {
+  const value = asUnknownRecord(input);
+  const definitions = libraries ?? cleanLibraryDefinitions(undefined, input, subjects);
+  const layouts = emptyLibraryLayouts(definitions);
+  for (const definition of definitions) {
+    layouts[definition.id] = Array.isArray(value[definition.id])
+      ? cleanLibraryLayout(value[definition.id], definition.id, subjects)
+      : definition.sourceKind
+        ? deriveFlatLibraryLayout(definition.id, groups, subjects)
+        : [];
+  }
+  return layouts;
+}
+
+/** Reconcile after a classification or catalog mutation without changing Markdown. */
+export function reconcilePortableLibraryLayouts(state: PortableIndexLocalState): void {
+  state.libraries = cleanLibraryDefinitions(state.libraries, state.libraryLayouts, state.subjects);
+  const valid = new Set(state.libraries.map((definition) => definition.id));
+  for (const subject of state.subjects) {
+    const id = subjectLibraryId(subject);
+    if (subject.indexed) delete subject.libraryId;
+    else subject.libraryId = id && valid.has(id) ? id : null;
+  }
+  state.libraryLayouts = cleanLibraryLayouts(state.libraryLayouts, state.groups, state.subjects, state.libraries);
+}
+
 export function cloneCurriculumVisual(state: CurriculumVisualState): CurriculumVisualState {
   const orderByContainer: Record<string, string[]> = {};
   for (const [key, paths] of Object.entries(state.orderByContainer)) orderByContainer[key] = [...paths];
@@ -593,11 +1029,19 @@ export function clonePathMap(input: Record<string, string>): Record<string, stri
 }
 
 export function clonePortableIndex(state: PortableIndexLocalState): PortableIndexLocalState {
+  const libraries = state.libraries
+    ? state.libraries.map((definition) => ({ ...definition }))
+    : cleanLibraryDefinitions(undefined, state.libraryLayouts, state.subjects);
   return {
-    version: 1,
+    version: 3,
     groups: state.groups.map((group) => ({ ...group })),
     subjects: state.subjects.map((subject) => ({ ...subject })),
     resolvedPathBySubjectId: { ...state.resolvedPathBySubjectId },
+    relinkableSubjectIds: [...(state.relinkableSubjectIds ?? [])],
+    libraries,
+    libraryLayouts: state.libraryLayouts
+      ? cloneLibraryLayouts(state.libraryLayouts)
+      : cleanLibraryLayouts(undefined, state.groups, state.subjects, libraries),
   };
 }
 
@@ -618,13 +1062,68 @@ export function isPortablePlaceholderPath(path: string): boolean {
  * mutate snapshots in place must invalidate the corresponding cache entry.
  */
 const snapshotByteCache = new WeakMap<PersonalSnapshot, number>();
+const snapshotUtf8Encoder = new TextEncoder();
 
 function snapshotByteLength(snapshot: PersonalSnapshot): number {
   const cached = snapshotByteCache.get(snapshot);
   if (cached !== undefined) return cached;
-  const bytes = JSON.stringify(snapshot).length;
+  const bytes = snapshotUtf8Encoder.encode(JSON.stringify(snapshot)).byteLength;
   snapshotByteCache.set(snapshot, bytes);
   return bytes;
+}
+
+interface MigrationBackupBudget {
+  nodes: number;
+}
+
+/** Clone only the JSON subset that plugin data can actually persist. */
+function cloneBoundedMigrationJson(value: unknown, depth: number, budget: MigrationBackupBudget): unknown {
+  budget.nodes += 1;
+  if (budget.nodes > MAX_MIGRATION_BACKUP_NODES) throw new Error("Migration backup has too many values.");
+  if (depth > MAX_MIGRATION_BACKUP_DEPTH) throw new Error("Migration backup is nested too deeply.");
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("Migration backup contains a non-finite number.");
+    return value;
+  }
+  if (typeof value === "string") {
+    // UTF-8 is never shorter than a JavaScript string's code-unit length, so
+    // this avoids allocating an encoder buffer for an obviously oversized value.
+    if (value.length > MAX_MIGRATION_BACKUP_BYTES) throw new Error("Migration backup contains oversized text.");
+    return value;
+  }
+  if (Array.isArray(value)) {
+    if (value.length > MAX_TRANSFER_LIST_ITEMS) throw new Error("Migration backup contains an oversized list.");
+    return value.map((item) => cloneBoundedMigrationJson(item, depth + 1, budget));
+  }
+  if (!value || typeof value !== "object") throw new Error("Migration backup contains a non-JSON value.");
+  const keys = Object.keys(value).sort();
+  if (keys.length > MAX_TRANSFER_LIST_ITEMS) throw new Error("Migration backup contains an oversized object.");
+  const output: Record<string, unknown> = {};
+  for (const key of keys) {
+    if (!isSafeObjectKey(key)) throw new Error("Migration backup contains an unsafe object key.");
+    output[key] = cloneBoundedMigrationJson((value as Record<string, unknown>)[key], depth + 1, budget);
+  }
+  return output;
+}
+
+function boundedMigrationBackup<T>(value: T): T | undefined {
+  try {
+    const cloned = cloneBoundedMigrationJson(value, 0, { nodes: 0 });
+    const measured = cloned && typeof cloned === "object" && !Array.isArray(cloned)
+      ? { ...(cloned as Record<string, unknown>), migratedAt: Number.MAX_SAFE_INTEGER }
+      : cloned;
+    const serialized = JSON.stringify(measured);
+    if (snapshotUtf8Encoder.encode(serialized).byteLength > MAX_MIGRATION_BACKUP_BYTES) return undefined;
+    return cloned as T;
+  } catch {
+    return undefined;
+  }
+}
+
+function cleanMigrationTimestamp(value: unknown): number {
+  const timestamp = Number(value);
+  return Number.isSafeInteger(timestamp) && timestamp > 0 ? timestamp : 1;
 }
 
 export function limitSnapshotStack(
@@ -1052,6 +1551,7 @@ export function snapshotPersonal(
   includeSettings = false,
   includePortableIndex = false,
   includeLayoutSnapshots = false,
+  includeActiveTab = false,
 ): PersonalSnapshot {
   const snapshot: PersonalSnapshot = {
     label,
@@ -1068,6 +1568,7 @@ export function snapshotPersonal(
     indexGroupAliases: clonePathMap(data.indexGroupAliases),
     indexGroupOrder: [...data.indexGroupOrder],
   };
+  if (includeActiveTab) snapshot.activeTab = data.activeTab;
   if (includeSettings) snapshot.settings = structuredClone(data.settings);
   if (includePortableIndex) snapshot.portableIndex = clonePortableIndex(data.portableIndex);
   if (includeLayoutSnapshots) snapshot.layoutSnapshots = data.layoutSnapshots.map((item) => structuredClone(item));
@@ -1075,6 +1576,7 @@ export function snapshotPersonal(
 }
 
 export function restoreSnapshot(data: PluginData, snapshot: PersonalSnapshot): void {
+  if (snapshot.activeTab !== undefined) data.activeTab = snapshot.activeTab;
   data.collections = cloneCollections(snapshot.collections);
   data.pinnedPaths = [...snapshot.pinnedPaths];
   data.nextStudyPaths = [...snapshot.nextStudyPaths];
@@ -1091,21 +1593,25 @@ export function restoreSnapshot(data: PluginData, snapshot: PersonalSnapshot): v
   if (snapshot.layoutSnapshots) data.layoutSnapshots = snapshot.layoutSnapshots.map((item) => structuredClone(item));
 }
 
+function recoveredLegacyId(prefix: string, parts: unknown[]): string {
+  return `${prefix}-recovered-${fingerprintText(JSON.stringify(canonicalMigrationValue(parts)))}`;
+}
+
 function cleanLayout(input: unknown): LayoutHeading[] {
   if (!Array.isArray(input)) return [];
   const headings: LayoutHeading[] = [];
-  for (const raw of input as unknown[]) {
+  for (const [headingIndex, raw] of (input as unknown[]).entries()) {
     const value = asUnknownRecord(raw);
     const title = asText(value.title);
     if (!title) continue;
     const subheadings: LayoutSubheading[] = [];
     if (Array.isArray(value.subheadings)) {
-      for (const rawSub of value.subheadings as unknown[]) {
+      for (const [subheadingIndex, rawSub] of (value.subheadings as unknown[]).entries()) {
         const sub = asUnknownRecord(rawSub);
         const subTitle = asText(sub.title);
         if (!subTitle) continue;
         subheadings.push({
-          id: asText(sub.id, makeId("subheading")),
+          id: asText(sub.id) || recoveredLegacyId("subheading", [headingIndex, subheadingIndex, subTitle]),
           title: subTitle,
           collapsed: sub.collapsed === true,
           subjects: asStringList(sub.subjects),
@@ -1113,7 +1619,7 @@ function cleanLayout(input: unknown): LayoutHeading[] {
       }
     }
     headings.push({
-      id: asText(value.id, makeId("collection")),
+      id: asText(value.id) || recoveredLegacyId("collection", [headingIndex, title]),
       title,
       collapsed: value.collapsed === true,
       subjects: asStringList(value.subjects),
@@ -1124,7 +1630,7 @@ function cleanLayout(input: unknown): LayoutHeading[] {
 }
 
 function isMainTab(value: unknown): value is MainTab {
-  return ["curriculum", "inbox", "collections", "queues", "procedures", "medications", "syndromes"].includes(String(value));
+  return ["curriculum", "inbox", "collections", "queues"].includes(String(value)) || libraryIdFromTab(value) !== null;
 }
 
 function isOpenNoteBehavior(value: unknown): value is OpenNoteBehavior {
@@ -1142,11 +1648,19 @@ function isNewNoteMode(value: unknown): value is NewNoteMode {
 function cleanSavedViews(input: unknown): SavedView[] {
   if (!Array.isArray(input)) return [];
   const views: SavedView[] = [];
-  for (const raw of input as unknown[]) {
+  for (const [viewIndex, raw] of (input as unknown[]).entries()) {
     const view = asUnknownRecord(raw);
     const name = asText(view.name);
-    if (!name || !isMainTab(view.tab)) continue;
-    views.push({ id: asText(view.id, makeId("view")), name, tab: view.tab, query: asText(view.query) });
+    if (!isMainTab(view.tab) && !legacyLibraryIdFromTab(view.tab)) continue;
+    const tab = migrateMainTab(view.tab, "curriculum");
+    if (!name) continue;
+    const query = asText(view.query);
+    views.push({
+      id: asText(view.id) || recoveredLegacyId("view", [viewIndex, name, tab, query]),
+      name,
+      tab,
+      query,
+    });
   }
   return views;
 }
@@ -1164,6 +1678,59 @@ function isRecordKind(value: unknown): value is RecordKind {
   return ["topic", "procedure", "medication", "syndrome", "proposal", "note"].includes(String(value));
 }
 
+const RECOVERED_PORTABLE_GROUP_ID = "group-recovered-ungrouped";
+const RECOVERED_PORTABLE_GROUP_TITLE = "Recovered / Ungrouped";
+
+/**
+ * Repair parent links from locally persisted data without discarding subjects.
+ * Portable imports are rejected strictly, but historical or hand-edited plugin
+ * data is recovered conservatively: invalid edges are detached and one stable
+ * edge is removed from every cycle.
+ */
+function repairPortableParentLinks(
+  subjects: PortableSubjectDefinition[],
+  sourceGroupIdBySubjectId: ReadonlyMap<string, string>,
+): void {
+  const byId = new Map(subjects.map((subject) => [subject.id, subject]));
+  for (const subject of subjects) {
+    const parent = subject.parentId ? byId.get(subject.parentId) : undefined;
+    const sourceGroupId = sourceGroupIdBySubjectId.get(subject.id) ?? subject.groupId;
+    const parentSourceGroupId = parent
+      ? sourceGroupIdBySubjectId.get(parent.id) ?? parent.groupId
+      : "";
+    if (!subject.indexed
+      || !parent
+      || parent.id === subject.id
+      || !parent.indexed
+      || parent.groupId !== subject.groupId
+      || parentSourceGroupId !== sourceGroupId) subject.parentId = null;
+  }
+
+  const completed = new Set<string>();
+  for (const subject of subjects) {
+    if (completed.has(subject.id)) continue;
+    const chain: string[] = [];
+    const positions = new Map<string, number>();
+    let cursor: PortableSubjectDefinition | undefined = subject;
+    while (cursor && !completed.has(cursor.id)) {
+      const position = positions.get(cursor.id);
+      if (position !== undefined) {
+        const cycleIds = chain.slice(position);
+        const detachId = cycleIds.reduce((greatest, id) => id > greatest ? id : greatest, "");
+        if (detachId) {
+          const detached = byId.get(detachId);
+          if (detached) detached.parentId = null;
+        }
+        break;
+      }
+      positions.set(cursor.id, chain.length);
+      chain.push(cursor.id);
+      cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
+    }
+    chain.forEach((id) => completed.add(id));
+  }
+}
+
 export function cleanPortableIndex(input: unknown): PortableIndexLocalState {
   const value = asUnknownRecord(input);
   const groups: PortableGroupDefinition[] = [];
@@ -1178,33 +1745,56 @@ export function cleanPortableIndex(input: unknown): PortableIndexLocalState {
       groups.push({ id, title, order: Number.isFinite(Number(group.order)) ? Number(group.order) : groups.length });
     }
   }
+  let recoveredGroupId = "";
+  const ensureRecoveredGroup = (): string => {
+    if (recoveredGroupId) return recoveredGroupId;
+    const existing = groups.find((group) => group.title === RECOVERED_PORTABLE_GROUP_TITLE);
+    if (existing) {
+      recoveredGroupId = existing.id;
+      return recoveredGroupId;
+    }
+    let candidate = RECOVERED_PORTABLE_GROUP_ID;
+    let suffix = 2;
+    while (groupIds.has(candidate)) {
+      candidate = `${RECOVERED_PORTABLE_GROUP_ID}-${suffix}`;
+      suffix += 1;
+    }
+    recoveredGroupId = candidate;
+    groupIds.add(candidate);
+    groups.push({ id: candidate, title: RECOVERED_PORTABLE_GROUP_TITLE, order: groups.length });
+    return recoveredGroupId;
+  };
   const subjects: PortableSubjectDefinition[] = [];
   const subjectIds = new Set<string>();
+  const sourceGroupIdBySubjectId = new Map<string, string>();
   if (Array.isArray(value.subjects)) {
     for (const raw of value.subjects as unknown[]) {
       const subject = asUnknownRecord(raw);
       const id = asText(subject.id);
       const title = asText(subject.title);
-      const groupId = asText(subject.groupId);
-      if (!id || !title || !groupIds.has(groupId) || !isSafeObjectKey(id) || subjectIds.has(id)) continue;
+      const requestedGroupId = asText(subject.groupId);
+      if (!id || !title || !isSafeObjectKey(id) || subjectIds.has(id)) continue;
+      const groupId = groupIds.has(requestedGroupId) ? requestedGroupId : ensureRecoveredGroup();
       const parentId = subject.parentId === null ? null : asText(subject.parentId) || null;
+      const indexed = subject.indexed !== false;
+      const hasLibraryId = subject.libraryId !== undefined;
       subjectIds.add(id);
+      sourceGroupIdBySubjectId.set(id, requestedGroupId);
       subjects.push({
         id,
         title,
         groupId,
         parentId,
         order: Number.isFinite(Number(subject.order)) ? Number(subject.order) : subjects.length,
-        indexed: subject.indexed !== false,
+        indexed,
         configuredId: asText(subject.configuredId),
         recordKind: isRecordKind(subject.recordKind) ? subject.recordKind : "topic",
+        ...(hasLibraryId ? { libraryId: !indexed && isValidLibraryId(subject.libraryId) ? asText(subject.libraryId) : null } : {}),
       });
     }
   }
+  repairPortableParentLinks(subjects, sourceGroupIdBySubjectId);
   const validSubjects = new Set(subjects.map((subject) => subject.id));
-  for (const subject of subjects) {
-    if (subject.parentId && (!validSubjects.has(subject.parentId) || subject.parentId === subject.id)) subject.parentId = null;
-  }
   const resolvedPathBySubjectId: Record<string, string> = {};
   const usedPaths = new Set<string>();
   const rawBindings = asUnknownRecord(value.resolvedPathBySubjectId);
@@ -1214,7 +1804,23 @@ export function cleanPortableIndex(input: unknown): PortableIndexLocalState {
     resolvedPathBySubjectId[subjectId] = path;
     usedPaths.add(path);
   }
-  return { version: 1, groups, subjects, resolvedPathBySubjectId };
+  const libraries = cleanLibraryDefinitions(value.libraries, value.libraryLayouts, subjects);
+  const validLibraryIds = new Set(libraries.map((definition) => definition.id));
+  for (const subject of subjects) {
+    const libraryId = subjectLibraryId(subject);
+    if (subject.indexed) delete subject.libraryId;
+    else subject.libraryId = libraryId && validLibraryIds.has(libraryId) ? libraryId : null;
+  }
+  return {
+    version: 3,
+    groups,
+    subjects,
+    resolvedPathBySubjectId,
+    relinkableSubjectIds: [...new Set(asStringList(value.relinkableSubjectIds))]
+      .filter((subjectId) => validSubjects.has(subjectId) && Boolean(resolvedPathBySubjectId[subjectId])),
+    libraries,
+    libraryLayouts: cleanLibraryLayouts(value.libraryLayouts, groups, subjects, libraries),
+  };
 }
 
 function cleanCollapseState(input: unknown): ViewCollapseState {
@@ -1259,14 +1865,20 @@ function cleanPathMap(input: unknown): Record<string, string> {
   return output;
 }
 
-function cleanSnapshots(input: unknown, allowNested = true): PersonalSnapshot[] {
+function cleanSnapshots(input: unknown, allowNested = true, maxCount = 20): PersonalSnapshot[] {
   if (!Array.isArray(input)) return [];
   const snapshots: PersonalSnapshot[] = [];
-  for (const raw of input as unknown[]) {
+  // Histories are untrusted synced input. Limit the raw entries before cloning
+  // nested structures, then apply the same byte budget used by local writes.
+  for (const [snapshotIndex, raw] of (input as unknown[]).slice(-maxCount).entries()) {
     const snapshot = asUnknownRecord(raw);
+    const rawAt = Number(snapshot.at);
     snapshots.push({
       label: asText(snapshot.label, "Saved organization"),
-      at: Number(snapshot.at) || Date.now(),
+      at: Number.isFinite(rawAt) && rawAt > 0 ? rawAt : snapshotIndex + 1,
+      ...(snapshot.activeTab === undefined
+        ? {}
+        : { activeTab: migrateMainTab(snapshot.activeTab, "curriculum") }),
       collections: cleanLayout(snapshot.collections),
       pinnedPaths: asStringList(snapshot.pinnedPaths),
       nextStudyPaths: asStringList(snapshot.nextStudyPaths),
@@ -1281,11 +1893,51 @@ function cleanSnapshots(input: unknown, allowNested = true): PersonalSnapshot[] 
       portableIndex: snapshot.portableIndex === undefined ? undefined : cleanPortableIndex(snapshot.portableIndex),
       settings: snapshot.settings === undefined ? undefined : cleanSettings(snapshot.settings),
       layoutSnapshots: allowNested && snapshot.layoutSnapshots !== undefined
-        ? cleanSnapshots(snapshot.layoutSnapshots, false)
+        ? cleanSnapshots(snapshot.layoutSnapshots, false, MAX_TRANSFER_SNAPSHOTS)
         : undefined,
     });
   }
-  return snapshots;
+  return limitSnapshotStack(snapshots, maxCount);
+}
+
+function cleanMigrationBackup(input: unknown): MigrationBackup | undefined {
+  try {
+    const value = asUnknownRecord(input);
+    if (value.version !== 1
+      || !Array.isArray(value.headings)
+      || value.headings.length > MAX_TRANSFER_COLLECTIONS) return undefined;
+    return boundedMigrationBackup<MigrationBackup>({
+      version: 1,
+      headings: value.headings,
+      migratedAt: cleanMigrationTimestamp(value.migratedAt),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function cleanV2MigrationBackup(input: unknown): V2MigrationBackup | undefined {
+  try {
+    const value = asUnknownRecord(input);
+    if (value.version !== 2) return undefined;
+    const budget: TransferValidationBudget = { references: 0, collectionStructures: 0, snapshots: 0 };
+    validateRecoveryCollections(value.collections, "V2 migration backup collections", budget);
+    validateRecoveryReferenceList(value.pinnedPaths, "V2 migration backup pins", budget);
+    validateRecoveryReferenceList(value.nextStudyPaths, "V2 migration backup Next list", budget);
+    transferArrayLength(value.savedViews, "V2 migration backup saved views", MAX_TRANSFER_COLLECTIONS);
+    ownEntryCount(value.settings, "V2 migration backup settings");
+    return boundedMigrationBackup<V2MigrationBackup>({
+      version: 2,
+      migratedAt: cleanMigrationTimestamp(value.migratedAt),
+      collections: cleanLayout(value.collections),
+      pinnedPaths: asStringList(value.pinnedPaths),
+      nextStudyPaths: asStringList(value.nextStudyPaths),
+      savedViews: cleanSavedViews(value.savedViews),
+      settings: asUnknownRecord(value.settings),
+    });
+  } catch {
+    return undefined;
+  }
 }
 
 function cleanSettings(input: unknown, legacyEnt = false): PluginSettings {
@@ -1309,7 +1961,7 @@ function cleanSettings(input: unknown, legacyEnt = false): PluginSettings {
     defaultNoteFolder: asText(settings.defaultNoteFolder, base.defaultNoteFolder).replace(/^\/+|\/+$/g, ""),
     defaultNewNoteMode: isNewNoteMode(settings.defaultNewNoteMode) ? settings.defaultNewNoteMode : base.defaultNewNoteMode,
     defaultTemplatePath: asText(settings.defaultTemplatePath, base.defaultTemplatePath).replace(/^\/+/, ""),
-    defaultTab: isMainTab(settings.defaultTab) ? settings.defaultTab : base.defaultTab,
+    defaultTab: migrateMainTab(settings.defaultTab, base.defaultTab),
     recentLimit: Math.max(5, Math.min(100, Number(settings.recentLimit) || base.recentLimit)),
     enableHoverPreview: settings.enableHoverPreview !== false,
     showSafetyBadges: settings.showSafetyBadges !== false,
@@ -1360,23 +2012,48 @@ function cleanTimestamp(input: unknown, fallback: number): number {
 }
 
 export function createKnowledgeBaseEntry(data: PluginData, id = makeId("base"), now = Date.now()): KnowledgeBaseEntry {
+  // These raw legacy payloads exist only to recover the base that underwent
+  // migration. Copying them into every duplicated base adds no recovery value
+  // and can multiply hidden plugin-data size by the 50-base limit.
+  const entryData = data.migrationBackup || data.v2MigrationBackup ? { ...data } : data;
+  if (entryData !== data) {
+    delete entryData.migrationBackup;
+    delete entryData.v2MigrationBackup;
+  }
   return {
     id: cleanKnowledgeBaseId(id, "Knowledge base"),
     createdAt: now,
     updatedAt: now,
     archivedAt: null,
-    data,
+    data: entryData,
   };
+}
+
+/** Retain one bounded copy of each historical migration payload store-wide. */
+function limitStoreMigrationBackups(bases: KnowledgeBaseEntry[]): void {
+  let keptV1 = false;
+  let keptV2 = false;
+  const oldestFirst = [...bases].sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+  for (const entry of oldestFirst) {
+    if (entry.data.migrationBackup) {
+      if (keptV1) delete entry.data.migrationBackup;
+      else keptV1 = true;
+    }
+    if (entry.data.v2MigrationBackup) {
+      if (keptV2) delete entry.data.v2MigrationBackup;
+      else keptV2 = true;
+    }
+  }
 }
 
 export function isRecognizedPluginStore(input: unknown): boolean {
   if (!input || typeof input !== "object" || Array.isArray(input)) return false;
   const value = input as Record<string, unknown>;
-  return value.kind === STORE_KIND && Number(value.version) >= STORE_VERSION && Array.isArray(value.bases);
+  return value.kind === STORE_KIND && Number(value.version) >= MIN_RECOGNIZED_STORE_VERSION && Array.isArray(value.bases);
 }
 
 /**
- * Parse the v11 multi-base envelope, or wrap any recognized flat v1-v10 data
+ * Parse the v11+ multi-base envelope, or wrap any recognized flat v1-v10 data
  * unchanged into one base with a random provisional vault identity. A malformed envelope throws so the
  * loader can preserve the original data.json in read-only mode.
  */
@@ -1384,14 +2061,14 @@ export function migrateStore(input: unknown, now = Date.now()): PluginStore {
   if (!isRecognizedPluginStore(input)) {
     if (input && typeof input === "object" && !Array.isArray(input)) {
       const value = input as Record<string, unknown>;
-      if (Number(value.version) >= STORE_VERSION || Object.prototype.hasOwnProperty.call(value, "bases")) {
+      if (value.kind === STORE_KIND || Object.prototype.hasOwnProperty.call(value, "bases")) {
         throw new Error("The knowledge-base store has an unrecognized or damaged shape.");
       }
     }
     const hasLegacyData = Boolean(input && typeof input === "object" && !Array.isArray(input)
       && Object.keys(input as Record<string, unknown>).length > 0);
     const migrated = migrateData(input);
-    return createDefaultStore(migrated, now, hasLegacyData ? migratedVaultId(migrated) : makeId("vault"));
+    return createDefaultStore(migrated, now, hasLegacyData ? migratedVaultId(migrated) : freshVaultId());
   }
 
   const value = input as Record<string, unknown>;
@@ -1416,6 +2093,7 @@ export function migrateStore(input: unknown, now = Date.now()): PluginStore {
       : cleanTimestamp(archivedValue, now);
     return { id, createdAt, updatedAt, archivedAt, data: migrateData(entry.data) };
   });
+  limitStoreMigrationBackups(bases);
   const rawDeletedBaseIds = value.deletedBaseIds;
   if (rawDeletedBaseIds !== undefined && (!rawDeletedBaseIds || typeof rawDeletedBaseIds !== "object" || Array.isArray(rawDeletedBaseIds))) {
     throw new Error("Deleted knowledge-base IDs must be a timestamp map.");
@@ -1446,6 +2124,43 @@ export function migrateStore(input: unknown, now = Date.now()): PluginStore {
   return { kind: STORE_KIND, version: STORE_VERSION, vaultId, activeBaseId, bases, deletedBaseIds };
 }
 
+/** Normalize Library definitions, layouts, and navigation after migration or restoration. */
+export function normalizeKnowledgeBaseLibrariesAndNavigation(data: PluginData): PluginData {
+  if (data.settings.workspaceMode === "ent-clinical") ensureSystemLibraries(data.portableIndex);
+  else {
+    // A legacy generic workspace could deliberately keep an otherwise-empty
+    // fixed library as its active/default tab or in a saved view. Treat that
+    // persisted navigation reference as real use so migration does not erase it.
+    const referencedIds = [
+      libraryIdFromTab(data.activeTab),
+      libraryIdFromTab(data.settings.defaultTab),
+      ...data.savedViews.map((view) => libraryIdFromTab(view.tab)),
+    ];
+    const existingIds = new Set(data.portableIndex.libraries.map((definition) => definition.id));
+    for (const id of referencedIds) {
+      if (!isLibraryKind(id) || existingIds.has(id) || data.portableIndex.libraries.length >= MAX_LIBRARIES) continue;
+      data.portableIndex.libraries.push(builtinLibraryDefinition(id));
+      data.portableIndex.libraryLayouts[id] ??= [];
+      existingIds.add(id);
+    }
+  }
+  reconcilePortableLibraryLayouts(data.portableIndex);
+  const availableLibraryIds = new Set(data.portableIndex.libraries
+    .filter((definition) => definition.archivedAt === null)
+    .map((definition) => definition.id));
+  const usableTab = (tab: MainTab): boolean => {
+    const libraryId = libraryIdFromTab(tab);
+    return libraryId === null || availableLibraryIds.has(libraryId);
+  };
+  if (!usableTab(data.settings.defaultTab)) data.settings.defaultTab = "curriculum";
+  if (!usableTab(data.activeTab)) data.activeTab = data.settings.defaultTab;
+  data.savedViews = data.savedViews.filter((view) => {
+    const libraryId = libraryIdFromTab(view.tab);
+    return libraryId === null || data.portableIndex.libraries.some((definition) => definition.id === libraryId);
+  });
+  return data;
+}
+
 export function migrateData(input: unknown): PluginData {
   if (!input || typeof input !== "object") return structuredClone(DEFAULT_DATA);
   const loaded = input as Record<string, unknown>;
@@ -1453,8 +2168,9 @@ export function migrateData(input: unknown): PluginData {
   // Versions newer than this plugin are read through the latest compatible
   // shape instead of being mistaken for v1. main.ts keeps them read-only.
   if (loadedVersion >= 3 || (loadedVersion === 0 && isRecognizedPluginData(loaded) && Object.keys(loaded).length > 0)) {
-    return {
-      version: 10,
+    const settings = cleanSettings(loaded.settings, loadedVersion > 0 && loadedVersion <= 5);
+    const data: PluginData = {
+      version: 12,
       collections: cleanLayout(loaded.collections),
       pinnedPaths: asStringList(loaded.pinnedPaths),
       nextStudyPaths: asStringList(loaded.nextStudyPaths),
@@ -1468,15 +2184,16 @@ export function migrateData(input: unknown): PluginData {
       indexGroupOrder: [...new Set(asStringList(loaded.indexGroupOrder))],
       portableIndex: cleanPortableIndex(loaded.portableIndex),
       selectedPath: asText(loaded.selectedPath),
-      activeTab: isMainTab(loaded.activeTab) ? loaded.activeTab : DEFAULT_SETTINGS.defaultTab,
-      settings: cleanSettings(loaded.settings, loadedVersion > 0 && loadedVersion <= 5),
-      layoutSnapshots: cleanSnapshots(loaded.layoutSnapshots),
+      activeTab: migrateMainTab(loaded.activeTab, settings.defaultTab),
+      settings,
+      layoutSnapshots: cleanSnapshots(loaded.layoutSnapshots, true, MAX_TRANSFER_SNAPSHOTS),
       undoStack: cleanSnapshots(loaded.undoStack),
       redoStack: cleanSnapshots(loaded.redoStack),
       collapsed: cleanCollapseState(loaded.collapsed),
-      migrationBackup: loaded.migrationBackup as MigrationBackup | undefined,
-      v2MigrationBackup: loaded.v2MigrationBackup as V2MigrationBackup | undefined,
+      migrationBackup: cleanMigrationBackup(loaded.migrationBackup),
+      v2MigrationBackup: cleanV2MigrationBackup(loaded.v2MigrationBackup),
     };
+    return normalizeKnowledgeBaseLibrariesAndNavigation(data);
   }
 
   if (loaded.version === 2) {
@@ -1485,8 +2202,9 @@ export function migrateData(input: unknown): PluginData {
     const nextStudyPaths = asStringList(loaded.nextStudyPaths);
     const savedViews = cleanSavedViews(loaded.savedViews);
     const rawSettings = loaded.settings && typeof loaded.settings === "object" ? loaded.settings as Record<string, unknown> : {};
-    return {
-      version: 10,
+    const settings = cleanSettings(rawSettings, true);
+    const data: PluginData = {
+      version: 12,
       collections,
       pinnedPaths,
       nextStudyPaths,
@@ -1500,14 +2218,14 @@ export function migrateData(input: unknown): PluginData {
       indexGroupOrder: [],
       portableIndex: cleanPortableIndex(loaded.portableIndex),
       selectedPath: asText(loaded.selectedPath),
-      activeTab: isMainTab(loaded.activeTab) ? loaded.activeTab : DEFAULT_SETTINGS.defaultTab,
-      settings: cleanSettings(rawSettings, true),
-      layoutSnapshots: cleanSnapshots(loaded.layoutSnapshots),
+      activeTab: migrateMainTab(loaded.activeTab, settings.defaultTab),
+      settings,
+      layoutSnapshots: cleanSnapshots(loaded.layoutSnapshots, true, MAX_TRANSFER_SNAPSHOTS),
       undoStack: [],
       redoStack: [],
       collapsed: cleanCollapseState(loaded.collapsed),
-      migrationBackup: loaded.migrationBackup as MigrationBackup | undefined,
-      v2MigrationBackup: {
+      migrationBackup: cleanMigrationBackup(loaded.migrationBackup),
+      v2MigrationBackup: cleanV2MigrationBackup({
         version: 2,
         migratedAt: Date.now(),
         collections: cloneCollections(collections),
@@ -1515,8 +2233,9 @@ export function migrateData(input: unknown): PluginData {
         nextStudyPaths: [...nextStudyPaths],
         savedViews: savedViews.map((view) => ({ ...view })),
         settings: structuredClone(rawSettings),
-      },
+      }),
     };
+    return normalizeKnowledgeBaseLibrariesAndNavigation(data);
   }
 
   if (loadedVersion !== 1 || !Array.isArray(loaded.headings)) return structuredClone(DEFAULT_DATA);
@@ -1528,13 +2247,14 @@ export function migrateData(input: unknown): PluginData {
     const id = asText(heading.id);
     return heading.kind === "custom" || (!id.startsWith("auto-") && id !== "ent-cc-inbox");
   });
-  return {
+  const data: PluginData = {
     ...structuredClone(DEFAULT_DATA),
     collections: cleanLayout(custom),
     selectedPath: asText(loaded.selectedPath),
     settings: { ...ENT_CLINICAL_SETTINGS },
-    migrationBackup: { version: 1, headings: structuredClone(oldHeadings), migratedAt: Date.now() },
+    migrationBackup: cleanMigrationBackup({ version: 1, headings: oldHeadings, migratedAt: Date.now() }),
   };
+  return normalizeKnowledgeBaseLibrariesAndNavigation(data);
 }
 
 export function recordMatchesLink(record: VaultRecord, link: string): boolean {
@@ -1621,11 +2341,12 @@ function sortCurriculumNodes(roots: CurriculumTreeNode[], state: CurriculumVisua
 }
 
 /** Build the effective visual tree while safely ignoring invalid, cross-domain, and cyclic overrides. */
-export function buildCurriculumTree(records: VaultRecord[], state: CurriculumVisualState): CurriculumTreeResult {
-  const topics = records.filter((record) => record.kind === "topic" && (record.role === "canonical"
-    || record.role === "supporting"
-    || (record.role === "placeholder" && record.portableIndexed !== false)
-    || record.portableIndexed === true));
+export function buildCurriculumTree(
+  records: VaultRecord[],
+  state: CurriculumVisualState,
+  topicsOnly = true,
+): CurriculumTreeResult {
+  const topics = records.filter((record) => recordBelongsToIndex(record, topicsOnly));
   const byPath = new Map(topics.map((record) => [record.path, record]));
   const lookup = buildCurriculumLookup(topics);
   const parentByPath = new Map<string, string | null>();
@@ -1755,11 +2476,13 @@ export function replaceCurriculumVisualPath(state: CurriculumVisualState, oldPat
   return changed;
 }
 
-export function reconcileCurriculumVisual(state: CurriculumVisualState, records: VaultRecord[], groupByPath: Record<string, string> = {}): boolean {
-  const topics = new Map(records.filter((record) => record.kind === "topic" && (record.role === "canonical"
-    || record.role === "supporting"
-    || record.role === "placeholder"
-    || record.portableIndexed === true)).map((record) => [record.path, record]));
+export function reconcileCurriculumVisual(
+  state: CurriculumVisualState,
+  records: VaultRecord[],
+  groupByPath: Record<string, string> = {},
+  topicsOnly = true,
+): boolean {
+  const topics = new Map(records.filter((record) => recordBelongsToIndex(record, topicsOnly)).map((record) => [record.path, record]));
   let changed = false;
   for (const [path, parentPath] of Object.entries(state.parentByPath)) {
     const record = topics.get(path);
@@ -1808,9 +2531,17 @@ export function normalizeSearchText(value: string): string {
   // Search is intentionally forgiving of common Arabic/Persian keyboard and
   // presentation variants. This is a lookup key only; source text is untouched.
   return value
-    .normalize("NFD")
+    // Compatibility decomposition also expands Arabic presentation forms such
+    // as lam-alef, while canonical decomposition keeps Latin accent folding.
+    .normalize("NFKD")
     .replace(/\p{M}/gu, "")
     .replace(/\u0640/gu, "")
+    // Apostrophes are commonly omitted or entered with a different keyboard
+    // glyph in clinical eponyms. Wrapper quotes should not turn a free-text
+    // search into an impossible literal punctuation match.
+    .replace(/['\u2018\u2019\u02bc\u02bb\u02b9"]/gu, "")
+    .replace(/[\u201c\u201d\u201e\u201f]/gu, "")
+    .replace(/\u0671/gu, "\u0627")
     .replace(/[\u0649\u06cc]/gu, "\u064a")
     .replace(/\u06a9/gu, "\u0643")
     .replace(/\u0629/gu, "\u0647")
@@ -2367,10 +3098,8 @@ export function buildIndexDiagnostics(data: PluginData, records: VaultRecord[], 
     for (const subheading of heading.subheadings) inspect(subheading.subjects, `Collection “${heading.title} / ${subheading.title}”`);
   }
 
-  const topics = records.filter((record) => record.kind === "topic" && (record.role === "canonical"
-    || record.role === "supporting"
-    || record.role === "placeholder"
-    || record.portableIndexed === true));
+  const topicsOnly = data.settings.workspaceMode === "ent-clinical";
+  const topics = records.filter((record) => recordBelongsToIndex(record, topicsOnly));
   const topicByPath = new Map(topics.map((record) => [record.path, record]));
   const linksByDomain = new Map<string, Map<string, Set<string>>>();
   for (const topic of topics) {
@@ -2407,7 +3136,7 @@ export function buildIndexDiagnostics(data: PluginData, records: VaultRecord[], 
       diagnostics.push({ id: `visual-parent:${path}`, kind: "invalid-visual-parent", title: "Invalid visual parent", detail: `The visual parent ${parentPath} is missing, self-referential, or in another group.`, path });
     }
   }
-  const depthLimited = buildCurriculumTree(records, data.curriculumVisual).depthLimitedPaths;
+  const depthLimited = buildCurriculumTree(records, data.curriculumVisual, topicsOnly).depthLimitedPaths;
   if (depthLimited.length > 0) {
     diagnostics.push({
       id: "depth-limit",
@@ -2454,7 +3183,7 @@ export function parseWorkspaceConfig(input: unknown): WorkspaceConfig {
 
 export interface PersonalBackup {
   kind: "ent-vault-command-center-personal-backup";
-  version: 7;
+  version: 9;
   exportedAt: string;
   /** Stable identity of the vault that created this exact-path recovery. */
   sourceVaultId: string;
@@ -2508,7 +3237,7 @@ export function createPersonalBackup(
   if (!cleanSourceBaseName) throw new Error("A knowledge-base name is required to create same-base recovery data.");
   return {
     kind: "ent-vault-command-center-personal-backup",
-    version: 7,
+    version: 9,
     exportedAt,
     sourceVaultId: cleanSourceVaultId,
     sourceBaseId: cleanSourceBaseId,
@@ -2525,7 +3254,7 @@ export function createPersonalBackup(
     displayNameByPath: clonePathMap(data.displayNameByPath),
     indexGroupAliases: clonePathMap(data.indexGroupAliases),
     indexGroupOrder: [...data.indexGroupOrder],
-    layoutSnapshots: cleanSnapshots(data.layoutSnapshots),
+    layoutSnapshots: cleanSnapshots(data.layoutSnapshots, true, MAX_TRANSFER_SNAPSHOTS),
     portableIndex: clonePortableIndex(data.portableIndex),
   };
 }
@@ -2570,7 +3299,17 @@ function validateRecoveryPortableIndex(input: unknown, label: string, budget: Tr
   const value = asUnknownRecord(input);
   transferArrayLength(value.groups, `${label} groups`, MAX_TRANSFER_COLLECTIONS);
   transferArrayLength(value.subjects, `${label} subjects`, MAX_TRANSFER_LIST_ITEMS);
+  transferArrayLength(value.libraries, `${label} libraries`, MAX_LIBRARIES);
   addTransferReferenceCount(budget, ownEntryCount(value.resolvedPathBySubjectId, `${label} note bindings`), `${label} note bindings`);
+  validateRecoveryReferenceList(value.relinkableSubjectIds, `${label} relinkable identities`, budget);
+  const libraryLayouts = asUnknownRecord(value.libraryLayouts);
+  if (ownEntryCount(libraryLayouts, `${label} library layouts`) > MAX_LIBRARIES) {
+    throw new Error(`${label} has too many library layouts.`);
+  }
+  for (const [libraryId, layout] of Object.entries(libraryLayouts)) {
+    if (!isValidLibraryId(libraryId)) throw new Error(`${label} has an invalid library ID.`);
+    validateRecoveryCollections(layout, `${label} ${libraryId} layout`, budget);
+  }
 }
 
 function validateRecoveryVisual(input: unknown, label: string, budget: TransferValidationBudget): void {
@@ -2649,7 +3388,7 @@ export function parsePersonalBackup(input: unknown): PersonalBackup {
   if (!input || typeof input !== "object") throw new Error("The selected file is not a Command Center backup.");
   const value = input as Record<string, unknown>;
   const sourceVersion = Number(value.version);
-  if (value.kind !== "ent-vault-command-center-personal-backup" || ![1, 2, 3, 4, 5, 6, 7].includes(sourceVersion)) {
+  if (value.kind !== "ent-vault-command-center-personal-backup" || ![1, 2, 3, 4, 5, 6, 7, 8, 9].includes(sourceVersion)) {
     throw new Error("Unsupported Command Center backup format.");
   }
   const sourceVaultId = cleanRecoveryVaultId(value.sourceVaultId);
@@ -2667,7 +3406,7 @@ export function parsePersonalBackup(input: unknown): PersonalBackup {
   validatePersonalBackupTransferShape(value);
   return {
     kind: "ent-vault-command-center-personal-backup",
-    version: 7,
+    version: 9,
     exportedAt: asText(value.exportedAt),
     sourceVaultId,
     sourceBaseId,
@@ -2684,7 +3423,7 @@ export function parsePersonalBackup(input: unknown): PersonalBackup {
     displayNameByPath: cleanPathMap(value.displayNameByPath),
     indexGroupAliases: cleanPathMap(value.indexGroupAliases),
     indexGroupOrder: [...new Set(asStringList(value.indexGroupOrder))],
-    layoutSnapshots: cleanSnapshots(value.layoutSnapshots),
+    layoutSnapshots: cleanSnapshots(value.layoutSnapshots, true, MAX_TRANSFER_SNAPSHOTS),
     portableIndex: cleanPortableIndex(value.portableIndex),
   };
 }
@@ -2726,7 +3465,14 @@ function collectPersonalBackupPaths(backup: PersonalBackup): string[] {
       seenSnapshots.add(snapshot);
       addState({
         ...snapshot,
-        portableIndex: snapshot.portableIndex ?? { version: 1, groups: [], subjects: [], resolvedPathBySubjectId: {} },
+        portableIndex: snapshot.portableIndex ?? {
+          version: 3,
+          groups: [],
+          subjects: [],
+          resolvedPathBySubjectId: {},
+          libraries: [],
+          libraryLayouts: emptyLibraryLayouts(),
+        },
         layoutSnapshots: snapshot.layoutSnapshots ?? [],
       });
     }

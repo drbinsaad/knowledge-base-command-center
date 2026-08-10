@@ -1,4 +1,4 @@
-import { App, FuzzyMatch, FuzzySuggestModal, Modal, Notice, Setting, TFile, setIcon } from "obsidian";
+import { App, FuzzyMatch, FuzzySuggestModal, Modal, Notice, prepareFuzzySearch, Setting, TFile, setIcon } from "obsidian";
 import {
   canonicalPath,
   DOMAIN_DEFINITIONS,
@@ -8,6 +8,7 @@ import {
   isExtensionCurriculumId,
   LayoutHeading,
   NewNoteMode,
+  normalizeSearchText,
   pathIsInsideFolder,
   proposalPath,
   TOPIC_KINDS,
@@ -15,6 +16,34 @@ import {
   PluginSettings,
   VaultRecord,
 } from "./model";
+
+/**
+ * Obsidian's picker matcher lowercases text but does not fold accents, Arabic
+ * keyboard variants, or presentation forms. Use the same lookup key as the
+ * command-center search so a note can be found consistently in either place.
+ * Suggestions render their original text; normalized match offsets are never
+ * applied to the user-visible string because decomposition can change length.
+ */
+abstract class NormalizedFuzzySuggestModal<T> extends FuzzySuggestModal<T> {
+  getSuggestions(query: string): FuzzyMatch<T>[] {
+    const normalizedQuery = normalizeSearchText(query);
+    if (!normalizedQuery.trim()) {
+      return this.getItems().map((item) => ({ item, match: { score: 0, matches: [] } }));
+    }
+    const search = prepareFuzzySearch(normalizedQuery);
+    const suggestions: FuzzyMatch<T>[] = [];
+    for (const item of this.getItems()) {
+      const match = search(normalizeSearchText(this.getItemText(item)));
+      if (match) suggestions.push({ item, match });
+    }
+    suggestions.sort((left, right) => right.match.score - left.match.score);
+    return suggestions;
+  }
+
+  renderSuggestion(match: FuzzyMatch<T>, element: HTMLElement): void {
+    element.setText(this.getItemText(match.item));
+  }
+}
 
 function reportAsyncError(error: unknown): void {
   console.error("ENT Command Center action failed", error);
@@ -122,15 +151,16 @@ export function collectionTargets(collections: LayoutHeading[]): CollectionTarge
   return targets;
 }
 
-export class CollectionPickerModal extends FuzzySuggestModal<CollectionTarget> {
+export class CollectionPickerModal extends NormalizedFuzzySuggestModal<CollectionTarget> {
   constructor(
     app: App,
     private readonly targets: CollectionTarget[],
     private readonly action: "Add" | "Move",
     private readonly onChoose: (target: CollectionTarget) => void | Promise<void>,
+    private readonly targetLabel = "collection",
   ) {
     super(app);
-    this.setPlaceholder(`${action} to collection…`);
+    this.setPlaceholder(`${action} to ${targetLabel}…`);
   }
 
   getItems(): CollectionTarget[] { return this.targets; }
@@ -140,7 +170,7 @@ export class CollectionPickerModal extends FuzzySuggestModal<CollectionTarget> {
   onOpen(): void {
     void super.onOpen();
     this.modalEl.addClass("ent-cc-modal");
-    this.titleEl.setText(`${this.action} to collection`);
+    this.titleEl.setText(`${this.action} to ${this.targetLabel}`);
   }
 }
 
@@ -151,7 +181,7 @@ export interface AddAction {
   icon: string;
 }
 
-export class AddActionModal extends FuzzySuggestModal<AddAction> {
+export class AddActionModal extends NormalizedFuzzySuggestModal<AddAction> {
   constructor(
     app: App,
     private readonly actions: AddAction[],
@@ -183,7 +213,7 @@ export class AddActionModal extends FuzzySuggestModal<AddAction> {
   }
 }
 
-export class RecordPickerModal extends FuzzySuggestModal<VaultRecord> {
+export class RecordPickerModal extends NormalizedFuzzySuggestModal<VaultRecord> {
   constructor(
     app: App,
     private readonly records: VaultRecord[],
@@ -212,7 +242,7 @@ export class RecordPickerModal extends FuzzySuggestModal<VaultRecord> {
   }
 }
 
-export class VaultFilePickerModal extends FuzzySuggestModal<TFile> {
+export class VaultFilePickerModal extends NormalizedFuzzySuggestModal<TFile> {
   constructor(
     app: App,
     private readonly files: TFile[],
@@ -240,7 +270,7 @@ export class VaultFilePickerModal extends FuzzySuggestModal<TFile> {
   }
 }
 
-export class StringPickerModal extends FuzzySuggestModal<string> {
+export class StringPickerModal extends NormalizedFuzzySuggestModal<string> {
   constructor(
     app: App,
     private readonly values: string[],
@@ -320,6 +350,10 @@ export class IndexGroupModal extends Modal {
 
 export interface KnowledgeNoteModalOptions {
   itemSingular: string;
+  /** Optional workflow-specific label, such as Medication, while still creating a Markdown note. */
+  createLabel?: string;
+  /** Visible workflow context that remains available in the compact mobile sheet. */
+  contextNotice?: string;
   templates: TFile[];
   initial: GenericNoteFormValue;
   validate: (value: GenericNoteFormValue) => string | null;
@@ -377,21 +411,29 @@ export class KnowledgeNoteModal extends Modal {
     this.contentEl.empty();
     this.modalEl.addClass("ent-cc-topic-editor-modal", "ent-cc-knowledge-note-modal");
     this.contentEl.addClass("ent-cc-modal", "ent-cc-topic-editor", "ent-cc-knowledge-note-content");
-    this.titleEl.setText(`Create ${this.options.itemSingular}`);
+    const createLabel = this.options.createLabel?.trim() || this.options.itemSingular;
+    this.titleEl.setText(`Create ${createLabel}`);
     const formBody = this.contentEl.createDiv({ cls: "ent-cc-note-form-body" });
     formBody.createEl("p", {
       cls: "ent-cc-modal-lead",
       text: "Choose a destination and start with a truly empty note or a copied Markdown template. Existing files are never overwritten.",
     });
+    if (this.options.contextNotice) {
+      formBody.createDiv({
+        cls: "ent-cc-catalog-context",
+        text: this.options.contextNotice,
+        attr: { role: "note" },
+      });
+    }
 
     new Setting(formBody)
       .setName("Title")
       .addText((text) => {
-        text.setPlaceholder(`New ${this.options.itemSingular}`).setValue(this.value.title).onChange((value) => {
+        text.setPlaceholder(`New ${createLabel.toLocaleLowerCase()}`).setValue(this.value.title).onChange((value) => {
           this.value.title = value;
           this.updatePreview();
         });
-        text.inputEl.setAttribute("aria-label", `${this.options.itemSingular} title`);
+        text.inputEl.setAttribute("aria-label", `${createLabel} title`);
         text.inputEl.enterKeyHint = "done";
         text.inputEl.addEventListener("keydown", (event) => {
           if (event.key !== "Enter" || event.isComposing) return;
@@ -467,7 +509,7 @@ export class KnowledgeNoteModal extends Modal {
         button.setButtonText("Cancel").onClick(() => this.close());
         button.buttonEl.addClass("ent-cc-note-cancel-button");
       })
-      .addButton((button) => button.setButtonText(`Create ${this.options.itemSingular}`).setCta().onClick(() => void this.submit()))
+      .addButton((button) => button.setButtonText(`Create ${createLabel}`).setCta().onClick(() => void this.submit()))
       .settingEl.addClass("ent-cc-modal-footer");
 
     this.bindViewportLayout();
@@ -667,7 +709,7 @@ export interface TopicEditorOptions {
   onSubmit: (value: TopicFormValue) => void | Promise<void>;
 }
 
-class ParentTopicPickerModal extends FuzzySuggestModal<VaultRecord> {
+class ParentTopicPickerModal extends NormalizedFuzzySuggestModal<VaultRecord> {
   constructor(app: App, private readonly records: VaultRecord[], private readonly onChoose: (record: VaultRecord) => void) {
     super(app);
     this.setPlaceholder("Search canonical parent topics…");

@@ -32,19 +32,66 @@ await mkdir(dist, { recursive: true });
 await rm(zipPath, { force: true });
 await rm(checksumPath, { force: true });
 
-const zip = spawnSync("/usr/bin/zip", ["-j", "-X", zipPath, ...assets.map((asset) => path.join(root, asset))], {
-  cwd: root,
-  encoding: "utf8",
-});
+const powershellQuote = (value) => `'${value.replaceAll("'", "''")}'`;
+const zip = process.platform === "win32"
+  ? spawnSync("powershell.exe", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      `Compress-Archive -LiteralPath ${assets.map((asset) => powershellQuote(path.join(root, asset))).join(",")} -DestinationPath ${powershellQuote(zipPath)} -Force`,
+    ], { cwd: root, encoding: "utf8" })
+  : spawnSync("zip", ["-j", "-X", zipPath, ...assets.map((asset) => path.join(root, asset))], {
+      cwd: root,
+      encoding: "utf8",
+    });
 if (zip.status !== 0) throw new Error(zip.stderr || zip.stdout || "zip failed");
 
-const listing = spawnSync("/usr/bin/unzip", ["-Z1", zipPath], { encoding: "utf8" });
-if (listing.status !== 0) throw new Error(listing.stderr || "Unable to inspect release ZIP.");
-const entries = listing.stdout.trim().split("\n").filter(Boolean).sort();
+const archive = await readFile(zipPath);
+const minimumEocdSize = 22;
+const maximumZipCommentSize = 0xffff;
+let eocdOffset = -1;
+for (
+  let offset = archive.length - minimumEocdSize;
+  offset >= Math.max(0, archive.length - minimumEocdSize - maximumZipCommentSize);
+  offset -= 1
+) {
+  if (archive.readUInt32LE(offset) === 0x06054b50) {
+    eocdOffset = offset;
+    break;
+  }
+}
+if (eocdOffset < 0) throw new Error("Unable to inspect release ZIP: end-of-central-directory record is missing.");
+if (archive.readUInt16LE(eocdOffset + 4) !== 0 || archive.readUInt16LE(eocdOffset + 6) !== 0) {
+  throw new Error("Unable to inspect release ZIP: multi-disk archives are unsupported.");
+}
+const entryCount = archive.readUInt16LE(eocdOffset + 10);
+const centralDirectorySize = archive.readUInt32LE(eocdOffset + 12);
+const centralDirectoryOffset = archive.readUInt32LE(eocdOffset + 16);
+const centralDirectoryEnd = centralDirectoryOffset + centralDirectorySize;
+if (centralDirectoryEnd > eocdOffset || centralDirectoryEnd > archive.length) {
+  throw new Error("Unable to inspect release ZIP: central directory is out of bounds.");
+}
+const entries = [];
+let centralOffset = centralDirectoryOffset;
+for (let entryIndex = 0; entryIndex < entryCount; entryIndex += 1) {
+  if (centralOffset + 46 > centralDirectoryEnd || archive.readUInt32LE(centralOffset) !== 0x02014b50) {
+    throw new Error("Unable to inspect release ZIP: invalid central-directory entry.");
+  }
+  const offset = centralOffset;
+  const nameLength = archive.readUInt16LE(offset + 28);
+  const extraLength = archive.readUInt16LE(offset + 30);
+  const commentLength = archive.readUInt16LE(offset + 32);
+  const nameStart = offset + 46;
+  const nextOffset = nameStart + nameLength + extraLength + commentLength;
+  if (nextOffset > centralDirectoryEnd) throw new Error("Unable to inspect release ZIP: truncated central directory.");
+  entries.push(archive.subarray(nameStart, nameStart + nameLength).toString("utf8"));
+  centralOffset = nextOffset;
+}
+if (centralOffset !== centralDirectoryEnd) throw new Error("Unable to inspect release ZIP: unexpected central-directory data.");
+entries.sort();
 const expected = [...assets].sort();
 if (JSON.stringify(entries) !== JSON.stringify(expected)) throw new Error(`Unexpected ZIP contents: ${entries.join(", ")}`);
 
-const archive = await readFile(zipPath);
 const checksum = createHash("sha256").update(archive).digest("hex");
 await writeFile(checksumPath, `${checksum}  ${path.basename(zipPath)}\n`, "utf8");
 

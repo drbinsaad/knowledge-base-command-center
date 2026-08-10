@@ -8,7 +8,6 @@ import {
   isPortablePlaceholderPath,
   normalizeSearchText,
   parseWorkspaceConfig,
-  pathIsInsideFolder,
   resetCurriculumVisualPath,
   validateProposalFolderPath,
   validateWritableFolderPath,
@@ -157,12 +156,16 @@ export class IndexManagerModal extends Modal {
   private availableNotes(): ManagerNote[] {
     if (this.plugin.isClinicalMode()) return [];
     const hidden = new Set(this.plugin.data.excludedIndexPaths);
+    const libraryPaths = new Set(this.plugin.getRecords()
+      .filter((record) => Boolean(record.libraryId))
+      .map((record) => record.path));
     const vaultNotes = this.plugin.getIndexCandidateFiles()
-      .filter((file) => !hidden.has(file.path))
+      .filter((file) => !hidden.has(file.path) && !libraryPaths.has(file.path))
       .map((file) => ({ path: file.path, title: file.basename, meta: file.path }));
     const portablePlaceholders = this.plugin.getRecords()
       .filter((record) => record.role === "placeholder"
         && record.portableIndexed === false
+        && !record.libraryId
         && isPortablePlaceholderPath(record.path)
         && !hidden.has(record.path))
       .map((record) => ({
@@ -175,7 +178,11 @@ export class IndexManagerModal extends Modal {
 
   private hiddenNotes(): ManagerNote[] {
     const excluded = new Set(this.plugin.data.excludedIndexPaths);
-    const hidden = this.plugin.data.excludedIndexPaths.map((path) => {
+    const records = this.plugin.getRecords();
+    const libraryPaths = new Set(records
+      .filter((record) => Boolean(record.libraryId))
+      .map((record) => record.path));
+    const hidden = this.plugin.data.excludedIndexPaths.filter((path) => !libraryPaths.has(path)).map((path) => {
       const file = this.app.vault.getAbstractFileByPath(path);
       const fallbackTitle = file instanceof TFile ? file.basename : path.split("/").pop()?.replace(/\.md$/, "") || path;
       return {
@@ -185,9 +192,10 @@ export class IndexManagerModal extends Modal {
       };
     });
     if (!this.plugin.isClinicalMode()) return hidden;
-    const placeholders = this.plugin.getRecords()
+    const placeholders = records
       .filter((record) => record.role === "placeholder"
         && record.portableIndexed === false
+        && !record.libraryId
         && isPortablePlaceholderPath(record.path)
         && !excluded.has(record.path))
       .map((record) => ({
@@ -317,7 +325,6 @@ export class IndexManagerModal extends Modal {
       return;
     }
     const first = this.plugin.getRecord(paths[0] ?? "");
-    const updatesPortableMembership = mode !== "move" && paths.some((path) => Boolean(this.plugin.getRecord(path)?.portableId));
     new IndexGroupModal(this.app, {
       title: `${mode === "move" ? "Move" : mode === "restore" ? "Restore" : "Add"} ${paths.length} note${paths.length === 1 ? "" : "s"}`,
       groupLabel: this.plugin.data.settings.groupLabel,
@@ -326,29 +333,25 @@ export class IndexManagerModal extends Modal {
       submitLabel: mode === "move" ? "Move visually" : mode === "restore" ? "Restore to index" : "Add to index",
       onSubmit: async (group) => {
         if (!this.guardOpenedBase()) return;
-        await this.plugin.mutate(`${mode} ${paths.length} index note${paths.length === 1 ? "" : "s"}`, () => {
-          if (!this.plugin.data.indexGroupOrder.includes(group)) this.plugin.data.indexGroupOrder.push(group);
-          const manualPaths = new Set(this.plugin.data.manualIndexPaths);
-          if (mode !== "move") {
-            const selectedPaths = new Set(paths);
-            this.plugin.data.excludedIndexPaths = this.plugin.data.excludedIndexPaths.filter((candidate) => !selectedPaths.has(candidate));
-          }
-          for (const path of paths) {
-            if (mode !== "move") {
-              const portableId = this.plugin.getRecord(path)?.portableId;
-              if (portableId) {
-                const subject = this.plugin.getPortableSubject(portableId);
-                if (subject) subject.indexed = true;
-              }
-              if (!pathIsInsideFolder(path, this.plugin.data.settings.primaryFolder) && !manualPaths.has(path)) {
-                this.plugin.data.manualIndexPaths.push(path);
-                manualPaths.add(path);
-              }
+        if (mode !== "move") {
+          // The plugin API preflights the whole selection against protected ENT
+          // source classification before mutating any membership. Routing this
+          // branch through it prevents visual group selection from becoming a
+          // back door into the clinical Index.
+          await this.plugin.restoreRecordsToIndex(
+            paths,
+            `${mode === "add" ? "Add" : "Restore"} ${paths.length} index note${paths.length === 1 ? "" : "s"}`,
+            group,
+          );
+        } else {
+          await this.plugin.mutate(`${mode} ${paths.length} index note${paths.length === 1 ? "" : "s"}`, () => {
+            if (!this.plugin.data.indexGroupOrder.includes(group)) this.plugin.data.indexGroupOrder.push(group);
+            for (const path of paths) {
+              this.plugin.data.indexGroupByPath[path] = group;
+              resetCurriculumVisualPath(this.plugin.data.curriculumVisual, path);
             }
-            this.plugin.data.indexGroupByPath[path] = group;
-            resetCurriculumVisualPath(this.plugin.data.curriculumVisual, path);
-          }
-        }, { includePortableIndex: updatesPortableMembership });
+          });
+        }
         if (!this.guardOpenedBase()) return;
         this.selected.clear();
         this.tab = "indexed";
@@ -455,7 +458,7 @@ export class IndexManagerModal extends Modal {
         await this.plugin.mutate(`Create visual group “${group}”`, () => {
           this.plugin.data.indexGroupOrder.push(group);
           registerPortableGroup(this.plugin.data, group);
-        }, { includePortableIndex: true });
+        }, { includePortableIndex: true, requireUndo: true });
         if (!this.guardOpenedBase()) return;
         this.render();
       },
@@ -474,7 +477,7 @@ export class IndexManagerModal extends Modal {
         const [moved] = order.splice(from, 1);
         if (moved) order.splice(to, 0, moved);
         this.plugin.data.indexGroupOrder = order;
-      });
+      }, { requireUndo: true });
       if (!this.guardOpenedBase()) return;
       this.render();
     });
@@ -528,10 +531,14 @@ export class IndexManagerModal extends Modal {
             for (const record of members) this.plugin.data.indexGroupByPath[record.path] = next;
           }
           this.transferRootOrder(group, next, false);
+          const collapsed = this.plugin.data.collapsed.curriculumDomains;
+          this.plugin.data.collapsed.curriculumDomains = [...new Set(
+            collapsed.map((candidate) => candidate === group ? next : candidate),
+          )];
           this.plugin.data.indexGroupOrder = [...new Set(groupOrder.map((candidate) => candidate === group ? next : candidate))];
           for (const source of new Set([group, ...sourceGroups])) renameOrMergePortableGroup(this.plugin.data, source, next);
           this.plugin.invalidateRecordCache();
-        }, { includePortableIndex: true });
+        }, { includePortableIndex: true, requireUndo: true });
         if (!this.guardOpenedBase()) return;
         this.render();
       },
@@ -562,10 +569,15 @@ export class IndexManagerModal extends Modal {
             for (const record of members) this.plugin.data.indexGroupByPath[record.path] = target;
           }
           this.transferRootOrder(source, target, true);
+          const collapsed = this.plugin.data.collapsed.curriculumDomains;
+          this.plugin.data.collapsed.curriculumDomains = [
+            ...collapsed.filter((candidate) => candidate !== source && candidate !== target),
+            ...(collapsed.includes(source) || collapsed.includes(target) ? [target] : []),
+          ];
           this.plugin.data.indexGroupOrder = groupOrder.filter((group) => group !== source);
           for (const group of new Set([source, ...sourceGroups])) renameOrMergePortableGroup(this.plugin.data, group, target);
           this.plugin.invalidateRecordCache();
-        }, { includePortableIndex: true });
+        }, { includePortableIndex: true, requireUndo: true });
         if (!this.guardOpenedBase()) return;
         this.render();
       }).open();

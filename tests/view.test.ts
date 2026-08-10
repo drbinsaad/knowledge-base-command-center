@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Notice } from "obsidian";
-import { calculateModalViewportLayout, ConfirmModal, KnowledgeNoteModal, TextPromptModal, TopicEditorModal } from "../src/modals.ts";
+import { Menu, Notice, TFile } from "obsidian";
+import { AddActionModal, calculateModalViewportLayout, ConfirmModal, IndexGroupModal, KnowledgeNoteModal, RecordPickerModal, TextPromptModal, TopicEditorModal, VaultFilePickerModal } from "../src/modals.ts";
 import {
+  canRelinkPortableRecord,
   calculateSearchViewportLayout,
   EntVaultCommandCenterView,
   matchingKnowledgeBaseRecords,
@@ -10,11 +11,28 @@ import {
   tabDefinitions,
 } from "../src/view.ts";
 import { IndexManagerModal } from "../src/index-manager.ts";
-import { ExportImportCenterModal, preparePortableExport } from "../src/portability-modal.ts";
+import {
+  ExportImportCenterModal,
+  portabilityLibraryUnavailableText,
+  preparePortableExport,
+} from "../src/portability-modal.ts";
 import { createPortableExport, EMPTY_PORTABLE_SELECTION } from "../src/portability.ts";
-import { createPersonalBackup, migrateData, parseQuery, type VaultRecord } from "../src/model.ts";
+import {
+  BUILTIN_LIBRARY_DEFINITIONS,
+  createPersonalBackup,
+  emptyCurriculumTree,
+  libraryTabId,
+  migrateData,
+  parseQuery,
+  snapshotPersonal,
+  type LibraryDefinition,
+  type PluginData,
+  type VaultRecord,
+} from "../src/model.ts";
 import { collectKnowledgeBaseSearchResults } from "../src/search.ts";
 import { EntCommandCenterSettingsTab } from "../src/settings.ts";
+import { LibraryEditorModal, ManageLibrariesModal } from "../src/library-modal.ts";
+import { createFakeDom } from "./support/fake-dom.ts";
 
 function record(path: string, title: string, kind: VaultRecord["kind"] = "topic"): VaultRecord {
   return {
@@ -43,43 +61,1401 @@ function record(path: string, title: string, kind: VaultRecord["kind"] = "topic"
   };
 }
 
-test("generic workspaces expose only the library tabs represented by their records", () => {
+const CUSTOM_LIBRARY_ID = "reference-sets";
+
+function customLibrary(
+  id = CUSTOM_LIBRARY_ID,
+  name = "Reference Sets",
+  singularName = "Reference",
+  order = 0,
+  archivedAt: number | null = null,
+): LibraryDefinition {
+  return { id, name, singularName, icon: "book-open", order, sourceKind: null, archivedAt };
+}
+
+function installLibrary(data: PluginData, library = customLibrary()): LibraryDefinition {
+  data.portableIndex.libraries.push(library);
+  data.portableIndex.libraryLayouts[library.id] = [];
+  return library;
+}
+
+test("configured libraries produce ordered dynamic tabs, including empty libraries, while archived libraries stay hidden", () => {
   const settings = migrateData(null).settings;
   settings.workspaceMode = "generic";
-  const ids = (records: VaultRecord[]): string[] => tabDefinitions(settings, records).map((tab) => tab.id);
   const coreTabs = ["curriculum", "inbox", "collections", "queues"];
+  const active = customLibrary("references", "References", "Reference", 2);
+  const first = customLibrary("courses", "Courses", "Course", 0);
+  const archived = customLibrary("archive", "Archive", "Archive item", 1, Date.now());
+  const records = [{ ...record("Reference/Guideline.md", "Guideline"), libraryId: active.id }];
 
-  assert.deepEqual(ids([]), coreTabs);
-  assert.deepEqual(ids([record("Knowledge Base/Topic.md", "Topic")]), coreTabs);
-  assert.deepEqual(ids([record("Portable/Procedure.md", "Procedure", "procedure")]), [...coreTabs, "procedures"]);
-  assert.deepEqual(ids([record("Portable/Medication.md", "Medication", "medication")]), [...coreTabs, "medications"]);
-  assert.deepEqual(ids([record("Portable/Syndrome.md", "Syndrome", "syndrome")]), [...coreTabs, "syndromes"]);
-  assert.deepEqual(ids([
-    record("Portable/Procedure.md", "Procedure", "procedure"),
-    record("Portable/Medication.md", "Medication", "medication"),
-    record("Portable/Syndrome.md", "Syndrome", "syndrome"),
-  ]), [...coreTabs, "procedures", "medications", "syndromes"]);
+  assert.deepEqual(tabDefinitions(settings, records).map((tab) => tab.id), coreTabs, "records never invent a missing library definition");
+  assert.deepEqual(tabDefinitions(settings, records, [active, archived, first]).map((tab) => tab.id), [
+    ...coreTabs,
+    libraryTabId(first.id),
+    libraryTabId(active.id),
+  ]);
+  assert.deepEqual(
+    tabDefinitions(settings, [], [active]).map((tab) => tab.id),
+    [...coreTabs, libraryTabId(active.id)],
+    "an empty configured library stays reachable for heading edits",
+  );
+  const tab = tabDefinitions(settings, [], [active]).at(-1);
+  assert.deepEqual(tab, { id: libraryTabId(active.id), label: "References", icon: "book-open" });
 });
 
-test("ENT workspaces keep every clinical library tab visible even when it is empty", () => {
+test("unknown stored Library icons use a registered display fallback without rewriting the stored value", () => {
+  const settings = migrateData(null).settings;
+  const imported = { ...customLibrary(), icon: "future-library-icon" };
+
+  const tab = tabDefinitions(settings, [], [imported]).at(-1);
+
+  assert.equal(tab?.icon, "library");
+  assert.equal(imported.icon, "future-library-icon", "display fallback must not destroy a forward-compatible stored ID");
+});
+
+test("ENT workspaces keep every configured system library tab visible even when it is empty", () => {
   const settings = migrateData(null).settings;
   settings.workspaceMode = "ent-clinical";
 
-  assert.deepEqual(tabDefinitions(settings, []).map((tab) => tab.id), [
+  assert.deepEqual(tabDefinitions(settings, [], [...BUILTIN_LIBRARY_DEFINITIONS]).map((tab) => tab.id), [
     "curriculum",
     "inbox",
     "collections",
     "queues",
-    "procedures",
-    "medications",
-    "syndromes",
+    libraryTabId("procedure"),
+    libraryTabId("medication"),
+    libraryTabId("syndrome"),
   ]);
+});
+
+test("a stale library editor cannot overwrite a changed, reordered, archived, or deleted library", async () => {
+  Notice.messages.length = 0;
+  const original = customLibrary();
+  const scenarios: Array<{ name: string; mutate(current: LibraryDefinition | null): LibraryDefinition | null }> = [
+    { name: "changed", mutate: (current) => current ? { ...current, name: "Newer name" } : null },
+    { name: "reordered", mutate: (current) => current ? { ...current, order: current.order + 1 } : null },
+    { name: "archived", mutate: (current) => current ? { ...current, archivedAt: Date.now() } : null },
+    { name: "deleted", mutate: () => null },
+  ];
+
+  for (const scenario of scenarios) {
+    let current: LibraryDefinition | null = { ...original };
+    let updates = 0;
+    const plugin = {
+      app: {},
+      getActiveKnowledgeBaseId: () => "base-a",
+      getDataEpoch: () => 0,
+      getLibrary: (id: string) => id === original.id ? current : null,
+      async updateLibrary(): Promise<void> { updates += 1; },
+    };
+    const modal = new LibraryEditorModal(
+      plugin as unknown as ConstructorParameters<typeof LibraryEditorModal>[0],
+      { ...original },
+    );
+    const harness = modal as unknown as {
+      render(): void;
+      close(): void;
+      submit(): Promise<void>;
+    };
+    harness.render = () => undefined;
+    harness.close = () => undefined;
+    current = scenario.mutate(current);
+
+    await harness.submit();
+
+    assert.equal(updates, 0, `${scenario.name} library must reject the stale editor`);
+  }
+  assert.equal(Notice.messages.filter((message) => /after the editor opened/i.test(message)).length, scenarios.length);
+});
+
+test("editing only a Library name preserves an imported unknown icon ID", async () => {
+  const original = { ...customLibrary(), icon: "future-library-icon" };
+  let submittedIcon = "";
+  const plugin = {
+    app: {},
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    getLibrary: (id: string) => id === original.id ? { ...original } : null,
+    async updateLibrary(_id: string, input: { icon: string }): Promise<void> { submittedIcon = input.icon; },
+  };
+  const modal = new LibraryEditorModal(
+    plugin as unknown as ConstructorParameters<typeof LibraryEditorModal>[0],
+    original,
+  );
+  const harness = modal as unknown as {
+    name: string;
+    render(): void;
+    close(): void;
+    submit(): Promise<void>;
+  };
+  harness.name = "Renamed references";
+  harness.render = () => undefined;
+  harness.close = () => undefined;
+
+  await harness.submit();
+
+  assert.equal(submittedIcon, "future-library-icon");
+});
+
+test("library icon selection updates pressed state in place and retains keyboard focus", () => {
+  const dom = createFakeDom();
+  const original = customLibrary();
+  const plugin = {
+    app: {},
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+  };
+  const modal = new LibraryEditorModal(
+    plugin as unknown as ConstructorParameters<typeof LibraryEditorModal>[0],
+    original,
+  );
+  const first = dom.document.body.createEl("button", {
+    cls: "ent-cc-library-icon-choice is-selected",
+    attr: { "aria-pressed": "true" },
+  }) as unknown as HTMLButtonElement;
+  const second = dom.document.body.createEl("button", {
+    cls: "ent-cc-library-icon-choice",
+    attr: { "aria-pressed": "false" },
+  }) as unknown as HTMLButtonElement;
+  let renders = 0;
+  const harness = modal as unknown as {
+    icon: string;
+    iconButtonEls: Map<string, HTMLButtonElement>;
+    render(): void;
+    selectIcon(icon: string, button: HTMLButtonElement): void;
+  };
+  harness.icon = "book-open";
+  harness.iconButtonEls = new Map([["book-open", first], ["microscope", second]]);
+  harness.render = () => { renders += 1; };
+
+  harness.selectIcon("microscope", second);
+
+  assert.equal(first.classList.contains("is-selected"), false);
+  assert.equal(first.getAttribute("aria-pressed"), "false");
+  assert.equal(second.classList.contains("is-selected"), true);
+  assert.equal(second.getAttribute("aria-pressed"), "true");
+  assert.equal(dom.document.activeElement, second);
+  assert.equal(renders, 0, "choosing an icon must not rebuild the modal DOM");
+});
+
+test("Library manager renders an imported unknown icon safely and exposes stable action focus keys", () => {
+  const dom = createFakeDom();
+  const imported = { ...customLibrary(), icon: "future-library-icon" };
+  const manager = Object.create(ManageLibrariesModal.prototype) as {
+    plugin: { librarySubjectCount(libraryId: string): number };
+    busy: boolean;
+    renderLibrary(
+      parent: HTMLElement,
+      library: LibraryDefinition,
+      archived: boolean,
+      activeIndex: number,
+      activeLibraries: LibraryDefinition[],
+      allLibraries: LibraryDefinition[],
+    ): void;
+  };
+  manager.plugin = { librarySubjectCount: () => 0 };
+  manager.busy = false;
+
+  manager.renderLibrary(
+    dom.document.body as unknown as HTMLElement,
+    imported,
+    false,
+    0,
+    [imported],
+    [imported],
+  );
+
+  const icon = dom.document.body.querySelector(".ent-cc-library-manager-icon");
+  assert.equal(icon?.getAttribute("data-icon"), "library");
+  assert.equal(imported.icon, "future-library-icon");
+  assert.deepEqual(
+    dom.document.body.querySelectorAll("[data-library-focus]").map((element) => element.getAttribute("data-library-focus")),
+    [
+      `library-${imported.id}-move-up`,
+      `library-${imported.id}-move-down`,
+      `library-${imported.id}-edit`,
+      `library-${imported.id}-archive`,
+    ],
+  );
+});
+
+test("Manage Libraries retains logical focus through busy rebuilds and changed archive state", () => {
+  const dom = createFakeDom();
+  const manager = Object.create(ManageLibrariesModal.prototype) as {
+    contentEl: HTMLElement;
+    busy: boolean;
+    pendingFocusKey: string | null;
+    pendingFallbackFocusKey: string | null;
+    renderGeneration: number;
+    capturePendingFocus(focusKey?: string, fallbackFocusKey?: string): void;
+    restorePendingFocus(): void;
+  };
+  manager.contentEl = dom.document.body as unknown as HTMLElement;
+  manager.busy = false;
+  manager.pendingFocusKey = null;
+  manager.pendingFallbackFocusKey = null;
+  manager.renderGeneration = 1;
+
+  const archive = dom.document.body.createEl("button", {
+    attr: {
+      "data-library-focus": "library-reference-sets-archive",
+      "data-library-focus-fallback": "library-reference-sets-restore",
+    },
+  });
+  archive.focus();
+  manager.capturePendingFocus();
+  dom.document.body.empty();
+
+  const restore = dom.document.body.createEl("button", {
+    attr: {
+      "data-library-focus": "library-reference-sets-restore",
+      "data-library-focus-fallback": "library-reference-sets-edit",
+    },
+  });
+  restore.disabled = true;
+  manager.busy = true;
+  manager.restorePendingFocus();
+
+  assert.equal(dom.document.activeElement, dom.document.body, "busy rebuild keeps focus inside the modal");
+  assert.equal(manager.pendingFocusKey, "library-reference-sets-archive", "logical target survives the busy render");
+
+  restore.disabled = false;
+  manager.busy = false;
+  manager.restorePendingFocus();
+
+  assert.equal(dom.document.activeElement, restore, "archive falls forward to the matching Restore action");
+  assert.equal(manager.pendingFocusKey, null);
+  assert.equal(manager.pendingFallbackFocusKey, null);
+});
+
+test("the Add menu defaults to the active custom library and exposes the library picker elsewhere", () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const library = installLibrary(data);
+  data.activeTab = libraryTabId(library.id);
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: object;
+    plugin: {
+      data: typeof data;
+      getActiveKnowledgeBaseId(): string;
+      getDataEpoch(): number;
+      isClinicalMode(): boolean;
+      getLibraries(): LibraryDefinition[];
+      getLibrary(id: string): LibraryDefinition | null;
+    };
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    openAddActions(): void;
+  };
+  view.app = {};
+  view.plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    isClinicalMode: () => false,
+    getLibraries: () => [library],
+    getLibrary: (id) => id === library.id ? library : null,
+  };
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+  let titles: string[] = [];
+  AddActionModal.prototype.open = function openForTest(): void {
+    titles = (this as unknown as { actions: Array<{ title: string }> }).actions.map((action) => action.title);
+  };
+  try {
+    view.openAddActions();
+  } finally {
+    delete (AddActionModal.prototype as { open?: () => void }).open;
+  }
+
+  assert.deepEqual(titles.slice(0, 3), [
+    "Create Reference",
+    "Add existing note to Reference Sets",
+    "Add current note to Reference Sets",
+  ]);
+
+  data.activeTab = "curriculum";
+  AddActionModal.prototype.open = function openForTest(): void {
+    titles = (this as unknown as { actions: Array<{ title: string }> }).actions.map((action) => action.title);
+  };
+  try {
+    view.openAddActions();
+  } finally {
+    delete (AddActionModal.prototype as { open?: () => void }).open;
+  }
+  assert.equal(titles.includes("Add to library…"), true);
+  assert.equal(titles.includes("New library…"), true);
+});
+
+test("the active-library Add menu dispatches both existing-note and current-note classification", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const library = installLibrary(data);
+  data.activeTab = libraryTabId(library.id);
+  const existing = new TFile("Reference/Existing reference.md");
+  const current = new TFile("Reference/Current reference.md");
+  const assignments: Array<{ path: string; libraryId: string }> = [];
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    isClinicalMode: () => false,
+    getLibraries: () => [library],
+    getLibrary: (id: string) => id === library.id ? library : null,
+    getVaultNoteFiles: () => [existing, current],
+    async assignRecordToLibrary(path: string, libraryId: string): Promise<void> {
+      assignments.push({ path, libraryId });
+    },
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: { workspace: { getActiveFile(): TFile } };
+    plugin: typeof plugin;
+    records: VaultRecord[];
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    openAddActions(): void;
+  };
+  view.app = { workspace: { getActiveFile: () => current } };
+  view.plugin = plugin;
+  view.records = [];
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+
+  let requestedAction = "existing-active-library";
+  const addOpen = Object.getOwnPropertyDescriptor(AddActionModal.prototype, "open");
+  const pickerOpen = Object.getOwnPropertyDescriptor(VaultFilePickerModal.prototype, "open");
+  AddActionModal.prototype.open = function chooseRequestedAction(): void {
+    const modal = this as unknown as {
+      getItems(): Array<{ id: string }>;
+      onChooseItem(item: { id: string }): void;
+    };
+    const action = modal.getItems().find((item) => item.id === requestedAction);
+    assert.ok(action, `missing Add action ${requestedAction}`);
+    modal.onChooseItem(action);
+  };
+  VaultFilePickerModal.prototype.open = function chooseExistingFile(): void {
+    const modal = this as unknown as {
+      getItems(): TFile[];
+      onChooseItem(file: TFile): void;
+    };
+    assert.equal(modal.getItems().includes(existing), true);
+    modal.onChooseItem(existing);
+  };
+  try {
+    view.openAddActions();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    requestedAction = "current-active-library";
+    view.openAddActions();
+    await Promise.resolve();
+    await Promise.resolve();
+  } finally {
+    if (addOpen) Object.defineProperty(AddActionModal.prototype, "open", addOpen);
+    else Reflect.deleteProperty(AddActionModal.prototype, "open");
+    if (pickerOpen) Object.defineProperty(VaultFilePickerModal.prototype, "open", pickerOpen);
+    else Reflect.deleteProperty(VaultFilePickerModal.prototype, "open");
+  }
+
+  assert.deepEqual(assignments, [
+    { path: existing.path, libraryId: library.id },
+    { path: current.path, libraryId: library.id },
+  ]);
+});
+
+test("record and vault-file pickers use the command center's normalized multilingual search", () => {
+  const records = [
+    record("Knowledge Base/Ménière’s disease.md", "Ménière’s disease"),
+    record("Knowledge Base/مدرسة الصوت.md", "مدرسة الصوت"),
+  ];
+  const recordPicker = Object.create(RecordPickerModal.prototype) as RecordPickerModal & { records: VaultRecord[] };
+  recordPicker.records = records;
+  assert.equal(recordPicker.getSuggestions("").length, records.length, "opening a picker still lists every item");
+  assert.deepEqual(recordPicker.getSuggestions("menieres").map((match) => match.item.title), ["Ménière’s disease"]);
+  assert.deepEqual(recordPicker.getSuggestions("مدرسه").map((match) => match.item.title), ["مدرسة الصوت"]);
+
+  const files = [new TFile("Reference/ٱلحنجرة.md")];
+  const filePicker = Object.create(VaultFilePickerModal.prototype) as VaultFilePickerModal & { files: TFile[] };
+  filePicker.files = files;
+  assert.deepEqual(filePicker.getSuggestions("الحنجرة").map((match) => match.item.path), [files[0]?.path]);
+});
+
+test("a built-in clinical tab still exposes custom libraries through Add", () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  const builtIn = { ...BUILTIN_LIBRARY_DEFINITIONS[1] };
+  assert.ok(builtIn);
+  const custom = customLibrary();
+  data.portableIndex.libraries = [builtIn, custom];
+  data.activeTab = libraryTabId(builtIn.id);
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: object;
+    plugin: {
+      data: typeof data;
+      getActiveKnowledgeBaseId(): string;
+      getDataEpoch(): number;
+      isClinicalMode(): boolean;
+      getLibraries(): LibraryDefinition[];
+      getLibrary(id: string): LibraryDefinition | null;
+    };
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    openAddActions(): void;
+  };
+  view.app = {};
+  view.plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    isClinicalMode: () => true,
+    getLibraries: () => [builtIn, custom],
+    getLibrary: (id) => [builtIn, custom].find((library) => library.id === id) ?? null,
+  };
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+
+  let titles: string[] = [];
+  const open = Object.getOwnPropertyDescriptor(AddActionModal.prototype, "open");
+  AddActionModal.prototype.open = function captureActions(): void {
+    titles = (this as unknown as { actions: Array<{ title: string }> }).actions.map((action) => action.title);
+  };
+  try {
+    view.openAddActions();
+  } finally {
+    if (open) Object.defineProperty(AddActionModal.prototype, "open", open);
+    else Reflect.deleteProperty(AddActionModal.prototype, "open");
+  }
+
+  assert.equal(titles.includes("Add to library…"), true);
+  assert.equal(titles.includes(`Create ${builtIn.singularName}`), false, "native clinical libraries remain source-driven");
+});
+
+test("move to another section lists every active dynamic library and dispatches by stable ID", async () => {
+  const data = migrateData(null);
+  const source = installLibrary(data, customLibrary("source-library", "Sources", "Source", 0));
+  const destination = installLibrary(data, customLibrary("courses", "Courses", "Course", 1));
+  data.activeTab = libraryTabId(source.id);
+  const assignments: Array<{ path: string; libraryId: string }> = [];
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    isClinicalMode: () => false,
+    getRecordIndexDestinationError: () => null,
+    getLibraries: () => [source, destination],
+    async assignRecordToLibrary(path: string, libraryId: string): Promise<void> {
+      assignments.push({ path, libraryId });
+    },
+    async assignRecordToCatalog(): Promise<void> {
+      throw new Error("the library destination should not route through a semantic kind");
+    },
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: object;
+    plugin: typeof plugin;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    openCatalogMoveActions(record: VaultRecord): void;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+  const item = { ...record("Reference/Guideline.md", "Guideline"), libraryId: source.id };
+
+  let titles: string[] = [];
+  const open = Object.getOwnPropertyDescriptor(AddActionModal.prototype, "open");
+  AddActionModal.prototype.open = function chooseDestination(): void {
+    const modal = this as unknown as {
+      actions: Array<{ id: string; title: string }>;
+      onChooseItem(action: { id: string; title: string }): void;
+    };
+    titles = modal.actions.map((action) => action.title);
+    const action = modal.actions.find((candidate) => candidate.id === libraryTabId(destination.id));
+    assert.ok(action);
+    modal.onChooseItem(action);
+  };
+  try {
+    view.openCatalogMoveActions(item);
+    await Promise.resolve();
+    await Promise.resolve();
+  } finally {
+    if (open) Object.defineProperty(AddActionModal.prototype, "open", open);
+    else Reflect.deleteProperty(AddActionModal.prototype, "open");
+  }
+
+  assert.deepEqual(titles, [`Move to ${data.settings.indexLabel}`, "Move to Courses"]);
+  assert.deepEqual(assignments, [{ path: item.path, libraryId: destination.id }]);
+});
+
+test("ENT move choices omit the Index for protected records but retain it for native topics", () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  data.settings.indexLabel = "Curriculum";
+  const source = installLibrary(data, customLibrary("exam-review", "Exam review", "Review topic", 3));
+  const medication = { ...BUILTIN_LIBRARY_DEFINITIONS.find((library) => library.id === "medication"), archivedAt: null } as LibraryDefinition;
+  data.portableIndex.libraries.push(medication);
+  data.portableIndex.libraryLayouts.medication = [];
+  data.activeTab = libraryTabId(source.id);
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    isClinicalMode: () => true,
+    getRecordIndexDestinationError: (path: string) => path.includes("Allergodil") ? "protected medication" : null,
+    getLibraries: () => [source, medication],
+    async assignRecordToLibrary(): Promise<void> {},
+    async assignRecordToCatalog(): Promise<void> {},
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: object;
+    plugin: typeof plugin;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    openCatalogMoveActions(item: VaultRecord): void;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+
+  const opened: string[][] = [];
+  const open = Object.getOwnPropertyDescriptor(AddActionModal.prototype, "open");
+  AddActionModal.prototype.open = function captureDestinations(): void {
+    opened.push((this as unknown as { actions: Array<{ title: string }> }).actions.map((action) => action.title));
+  };
+  try {
+    view.openCatalogMoveActions({
+      ...record("06 Clinical Tools/Medications/Drug - Allergodil.md", "Allergodil", "medication"),
+      role: "library",
+      libraryId: source.id,
+    });
+    view.openCatalogMoveActions({
+      ...record("03 Clinical Topics/01 Pediatric/ENT-PED-001 - Airway.md", "Airway"),
+      role: "canonical",
+      libraryId: source.id,
+    });
+  } finally {
+    if (open) Object.defineProperty(AddActionModal.prototype, "open", open);
+    else Reflect.deleteProperty(AddActionModal.prototype, "open");
+  }
+
+  assert.deepEqual(opened[0], ["Move to Medications"]);
+  assert.deepEqual(opened[1], ["Move to Curriculum"]);
+});
+
+test("removing a native ENT record from a custom Library explains its built-in fallback", () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  data.settings.indexLabel = "Curriculum";
+  const custom = installLibrary(data, customLibrary("exam-review", "Exam review", "Review topic", 3));
+  const medication = { ...BUILTIN_LIBRARY_DEFINITIONS.find((library) => library.id === "medication"), archivedAt: null } as LibraryDefinition;
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    getLibrary: (id: string) => id === custom.id ? custom : id === medication.id ? medication : null,
+    getRecordUnassignedLibraryFallback: () => medication,
+    getRecordIndexDestinationError: () => "protected medication",
+    async removeRecordFromLibrary(): Promise<void> {},
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: object;
+    plugin: typeof plugin;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    confirmRemoveFromCatalog(item: VaultRecord, libraryId: string): void;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+
+  let message = "";
+  const open = Object.getOwnPropertyDescriptor(ConfirmModal.prototype, "open");
+  ConfirmModal.prototype.open = function captureCopy(): void {
+    message = (this as unknown as { message: string }).message;
+  };
+  try {
+    view.confirmRemoveFromCatalog({
+      ...record("06 Clinical Tools/Medications/Drug - Allergodil.md", "Allergodil", "medication"),
+      role: "library",
+      libraryId: custom.id,
+    }, custom.id);
+  } finally {
+    if (open) Object.defineProperty(ConfirmModal.prototype, "open", open);
+    else Reflect.deleteProperty(ConfirmModal.prototype, "open");
+  }
+
+  assert.match(message, /return to the protected built-in Medications library/i);
+  assert.match(message, /compatible custom library/i);
+  assert.doesNotMatch(message, /return it to Curriculum/i);
+  assert.doesNotMatch(message, /become unclassified/i);
+});
+
+test("Index Manager group restore routes through the guarded atomic restore API", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  data.settings.allowClinicalVisualGroupMoves = true;
+  const path = "06 Clinical Tools/Medications/Drug - Allergodil.md";
+  const restored: Array<{ paths: string[]; label: string; group: string }> = [];
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    canVisuallyMoveAcrossGroups: () => true,
+    getRecord: (candidate: string) => candidate === path ? record(path, "Allergodil", "medication") : null,
+    getIndexGroups: () => ["Rhinology"],
+    async restoreRecordsToIndex(paths: string[], label: string, group: string): Promise<void> {
+      restored.push({ paths, label, group });
+    },
+    async mutate(): Promise<void> {
+      throw new Error("restore must not bypass the guarded plugin API");
+    },
+  };
+  const manager = Object.create(IndexManagerModal.prototype) as {
+    app: object;
+    plugin: typeof plugin;
+    selected: Set<string>;
+    tab: "indexed" | "available" | "hidden" | "groups" | "diagnostics";
+    openedBaseId: string;
+    openedDataEpoch: number;
+    staleBaseNoticeShown: boolean;
+    managerOpen: boolean;
+    render(): void;
+    chooseGroupForSelection(mode: "add" | "restore" | "move"): void;
+  };
+  manager.app = {};
+  manager.plugin = plugin;
+  manager.selected = new Set([path]);
+  manager.tab = "hidden";
+  manager.openedBaseId = "base-a";
+  manager.openedDataEpoch = 0;
+  manager.staleBaseNoticeShown = false;
+  manager.managerOpen = true;
+  manager.render = () => {};
+
+  let submitted: Promise<void> = Promise.resolve();
+  const open = Object.getOwnPropertyDescriptor(IndexGroupModal.prototype, "open");
+  IndexGroupModal.prototype.open = function submitGroup(): void {
+    const options = (this as unknown as { options: { onSubmit(group: string): void | Promise<void> } }).options;
+    submitted = Promise.resolve(options.onSubmit("Rhinology"));
+  };
+  try {
+    manager.chooseGroupForSelection("restore");
+    await submitted;
+  } finally {
+    if (open) Object.defineProperty(IndexGroupModal.prototype, "open", open);
+    else Reflect.deleteProperty(IndexGroupModal.prototype, "open");
+  }
+
+  assert.deepEqual(restored, [{
+    paths: [path],
+    label: "Restore 1 index note",
+    group: "Rhinology",
+  }]);
+});
+
+test("link controls are limited to notes explicitly completed from portable placeholders", () => {
+  assert.equal(canRelinkPortableRecord({ portableId: "local-medication" }), false);
+  assert.equal(canRelinkPortableRecord({ portableId: "native-clinical", portableRelinkable: false }), false);
+  assert.equal(canRelinkPortableRecord({ portableId: "imported", portableRelinkable: true }), true);
+  assert.equal(canRelinkPortableRecord({ portableId: "imported", portableRelinkable: true, isPlaceholder: true }), false);
+});
+
+test("creating a note from a custom library carries its labels into the generic note form", () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.itemSingular = "note";
+  const library = installLibrary(data);
+  data.activeTab = libraryTabId(library.id);
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: object;
+    plugin: {
+      data: typeof data;
+      getActiveKnowledgeBaseId(): string;
+      getDataEpoch(): number;
+      isClinicalMode(): boolean;
+      getTemplateFiles(): [];
+      getLibrary(id: string): LibraryDefinition | null;
+    };
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    startCreateLibraryNote(libraryId: string): void;
+  };
+  view.app = {};
+  view.plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    isClinicalMode: () => false,
+    getTemplateFiles: () => [],
+    getLibrary: (id) => id === library.id ? library : null,
+  };
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+  let options: { createLabel?: string; contextNotice?: string } | null = null;
+  KnowledgeNoteModal.prototype.open = function openForTest(): void {
+    options = (this as unknown as { options: typeof options }).options;
+  };
+  try {
+    view.startCreateLibraryNote(library.id);
+  } finally {
+    delete (KnowledgeNoteModal.prototype as { open?: () => void }).open;
+  }
+
+  assert.equal(options?.createLabel, "Reference");
+  assert.match(options?.contextNotice ?? "", /classified in Reference Sets after creation/i);
+});
+
+test("library heading reorder is portable, undo-protected, and leaves Markdown outside the mutation", async () => {
+  const data = migrateData(null);
+  const library = installLibrary(data);
+  data.portableIndex.libraryLayouts[library.id] = [
+    { id: "heading-a", title: "A", collapsed: false, subjects: [], subheadings: [] },
+    { id: "heading-b", title: "B", collapsed: false, subjects: [], subheadings: [] },
+  ];
+  let options: { includePortableIndex?: boolean; requireUndo?: boolean } | undefined;
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    plugin: {
+      data: typeof data;
+      getLibrary(id: string): LibraryDefinition | null;
+      mutate(label: string, action: () => void, nextOptions?: typeof options): Promise<void>;
+    };
+    moveLibraryHeading(libraryId: string, from: number, to: number): Promise<void>;
+  };
+  view.plugin = {
+    data,
+    getLibrary: (id) => id === library.id ? library : null,
+    mutate: async (_label, action, nextOptions) => {
+      options = nextOptions;
+      action();
+    },
+  };
+
+  await view.moveLibraryHeading(library.id, 0, 1);
+
+  assert.deepEqual(data.portableIndex.libraryLayouts[library.id]?.map((heading) => heading.id), ["heading-b", "heading-a"]);
+  assert.deepEqual(options, { includePortableIndex: true, requireUndo: true });
+});
+
+test("library interaction menus create, rename, reorder, and remove headings, subheadings, and records", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const library = installLibrary(data);
+  data.activeTab = libraryTabId(library.id);
+  data.portableIndex.libraryLayouts[library.id] = [
+    {
+      id: "heading-a",
+      title: "Heading A",
+      collapsed: false,
+      subjects: ["subject-a", "subject-b"],
+      subheadings: [{ id: "subheading-old", title: "Old", collapsed: false, subjects: [] }],
+    },
+    { id: "heading-b", title: "Heading B", collapsed: false, subjects: [], subheadings: [] },
+  ];
+  const mutationOptions: Array<{ includePortableIndex?: boolean; requireUndo?: boolean } | undefined> = [];
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    isClinicalMode: () => false,
+    getLibraries: () => [library],
+    getLibrary: (id: string) => id === library.id ? library : null,
+    canVisuallyMoveAcrossGroups: () => false,
+    async mutate(
+      _label: string,
+      action: () => void,
+      options?: { includePortableIndex?: boolean; requireUndo?: boolean },
+    ): Promise<void> {
+      mutationOptions.push(options);
+      action();
+    },
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: object;
+    plugin: typeof plugin;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    curriculumArrangeMode: boolean;
+    promptNewLibraryHeading(libraryId: string): void;
+    showLibraryHeadingMenu(event: MouseEvent, libraryId: string, heading: NonNullable<typeof data.portableIndex.libraryLayouts[string]>[number]): void;
+    showLibrarySubheadingMenu(
+      event: MouseEvent,
+      libraryId: string,
+      heading: NonNullable<typeof data.portableIndex.libraryLayouts[string]>[number],
+      subheading: NonNullable<typeof data.portableIndex.libraryLayouts[string]>[number]["subheadings"][number],
+    ): void;
+    showRecordMenu(
+      event: MouseEvent,
+      item: VaultRecord,
+      membership: undefined,
+      libraryMembership: { libraryId: string; headingId: string },
+    ): void;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+  view.curriculumArrangeMode = false;
+
+  interface CapturedMenuItem {
+    title: string;
+    disabled: boolean;
+    click?: () => void;
+  }
+  const menuItems = new WeakMap<object, CapturedMenuItem[]>();
+  const shownMenus: CapturedMenuItem[][] = [];
+  const menuDescriptors = new Map(["addItem", "addSeparator", "showAtMouseEvent"].map((name) => [
+    name,
+    Object.getOwnPropertyDescriptor(Menu.prototype, name),
+  ]));
+  Object.defineProperty(Menu.prototype, "addItem", {
+    configurable: true,
+    value(this: object, configure: (item: unknown) => void): object {
+      const entries = menuItems.get(this) ?? [];
+      menuItems.set(this, entries);
+      const captured: CapturedMenuItem = { title: "", disabled: false };
+      const item = {
+        setTitle(title: string) { captured.title = title; return item; },
+        setIcon() { return item; },
+        setDisabled(disabled: boolean) { captured.disabled = disabled; return item; },
+        onClick(callback: () => void) { captured.click = callback; return item; },
+      };
+      configure(item);
+      entries.push(captured);
+      return this;
+    },
+  });
+  Object.defineProperty(Menu.prototype, "addSeparator", {
+    configurable: true,
+    value(this: object): object { return this; },
+  });
+  Object.defineProperty(Menu.prototype, "showAtMouseEvent", {
+    configurable: true,
+    value(this: object): void { shownMenus.push(menuItems.get(this) ?? []); },
+  });
+
+  let nextPrompt = "";
+  const promptPromises: Promise<unknown>[] = [];
+  const confirmations: Array<() => void | Promise<void>> = [];
+  const promptOpen = Object.getOwnPropertyDescriptor(TextPromptModal.prototype, "open");
+  const confirmOpen = Object.getOwnPropertyDescriptor(ConfirmModal.prototype, "open");
+  TextPromptModal.prototype.open = function submitPrompt(): void {
+    const options = (this as unknown as { options: { onSubmit(value: string): void | Promise<void> } }).options;
+    promptPromises.push(Promise.resolve(options.onSubmit(nextPrompt)));
+  };
+  ConfirmModal.prototype.open = function captureConfirmation(): void {
+    const modal = this as unknown as { onConfirm(): void | Promise<void> };
+    confirmations.push(() => modal.onConfirm());
+  };
+
+  const settlePrompts = async (): Promise<void> => {
+    const pending = promptPromises.splice(0);
+    await Promise.all(pending);
+    await Promise.resolve();
+  };
+  const choose = (items: CapturedMenuItem[], title: string): void => {
+    const item = items.find((candidate) => candidate.title === title);
+    assert.ok(item, `missing menu item ${title}`);
+    assert.equal(item.disabled, false, `${title} should be enabled`);
+    item.click?.();
+  };
+
+  try {
+    nextPrompt = "Created heading";
+    view.promptNewLibraryHeading(library.id);
+    await settlePrompts();
+    assert.equal(data.portableIndex.libraryLayouts[library.id]?.some((heading) => heading.title === "Created heading"), true);
+
+    const heading = data.portableIndex.libraryLayouts[library.id]?.find((item) => item.id === "heading-a");
+    assert.ok(heading);
+    view.showLibraryHeadingMenu({} as MouseEvent, library.id, heading);
+    const headingMenu = shownMenus.at(-1) ?? [];
+
+    nextPrompt = "Renamed heading";
+    choose(headingMenu, "Rename heading");
+    await settlePrompts();
+    assert.equal(heading.title, "Renamed heading");
+
+    nextPrompt = "Topical";
+    choose(headingMenu, "Add subheading");
+    await settlePrompts();
+    const subheading = heading.subheadings.find((item) => item.title === "Topical");
+    assert.ok(subheading);
+    subheading.subjects = ["subject-c"];
+
+    choose(headingMenu, "Move heading down");
+    await Promise.resolve();
+    assert.deepEqual(data.portableIndex.libraryLayouts[library.id]?.map((item) => item.id).slice(0, 2), ["heading-b", "heading-a"]);
+
+    view.showLibrarySubheadingMenu({} as MouseEvent, library.id, heading, subheading);
+    const subheadingMenu = shownMenus.at(-1) ?? [];
+    choose(subheadingMenu, "Move subheading up");
+    await Promise.resolve();
+    assert.equal(heading.subheadings[0]?.id, subheading.id);
+
+    nextPrompt = "Intranasal";
+    choose(subheadingMenu, "Rename subheading");
+    await settlePrompts();
+    assert.equal(subheading.title, "Intranasal");
+
+    choose(subheadingMenu, "Remove subheading");
+    const removeSubheading = confirmations.shift();
+    assert.ok(removeSubheading);
+    await removeSubheading();
+    assert.equal(heading.subheadings.some((item) => item.id === subheading.id), false);
+    assert.equal(heading.subjects.includes("subject-c"), true, "removing a subheading keeps its records directly under the heading");
+
+    const reference = {
+      ...record("Reference/Guideline.md", "Guideline"),
+      portableId: "subject-a",
+      libraryId: library.id,
+    };
+    view.showRecordMenu({} as MouseEvent, reference, undefined, { libraryId: library.id, headingId: heading.id });
+    const recordMenu = shownMenus.at(-1) ?? [];
+    choose(recordMenu, "Move down");
+    await Promise.resolve();
+    assert.deepEqual(heading.subjects.slice(0, 2), ["subject-b", "subject-a"]);
+
+    choose(headingMenu, "Delete heading");
+    const deleteHeading = confirmations.shift();
+    assert.ok(deleteHeading);
+    await deleteHeading();
+    assert.equal(data.portableIndex.libraryLayouts[library.id]?.some((item) => item.id === heading.id), false);
+    assert.equal(data.portableIndex.libraryLayouts[library.id]?.some((item) => item.title === "Created heading"), true);
+  } finally {
+    if (promptOpen) Object.defineProperty(TextPromptModal.prototype, "open", promptOpen);
+    else Reflect.deleteProperty(TextPromptModal.prototype, "open");
+    if (confirmOpen) Object.defineProperty(ConfirmModal.prototype, "open", confirmOpen);
+    else Reflect.deleteProperty(ConfirmModal.prototype, "open");
+    for (const [name, descriptor] of menuDescriptors) {
+      if (descriptor) Object.defineProperty(Menu.prototype, name, descriptor);
+      else Reflect.deleteProperty(Menu.prototype, name);
+    }
+  }
+
+  assert.equal(mutationOptions.length >= 8, true);
+  assert.equal(mutationOptions.every((options) => options?.includePortableIndex && options.requireUndo), true);
+});
+
+test("Generic indexed non-topic records expose inspector and mobile arrange controls", () => {
+  const dom = createFakeDom();
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.activeTab = "curriculum";
+  const indexedNote: VaultRecord = {
+    ...record("Knowledge Base/References/Guideline.md", "Guideline", "note"),
+    role: "vault-note",
+    portableIndexed: true,
+  };
+  data.selectedPath = indexedNote.path;
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    isClinicalMode: () => false,
+    canVisuallyMoveAcrossGroups: () => true,
+    getLibrary: () => null,
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as unknown as {
+    app: object;
+    plugin: typeof plugin;
+    contentEl: HTMLElement;
+    inspectorEl: HTMLElement;
+    recordByPath: Map<string, VaultRecord>;
+    viewInstanceId: string;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    mobileInspectorOpen: boolean;
+    mobileInspectorNeedsFocus: boolean;
+    curriculumArrangeMode: boolean;
+    curriculum: ReturnType<typeof emptyCurriculumTree>;
+    visualPlacementPaths: Set<string>;
+    timerWindow: { setTimeout(callback: () => void): number };
+    isCompactInspectorLayout(): boolean;
+    renderRelatedKnowledge(): void;
+    renderInspector(): void;
+    showRecordMenu(event: MouseEvent, item: VaultRecord): void;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.contentEl = dom.document.body as unknown as HTMLElement;
+  view.inspectorEl = dom.document.body.createEl("aside") as unknown as HTMLElement;
+  view.recordByPath = new Map([[indexedNote.path, indexedNote]]);
+  view.viewInstanceId = "generic-indexed-note-test";
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+  view.mobileInspectorOpen = false;
+  view.mobileInspectorNeedsFocus = false;
+  view.curriculumArrangeMode = true;
+  view.curriculum = emptyCurriculumTree();
+  view.visualPlacementPaths = new Set();
+  view.curriculum.domains = [{
+    domain: indexedNote.domain,
+    folderOrder: indexedNote.folderOrder,
+    roots: [{ record: indexedNote, children: [] }],
+  }];
+  view.curriculum.parentByPath.set(indexedNote.path, null);
+  view.curriculum.childrenByPath.set(indexedNote.path, []);
+  view.timerWindow = { setTimeout: (callback) => { callback(); return 1; } };
+  view.isCompactInspectorLayout = () => false;
+  view.renderRelatedKnowledge = () => undefined;
+
+  interface CapturedMenuItem { title: string }
+  const menuItems = new WeakMap<object, CapturedMenuItem[]>();
+  let shown: CapturedMenuItem[] = [];
+  const descriptors = new Map(["addItem", "addSeparator", "showAtMouseEvent"].map((name) => [
+    name,
+    Object.getOwnPropertyDescriptor(Menu.prototype, name),
+  ]));
+  Object.defineProperty(Menu.prototype, "addItem", {
+    configurable: true,
+    value(this: object, configure: (item: unknown) => void): object {
+      const items = menuItems.get(this) ?? [];
+      menuItems.set(this, items);
+      const captured: CapturedMenuItem = { title: "" };
+      const item = {
+        setTitle(title: string) { captured.title = title; return item; },
+        setIcon() { return item; },
+        setDisabled() { return item; },
+        onClick() { return item; },
+      };
+      configure(item);
+      items.push(captured);
+      return this;
+    },
+  });
+  Object.defineProperty(Menu.prototype, "addSeparator", {
+    configurable: true,
+    value(this: object): object { return this; },
+  });
+  Object.defineProperty(Menu.prototype, "showAtMouseEvent", {
+    configurable: true,
+    value(this: object): void { shown = menuItems.get(this) ?? []; },
+  });
+
+  try {
+    view.renderInspector();
+    assert.match(view.inspectorEl.textContent ?? "", /Move .*…/i);
+    view.showRecordMenu({} as MouseEvent, indexedNote);
+    assert.equal(shown.some((item) => /^Move to .*…$/i.test(item.title)), true);
+    assert.equal(shown.some((item) => item.title === "Move under…"), true);
+    assert.equal(shown.some((item) => item.title.startsWith("Indent under previous")), true);
+  } finally {
+    for (const [name, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(Menu.prototype, name, descriptor);
+      else Reflect.deleteProperty(Menu.prototype, name);
+    }
+  }
+});
+
+test("global expand and collapse controls apply to the active dynamic library hierarchy", async () => {
+  const data = migrateData(null);
+  const library = installLibrary(data);
+  data.activeTab = libraryTabId(library.id);
+  data.portableIndex.libraryLayouts[library.id] = [{
+    id: "heading-a",
+    title: "Heading A",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{ id: "subheading-a", title: "Subheading A", collapsed: false, subjects: [] }],
+  }];
+  let saves = 0;
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    isClinicalMode: () => false,
+    isDataReadOnly: () => false,
+    savePluginData: async () => { saves += 1; },
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: object;
+    plugin: typeof plugin;
+    records: VaultRecord[];
+    recordByPath: Map<string, VaultRecord>;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    collapsedQueues: Set<string>;
+    renderTree(): void;
+    showGlobalMenu(event: MouseEvent): void;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.records = [];
+  view.recordByPath = new Map();
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+  view.collapsedQueues = new Set();
+  view.renderTree = () => undefined;
+
+  interface CapturedItem { title: string; click?: () => void }
+  let shown: CapturedItem[] = [];
+  const entriesByMenu = new WeakMap<object, CapturedItem[]>();
+  const descriptors = new Map(["addItem", "addSeparator", "showAtMouseEvent"].map((name) => [
+    name,
+    Object.getOwnPropertyDescriptor(Menu.prototype, name),
+  ]));
+  Object.defineProperty(Menu.prototype, "addItem", {
+    configurable: true,
+    value(this: object, configure: (item: unknown) => void): object {
+      const entries = entriesByMenu.get(this) ?? [];
+      entriesByMenu.set(this, entries);
+      const captured: CapturedItem = { title: "" };
+      const item = {
+        setTitle(title: string) { captured.title = title; return item; },
+        setIcon() { return item; },
+        setDisabled() { return item; },
+        onClick(callback: () => void) { captured.click = callback; return item; },
+      };
+      configure(item);
+      entries.push(captured);
+      return this;
+    },
+  });
+  Object.defineProperty(Menu.prototype, "addSeparator", {
+    configurable: true,
+    value(this: object): object { return this; },
+  });
+  Object.defineProperty(Menu.prototype, "showAtMouseEvent", {
+    configurable: true,
+    value(this: object): void { shown = entriesByMenu.get(this) ?? []; },
+  });
+
+  const choose = async (title: string): Promise<void> => {
+    const action = shown.find((item) => item.title === title);
+    assert.ok(action, `missing menu item ${title}`);
+    action.click?.();
+    await Promise.resolve();
+    await Promise.resolve();
+  };
+
+  try {
+    view.showGlobalMenu({} as MouseEvent);
+    await choose("Collapse all visible groups");
+    assert.equal(data.portableIndex.libraryLayouts[library.id]?.[0]?.collapsed, true);
+    assert.equal(data.portableIndex.libraryLayouts[library.id]?.[0]?.subheadings[0]?.collapsed, true);
+
+    view.showGlobalMenu({} as MouseEvent);
+    await choose("Expand all visible groups");
+    assert.equal(data.portableIndex.libraryLayouts[library.id]?.[0]?.collapsed, false);
+    assert.equal(data.portableIndex.libraryLayouts[library.id]?.[0]?.subheadings[0]?.collapsed, false);
+  } finally {
+    for (const [name, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(Menu.prototype, name, descriptor);
+      else Reflect.deleteProperty(Menu.prototype, name);
+    }
+  }
+
+  assert.equal(saves, 2);
+});
+
+test("library modal callbacks reject replaced layouts and removed IDs without touching detached objects", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const library = installLibrary(data);
+  data.activeTab = libraryTabId(library.id);
+  const detachedHeading = {
+    id: "heading-live",
+    title: "Detached heading",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{ id: "subheading-live", title: "Detached subheading", collapsed: false, subjects: [] }],
+  };
+  data.portableIndex.libraryLayouts[library.id] = [detachedHeading];
+  let mutations = 0;
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    getLibrary: (id: string) => id === library.id ? library : null,
+    async mutate(
+      _label: string,
+      action: () => void,
+      options?: { includePortableIndex?: boolean; requireUndo?: boolean },
+    ): Promise<void> {
+      assert.deepEqual(options, { includePortableIndex: true, requireUndo: true });
+      mutations += 1;
+      action();
+    },
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: object;
+    plugin: typeof plugin;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    promptNewLibrarySubheading(libraryId: string, heading: typeof detachedHeading): void;
+    showLibraryHeadingMenu(event: MouseEvent, libraryId: string, heading: typeof detachedHeading): void;
+    showLibrarySubheadingMenu(
+      event: MouseEvent,
+      libraryId: string,
+      heading: typeof detachedHeading,
+      subheading: typeof detachedHeading.subheadings[number],
+    ): void;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+
+  type PromptSubmit = (value: string) => void | Promise<void>;
+  interface CapturedMenuItem { title: string; click?: () => void }
+  const prompts: PromptSubmit[] = [];
+  const shownMenus: CapturedMenuItem[][] = [];
+  const itemsByMenu = new WeakMap<object, CapturedMenuItem[]>();
+  const promptOpen = Object.getOwnPropertyDescriptor(TextPromptModal.prototype, "open");
+  const menuDescriptors = new Map(["addItem", "addSeparator", "showAtMouseEvent"].map((name) => [
+    name,
+    Object.getOwnPropertyDescriptor(Menu.prototype, name),
+  ]));
+  TextPromptModal.prototype.open = function capturePrompt(): void {
+    const modal = this as unknown as { options: { onSubmit(value: string): void | Promise<void> } };
+    prompts.push((value) => modal.options.onSubmit(value));
+  };
+  Object.defineProperty(Menu.prototype, "addItem", {
+    configurable: true,
+    value(this: object, configure: (item: unknown) => void): object {
+      const entries = itemsByMenu.get(this) ?? [];
+      itemsByMenu.set(this, entries);
+      const captured: CapturedMenuItem = { title: "" };
+      const item = {
+        setTitle(title: string) { captured.title = title; return item; },
+        setIcon() { return item; },
+        setDisabled() { return item; },
+        onClick(callback: () => void) { captured.click = callback; return item; },
+      };
+      configure(item);
+      entries.push(captured);
+      return this;
+    },
+  });
+  Object.defineProperty(Menu.prototype, "addSeparator", {
+    configurable: true,
+    value(this: object): object { return this; },
+  });
+  Object.defineProperty(Menu.prototype, "showAtMouseEvent", {
+    configurable: true,
+    value(this: object): void { shownMenus.push(itemsByMenu.get(this) ?? []); },
+  });
+
+  const takePrompt = (): PromptSubmit => {
+    const submit = prompts.shift();
+    assert.ok(submit, "expected a library prompt callback");
+    return submit;
+  };
+  const choose = (title: string): void => {
+    const item = shownMenus.at(-1)?.find((candidate) => candidate.title === title);
+    assert.ok(item, `missing menu item ${title}`);
+    item.click?.();
+  };
+
+  try {
+    view.promptNewLibrarySubheading(library.id, detachedHeading);
+    const staleAddSubheading = takePrompt();
+    const liveHeading = structuredClone(detachedHeading);
+    data.portableIndex.libraryLayouts[library.id] = [liveHeading];
+    await assert.rejects(Promise.resolve(staleAddSubheading("Must not apply")), /library organization changed/i);
+    assert.equal(liveHeading.subheadings.some((item) => item.title === "Must not apply"), false);
+    assert.equal(detachedHeading.subheadings.some((item) => item.title === "Must not apply"), false);
+
+    view.promptNewLibrarySubheading(library.id, liveHeading);
+    const addSubheading = takePrompt();
+    await addSubheading("Added to live heading");
+    assert.equal(liveHeading.subheadings.some((item) => item.title === "Added to live heading"), true);
+    assert.equal(detachedHeading.subheadings.some((item) => item.title === "Added to live heading"), false);
+
+    view.showLibraryHeadingMenu({} as MouseEvent, library.id, liveHeading);
+    choose("Rename heading");
+    const staleRenameHeading = takePrompt();
+    const replacementHeading = structuredClone(liveHeading);
+    data.portableIndex.libraryLayouts[library.id] = [replacementHeading];
+    await assert.rejects(Promise.resolve(staleRenameHeading("Must not apply")), /library organization changed/i);
+    assert.equal(replacementHeading.title, "Detached heading");
+    assert.equal(liveHeading.title, "Detached heading");
+
+    view.showLibraryHeadingMenu({} as MouseEvent, library.id, replacementHeading);
+    choose("Rename heading");
+    const renameHeading = takePrompt();
+    await renameHeading("Renamed live heading");
+    assert.equal(replacementHeading.title, "Renamed live heading");
+    assert.equal(liveHeading.title, "Detached heading");
+
+    const detachedSubheading = replacementHeading.subheadings.find((item) => item.id === "subheading-live");
+    assert.ok(detachedSubheading);
+    view.showLibrarySubheadingMenu({} as MouseEvent, library.id, replacementHeading, detachedSubheading);
+    choose("Rename subheading");
+    const staleRenameSubheading = takePrompt();
+    const secondReplacement = structuredClone(replacementHeading);
+    data.portableIndex.libraryLayouts[library.id] = [secondReplacement];
+    await assert.rejects(Promise.resolve(staleRenameSubheading("Must not apply")), /library organization changed/i);
+    assert.equal(secondReplacement.subheadings.find((item) => item.id === "subheading-live")?.title, "Detached subheading");
+    assert.equal(detachedSubheading.title, "Detached subheading");
+
+    const liveSubheading = secondReplacement.subheadings.find((item) => item.id === "subheading-live");
+    assert.ok(liveSubheading);
+    view.showLibrarySubheadingMenu({} as MouseEvent, library.id, secondReplacement, liveSubheading);
+    choose("Rename subheading");
+    const renameSubheading = takePrompt();
+    await renameSubheading("Renamed live subheading");
+    assert.equal(secondReplacement.subheadings.find((item) => item.id === "subheading-live")?.title, "Renamed live subheading");
+    assert.equal(detachedSubheading.title, "Detached subheading");
+
+    const removableSubheading = secondReplacement.subheadings.find((item) => item.id === "subheading-live");
+    assert.ok(removableSubheading);
+    view.showLibrarySubheadingMenu({} as MouseEvent, library.id, secondReplacement, removableSubheading);
+    choose("Rename subheading");
+    const renameRemovedSubheading = takePrompt();
+    const headingWithoutSubheading = structuredClone(secondReplacement);
+    headingWithoutSubheading.subheadings = headingWithoutSubheading.subheadings.filter((item) => item.id !== "subheading-live");
+    data.portableIndex.libraryLayouts[library.id]?.splice(0, 1, headingWithoutSubheading);
+    await assert.rejects(Promise.resolve(renameRemovedSubheading("Must not apply")), /subheading is no longer available/i);
+    assert.equal(removableSubheading.title, "Renamed live subheading");
+
+    view.showLibraryHeadingMenu({} as MouseEvent, library.id, headingWithoutSubheading);
+    choose("Rename heading");
+    const renameRemovedHeading = takePrompt();
+    data.portableIndex.libraryLayouts[library.id]?.splice(0);
+    await assert.rejects(Promise.resolve(renameRemovedHeading("Must not apply")), /heading is no longer available/i);
+    assert.equal(headingWithoutSubheading.title, "Renamed live heading");
+  } finally {
+    if (promptOpen) Object.defineProperty(TextPromptModal.prototype, "open", promptOpen);
+    else Reflect.deleteProperty(TextPromptModal.prototype, "open");
+    for (const [name, descriptor] of menuDescriptors) {
+      if (descriptor) Object.defineProperty(Menu.prototype, name, descriptor);
+      else Reflect.deleteProperty(Menu.prototype, name);
+    }
+  }
+
+  assert.equal(mutations, 3, "removed targets must reject before starting a mutation");
 });
 
 test("reload returns to the index when the active dynamic library tab no longer exists", async () => {
   const data = migrateData(null);
   data.settings.workspaceMode = "generic";
-  data.activeTab = "syndromes";
+  data.activeTab = libraryTabId("removed-library");
   let saves = 0;
   let renders = 0;
   const records = [record("Knowledge Base/Topic.md", "Topic")];
@@ -93,6 +1469,8 @@ test("reload returns to the index when the active dynamic library tab no longer 
       getDataEpoch(): number;
       getRecords(): VaultRecord[];
       reconcileRecords(records: VaultRecord[]): Promise<boolean>;
+      getLibraries(): LibraryDefinition[];
+      isClinicalMode(): boolean;
       isDataReadOnly(): boolean;
       savePluginData(): Promise<void>;
     };
@@ -108,6 +1486,8 @@ test("reload returns to the index when the active dynamic library tab no longer 
     getDataEpoch: () => 0,
     getRecords: () => records,
     reconcileRecords: async () => false,
+    getLibraries: () => [],
+    isClinicalMode: () => false,
     isDataReadOnly: () => false,
     savePluginData: async () => { saves += 1; },
   };
@@ -389,6 +1769,133 @@ test("oversized export preparation never mutates the live portable registry", ()
   assert.deepEqual(data.portableIndex, before);
 });
 
+test("portability mode tabs implement automatic Arrow, Home, and End keyboard navigation", () => {
+  const dom = createFakeDom();
+  let restoredFocusKey = "";
+  const center = Object.create(ExportImportCenterModal.prototype) as {
+    mode: "export" | "import";
+    busyAction: "export" | "import" | "file" | null;
+    contentEl: HTMLElement;
+    renderModePicker(): void;
+    rerenderFromControl(focusKey: string): void;
+  };
+  center.mode = "export";
+  center.busyAction = null;
+  center.contentEl = dom.document.body as unknown as HTMLElement;
+  center.rerenderFromControl = (focusKey) => {
+    restoredFocusKey = focusKey;
+    center.contentEl.empty();
+    center.renderModePicker();
+    const target = Array.from(center.contentEl.querySelectorAll<HTMLElement>("[data-portability-focus]"))
+      .find((element) => element.getAttribute("data-portability-focus") === focusKey);
+    target?.focus({ preventScroll: true });
+  };
+
+  center.renderModePicker();
+  const keydown = (key: string): { defaultPrevented: boolean } => {
+    const active = dom.document.body.querySelector('[role="tab"][aria-selected="true"]');
+    assert.ok(active);
+    return active.dispatch("keydown", { key });
+  };
+
+  assert.equal(keydown("ArrowRight").defaultPrevented, true);
+  assert.equal(center.mode, "import");
+  assert.equal(restoredFocusKey, "mode-import");
+  assert.equal(dom.document.activeElement?.getAttribute("data-portability-focus"), "mode-import");
+
+  assert.equal(keydown("Home").defaultPrevented, true);
+  assert.equal(center.mode, "export");
+  assert.equal(dom.document.activeElement?.getAttribute("data-portability-focus"), "mode-export");
+
+  assert.equal(keydown("End").defaultPrevented, true);
+  assert.equal(center.mode, "import");
+  assert.equal(keydown("ArrowLeft").defaultPrevented, true);
+  assert.equal(center.mode, "export");
+});
+
+test("portability tabs own one stable, labelled active tabpanel", () => {
+  const dom = createFakeDom();
+  const center = Object.create(ExportImportCenterModal.prototype) as {
+    mode: "export" | "import";
+    busyAction: "export" | "import" | "file" | null;
+    accessibilityInstanceId: string;
+    panelEl: HTMLElement | null;
+    contentEl: HTMLElement;
+    renderModePicker(): void;
+    renderModePanel(): void;
+    renderExport(): void;
+    renderImport(): void;
+    rerenderFromControl(focusKey: string): void;
+  };
+  center.mode = "export";
+  center.busyAction = null;
+  center.accessibilityInstanceId = "ent-cc-portability-test";
+  center.panelEl = null;
+  center.contentEl = dom.document.body as unknown as HTMLElement;
+  center.renderExport = () => center.panelEl?.createDiv({ text: "Export body" });
+  center.renderImport = () => center.panelEl?.createDiv({ text: "Import body" });
+  const renderSurface = (): void => {
+    center.panelEl = null;
+    center.contentEl.empty();
+    center.renderModePicker();
+    center.renderModePanel();
+  };
+  center.rerenderFromControl = () => renderSurface();
+
+  renderSurface();
+  const exportTab = dom.document.body.querySelector('[role="tab"][aria-selected="true"]');
+  const exportPanel = dom.document.body.querySelector('[role="tabpanel"]');
+  assert.equal(exportTab?.getAttribute("id"), "ent-cc-portability-test-tab-export");
+  assert.equal(exportTab?.getAttribute("aria-controls"), "ent-cc-portability-test-panel-export");
+  assert.equal(exportPanel?.getAttribute("id"), "ent-cc-portability-test-panel-export");
+  assert.equal(exportPanel?.getAttribute("aria-labelledby"), "ent-cc-portability-test-tab-export");
+  assert.equal(exportPanel?.textContent, "Export body");
+  assert.equal(dom.document.body.querySelectorAll('[role="tabpanel"]').length, 1);
+
+  const importTab = dom.document.body.querySelector('[data-portability-focus="mode-import"]');
+  assert.ok(importTab);
+  importTab.click();
+  const activeImportTab = dom.document.body.querySelector('[role="tab"][aria-selected="true"]');
+  const importPanel = dom.document.body.querySelector('[role="tabpanel"]');
+  assert.equal(activeImportTab?.getAttribute("id"), "ent-cc-portability-test-tab-import");
+  assert.equal(activeImportTab?.getAttribute("aria-controls"), "ent-cc-portability-test-panel-import");
+  assert.equal(importPanel?.getAttribute("id"), "ent-cc-portability-test-panel-import");
+  assert.equal(importPanel?.getAttribute("aria-labelledby"), "ent-cc-portability-test-tab-import");
+  assert.equal(importPanel?.textContent, "Import body");
+  assert.equal(dom.document.body.querySelectorAll('[role="tabpanel"]').length, 1);
+});
+
+test("portability export explains archived Libraries even when none remain active", () => {
+  const dom = createFakeDom();
+  const archived = customLibrary("archived-library", "Archived references", "Reference", 0, Date.now());
+  const center = Object.create(ExportImportCenterModal.prototype) as {
+    plugin: { getLibraries(includeArchived?: boolean): LibraryDefinition[] };
+    contentEl: HTMLElement;
+    renderLibraryToggles(
+      selection: typeof EMPTY_PORTABLE_SELECTION,
+      available: undefined,
+      onChange: (selection: typeof EMPTY_PORTABLE_SELECTION) => void,
+    ): void;
+  };
+  center.plugin = {
+    getLibraries: (includeArchived = false) => includeArchived ? [{ ...archived }] : [],
+  };
+  center.contentEl = dom.document.body as unknown as HTMLElement;
+
+  center.renderLibraryToggles({ ...EMPTY_PORTABLE_SELECTION }, undefined, () => undefined);
+
+  assert.match(center.contentEl.textContent ?? "", /Archived libraries are not part of the portable set/i);
+});
+
+test("dependency-only Library copy covers every selected-section source", () => {
+  assert.equal(
+    portabilityLibraryUnavailableText(true, false),
+    " Referenced by another selected section; this file does not declare the complete Library.",
+  );
+  assert.equal(portabilityLibraryUnavailableText(true, true), "");
+  assert.equal(portabilityLibraryUnavailableText(false, false), "");
+});
+
 test("portability center ignores a second action while an import is busy", async () => {
   let finish: (() => void) | null = null;
   const gate = new Promise<void>((resolve) => { finish = resolve; });
@@ -625,6 +2132,9 @@ test("reload cancels A selection and search timers before adopting B", async () 
     getDataEpoch: () => 2,
     getRecords: (): VaultRecord[] => [],
     reconcileRecords: async () => false,
+    getLibraries: (): LibraryDefinition[] => [],
+    isDataReadOnly: () => false,
+    savePluginData: async () => { savesIntoB += 1; },
   };
   const view = Object.create(EntVaultCommandCenterView.prototype) as {
     plugin: typeof plugin;
@@ -702,6 +2212,156 @@ test("settings callbacks stay bound to the knowledge base that rendered them", (
   assert.equal(ownsBase(), false);
   assert.equal(ownsBase(), false);
   assert.equal(Notice.messages.filter((message) => message.includes("active knowledge base changed")).length, 1);
+});
+
+test("a rejected direct setting save restores memory and reports the failure", async () => {
+  Notice.messages.length = 0;
+  const data = migrateData(null);
+  data.settings.workspaceSubtitle = "Persisted subtitle";
+  let refreshes = 0;
+  let updates = 0;
+  const settingsTab = Object.create(EntCommandCenterSettingsTab.prototype) as {
+    host: {
+      data: typeof data;
+      savePluginData(): Promise<void>;
+      refreshViews(): Promise<void>;
+    };
+    persistedDataSnapshot: typeof data;
+    settingsSaveRevision: number;
+    persistedSettingsRevision: number;
+    pendingSettingsSaves: number;
+    update(): void;
+    save(refresh?: boolean, directDataFields?: Array<"activeTab" | "indexGroupOrder">): Promise<boolean>;
+  };
+  settingsTab.host = {
+    data,
+    savePluginData: async () => { throw new Error("Sync reload won the race"); },
+    refreshViews: async () => { refreshes += 1; },
+  };
+  settingsTab.persistedDataSnapshot = structuredClone(data);
+  settingsTab.settingsSaveRevision = 0;
+  settingsTab.persistedSettingsRevision = 0;
+  settingsTab.pendingSettingsSaves = 0;
+  settingsTab.update = () => { updates += 1; };
+  data.settings.workspaceSubtitle = "Unsaved subtitle";
+
+  assert.equal(await settingsTab.save(), false);
+  assert.equal(data.settings.workspaceSubtitle, "Persisted subtitle");
+  assert.equal(refreshes, 1);
+  assert.equal(updates, 1);
+  assert.equal(Notice.messages.some((message) => message.includes("not saved") && message.includes("Sync reload")), true);
+});
+
+test("overlapping direct setting saves roll back to the latest successful attempt", async () => {
+  Notice.messages.length = 0;
+  const data = migrateData(null);
+  data.settings.workspaceSubtitle = "Initial subtitle";
+  let releaseFirst: () => void = () => {};
+  let rejectSecond: (error: Error) => void = () => {};
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const secondGate = new Promise<void>((_resolve, reject) => { rejectSecond = reject; });
+  const persisted: PluginData[] = [];
+  let saveCalls = 0;
+  const settingsTab = Object.create(EntCommandCenterSettingsTab.prototype) as {
+    host: {
+      data: typeof data;
+      savePluginData(): Promise<void>;
+      refreshViews(): Promise<void>;
+    };
+    persistedDataSnapshot: typeof data;
+    settingsSaveRevision: number;
+    persistedSettingsRevision: number;
+    pendingSettingsSaves: number;
+    update(): void;
+    save(refresh?: boolean, directDataFields?: Array<"activeTab" | "indexGroupOrder">): Promise<boolean>;
+  };
+  settingsTab.host = {
+    data,
+    savePluginData: async () => {
+      saveCalls += 1;
+      const attempted = structuredClone(data);
+      if (saveCalls === 1) {
+        await firstGate;
+        persisted.push(attempted);
+      } else {
+        await secondGate;
+      }
+    },
+    refreshViews: async () => {},
+  };
+  settingsTab.persistedDataSnapshot = structuredClone(data);
+  settingsTab.settingsSaveRevision = 0;
+  settingsTab.persistedSettingsRevision = 0;
+  settingsTab.pendingSettingsSaves = 0;
+  settingsTab.update = () => {};
+
+  data.settings.workspaceSubtitle = "First edit";
+  const firstSave = settingsTab.save(false);
+  data.settings.workspaceSubtitle = "Second edit";
+  const secondSave = settingsTab.save(false);
+  releaseFirst();
+  assert.equal(await firstSave, true);
+  rejectSecond(new Error("second adapter write failed"));
+  assert.equal(await secondSave, false);
+
+  assert.equal(persisted[0]?.settings.workspaceSubtitle, "First edit");
+  assert.equal(data.settings.workspaceSubtitle, "First edit", "memory follows the newest successful disk snapshot");
+  assert.equal(settingsTab.persistedDataSnapshot.settings.workspaceSubtitle, "First edit");
+  assert.equal(settingsTab.pendingSettingsSaves, 0);
+});
+
+test("a failed setting save preserves concurrent organization and newer view changes", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceSubtitle = "Persisted subtitle";
+  let rejectSave: (error: Error) => void = () => {};
+  const saveGate = new Promise<void>((_resolve, reject) => { rejectSave = reject; });
+  const settingsTab = Object.create(EntCommandCenterSettingsTab.prototype) as {
+    host: {
+      data: typeof data;
+      savePluginData(): Promise<void>;
+      refreshViews(): Promise<void>;
+    };
+    persistedDataSnapshot: typeof data;
+    settingsSaveRevision: number;
+    persistedSettingsRevision: number;
+    pendingSettingsSaves: number;
+    update(): void;
+    save(refresh?: boolean, directDataFields?: Array<"activeTab" | "indexGroupOrder">): Promise<boolean>;
+  };
+  settingsTab.host = {
+    data,
+    savePluginData: async () => { await saveGate; },
+    refreshViews: async () => {},
+  };
+  settingsTab.persistedDataSnapshot = structuredClone(data);
+  settingsTab.settingsSaveRevision = 0;
+  settingsTab.persistedSettingsRevision = 0;
+  settingsTab.pendingSettingsSaves = 0;
+  settingsTab.update = () => {};
+
+  data.settings.workspaceSubtitle = "Rejected subtitle";
+  data.settings.defaultTab = "queues";
+  data.activeTab = "queues";
+  data.settings.allowClinicalVisualGroupMoves = true;
+  data.indexGroupOrder = ["Attempted default group"];
+  const pending = settingsTab.save(false, ["activeTab", "indexGroupOrder"]);
+
+  // A separate organization/view action commits while the settings adapter
+  // request is pending. Its fields were not part of the attempted settings
+  // delta (or have since changed again) and must survive the rollback.
+  data.pinnedPaths = ["Concurrent organization.md"];
+  data.selectedPath = "Concurrent selection.md";
+  data.indexGroupOrder = ["Concurrent group"];
+  rejectSave(new Error("settings adapter failed"));
+
+  assert.equal(await pending, false);
+  assert.equal(data.settings.workspaceSubtitle, "Persisted subtitle");
+  assert.equal(data.settings.defaultTab, "curriculum");
+  assert.equal(data.activeTab, "curriculum");
+  assert.equal(data.settings.allowClinicalVisualGroupMoves, false);
+  assert.deepEqual(data.pinnedPaths, ["Concurrent organization.md"]);
+  assert.equal(data.selectedPath, "Concurrent selection.md");
+  assert.deepEqual(data.indexGroupOrder, ["Concurrent group"]);
 });
 
 test("a create-note form cannot submit into a different active knowledge base", async () => {
@@ -842,6 +2502,47 @@ test("compatibility read-only mode blocks recovery export and import", async () 
 
   await assert.rejects(center.exportSelected(), /recovery is unavailable.*read-only/i);
   await assert.rejects(center.importSelected(), /import is unavailable.*read-only/i);
+});
+
+test("portability center rejects an indexed non-topic ENT package before mutate starts", async () => {
+  const source = migrateData(null);
+  const sourceRecord = record("Knowledge Base/Imported reference.md", "Imported reference");
+  const value = createPortableExport(
+    source,
+    [sourceRecord],
+    { ...EMPTY_PORTABLE_SELECTION, index: true },
+    "2026-08-09T00:00:00.000Z",
+  );
+  const incomingSubject = value.components.index?.subjects[0];
+  assert.ok(incomingSubject);
+  incomingSubject.recordKind = "note";
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  data.settings.primaryFolder = "03 Clinical Topics";
+  const before = structuredClone(data);
+  let mutateCalls = 0;
+  const plugin = {
+    data,
+    isDataReadOnly: () => false,
+    async mutate(): Promise<void> { mutateCalls += 1; },
+  };
+  const center = Object.create(ExportImportCenterModal.prototype) as {
+    plugin: typeof plugin;
+    importValue: typeof value;
+    importSelection: typeof EMPTY_PORTABLE_SELECTION;
+    importMode: "merge" | "replace";
+    recoveryConfirmed: boolean;
+    importSelected(): Promise<void>;
+  };
+  center.plugin = plugin;
+  center.importValue = value;
+  center.importSelection = { ...EMPTY_PORTABLE_SELECTION, index: true };
+  center.importMode = "merge";
+  center.recoveryConfirmed = false;
+
+  await assert.rejects(center.importSelected(), /ENT knowledge index accepts topic subjects only/i);
+  assert.equal(mutateCalls, 0);
+  assert.deepEqual(plugin.data, before);
 });
 
 test("portability center rejects cross-vault recovery before mutate starts", async () => {
@@ -1007,6 +2708,7 @@ test("template fallback stays transactional and does not mutate the selected imp
       throw new Error("simulated save failure");
     },
     invalidateRecordCache(): void {},
+    assertClinicalIndexEligibility(): void {},
     getRecords(): VaultRecord[] { return []; },
   };
   const center = Object.create(ExportImportCenterModal.prototype) as {
@@ -1085,7 +2787,7 @@ test("bulk collection actions use current global search text during the render d
   view.query = "beta";
   view.parsedQuery = parseQuery("alpha");
   view.records = [record("KB/alpha.md", "Alpha"), record("KB/beta.md", "Beta")];
-  view.plugin = { data: { activeTab: "syndromes" } };
+  view.plugin = { data: { activeTab: "curriculum" } };
 
   assert.deepEqual(view.matchingRecordsForCurrentView().map((item) => item.title), ["Beta"]);
 });
@@ -1284,6 +2986,85 @@ test("compact record inspector traps backward focus at its first control", () =>
 
   assert.equal(prevented, true);
   assert.equal(lastFocusCount, 1);
+});
+
+test("named snapshot UI requests a full rollback-safe normalized restore", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  const source = structuredClone(data);
+  source.settings.workspaceName = "Historical ENT";
+  source.activeTab = "collections";
+  source.layoutSnapshots = [snapshotPersonal(source, "Nested", true, true, false, true)];
+  const snapshot = snapshotPersonal(source, "Complete historical state", true, true, true, true);
+  data.layoutSnapshots = [snapshot];
+  let capturedOptions: Record<string, unknown> | undefined;
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-default",
+    getDataEpoch: () => 4,
+    async mutate(_label: string, _action: () => void, options?: Record<string, unknown>): Promise<void> {
+      capturedOptions = options;
+    },
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as unknown as {
+    app: object;
+    plugin: typeof plugin;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    run(action: () => Promise<unknown>): void;
+    showOrganizationSnapshots(event: MouseEvent): void;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.loadedBaseId = "base-default";
+  view.loadedDataEpoch = 4;
+  view.staleViewNoticeShown = false;
+  let pending: Promise<unknown> = Promise.resolve();
+  view.run = (action) => { pending = action(); };
+
+  let click: (() => void) | undefined;
+  const descriptors = new Map(["addItem", "showAtMouseEvent"].map((name) => [
+    name,
+    Object.getOwnPropertyDescriptor(Menu.prototype, name),
+  ]));
+  Object.defineProperty(Menu.prototype, "addItem", {
+    configurable: true,
+    value(this: object, configure: (item: unknown) => void): object {
+      const item = {
+        setTitle() { return item; },
+        setIcon() { return item; },
+        onClick(callback: () => void) { click = callback; return item; },
+      };
+      configure(item);
+      return this;
+    },
+  });
+  Object.defineProperty(Menu.prototype, "showAtMouseEvent", {
+    configurable: true,
+    value(): void {},
+  });
+
+  try {
+    view.showOrganizationSnapshots({} as MouseEvent);
+    assert.ok(click);
+    click();
+    await pending;
+  } finally {
+    for (const [name, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(Menu.prototype, name, descriptor);
+      else Reflect.deleteProperty(Menu.prototype, name);
+    }
+  }
+
+  assert.deepEqual(capturedOptions, {
+    includeSettings: true,
+    includePortableIndex: true,
+    includeLayoutSnapshots: true,
+    includeActiveTab: true,
+    requireUndo: true,
+    normalizeAfterRestore: true,
+  });
 });
 
 test("organization snapshots cannot mutate memory or report success in compatibility read-only mode", async () => {

@@ -20,6 +20,7 @@ test("release metadata is internally consistent and mobile-compatible", async ()
 });
 
 test("public repository metadata is present", async () => {
+  const manifest = await readJson("manifest.json");
   const license = await readFile(path.join(root, "LICENSE"), "utf8");
   const readme = await readFile(path.join(root, "README.md"), "utf8");
   const changelog = await readFile(path.join(root, "CHANGELOG.md"), "utf8");
@@ -40,6 +41,10 @@ test("public repository metadata is present", async () => {
   assert.match(readme, /Showing the first 300 of _N_ results/);
   assert.match(readme, /Two deliberate ENT-only workflows are exceptions/);
   assert.match(readme, /stable internal ID `ent-vault-command-center`/);
+  assert.match(readme, /Portable packages created by version .* use format version 4/i);
+  assert.match(readme, /Current v9 (?:snapshots|files)/i);
+  const latestChangelogVersion = /^##\s+(\d+\.\d+\.\d+)\s*$/m.exec(changelog)?.[1];
+  assert.equal(latestChangelogVersion, manifest.version, "the first changelog release must match the release manifest");
   assert.match(changelog, /Version 0\.8\.1 was not published as a tag or GitHub release/);
   assert.doesNotMatch(changelog, /^## 0\.8\.1$/m);
   assert.match(iphoneChecklist, /physical iPhone/);
@@ -66,6 +71,7 @@ test("mobile flows keep primary actions visible and empty states actionable", as
   const view = await readFile(path.join(root, "src/view.ts"), "utf8");
   const manager = await readFile(path.join(root, "src/index-manager.ts"), "utf8");
   const modals = await readFile(path.join(root, "src/modals.ts"), "utf8");
+  const libraryModal = await readFile(path.join(root, "src/library-modal.ts"), "utf8");
   const styles = await readFile(path.join(root, "styles.css"), "utf8");
   assert.match(view, /Add existing \$\{settings\.itemPlural\}/);
   assert.match(view, /ent-cc-history-action/);
@@ -77,6 +83,10 @@ test("mobile flows keep primary actions visible and empty states actionable", as
   assert.match(styles, /ent-cc-manager-bulk-actions\.is-idle/);
   assert.match(modals, /visualViewport/);
   assert.match(modals, /calculateModalViewportLayout/);
+  assert.match(libraryModal, /Manage libraries/);
+  assert.match(libraryModal, /Archive this library before permanently deleting it|Delete library/);
+  assert.match(libraryModal, /setDestructive\(\)/);
+  assert.match(styles, /ent-cc-library-manager-action/);
   assert.match(styles, /ent-cc-knowledge-note-content/);
   assert.match(styles, /--ent-cc-modal-visual-height/);
   assert.match(view, /const backLabel = "Back to main page"/);
