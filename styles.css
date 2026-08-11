@@ -2319,6 +2319,137 @@
   border-top: 1px solid var(--background-modifier-border);
 }
 
+.ent-cc-taxonomy-health-modal {
+  width: min(920px, calc(100vw - 32px));
+  height: min(840px, calc(100dvh - 32px));
+  max-height: min(840px, calc(100dvh - 32px));
+}
+
+.ent-cc-taxonomy-health,
+.ent-cc-taxonomy-preview {
+  display: flex;
+  overflow: hidden;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ent-cc-taxonomy-intro > p,
+.ent-cc-taxonomy-preview-body > p {
+  margin: 0 0 8px;
+  color: var(--text-muted);
+}
+
+.ent-cc-taxonomy-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ent-cc-taxonomy-summary > span,
+.ent-cc-taxonomy-scope,
+.ent-cc-taxonomy-report-only {
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.ent-cc-taxonomy-load-note {
+  margin-top: 8px;
+  color: var(--text-faint);
+  font-size: 0.75rem;
+}
+
+.ent-cc-taxonomy-toolbar,
+.ent-cc-taxonomy-finding-actions,
+.ent-cc-taxonomy-preview-actions,
+.ent-cc-taxonomy-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ent-cc-taxonomy-toolbar input[type="search"] {
+  min-width: 0;
+  min-height: 40px;
+  flex: 1 1 auto;
+}
+
+.ent-cc-taxonomy-list {
+  overflow-y: auto;
+  min-height: 180px;
+  flex: 1 1 180px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.ent-cc-taxonomy-finding {
+  display: grid;
+  min-width: 0;
+  padding: 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.ent-cc-taxonomy-finding:last-child { border-bottom: 0; }
+.ent-cc-taxonomy-finding.is-warning { border-inline-start: 3px solid var(--color-orange, var(--text-warning)); }
+.ent-cc-taxonomy-finding.is-info { border-inline-start: 3px solid var(--interactive-accent); }
+
+.ent-cc-taxonomy-finding-icon {
+  display: grid;
+  color: var(--text-muted);
+  place-items: start center;
+}
+
+.ent-cc-taxonomy-finding-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.ent-cc-taxonomy-finding-content { min-width: 0; }
+
+.ent-cc-taxonomy-finding-content h3,
+.ent-cc-taxonomy-preview-body h3 {
+  margin: 0 0 4px;
+  color: var(--text-normal);
+  font-size: 0.95rem;
+}
+
+.ent-cc-taxonomy-finding-content p {
+  margin: 7px 0 0;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.ent-cc-taxonomy-finding-actions {
+  align-self: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.ent-cc-taxonomy-report-only { white-space: nowrap; }
+
+.ent-cc-taxonomy-more { align-self: center; }
+
+.ent-cc-taxonomy-footer,
+.ent-cc-taxonomy-preview-actions {
+  justify-content: flex-end;
+  padding-top: 8px;
+  padding-bottom: max(0px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.ent-cc-taxonomy-guarantees {
+  margin: 12px 0;
+  padding-inline-start: 22px;
+  color: var(--text-muted);
+}
+
 .ent-cc-warning-button {
   color: var(--text-error);
 }
@@ -2547,6 +2678,39 @@
     width: calc(100vw - 12px);
     height: calc(100vh - 16px);
     height: calc(100dvh - 16px);
+  }
+
+  .ent-cc-taxonomy-health-modal,
+  .ent-cc-taxonomy-preview-modal {
+    width: calc(100vw - 12px);
+    max-height: calc(100dvh - 16px);
+  }
+
+  .ent-cc-taxonomy-health-modal {
+    height: calc(100dvh - 16px);
+  }
+
+  .ent-cc-taxonomy-toolbar .ent-cc-button,
+  .ent-cc-taxonomy-finding-actions .ent-cc-button,
+  .ent-cc-taxonomy-preview-actions .ent-cc-button,
+  .ent-cc-taxonomy-footer .ent-cc-button,
+  .ent-cc-taxonomy-more,
+  .ent-cc-taxonomy-toolbar input[type="search"] {
+    min-height: 44px;
+  }
+
+  .ent-cc-taxonomy-finding {
+    grid-template-columns: 24px minmax(0, 1fr);
+  }
+
+  .ent-cc-taxonomy-finding-actions {
+    align-items: stretch;
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+
+  .ent-cc-taxonomy-report-only {
+    white-space: normal;
   }
 
   .ent-cc-manager-header {

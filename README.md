@@ -72,7 +72,7 @@ The [Getting started guide](docs/GETTING_STARTED.md) covers installation, first-
 
 ### Visual index and Index Manager
 
-The index starts from a configured folder and optional ID, group, and parent properties. Visual arrangement changes only plugin-owned organization. **Manage Index…** provides Indexed, Available, Hidden, Groups, and Diagnostics views for bulk membership and safe integrity repair.
+The index starts from a configured folder and optional ID, group, and parent properties. Visual arrangement changes only plugin-owned organization. **Manage Index…** provides Indexed, Available, Hidden, Groups, and Diagnostics views for bulk membership and safe integrity repair. Its Taxonomy Health Center reports duplicate/confusable names, hierarchy defects, empty or unreachable structure, unavailable configured paths, duplicate bindings, and possible placeholder matches. Ambiguous issues remain report-only; deterministic repairs require an exact preview and are Undo-protected.
 
 ### Custom Libraries and Collections
 

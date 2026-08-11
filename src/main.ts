@@ -147,6 +147,12 @@ import { EntVaultCommandCenterView, VIEW_TYPE } from "./view";
 import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge-base-modal";
 import { ManageLibrariesModal } from "./library-modal";
 import { mergeKnowledgeBaseStores, type StoreMergeResult } from "./store-merge";
+import {
+  applyTaxonomyRepairToData,
+  buildTaxonomyHealthFindings,
+  type TaxonomyRepairPlan,
+} from "./taxonomy-health";
+import { TaxonomyHealthModal } from "./taxonomy-health-modal";
 
 /** Bound stable inactive projections by records, not an arbitrary base count. */
 const MAX_INACTIVE_SEARCH_CACHED_RECORDS = 50_000;
@@ -339,6 +345,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.addCommand({ id: "open-workspace", name: "Open workspace", callback: () => this.run(() => this.activateView()) });
     this.addCommand({ id: "add-or-create", name: "Add or create…", callback: () => void this.withView((view) => view.openAddActions()) });
     this.addCommand({ id: "manage-knowledge-index", name: "Manage index…", callback: () => void this.withView((view) => view.openIndexManager()) });
+    this.addCommand({ id: "open-taxonomy-health", name: "Open taxonomy health center", callback: () => new TaxonomyHealthModal(this).open() });
     this.addCommand({ id: "new-knowledge-base", name: "New knowledge base…", callback: () => new CreateKnowledgeBaseModal(this).open() });
     this.addCommand({ id: "switch-knowledge-base", name: "Switch knowledge base…", callback: () => new ManageKnowledgeBasesModal(this).open() });
     this.addCommand({ id: "manage-knowledge-bases", name: "Manage knowledge bases…", callback: () => new ManageKnowledgeBasesModal(this).open() });
@@ -4209,6 +4216,31 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   getIndexDiagnostics() {
     return buildIndexDiagnostics(this.data, this.getRecords(), new Set(this.app.vault.getMarkdownFiles().map((file) => file.path)));
+  }
+
+  getTaxonomyHealthFindings() {
+    return buildTaxonomyHealthFindings({
+      data: this.data,
+      records: this.getRecords(),
+      existingMarkdownPaths: new Set(this.app.vault.getMarkdownFiles().map((file) => file.path)),
+      existingFolderPaths: new Set(this.app.vault.getAllLoadedFiles()
+        .filter((file): file is TFolder => file instanceof TFolder)
+        .map((folder) => folder.path)),
+      configDir: this.app.vault.configDir,
+    });
+  }
+
+  async applyTaxonomyHealthRepair(findingId: string, repair: TaxonomyRepairPlan): Promise<void> {
+    const current = this.getTaxonomyHealthFindings().find((finding) => finding.id === findingId);
+    if (!current?.repair || JSON.stringify(current.repair) !== JSON.stringify(repair)) {
+      throw new Error("This finding changed after the preview. Recheck Taxonomy health before applying a repair.");
+    }
+    await this.mutate(repair.label, () => {
+      if (!applyTaxonomyRepairToData(this.data, repair)) {
+        throw new Error("This relationship changed after the preview. No repair was applied.");
+      }
+      this.invalidateRecordCache();
+    }, { includePortableIndex: repair.kind === "clear-portable-parent", requireUndo: true });
   }
 
   async repairIndexOrganization(): Promise<void> {

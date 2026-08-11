@@ -49,9 +49,22 @@ Open **Manage Index…** from the Command palette, Index header, or overflow men
 | **Available** | Add eligible existing notes that are not currently in the Generic Index. |
 | **Hidden** | Restore records removed from the active base, including protected ENT subjects. |
 | **Groups** | Create, reorder, rename, merge, or remove visual groups safely. |
-| **Diagnostics** | Inspect missing references, duplicate membership, broken visual parents, and orphaned group state, then apply safe plugin-state repair. |
+| **Diagnostics** | Inspect missing references, duplicate membership, broken visual parents, and orphaned group state, apply the established safe reference cleanup, or open the broader Taxonomy Health Center. |
 
 Index Manager changes plugin state only. It does not move, delete, or rewrite Markdown notes.
+
+### Taxonomy Health Center
+
+Open **Taxonomy health center** from the Command palette or **Manage Index… → Diagnostics**. It checks the active knowledge base for:
+
+- duplicate display names, case/hyphen variants, and a small audited set of visually confusable Latin/Greek/Cyrillic characters;
+- missing, self-referential, ambiguous, or cyclic visual, portable, and configured parent relationships;
+- empty or unreachable Index, Collection, and Library headings or subheadings;
+- configured folders or templates that are not currently available;
+- multiple portable identities bound to one note; and
+- unresolved portable placeholders whose title or configured ID may match a local note.
+
+The report never rewrites Markdown or links identities automatically. Ambiguous findings are report-only. A deterministic invalid visual or portable parent can be cleared only after reviewing an exact preview; that repair changes plugin-owned organization in one transaction and can be reversed with **Undo**. Empty headings are preserved because they may be intentional scaffolding. Historical load-repair counts are not persisted in the current data format, so the center does not invent them.
 
 ## Libraries
 
@@ -323,6 +336,7 @@ The ENT preset also exposes safety-badge display and optional advanced canonical
 - Manage libraries…
 - Open export / import center
 - Manage index…
+- Open taxonomy health center
 - Add or create…
 - Create note from template or empty note…
 - Attach file to current note…

@@ -19,6 +19,7 @@ import {
 import { ConfirmModal, IndexGroupModal, StringPickerModal, TextPromptModal, VaultFilePickerModal } from "./modals";
 import { registerPortableGroup, removePortableGroup, renameOrMergePortableGroup } from "./portability";
 import { ExportImportCenterModal } from "./portability-modal";
+import { TaxonomyHealthModal } from "./taxonomy-health-modal";
 
 export type ManagerTab = "indexed" | "available" | "hidden" | "groups" | "diagnostics";
 
@@ -634,6 +635,10 @@ export class IndexManagerModal extends Modal {
   private renderDiagnostics(diagnostics: IndexDiagnostic[]): void {
     const toolbar = this.contentEl.createDiv({ cls: "ent-cc-manager-toolbar" });
     toolbar.createEl("p", { text: diagnostics.length === 0 ? "No index-organization problems detected." : `${diagnostics.length} issue${diagnostics.length === 1 ? "" : "s"} detected. Safe repair removes only stale or duplicate plugin references; configured parent properties are never rewritten.` });
+    this.actionButton(toolbar, "scan-search", "Open taxonomy health…", () => {
+      if (!this.guardOpenedBase()) return;
+      new TaxonomyHealthModal(this.plugin).open();
+    });
     const repairableKinds = new Set<IndexDiagnostic["kind"]>(["missing-note", "duplicate-membership", "orphaned-group", "invalid-visual-parent"]);
     const repairable = diagnostics.some((item) => repairableKinds.has(item.kind));
     this.actionButton(toolbar, "wrench", "Repair safe issues", () => {
