@@ -20,6 +20,7 @@
 ### Changed
 
 - Advanced the multi-base store to version 14 and separated semantic organization revisions from device-local view state. Selection, active tabs, live collapse state, and Undo/Redo history no longer advance Sync conflict ordering, while existing version 11–13 stores migrate with a zero semantic baseline and newer stores remain read-only in older builds.
+- Advanced standalone Workspace settings exports to version 2 so older builds reject settings they do not understand instead of silently dropping Quick append, attachment, or Library-profile configuration; version 1 remains importable.
 
 ### Fixed
 

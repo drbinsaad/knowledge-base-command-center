@@ -175,6 +175,22 @@ test("health center finds empty structure, unavailable configuration, and possib
   assert.ok(findings.some((item) => item.kind === "placeholder-match" && item.path === local.path));
 });
 
+test("health center reports a damaged template-mode Library profile without a template", () => {
+  const data = migrateData(null);
+  data.settings.defaultNewNoteMode = "empty";
+  data.settings.defaultTemplatePath = "";
+  data.portableIndex.libraries = [{
+    id: "library-damaged", name: "Damaged", singularName: "Record", icon: "folder",
+    order: 0, sourceKind: null, archivedAt: null,
+  }];
+  data.portableIndex.libraryLayouts = { "library-damaged": [] };
+  data.settings.libraryNoteProfiles = { "library-damaged": { mode: "template" } };
+
+  const findings = analyze(data, []);
+  assert.ok(findings.some((item) => item.scope === "Library profile: Damaged"
+    && item.detail === "The Library creation profile requests Template mode without a template."));
+});
+
 test("taxonomy analysis remains linear at large-data scale", () => {
   const data = migrateData(null);
   const records = Array.from({ length: 50_000 }, (_, index) => record(

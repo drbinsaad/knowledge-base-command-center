@@ -2229,6 +2229,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (!category) throw new Error("The selected Quick Append category is no longer active.");
     let undo: FollowUpUndoMetadata | null = null;
     await this.app.vault.process(currentFile, (content) => {
+      if (this.app.vault.getAbstractFileByPath(currentFile.path) !== currentFile) {
+        throw new Error("The selected note is no longer the same Markdown file. Reopen Quick Append and choose it again.");
+      }
       assertFollowUpNoteWritable(content);
       const result = appendFollowUpEntry({ content, category, text, date });
       undo = result.undo;

@@ -2149,6 +2149,7 @@ test("portable workspace configuration round-trips settings and group order with
   data.indexGroupOrder = ["Projects", "Reading"];
   data.manualIndexPaths = ["Private/Note.md"];
   const config = createWorkspaceConfig(data, "2026-08-07T00:00:00.000Z");
+  assert.equal(config.version, 2, "new settings exports use a compatibility boundary older builds reject");
   const parsed = parseWorkspaceConfig(JSON.parse(JSON.stringify(config)) as unknown);
   assert.equal(parsed.settings.workspaceName, "Research Command Center");
   assert.equal(parsed.settings.allowClinicalVisualGroupMoves, true);
@@ -2162,6 +2163,11 @@ test("portable workspace configuration round-trips settings and group order with
   assert.equal("manualIndexPaths" in parsed, false);
   assert.equal(JSON.stringify(parsed).includes("Private/Note.md"), false);
   assert.equal(JSON.stringify(parsed).includes("Private/Orphaned"), false);
+
+  const legacy = structuredClone(config);
+  legacy.version = 1;
+  assert.equal(parseWorkspaceConfig(legacy).version, 1, "legacy version-1 workspace settings remain importable");
+  assert.throws(() => parseWorkspaceConfig({ ...config, version: 3 }), /unsupported/i);
 });
 
 test("workspace parsing rejects Quick Append settings without an active category", () => {

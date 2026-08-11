@@ -890,6 +890,10 @@ function sanitizeWorkspaceResources(
     settings.proposalFolder = before.settings.proposalFolder;
     fallbacks.push(`${destinationName}: unavailable proposal folder “${unavailable}” falls back to “${settings.proposalFolder}”.`);
   }
+  if (settings.attachmentStorageMode === "fixed-folder") {
+    const attachmentValidation = validateWritableFolderPath(settings.attachmentFolder, configDir);
+    if (attachmentValidation) throw new Error(attachmentValidation);
+  }
   if (settings.defaultNewNoteMode === "template") {
     const invalid = validateTemplateFilePath(settings.defaultTemplatePath, settings.templatesFolder, configDir);
     const missing = resources?.templateExists && !resources.templateExists(settings.defaultTemplatePath);

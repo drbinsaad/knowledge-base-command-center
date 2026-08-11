@@ -3939,7 +3939,7 @@ export function buildIndexDiagnostics(data: PluginData, records: VaultRecord[], 
 
 export interface WorkspaceConfig {
   kind: "knowledge-base-command-center-workspace";
-  version: 1;
+  version: 1 | 2;
   exportedAt: string;
   settings: PluginSettings;
   indexGroupOrder: string[];
@@ -3955,7 +3955,7 @@ export function createWorkspaceConfig(data: PluginData, exportedAt: string): Wor
   );
   return {
     kind: "knowledge-base-command-center-workspace",
-    version: 1,
+    version: 2,
     exportedAt,
     settings,
     indexGroupOrder: [...data.indexGroupOrder],
@@ -4000,7 +4000,10 @@ function parseTransferredLibraryNoteProfiles(input: unknown): LibraryNoteProfile
 export function parseWorkspaceConfig(input: unknown): WorkspaceConfig {
   if (!input || typeof input !== "object") throw new Error("The selected file is not a Command Center workspace configuration.");
   const value = input as Record<string, unknown>;
-  if (value.kind !== "knowledge-base-command-center-workspace" || value.version !== 1) throw new Error("Unsupported Command Center workspace configuration.");
+  if (value.kind !== "knowledge-base-command-center-workspace"
+    || (value.version !== 1 && value.version !== 2)) {
+    throw new Error("Unsupported Command Center workspace configuration.");
+  }
   transferArrayLength(value.indexGroupOrder, "Workspace group order", MAX_TRANSFER_COLLECTIONS);
   const rawSettings = asUnknownRecord(value.settings);
   const settings = { ...cleanSettings(rawSettings), setupComplete: true };
@@ -4010,7 +4013,7 @@ export function parseWorkspaceConfig(input: unknown): WorkspaceConfig {
   settings.libraryNoteProfiles = parseTransferredLibraryNoteProfiles(rawSettings.libraryNoteProfiles);
   return {
     kind: "knowledge-base-command-center-workspace",
-    version: 1,
+    version: value.version,
     exportedAt: asText(value.exportedAt),
     settings,
     indexGroupOrder: [...new Set(asStringList(value.indexGroupOrder))],

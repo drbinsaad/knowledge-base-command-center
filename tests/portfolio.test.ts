@@ -424,6 +424,23 @@ test("malicious workspace paths fail before a plan exists", () => {
   }], { now: 1_700_000_000_500 }), /relative segments|outside|folder/i);
 });
 
+test("portfolio workspace preflight rejects an unsafe fixed attachment folder", () => {
+  const source = entry("base-source", "Source");
+  source.data.settings.attachmentStorageMode = "fixed-folder";
+  source.data.settings.attachmentFolder = "../Outside";
+  const bundle = bundleFor([source], "vault-local");
+  const destination = entry("base-destination", "Destination");
+
+  assert.throws(() => createPortfolioImportPlan(storeWith([destination], "vault-local"), bundle, [{
+    sourceBaseId: source.id,
+    destination: { kind: "existing", baseId: destination.id },
+    mode: "merge",
+  }], {
+    now: 1_700_000_000_501,
+    resources: { configDir: ".obsidian" },
+  }), /relative segments|outside|folder/i);
+});
+
 test("stale or tampered plans leave the store byte-for-byte unchanged", () => {
   const source = entry("base-source", "Source");
   const bundle = bundleFor([source], "vault-local");

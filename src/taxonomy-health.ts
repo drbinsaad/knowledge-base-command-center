@@ -477,7 +477,7 @@ function addPathFindings(findings: TaxonomyHealthFinding[], input: TaxonomyHealt
     }
     const effective = resolveLibraryNoteProfile(data.settings, libraryId);
     const configuredTemplate = profile.templatePath;
-    if (!configuredTemplate && !(profile.mode === "template" && effective.templatePath !== data.settings.defaultTemplatePath)) continue;
+    if (!configuredTemplate && profile.mode !== "template") continue;
     const template = configuredTemplate ?? effective.templatePath;
     const validation = validateTemplateFilePath(template, data.settings.templatesFolder, input.configDir);
     if (!template || validation || !existingMarkdownPaths.has(template)) findings.push({

@@ -8975,6 +8975,44 @@ test("Quick Append refuses immutable source books and same-path file replacement
   assert.equal(processCalls, 0, "both refusals happen before Vault.process can commit anything");
 });
 
+test("Quick Append refuses a same-path replacement inside the atomic transform", async () => {
+  const selected = new TFile("Knowledge Base/Append identity.md");
+  let currentFile = selected;
+  const original = "# Append identity\n";
+  let content = original;
+  let processCalls = 0;
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getMarkdownFiles: () => [currentFile],
+      getAbstractFileByPath: (path: string) => path === currentFile.path ? currentFile : null,
+      process: async (_file: TFile, transform: (value: string) => string) => {
+        processCalls += 1;
+        currentFile = new TFile(selected.path);
+        content = transform(content);
+      },
+      createFolder: async () => {},
+      create: async (path: string) => new TFile(path),
+    },
+    workspace: { getLeavesOfType: () => [], getActiveFile: () => currentFile },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+    fileManager: {},
+  };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-quick-append-process-identity-test");
+  await plugin.loadPluginData();
+
+  await assert.rejects(
+    () => plugin.appendFollowUpToFile(selected, "questions", "Do not append to the replacement"),
+    /no longer the same Markdown file/u,
+  );
+  assert.equal(processCalls, 1);
+  assert.equal(content, original, "the replacement note is not rewritten");
+  assert.notEqual(currentFile, selected);
+});
+
 test("Quick Append undo refuses a same-path replacement before and during the atomic transform", async () => {
   const selected = new TFile("Knowledge Base/Undo identity.md");
   let currentFile = selected;
