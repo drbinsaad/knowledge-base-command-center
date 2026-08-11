@@ -37,6 +37,7 @@ interface SettingsHost extends Plugin {
   getKnowledgeBases(includeArchived?: boolean): KnowledgeBaseEntry[];
   getActiveKnowledgeBaseId(): string;
   getDataEpoch?(): number;
+  getExternalChangeGeneration?(): number;
   switchKnowledgeBase(id: string): Promise<void>;
   renameKnowledgeBase(id: string, name: string): Promise<void>;
   getLibraries(includeArchived?: boolean): LibraryDefinition[];
@@ -65,10 +66,22 @@ function renderSetting(
 }
 
 export class EntCommandCenterSettingsTab extends PluginSettingTab {
+  private static readonly TEXT_SAVE_DELAY_MS = 600;
   private persistedDataSnapshot: PluginData | null = null;
   private settingsSaveRevision = 0;
   private persistedSettingsRevision = 0;
   private pendingSettingsSaves = 0;
+  private settingsSaveBarrier: Promise<boolean> = Promise.resolve(true);
+  private settingsWriteUncertain = false;
+  private settingsRefreshPending = false;
+  private settingsRefreshGeneration = 0;
+  private bufferedTextSaveTimer: number | null = null;
+  private bufferedTextSaveWindow: Window | null = null;
+  private bufferedTextSaveBaseId = "";
+  private bufferedTextSaveDataEpoch = 0;
+  private bufferedTextSaveExternalGeneration = 0;
+  private bufferedTextSaveData: PluginData | null = null;
+  private bufferedTextSaveRefresh = false;
 
   constructor(app: App, private readonly host: SettingsHost) {
     super(app, host);
@@ -108,15 +121,145 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
     }
   }
 
+  private clearBufferedTextSaveTimer(): void {
+    if (this.bufferedTextSaveTimer !== null) {
+      this.bufferedTextSaveWindow?.clearTimeout(this.bufferedTextSaveTimer);
+    }
+    this.bufferedTextSaveTimer = null;
+    this.bufferedTextSaveWindow = null;
+  }
+
+  private hasPersistedSettingsChange(directDataFields: readonly DirectSettingsDataField[]): boolean {
+    const persisted = this.persistedDataSnapshot;
+    if (!persisted) return true;
+    if (JSON.stringify(this.host.data.settings) !== JSON.stringify(persisted.settings)) return true;
+    if (directDataFields.includes("activeTab") && this.host.data.activeTab !== persisted.activeTab) return true;
+    if (directDataFields.includes("indexGroupOrder")) {
+      const current = this.host.data.indexGroupOrder;
+      const previous = persisted.indexGroupOrder;
+      if (current.length !== previous.length || current.some((value, index) => value !== previous[index])) return true;
+    }
+    return false;
+  }
+
+  private requestSettingsRefresh(): void {
+    this.settingsRefreshPending = true;
+    this.settingsRefreshGeneration = (this.settingsRefreshGeneration ?? 0) + 1;
+  }
+
+  private scheduleTextSave(refresh = true): void {
+    const viewWindow = this.containerEl.ownerDocument.defaultView;
+    if (!viewWindow) {
+      void this.save(refresh);
+      return;
+    }
+    this.clearBufferedTextSaveTimer();
+    this.bufferedTextSaveWindow = viewWindow;
+    this.bufferedTextSaveBaseId = this.host.getActiveKnowledgeBaseId();
+    this.bufferedTextSaveDataEpoch = this.host.getDataEpoch?.() ?? 0;
+    this.bufferedTextSaveExternalGeneration = this.host.getExternalChangeGeneration?.() ?? 0;
+    this.bufferedTextSaveData = this.host.data;
+    this.bufferedTextSaveRefresh = this.bufferedTextSaveRefresh || refresh;
+    if (refresh) this.requestSettingsRefresh();
+    this.bufferedTextSaveTimer = viewWindow.setTimeout(() => {
+      void this.flushBufferedTextSave();
+    }, EntCommandCenterSettingsTab.TEXT_SAVE_DELAY_MS);
+  }
+
+  private async flushBufferedTextSave(acceptCompensatedRejection = false): Promise<boolean> {
+    if (this.bufferedTextSaveTimer === null) return true;
+    const openedBaseId = this.bufferedTextSaveBaseId;
+    const openedDataEpoch = this.bufferedTextSaveDataEpoch;
+    const openedExternalGeneration = this.bufferedTextSaveExternalGeneration;
+    const openedData = this.bufferedTextSaveData;
+    const refresh = this.bufferedTextSaveRefresh;
+    this.clearBufferedTextSaveTimer();
+    this.bufferedTextSaveRefresh = false;
+    this.bufferedTextSaveData = null;
+    if (this.host.data !== openedData
+      || this.host.getActiveKnowledgeBaseId() !== openedBaseId
+      || (this.host.getDataEpoch?.() ?? 0) !== openedDataEpoch
+      || (this.host.getExternalChangeGeneration?.() ?? 0) !== openedExternalGeneration) {
+      new Notice("The active knowledge base changed or synced data was replaced. Reopen this setting before continuing.", 8000);
+      this.persistedDataSnapshot = structuredClone(this.host.data);
+      this.update();
+      return false;
+    }
+    const saved = await this.save(refresh);
+    if (saved || !acceptCompensatedRejection) return saved;
+    // The user's requested value was rejected, but a base lifecycle operation
+    // only needs memory and disk to have converged. The save barrier resolves
+    // true after a verified host/Sync compensation and stays false for an
+    // ambiguous partial write or read-only state.
+    return this.settingsSaveBarrier;
+  }
+
+  /** Flush settings drafts and in-flight saves before rebinding active data. */
+  async prepareForKnowledgeBaseChange(): Promise<boolean> {
+    for (;;) {
+      if (!await this.flushBufferedTextSave(true)) return false;
+      const barrier = this.settingsSaveBarrier;
+      if (!await barrier) return false;
+      if (this.bufferedTextSaveTimer === null
+        && this.pendingSettingsSaves === 0
+        && barrier === this.settingsSaveBarrier) return true;
+    }
+  }
+
+  private bindBufferedTextCommit(inputEl: HTMLInputElement): void {
+    inputEl.addEventListener("blur", () => { void this.flushBufferedTextSave(); });
+    inputEl.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      void this.flushBufferedTextSave();
+      inputEl.blur();
+    });
+  }
+
   /** Persist direct settings controls transactionally, including Sync rejections. */
   private async save(
     refresh = true,
     directDataFields: readonly DirectSettingsDataField[] = [],
   ): Promise<boolean> {
+    if (refresh) this.requestSettingsRefresh();
+    const operation = this.performSave(refresh, directDataFields);
+    this.settingsSaveBarrier = operation.then(
+      () => !this.settingsWriteUncertain && !(this.host.isDataReadOnly?.() ?? false),
+      () => false,
+    );
+    return operation;
+  }
+
+  private async performSave(
+    refresh: boolean,
+    directDataFields: readonly DirectSettingsDataField[],
+  ): Promise<boolean> {
+    const effectiveRefresh = refresh || this.bufferedTextSaveRefresh || this.settingsRefreshPending;
+    const refreshGeneration = this.settingsRefreshGeneration;
+    this.clearBufferedTextSaveTimer();
+    this.bufferedTextSaveRefresh = false;
+    this.bufferedTextSaveData = null;
+    this.host.data.settings.setupComplete = true;
+    // Matching the last committed snapshot is not a no-op while an older write
+    // is pending: that older write may contain the value the user just reverted.
+    if (this.pendingSettingsSaves === 0 && !this.hasPersistedSettingsChange(directDataFields)) {
+      if (effectiveRefresh) {
+        try {
+          await this.host.refreshViews();
+          if (refreshGeneration === this.settingsRefreshGeneration) this.settingsRefreshPending = false;
+        } catch (error) {
+          console.error("Knowledge Base Command Center could not refresh its saved settings", error);
+          new Notice("The setting is already saved, but the command center could not refresh. Reopen it to see the change.", 8000);
+        }
+      }
+      return true;
+    }
     const revision = this.settingsSaveRevision + 1;
     this.settingsSaveRevision = revision;
+    const attemptedBaseId = this.host.getActiveKnowledgeBaseId?.() ?? "";
+    const attemptedDataEpoch = this.host.getDataEpoch?.() ?? 0;
+    const attemptedExternalGeneration = this.host.getExternalChangeGeneration?.() ?? 0;
+    const attemptedLiveData = this.host.data;
     const fallbackRollback = structuredClone(this.persistedDataSnapshot ?? this.host.data);
-    this.host.data.settings.setupComplete = true;
     // Keep the exact attempted value independently from the host transaction:
     // a later input event may mutate the live object before this promise
     // settles, and three-way rollback must never read that newer value.
@@ -125,21 +268,43 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
     try {
       await this.host.savePluginData();
     } catch (error) {
-      this.pendingSettingsSaves -= 1;
       // Text controls can start another save while this one is in flight. An
       // older rejection must not roll back the newer live value; the latest
       // revision will either persist it or restore the last successful attempt.
-      if (revision !== this.settingsSaveRevision) return false;
-      this.rollbackAttemptedData(this.persistedDataSnapshot ?? fallbackRollback, attempted, directDataFields);
+      if (revision !== this.settingsSaveRevision) {
+        this.pendingSettingsSaves -= 1;
+        return false;
+      }
+      const stillOwnsAttemptedData = this.host.data === attemptedLiveData
+        && (this.host.getActiveKnowledgeBaseId?.() ?? "") === attemptedBaseId
+        && (this.host.getDataEpoch?.() ?? 0) === attemptedDataEpoch
+        && (this.host.getExternalChangeGeneration?.() ?? 0) === attemptedExternalGeneration;
+      if (stillOwnsAttemptedData) {
+        this.rollbackAttemptedData(this.persistedDataSnapshot ?? fallbackRollback, attempted, directDataFields);
+      }
+      let compensated = false;
       try {
         await this.host.saveCompensatingRollback();
+        compensated = !(this.host.isDataReadOnly?.() ?? false);
       } catch (rollbackError) {
         console.error("Knowledge Base Command Center could not persist a rejected setting rollback", rollbackError);
         this.host.markPersistenceUncertain("A rejected setting may have reached Sync, and its compensating rollback could not be saved. Knowledge bases remain read-only until Obsidian is restarted after the plugin data.json is copied or a same-vault recovery is exported.");
       }
-      new Notice(`The setting was not saved and has been restored: ${error instanceof Error ? error.message : String(error)}`, 8000);
+      this.pendingSettingsSaves -= 1;
+      this.settingsWriteUncertain = !compensated;
+      if (compensated) {
+        this.persistedDataSnapshot = structuredClone(this.host.data);
+        this.persistedSettingsRevision = Math.max(this.persistedSettingsRevision, revision);
+      }
+      new Notice(
+        compensated
+          ? `The setting was not saved and its prior value was restored: ${error instanceof Error ? error.message : String(error)}`
+          : `The setting write could not be confirmed: ${error instanceof Error ? error.message : String(error)}`,
+        8000,
+      );
       try {
         await this.host.refreshViews();
+        if (compensated && refreshGeneration === this.settingsRefreshGeneration) this.settingsRefreshPending = false;
       } catch (refreshError) {
         console.error("Knowledge Base Command Center restored a failed setting but could not refresh its view", refreshError);
       }
@@ -151,12 +316,14 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
       this.persistedDataSnapshot = attempted;
       this.persistedSettingsRevision = revision;
     }
+    this.settingsWriteUncertain = false;
     // A later input owns the live value and the eventual refresh. Refreshing
     // this superseded revision can make Obsidian rebuild controls mid-typing.
     if (revision !== this.settingsSaveRevision) return true;
-    if (refresh) {
+    if (effectiveRefresh) {
       try {
         await this.host.refreshViews();
+        if (refreshGeneration === this.settingsRefreshGeneration) this.settingsRefreshPending = false;
       } catch (error) {
         console.error("Knowledge Base Command Center saved a setting but could not refresh its view", error);
         new Notice("The setting was saved, but the command center could not refresh. Reopen it to see the change.", 8000);
@@ -167,13 +334,17 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
 
   private createOpenedBaseGuard(openedBaseId = this.host.getActiveKnowledgeBaseId()): () => boolean {
     const openedDataEpoch = this.host.getDataEpoch?.() ?? 0;
+    const openedExternalGeneration = this.host.getExternalChangeGeneration?.() ?? 0;
+    const openedData = this.host.data;
     let noticeShown = false;
     return (): boolean => {
-      if (this.host.getActiveKnowledgeBaseId() === openedBaseId
-        && (this.host.getDataEpoch?.() ?? 0) === openedDataEpoch) return true;
+      if (this.host.data === openedData
+        && this.host.getActiveKnowledgeBaseId() === openedBaseId
+        && (this.host.getDataEpoch?.() ?? 0) === openedDataEpoch
+        && (this.host.getExternalChangeGeneration?.() ?? 0) === openedExternalGeneration) return true;
       if (!noticeShown) {
         noticeShown = true;
-        new Notice("The active knowledge base changed. Reopen this setting before continuing.", 8000);
+        new Notice("The active knowledge base changed or synced data was replaced. Reopen this setting before continuing.", 8000);
       }
       return false;
     };
@@ -182,7 +353,9 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
   getSettingDefinitions(): SettingDefinitionItem[] {
     // Settings search can ask for definitions while an onChange save is still
     // pending. Never bless that uncommitted live value as the rollback point.
-    if (this.pendingSettingsSaves === 0) this.persistedDataSnapshot = structuredClone(this.host.data);
+    if (this.pendingSettingsSaves === 0 && this.bufferedTextSaveTimer === null) {
+      this.persistedDataSnapshot = structuredClone(this.host.data);
+    }
     const settings = this.host.data.settings;
     const readOnly = this.host.isDataReadOnly();
     const definitions: SettingDefinitionItem[] = [{
@@ -312,20 +485,23 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
       onValid: (value: string) => void,
       allowEmpty = true,
     ): SettingDefinitionRender => renderSetting(name, description, (row) => {
-      row.addText((text) => text
-        .setPlaceholder(allowEmpty ? "Vault root (leave empty)" : "Folder/path")
-        .setValue(current)
-        .setDisabled(readOnly)
-        .onChange(async (value) => {
-          if (!ownsConfiguredBase()) return;
-          const clean = value.trim().replace(/^\/+|\/+$/g, "");
-          const error = validateWritableFolderPath(clean, this.host.app.vault.configDir) || (!allowEmpty && !clean ? "Choose a folder." : null);
-          text.inputEl.toggleClass("is-error", Boolean(error));
-          row.setDesc(error ?? description);
-          if (error) return;
-          onValid(clean);
-          await this.save();
-        }));
+      row.addText((text) => {
+        text
+          .setPlaceholder(allowEmpty ? "Vault root (leave empty)" : "Folder/path")
+          .setValue(current)
+          .setDisabled(readOnly)
+          .onChange((value) => {
+            if (!ownsConfiguredBase()) return;
+            const clean = value.trim().replace(/^\/+|\/+$/g, "");
+            const error = validateWritableFolderPath(clean, this.host.app.vault.configDir) || (!allowEmpty && !clean ? "Choose a folder." : null);
+            text.inputEl.toggleClass("is-error", Boolean(error));
+            row.setDesc(error ?? description);
+            if (error) return;
+            onValid(clean);
+            this.scheduleTextSave();
+          });
+        this.bindBufferedTextCommit(text.inputEl);
+      });
       row.addButton((button) => button.setButtonText("Browse…").setDisabled(readOnly).onClick(() => {
         if (!ownsConfiguredBase()) return;
         const folders = folderPaths();
@@ -360,15 +536,18 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
       current: string,
       onChange: (value: string) => void,
     ): SettingDefinitionRender => renderSetting(name, description, (row) => {
-      row.addText((text) => text
-        .setPlaceholder(placeholder)
-        .setValue(current)
-        .setDisabled(readOnly)
-        .onChange(async (value) => {
-          if (!ownsConfiguredBase()) return;
-          onChange(value.trim());
-          await this.save();
-        }));
+      row.addText((text) => {
+        text
+          .setPlaceholder(placeholder)
+          .setValue(current)
+          .setDisabled(readOnly)
+          .onChange((value) => {
+            if (!ownsConfiguredBase()) return;
+            onChange(value.trim());
+            this.scheduleTextSave();
+          });
+        this.bindBufferedTextCommit(text.inputEl);
+      });
       row.addButton((button) => button.setButtonText("Choose…").setDisabled(readOnly).onClick(() => {
         if (!ownsConfiguredBase()) return;
         const properties = propertyNames();
@@ -423,44 +602,59 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
               }));
           }, ["workspace name", "title"]),
           renderSetting("Header description", "Short explanation shown below the command center name.", (row) => {
-            row.addText((text) => text.setPlaceholder("Search, organize, arrange, and create notes.").setValue(settings.workspaceSubtitle).setDisabled(readOnly).onChange(async (value) => {
-              if (!ownsConfiguredBase()) return;
-              settings.workspaceSubtitle = value.trim();
-              await this.save();
-            }));
+            row.addText((text) => {
+              text.setPlaceholder("Search, organize, arrange, and create notes.").setValue(settings.workspaceSubtitle).setDisabled(readOnly).onChange((value) => {
+                if (!ownsConfiguredBase()) return;
+                settings.workspaceSubtitle = value.trim();
+                this.scheduleTextSave();
+              });
+              this.bindBufferedTextCommit(text.inputEl);
+            });
           }, ["subtitle"]),
           renderSetting("Index name", "For example: Knowledge Index, Curriculum, Projects, Research Library.", (row) => {
-            row.addText((text) => text.setPlaceholder("Knowledge index").setValue(settings.indexLabel).setDisabled(readOnly).onChange(async (value) => {
-              if (!ownsConfiguredBase()) return;
-              const clean = value.trim();
-              if (!clean) return;
-              settings.indexLabel = clean;
-              await this.save();
-            }));
+            row.addText((text) => {
+              text.setPlaceholder("Knowledge index").setValue(settings.indexLabel).setDisabled(readOnly).onChange((value) => {
+                if (!ownsConfiguredBase()) return;
+                const clean = value.trim();
+                if (!clean) return;
+                settings.indexLabel = clean;
+                this.scheduleTextSave();
+              });
+              this.bindBufferedTextCommit(text.inputEl);
+            });
           }, ["curriculum", "library"]),
           renderSetting("Item singular", "Singular label used throughout the interface.", (row) => {
-            row.addText((text) => text.setPlaceholder("Note").setValue(settings.itemSingular).setDisabled(readOnly).onChange(async (value) => {
-              if (!ownsConfiguredBase()) return;
-              if (!value.trim()) return;
-              settings.itemSingular = value.trim();
-              await this.save();
-            }));
+            row.addText((text) => {
+              text.setPlaceholder("Note").setValue(settings.itemSingular).setDisabled(readOnly).onChange((value) => {
+                if (!ownsConfiguredBase()) return;
+                if (!value.trim()) return;
+                settings.itemSingular = value.trim();
+                this.scheduleTextSave();
+              });
+              this.bindBufferedTextCommit(text.inputEl);
+            });
           }, ["item name", "terminology"]),
           renderSetting("Item plural", "Plural label used throughout the interface.", (row) => {
-            row.addText((text) => text.setPlaceholder("Notes").setValue(settings.itemPlural).setDisabled(readOnly).onChange(async (value) => {
-              if (!ownsConfiguredBase()) return;
-              if (!value.trim()) return;
-              settings.itemPlural = value.trim();
-              await this.save();
-            }));
+            row.addText((text) => {
+              text.setPlaceholder("Notes").setValue(settings.itemPlural).setDisabled(readOnly).onChange((value) => {
+                if (!ownsConfiguredBase()) return;
+                if (!value.trim()) return;
+                settings.itemPlural = value.trim();
+                this.scheduleTextSave();
+              });
+              this.bindBufferedTextCommit(text.inputEl);
+            });
           }, ["item names", "terminology"]),
           renderSetting("Group name", "Label for the top-level grouping property, such as Category, Domain, Area, or Course.", (row) => {
-            row.addText((text) => text.setPlaceholder("Group").setValue(settings.groupLabel).setDisabled(readOnly).onChange(async (value) => {
-              if (!ownsConfiguredBase()) return;
-              if (!value.trim()) return;
-              settings.groupLabel = value.trim();
-              await this.save();
-            }));
+            row.addText((text) => {
+              text.setPlaceholder("Group").setValue(settings.groupLabel).setDisabled(readOnly).onChange((value) => {
+                if (!ownsConfiguredBase()) return;
+                if (!value.trim()) return;
+                settings.groupLabel = value.trim();
+                this.scheduleTextSave();
+              });
+              this.bindBufferedTextCommit(text.inputEl);
+            });
           }, ["category", "domain", "area", "course"]),
         ],
       },
@@ -596,18 +790,21 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
           }, ["attachment heading"]),
           renderSetting("Inbox folder", settings.workspaceMode === "ent-clinical" ? "Clinical proposals must stay inside 01 Inbox." : "Notes in this folder appear in the Inbox section.", (row) => {
             const description = settings.workspaceMode === "ent-clinical" ? "Clinical proposals must stay inside 01 Inbox." : "Notes in this folder appear in the Inbox section.";
-            row.addText((text) => text.setPlaceholder(DEFAULT_PROPOSAL_FOLDER).setValue(settings.proposalFolder).setDisabled(readOnly).onChange(async (value) => {
-              if (!ownsConfiguredBase()) return;
-              const clean = value.trim().replace(/^\/+|\/+$/g, "");
-              const error = settings.workspaceMode === "ent-clinical"
-                ? validateProposalFolderPath(clean, this.host.app.vault.configDir)
-                : validateWritableFolderPath(clean, this.host.app.vault.configDir);
-              text.inputEl.toggleClass("is-error", Boolean(error));
-              row.setDesc(error ?? description);
-              if (error) return;
-              settings.proposalFolder = clean;
-              await this.save();
-            }));
+            row.addText((text) => {
+              text.setPlaceholder(DEFAULT_PROPOSAL_FOLDER).setValue(settings.proposalFolder).setDisabled(readOnly).onChange((value) => {
+                if (!ownsConfiguredBase()) return;
+                const clean = value.trim().replace(/^\/+|\/+$/g, "");
+                const error = settings.workspaceMode === "ent-clinical"
+                  ? validateProposalFolderPath(clean, this.host.app.vault.configDir)
+                  : validateWritableFolderPath(clean, this.host.app.vault.configDir);
+                text.inputEl.toggleClass("is-error", Boolean(error));
+                row.setDesc(error ?? description);
+                if (error) return;
+                settings.proposalFolder = clean;
+                this.scheduleTextSave();
+              });
+              this.bindBufferedTextCommit(text.inputEl);
+            });
             row.addButton((button) => button.setButtonText("Browse…").setDisabled(readOnly).onClick(() => {
               if (!ownsConfiguredBase()) return;
               new StringPickerModal(this.host.app, folderPaths(), "Choose inbox folder", "Search vault folders…", async (path) => {
@@ -624,12 +821,15 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
             }));
           }, ["proposal folder"]),
           renderSetting("Inbox name", "Label used for the Inbox section.", (row) => {
-            row.addText((text) => text.setPlaceholder("Inbox").setValue(settings.inboxLabel).setDisabled(readOnly).onChange(async (value) => {
-              if (!ownsConfiguredBase()) return;
-              if (!value.trim()) return;
-              settings.inboxLabel = value.trim();
-              await this.save();
-            }));
+            row.addText((text) => {
+              text.setPlaceholder("Inbox").setValue(settings.inboxLabel).setDisabled(readOnly).onChange((value) => {
+                if (!ownsConfiguredBase()) return;
+                if (!value.trim()) return;
+                settings.inboxLabel = value.trim();
+                this.scheduleTextSave();
+              });
+              this.bindBufferedTextCommit(text.inputEl);
+            });
           }, ["proposal inbox"]),
         ],
       },
@@ -765,5 +965,10 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
       },
     );
     return definitions;
+  }
+
+  override hide(): void {
+    void this.flushBufferedTextSave();
+    super.hide();
   }
 }

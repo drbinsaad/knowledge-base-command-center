@@ -2513,6 +2513,375 @@ test("settings callbacks stay bound to the knowledge base that rendered them", (
   assert.equal(Notice.messages.filter((message) => message.includes("active knowledge base changed")).length, 1);
 });
 
+type BufferedSettingsHarness = {
+  host: {
+    data: PluginData;
+    dataCompatibilityWarning: string;
+    getActiveKnowledgeBaseId(): string;
+    getDataEpoch(): number;
+    getExternalChangeGeneration(): number;
+    isDataReadOnly(): boolean;
+    savePluginData(): Promise<void>;
+    saveCompensatingRollback(): Promise<void>;
+    markPersistenceUncertain(message: string): void;
+    refreshViews(): Promise<void>;
+  };
+  containerEl: { ownerDocument: { defaultView: Window } };
+  persistedDataSnapshot: PluginData;
+  settingsSaveRevision: number;
+  persistedSettingsRevision: number;
+  pendingSettingsSaves: number;
+  settingsSaveBarrier: Promise<boolean>;
+  settingsWriteUncertain: boolean;
+  settingsRefreshPending: boolean;
+  settingsRefreshGeneration: number;
+  bufferedTextSaveTimer: number | null;
+  bufferedTextSaveWindow: Window | null;
+  bufferedTextSaveBaseId: string;
+  bufferedTextSaveDataEpoch: number;
+  bufferedTextSaveExternalGeneration: number;
+  bufferedTextSaveData: PluginData | null;
+  bufferedTextSaveRefresh: boolean;
+  update(): void;
+  scheduleTextSave(refresh?: boolean): void;
+  flushBufferedTextSave(acceptCompensatedRejection?: boolean): Promise<boolean>;
+  prepareForKnowledgeBaseChange(): Promise<boolean>;
+  save(refresh?: boolean, directDataFields?: Array<"activeTab" | "indexGroupOrder">): Promise<boolean>;
+  hide(): void;
+};
+
+function settingsTimerWindow(): { window: Window; callbacks: Map<number, () => void> } {
+  let nextTimer = 0;
+  const callbacks = new Map<number, () => void>();
+  const window = {
+    setTimeout(callback: () => void): number {
+      nextTimer += 1;
+      callbacks.set(nextTimer, callback);
+      return nextTimer;
+    },
+    clearTimeout(timer: number): void { callbacks.delete(timer); },
+  } as unknown as Window;
+  return { window, callbacks };
+}
+
+function bufferedSettingsHarness(options: {
+  onSave?: () => void | Promise<void>;
+  onCompensate?: () => void | Promise<void>;
+  onRefresh?: () => void | Promise<void>;
+  onUpdate?: () => void;
+} = {}): {
+  tab: BufferedSettingsHarness;
+  data: PluginData;
+  callbacks: Map<number, () => void>;
+  setBase(value: string): void;
+  setEpoch(value: number): void;
+  setExternalGeneration(value: number): void;
+  setOwnerWindow(value: Window): void;
+} {
+  const data = migrateData(null);
+  data.settings.setupComplete = true;
+  let activeBaseId = "base-a";
+  let epoch = 1;
+  let externalGeneration = 0;
+  let readOnly = false;
+  const initialTimers = settingsTimerWindow();
+  const tab = Object.create(EntCommandCenterSettingsTab.prototype) as BufferedSettingsHarness;
+  tab.host = {
+    data,
+    dataCompatibilityWarning: "",
+    getActiveKnowledgeBaseId: () => activeBaseId,
+    getDataEpoch: () => epoch,
+    getExternalChangeGeneration: () => externalGeneration,
+    isDataReadOnly: () => readOnly,
+    savePluginData: async () => { await options.onSave?.(); },
+    saveCompensatingRollback: async () => { await options.onCompensate?.(); },
+    markPersistenceUncertain: (message) => {
+      readOnly = true;
+      tab.host.dataCompatibilityWarning = message;
+    },
+    refreshViews: async () => { await options.onRefresh?.(); },
+  };
+  tab.containerEl = { ownerDocument: { defaultView: initialTimers.window } };
+  tab.persistedDataSnapshot = structuredClone(data);
+  tab.settingsSaveRevision = 0;
+  tab.persistedSettingsRevision = 0;
+  tab.pendingSettingsSaves = 0;
+  tab.settingsSaveBarrier = Promise.resolve(true);
+  tab.settingsWriteUncertain = false;
+  tab.settingsRefreshPending = false;
+  tab.settingsRefreshGeneration = 0;
+  tab.bufferedTextSaveTimer = null;
+  tab.bufferedTextSaveWindow = null;
+  tab.bufferedTextSaveBaseId = "";
+  tab.bufferedTextSaveDataEpoch = 0;
+  tab.bufferedTextSaveExternalGeneration = 0;
+  tab.bufferedTextSaveData = null;
+  tab.bufferedTextSaveRefresh = false;
+  tab.update = () => { options.onUpdate?.(); };
+  return {
+    tab,
+    data,
+    callbacks: initialTimers.callbacks,
+    setBase: (value) => { activeBaseId = value; },
+    setEpoch: (value) => { epoch = value; },
+    setExternalGeneration: (value) => { externalGeneration = value; },
+    setOwnerWindow: (value) => { tab.containerEl.ownerDocument.defaultView = value; },
+  };
+}
+
+async function settleBufferedSettingsSave(): Promise<void> {
+  for (let index = 0; index < 8; index += 1) await Promise.resolve();
+}
+
+test("settings text edits coalesce and unchanged drafts skip adapter writes", async () => {
+  let saves = 0;
+  let refreshes = 0;
+  const { tab, data, callbacks } = bufferedSettingsHarness({
+    onSave: () => { saves += 1; },
+    onRefresh: () => { refreshes += 1; },
+  });
+
+  for (let index = 1; index <= 20; index += 1) {
+    data.settings.workspaceSubtitle = `Typed value ${index}`;
+    tab.scheduleTextSave();
+  }
+  assert.equal(callbacks.size, 1);
+  [...callbacks.values()][0]?.();
+  await settleBufferedSettingsSave();
+  assert.equal(saves, 1);
+  assert.equal(refreshes, 1);
+  assert.equal(tab.persistedDataSnapshot.settings.workspaceSubtitle, "Typed value 20");
+
+  data.settings.workspaceSubtitle = "Temporary";
+  tab.scheduleTextSave();
+  data.settings.workspaceSubtitle = "Typed value 20";
+  tab.scheduleTextSave();
+  [...callbacks.values()][0]?.();
+  await settleBufferedSettingsSave();
+  assert.equal(saves, 1, "returning to the committed value is a no-op once no write is in flight");
+});
+
+test("reverting while an older settings write is in flight queues the durable revert", async () => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let saveCalls = 0;
+  const writes: string[] = [];
+  const { tab, data, callbacks } = bufferedSettingsHarness({
+    onSave: async () => {
+      saveCalls += 1;
+      writes.push(data.settings.workspaceSubtitle);
+      await gate;
+    },
+  });
+  const original = data.settings.workspaceSubtitle;
+
+  data.settings.workspaceSubtitle = "Pending value";
+  tab.scheduleTextSave();
+  [...callbacks.values()][0]?.();
+  await Promise.resolve();
+  assert.equal(tab.pendingSettingsSaves, 1);
+
+  data.settings.workspaceSubtitle = original;
+  tab.scheduleTextSave();
+  [...callbacks.values()][0]?.();
+  await Promise.resolve();
+  assert.equal(saveCalls, 2, "the matching baseline still needs a write behind an in-flight attempt");
+
+  release();
+  await settleBufferedSettingsSave();
+  assert.deepEqual(writes, ["Pending value", original]);
+  assert.equal(tab.persistedDataSnapshot.settings.workspaceSubtitle, original);
+  assert.equal(tab.pendingSettingsSaves, 0);
+});
+
+test("an immediate save(false) absorbs a buffered edit without losing refresh intent", async () => {
+  let saves = 0;
+  let refreshes = 0;
+  const harness = bufferedSettingsHarness({
+    onSave: () => { saves += 1; },
+    onRefresh: () => { refreshes += 1; },
+  });
+  harness.data.settings.primaryFolder = "Buffered scope";
+  harness.tab.scheduleTextSave(true);
+  harness.data.settings.openNoteBehavior = "same-tab";
+
+  assert.equal(await harness.tab.save(false), true);
+  assert.equal(harness.callbacks.size, 0);
+  assert.equal(saves, 1);
+  assert.equal(refreshes, 1);
+  assert.equal(harness.tab.settingsRefreshPending, false);
+});
+
+test("refresh intent survives while the first settings save is in flight", async () => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let saves = 0;
+  let refreshes = 0;
+  const { tab, data, callbacks } = bufferedSettingsHarness({
+    onSave: async () => { saves += 1; await gate; },
+    onRefresh: () => { refreshes += 1; },
+  });
+  data.settings.primaryFolder = "Changed scope";
+  tab.scheduleTextSave(true);
+  [...callbacks.values()][0]?.();
+  await Promise.resolve();
+
+  data.settings.openNoteBehavior = "same-tab";
+  const latestSave = tab.save(false);
+  release();
+  assert.equal(await latestSave, true);
+  await settleBufferedSettingsSave();
+
+  assert.equal(saves, 2);
+  assert.equal(refreshes, 1, "the newest successful revision performs the inherited refresh once");
+  assert.equal(tab.settingsRefreshPending, false);
+});
+
+test("a failed settings refresh remains pending for a later no-op action", async () => {
+  let refreshes = 0;
+  const harness = bufferedSettingsHarness({
+    onRefresh: () => {
+      refreshes += 1;
+      if (refreshes === 1) throw new Error("simulated refresh failure");
+    },
+  });
+  harness.data.settings.workspaceSubtitle = "Saved before refresh failure";
+
+  assert.equal(await harness.tab.save(true), true);
+  assert.equal(harness.tab.settingsRefreshPending, true);
+  assert.equal(await harness.tab.save(false), true);
+  assert.equal(refreshes, 2);
+  assert.equal(harness.tab.settingsRefreshPending, false);
+});
+
+test("a stale pre-timer base switch cannot save the prior base draft", async () => {
+  Notice.messages.length = 0;
+  let saves = 0;
+  let updates = 0;
+  const harness = bufferedSettingsHarness({
+    onSave: () => { saves += 1; },
+    onUpdate: () => { updates += 1; },
+  });
+  harness.data.settings.workspaceSubtitle = "Stale base A draft";
+  harness.tab.scheduleTextSave();
+  harness.setBase("base-b");
+  [...harness.callbacks.values()][0]?.();
+  await settleBufferedSettingsSave();
+
+  assert.equal(saves, 0);
+  assert.equal(updates, 1);
+  assert.equal(Notice.messages.some((message) => message.includes("active knowledge base changed")), true);
+});
+
+test("a same-object external generation advance invalidates a buffered settings draft", async () => {
+  let saves = 0;
+  const harness = bufferedSettingsHarness({ onSave: () => { saves += 1; } });
+  harness.data.settings.workspaceSubtitle = "Draft captured before Sync callback";
+  harness.tab.scheduleTextSave();
+  harness.setExternalGeneration(1);
+  [...harness.callbacks.values()][0]?.();
+  await settleBufferedSettingsSave();
+
+  assert.equal(saves, 0, "the callback generation guard runs before the same object can be persisted");
+});
+
+test("a rejected settings write never rolls back a replacement Sync object", async () => {
+  const incoming = migrateData(null);
+  incoming.settings.workspaceSubtitle = "Authoritative synced value";
+  let harness: ReturnType<typeof bufferedSettingsHarness>;
+  harness = bufferedSettingsHarness({
+    onSave: () => {
+      harness.tab.host.data = incoming;
+      harness.setEpoch(2);
+      harness.setExternalGeneration(1);
+      throw new Error("superseded by Sync");
+    },
+  });
+  harness.data.settings.workspaceSubtitle = "Rejected local value";
+
+  assert.equal(await harness.tab.save(false), false);
+  assert.equal(harness.tab.host.data, incoming);
+  assert.equal(incoming.settings.workspaceSubtitle, "Authoritative synced value");
+  assert.equal(harness.tab.persistedDataSnapshot.settings.workspaceSubtitle, "Authoritative synced value");
+});
+
+test("prepareForKnowledgeBaseChange accepts a rejected write after verified compensation", async () => {
+  const baseline = migrateData(null).settings.workspaceSubtitle;
+  let disk = migrateData(null);
+  let saves = 0;
+  let compensations = 0;
+  const harness = bufferedSettingsHarness({
+    onSave: () => {
+      saves += 1;
+      disk = structuredClone(harness.tab.host.data);
+      throw new Error("adapter rejected after replacement");
+    },
+    onCompensate: () => {
+      compensations += 1;
+      disk = structuredClone(harness.tab.host.data);
+    },
+  });
+  harness.data.settings.workspaceSubtitle = "Rejected draft";
+  harness.tab.scheduleTextSave();
+
+  assert.equal(await harness.tab.prepareForKnowledgeBaseChange(), true);
+  assert.equal(saves, 1);
+  assert.equal(compensations, 1);
+  assert.equal(harness.data.settings.workspaceSubtitle, baseline);
+  assert.equal(disk.settings.workspaceSubtitle, baseline, "the partial data.json replacement is compensated");
+});
+
+test("a failed settings compensation keeps the lifecycle barrier closed", async () => {
+  const harness = bufferedSettingsHarness({
+    onSave: () => { throw new Error("ambiguous first write"); },
+    onCompensate: () => { throw new Error("ambiguous compensation"); },
+  });
+  harness.data.settings.workspaceSubtitle = "Uncertain draft";
+  harness.tab.scheduleTextSave();
+
+  assert.equal(await harness.tab.prepareForKnowledgeBaseChange(), false);
+  assert.equal(harness.tab.host.isDataReadOnly(), true);
+  assert.match(harness.tab.host.dataCompatibilityWarning, /read-only/i);
+});
+
+test("settings debounce timers migrate between owner windows", async () => {
+  let saves = 0;
+  const first = settingsTimerWindow();
+  const second = settingsTimerWindow();
+  const harness = bufferedSettingsHarness({ onSave: () => { saves += 1; } });
+  harness.setOwnerWindow(first.window);
+  harness.data.settings.workspaceSubtitle = "First window";
+  harness.tab.scheduleTextSave();
+  assert.equal(first.callbacks.size, 1);
+
+  harness.setOwnerWindow(second.window);
+  harness.data.settings.workspaceSubtitle = "Second window";
+  harness.tab.scheduleTextSave();
+  assert.equal(first.callbacks.size, 0, "the timer is cleared through the window that created it");
+  assert.equal(second.callbacks.size, 1);
+  [...second.callbacks.values()][0]?.();
+  await settleBufferedSettingsSave();
+  assert.equal(saves, 1);
+  assert.equal(harness.tab.persistedDataSnapshot.settings.workspaceSubtitle, "Second window");
+});
+
+test("hiding settings flushes buffered text with its refresh intent", async () => {
+  let saves = 0;
+  let refreshes = 0;
+  const harness = bufferedSettingsHarness({
+    onSave: () => { saves += 1; },
+    onRefresh: () => { refreshes += 1; },
+  });
+  harness.data.settings.workspaceSubtitle = "Commit on hide";
+  harness.tab.scheduleTextSave(true);
+
+  harness.tab.hide();
+  await settleBufferedSettingsSave();
+  assert.equal(harness.callbacks.size, 0);
+  assert.equal(saves, 1);
+  assert.equal(refreshes, 1);
+});
+
 test("Library creation profiles are discoverable through Obsidian settings search", () => {
   const data = migrateData(null);
   const library = installLibrary(data);

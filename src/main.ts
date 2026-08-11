@@ -327,6 +327,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private vaultRenameRepairQueue: Promise<void> = Promise.resolve();
   private lastFollowUpUndo: { expiresAt: number; file: TFile; undo: FollowUpUndoMetadata } | null = null;
   private readonly libraryCommandNames = new Map<string, string>();
+  private settingsTab: EntCommandCenterSettingsTab | null = null;
   dataCompatibilityWarning = "";
 
   async onload(): Promise<void> {
@@ -477,7 +478,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     });
     this.syncLibraryCommands();
 
-    this.addSettingTab(new EntCommandCenterSettingsTab(this.app, this));
+    this.settingsTab = new EntCommandCenterSettingsTab(this.app, this);
+    this.addSettingTab(this.settingsTab);
     // Registration happens once at plugin load, while the active index profile
     // can later change between generic and ENT presets. The view itself also
     // works for generic notes by falling back to their folder grouping.
@@ -1871,6 +1873,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   getActiveKnowledgeBase(): KnowledgeBaseEntry { return this.requireActiveBase(); }
   getActiveKnowledgeBaseId(): string { return this.store.activeBaseId; }
   getDataEpoch(): number { return this.dataEpoch; }
+  getExternalChangeGeneration(): number { return this.externalChangeGeneration; }
   getSearchGeneration(): number { return this.searchGeneration; }
   getVaultId(): string { return this.store.vaultId; }
 
@@ -2025,6 +2028,19 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   private async commitBaseStoreChange(change: () => void, persistSyncedStore = true): Promise<void> {
     this.assertDataWritable();
+    if (this.baseOperationBusy) throw new Error("Another knowledge-base change is still being saved.");
+    if (this.dataTransactionBusy) throw new Error("Finish the current organization change before switching knowledge bases.");
+    if (this.externalReloadBusy) throw new Error("Finish reloading synced knowledge-base data before switching bases.");
+    // A debounced text control has already mutated the active PluginData object.
+    // Commit or causally compensate that draft before a lifecycle transaction
+    // snapshots/rebinds the store, otherwise switching bases could publish the
+    // draft without the settings transaction that owns its rollback boundary.
+    if (this.settingsTab && !await this.settingsTab.prepareForKnowledgeBaseChange()) {
+      throw new Error("Save or restore the pending settings change before changing knowledge bases.");
+    }
+    // The flush yields through the shared logical/adapter barriers. Recheck all
+    // owners before claiming baseOperationBusy in case Sync or another action
+    // began while the settings write was settling.
     if (this.baseOperationBusy) throw new Error("Another knowledge-base change is still being saved.");
     if (this.dataTransactionBusy) throw new Error("Finish the current organization change before switching knowledge bases.");
     if (this.externalReloadBusy) throw new Error("Finish reloading synced knowledge-base data before switching bases.");

@@ -108,6 +108,17 @@ function settingsTabForPlugin(plugin: EntVaultCommandCenterPlugin): EntCommandCe
     settingsSaveRevision: 0,
     persistedSettingsRevision: 0,
     pendingSettingsSaves: 0,
+    settingsSaveBarrier: Promise.resolve(true),
+    settingsWriteUncertain: false,
+    settingsRefreshPending: false,
+    settingsRefreshGeneration: 0,
+    bufferedTextSaveTimer: null,
+    bufferedTextSaveWindow: null,
+    bufferedTextSaveBaseId: "",
+    bufferedTextSaveDataEpoch: 0,
+    bufferedTextSaveExternalGeneration: 0,
+    bufferedTextSaveData: null,
+    bufferedTextSaveRefresh: false,
     update: () => {},
   });
   return tab as EntCommandCenterSettingsTab & { save(refresh?: boolean): Promise<boolean> };
@@ -1726,6 +1737,85 @@ test("knowledge-base switching is device-local while failed creation restores th
   assert.equal(saveAttempts, 2, "the rejected creation is followed by a tombstone compensation for its stable ID");
   assert.equal(Object.keys(compensated?.deletedBaseIds ?? {}).length, 1);
   assert.equal(plugin.isDataReadOnly(), false);
+});
+
+test("knowledge-base lifecycle changes flush settings before snapshotting or rebinding data", async () => {
+  const first = migrateData(null);
+  first.settings.workspaceName = "First KB";
+  const second = migrateData(null);
+  second.settings.workspaceName = "Second KB";
+  const store = createDefaultStore(first, 100, "vault-settings-lifecycle-barrier");
+  store.bases.push(createKnowledgeBaseEntry(second, "base-second", 200));
+  const plugin = pluginWith(store);
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+  let barrierCalls = 0;
+  (plugin as unknown as {
+    settingsTab: { prepareForKnowledgeBaseChange(): Promise<boolean> };
+  }).settingsTab = {
+    prepareForKnowledgeBaseChange: async () => {
+      barrierCalls += 1;
+      plugin.data.settings.workspaceSubtitle = "Committed before switch";
+      await plugin.savePluginData();
+      return true;
+    },
+  };
+
+  await plugin.switchKnowledgeBase("base-second");
+
+  assert.equal(barrierCalls, 1);
+  assert.equal(plugin.getActiveKnowledgeBaseId(), "base-second");
+  const finalStore = plugin.savedData.at(-1) as PluginStore;
+  assert.equal(
+    finalStore.bases.find((entry) => entry.id === "base-default")?.data.settings.workspaceSubtitle,
+    "Committed before switch",
+  );
+});
+
+test("a busy organization transaction rejects a base change before flushing settings", async () => {
+  const first = migrateData(null);
+  const second = migrateData(null);
+  const store = createDefaultStore(first, 100, "vault-settings-busy-barrier");
+  store.bases.push(createKnowledgeBaseEntry(second, "base-second", 200));
+  const plugin = pluginWith(store);
+  await plugin.loadPluginData();
+  let barrierCalls = 0;
+  const internal = plugin as unknown as {
+    dataTransactionBusy: boolean;
+    settingsTab: { prepareForKnowledgeBaseChange(): Promise<boolean> };
+  };
+  internal.settingsTab = {
+    prepareForKnowledgeBaseChange: async () => {
+      barrierCalls += 1;
+      return true;
+    },
+  };
+  internal.dataTransactionBusy = true;
+
+  await assert.rejects(
+    plugin.switchKnowledgeBase("base-second"),
+    /Finish the current organization change/,
+  );
+
+  assert.equal(barrierCalls, 0, "the settings draft must not snapshot transaction-owned intermediate memory");
+  assert.equal(plugin.getActiveKnowledgeBaseId(), "base-default");
+});
+
+test("a failed settings convergence barrier blocks the knowledge-base lifecycle change", async () => {
+  const store = createDefaultStore(migrateData(null), 100, "vault-settings-failed-barrier");
+  store.bases.push(createKnowledgeBaseEntry(migrateData(null), "base-second", 200));
+  const plugin = pluginWith(store);
+  await plugin.loadPluginData();
+  (plugin as unknown as {
+    settingsTab: { prepareForKnowledgeBaseChange(): Promise<boolean> };
+  }).settingsTab = { prepareForKnowledgeBaseChange: async () => false };
+
+  await assert.rejects(
+    plugin.switchKnowledgeBase("base-second"),
+    /Save or restore the pending settings change/,
+  );
+
+  assert.equal(plugin.getActiveKnowledgeBaseId(), "base-default");
 });
 
 test("Sync captures of rejected create, duplicate, archive, and restore operations converge on their compensated envelopes", async () => {

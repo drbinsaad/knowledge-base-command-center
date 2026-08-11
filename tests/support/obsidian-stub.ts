@@ -142,6 +142,7 @@ export class PluginSettingTab {
   containerEl = {};
   constructor(app: unknown, public plugin: unknown) { this.app = app; }
   update(): void {}
+  hide(): void {}
 }
 export class WorkspaceLeaf {}
 export class BasesView {}
