@@ -166,6 +166,64 @@ export interface SearchViewportLayout {
   shift: number;
 }
 
+export type PaneLayout = "wide" | "compact" | "narrow";
+
+export const PANE_WIDE_MIN_WIDTH = 1050;
+export const PANE_COMPACT_MIN_WIDTH = 680;
+
+/** Classify the space Obsidian assigned to this leaf, independent of window size. */
+export function classifyPaneWidth(width: number): PaneLayout {
+  const safeWidth = Number.isFinite(width) ? Math.max(0, width) : 0;
+  if (safeWidth >= PANE_WIDE_MIN_WIDTH) return "wide";
+  if (safeWidth >= PANE_COMPACT_MIN_WIDTH) return "compact";
+  return "narrow";
+}
+
+function measuredPaneWidth(element: HTMLElement): number {
+  const rectWidth = element.getBoundingClientRect().width;
+  const clientWidth = element.clientWidth;
+  return Math.max(
+    Number.isFinite(rectWidth) ? rectWidth : 0,
+    Number.isFinite(clientWidth) ? clientWidth : 0,
+  );
+}
+
+/**
+ * Observe one stable Obsidian leaf element using its owning window. A zero-width
+ * callback means the stacked tab is temporarily hidden, not that its layout
+ * should be discarded.
+ */
+export function observePaneWidth(element: HTMLElement, onWidth: (width: number) => void): () => void {
+  const viewWindow = element.ownerDocument.defaultView;
+  if (!viewWindow) return () => undefined;
+  let active = true;
+  const report = (width: number): void => {
+    if (active && Number.isFinite(width) && width > 0) onWidth(width);
+  };
+  const sync = (): void => report(measuredPaneWidth(element));
+  const ResizeObserverConstructor = (viewWindow as Window & {
+    ResizeObserver?: typeof ResizeObserver;
+  }).ResizeObserver;
+  if (ResizeObserverConstructor) {
+    const observer = new ResizeObserverConstructor((entries) => {
+      const entry = entries.find((candidate) => candidate.target === element);
+      report(entry?.contentRect.width ?? measuredPaneWidth(element));
+    });
+    observer.observe(element);
+    sync();
+    return () => {
+      active = false;
+      observer.disconnect();
+    };
+  }
+  viewWindow.addEventListener("resize", sync);
+  sync();
+  return () => {
+    active = false;
+    viewWindow.removeEventListener("resize", sync);
+  };
+}
+
 /**
  * Fit the focused search route into the part of an iOS layout viewport that is
  * not covered by the virtual keyboard. The command center begins below
@@ -336,6 +394,11 @@ export class EntVaultCommandCenterView extends ItemView {
   private browseStructuresOmitted = 0;
   private viewClosed = false;
   private searchViewportWindow: Window | null = null;
+  private paneLayout: PaneLayout = "narrow";
+  private paneWidth = 0;
+  private paneLayoutRenderInProgress = false;
+  private paneResizeWindow: Window | null = null;
+  private paneResizeCleanup: (() => void) | null = null;
   private collapsedQueues = new Set<string>();
   private collapsedCurriculumDomains = new Set<string>();
   private collapsedCurriculumNodes = new Set<string>();
@@ -363,7 +426,9 @@ export class EntVaultCommandCenterView extends ItemView {
 
   async onOpen(): Promise<void> {
     this.viewClosed = false;
+    this.measureAndApplyPaneLayout(false);
     await this.reload();
+    this.bindPaneLayout();
     this.bindSearchViewportLayout();
     if (!this.plugin.data.settings.setupComplete && !this.setupPromptShown) {
       const ownsBase = this.createOpenedBaseGuard();
@@ -380,6 +445,7 @@ export class EntVaultCommandCenterView extends ItemView {
     this.viewClosed = true;
     this.globalSearchRequestGeneration += 1;
     this.globalSearchPendingKey = "";
+    this.unbindPaneLayout();
     this.unbindSearchViewportLayout();
     const selectionSavePending = this.selectionSaveTimer !== null;
     for (const timer of [this.setupTimer, this.searchDebounce, this.selectionSaveTimer]) {
@@ -399,7 +465,18 @@ export class EntVaultCommandCenterView extends ItemView {
     }
   }
 
+  onResize(): void {
+    if (this.viewClosed) return;
+    // Obsidian can adopt a leaf into a pop-out window. Rebind both observers
+    // to the element's current owner instead of retaining the original window.
+    this.bindPaneLayout();
+    this.bindSearchViewportLayout();
+    this.measureAndApplyPaneLayout();
+    this.syncSearchViewportLayout();
+  }
+
   async reload(): Promise<void> {
+    this.measureAndApplyPaneLayout(false);
     const activeBaseId = this.plugin.getActiveKnowledgeBaseId();
     const dataEpoch = this.currentDataEpoch();
     const baseChanged = this.loadedBaseId !== activeBaseId;
@@ -1679,23 +1756,23 @@ export class EntVaultCommandCenterView extends ItemView {
     ];
   }
 
-  private render(): void {
+  private render(preserveBrowseLimits = false): void {
     // A full route/tab render returns to the bounded initial page. Incremental
     // "Show more" actions use renderTree() and therefore preserve their limit.
-    this.browseRowLimit = MAX_RENDERED_BROWSE_RECORDS;
-    this.browseStructureLimit = MAX_RENDERED_BROWSE_STRUCTURES;
+    if (!preserveBrowseLimits) {
+      this.browseRowLimit = MAX_RENDERED_BROWSE_RECORDS;
+      this.browseStructureLimit = MAX_RENDERED_BROWSE_STRUCTURES;
+    }
     const compact = this.isCompactInspectorLayout();
     if (compact && this.mobileInspectorOpen) {
       const currentBody = this.inspectorEl?.querySelector<HTMLElement>(".ent-cc-inspector-body");
-      if (currentBody) this.mobileInspectorScrollTop = currentBody.scrollTop;
+      if (currentBody && !this.paneLayoutRenderInProgress) this.mobileInspectorScrollTop = currentBody.scrollTop;
       this.mobileInspectorNeedsFocus = true;
-    } else if (!compact) {
-      this.mobileInspectorOpen = false;
-      this.mobileInspectorNeedsFocus = false;
     }
     this.contentEl.empty();
     this.contentEl.addClass("ent-cc-view");
-    const shell = this.contentEl.createDiv({ cls: "ent-cc-shell" });
+    this.applyPaneLayoutClasses();
+    const shell = this.contentEl.createDiv({ cls: `ent-cc-shell is-pane-${this.paneLayout}` });
 
     if (compact && this.mobileInspectorOpen && !this.recordByPath.has(this.plugin.data.selectedPath)) {
       this.mobileInspectorOpen = false;
@@ -3094,6 +3171,98 @@ export class EntVaultCommandCenterView extends ItemView {
     });
   }
 
+  private applyPaneLayoutClasses(): void {
+    for (const layout of ["wide", "compact", "narrow"] as const) {
+      this.contentEl.toggleClass(`is-pane-${layout}`, this.paneLayout === layout);
+    }
+    this.contentEl.setAttribute("data-pane-layout", this.paneLayout);
+  }
+
+  private measureAndApplyPaneLayout(allowRender = true): void {
+    if (!this.contentEl?.getBoundingClientRect) return;
+    const width = measuredPaneWidth(this.contentEl);
+    if (width > 0) this.applyPaneWidth(width, allowRender);
+    else this.applyPaneLayoutClasses();
+  }
+
+  private applyPaneWidth(width: number, allowRender = true): void {
+    if (!Number.isFinite(width) || width <= 0) return;
+    const previous = this.paneLayout;
+    const next = classifyPaneWidth(width);
+    const modeChanged = next !== previous;
+    this.paneWidth = width;
+    this.paneLayout = next;
+    this.applyPaneLayoutClasses();
+    if (!allowRender || !modeChanged || this.viewClosed) return;
+    if (!this.contentEl.querySelector(".ent-cc-shell")) return;
+    this.renderPaneLayoutChange(previous, next);
+  }
+
+  private renderPaneLayoutChange(previous: PaneLayout, next: PaneLayout): void {
+    const activeElement = this.contentEl.ownerDocument.activeElement;
+    const search = this.contentEl.querySelector<HTMLInputElement>('.ent-cc-search-box input[type="search"]');
+    const restoreSearchFocus = Boolean(search && activeElement === search);
+    const searchSelectionStart = search?.selectionStart ?? null;
+    const searchSelectionEnd = search?.selectionEnd ?? null;
+    const restoreTreeFocus = Boolean(this.treeEl && activeElement && this.treeEl.contains(activeElement));
+    const listScrollTop = previous === "wide"
+      ? this.treeEl?.scrollTop ?? this.mobileTreeScrollTop
+      : this.workspaceEl?.scrollTop ?? this.mobileTreeScrollTop;
+    const inspectorBody = this.inspectorEl?.querySelector<HTMLElement>(".ent-cc-inspector-body");
+    const detailScrollTop = previous === "wide"
+      ? this.inspectorEl?.scrollTop ?? this.mobileInspectorScrollTop
+      : inspectorBody?.scrollTop ?? this.mobileInspectorScrollTop;
+
+    this.mobileTreeScrollTop = listScrollTop;
+    this.mobileInspectorScrollTop = detailScrollTop;
+    this.paneLayoutRenderInProgress = true;
+    try {
+      this.render(true);
+    } finally {
+      this.paneLayoutRenderInProgress = false;
+    }
+
+    const listOwner = next === "wide" ? this.treeEl : this.workspaceEl;
+    if (listOwner) listOwner.scrollTop = listScrollTop;
+    const replacementInspectorBody = this.inspectorEl?.querySelector<HTMLElement>(".ent-cc-inspector-body");
+    const detailOwner = next === "wide" ? this.inspectorEl : replacementInspectorBody;
+    if (detailOwner) detailOwner.scrollTop = detailScrollTop;
+    if (restoreSearchFocus) {
+      const replacement = this.contentEl.querySelector<HTMLInputElement>('.ent-cc-search-box input[type="search"]');
+      replacement?.focus({ preventScroll: true });
+      if (replacement && searchSelectionStart !== null && searchSelectionEnd !== null
+        && typeof replacement.setSelectionRange === "function") {
+        replacement.setSelectionRange(searchSelectionStart, searchSelectionEnd);
+      }
+    } else if (restoreTreeFocus && !this.mobileInspectorOpen) {
+      const selected = this.treeEl?.querySelector<HTMLElement>(".ent-cc-subject-row.is-selected .ent-cc-subject-title");
+      (selected ?? this.treeEl)?.focus({ preventScroll: true });
+    }
+  }
+
+  private bindPaneLayout(): void {
+    if (this.viewClosed) return;
+    const ownerWindow = this.contentEl.ownerDocument.defaultView;
+    if (!ownerWindow) return;
+    if (this.paneResizeCleanup && this.paneResizeWindow === ownerWindow) return;
+    this.unbindPaneLayout();
+    this.paneResizeWindow = ownerWindow;
+    this.paneResizeCleanup = observePaneWidth(this.contentEl, (width) => {
+      if (this.viewClosed) return;
+      if (this.contentEl.ownerDocument.defaultView !== this.paneResizeWindow) {
+        this.bindPaneLayout();
+        return;
+      }
+      this.applyPaneWidth(width);
+    });
+  }
+
+  private unbindPaneLayout(): void {
+    this.paneResizeCleanup?.();
+    this.paneResizeCleanup = null;
+    this.paneResizeWindow = null;
+  }
+
   private selectRecord(path: string): void {
     if (!this.guardLoadedBase()) return;
     this.plugin.data.selectedPath = path;
@@ -3122,8 +3291,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private isCompactInspectorLayout(): boolean {
-    const viewWindow = this.contentEl.ownerDocument.defaultView;
-    return viewWindow?.matchMedia("(max-width: 900px)").matches === true;
+    return this.paneLayout !== "wide";
   }
 
   private closeMobileInspector(): void {

@@ -225,7 +225,7 @@ Search reports the full match count but renders at most the strongest 300 rows. 
 
 Selecting a record opens its inspector with identity, path/status information, note or study actions, and resolved related knowledge.
 
-Desktop keeps the Index and inspector side by side. On a narrow phone screen, selecting a row opens a focused detail route. **Back to main page** or Escape returns to the same compact row and list position.
+A wide Obsidian leaf keeps the Index and inspector side by side. Compact or narrow leaves—including desktop stacked tabs, side-by-side splits, pop-out windows, and phones—open the selected record as a focused detail route. **Back to main page** or Escape returns to the same compact row and list position. Expanding the leaf restores the two-column inspector without clearing the current selection or search.
 
 ## Saved views, snapshots, and history
 
