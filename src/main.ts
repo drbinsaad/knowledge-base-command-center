@@ -1,4 +1,4 @@
-import { MarkdownView, normalizePath, Notice, parseYaml, Plugin, TFile, TFolder, type TAbstractFile } from "obsidian";
+import { MarkdownView, normalizePath, Notice, parseYaml, Platform, Plugin, TFile, TFolder, type TAbstractFile } from "obsidian";
 import {
   attachmentFileName,
   attachmentPathCandidate,
@@ -163,10 +163,27 @@ import {
 } from "./taxonomy-health";
 import { TaxonomyHealthModal } from "./taxonomy-health-modal";
 import { PortfolioTransferModal } from "./portfolio-modal";
+import {
+  createDefaultSyncRecoveryLocalState,
+  describeConfigProfile,
+  describePlatform,
+  MAX_SYNC_RECOVERY_ARTIFACT_ENTRIES,
+  parseSyncRecoveryLocalState,
+  privacySafeBaseName,
+  privacySafeReadOnlyReason,
+  summarizeRecoveryArtifacts,
+  summarizeSemanticHead,
+  SYNC_RECOVERY_EXPORT_FOLDER,
+  type ExternalReloadOutcome,
+  type SyncRecoveryCenterSnapshot,
+  type SyncRecoveryLocalState,
+} from "./sync-recovery";
+import { SyncRecoveryCenterModal } from "./sync-recovery-modal";
 
 /** Bound stable inactive projections by records, not an arbitrary base count. */
 const MAX_INACTIVE_SEARCH_CACHED_RECORDS = 50_000;
 const DEVICE_LOCAL_STATE_KEY = "ent-vault-command-center.device-state.v1";
+const SYNC_RECOVERY_LOCAL_STATE_KEY = "ent-vault-command-center.sync-recovery-state.v1";
 const FOLLOW_UP_UNDO_WINDOW_MS = 5 * 60 * 1000;
 
 function markdownHasAiLock(markdown: string): boolean {
@@ -308,6 +325,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private lastConflictRescuePath = "";
   private deviceLocalState: DeviceLocalPluginState | null = null;
   private deviceLocalStateLoaded = false;
+  private syncRecoveryLocalState: SyncRecoveryLocalState = createDefaultSyncRecoveryLocalState();
+  private syncRecoveryLocalStateLoaded = false;
   /** Saves that may have reached data.json before their promise rejected. */
   private rejectedSemanticAttemptsByBase = new Map<string, RejectedSemanticAttempt[]>();
   private dataEpoch = 0;
@@ -342,6 +361,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   async onload(): Promise<void> {
     this.activateAppWriteBarrier();
+    this.loadSyncRecoveryLocalState();
     await this.loadPluginData();
     this.registerView(VIEW_TYPE, (leaf) => new EntVaultCommandCenterView(leaf, this));
     this.registerHoverLinkSource("ent-vault-command-center", {
@@ -358,6 +378,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.addCommand({ id: "add-or-create", name: "Add or create…", callback: () => void this.withView((view) => view.openAddActions()) });
     this.addCommand({ id: "manage-knowledge-index", name: "Manage index…", callback: () => void this.withView((view) => view.openIndexManager()) });
     this.addCommand({ id: "open-taxonomy-health", name: "Open taxonomy health center", callback: () => new TaxonomyHealthModal(this).open() });
+    this.addCommand({ id: "open-sync-recovery-center", name: "Open sync & recovery center", icon: "shield-check", callback: () => new SyncRecoveryCenterModal(this).open() });
     this.addCommand({ id: "new-knowledge-base", name: "New knowledge base…", callback: () => new CreateKnowledgeBaseModal(this).open() });
     this.addCommand({ id: "switch-knowledge-base", name: "Switch knowledge base…", callback: () => new ManageKnowledgeBasesModal(this).open() });
     this.addCommand({ id: "manage-knowledge-bases", name: "Manage knowledge bases…", callback: () => new ManageKnowledgeBasesModal(this).open() });
@@ -839,6 +860,138 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
   }
 
+  private loadSyncRecoveryLocalState(): void {
+    if (this.syncRecoveryLocalStateLoaded) return;
+    this.syncRecoveryLocalStateLoaded = true;
+    try {
+      if (typeof this.app.loadLocalStorage !== "function") return;
+      const loaded = this.app.loadLocalStorage(SYNC_RECOVERY_LOCAL_STATE_KEY) as unknown;
+      if (loaded !== null && loaded !== undefined) {
+        this.syncRecoveryLocalState = parseSyncRecoveryLocalState(loaded);
+      }
+    } catch {
+      this.syncRecoveryLocalState = createDefaultSyncRecoveryLocalState();
+      console.warn("Knowledge Base Command Center ignored malformed device-local Sync and Recovery state.");
+    }
+  }
+
+  private persistSyncRecoveryLocalState(): void {
+    this.loadSyncRecoveryLocalState();
+    try {
+      if (typeof this.app.saveLocalStorage === "function") {
+        this.app.saveLocalStorage(SYNC_RECOVERY_LOCAL_STATE_KEY, this.syncRecoveryLocalState);
+      }
+    } catch {
+      // Diagnostics must never turn a successful organization write into a
+      // failure or echo a storage error that may contain a private identifier.
+      console.warn("Knowledge Base Command Center could not persist device-local Sync and Recovery state.");
+    }
+  }
+
+  private recordLocalSuccessfulSave(at = Date.now()): void {
+    this.loadSyncRecoveryLocalState();
+    this.syncRecoveryLocalState.lastLocalSaveAt = at;
+    this.persistSyncRecoveryLocalState();
+  }
+
+  private recordExternalReload(outcome: ExternalReloadOutcome, at = Date.now()): void {
+    this.loadSyncRecoveryLocalState();
+    this.syncRecoveryLocalState.lastExternalReloadAt = at;
+    this.syncRecoveryLocalState.lastExternalReloadOutcome = outcome;
+    this.persistSyncRecoveryLocalState();
+  }
+
+  private recordSemanticConflicts(conflicts: readonly { baseId: string }[], at = Date.now()): void {
+    if (conflicts.length === 0) return;
+    this.loadSyncRecoveryLocalState();
+    const counts = new Map<string, number>();
+    for (const conflict of conflicts) counts.set(conflict.baseId, (counts.get(conflict.baseId) ?? 0) + 1);
+    const replaced = new Set(counts.keys());
+    this.syncRecoveryLocalState.semanticConflicts = [
+      ...[...counts].map(([baseId, count]) => ({ baseId, at, count })),
+      ...this.syncRecoveryLocalState.semanticConflicts.filter((entry) => !replaced.has(entry.baseId)),
+    ].slice(0, MAX_KNOWLEDGE_BASES);
+    this.persistSyncRecoveryLocalState();
+  }
+
+  /** Record an explicitly created same-vault recovery without retaining its path. */
+  recordRecoveryExport(at = Date.now()): void {
+    this.loadSyncRecoveryLocalState();
+    this.syncRecoveryLocalState.lastRecoveryExportAt = at;
+    this.persistSyncRecoveryLocalState();
+  }
+
+  getSyncRecoveryCenterSnapshot(): SyncRecoveryCenterSnapshot {
+    this.loadSyncRecoveryLocalState();
+    if (!this.deviceLocalStateLoaded) this.loadDeviceLocalState();
+    const active = this.requireActiveBase();
+    const committed = this.committedStoreSnapshot?.bases.find((entry) => entry.id === active.id);
+    const semanticCommitState = !committed
+      ? "unavailable"
+      : committed.semanticRevision === active.semanticRevision
+        && committed.semanticHead === active.semanticHead
+        && committed.semanticHash === active.semanticHash
+        ? "committed"
+        : "pending";
+
+    let artifactInspectionAvailable = true;
+    let artifacts: Array<{ path: string; mtime: number }> = [];
+    try {
+      const folder = this.app.vault.getAbstractFileByPath(SYNC_RECOVERY_EXPORT_FOLDER);
+      if (folder instanceof TFolder) {
+        artifacts = folder.children
+          .slice(0, MAX_SYNC_RECOVERY_ARTIFACT_ENTRIES + 1)
+          .map((entry) => entry instanceof TFile
+            ? { path: entry.path, mtime: entry.stat.mtime }
+            : { path: "", mtime: 0 });
+      }
+    } catch {
+      artifactInspectionAvailable = false;
+    }
+    const artifactSummary = summarizeRecoveryArtifacts(artifacts);
+    const localConflict = this.syncRecoveryLocalState.semanticConflicts.find((entry) => entry.baseId === active.id);
+    const localStateApiAvailable = typeof this.app.loadLocalStorage === "function"
+      && typeof this.app.saveLocalStorage === "function";
+    const activeHasDeviceProfile = this.deviceLocalState?.bases.some((entry) => entry.baseId === active.id) ?? false;
+    const deviceLocalStateProfile = !localStateApiAvailable
+      ? "Device-local profile API unavailable"
+      : activeHasDeviceProfile
+        ? "Active-base view profile stored on this device"
+        : this.deviceLocalState?.bases.length
+          ? "Other base view profiles stored on this device"
+          : "No saved view profile on this device";
+    const readOnly = this.isDataReadOnly();
+    return {
+      activeBaseName: privacySafeBaseName(active.data.settings.workspaceName),
+      workspaceProfile: active.data.settings.workspaceMode === "ent-clinical" ? "ENT clinical preset" : "Generic knowledge base",
+      semanticRevision: active.semanticRevision,
+      semanticHeadSummary: summarizeSemanticHead(active.semanticHead),
+      semanticCommitState,
+      lastLocalSaveAt: this.syncRecoveryLocalState.lastLocalSaveAt,
+      lastExternalReloadAt: this.syncRecoveryLocalState.lastExternalReloadAt,
+      lastExternalReloadOutcome: this.syncRecoveryLocalState.lastExternalReloadOutcome,
+      conflictRescueCount: artifactSummary.conflictRescueCount,
+      conflictRescueCountIsLowerBound: artifactSummary.scanTruncated,
+      artifactInspectionAvailable,
+      newestConflictRescueAt: artifactSummary.newestConflictRescueAt,
+      newestRecoveryExportAt: Math.max(
+        this.syncRecoveryLocalState.lastRecoveryExportAt ?? 0,
+        artifactSummary.newestNamedRecoveryAt ?? 0,
+      ) || null,
+      readOnly,
+      readOnlyReason: privacySafeReadOnlyReason(this.dataCompatibilityWarning, {
+        persistenceUncertain: this.persistenceUncertain,
+        semanticConflictRescueFailed: this.semanticConflictRescueFailed,
+      }),
+      stickyUntilRestart: this.persistenceUncertain || this.semanticConflictRescueFailed,
+      activeBaseConcurrentEditAt: localConflict?.at ?? null,
+      activeBaseConcurrentEditCount: localConflict?.count ?? 0,
+      deviceProfile: describePlatform(Platform),
+      configProfile: describeConfigProfile(this.app.vault.configDir),
+      deviceLocalStateProfile,
+    };
+  }
+
   /**
    * Enter the one conservative state used whenever a write may have reached
    * data.json but its compensating write could not be proven. The marker lives
@@ -1314,6 +1467,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.committedStoreSnapshot = structuredClone(snapshot);
       this.rollbackStoreSnapshot = structuredClone(snapshot);
       this.clearSupersededRejectedAttempts(snapshot);
+      if (!allowDuringExternalReload) this.recordLocalSuccessfulSave();
       this.persistDeviceLocalStateSafely();
     };
     const operation = this.saveQueue.then(
@@ -1487,6 +1641,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   ): Promise<StoreMergeResult> {
     const merged = mergeKnowledgeBaseStores(local, incoming, preferredActiveId);
     if (merged.semanticConflicts.length === 0) return merged;
+    this.recordSemanticConflicts(merged.semanticConflicts);
 
     const localLoses = merged.semanticConflicts.some((conflict) => conflict.winner === "incoming");
     const incomingLoses = merged.semanticConflicts.some((conflict) => conflict.winner === "local");
@@ -1515,10 +1670,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (this.unloaded) return;
     this.adoptSharedPersistenceUncertainty();
     if (this.persistenceUncertain) {
-      new Notice(this.dataCompatibilityWarning, 12000);
+      this.recordExternalReload("blocked");
+      new Notice("An external plugin-data change was not reloaded because organization is already in protected read-only mode.", 12000);
       return;
     }
     if (this.semanticConflictRescueFailed) {
+      this.recordExternalReload("blocked");
       new Notice("Knowledge-base sync remains read-only because a prior concurrent edit could not be preserved. Restart only after exporting every base or copying the plugin data.json.", 12000);
       return;
     }
@@ -1537,6 +1694,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.externalReloadPending = true;
     if (this.externalReloadPromise) return this.externalReloadPromise;
     let operation: Promise<void>;
+    let reloadOutcome: ExternalReloadOutcome = "blocked";
     const reload = async (): Promise<void> => {
       // Yield once so `operation` is installed before any clone or migration can
       // fail. Final cleanup below then owns both state fields atomically before
@@ -1853,6 +2011,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
               }
             }
           }
+          if (latestCapture) {
+            reloadOutcome = latestCaptureCompatible && !latestBlockingWarning && !this.persistenceUncertain
+              ? "applied"
+              : "blocked";
+          }
           try {
             await this.refreshViews(false);
           } catch (error) {
@@ -1864,6 +2027,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         if (this.externalReloadPromise === operation) {
           this.externalReloadPromise = null;
           this.externalReloadBusy = false;
+          this.recordExternalReload(reloadOutcome);
         }
       }
     };
@@ -5015,8 +5179,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.lastConflictRescueStore = serializedStore;
       this.lastConflictRescuePath = file.path;
       return file.path;
-    } catch (error) {
-      console.error("Knowledge Base Command Center could not write a Sync conflict rescue", error);
+    } catch {
+      console.error("Knowledge Base Command Center could not write a Sync conflict rescue.");
       return "";
     }
   }

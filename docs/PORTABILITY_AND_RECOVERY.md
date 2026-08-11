@@ -179,9 +179,11 @@ Do not use a different-base or legacy-identity override unless the displayed unc
 
 ## Sync model and conflict handling
 
-Different knowledge bases can merge independently through Obsidian Sync. Concurrent or offline edits to the same established base use whole-base last-write-wins reconciliation, not field-level merging.
+Different knowledge bases can merge independently through Obsidian Sync. Current stores carry a per-base semantic revision, head, payload fingerprint, and bounded causal lineage. When two different semantic payloads have no proven ancestor relationship, the plugin treats them as concurrent edits, writes every possible losing complete envelope to private conflict rescue, and only then selects a deterministic whole-base winner. It still does not field-merge simultaneous edits.
 
-The plugin cannot reliably distinguish a genuine same-base concurrent edit from a normal sequential Sync update. The losing same-base payload therefore does not receive a dedicated conflict notice or automatic rescue. Avoid editing the same base on two devices at once, let Sync finish before switching devices, and keep current recovery exports.
+Run **Open sync & recovery center** for local evidence about the active base, last successful local save, last external plugin-data reload, conflict rescues, recovery age, and any recorded active-base conflict. The center does not inspect Obsidian Sync, a provider queue, the network, or another device. An absent warning is not proof that it is safe to switch devices. Avoid editing the same base on two devices at once, let your provider settle using its supported surface, and keep current recovery exports.
+
+Conflict-rescue counts use only direct export-folder file metadata and the documented <code>knowledge-base-command-center-conflict-*.json</code> name pattern. The bounded scan never opens the JSON. Recovery age comes from a confirmed recovery export on this device or the standalone backup name pattern; the center does not open an arbitrary portable package to infer its selected components.
 
 When a newly enabled device starts before <code>data.json</code> arrives, it does not immediately publish an authoritative empty store. Meaningful local work is written to a private conflict-rescue JSON before an established synced store is adopted.
 

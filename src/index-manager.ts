@@ -20,6 +20,7 @@ import { ConfirmModal, IndexGroupModal, StringPickerModal, TextPromptModal, Vaul
 import { registerPortableGroup, removePortableGroup, renameOrMergePortableGroup } from "./portability";
 import { ExportImportCenterModal } from "./portability-modal";
 import { TaxonomyHealthModal } from "./taxonomy-health-modal";
+import { SyncRecoveryCenterModal } from "./sync-recovery-modal";
 
 export type ManagerTab = "indexed" | "available" | "hidden" | "groups" | "diagnostics";
 
@@ -638,6 +639,9 @@ export class IndexManagerModal extends Modal {
     this.actionButton(toolbar, "scan-search", "Open taxonomy health…", () => {
       if (!this.guardOpenedBase()) return;
       new TaxonomyHealthModal(this.plugin).open();
+    });
+    this.actionButton(toolbar, "shield-check", "Sync & Recovery Center…", () => {
+      if (this.guardOpenedBase()) new SyncRecoveryCenterModal(this.plugin).open();
     });
     const repairableKinds = new Set<IndexDiagnostic["kind"]>(["missing-note", "duplicate-membership", "orphaned-group", "invalid-visual-parent"]);
     const repairable = diagnostics.some((item) => repairableKinds.has(item.kind));

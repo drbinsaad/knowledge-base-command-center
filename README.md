@@ -45,6 +45,7 @@ _Real iPhone portrait capture from version 0.10.0 showing one search state with 
 - **Attach deliberately.** Copy one user-selected file into the vault and insert its Markdown link using a per-base policy, without intercepting ordinary paste or drag-and-drop.
 - **Capture from anywhere.** Open Quick entry from the desktop ribbon, the mobile **Open** menu, the Command Center header, a user-assigned hotkey, the mobile toolbar, or an action-only Obsidian URL.
 - **Transfer organization deliberately.** Export one path-free portable set, bundle up to 50 bases as independently parsed portfolio packages, or create a private same-vault recovery package.
+- **Inspect local recovery facts.** Review this device's last successful save, external plugin-data reload, semantic head, conflict rescues, recovery age, and read-only protection without probing Sync or reading note bodies.
 - **Work on desktop and mobile.** Use drag-and-drop on desktop and labelled action menus on touch devices.
 
 Typical uses include a research library with Methods and Papers, a project index with reusable review queues, a study system with cross-topic collections, or the optional protected ENT clinical preset.
@@ -134,6 +135,12 @@ Personal organization supports Undo/Redo and named snapshots. Portable exports c
 
 Portable packages created by version 0.10.0 use format version 4. Current v9 files include dynamic Library definitions and layouts and are locked to their source vault, base, and preset by default. Read [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md) before importing, replacing, or restoring data.
 
+### Sync and recovery diagnostics
+
+Run **Open sync & recovery center** from the Command palette, or open **Manage index → Diagnostics → Sync & recovery center**. The center uses only plugin-owned in-memory state, vault-scoped local storage, Obsidian's public platform/configuration facts, and file metadata for direct children of the documented export folder. It never opens recovery/conflict JSON or Markdown files.
+
+The center is historical local evidence, not a live Sync monitor. “External reload” means the plugin observed a local <code>data.json</code> change; it does not prove that a provider is online, caught up, or safe to switch devices. Names that resemble full paths, stable vault/base identifiers, custom configuration-folder names, and full semantic fingerprints are hidden.
+
 ## Generic and ENT profiles
 
 | | Generic knowledge base | ENT clinical preset |
@@ -192,7 +199,8 @@ Recovery is a standalone replacement, never a merge with portable sections. Curr
 - Export, import, snapshots, and Undo history are base-local.
 - Export and import operate on the active base; switch bases to handle each one separately.
 - Portable exports include selected active Libraries; confirmed private recovery preserves archived Library state.
-- Concurrent or offline edits to the same established base use whole-base last-write-wins reconciliation, not field-level merging. Avoid editing the same base on two devices at once, let Sync settle before switching devices, and keep current recovery exports.
+- Concurrent or offline edits to the same established base use whole-base deterministic conflict resolution after private rescue, not field-level merging. Avoid editing the same base on two devices at once, let Sync settle before switching devices, and keep current recovery exports.
+- The Sync and recovery center cannot report network, provider queue, remote-device, or Obsidian Sync status. Its absence of a warning is not proof that remote work has settled.
 - Search retains at most the strongest 300 visible matches while reporting the full count. Browse rows and structural sections page in groups of 300.
 - Desktop offers drag-and-drop; touch devices use labelled row action menus.
 - Same-vault recovery is intentionally not portable.

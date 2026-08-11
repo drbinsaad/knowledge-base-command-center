@@ -4366,3 +4366,193 @@
 .ent-cc-view:dir(rtl) .ent-cc-inspector-close svg:first-child {
   transform: scaleX(-1);
 }
+
+/* Sync & Recovery Center: the diagnostics body is the sole scroll owner. */
+.ent-cc-sync-recovery-modal {
+  width: min(780px, calc(100vw - 32px));
+  height: min(820px, calc(100dvh - 32px));
+  max-height: min(820px, calc(100dvh - 32px));
+}
+
+.ent-cc-sync-recovery {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+  overflow: hidden;
+}
+
+.ent-cc-sync-recovery-intro {
+  flex: 0 0 auto;
+}
+
+.ent-cc-sync-recovery-intro > p {
+  margin: 0 0 8px;
+  color: var(--text-muted);
+}
+
+.ent-cc-sync-recovery-mode {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  padding: 4px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 999px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-weight: 650;
+  gap: 7px;
+}
+
+.ent-cc-sync-recovery-mode.is-read-only {
+  border-color: var(--color-orange, var(--text-warning));
+}
+
+.ent-cc-sync-recovery-mode svg,
+.ent-cc-sync-recovery-section h3 svg,
+.ent-cc-sync-recovery-actions svg {
+  width: 18px;
+  height: 18px;
+}
+
+.ent-cc-sync-recovery-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 1px 3px 12px 1px;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
+}
+
+.ent-cc-sync-recovery-section {
+  margin-bottom: 12px;
+  padding: 14px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  background: var(--background-primary-alt);
+}
+
+.ent-cc-sync-recovery-section h3 {
+  display: flex;
+  align-items: center;
+  margin: 0 0 10px;
+  color: var(--text-normal);
+  font-size: 0.95rem;
+  gap: 8px;
+}
+
+.ent-cc-sync-recovery-facts {
+  display: grid;
+  margin: 0;
+  grid-template-columns: minmax(160px, 0.8fr) minmax(0, 1.4fr);
+}
+
+.ent-cc-sync-recovery-fact {
+  display: contents;
+}
+
+.ent-cc-sync-recovery-fact dt,
+.ent-cc-sync-recovery-fact dd {
+  min-width: 0;
+  margin: 0;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--background-modifier-border-hover);
+}
+
+.ent-cc-sync-recovery-fact dt {
+  padding-inline-end: 12px;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.ent-cc-sync-recovery-fact dd {
+  color: var(--text-normal);
+  overflow-wrap: anywhere;
+}
+
+.ent-cc-sync-recovery-fact:last-child dt,
+.ent-cc-sync-recovery-fact:last-child dd {
+  border-bottom: 0;
+}
+
+.ent-cc-sync-recovery-note {
+  margin: 10px 0 0;
+  color: var(--text-faint);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.ent-cc-sync-recovery-callout,
+.ent-cc-sync-recovery-boundary {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-inline-start: 3px solid var(--interactive-accent);
+  border-radius: 6px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.ent-cc-sync-recovery-callout.is-warning {
+  border-inline-start-color: var(--color-orange, var(--text-warning));
+  color: var(--text-normal);
+}
+
+.ent-cc-sync-recovery-boundary {
+  margin: 0;
+}
+
+.ent-cc-sync-recovery-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  padding-top: 10px;
+  padding-bottom: max(0px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--background-modifier-border);
+  gap: 8px;
+}
+
+@media (max-width: 1024px), (pointer: coarse) {
+  .ent-cc-sync-recovery-modal {
+    width: calc(100vw - 12px);
+    height: calc(100dvh - 16px);
+    max-height: calc(100dvh - 16px);
+  }
+
+  .ent-cc-sync-recovery-actions .ent-cc-button {
+    min-height: 44px;
+  }
+}
+
+@media (max-width: 600px) {
+  .ent-cc-sync-recovery-facts {
+    display: block;
+  }
+
+  .ent-cc-sync-recovery-fact {
+    display: block;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--background-modifier-border-hover);
+  }
+
+  .ent-cc-sync-recovery-fact:last-child {
+    border-bottom: 0;
+  }
+
+  .ent-cc-sync-recovery-fact dt,
+  .ent-cc-sync-recovery-fact dd {
+    padding: 0;
+    border-bottom: 0;
+  }
+
+  .ent-cc-sync-recovery-fact dd {
+    margin-top: 3px;
+  }
+
+  .ent-cc-sync-recovery-actions .ent-cc-button {
+    flex: 1 1 0;
+  }
+}

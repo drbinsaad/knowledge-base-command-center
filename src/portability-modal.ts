@@ -909,6 +909,7 @@ export class ExportImportCenterModal extends Modal {
       if (Platform.isMobile) {
         const file = await this.plugin.writePortableJson("portable", prepared.value);
         if (!this.guardOpenedBase()) return;
+        if (selection.recovery) this.plugin.recordRecoveryExport(now.getTime());
         new Notice(`Saved ${selectionCount(selection)} selected sections inside the vault at ${file.path}. Note contents were not included.`, 8000);
         this.close();
         return;
@@ -921,6 +922,7 @@ export class ExportImportCenterModal extends Modal {
       link.href = url;
       link.download = `knowledge-base-command-center-portable-${now.toISOString().slice(0, 10)}.json`;
       link.click();
+      if (selection.recovery) this.plugin.recordRecoveryExport(now.getTime());
       viewWindow.setTimeout(() => viewWindow.URL.revokeObjectURL(url), 1000);
       new Notice(`Exported ${selectionCount(selection)} selected sections. Note contents and attachments were not included.`);
       this.close();

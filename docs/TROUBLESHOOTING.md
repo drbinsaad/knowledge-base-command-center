@@ -98,9 +98,9 @@ See [Getting started: Upgrade from the old single-base format](GETTING_STARTED.m
 
 ## Same-base changes were lost after Sync
 
-Established concurrent edits to the same knowledge base use whole-base last-write-wins behavior. There is no field-level merge and no guaranteed conflict rescue for the losing same-base payload.
+Current semantic metadata can identify divergent same-base edits that have no proven causal relationship. Before deterministic whole-base selection, the plugin attempts to preserve every possible losing complete envelope in a private conflict rescue. There is still no field-level merge, and a failed rescue forces protected read-only mode rather than guessing.
 
-Avoid editing the same base on several devices at once. Let Sync finish before switching devices and keep current private recovery exports. Changes to different knowledge bases can reconcile independently.
+Open **Sync & recovery center** to review the locally recorded conflict warning and rescue count. This is historical evidence only: it does not inspect Sync or prove that another device has settled. Avoid editing the same base on several devices at once, let the provider finish before switching devices, and keep current private recovery exports. Changes to different knowledge bases can reconcile independently.
 
 ## A conflict-rescue JSON appeared
 

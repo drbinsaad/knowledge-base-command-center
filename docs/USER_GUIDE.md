@@ -311,13 +311,30 @@ Undo/Redo covers personal organization and guarded import changes. Named organiz
 
 For durable recovery, use a same-vault recovery export in addition to a complete vault backup. See [Portability and recovery](PORTABILITY_AND_RECOVERY.md).
 
-### Multi-base portfolio transfer
+## Multi-base portfolio transfer
 
 Choose **Multi-base portfolio transfer…** to export several available knowledge bases in one file. Each base remains an independent ordinary portable package inside the bundle; same-vault recovery, note bodies, attachments, and exact note paths cannot be included. The bundle is limited to 50 bases and 32 MB plus aggregate subject, structure, and reference budgets.
 
 During import, enable the sources you want, map each one to a new base or one distinct existing base, choose Merge or Replace per existing destination, and select the exact components and Libraries. **Build exact preview** shows base, heading, subject, Library, conflict, unavailable folder/template fallback, and will-not-change categories. Apply commits this exact precomputed plan without rematching. If the store, destination, active-base state, or Sync generation changes, rebuild the preview.
 
 Replace requires the displayed typed phrase. Before changing plugin data, the plugin saves a same-vault recovery package for every replacement destination; failure to write any recovery aborts all mutation. Cross-vault Replace also requires its own acknowledgement. No portfolio operation moves, rewrites, or deletes Markdown notes or attachments.
+
+## Sync and recovery center
+
+Run **Open sync & recovery center** from the Command palette, or open **Manage index → Diagnostics → Sync & recovery center**. The modal remains available in compatibility or sticky read-only mode and reports a fixed, bounded set of local facts:
+
+- the active knowledge-base name and Generic/ENT profile;
+- its semantic revision, a shortened semantic-head fingerprint, and whether it matches the last committed local snapshot;
+- the last successful local organization save and the last locally observed external <code>data.json</code> reload;
+- the number and newest age of direct export-folder files matching the documented <code>knowledge-base-command-center-conflict-*.json</code> pattern;
+- the newest recovery export confirmed by an export action on this device or by the documented standalone backup filename pattern;
+- the path-safe reason for read-only protection and whether that protection is sticky until restart;
+- device-local runtime, default/custom configuration-folder status, and active-base view-profile status; and
+- a warning when existing semantic conflict metadata shows that the active base participated in a concurrent edit.
+
+The artifact scan examines at most 2,000 direct children of the export folder and reads only paths and modification times. A capped count is labelled as a lower bound, and the age is labelled as the newest inspected rescue. The plugin does not open JSON packages to guess whether an arbitrary portable package contains recovery.
+
+This is not a Sync-status surface. It makes no network request, calls no private Obsidian Sync API, and cannot tell whether a provider is online, queued, caught up, or safe for a device handoff. It never reads note bodies. Full paths, export filenames, custom configuration names, vault/base identifiers, and full semantic fingerprints are not shown.
 
 ## Settings
 
@@ -344,6 +361,7 @@ The ENT preset also exposes safety-badge display and optional advanced canonical
 - Switch knowledge base…
 - Manage knowledge bases…
 - Manage libraries…
+- Open sync & recovery center
 - Open export / import center
 - Open multi-base portfolio transfer
 - Manage index…

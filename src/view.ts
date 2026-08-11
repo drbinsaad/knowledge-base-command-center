@@ -4915,6 +4915,7 @@ export class EntVaultCommandCenterView extends ItemView {
       if (Platform.isMobile) {
         await this.plugin.writePortableJson("backup", backup);
         if (!ownsBase()) return;
+        this.plugin.recordRecoveryExport(now.getTime());
         new Notice("Backup saved in the export folder inside the vault. Source notes were not included.");
         return;
       }
@@ -4925,6 +4926,7 @@ export class EntVaultCommandCenterView extends ItemView {
       const slug = workspaceName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "knowledge-command-center";
       link.download = `${slug}-backup-${now.toISOString().slice(0, 10)}.json`;
       link.click();
+      this.plugin.recordRecoveryExport(now.getTime());
       viewWindow.setTimeout(() => viewWindow.URL.revokeObjectURL(url), 1000);
       new Notice("Organization backup exported. Source notes were not included.");
     } catch (error) {
