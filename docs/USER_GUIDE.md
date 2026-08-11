@@ -311,6 +311,14 @@ Undo/Redo covers personal organization and guarded import changes. Named organiz
 
 For durable recovery, use a same-vault recovery export in addition to a complete vault backup. See [Portability and recovery](PORTABILITY_AND_RECOVERY.md).
 
+### Multi-base portfolio transfer
+
+Choose **Multi-base portfolio transfer…** to export several available knowledge bases in one file. Each base remains an independent ordinary portable package inside the bundle; same-vault recovery, note bodies, attachments, and exact note paths cannot be included. The bundle is limited to 50 bases and 32 MB plus aggregate subject, structure, and reference budgets.
+
+During import, enable the sources you want, map each one to a new base or one distinct existing base, choose Merge or Replace per existing destination, and select the exact components and Libraries. **Build exact preview** shows base, heading, subject, Library, conflict, unavailable folder/template fallback, and will-not-change categories. Apply commits this exact precomputed plan without rematching. If the store, destination, active-base state, or Sync generation changes, rebuild the preview.
+
+Replace requires the displayed typed phrase. Before changing plugin data, the plugin saves a same-vault recovery package for every replacement destination; failure to write any recovery aborts all mutation. Cross-vault Replace also requires its own acknowledgement. No portfolio operation moves, rewrites, or deletes Markdown notes or attachments.
+
 ## Settings
 
 Configurable Generic-base settings include:
@@ -337,6 +345,7 @@ The ENT preset also exposes safety-badge display and optional advanced canonical
 - Manage knowledge bases…
 - Manage libraries…
 - Open export / import center
+- Open multi-base portfolio transfer
 - Manage index…
 - Open taxonomy health center
 - Add or create…

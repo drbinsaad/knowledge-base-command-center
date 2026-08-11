@@ -7,6 +7,7 @@ Knowledge Base Command Center separates portable organization from private same-
 | Artifact | Intended use | Path exposure |
 | --- | --- | --- |
 | **Portable set** | Move selected workspace organization to another vault or knowledge base. | Index and Libraries are path-free. Workspace settings can contain configured vault-relative folders; saved queries are literal. |
+| **Multi-base portfolio** | Move selected components from as many as 50 available knowledge bases in one bounded bundle, with an independent ordinary portable package for each base. | The same portable boundaries apply independently to every package; private recovery is forbidden. |
 | **Same-vault recovery** | Restore one knowledge base in the vault that created it. | Contains exact vault-relative note paths and private plugin organization. |
 | **Complete vault backup** | Recover Markdown notes, attachments, Obsidian configuration, and plugin data. | Contains the vault's actual files and should be protected accordingly. |
 
@@ -14,9 +15,9 @@ No plugin export contains Markdown note bodies or attachments.
 
 ## Export components
 
-Open **Export / import center…** from the Command palette, Index Manager, or Command Center menu.
+Open **Export / import center…** from the Command palette, Index Manager, or Command Center menu for a single-base package. Open **Multi-base portfolio transfer…** from the Command palette or Command Center menu for a portfolio.
 
-Export and import operate on the active knowledge base. Switch to each base and handle it separately; archived bases must be restored temporarily before export.
+The single-base center operates on the active knowledge base. A portfolio can include several available bases without switching between them. Archived bases must still be restored temporarily before either kind of export.
 
 | Component | Contents |
 | --- | --- |
@@ -37,6 +38,30 @@ Collections and study state carry only the portable identities they reference. T
 **All + private recovery** adds same-vault recovery. Selecting it does not make that recovery portable. The Export button remains disabled until the separate private-path confirmation is accepted, and the summary names every selected Library before JSON is created.
 
 The complete Portable set is not necessarily path-free. Deselect Workspace settings when configured vault-relative folders should not be shared, and deselect Saved views when literal queries may disclose a private term or path.
+
+## Multi-base portfolio transfer
+
+A portfolio is a small manifest plus one independent, current portable-format package for each selected source base. Each embedded package is created, serialized, and parsed by the same strict portable-package implementation used by the single-base center. The manifest does not introduce another organization schema, and an importer rejects a package whose declared components, preset, byte count, or aggregate counts do not match its parsed contents.
+
+Export chooses available knowledge bases and a component set. Libraries means the complete active Library set in each chosen base, including empty Libraries, empty headings, placeholders, and intentionally unplaced subjects. Archived Libraries stay excluded. Note bodies, attachments, exact note bindings, and same-vault recovery are never allowed in a portfolio.
+
+Import maps each selected source to either a new compatible knowledge base or one distinct existing compatible destination. A new base is initialized with Merge. For an existing destination, choose Merge or Replace independently and then narrow the source's components or individual Libraries if needed. Two sources cannot target the same destination in one plan.
+
+**Build exact preview** computes the sole immutable mutation plan. The apply action commits that already-computed post-state; it does not rerun matching or rebuild the import. The preview reports these categories, including explicit zero-count sections:
+
+- knowledge bases to add or replace;
+- headings to add, rename, or remove;
+- subjects to add, move, or leave unplaced;
+- Libraries to add or archive;
+- identity and naming conflicts;
+- unavailable template or folder fallbacks; and
+- what will not change.
+
+Large categories initially show 50 entries and expand in bounded 50-entry pages. A stale destination base, active-base selection, complete store snapshot, or externally synced generation invalidates the plan before mutation. The selected portfolio remains unchanged.
+
+Every Replace destination requires the displayed typed phrase. Before any plugin-data mutation, the plugin writes a separate strict same-vault recovery package for every destination that will be replaced. If one recovery write fails, no plan operation is applied. The final multi-base store change uses the existing atomic persistence and rollback path and each destination also receives an in-plugin Undo snapshot when its bounded size permits. A plan that cannot retain the required Undo snapshot is rejected.
+
+Cross-vault Merge and new-base initialization retain the normal portable behavior. Cross-vault Replace has an additional acknowledgement because it can remove selected destination organization even though it never changes Markdown files.
 
 ## What “path-free” means
 
@@ -93,7 +118,7 @@ The plugin itself does not read or write outside the vault. On desktop, the oper
 
 On iPhone and iPad, Export writes JSON under <code>Knowledge Base Command Center Exports/</code> inside the vault so it can sync or be shared through Files. Import uses an in-vault JSON picker and displays the selected vault path during review.
 
-Import and export enforce a 10 MB ceiling plus per-list and aggregate-reference limits. Export validates the exact serialized JSON before saving, so the plugin does not intentionally create a package its own importer refuses to read.
+Single-base import and export enforce a 10 MB ceiling plus per-list and aggregate-reference limits. A portfolio is limited to 50 bases and 32 MB total, and also enforces strict aggregate subject, structure, and reference budgets across its already-bounded packages. Export validates the exact serialized JSON before saving, so the plugin does not intentionally create a package its own importer refuses to read.
 
 ## Same-vault recovery
 

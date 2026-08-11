@@ -115,19 +115,84 @@
   background: var(--background-secondary);
 }
 
-@media (max-width: 600px) {
-  .ent-cc-portability-modal {
+.ent-cc-portfolio-modal {
+  width: min(820px, calc(100vw - 32px));
+  max-width: 820px;
+  max-height: calc(100vh - 40px);
+  max-height: calc(100dvh - 40px);
+}
+
+.ent-cc-portfolio-center {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.ent-cc-portfolio-center[aria-busy="true"] {
+  cursor: progress;
+}
+
+.ent-cc-portfolio-map-card,
+.ent-cc-portfolio-preview {
+  margin: 10px 0;
+  padding: 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  background: var(--background-secondary);
+}
+
+.ent-cc-portfolio-components {
+  margin-top: 8px;
+}
+
+.ent-cc-portfolio-components > summary {
+  min-height: 44px;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-weight: 600;
+  line-height: 44px;
+}
+
+.ent-cc-portfolio-diff-section {
+  margin-top: 14px;
+}
+
+.ent-cc-portfolio-diff-section h4 {
+  margin: 0 0 6px;
+}
+
+.ent-cc-portfolio-diff-section ul {
+  margin: 0;
+  padding-inline-start: 22px;
+}
+
+.ent-cc-portfolio-diff-section li {
+  margin: 4px 0;
+  overflow-wrap: anywhere;
+}
+
+.ent-cc-portfolio-diff-section > button {
+  min-height: 44px;
+  margin-top: 8px;
+}
+
+@media (max-width: 1024px) {
+  .ent-cc-portability-modal,
+  .ent-cc-portfolio-modal {
     width: calc(100vw - 16px);
     max-height: calc(100vh - 16px);
     max-height: calc(100dvh - 16px);
   }
 
-  .ent-cc-portability-center .setting-item {
+  .ent-cc-portability-center .setting-item,
+  .ent-cc-portfolio-center .setting-item {
     min-height: 54px;
   }
 
   .ent-cc-portability-center .setting-item-control button,
-  .ent-cc-portability-center .setting-item-control select {
+  .ent-cc-portability-center .setting-item-control select,
+  .ent-cc-portfolio-center .setting-item-control button,
+  .ent-cc-portfolio-center .setting-item-control select,
+  .ent-cc-portfolio-center .setting-item-control input {
     min-height: 44px;
   }
 
@@ -136,6 +201,37 @@
     min-height: 44px;
     align-items: center;
     justify-content: flex-end;
+  }
+
+  .ent-cc-portfolio-map-card,
+  .ent-cc-portfolio-preview {
+    padding: 10px;
+  }
+
+  .ent-cc-portfolio-center .setting-item {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .ent-cc-portfolio-center .setting-item-control {
+    justify-content: stretch;
+    width: 100%;
+  }
+
+  .ent-cc-portfolio-center .setting-item-control select,
+  .ent-cc-portfolio-center .setting-item-control input,
+  .ent-cc-portfolio-center .setting-item-control button {
+    width: 100%;
+  }
+
+  .ent-cc-portfolio-center .setting-item-control select,
+  .ent-cc-portfolio-center .setting-item-control input {
+    font-size: 16px;
+  }
+
+  .ent-cc-portfolio-center {
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
   }
 }
 

@@ -3,6 +3,7 @@ import type EntVaultCommandCenterPlugin from "./main";
 import type { CatalogPlacementTarget } from "./main";
 import { IndexManagerModal, type ManagerTab } from "./index-manager";
 import { ExportImportCenterModal } from "./portability-modal";
+import { PortfolioTransferModal } from "./portfolio-modal";
 import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge-base-modal";
 import { LibraryEditorModal, ManageLibrariesModal } from "./library-modal";
 import { resolveLibraryIconId } from "./library-icons";
@@ -1403,6 +1404,10 @@ export class EntVaultCommandCenterView extends ItemView {
 
   public openPortabilityCenter(mode: "export" | "import" = "export"): void {
     new ExportImportCenterModal(this.plugin, mode).open();
+  }
+
+  public openPortfolioTransfer(): void {
+    new PortfolioTransferModal(this.plugin).open();
   }
 
   public openKnowledgeBaseManager(): void {
@@ -4831,6 +4836,9 @@ export class EntVaultCommandCenterView extends ItemView {
     menu.addSeparator();
     menu.addItem((item) => item.setTitle("Export / import center…").setIcon("arrow-left-right").onClick(() => {
       if (ownsBase()) this.openPortabilityCenter();
+    }));
+    menu.addItem((item) => item.setTitle("Multi-base portfolio transfer…").setIcon("package-open").onClick(() => {
+      if (ownsBase()) this.openPortfolioTransfer();
     }));
     menu.showAtMouseEvent(event);
   }

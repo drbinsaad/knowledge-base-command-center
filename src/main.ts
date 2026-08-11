@@ -118,7 +118,16 @@ import {
   VaultRecord,
   WorkspaceMode,
 } from "./model";
-import { MAX_PORTABLE_PACKAGE_BYTES, portableSubjectPath, registerPortableGroup } from "./portability";
+import { MAX_PORTABLE_PACKAGE_BYTES, portableSubjectPath, registerPortableGroup, type PortableExportSelection } from "./portability";
+import {
+  applyPortfolioImportPlan,
+  createPortfolioExport,
+  createPortfolioImportPlan,
+  MAX_PORTFOLIO_BUNDLE_BYTES,
+  type PortfolioExportV1,
+  type PortfolioImportMapping,
+  type PortfolioImportPlan,
+} from "./portfolio";
 import {
   appendFollowUpEntry,
   assertFollowUpNoteWritable,
@@ -153,6 +162,7 @@ import {
   type TaxonomyRepairPlan,
 } from "./taxonomy-health";
 import { TaxonomyHealthModal } from "./taxonomy-health-modal";
+import { PortfolioTransferModal } from "./portfolio-modal";
 
 /** Bound stable inactive projections by records, not an arbitrary base count. */
 const MAX_INACTIVE_SEARCH_CACHED_RECORDS = 50_000;
@@ -353,6 +363,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.addCommand({ id: "manage-knowledge-bases", name: "Manage knowledge bases…", callback: () => new ManageKnowledgeBasesModal(this).open() });
     this.addCommand({ id: "manage-libraries", name: "Manage libraries…", callback: () => new ManageLibrariesModal(this, () => void this.refreshViews()).open() });
     this.addCommand({ id: "export-import-center", name: "Open export / import center", callback: () => void this.withView((view) => view.openPortabilityCenter()) });
+    this.addCommand({ id: "portfolio-transfer-center", name: "Open multi-base portfolio transfer", callback: () => new PortfolioTransferModal(this).open() });
     this.addCommand({ id: "create-knowledge-note", name: "Create note from template or empty note…", callback: () => void this.withView((view) => view.startCreateKnowledgeNote()) });
     this.addCommand({
       id: "attach-file-to-current-note",
@@ -1876,6 +1887,95 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   getExternalChangeGeneration(): number { return this.externalChangeGeneration; }
   getSearchGeneration(): number { return this.searchGeneration; }
   getVaultId(): string { return this.store.vaultId; }
+
+  /**
+   * Build a path-free multi-base transfer from isolated copies. Each inner
+   * value is produced and validated by the ordinary portable-v4 exporter, so
+   * portfolio export never introduces a second package schema or reads note
+   * bodies/attachments.
+   */
+  createPortfolioExport(
+    requests: ReadonlyArray<{ baseId: string; selection: PortableExportSelection; completeLibrarySet?: boolean }>,
+    exportedAt = new Date().toISOString(),
+  ): PortfolioExportV1 {
+    if (this.externalReloadBusy) throw new Error("Finish reloading synced knowledge-base data before exporting a portfolio.");
+    const selected = requests.map((request) => {
+      const entry = this.store.bases.find((candidate) => candidate.id === request.baseId && candidate.archivedAt === null);
+      if (!entry) throw new Error("A selected knowledge base is unavailable or archived.");
+      return {
+        entry,
+        records: this.getRecordsForEntry(entry),
+        selection: request.selection,
+        completeLibrarySet: request.completeLibrarySet,
+      };
+    });
+    return createPortfolioExport(selected, exportedAt, this.store.vaultId);
+  }
+
+  /** Prepare the sole exact mutation plan used by both portfolio preview and apply. */
+  createPortfolioImportPlan(
+    bundle: unknown,
+    mappings: readonly PortfolioImportMapping[],
+    allowCrossVaultReplace = false,
+  ): PortfolioImportPlan {
+    this.assertDataWritable();
+    if (this.baseOperationBusy || this.dataTransactionBusy || this.directSaveBusyCount > 0) {
+      throw new Error("Finish the current knowledge-base operation before preparing a portfolio import.");
+    }
+    if (this.externalReloadBusy) throw new Error("Finish reloading synced knowledge-base data before preparing a portfolio import.");
+    const recordsByBaseId = new Map<string, readonly VaultRecord[]>();
+    for (const mapping of mappings) {
+      const destination = mapping.destination;
+      if (destination.kind !== "existing") continue;
+      const entry = this.store.bases.find((candidate) => candidate.id === destination.baseId && candidate.archivedAt === null);
+      if (entry) recordsByBaseId.set(entry.id, this.getRecordsForEntry(entry));
+    }
+    const folderExists = (path: string): boolean => this.app.vault.getAbstractFileByPath(normalizePath(path)) instanceof TFolder;
+    const templateExists = (path: string): boolean => {
+      const file = path ? this.app.vault.getAbstractFileByPath(normalizePath(path)) : null;
+      return file instanceof TFile && file.extension.toLowerCase() === "md";
+    };
+    return createPortfolioImportPlan(this.store, bundle, mappings, {
+      allowCrossVaultReplace,
+      expectedExternalGeneration: this.externalChangeGeneration,
+      recordsByBaseId,
+      resources: {
+        configDir: this.app.vault.configDir,
+        folderExists,
+        templateExists,
+      },
+    });
+  }
+
+  /**
+   * Write usable per-base same-vault recovery files first, then commit every
+   * previewed base as one guarded store transaction. A failed write or stale
+   * guard leaves the store untouched; commitBaseStoreChange supplies the
+   * existing adapter-save rollback and Sync compensation boundary.
+   */
+  async applyPortfolioImportPlan(
+    plan: PortfolioImportPlan,
+    typedConfirmation = "",
+  ): Promise<string[]> {
+    this.assertDataWritable();
+    if (this.baseOperationBusy || this.dataTransactionBusy || this.directSaveBusyCount > 0) {
+      throw new Error("Finish the current knowledge-base operation before applying a portfolio import.");
+    }
+    if (this.externalReloadBusy) throw new Error("Finish reloading synced knowledge-base data before applying a portfolio import.");
+    // Validate every stale/confirmation/plan-integrity guard before creating
+    // recovery files. The guarded transaction repeats this check after them.
+    const validationStore = structuredClone(this.store);
+    applyPortfolioImportPlan(validationStore, plan, typedConfirmation, this.externalChangeGeneration);
+    const recoveryPaths: string[] = [];
+    for (const recovery of plan.recoveryPackages) {
+      const file = await this.writePortableJson("backup", recovery.package);
+      recoveryPaths.push(file.path);
+    }
+    await this.commitBaseStoreChange(() => {
+      applyPortfolioImportPlan(this.store, plan, typedConfirmation, this.externalChangeGeneration);
+    });
+    return recoveryPaths;
+  }
 
   getFollowUpCategories(): FollowUpCategoryDefinition[] {
     return this.data.settings.followUpCategories.map((category) => ({ ...category }));
@@ -4921,7 +5021,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
   }
 
-  async writePortableJson(kind: "backup" | "workspace" | "portable" | "conflict", value: unknown): Promise<TFile> {
+  async writePortableJson(kind: "backup" | "workspace" | "portable" | "portfolio" | "conflict", value: unknown): Promise<TFile> {
     const folder = "Knowledge Base Command Center Exports";
     const content = `${JSON.stringify(value, null, 2)}\n`;
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -4945,6 +5045,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   async readPortableJson(file: TFile): Promise<unknown> {
     if (file.extension.toLowerCase() !== "json") throw new Error("Choose a JSON export file.");
     if (file.stat.size > MAX_PORTABLE_PACKAGE_BYTES) throw new Error("The selected JSON is larger than the 10 MB import limit.");
+    return JSON.parse(await this.app.vault.read(file)) as unknown;
+  }
+
+  async readPortfolioJson(file: TFile): Promise<unknown> {
+    if (file.extension.toLowerCase() !== "json") throw new Error("Choose a JSON portfolio export file.");
+    if (file.stat.size > MAX_PORTFOLIO_BUNDLE_BYTES) throw new Error("The selected portfolio is larger than the 32 MB import limit.");
     return JSON.parse(await this.app.vault.read(file)) as unknown;
   }
 

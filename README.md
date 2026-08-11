@@ -44,7 +44,7 @@ _Real iPhone portrait capture from version 0.10.0 showing one search state with 
 - **Create consistently.** Start empty notes or copy a chosen template into a safely previewed destination, with optional per-Library creation defaults.
 - **Attach deliberately.** Copy one user-selected file into the vault and insert its Markdown link using a per-base policy, without intercepting ordinary paste or drag-and-drop.
 - **Capture from anywhere.** Open Quick entry from the desktop ribbon, the mobile **Open** menu, the Command Center header, a user-assigned hotkey, the mobile toolbar, or an action-only Obsidian URL.
-- **Transfer organization deliberately.** Export path-free index and Library blueprints, selected personal organization, or a private same-vault recovery package.
+- **Transfer organization deliberately.** Export one path-free portable set, bundle up to 50 bases as independently parsed portfolio packages, or create a private same-vault recovery package.
 - **Work on desktop and mobile.** Use drag-and-drop on desktop and labelled action menus on touch devices.
 
 Typical uses include a research library with Methods and Papers, a project index with reusable review queues, a study system with cross-topic collections, or the optional protected ENT clinical preset.
@@ -129,6 +129,8 @@ This command copies one explicitly selected file, up to 100 megabytes, into the 
 ### Undo, snapshots, export, and recovery
 
 Personal organization supports Undo/Redo and named snapshots. Portable exports can carry workspace settings, a path-free Index blueprint, selected Libraries, Collections, study state, and saved views. Same-vault recovery is a separate private restoration format containing exact vault-relative paths.
+
+**Multi-base portfolio transfer** bundles independent ordinary portable packages behind one bounded manifest. Map each source to a new or existing compatible base, choose Merge or Replace per existing destination, select components per source, and inspect the exact immutable change plan before applying it. Replace requires the displayed typed phrase and writes a same-vault recovery for every affected destination before the atomic store mutation. The preview reports base, heading, subject, Library, conflict, folder/template fallback, and explicit will-not-change categories. It never includes or changes note bodies or attachments.
 
 Portable packages created by version 0.10.0 use format version 4. Current v9 files include dynamic Library definitions and layouts and are locked to their source vault, base, and preset by default. Read [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md) before importing, replacing, or restoring data.
 

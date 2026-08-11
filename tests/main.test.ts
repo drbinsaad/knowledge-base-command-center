@@ -48,6 +48,7 @@ import { EntCommandCenterSettingsTab } from "../src/settings.ts";
 import { QuickAppendModal } from "../src/follow-up-modal.ts";
 import { Notice, Plugin, TFile, TFolder, type TAbstractFile } from "obsidian";
 import { mergeKnowledgeBaseStores } from "../src/store-merge.ts";
+import { createPortfolioExport } from "../src/portfolio.ts";
 
 interface TestPluginBase {
   loadedData: unknown;
@@ -4973,6 +4974,61 @@ test("an undo-protected import restores and persists the pre-import state when s
   } | undefined;
   const persistedActive = persisted?.bases?.find((entry) => entry.id === persisted.activeBaseId);
   assert.equal(persistedActive?.data?.settings?.workspaceName, originalName);
+});
+
+test("portfolio Replace writes strict recovery first and rolls every base back when the atomic save fails", async () => {
+  const destinationData = migrateData(null);
+  destinationData.settings.workspaceName = "Portfolio destination";
+  const destinationStore = createDefaultStore(destinationData, 100, "vault-portfolio-rollback");
+  const plugin = pluginWith(destinationStore);
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+
+  const sourceData = migrateData(null);
+  sourceData.settings.workspaceName = "Portfolio source";
+  sourceData.indexGroupOrder = ["Imported empty heading"];
+  sourceData.portableIndex.groups = [{ id: "portfolio-empty-heading", title: "Imported empty heading", order: 0 }];
+  const sourceEntry = createKnowledgeBaseEntry(sourceData, "base-portfolio-source", 50);
+  const bundle = createPortfolioExport([{
+    entry: sourceEntry,
+    records: [],
+    selection: { ...EMPTY_PORTABLE_SELECTION, index: true },
+  }], "2026-08-11T00:00:00.000Z", plugin.getVaultId());
+  const plan = plugin.createPortfolioImportPlan(bundle, [{
+    sourceBaseId: sourceEntry.id,
+    destination: { kind: "existing", baseId: plugin.getActiveKnowledgeBaseId() },
+    mode: "replace",
+  }]);
+  const before = structuredClone(plugin.getKnowledgeBases(true));
+  const created: Array<{ path: string; content: string }> = [];
+  const vault = plugin.app.vault as unknown as {
+    getAbstractFileByPath(path: string): null;
+    createFolder(path: string): Promise<void>;
+    create(path: string, content: string): Promise<TFile>;
+  };
+  vault.create = async (path, content) => {
+    created.push({ path, content });
+    return new TFile(path);
+  };
+  let saveAttempts = 0;
+  plugin.saveData = async (value: unknown) => {
+    saveAttempts += 1;
+    if (saveAttempts === 1) throw new Error("simulated portfolio store failure");
+    plugin.savedData.push(structuredClone(value));
+  };
+
+  await assert.rejects(
+    plugin.applyPortfolioImportPlan(plan, plan.confirmationPhrase),
+    /simulated portfolio store failure/,
+  );
+
+  assert.equal(created.length, 1, "the mandatory recovery is written before the store save starts");
+  assert.match(created[0]?.path ?? "", /knowledge-base-command-center-backup-/);
+  const recovery = parsePortableExport(JSON.parse(created[0]?.content ?? "null") as unknown);
+  assert.equal(recovery.components.recovery?.sourceBaseId, plugin.getActiveKnowledgeBaseId());
+  assert.deepEqual(plugin.getKnowledgeBases(true).map((entry) => entry.data), before.map((entry) => entry.data));
+  assert.equal(saveAttempts, 2, "the existing base transaction persists one compensating rollback");
+  assert.equal(plugin.data.indexGroupOrder.includes("Imported empty heading"), false);
 });
 
 test("workspace-only portability import includes dependency Library descriptors in Undo", async () => {

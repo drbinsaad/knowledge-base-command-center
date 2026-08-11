@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added bounded multi-base portfolio export/import for up to 50 available knowledge bases. Each bundle contains a strict manifest and independent existing-format portable packages per base, with source-to-destination mapping, per-base Merge/Replace, and per-source component and Library selection.
+- Added an exact dry-run portfolio plan used verbatim by apply, with categorized base, heading, subject, Library, conflict, folder/template fallback, and explicit will-not-change previews. Replace requires typed confirmation and writes a same-vault recovery for every affected destination before mutation.
 - Added Quick append for the active or a chosen Markdown note. Users can file repeated follow-up items beneath configurable Questions, Lectures to watch, Sources, Thoughts, To read, Other, or custom category headings without duplicating the managed section.
 - Added base-specific category management with stable marker IDs, rename/reorder/archive/restore, bullet or checkbox style, and optional dates, plus focused commands and fixed action-only Apple Shortcut URLs for current-note and note-picker entry.
 - Added optional note-creation profiles for active and archived Libraries. Each profile inherits the knowledge base defaults field by field or overrides its destination folder, Empty/Template mode, and template; the resolved Create note form remains editable per note.
@@ -23,6 +25,7 @@
 - Required Quick append Undo to target the exact original note object, so a deleted-and-recreated same-path note cannot receive an older note's rollback.
 - Rejected workspace imports that would leave Quick append with no active category, and validated imported fixed attachment folders before applying settings.
 - Extended Taxonomy Health checks to fixed attachment folders and effective per-Library creation folders and templates.
+- Preserved empty Libraries and headings, portable placeholders, and intentionally unplaced subjects across portfolio transfer; added stale base/store/Sync guards, cross-vault Replace acknowledgement, bounded mobile previews, and atomic rollback through the existing store transaction path.
 - Preserved Library creation profiles through settings exports, portable workspace dependency descriptors, settings-bearing named snapshots and Undo/Redo entries, Library renames/archives, and vault folder/template renames; permanent Library deletion removes its profile atomically.
 - Made workspace imports reset unavailable, restricted, or out-of-folder Library templates to Empty inside the same Undo-protected transaction while still rejecting invalid destination folders; legacy standalone workspace imports report and omit profiles without a matching destination Library ID.
 - Kept the Library-profile editor inside the iPhone visual viewport during keyboard animation, with 44-point controls, safe-area padding, explicit effective-value summaries, and stale Sync/base guards.
@@ -35,6 +38,7 @@
 
 ### Security
 
+- Kept portfolios free of note bodies, attachments, exact note bindings, and private recovery; rejected malicious IDs, paths, mismatched manifests, oversized packages, and aggregate budget overruns through the existing strict portable parser.
 - Made Quick append atomic and fail-closed: it checks <code>ai_lock</code> inside the write transaction, preserves all text outside the strict managed block, enforces bounded input and entry counts, and keeps only compact in-memory fingerprints for a five-minute exact undo. Note bodies and appended text are never stored in plugin data.
 
 ## 0.11.1
