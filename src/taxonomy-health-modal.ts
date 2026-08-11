@@ -27,9 +27,12 @@ class TaxonomyRepairPreviewModal extends Modal {
     this.modalEl.addClass("ent-cc-taxonomy-preview-modal");
     this.contentEl.addClass("ent-cc-modal", "ent-cc-taxonomy-preview");
     this.titleEl.setText("Review taxonomy repair");
-    const body = this.contentEl.createDiv({ cls: "ent-cc-taxonomy-preview-body" });
-    body.createEl("h3", { text: repair.label });
-    body.createEl("p", { text: repair.preview });
+    const body = this.contentEl.createDiv({
+      cls: "ent-cc-taxonomy-preview-body",
+      attr: { role: "region", "aria-label": "Taxonomy repair details", tabindex: "0" },
+    });
+    body.createEl("h3", { text: repair.label, attr: { dir: "auto" } });
+    body.createEl("p", { text: repair.preview, attr: { dir: "auto" } });
     const guarantees = body.createEl("ul", { cls: "ent-cc-taxonomy-guarantees" });
     guarantees.createEl("li", { text: "The repair changes plugin-owned organization only." });
     guarantees.createEl("li", { text: "Markdown notes, note bodies, properties, folders, and attachments are not changed." });
@@ -164,9 +167,9 @@ export class TaxonomyHealthModal extends Modal {
     const icon = row.createSpan({ cls: "ent-cc-taxonomy-finding-icon", attr: { "aria-hidden": "true" } });
     setIcon(icon, finding.severity === "warning" ? "triangle-alert" : "info");
     const content = row.createDiv({ cls: "ent-cc-taxonomy-finding-content" });
-    content.createEl("h3", { text: finding.title });
-    content.createDiv({ cls: "ent-cc-taxonomy-scope", text: finding.scope });
-    content.createEl("p", { text: finding.detail });
+    content.createEl("h3", { text: finding.title, attr: { dir: "auto" } });
+    content.createDiv({ cls: "ent-cc-taxonomy-scope", text: finding.scope, attr: { dir: "auto" } });
+    content.createEl("p", { text: finding.detail, attr: { dir: "auto" } });
     const actions = row.createDiv({ cls: "ent-cc-taxonomy-finding-actions" });
     if (finding.path) {
       const file = this.app.vault.getAbstractFileByPath(finding.path);

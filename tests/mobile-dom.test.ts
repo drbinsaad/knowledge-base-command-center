@@ -689,14 +689,15 @@ test("Library creation-profile sheets remain keyboard-aware and touch-sized on i
 
 test("portfolio transfer stays scrollable, touch-sized, and stacked across iPhone orientations", () => {
   const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
-  assert.match(styles, /\.ent-cc-portfolio-modal\s*\{[^}]*width:\s*min\(820px, calc\(100vw - 32px\)\);[^}]*max-height:\s*calc\(100dvh - 40px\);/s);
-  assert.match(styles, /\.ent-cc-portfolio-center\s*\{[^}]*overflow-y:\s*auto;/s);
+  assert.match(styles, /\.ent-cc-portfolio-modal\s*\{[^}]*width:\s*min\(820px, calc\(100vw - 32px\)\);[^}]*max-height:\s*calc\(var\(--ent-cc-portfolio-visual-height, 100dvh\) - 40px\);[^}]*translate:\s*0 var\(--ent-cc-portfolio-visual-shift, 0\);/s);
+  assert.match(styles, /\.ent-cc-portfolio-center\s*\{[^}]*overflow:\s*hidden;/s);
+  assert.match(styles, /\.ent-cc-portfolio-panel\s*\{[^}]*overflow-y:\s*auto;/s);
   assert.match(styles, /\.ent-cc-portfolio-components > summary\s*\{[^}]*min-height:\s*44px;/s);
   assert.match(styles, /\.ent-cc-portfolio-diff-section > button\s*\{[^}]*min-height:\s*44px;/s);
   assert.match(styles, /@media \(max-width: 1024px\)\s*\{[\s\S]*?\.ent-cc-portfolio-center \.setting-item-control button,[\s\S]*?min-height:\s*44px;/s);
   assert.match(styles, /@media \(max-width: 1024px\)\s*\{[\s\S]*?\.ent-cc-portfolio-center \.setting-item\s*\{[^}]*flex-direction:\s*column;/s);
   assert.match(styles, /\.ent-cc-portfolio-center \.setting-item-control select,[\s\S]*?\.ent-cc-portfolio-center \.setting-item-control input\s*\{\s*font-size:\s*16px;/s);
-  assert.match(styles, /\.ent-cc-portfolio-center\s*\{\s*padding-bottom:\s*max\(16px, env\(safe-area-inset-bottom\)\);/s);
+  assert.match(styles, /\.ent-cc-portfolio-footer\s*\{[^}]*padding-bottom:\s*max\(0px, env\(safe-area-inset-bottom\)\);/s);
 });
 
 test("desktop library drag and drop moves records across headings and reorders rows", async () => {

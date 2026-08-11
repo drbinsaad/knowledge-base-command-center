@@ -203,7 +203,7 @@ Available focused commands are:
 
 ### Add a mobile toolbar button
 
-On iPhone or iPad, open **Settings → Mobile → Manage toolbar options**, scroll to the bottom, choose **Add global command**, then search for and select **Quick entry…**. Any focused Quick Entry command can be selected instead. Command icons are supplied for the mobile toolbar, but the plugin does not force a toolbar layout.
+On iPhone or iPad, open **Settings → Mobile → Manage toolbar options**, scroll to the bottom, choose **Add global command**, then search for and select **Quick entry…**. Any focused Quick Entry or Quick Append command can be selected instead. Each active Library also provides an **Open Library: _Library name_** command, which can be placed on the toolbar or assigned as Obsidian's Quick Action. Command icons are supplied for the mobile toolbar, but the plugin does not force a toolbar layout.
 
 ### Use Apple Shortcuts safely
 
@@ -386,6 +386,9 @@ The ENT preset also exposes safety-badge display and optional advanced canonical
 - Quick entry: Create note…
 - Quick entry: Add current note…
 - Quick entry: Add existing note…
+- Quick append: Add to current note…
+- Quick append: Choose a note…
+- Quick append: Undo last append
 - Undo / redo personal organization
 
 The ENT preset adds proposal-promotion and advanced canonical-placement commands where applicable.

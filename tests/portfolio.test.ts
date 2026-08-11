@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   createDefaultStore,
@@ -27,6 +28,8 @@ import {
   parsePortableExport,
   type PortableExportSelection,
 } from "../src/portability";
+import { PortfolioTransferModal } from "../src/portfolio-modal";
+import { asHtmlElement, createFakeDom } from "./support/fake-dom";
 
 function selection(overrides: Partial<PortableExportSelection> = {}): PortableExportSelection {
   return {
@@ -476,4 +479,146 @@ test("stale or tampered plans leave the store byte-for-byte unchanged", () => {
   tamperedPlan.operations[0].afterEntry.data.settings.workspaceSubtitle = "tampered post-state";
   assert.throws(() => applyPortfolioImportPlan(tamperedStore, tamperedPlan), /plan changed after preview/i);
   assert.deepEqual(tamperedStore, tamperedBefore);
+});
+
+test("portfolio tabs expose one labelled panel and support Arrow, Home, and End navigation", () => {
+  const dom = createFakeDom();
+  const plugin = { app: {}, getKnowledgeBases: () => [] };
+  const modal = new PortfolioTransferModal(plugin as never) as unknown as {
+    mode: "export" | "import";
+    busy: null;
+    modalEl: HTMLElement;
+    contentEl: HTMLElement;
+    titleEl: HTMLElement;
+    panelEl: HTMLElement | null;
+    renderExport(): void;
+    renderImport(): void;
+    onOpen(): void;
+    onClose(): void;
+  };
+  modal.modalEl = asHtmlElement(dom.document.body.createDiv());
+  modal.contentEl = asHtmlElement(dom.document.body.createDiv());
+  modal.titleEl = asHtmlElement(dom.document.body.createEl("h2"));
+  modal.renderExport = () => modal.panelEl?.createDiv({ text: "Export body" });
+  modal.renderImport = () => modal.panelEl?.createDiv({ text: "Import body" });
+  modal.onOpen();
+
+  type FakeInteractive = {
+    dispatch(type: string, init: { key: string }): { defaultPrevented: boolean };
+    getAttribute(name: string): string | null;
+  };
+  const activeTab = (): FakeInteractive | null => modal.contentEl.querySelector('[role="tab"][aria-selected="true"]') as unknown as FakeInteractive | null;
+  const panel = (): HTMLElement | null => modal.contentEl.querySelector('[role="tabpanel"]');
+  assert.equal(modal.contentEl.querySelectorAll('[role="tabpanel"]').length, 1);
+  assert.equal(activeTab()?.getAttribute("aria-controls"), panel()?.getAttribute("id"));
+  assert.equal(panel()?.getAttribute("aria-labelledby"), activeTab()?.getAttribute("id"));
+  assert.equal(panel()?.textContent, "Export body");
+  assert.equal(modal.contentEl.querySelector('[data-portfolio-focus="close"]')?.textContent, "Cancel");
+
+  const keydown = (key: string): boolean => {
+    const tab = activeTab();
+    assert.ok(tab);
+    return tab.dispatch("keydown", { key }).defaultPrevented;
+  };
+  assert.equal(keydown("ArrowRight"), true);
+  assert.equal(modal.mode, "import");
+  assert.equal(dom.document.activeElement?.getAttribute("data-portfolio-focus"), "mode-import");
+  assert.equal(panel()?.textContent, "Import body");
+  assert.equal(keydown("Home"), true);
+  assert.equal(modal.mode, "export");
+  assert.equal(keydown("End"), true);
+  assert.equal(modal.mode, "import");
+  assert.equal(keydown("ArrowLeft"), true);
+  assert.equal(modal.mode, "export");
+  modal.onClose();
+});
+
+test("portfolio rerender focus restoration covers source, destination, acknowledgement, and show-more fallbacks", () => {
+  const dom = createFakeDom();
+  const plugin = { app: {}, getKnowledgeBases: () => [] };
+  const modal = new PortfolioTransferModal(plugin as never) as unknown as {
+    modalEl: HTMLElement;
+    contentEl: HTMLElement;
+    titleEl: HTMLElement;
+    pendingFocusKey: string | null;
+    pendingFocusFallbackKey: string | null;
+    render(): void;
+    rerenderFromControl(focusKey: string, fallbackFocusKey?: string): void;
+    restorePendingFocus(): void;
+  };
+  modal.modalEl = asHtmlElement(dom.document.body.createDiv());
+  modal.contentEl = asHtmlElement(dom.document.body.createDiv());
+  modal.titleEl = asHtmlElement(dom.document.body.createEl("h2"));
+  const keys = ["source-base-a", "destination-base-a", "cross-vault-ack", "diff-more-conflicts"];
+  modal.render = () => {
+    modal.contentEl.empty();
+    for (const key of keys) modal.contentEl.createEl("button", { attr: { "data-portfolio-focus": key } });
+    modal.restorePendingFocus();
+  };
+  for (const key of keys) {
+    modal.rerenderFromControl(key);
+    assert.equal(dom.document.activeElement?.getAttribute("data-portfolio-focus"), key);
+  }
+  keys.pop();
+  modal.render = () => {
+    modal.contentEl.empty();
+    modal.contentEl.createEl("section", { attr: { "data-portfolio-focus": "diff-section-conflicts" } });
+    modal.restorePendingFocus();
+  };
+  modal.rerenderFromControl("diff-more-conflicts", "diff-section-conflicts");
+  assert.equal(dom.document.activeElement?.getAttribute("data-portfolio-focus"), "diff-section-conflicts");
+});
+
+test("portfolio viewport lifecycle uses its owner window and removes every keyboard listener and CSS override", () => {
+  const dom = createFakeDom();
+  dom.window.innerHeight = 844;
+  dom.window.visualViewport.height = 430;
+  dom.window.visualViewport.offsetTop = 20;
+  dom.window.keyboardHeightCss = "414px";
+  const plugin = { app: {}, getKnowledgeBases: () => [] };
+  const modal = new PortfolioTransferModal(plugin as never) as unknown as {
+    modalEl: HTMLElement;
+    contentEl: HTMLElement;
+    titleEl: HTMLElement;
+    panelEl: HTMLElement | null;
+    renderExport(): void;
+    renderImport(): void;
+    onOpen(): void;
+    onClose(): void;
+  };
+  modal.modalEl = asHtmlElement(dom.document.body.createDiv());
+  modal.contentEl = asHtmlElement(dom.document.body.createDiv());
+  modal.titleEl = asHtmlElement(dom.document.body.createEl("h2"));
+  modal.renderExport = () => undefined;
+  modal.renderImport = () => undefined;
+  modal.onOpen();
+
+  assert.equal(dom.window.listenerCount("resize"), 1);
+  assert.equal(dom.window.visualViewport.listenerCount("resize"), 1);
+  assert.equal(dom.window.visualViewport.listenerCount("scroll"), 1);
+  assert.equal(modal.modalEl.style.getPropertyValue("--ent-cc-portfolio-visual-height"), "410px");
+  assert.equal(modal.modalEl.hasClass("is-virtual-keyboard-open"), true);
+
+  modal.onClose();
+  assert.equal(dom.window.listenerCount("resize"), 0);
+  assert.equal(dom.window.visualViewport.listenerCount("resize"), 0);
+  assert.equal(dom.window.visualViewport.listenerCount("scroll"), 0);
+  assert.equal(modal.modalEl.style.getPropertyValue("--ent-cc-portfolio-visual-height"), "");
+  assert.equal(modal.modalEl.hasClass("is-virtual-keyboard-open"), false);
+});
+
+test("portfolio mobile source declares stable focus keys, a sole scroll panel, and iOS keyboard geometry", () => {
+  const source = readFileSync(new URL("../src/portfolio-modal.ts", import.meta.url), "utf8");
+  const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+  assert.match(source, /data-portfolio-focus", `source-\$\{manifest\.sourceBaseId\}`/);
+  assert.match(source, /data-portfolio-focus", `destination-\$\{manifest\.sourceBaseId\}`/);
+  assert.match(source, /data-portfolio-focus", "cross-vault-ack"/);
+  assert.match(source, /diff-more-\$\{category\}/);
+  assert.match(source, /calculateModalViewportLayout/);
+  assert.match(source, /--keyboard-height/);
+  assert.match(source, /visualViewport\?\.removeEventListener/);
+  assert.match(styles, /\.ent-cc-portfolio-panel\s*\{[^}]*overflow-y:\s*auto/s);
+  assert.doesNotMatch(styles, /\.ent-cc-portfolio-center\s*\{[^}]*overflow-y:\s*auto/s);
+  assert.match(styles, /\.ent-cc-portfolio-footer \.ent-cc-button\s*\{[^}]*min-height:\s*44px/s);
+  assert.match(styles, /--ent-cc-portfolio-visual-height/);
 });

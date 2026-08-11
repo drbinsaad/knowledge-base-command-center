@@ -277,10 +277,20 @@ test("modal renders read-only local facts in its owner document with accessible 
   assert.equal(actions.ownerDocument, dom.document as unknown as Document);
   assert.equal(scroll.getAttribute("role"), "region");
   assert.equal(actions.querySelectorAll('button[type="button"]').length, 2);
-  assert.equal(ownerWindowTimers, 1, "initial focus is scheduled on the modal owner window");
-  assert.equal(dom.document.activeElement?.textContent, "Recheck local facts");
+  assert.equal(ownerWindowTimers, 0, "initial modal context is not skipped by footer autofocus");
+  assert.equal(dom.document.activeElement, null);
   assert.match(modal.contentEl.textContent ?? "", /Protected read-only/);
   assert.doesNotMatch(modal.contentEl.textContent ?? "", new RegExp(sensitive.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
+
+  const recheck = actions.querySelector('button[type="button"]');
+  assert.ok(recheck);
+  recheck.click();
+  assert.equal(ownerWindowTimers, 1, "Recheck focus restoration uses the modal owner window");
+  assert.equal(dom.document.activeElement?.textContent, "Recheck local facts");
+  const announcement = modal.contentEl.querySelector(".ent-cc-sync-recovery-recheck-status");
+  assert.equal(announcement?.getAttribute("role"), "status");
+  assert.equal(announcement?.getAttribute("aria-live"), "polite");
+  assert.equal(announcement?.textContent, "Local facts rechecked.");
 });
 
 test("Sync and Recovery UI is bounded, has one scroll owner, and keeps mobile actions touch-sized", () => {

@@ -25,6 +25,8 @@ test("public repository metadata is present", async () => {
   const readme = await readFile(path.join(root, "README.md"), "utf8");
   const changelog = await readFile(path.join(root, "CHANGELOG.md"), "utf8");
   const iphoneChecklist = await readFile(path.join(root, "docs", "manual-iphone-release-checklist.md"), "utf8");
+  const userGuide = await readFile(path.join(root, "docs", "USER_GUIDE.md"), "utf8");
+  const packageJson = await readFile(path.join(root, "package.json"), "utf8");
   assert.match(license, /MIT License/);
   assert.match(readme, /Privacy and permissions/);
   assert.match(readme, /enumerates whole-vault Markdown file paths/);
@@ -63,6 +65,18 @@ test("public repository metadata is present", async () => {
   assert.match(iphoneChecklist, /physical iPhone/);
   assert.match(iphoneChecklist, /no more than 300 result rows are rendered/);
   assert.match(iphoneChecklist, /grouped by knowledge base and then library section/);
+  assert.match(iphoneChecklist, /Taxonomy health center/);
+  assert.match(iphoneChecklist, /Manage categories/);
+  assert.match(iphoneChecklist, /Turn on VoiceOver/);
+  const commandAppendix = userGuide.slice(userGuide.indexOf("\n## Commands\n"), userGuide.indexOf("\n## Safety boundary\n"));
+  for (const command of [
+    "Quick append: Add to current note…",
+    "Quick append: Choose a note…",
+    "Quick append: Undo last append",
+  ]) assert.match(commandAppendix, new RegExp(command.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
+  assert.match(userGuide, /Any focused Quick Entry or Quick Append command/);
+  assert.match(userGuide, /Open Library: _Library name_/);
+  assert.match(packageJson, /tests\/follow-up\.test\.ts/);
 });
 
 test("manual release surface contains the three required nonempty assets", async () => {
@@ -116,6 +130,13 @@ test("mobile flows keep primary actions visible and empty states actionable", as
   assert.match(followUpModal, /ent-cc-modal-footer/);
   assert.match(styles, /\.ent-cc-follow-up-modal textarea\s*\{[^}]*width: 100%;/s);
   assert.match(styles, /\.ent-cc-follow-up-category-manager/);
+  assert.match(modals, /setName\(this\.options\.placeholder\)/);
+  assert.match(modals, /setAttribute\("aria-label", this\.options\.placeholder\)/);
+  assert.match(modals, /ent-cc-action-suggestion-title[\s\S]*?attr: \{ dir: "auto" \}/);
+  assert.match(modals, /ent-cc-action-suggestion-description[\s\S]*?attr: \{ dir: "auto" \}/);
+  assert.match(styles, /\.ent-cc-action-suggestion-description\s*\{[^}]*font-size:\s*var\(--font-ui-small\);[^}]*overflow-wrap:\s*anywhere;[^}]*white-space:\s*normal;/s);
+  assert.doesNotMatch(styles, /\.ent-cc-action-suggestion-description\s*\{[^}]*(?:font-size:\s*10px|text-overflow:\s*ellipsis|white-space:\s*nowrap)/s);
+  assert.match(styles, /\.ent-cc-catalog-context\s*\{[^}]*border-inline-start:/s);
   assert.match(view, /const backLabel = "Back to main page"/);
   assert.match(view, /"aria-label": backLabel, title: backLabel/);
   assert.match(view, /createSpan\(\{ text: backLabel \}\)/);

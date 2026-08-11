@@ -7,6 +7,7 @@ export class SyncRecoveryCenterModal extends Modal {
   private openedDataEpoch = 0;
   private staleNoticeShown = false;
   private focusTimer: number | null = null;
+  private recheckAnnouncement = "";
 
   constructor(private readonly plugin: EntVaultCommandCenterPlugin) {
     super(plugin.app);
@@ -16,10 +17,13 @@ export class SyncRecoveryCenterModal extends Modal {
     this.openedBaseId = this.plugin.getActiveKnowledgeBaseId();
     this.openedDataEpoch = this.plugin.getDataEpoch();
     this.staleNoticeShown = false;
+    this.recheckAnnouncement = "";
     this.modalEl.addClass("ent-cc-sync-recovery-modal");
     this.contentEl.addClass("ent-cc-modal", "ent-cc-sync-recovery");
     this.titleEl.setText("Sync & recovery center");
-    this.render(true);
+    // Leave initial focus management to Obsidian's modal so VoiceOver first
+    // receives the dialog title and context instead of jumping to the footer.
+    this.render();
   }
 
   onClose(): void {
@@ -61,6 +65,11 @@ export class SyncRecoveryCenterModal extends Modal {
     const modeIcon = mode.createSpan({ attr: { "aria-hidden": "true" } });
     setIcon(modeIcon, snapshot.readOnly ? "shield-alert" : "shield-check");
     mode.createSpan({ text: snapshot.readOnly ? "Protected read-only" : "Writable" });
+    intro.createDiv({
+      cls: "ent-cc-sync-recovery-recheck-status",
+      text: this.recheckAnnouncement,
+      attr: { role: "status", "aria-live": "polite", "aria-atomic": "true" },
+    });
 
     const scroll = this.contentEl.createDiv({
       cls: "ent-cc-sync-recovery-scroll",
@@ -77,7 +86,10 @@ export class SyncRecoveryCenterModal extends Modal {
     });
 
     const actions = this.contentEl.createDiv({ cls: "ent-cc-sync-recovery-actions" });
-    const recheck = this.actionButton(actions, "refresh-cw", "Recheck local facts", () => this.render());
+    const recheck = this.actionButton(actions, "refresh-cw", "Recheck local facts", () => {
+      this.recheckAnnouncement = "Local facts rechecked.";
+      this.render(true);
+    });
     this.actionButton(actions, "x", "Close", () => this.close());
     if (focusAction) this.focusFromOwnerWindow(recheck);
   }
@@ -193,7 +205,7 @@ export class SyncRecoveryCenterModal extends Modal {
   private fact(parent: HTMLElement, label: string, value: string): void {
     const row = parent.createDiv({ cls: "ent-cc-sync-recovery-fact" });
     row.createEl("dt", { text: label });
-    row.createEl("dd", { text: value });
+    row.createEl("dd", { text: value, attr: { dir: "auto" } });
   }
 
   private actionButton(parent: HTMLElement, icon: string, label: string, action: () => void): HTMLButtonElement {

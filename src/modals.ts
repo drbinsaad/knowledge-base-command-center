@@ -70,9 +70,11 @@ export class TextPromptModal extends Modal {
     this.titleEl.setText(this.options.title);
     let value = this.options.initialValue ?? "";
     let input: HTMLInputElement | null = null;
-    new Setting(this.contentEl).addText((control) => {
+    new Setting(this.contentEl).setName(this.options.placeholder).addText((control) => {
       control.setPlaceholder(this.options.placeholder).setValue(value).onChange((next) => { value = next; });
       input = control.inputEl;
+      control.inputEl.setAttribute("aria-label", this.options.placeholder);
+      control.inputEl.setAttribute("dir", "auto");
       control.inputEl.addEventListener("keydown", (event) => {
         if (event.key === "Enter") {
           event.preventDefault();
@@ -202,14 +204,15 @@ export class AddActionModal extends NormalizedFuzzySuggestModal<AddAction> {
     const icon = element.createSpan({ cls: "ent-cc-action-suggestion-icon" });
     setIcon(icon, item.icon);
     const text = element.createDiv();
-    text.createDiv({ cls: "ent-cc-action-suggestion-title", text: item.title });
-    text.createDiv({ cls: "ent-cc-action-suggestion-description", text: item.description });
+    text.createDiv({ cls: "ent-cc-action-suggestion-title", text: item.title, attr: { dir: "auto" } });
+    text.createDiv({ cls: "ent-cc-action-suggestion-description", text: item.description, attr: { dir: "auto" } });
   }
 
   onOpen(): void {
     void super.onOpen();
     this.modalEl.addClass("ent-cc-modal", "ent-cc-add-modal");
     this.titleEl.setText(this.heading);
+    this.titleEl.setAttribute("dir", "auto");
   }
 }
 

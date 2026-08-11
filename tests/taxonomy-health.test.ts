@@ -216,3 +216,17 @@ test("taxonomy health UI is bounded, touch-sized, and uses one scrolling list", 
   assert.match(styles, /\.ent-cc-taxonomy-finding-actions \.ent-cc-button,[\s\S]*?min-height:\s*44px/);
   assert.doesNotMatch(styles, /\.ent-cc-taxonomy-finding-content\s*\{[^}]*overflow-y:/s);
 });
+
+test("taxonomy repair preview has definite mobile scroll ownership and large-text-safe fixed actions", () => {
+  const source = readFileSync(new URL("../src/taxonomy-health-modal.ts", import.meta.url), "utf8");
+  const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+  assert.match(source, /class TaxonomyRepairPreviewModal/);
+  assert.match(source, /role: "region", "aria-label": "Taxonomy repair details", tabindex: "0"/);
+  assert.match(source, /text: repair\.label, attr: \{ dir: "auto" \}/);
+  assert.match(styles, /\.ent-cc-taxonomy-preview-modal\s*\{[^}]*height:[^;}]*100dvh[^}]*max-height:[^;}]*100dvh/s);
+  assert.match(styles, /\.ent-cc-taxonomy-preview-modal > \.modal-content\.ent-cc-taxonomy-preview\s*\{[^}]*flex:\s*1 1 0;[^}]*height:\s*0;[^}]*min-height:\s*0/s);
+  assert.match(styles, /\.ent-cc-taxonomy-preview-body\s*\{[^}]*flex:\s*1 1 auto;[^}]*min-height:\s*0;[^}]*overflow-y:\s*auto/s);
+  assert.match(styles, /\.ent-cc-taxonomy-footer,[\s\S]*?\.ent-cc-taxonomy-preview-actions\s*\{[^}]*flex:\s*0 0 auto;[^}]*flex-wrap:\s*wrap/s);
+  assert.match(styles, /\.ent-cc-taxonomy-preview-actions \.ent-cc-button\s*\{[^}]*min-height:\s*44px;[^}]*white-space:\s*normal/s);
+  assert.doesNotMatch(styles, /\.ent-cc-taxonomy-preview\s*\{[^}]*overflow-y:\s*auto/s);
+});

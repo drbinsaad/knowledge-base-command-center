@@ -170,6 +170,12 @@ export class FakeElement {
     this.listeners.set(type, listeners);
   }
 
+  removeEventListener(type: string, listener: FakeListener): void {
+    const listeners = this.listeners.get(type);
+    if (!listeners) return;
+    this.listeners.set(type, listeners.filter((candidate) => candidate !== listener));
+  }
+
   dispatch(type: string, init: FakeEventInit = {}): FakeEvent {
     const event = new FakeEvent(type, init);
     event.target = this;
@@ -263,6 +269,8 @@ class FakeEventTarget {
 
   removeEventListener(type: string, listener: () => void): void { this.listeners.get(type)?.delete(listener); }
 
+  listenerCount(type: string): number { return this.listeners.get(type)?.size ?? 0; }
+
   dispatch(type: string): void {
     for (const listener of this.listeners.get(type) ?? []) listener();
   }
@@ -278,9 +286,13 @@ export class FakeWindow extends FakeEventTarget {
   document: FakeDocument | null = null;
   innerHeight = 844;
   readonly visualViewport = new FakeVisualViewport();
+  keyboardHeightCss = "0px";
   private nextTimerId = 1;
 
   clearTimeout(_id: number): void {}
+  getComputedStyle(_element: unknown): { getPropertyValue: (name: string) => string } {
+    return { getPropertyValue: (name: string) => name === "--keyboard-height" ? this.keyboardHeightCss : "" };
+  }
   matchMedia(_query: string): { matches: boolean } { return { matches: true }; }
   requestAnimationFrame(callback: FrameRequestCallback): number {
     const id = this.nextTimerId;

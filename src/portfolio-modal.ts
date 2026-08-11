@@ -1,6 +1,6 @@
 import { Modal, Notice, Platform, Setting } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
-import { VaultFilePickerModal } from "./modals";
+import { calculateModalViewportLayout, VaultFilePickerModal } from "./modals";
 import {
   EMPTY_PORTABLE_SELECTION,
   normalizePortableSelection,
@@ -20,6 +20,8 @@ import {
 
 type PortfolioMode = "export" | "import";
 type BusyAction = "export" | "file" | "preview" | "apply";
+const PORTFOLIO_MODES: readonly PortfolioMode[] = ["export", "import"];
+let portfolioModalSequence = 0;
 
 const STATIC_COMPONENTS: ReadonlyArray<{
   key: "workspace" | "index" | "collections" | "study" | "savedViews";
@@ -79,6 +81,41 @@ export class PortfolioTransferModal extends Modal {
   private typedConfirmation = "";
   private plan: PortfolioImportPlan | null = null;
   private previewVisible = new Map<keyof PortfolioPlanDiff, number>();
+  private panelEl: HTMLElement | null = null;
+  private pendingFocusKey: string | null = null;
+  private pendingFocusFallbackKey: string | null = null;
+  private focusTimer: number | null = null;
+  private accessibilityInstanceId = `ent-cc-portfolio-${++portfolioModalSequence}`;
+  private viewportWindow: Window | null = null;
+  private viewportSyncTimers: number[] = [];
+
+  private readonly syncViewportLayout = (): void => {
+    const viewWindow = this.viewportWindow;
+    if (!viewWindow) return;
+    const viewport = viewWindow.visualViewport;
+    const keyboardHeight = Number.parseFloat(
+      viewWindow.getComputedStyle(this.modalEl).getPropertyValue("--keyboard-height"),
+    );
+    const layout = calculateModalViewportLayout(
+      viewWindow.innerHeight,
+      viewport?.height ?? viewWindow.innerHeight,
+      viewport?.offsetTop ?? 0,
+      keyboardHeight,
+    );
+    this.modalEl.style.setProperty("--ent-cc-portfolio-visual-height", `${layout.height}px`);
+    this.modalEl.style.setProperty("--ent-cc-portfolio-visual-shift", `${layout.shift}px`);
+    this.modalEl.toggleClass("is-virtual-keyboard-open", layout.keyboardOpen);
+  };
+
+  private readonly handleViewportFocus = (event: FocusEvent): void => {
+    this.scheduleViewportSync();
+    const target = event.target as HTMLElement | null;
+    const viewWindow = this.viewportWindow;
+    if (!viewWindow || !target || typeof target.scrollIntoView !== "function") return;
+    this.viewportSyncTimers.push(viewWindow.setTimeout(() => {
+      if (this.contentEl.contains(target)) target.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }, 80));
+  };
 
   constructor(private readonly plugin: EntVaultCommandCenterPlugin) {
     super(plugin.app);
@@ -89,19 +126,147 @@ export class PortfolioTransferModal extends Modal {
     this.modalEl.addClass("ent-cc-portfolio-modal");
     this.contentEl.addClass("ent-cc-modal", "ent-cc-portfolio-center");
     this.render();
+    this.bindViewportLayout();
+  }
+
+  onClose(): void {
+    const viewWindow = this.viewportWindow;
+    viewWindow?.visualViewport?.removeEventListener("resize", this.syncViewportLayout);
+    viewWindow?.visualViewport?.removeEventListener("scroll", this.syncViewportLayout);
+    viewWindow?.removeEventListener("resize", this.syncViewportLayout);
+    this.contentEl.removeEventListener("focusin", this.handleViewportFocus);
+    for (const timer of this.viewportSyncTimers) viewWindow?.clearTimeout(timer);
+    this.viewportSyncTimers = [];
+    if (this.focusTimer !== null) viewWindow?.clearTimeout(this.focusTimer);
+    this.focusTimer = null;
+    this.viewportWindow = null;
+    this.modalEl.style.removeProperty("--ent-cc-portfolio-visual-height");
+    this.modalEl.style.removeProperty("--ent-cc-portfolio-visual-shift");
+    this.modalEl.removeClass("is-virtual-keyboard-open");
   }
 
   private render(): void {
-    const scrollTop = this.contentEl.scrollTop;
+    const scrollTop = this.panelEl?.scrollTop ?? 0;
+    this.panelEl = null;
     this.contentEl.empty();
     this.titleEl.setText("Multi-base portfolio transfer");
     this.renderTabs();
-    if (this.mode === "export") this.renderExport();
-    else this.renderImport();
-    this.contentEl.scrollTop = scrollTop;
+    this.renderModePanel();
+    this.renderFooter();
+    const renderedPanel = this.contentEl.querySelector<HTMLElement>(".ent-cc-portfolio-panel");
+    if (renderedPanel) renderedPanel.scrollTop = scrollTop;
     this.contentEl.setAttribute("aria-busy", String(Boolean(this.busy)));
     const close = this.modalEl.querySelector<HTMLButtonElement>(".modal-close-button");
-    if (close) close.disabled = Boolean(this.busy);
+    if (close) {
+      close.disabled = Boolean(this.busy);
+      close.setAttribute("aria-disabled", String(Boolean(this.busy)));
+    }
+    this.restorePendingFocus();
+  }
+
+  private accessibilityId(): string {
+    if (!this.accessibilityInstanceId) this.accessibilityInstanceId = `ent-cc-portfolio-${++portfolioModalSequence}`;
+    return this.accessibilityInstanceId;
+  }
+
+  private modeTabId(mode: PortfolioMode): string {
+    return `${this.accessibilityId()}-tab-${mode}`;
+  }
+
+  private modePanelId(mode: PortfolioMode): string {
+    return `${this.accessibilityId()}-panel-${mode}`;
+  }
+
+  private renderModePanel(): void {
+    this.panelEl = this.contentEl.createDiv({
+      cls: "ent-cc-portfolio-panel",
+      attr: {
+        id: this.modePanelId(this.mode),
+        role: "tabpanel",
+        "aria-labelledby": this.modeTabId(this.mode),
+        tabindex: "0",
+      },
+    });
+    if (this.mode === "export") this.renderExport();
+    else this.renderImport();
+  }
+
+  private renderParent(): HTMLElement {
+    return this.panelEl ?? this.contentEl;
+  }
+
+  private renderFooter(): void {
+    const footer = this.contentEl.createDiv({ cls: "ent-cc-portfolio-footer" });
+    const cancel = footer.createEl("button", {
+      cls: "ent-cc-button",
+      text: "Cancel",
+      attr: {
+        type: "button",
+        "aria-label": "Cancel and close portfolio transfer",
+        "data-portfolio-focus": "close",
+        ...(this.busy ? { disabled: "" } : {}),
+      },
+    });
+    cancel.addEventListener("click", () => {
+      if (!this.busy) this.close();
+    });
+  }
+
+  private rerenderFromControl(focusKey: string, fallbackFocusKey = focusKey): void {
+    this.pendingFocusKey = focusKey;
+    this.pendingFocusFallbackKey = fallbackFocusKey;
+    this.render();
+  }
+
+  private captureCurrentFocus(): string | null {
+    const active = this.contentEl.ownerDocument.activeElement as HTMLElement | null;
+    if (!active || typeof active.getAttribute !== "function" || !this.contentEl.contains(active)) return null;
+    const focusKey = active.getAttribute("data-portfolio-focus");
+    if (!focusKey) return null;
+    this.pendingFocusKey = focusKey;
+    this.pendingFocusFallbackKey = focusKey;
+    return focusKey;
+  }
+
+  private restorePendingFocus(): void {
+    const focusKey = this.pendingFocusKey;
+    const fallbackFocusKey = this.pendingFocusFallbackKey;
+    this.pendingFocusKey = null;
+    this.pendingFocusFallbackKey = null;
+    if (!focusKey) return;
+    const viewWindow = this.contentEl.ownerDocument.defaultView;
+    if (this.focusTimer !== null) viewWindow?.clearTimeout(this.focusTimer);
+    this.focusTimer = null;
+    const restore = (): void => {
+      this.focusTimer = null;
+      const controls = Array.from(this.contentEl.querySelectorAll<HTMLElement>("[data-portfolio-focus]"));
+      const target = controls.find((element) => element.getAttribute("data-portfolio-focus") === focusKey)
+        ?? controls.find((element) => element.getAttribute("data-portfolio-focus") === fallbackFocusKey);
+      target?.focus({ preventScroll: true });
+    };
+    if (!viewWindow) {
+      restore();
+      return;
+    }
+    this.focusTimer = viewWindow.setTimeout(restore, 0);
+  }
+
+  private bindViewportLayout(): void {
+    const viewWindow = this.contentEl.ownerDocument.defaultView;
+    if (!viewWindow) return;
+    this.viewportWindow = viewWindow;
+    viewWindow.visualViewport?.addEventListener("resize", this.syncViewportLayout);
+    viewWindow.visualViewport?.addEventListener("scroll", this.syncViewportLayout);
+    viewWindow.addEventListener("resize", this.syncViewportLayout);
+    this.contentEl.addEventListener("focusin", this.handleViewportFocus);
+    this.scheduleViewportSync();
+  }
+
+  private scheduleViewportSync(): void {
+    const viewWindow = this.viewportWindow;
+    if (!viewWindow) return;
+    for (const timer of this.viewportSyncTimers) viewWindow.clearTimeout(timer);
+    this.viewportSyncTimers = [0, 60, 180, 420].map((delay) => viewWindow.setTimeout(this.syncViewportLayout, delay));
   }
 
   private renderTabs(): void {
@@ -109,34 +274,53 @@ export class PortfolioTransferModal extends Modal {
       cls: "ent-cc-manager-tabs ent-cc-portfolio-tabs",
       attr: { role: "tablist", "aria-label": "Portfolio export or import" },
     });
-    for (const mode of ["export", "import"] as const) {
+    for (const mode of PORTFOLIO_MODES) {
       const active = mode === this.mode;
       const button = tabs.createEl("button", {
         cls: `ent-cc-manager-tab ${active ? "is-active" : ""}`,
         text: mode === "export" ? "Export portfolio" : "Import portfolio",
         attr: {
+          id: this.modeTabId(mode),
           type: "button",
           role: "tab",
           "aria-selected": String(active),
+          "aria-controls": this.modePanelId(mode),
           tabindex: active ? "0" : "-1",
+          "data-portfolio-focus": `mode-${mode}`,
           ...(this.busy ? { disabled: "" } : {}),
         },
       });
       button.addEventListener("click", () => {
         if (this.busy || this.mode === mode) return;
         this.mode = mode;
-        this.render();
+        this.rerenderFromControl(`mode-${mode}`);
+      });
+      button.addEventListener("keydown", (event) => {
+        if (this.busy) return;
+        const index = PORTFOLIO_MODES.indexOf(mode);
+        const nextIndex = event.key === "Home" ? 0
+          : event.key === "End" ? PORTFOLIO_MODES.length - 1
+            : event.key === "ArrowRight" ? (index + 1) % PORTFOLIO_MODES.length
+              : event.key === "ArrowLeft" ? (index - 1 + PORTFOLIO_MODES.length) % PORTFOLIO_MODES.length
+                : -1;
+        if (nextIndex < 0) return;
+        const nextMode = PORTFOLIO_MODES[nextIndex];
+        if (!nextMode) return;
+        event.preventDefault();
+        this.mode = nextMode;
+        this.rerenderFromControl(`mode-${nextMode}`);
       });
     }
   }
 
   private renderExport(): void {
-    this.contentEl.createEl("p", {
+    const parent = this.renderParent();
+    parent.createEl("p", {
       text: "Bundle selected knowledge bases as independent, ordinary portable packages. Note bodies, attachments, and exact note paths are excluded.",
     });
-    this.contentEl.createEl("h3", { text: "Knowledge bases" });
+    parent.createEl("h3", { text: "Knowledge bases" });
     for (const entry of this.plugin.getKnowledgeBases()) {
-      new Setting(this.contentEl)
+      const baseSetting = new Setting(parent)
         .setName(entry.data.settings.workspaceName)
         .setDesc(entry.data.settings.workspaceMode === "ent-clinical" ? "ENT clinical preset" : "Generic preset")
         .addToggle((toggle) => toggle
@@ -146,10 +330,11 @@ export class PortfolioTransferModal extends Modal {
             if (enabled) this.selectedBaseIds.add(entry.id);
             else this.selectedBaseIds.delete(entry.id);
           }));
+      baseSetting.nameEl.setAttribute("dir", "auto");
     }
-    this.contentEl.createEl("h3", { text: "Components in each selected base" });
+    parent.createEl("h3", { text: "Components in each selected base" });
     for (const component of STATIC_COMPONENTS) {
-      new Setting(this.contentEl)
+      new Setting(parent)
         .setName(component.label)
         .setDesc(component.description)
         .addToggle((toggle) => toggle
@@ -157,20 +342,22 @@ export class PortfolioTransferModal extends Modal {
           .setDisabled(Boolean(this.busy))
           .onChange((enabled) => { this.exportComponents[component.key] = enabled; }));
     }
-    new Setting(this.contentEl)
+    new Setting(parent)
       .setName("Libraries")
       .setDesc("Every active library in each selected base, including empty libraries and empty headings.")
       .addToggle((toggle) => toggle
         .setValue(this.exportComponents.libraries)
         .setDisabled(Boolean(this.busy))
         .onChange((enabled) => { this.exportComponents.libraries = enabled; }));
-    const actions = new Setting(this.contentEl).setName("Create portfolio JSON");
+    const actions = new Setting(parent).setName("Create portfolio JSON");
     actions.setDesc(`${this.selectedBaseIds.size} knowledge base${this.selectedBaseIds.size === 1 ? "" : "s"} selected. The aggregate import limit is 50 bases and 32 MB.`);
     actions.addButton((button) => button
       .setCta()
       .setButtonText(this.busy === "export" ? "Exporting…" : "Export portfolio")
       .setDisabled(Boolean(this.busy))
       .onClick(() => this.run("export", () => this.exportPortfolio())));
+    const submit = actions.controlEl.querySelector<HTMLButtonElement>("button");
+    submit?.setAttribute("data-portfolio-focus", "export-submit");
   }
 
   private exportSelectionForBase(baseId: string): PortableExportSelection {
@@ -221,35 +408,40 @@ export class PortfolioTransferModal extends Modal {
   }
 
   private renderImport(): void {
-    this.contentEl.createEl("p", {
+    const parent = this.renderParent();
+    parent.createEl("p", {
       text: "Choose a portfolio, map each source to a new or existing destination, select components, then build the exact dry-run plan before applying anything.",
     });
-    new Setting(this.contentEl)
+    const fileSetting = new Setting(parent)
       .setName("Portfolio JSON")
       .setDesc(this.bundle ? `${this.sourceLabel || "Selected file"} · ${this.bundle.manifest.baseCount} source bases` : "No portfolio selected.")
       .addButton((button) => button
         .setButtonText(this.busy === "file" ? "Reading…" : "Choose file")
         .setDisabled(Boolean(this.busy))
         .onClick(() => this.chooseFile()));
+    fileSetting.controlEl.querySelector("button")?.setAttribute("data-portfolio-focus", "import-file");
     if (!this.bundle) return;
     const crossVault = this.bundle.sourceVaultId !== this.plugin.getVaultId();
     const destinationEntries = this.plugin.getKnowledgeBases();
-    this.contentEl.createEl("h3", { text: "Source → destination mapping" });
+    parent.createEl("h3", { text: "Source → destination mapping" });
     for (const manifest of this.bundle.manifest.entries) {
       const enabled = this.enabledSources.has(manifest.sourceBaseId);
-      const card = this.contentEl.createDiv({ cls: "ent-cc-portfolio-map-card" });
-      new Setting(card)
+      const card = parent.createDiv({ cls: "ent-cc-portfolio-map-card" });
+      const sourceSetting = new Setting(card)
         .setName(manifest.sourceBaseName)
         .setDesc(`${manifest.sourceWorkspaceMode === "ent-clinical" ? "ENT clinical" : "Generic"} · ${manifest.subjects} subjects · ${manifest.packageBytes.toLocaleString()} bytes`)
-        .addToggle((toggle) => toggle
-          .setValue(enabled)
-          .setDisabled(Boolean(this.busy))
-          .onChange((next) => {
-            if (next) this.enabledSources.add(manifest.sourceBaseId);
-            else this.enabledSources.delete(manifest.sourceBaseId);
-            this.invalidatePlan();
-            this.render();
-          }));
+        .addToggle((toggle) => {
+          toggle.toggleEl.setAttribute("data-portfolio-focus", `source-${manifest.sourceBaseId}`);
+          toggle.setValue(enabled)
+            .setDisabled(Boolean(this.busy))
+            .onChange((next) => {
+              if (next) this.enabledSources.add(manifest.sourceBaseId);
+              else this.enabledSources.delete(manifest.sourceBaseId);
+              this.invalidatePlan();
+              this.rerenderFromControl(`source-${manifest.sourceBaseId}`);
+            });
+        });
+      sourceSetting.nameEl.setAttribute("dir", "auto");
       if (!enabled) continue;
       const destination = this.destinationBySource.get(manifest.sourceBaseId) ?? "new";
       new Setting(card)
@@ -263,42 +455,48 @@ export class PortfolioTransferModal extends Modal {
           dropdown.setValue(destination).setDisabled(Boolean(this.busy)).onChange((value) => {
             this.destinationBySource.set(manifest.sourceBaseId, value);
             this.invalidatePlan();
-            this.render();
+            this.rerenderFromControl(`destination-${manifest.sourceBaseId}`);
           });
+          dropdown.selectEl.setAttribute("data-portfolio-focus", `destination-${manifest.sourceBaseId}`);
+          dropdown.selectEl.setAttribute("dir", "auto");
         });
       if (destination !== "new") {
         new Setting(card)
           .setName("Per-base mode")
           .setDesc("Merge keeps unselected/local organization. Replace resets only selected components.")
-          .addDropdown((dropdown) => dropdown
-            .addOption("merge", "Merge")
-            .addOption("replace", "Replace selected components")
-            .setValue(this.modeBySource.get(manifest.sourceBaseId) ?? "merge")
-            .setDisabled(Boolean(this.busy))
-            .onChange((value) => {
-              this.modeBySource.set(manifest.sourceBaseId, value === "replace" ? "replace" : "merge");
-              this.invalidatePlan();
-              this.render();
-            }));
+          .addDropdown((dropdown) => {
+            dropdown.selectEl.setAttribute("data-portfolio-focus", `mapping-mode-${manifest.sourceBaseId}`);
+            dropdown.addOption("merge", "Merge")
+              .addOption("replace", "Replace selected components")
+              .setValue(this.modeBySource.get(manifest.sourceBaseId) ?? "merge")
+              .setDisabled(Boolean(this.busy))
+              .onChange((value) => {
+                this.modeBySource.set(manifest.sourceBaseId, value === "replace" ? "replace" : "merge");
+                this.invalidatePlan();
+                this.rerenderFromControl(`mapping-mode-${manifest.sourceBaseId}`);
+              });
+          });
       }
       this.renderImportComponents(card, manifest.sourceBaseId, manifest.selection);
     }
     if (crossVault && this.hasExistingReplace()) {
-      const warning = this.contentEl.createDiv({ cls: "ent-cc-manager-diagnostic", attr: { role: "alert" } });
+      const warning = parent.createDiv({ cls: "ent-cc-manager-diagnostic", attr: { role: "alert" } });
       warning.createEl("strong", { text: "Cross-vault replacement gate" });
       warning.createEl("p", { text: "Portable merge and new-base import are allowed across vaults. Replacing selected components in an existing base requires this separate acknowledgement." });
       new Setting(warning)
         .setName("Allow cross-vault replace")
-        .addToggle((toggle) => toggle
-          .setValue(this.allowCrossVaultReplace)
-          .setDisabled(Boolean(this.busy))
-          .onChange((enabled) => {
-            this.allowCrossVaultReplace = enabled;
-            this.invalidatePlan();
-            this.render();
-          }));
+        .addToggle((toggle) => {
+          toggle.toggleEl.setAttribute("data-portfolio-focus", "cross-vault-ack");
+          toggle.setValue(this.allowCrossVaultReplace)
+            .setDisabled(Boolean(this.busy))
+            .onChange((enabled) => {
+              this.allowCrossVaultReplace = enabled;
+              this.invalidatePlan();
+              this.rerenderFromControl("cross-vault-ack");
+            });
+        });
     }
-    new Setting(this.contentEl)
+    const previewSetting = new Setting(parent)
       .setName("Exact dry-run plan")
       .setDesc("The resulting post-state is computed once. Apply commits this exact plan; it does not rerun import matching.")
       .addButton((button) => button
@@ -306,6 +504,7 @@ export class PortfolioTransferModal extends Modal {
         .setButtonText(this.busy === "preview" ? "Planning…" : "Build exact preview")
         .setDisabled(Boolean(this.busy) || this.enabledSources.size === 0)
         .onClick(() => this.run("preview", () => this.buildPreview())));
+    previewSetting.controlEl.querySelector("button")?.setAttribute("data-portfolio-focus", "build-preview");
     if (this.plan) this.renderPlan(this.plan);
   }
 
@@ -385,14 +584,18 @@ export class PortfolioTransferModal extends Modal {
   }
 
   private renderPlan(plan: PortfolioImportPlan): void {
-    const preview = this.contentEl.createDiv({ cls: "ent-cc-portfolio-preview", attr: { "aria-live": "polite" } });
+    const preview = this.renderParent().createDiv({ cls: "ent-cc-portfolio-preview", attr: { "aria-live": "polite" } });
     preview.createEl("h3", { text: "Exact change preview" });
     preview.createEl("p", {
       text: `${plan.operations.length} mapped source${plan.operations.length === 1 ? "" : "s"}. ${plan.recoveryPackages.length} Replace recovery export${plan.recoveryPackages.length === 1 ? "" : "s"} will be written before the atomic store mutation.`,
     });
     for (const category of PORTFOLIO_DIFF_CATEGORIES) {
       const items = plan.diff[category];
-      const section = preview.createEl("section", { cls: "ent-cc-portfolio-diff-section" });
+      const sectionFocusKey = `diff-section-${category}`;
+      const section = preview.createEl("section", {
+        cls: "ent-cc-portfolio-diff-section",
+        attr: { tabindex: "-1", "data-portfolio-focus": sectionFocusKey },
+      });
       section.createEl("h4", { text: `${DIFF_LABELS[category]} (${items.length})` });
       if (items.length === 0) {
         section.createEl("p", { text: "None." });
@@ -400,15 +603,19 @@ export class PortfolioTransferModal extends Modal {
       }
       const visible = Math.min(items.length, this.previewVisible.get(category) ?? 50);
       const list = section.createEl("ul");
-      for (const item of items.slice(0, visible)) list.createEl("li", { text: item });
+      for (const item of items.slice(0, visible)) list.createEl("li", { text: item, attr: { dir: "auto" } });
       if (visible < items.length) {
         const more = section.createEl("button", {
           text: `Show ${Math.min(50, items.length - visible)} more of ${items.length}`,
-          attr: { type: "button", ...(this.busy ? { disabled: "" } : {}) },
+          attr: {
+            type: "button",
+            "data-portfolio-focus": `diff-more-${category}`,
+            ...(this.busy ? { disabled: "" } : {}),
+          },
         });
         more.addEventListener("click", () => {
           this.previewVisible.set(category, visible + 50);
-          this.render();
+          this.rerenderFromControl(`diff-more-${category}`, sectionFocusKey);
         });
       }
     }
@@ -427,13 +634,15 @@ export class PortfolioTransferModal extends Modal {
             });
           text.inputEl.setAttribute("autocomplete", "off");
           text.inputEl.setAttribute("autocapitalize", "characters");
+          text.inputEl.setAttribute("data-portfolio-focus", "typed-confirmation");
         });
     }
     new Setting(preview)
       .setName("Apply this exact plan")
       .setDesc("Stale base, store, or sync generations abort before mutation. A save failure rolls the complete store transaction back.")
       .addButton((button) => {
-        button.buttonEl.dataset.portfolioApply = "true";
+        button.buttonEl.setAttribute("data-portfolio-apply", "true");
+        button.buttonEl.setAttribute("data-portfolio-focus", "apply-plan");
         button.setCta()
           .setButtonText(this.busy === "apply" ? "Applying…" : "Apply exact plan")
           .setDisabled(Boolean(this.busy) || Boolean(plan.confirmationPhrase && this.typedConfirmation !== plan.confirmationPhrase))
@@ -506,6 +715,7 @@ export class PortfolioTransferModal extends Modal {
 
   private run(action: BusyAction, callback: () => void | Promise<void>): void {
     if (this.busy) return;
+    const actionFocusKey = this.captureCurrentFocus();
     this.busy = action;
     this.render();
     void Promise.resolve()
@@ -513,7 +723,13 @@ export class PortfolioTransferModal extends Modal {
       .catch((error) => new Notice(errorMessage(error), 10000))
       .finally(() => {
         this.busy = null;
-        if (this.contentEl.isConnected) this.render();
+        if (this.contentEl.isConnected) {
+          if (actionFocusKey) {
+            this.pendingFocusKey = actionFocusKey;
+            this.pendingFocusFallbackKey = actionFocusKey;
+          }
+          this.render();
+        }
       });
   }
 }
