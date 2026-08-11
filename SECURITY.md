@@ -47,13 +47,15 @@ Security-relevant reports include:
 
 ## Trust boundary
 
-Knowledge Base Command Center runs inside the current Obsidian vault. It intentionally enumerates Markdown paths and cached metadata to build indexes and enumerates vault entries for folder and in-vault JSON pickers. Content reads are targeted to a selected template or import and to separately disclosed ENT canonical workflows.
+Knowledge Base Command Center runs inside the current Obsidian vault. It intentionally enumerates Markdown paths and cached metadata to build indexes and enumerates vault entries for folder and in-vault JSON pickers. Content reads are targeted to a selected template or import, to the note explicitly selected for Quick append inside Obsidian's atomic process operation, and to separately disclosed ENT canonical workflows.
 
 The plugin has no intended analytics, telemetry, advertising, account, payment, or network requests. Ordinary organization changes plugin data only.
 
 Portable Index and Library sections exclude source note paths and note bodies. Workspace settings can contain configured vault-relative folders; saved queries are literal. Same-vault recovery, conflict rescues, and raw <code>data.json</code> contain exact vault-relative paths and must remain private.
 
-The Quick entry protocol route is action-only. It accepts only Obsidian's intrinsic <code>action=kbcc-quick-entry</code> dispatch; any additional query key fails closed before the hub opens. URLs cannot prefill a title, note path, content, or other entry field, and rejected query values are not retained or logged.
+The Quick entry and Quick append protocol routes are fixed and action-only. They accept only Obsidian's intrinsic action dispatch; any additional query key fails closed before a hub, picker, or form opens. URLs cannot prefill a title, note path, category, content, or other entry field, and rejected query values are not retained or logged.
+
+Quick append is an explicit Markdown-write workflow. It uses the selected note's latest content inside Obsidian's atomic process operation, refuses <code>ai_lock: true</code> or ambiguous lock declarations, and changes only a strictly marked managed block. Its short undo retains only a file reference, offsets, and integrity fingerprints in memory; neither note bodies nor appended text are written to plugin data. The feature does not import, move, or manage attachments.
 
 Two ENT-only workflows—proposal promotion and advanced canonical placement—can move a selected note and update structural frontmatter and its top-level heading after explicit action. They refuse <code>ai_lock: true</code>, preview their destination, and attempt rollback.
 

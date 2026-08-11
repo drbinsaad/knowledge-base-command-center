@@ -98,6 +98,34 @@ export function prepareFuzzySearch(query: string): (text: string) => SearchResul
     return { score: -(first + gapCost), matches };
   };
 }
+
+/** Minimal test-side YAML mapping parser for the scalar lock forms exercised
+ * by Quick Append. Production uses Obsidian's full parseYaml implementation. */
+export function parseYaml(yaml: string): unknown {
+  const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const rawLine of yaml.split(/\r\n|\n|\r/u)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const match = /^("(?:\\.|[^"])*"|'(?:''|[^'])*'|[A-Za-z0-9_-]+)\s*:\s*(.*)$/u.exec(line);
+    if (!match) continue;
+    const rawKey = match[1] ?? "";
+    let key = rawKey;
+    if (rawKey.startsWith('"')) {
+      const jsonCompatible = rawKey.replace(/\\x([0-9A-Fa-f]{2})/gu, "\\u00$1");
+      key = JSON.parse(jsonCompatible) as string;
+    } else if (rawKey.startsWith("'")) {
+      key = rawKey.slice(1, -1).replace(/''/gu, "'");
+    }
+    const rawValue = (match[2] ?? "").replace(/\s+#.*$/u, "").trim();
+    if (/^false$/iu.test(rawValue)) result[key] = false;
+    else if (/^(?:null|~)$/iu.test(rawValue)) result[key] = null;
+    else if (/^(?:true|yes|on)$/iu.test(rawValue)) result[key] = true;
+    else if (/^(?:no|off)$/iu.test(rawValue)) result[key] = false;
+    else if (/^".*"$/u.test(rawValue)) result[key] = JSON.parse(rawValue) as unknown;
+    else result[key] = rawValue;
+  }
+  return result;
+}
 export class Menu {}
 export class Setting {}
 export class PluginSettingTab {

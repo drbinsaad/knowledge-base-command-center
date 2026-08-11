@@ -101,8 +101,20 @@ import {
 } from "./model";
 import { MAX_PORTABLE_PACKAGE_BYTES, portableSubjectPath, registerPortableGroup } from "./portability";
 import {
+  appendFollowUpEntry,
+  assertFollowUpNoteWritable,
+  cleanFollowUpCategoryDefinitions,
+  reverseFollowUpAppend,
+  type FollowUpCategoryDefinition,
+  type FollowUpUndoMetadata,
+} from "./follow-up";
+import { QuickAppendModal } from "./follow-up-modal";
+import { VaultFilePickerModal } from "./modals";
+import {
   createQuickEntryCommands,
+  privacySafeFixedActionRequest,
   privacySafeQuickEntryRequest,
+  QUICK_APPEND_PROTOCOL_ACTIONS,
   QUICK_ENTRY_PROTOCOL_ACTIONS,
 } from "./quick-entry";
 import {
@@ -120,6 +132,7 @@ import { mergeKnowledgeBaseStores, type StoreMergeResult } from "./store-merge";
 /** Bound stable inactive projections by records, not an arbitrary base count. */
 const MAX_INACTIVE_SEARCH_CACHED_RECORDS = 50_000;
 const DEVICE_LOCAL_STATE_KEY = "ent-vault-command-center.device-state.v1";
+const FOLLOW_UP_UNDO_WINDOW_MS = 5 * 60 * 1000;
 
 interface PluginDataLoadResult {
   recognizedStore: boolean;
@@ -268,6 +281,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
    */
   private pendingVaultRenames: PendingVaultRename[] = [];
   private vaultRenameRepairQueue: Promise<void> = Promise.resolve();
+  private lastFollowUpUndo: { expiresAt: number; file: TFile; undo: FollowUpUndoMetadata } | null = null;
   dataCompatibilityWarning = "";
 
   async onload(): Promise<void> {
@@ -307,6 +321,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         void this.withView((view) => view.startQuickAddCurrentNote(currentPath));
       },
       addExistingNote: () => void this.withView((view) => view.startQuickAddExistingNote()),
+      appendCurrentNote: () => this.openQuickAppendCurrentNote(),
+      appendExistingNote: () => this.openQuickAppendExistingNote(),
     })) this.addCommand(command);
 
     for (const action of QUICK_ENTRY_PROTOCOL_ACTIONS) {
@@ -318,6 +334,23 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         void this.withView((view) => view.openQuickEntry(currentPath));
       });
     }
+    for (const action of QUICK_APPEND_PROTOCOL_ACTIONS) {
+      this.registerObsidianProtocolHandler(action, (parameters) => {
+        if (!privacySafeFixedActionRequest(parameters, action)) return;
+        if (action === "kbcc-quick-append-current") this.openQuickAppendCurrentNote();
+        else this.openQuickAppendExistingNote();
+      });
+    }
+    this.addCommand({
+      id: "undo-last-quick-append",
+      name: "Quick append: Undo last append",
+      icon: "undo-2",
+      checkCallback: (checking) => {
+        if (!this.canUndoLastFollowUpAppend()) return false;
+        if (!checking) this.run(() => this.undoLastFollowUpAppend());
+        return true;
+      },
+    });
     this.addCommand({
       id: "create-topic-proposal",
       name: "Create topic proposal in inbox",
@@ -1744,6 +1777,128 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   getDataEpoch(): number { return this.dataEpoch; }
   getSearchGeneration(): number { return this.searchGeneration; }
   getVaultId(): string { return this.store.vaultId; }
+
+  getFollowUpCategories(): FollowUpCategoryDefinition[] {
+    return this.data.settings.followUpCategories.map((category) => ({ ...category }));
+  }
+
+  async replaceFollowUpCategories(categories: readonly FollowUpCategoryDefinition[]): Promise<void> {
+    const cleaned = cleanFollowUpCategoryDefinitions(categories);
+    if (cleaned.length === 0 || cleaned.every((category) => category.archived)) {
+      throw new Error("Keep at least one active Quick Append category.");
+    }
+    if (cleaned.length !== categories.length) throw new Error("One or more Quick Append categories are invalid or duplicated.");
+    await this.mutate("Update Quick Append categories", () => {
+      this.data.settings.followUpCategories = cleaned;
+    }, { includeSettings: true });
+  }
+
+  openQuickAppendCurrentNote(explicitPath?: string): void {
+    try {
+      this.assertDataWritable();
+      const file = explicitPath
+        ? this.app.vault.getAbstractFileByPath(normalizePath(explicitPath))
+        : this.app.workspace.getActiveFile();
+      if (!(file instanceof TFile) || file.extension.toLocaleLowerCase() !== "md") {
+        new Notice("Open a Markdown note first, then run quick append: Add to current note.", 7000);
+        return;
+      }
+      this.openQuickAppendForFile(file);
+    } catch (error) {
+      new Notice(error instanceof Error ? error.message : String(error), 8000);
+    }
+  }
+
+  openQuickAppendExistingNote(): void {
+    try {
+      this.assertDataWritable();
+      const openedBaseId = this.store.activeBaseId;
+      const openedDataEpoch = this.dataEpoch;
+      const files = this.getVaultNoteFiles()
+        .filter((file) => !isImmutableSourcePath(file.path))
+        .sort((left, right) => left.path.localeCompare(right.path));
+      if (files.length === 0) {
+        new Notice("No Markdown notes are available for quick append.");
+        return;
+      }
+      new VaultFilePickerModal(this.app, files, "Choose a note for Quick Append", (file) => {
+        if (this.store.activeBaseId !== openedBaseId || this.dataEpoch !== openedDataEpoch) {
+          new Notice("The active knowledge base changed. Reopen quick append before choosing a note.", 8000);
+          return;
+        }
+        this.openQuickAppendForFile(file);
+      }).open();
+    } catch (error) {
+      new Notice(error instanceof Error ? error.message : String(error), 8000);
+    }
+  }
+
+  private openQuickAppendForFile(file: TFile): void {
+    const openedBaseId = this.store.activeBaseId;
+    const openedDataEpoch = this.dataEpoch;
+    const categories = this.getFollowUpCategories();
+    if (!categories.some((category) => !category.archived)) {
+      new Notice("No active quick append categories are configured. Restore or add one in plugin settings.", 8000);
+      return;
+    }
+    new QuickAppendModal(this.app, {
+      file,
+      categories,
+      initialDate: this.today(),
+      onSubmit: async ({ categoryId, date, text }) => {
+        if (this.store.activeBaseId !== openedBaseId || this.dataEpoch !== openedDataEpoch) {
+          throw new Error("The active knowledge base changed. Reopen Quick Append before continuing.");
+        }
+        await this.appendFollowUpToFile(file, categoryId, text, date);
+      },
+    }).open();
+  }
+
+  async appendFollowUpToFile(file: TFile, categoryId: string, text: string, date = this.today()): Promise<void> {
+    this.assertDataWritable();
+    if (file.extension.toLocaleLowerCase() !== "md") throw new Error("Quick Append can change only Markdown notes.");
+    if (isImmutableSourcePath(file.path)) throw new Error("Immutable source-book files cannot be changed by Quick Append.");
+    const currentFile = this.app.vault.getAbstractFileByPath(file.path);
+    if (!(currentFile instanceof TFile) || currentFile.extension.toLocaleLowerCase() !== "md" || currentFile !== file) {
+      throw new Error("The selected note is no longer the same Markdown file. Reopen Quick Append and choose it again.");
+    }
+    const category = this.data.settings.followUpCategories.find((item) => item.id === categoryId && !item.archived);
+    if (!category) throw new Error("The selected Quick Append category is no longer active.");
+    let undo: FollowUpUndoMetadata | null = null;
+    await this.app.vault.process(currentFile, (content) => {
+      assertFollowUpNoteWritable(content);
+      const result = appendFollowUpEntry({ content, category, text, date });
+      undo = result.undo;
+      return result.content;
+    });
+    if (!undo) throw new Error("Quick Append did not receive a completed atomic note update.");
+    this.lastFollowUpUndo = { expiresAt: Date.now() + FOLLOW_UP_UNDO_WINDOW_MS, file: currentFile, undo };
+    new Notice(`Added to ${category.label} in ${currentFile.basename}.`, 5000);
+  }
+
+  private canUndoLastFollowUpAppend(): boolean {
+    const pending = this.lastFollowUpUndo;
+    if (!pending) return false;
+    if (Date.now() > pending.expiresAt) {
+      this.lastFollowUpUndo = null;
+      return false;
+    }
+    return this.app.vault.getAbstractFileByPath(pending.file.path) instanceof TFile;
+  }
+
+  private async undoLastFollowUpAppend(): Promise<void> {
+    this.assertDataWritable();
+    const pending = this.lastFollowUpUndo;
+    if (!pending || !this.canUndoLastFollowUpAppend()) throw new Error("There is no recent Quick Append change to undo.");
+    const currentFile = this.app.vault.getAbstractFileByPath(pending.file.path);
+    if (!(currentFile instanceof TFile)) throw new Error("The note changed location and the transient Quick Append undo is unavailable.");
+    await this.app.vault.process(currentFile, (content) => {
+      assertFollowUpNoteWritable(content);
+      return reverseFollowUpAppend(content, pending.undo);
+    });
+    this.lastFollowUpUndo = null;
+    new Notice(`Undid the last Quick Append in ${currentFile.basename}.`, 5000);
+  }
 
   private cleanKnowledgeBaseName(name: string): string {
     const clean = name.normalize("NFC").trim();

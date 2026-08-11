@@ -39,11 +39,15 @@ test("public repository metadata is present", async () => {
   assert.match(readme, /## Known limitations/);
   assert.match(readme, /every available, non-archived knowledge base/);
   assert.match(readme, /Showing the first 300 of _N_ results/);
-  assert.match(readme, /Two deliberate ENT-only workflows are exceptions/);
+  assert.match(readme, /Two additional ENT-only workflows can change selected files/);
+  assert.match(readme, /Quick append is a deliberate generic exception/);
   assert.match(readme, /stable internal ID `ent-vault-command-center`/);
   assert.match(readme, /Portable packages created by version .* use format version 4/i);
   assert.match(readme, /Current v9 (?:snapshots|files)/i);
   assert.match(readme, /obsidian:\/\/kbcc-quick-entry/);
+  assert.match(readme, /obsidian:\/\/kbcc-quick-append-current/);
+  assert.match(readme, /obsidian:\/\/kbcc-quick-append-existing/);
+  assert.match(readme, /Quick append follow-up notes/);
   assert.match(readme, /Settings → Mobile → Manage toolbar options/);
   const latestChangelogVersion = /^##\s+(\d+\.\d+\.\d+)\s*$/m.exec(changelog)?.[1];
   assert.equal(latestChangelogVersion, manifest.version, "the first changelog release must match the release manifest");
@@ -73,6 +77,7 @@ test("mobile flows keep primary actions visible and empty states actionable", as
   const view = await readFile(path.join(root, "src/view.ts"), "utf8");
   const manager = await readFile(path.join(root, "src/index-manager.ts"), "utf8");
   const modals = await readFile(path.join(root, "src/modals.ts"), "utf8");
+  const followUpModal = await readFile(path.join(root, "src/follow-up-modal.ts"), "utf8");
   const libraryModal = await readFile(path.join(root, "src/library-modal.ts"), "utf8");
   const styles = await readFile(path.join(root, "styles.css"), "utf8");
   assert.match(view, /Add existing \$\{settings\.itemPlural\}/);
@@ -98,6 +103,12 @@ test("mobile flows keep primary actions visible and empty states actionable", as
   assert.match(modals, /handleViewportFocus/);
   assert.match(modals, /\[0, 60, 180, 420\]/);
   assert.match(modals, /--keyboard-height/);
+  assert.match(followUpModal, /calculateModalViewportLayout/);
+  assert.match(followUpModal, /--keyboard-height/);
+  assert.match(followUpModal, /\[0, 60, 180, 420\]/);
+  assert.match(followUpModal, /ent-cc-modal-footer/);
+  assert.match(styles, /\.ent-cc-follow-up-modal textarea\s*\{[^}]*width: 100%;/s);
+  assert.match(styles, /\.ent-cc-follow-up-category-manager/);
   assert.match(view, /const backLabel = "Back to main page"/);
   assert.match(view, /"aria-label": backLabel, title: backLabel/);
   assert.match(view, /createSpan\(\{ text: backLabel \}\)/);

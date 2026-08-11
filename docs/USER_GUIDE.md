@@ -136,7 +136,9 @@ Open Quick entry from the lightning-bolt desktop ribbon action or the Command Ce
 - create a nested Index subject, Collection subheading, or Library subheading;
 - create a note after choosing its Index/Library destination, visual group, destination folder, and empty or template content;
 - add the note that was active when Quick entry opened; and
-- choose and add another existing Markdown note.
+- choose and add another existing Markdown note;
+- append a categorized follow-up item to the current note; and
+- choose another Markdown note and append a categorized follow-up item.
 
 Placeholder and visual-structure changes are transactional, stay in plugin data, and participate in Undo. Creating a note remains the only ordinary Quick entry action that writes a Markdown file. The ENT preset continues to route topic creation through the unverified proposal workflow and does not expose manual protected-Library classification.
 
@@ -155,6 +157,9 @@ Available focused commands are:
 - Quick entry: Create note…
 - Quick entry: Add current note…
 - Quick entry: Add existing note…
+- Quick append: Add to current note…
+- Quick append: Choose a note…
+- Quick append: Undo last append
 
 ### Add a mobile toolbar button
 
@@ -162,13 +167,28 @@ On iPhone or iPad, open **Settings → Mobile → Manage toolbar options**, scro
 
 ### Use Apple Shortcuts safely
 
-Create an Apple Shortcut with **Open URLs** and use exactly:
+Create an Apple Shortcut with **Open URLs** and use one exact action URL:
 
 ~~~text
 obsidian://kbcc-quick-entry
+obsidian://kbcc-quick-append-current
+obsidian://kbcc-quick-append-existing
 ~~~
 
-This URL can only open the hub. It cannot create an entry, select a note, or prefill a title, path, content, or clinical field. The protocol accepts only Obsidian's intrinsic `action=kbcc-quick-entry` value. Any additional query key—including `title`, `path`, `content`, or an unknown key—fails closed and the hub does not open.
+The first URL opens only the hub. The second opens a blank Quick append form for the active Markdown note, and the third opens the note picker first. They cannot prefill a title, path, content, category, or clinical field. Each protocol accepts only Obsidian's intrinsic action value. Any additional query key—including `title`, `path`, `content`, or an unknown key—fails closed and no form opens.
+
+## Quick append
+
+Use Quick append when a topic note needs a short follow-up item without opening its full editor workflow. Choose a category and enter one item. The defaults are:
+
+- **Questions** and **Lectures to watch** as checkboxes;
+- **Sources** and **Thoughts** as bullets;
+- **To read** as a checkbox; and
+- **Other** as a bullet.
+
+The first item creates one managed **Follow-up notes** block at the end of the note. A later item in the same category is appended below the existing category heading. Another category receives its own heading inside the same block. Open **Settings → Knowledge Base Command Center → Quick append → Categories** to rename, reorder, add, archive, or restore categories and to choose bullet/checkbox and optional-date behavior.
+
+Quick append refuses locked notes, ambiguous managed markers, malformed frontmatter, oversized notes, and stale undo. Its five-minute undo stores only positions and integrity fingerprints in memory; it never stores the note body in plugin data. Ordinary attachments remain controlled by Obsidian.
 
 ## Portable placeholders
 

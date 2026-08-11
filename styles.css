@@ -1840,6 +1840,55 @@
   -webkit-overflow-scrolling: touch;
 }
 
+.ent-cc-follow-up-modal textarea {
+  width: 100%;
+  min-height: 9rem;
+  resize: vertical;
+}
+
+.ent-cc-follow-up-modal .ent-cc-catalog-context {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+
+.ent-cc-follow-up-category-manager {
+  width: min(760px, calc(100vw - 32px));
+  max-width: 760px;
+  max-height: calc(100dvh - 32px);
+}
+
+.ent-cc-follow-up-category-manager .modal-content {
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.ent-cc-follow-up-category-list {
+  max-height: min(56vh, 560px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-block: 1px solid var(--background-modifier-border);
+}
+
+.ent-cc-follow-up-category-list .setting-item {
+  min-width: 0;
+}
+
+.ent-cc-follow-up-category-list .setting-item-info,
+.ent-cc-follow-up-category-list .setting-item-control {
+  min-width: 0;
+}
+
+.ent-cc-follow-up-category-list .setting-item-control {
+  flex-wrap: wrap;
+}
+
+.ent-cc-follow-up-category-list .setting-item.is-archived .setting-item-name {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
 .ent-cc-topic-editor {
   overflow-y: auto;
   padding-bottom: 4px;
@@ -2400,6 +2449,31 @@
   .ent-cc-knowledge-note-content > .ent-cc-modal-footer .setting-item-control,
   .ent-cc-knowledge-note-content > .ent-cc-modal-footer button {
     width: 100%;
+  }
+
+  .ent-cc-follow-up-modal textarea {
+    min-height: 7rem;
+    font-size: 16px;
+  }
+
+  .ent-cc-follow-up-category-manager {
+    width: calc(100vw - 12px);
+    max-height: calc(100dvh - 16px);
+  }
+
+  .ent-cc-follow-up-category-list {
+    max-height: none;
+  }
+
+  .ent-cc-follow-up-category-list .setting-item {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ent-cc-follow-up-category-list .setting-item-control,
+  .ent-cc-follow-up-category-list button,
+  .ent-cc-follow-up-category-manager > .modal-content > .ent-cc-modal-footer button {
+    min-height: 44px;
   }
 
   .ent-cc-index-manager-modal {

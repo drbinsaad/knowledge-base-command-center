@@ -1,6 +1,8 @@
 import { App, Notice, Plugin, PluginSettingTab, Setting, SettingDefinitionItem, SettingDefinitionRender, TFile, TFolder } from "obsidian";
 import { ManageKnowledgeBasesModal } from "./knowledge-base-modal";
 import { ManageLibrariesModal } from "./library-modal";
+import { FollowUpCategoryManagerModal } from "./follow-up-modal";
+import type { FollowUpCategoryDefinition } from "./follow-up";
 import type EntVaultCommandCenterPlugin from "./main";
 import {
   asUnknownRecord,
@@ -36,6 +38,8 @@ interface SettingsHost extends Plugin {
   renameKnowledgeBase(id: string, name: string): Promise<void>;
   getLibraries(includeArchived?: boolean): LibraryDefinition[];
   librarySubjectCount(id: string): number;
+  getFollowUpCategories(): FollowUpCategoryDefinition[];
+  replaceFollowUpCategories(categories: readonly FollowUpCategoryDefinition[]): Promise<void>;
 }
 
 type DirectSettingsDataField = "activeTab" | "indexGroupOrder";
@@ -579,6 +583,38 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
                 await this.save(false);
               }));
           }, ["new tab", "same tab", "split"]),
+        ],
+      },
+      {
+        type: "group",
+        heading: "Quick Append",
+        items: [
+          {
+            name: "Quick Append behavior",
+            desc: "Adds one item beneath a strict, plugin-owned Follow-up notes block in a chosen Markdown note. Existing text, ordinary paste/drop attachments, and note location are not changed.",
+            aliases: ["follow up", "questions", "sources", "thoughts", "lectures", "reading"],
+          },
+          renderSetting(
+            "Categories",
+            `${String(settings.followUpCategories.filter((category) => !category.archived).length)} active · ${String(settings.followUpCategories.length)} total. Labels can change while stable marker IDs keep existing sections connected.`,
+            (row) => {
+              row.addButton((button) => button.setButtonText("Manage…").setDisabled(readOnly).onClick(() => {
+                if (!ownsConfiguredBase()) return;
+                new FollowUpCategoryManagerModal(this.host.app, this.host.getFollowUpCategories(), (categories) => {
+                  if (!ownsConfiguredBase()) throw new Error("The active knowledge base changed. Reopen category management.");
+                  return this.host.replaceFollowUpCategories(categories).then(() => {
+                    if (ownsConfiguredBase()) this.update();
+                  });
+                }).open();
+              }));
+            },
+            ["append", "category", "question", "source", "lecture"],
+          ),
+          {
+            name: "Attachments in appended items",
+            desc: "Quick Append writes Markdown text only. Paste, drag, and attachment storage continue to follow Obsidian’s Files and Links setting; the plugin does not move existing attachments.",
+            aliases: ["attachment folder", "files", "images"],
+          },
         ],
       },
       {

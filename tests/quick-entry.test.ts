@@ -6,7 +6,9 @@ import EntVaultCommandCenterPlugin from "../src/main.ts";
 import type { CatalogPlacementTarget } from "../src/main.ts";
 import {
   createQuickEntryCommands,
+  privacySafeFixedActionRequest,
   privacySafeQuickEntryRequest,
+  QUICK_APPEND_PROTOCOL_ACTIONS,
   QUICK_ENTRY_PROTOCOL_ACTIONS,
   QUICK_ENTRY_PROTOCOL_ALLOWED_PARAMETER_KEYS,
 } from "../src/quick-entry.ts";
@@ -63,6 +65,8 @@ test("Quick Entry commands are focused, icon-ready, and never assign default hot
     createNote: () => calls.push("note"),
     addCurrentNote: () => calls.push("current"),
     addExistingNote: () => calls.push("existing"),
+    appendCurrentNote: () => calls.push("append-current"),
+    appendExistingNote: () => calls.push("append-existing"),
   });
 
   assert.deepEqual(commands.map((command) => command.id), [
@@ -73,11 +77,23 @@ test("Quick Entry commands are focused, icon-ready, and never assign default hot
     "quick-create-note",
     "quick-add-current-note",
     "quick-add-existing-note",
+    "quick-append-current-note",
+    "quick-append-existing-note",
   ]);
   assert.equal(commands.every((command) => Boolean(command.icon)), true);
   assert.equal(commands.every((command) => !("hotkeys" in command)), true);
   commands.forEach((command) => command.callback?.());
-  assert.deepEqual(calls, ["hub", "subject", "heading", "subheading", "note", "current", "existing"]);
+  assert.deepEqual(calls, [
+    "hub",
+    "subject",
+    "heading",
+    "subheading",
+    "note",
+    "current",
+    "existing",
+    "append-current",
+    "append-existing",
+  ]);
 });
 
 test("Quick Entry protocol is action-only and fails closed for every query field", () => {
@@ -98,8 +114,20 @@ test("Quick Entry protocol is action-only and fails closed for every query field
   assert.deepEqual(sensitive.rejectedParameterKeys, ["content", "path", "patient", "title"]);
   assert.equal(JSON.stringify(sensitive).includes("private"), false, "rejected query values must not be retained");
 
+  assert.deepEqual(QUICK_APPEND_PROTOCOL_ACTIONS, [
+    "kbcc-quick-append-current",
+    "kbcc-quick-append-existing",
+  ]);
+  for (const action of QUICK_APPEND_PROTOCOL_ACTIONS) {
+    assert.equal(privacySafeFixedActionRequest({ action }, action), true);
+    assert.equal(privacySafeFixedActionRequest({ action, title: "private" }, action), false);
+    assert.equal(privacySafeFixedActionRequest({ action: "other" }, action), false);
+    assert.equal(privacySafeFixedActionRequest({}, action), false);
+  }
+
   const mainSource = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
   assert.match(mainSource, /if \(!privacySafeQuickEntryRequest\(parameters\)\.openHub\) return;/);
+  assert.match(mainSource, /if \(!privacySafeFixedActionRequest\(parameters, action\)\) return;/);
 });
 
 test("Quick Entry delayed menus reject base switches and same-base data replacements", () => {

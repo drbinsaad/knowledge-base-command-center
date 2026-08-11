@@ -794,6 +794,8 @@ export class EntVaultCommandCenterView extends ItemView {
       { id: "create-note", title: "Create note", description: "Choose the Index or a Library, a visual group, and empty or template-based content.", icon: "file-plus-2" },
       { id: "add-current", title: "Add current note", description: "Use the note that was active when Quick Entry opened; its file is not moved or rewritten.", icon: "panel-top" },
       { id: "add-existing", title: "Add existing note", description: "Choose an existing Markdown note, then its Index, Library, or Collection destination.", icon: "list-plus" },
+      { id: "append-current", title: "Quick Append to current note", description: "Add a source, question, thought, lecture, reading item, or other follow-up under its managed category.", icon: "list-end" },
+      { id: "append-existing", title: "Quick Append to another note", description: "Choose a Markdown note, then append one categorized follow-up item without moving the file.", icon: "file-input" },
       { id: "create-heading", title: "Create heading", description: "Create an Index group, Collection heading, or Library heading.", icon: "folder-plus" },
       { id: "create-subheading", title: "Create subheading", description: "Create a nested Index subject, Collection subheading, or Library subheading.", icon: "list-tree" },
       { id: "more", title: "More add actions", description: "Open the full Add or create menu for proposals, advanced workflows, and other actions.", icon: "ellipsis" },
@@ -805,6 +807,8 @@ export class EntVaultCommandCenterView extends ItemView {
       else if (action.id === "create-note") this.startQuickCreateNote();
       else if (action.id === "add-current") this.startQuickAddCurrentNote(explicitCurrentPath);
       else if (action.id === "add-existing") this.startQuickAddExistingNote();
+      else if (action.id === "append-current") this.plugin.openQuickAppendCurrentNote(explicitCurrentPath);
+      else if (action.id === "append-existing") this.plugin.openQuickAppendExistingNote();
       else if (action.id === "create-heading") this.startQuickCreateHeading();
       else if (action.id === "create-subheading") this.startQuickCreateSubheading();
       else this.openAddActions();

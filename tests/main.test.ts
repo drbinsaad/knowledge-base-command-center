@@ -43,8 +43,9 @@ import {
   synchronizePortableRegistry,
 } from "../src/portability.ts";
 import { IndexManagerModal } from "../src/index-manager.ts";
-import { ConfirmModal, IndexGroupModal, StringPickerModal, TextPromptModal } from "../src/modals.ts";
+import { ConfirmModal, IndexGroupModal, StringPickerModal, TextPromptModal, VaultFilePickerModal } from "../src/modals.ts";
 import { EntCommandCenterSettingsTab } from "../src/settings.ts";
+import { QuickAppendModal } from "../src/follow-up-modal.ts";
 import { Notice, Plugin, TFile, TFolder, type TAbstractFile } from "obsidian";
 import { mergeKnowledgeBaseStores } from "../src/store-merge.ts";
 
@@ -1480,6 +1481,24 @@ test("an older build treats a future semantic store envelope as read-only", asyn
   await plugin.savePluginData();
   assert.equal(plugin.savedData.length, 0);
 });
+
+test("a future inner data version makes the complete store read-only", async () => {
+  const future = createDefaultStore(migrateData(null), 100, "vault-future-inner-data");
+  const futureBase = future.bases[0];
+  assert.ok(futureBase);
+  (futureBase.data as { version: number }).version = DATA_VERSION + 1;
+  futureBase.data.settings.workspaceName = "Future inner organization";
+  const original = structuredClone(future);
+  const plugin = pluginWith(future);
+
+  const result = await plugin.loadPluginData();
+
+  assert.equal(result.compatible, false);
+  assert.match(plugin.dataCompatibilityWarning, /unsupported data version/i);
+  assert.equal(plugin.savedData.length, 0);
+  assert.deepEqual(future, original);
+});
+
 test("archiving the active knowledge base switches atomically and never archives the last available base", async () => {
   const first = migrateData(null);
   first.settings.workspaceName = "First KB";
@@ -8192,4 +8211,154 @@ test("path-scoped invalidation tracks clinical proposals outside the configured 
   delete frontmatterByPath[file.path];
   assert.equal(internal.invalidateRecordCachesForPath(file.path), true, "deleting the cached outside proposal invalidates by its prior record path");
   assert.deepEqual(plugin.getRecords(), []);
+});
+
+test("Quick Append atomically groups repeated categories and keeps only compact transient undo metadata", async () => {
+  Notice.messages.length = 0;
+  const file = new TFile("Knowledge Base/Airway.md");
+  const original = "---\nai_lock: false\n---\n# Airway\n\nExisting text.";
+  let content = original;
+  let committedWrites = 0;
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getMarkdownFiles: () => [file],
+      getAbstractFileByPath: (path: string) => path === file.path ? file : null,
+      process: async (_file: TFile, transform: (value: string) => string) => {
+        const next = transform(content);
+        if (next !== content) {
+          content = next;
+          committedWrites += 1;
+        }
+      },
+      createFolder: async () => {},
+      create: async (path: string) => new TFile(path),
+    },
+    workspace: { getLeavesOfType: () => [], getActiveFile: () => file },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+    fileManager: {},
+  };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-quick-append-test");
+  await plugin.loadPluginData();
+
+  await plugin.appendFollowUpToFile(file, "questions", "Why does this happen?");
+  const afterFirst = content;
+  await plugin.appendFollowUpToFile(file, "questions", "What should I review next?");
+  await plugin.appendFollowUpToFile(file, "sources", "[[Airway review article]]");
+
+  assert.equal(committedWrites, 3);
+  assert.equal(content.match(/^## Follow-up notes$/gmu)?.length, 1);
+  assert.equal(content.match(/kbcc-follow-up:category:questions/gu)?.length, 1);
+  assert.equal(content.match(/kbcc-follow-up:category:sources/gu)?.length, 1);
+  assert.match(content, /### Questions\n- \[ \] Why does this happen\?\n- \[ \] What should I review next\?/u);
+  assert.match(content, /### Sources\n- \[\[Airway review article\]\]/u);
+
+  const internal = plugin as unknown as {
+    lastFollowUpUndo: unknown;
+    undoLastFollowUpAppend(): Promise<void>;
+  };
+  const transientUndo = JSON.stringify(internal.lastFollowUpUndo);
+  assert.equal(transientUndo.includes("Airway review article"), false, "transient undo fingerprints instead of retaining note text");
+  assert.equal(JSON.stringify(plugin.savedData).includes("Airway review article"), false, "plugin data never stores appended note bodies");
+
+  await internal.undoLastFollowUpAppend();
+  assert.match(content, /What should I review next\?/u);
+  assert.equal(content.includes("Airway review article"), false);
+
+  await plugin.appendFollowUpToFile(file, "sources", "Source that will become stale");
+  content += "\nUser edit after append.";
+  const staleContent = content;
+  await assert.rejects(() => internal.undoLastFollowUpAppend(), /changed after the append/u);
+  assert.equal(content, staleContent, "a stale undo must not rewrite any user edit");
+
+  content = "---\nai_lock: true\n---\n# Locked note\n";
+  const writesBeforeLock = committedWrites;
+  await assert.rejects(
+    () => plugin.appendFollowUpToFile(file, "questions", "Must not be written"),
+    /ai_lock enabled/u,
+  );
+  assert.equal(content, "---\nai_lock: true\n---\n# Locked note\n");
+  assert.equal(committedWrites, writesBeforeLock, "ai_lock refusal happens inside the atomic transform before commit");
+
+  assert.notEqual(afterFirst, original);
+});
+
+test("Quick Append refuses immutable source books and same-path file replacements before processing", async () => {
+  const sourceBook = new TFile("05 Sources/_books/Reference/Chapter.md");
+  const selected = new TFile("Knowledge Base/Selected.md");
+  const replacement = new TFile(selected.path);
+  let current: TFile = sourceBook;
+  let processCalls = 0;
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getMarkdownFiles: () => [sourceBook, current],
+      getAbstractFileByPath: (path: string) => path === current.path ? current : path === sourceBook.path ? sourceBook : null,
+      process: async () => { processCalls += 1; },
+      createFolder: async () => {},
+      create: async (path: string) => new TFile(path),
+    },
+    workspace: { getLeavesOfType: () => [], getActiveFile: () => current },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+    fileManager: {},
+  };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-quick-append-identity-test");
+  await plugin.loadPluginData();
+
+  await assert.rejects(
+    () => plugin.appendFollowUpToFile(sourceBook, "questions", "Do not write a source book"),
+    /immutable source-book/iu,
+  );
+  current = replacement;
+  await assert.rejects(
+    () => plugin.appendFollowUpToFile(selected, "questions", "Do not write a replacement"),
+    /no longer the same Markdown file/u,
+  );
+  assert.equal(processCalls, 0, "both refusals happen before Vault.process can commit anything");
+});
+
+test("Quick Append existing-note picker refuses a base or data-epoch change before opening the form", async () => {
+  Notice.messages.length = 0;
+  const file = new TFile("Knowledge Base/Topic.md");
+  const first = migrateData(null);
+  first.settings.workspaceMode = "generic";
+  first.settings.primaryFolder = "Knowledge Base";
+  const second = migrateData(null);
+  second.settings.workspaceMode = "generic";
+  second.settings.primaryFolder = "Knowledge Base";
+  second.settings.workspaceName = "Second";
+  const store = createDefaultStore(first, 1, "vault-quick-append-picker-guard");
+  store.bases.push(createKnowledgeBaseEntry(second, "base-second", 2));
+  const { plugin } = pluginWithFiles(store, [file], { [file.path]: { title: "Topic" } });
+  await plugin.loadPluginData();
+
+  const pickerOpen = Object.getOwnPropertyDescriptor(VaultFilePickerModal.prototype, "open");
+  const appendOpen = Object.getOwnPropertyDescriptor(QuickAppendModal.prototype, "open");
+  let chooseFromPicker: ((chosen: TFile) => void) | null = null;
+  let appendFormsOpened = 0;
+  VaultFilePickerModal.prototype.open = function capturePicker(): void {
+    chooseFromPicker = (chosen) => this.onChooseItem(chosen);
+  };
+  QuickAppendModal.prototype.open = function countAppendForm(): void { appendFormsOpened += 1; };
+  try {
+    plugin.openQuickAppendExistingNote();
+    assert.ok(chooseFromPicker);
+    await plugin.switchKnowledgeBase("base-second");
+    chooseFromPicker(file);
+    await Promise.resolve();
+
+    assert.equal(appendFormsOpened, 0);
+    assert.equal(Notice.messages.some((message) => message.includes("active knowledge base changed")), true);
+  } finally {
+    if (pickerOpen) Object.defineProperty(VaultFilePickerModal.prototype, "open", pickerOpen);
+    else Reflect.deleteProperty(VaultFilePickerModal.prototype, "open");
+    if (appendOpen) Object.defineProperty(QuickAppendModal.prototype, "open", appendOpen);
+    else Reflect.deleteProperty(QuickAppendModal.prototype, "open");
+  }
 });

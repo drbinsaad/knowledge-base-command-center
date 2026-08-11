@@ -1,6 +1,6 @@
 # Knowledge Base Command Center
 
-Turn an Obsidian vault into a navigable knowledge system—without moving or rewriting the Markdown notes you already own.
+Turn an Obsidian vault into a navigable knowledge system. Visual organization stays in plugin data; an optional explicit Quick append action can add categorized follow-up items to a selected Markdown note.
 
 ![Abstract illustration of interconnected knowledge cards](docs/assets/hero.png)
 
@@ -93,11 +93,17 @@ The view reads note, file, and formula values through Obsidian's Bases API. A `.
 
 ### Quick entry, hotkeys, and mobile toolbar
 
-Quick entry is available from the lightning-bolt desktop ribbon action and the Command Center header. On mobile, Obsidian exposes ribbon actions in its **Open** menu. Its focused commands can create a No note subject, heading, subheading, or note, and can add the current or an existing note. Library capture asks for the exact heading or subheading before it creates or classifies a note. The hub can switch the active knowledge base before opening an entry form.
+Quick entry is available from the lightning-bolt desktop ribbon action and the Command Center header. On mobile, Obsidian exposes ribbon actions in its **Open** menu. Its focused commands can create a No note subject, heading, subheading, or note, add the current or an existing note, and open Quick append for the current or a chosen note. Library capture asks for the exact heading or subheading before it creates or classifies a note. The hub can switch the active knowledge base before opening an entry form.
 
 The plugin assigns no default key combinations. Choose your own under **Settings → Hotkeys**. On iPhone or iPad, open **Settings → Mobile → Manage toolbar options**, scroll to the bottom, choose **Add global command**, then search for and select **Quick entry…** or another focused command.
 
-Apple Shortcuts can open the hub with the action-only URL <code>obsidian://kbcc-quick-entry</code>. Query fields are not supported: a URL containing <code>?title=</code>, <code>?path=</code>, or any other parameter fails closed and does not open Quick entry. A URL can never prefill or submit note data.
+Apple Shortcuts can open the hub with <code>obsidian://kbcc-quick-entry</code>, Quick append for the active note with <code>obsidian://kbcc-quick-append-current</code>, or the note picker with <code>obsidian://kbcc-quick-append-existing</code>. These routes are fixed and action-only. A URL containing <code>?title=</code>, <code>?path=</code>, or any other parameter fails closed; a URL can never prefill or submit note data.
+
+### Quick append follow-up notes
+
+Quick append adds one item to a strict plugin-owned block at the end of a chosen Markdown note. The default categories are Questions, Lectures to watch, Sources, Thoughts, To read, and Other. Reusing a category appends below its existing heading instead of creating another heading. Categories are configurable per knowledge base: rename, reorder, add, archive, restore, and choose bullet or checkbox style with an optional date.
+
+The operation uses Obsidian's atomic note-processing API, refuses <code>ai_lock: true</code>, preserves text outside the managed block byte-for-byte, and offers a short exact undo that refuses to run after the note changes. Note bodies and appended text are never copied into plugin data. Quick append writes Markdown text only; normal paste, drag, and attachment placement continue to follow Obsidian's Files and Links settings.
 
 ### Note creation and placeholders
 
@@ -137,7 +143,7 @@ The ENT preset is an organization workflow, not medical advice, a medical record
 
 - The plugin enumerates whole-vault Markdown file paths and cached Markdown metadata to build and reconcile indexes, offer note/template choices, and diagnose stale references.
 - It enumerates all loaded vault entries before retaining folder paths for settings pickers, and enumerates all vault file paths before retaining JSON packages for the in-vault picker. Path enumeration alone does not read note bodies.
-- Content reads are targeted to an explicitly chosen template or JSON import and to the disclosed ENT proposal-promotion and canonical-placement workflows.
+- Content reads are targeted to an explicitly chosen template or JSON import, to the note explicitly selected for Quick append inside Obsidian's atomic process operation, and to the disclosed ENT proposal-promotion and canonical-placement workflows.
 - Copy buttons write only the plugin-generated command, wikilink, or path you selected; the plugin never reads clipboard contents.
 - Settings and organization are stored in Obsidian's plugin <code>data.json</code>. Sync reconciliation, schema migration, and vault renames can update that file automatically.
 - The Quick entry Obsidian protocol accepts only its intrinsic action. Any query parameter is rejected before a form opens; titles, paths, and content cannot be supplied by URL.
@@ -153,7 +159,8 @@ See [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md) for the exact e
 - Removing or hiding membership does not delete the Markdown file.
 - Merge and Replace imports change selected plugin-owned organization only.
 - Newer or unrecognized plugin data opens read-only rather than being overwritten by an older build.
-- Two deliberate ENT-only workflows are exceptions to the ordinary no-file-change rule: proposal promotion moves the selected proposal and updates its frontmatter and top-level heading; advanced canonical placement may move the selected canonical note and updates the same structural fields. Both refuse <code>ai_lock: true</code>, require explicit action, preview the destination, and attempt rollback if an operation fails.
+- Quick append is a deliberate generic exception to the ordinary no-file-change rule. It atomically writes one item inside a strictly marked follow-up block in the selected note, refuses <code>ai_lock: true</code>, and keeps note bodies out of plugin data.
+- Two additional ENT-only workflows can change selected files: proposal promotion moves the selected proposal and updates its frontmatter and top-level heading; advanced canonical placement may move the selected canonical note and updates the same structural fields. Both refuse <code>ai_lock: true</code>, require explicit action, preview the destination, and attempt rollback if an operation fails.
 
 ## Backup and recovery
 

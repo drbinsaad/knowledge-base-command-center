@@ -1,9 +1,15 @@
+import {
+  cleanFollowUpCategoryDefinitions,
+  DEFAULT_FOLLOW_UP_CATEGORIES,
+  type FollowUpCategoryDefinition,
+} from "./follow-up";
+
 export const TOPIC_ROOT = "03 Clinical Topics/";
 export const PROCEDURE_ROOT = "04 Procedures/";
 export const MEDICATION_ROOT = "06 Clinical Tools/Medications/";
 export const SYNDROME_ROOT = "06 Clinical Tools/Syndromes/";
 export const DEFAULT_PROPOSAL_FOLDER = "01 Inbox/ENT Topic Proposals";
-export const DATA_VERSION = 12;
+export const DATA_VERSION = 13;
 export const STORE_VERSION = 14;
 export const MIN_RECOGNIZED_STORE_VERSION = 11;
 export const STORE_KIND = "knowledge-base-command-center-store";
@@ -326,6 +332,7 @@ export interface PluginSettings {
   enableAdvancedCanonicalActions: boolean;
   openNoteBehavior: OpenNoteBehavior;
   allowClinicalVisualGroupMoves: boolean;
+  followUpCategories: FollowUpCategoryDefinition[];
 }
 
 export interface MigrationBackup {
@@ -345,7 +352,7 @@ export interface V2MigrationBackup {
 }
 
 export interface PluginData {
-  version: 12;
+  version: typeof DATA_VERSION;
   collections: LayoutHeading[];
   pinnedPaths: string[];
   nextStudyPaths: string[];
@@ -438,10 +445,12 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   enableAdvancedCanonicalActions: false,
   openNoteBehavior: "new-tab",
   allowClinicalVisualGroupMoves: false,
+  followUpCategories: DEFAULT_FOLLOW_UP_CATEGORIES.map((category) => ({ ...category })),
 };
 
 export const ENT_CLINICAL_SETTINGS: PluginSettings = {
   ...DEFAULT_SETTINGS,
+  followUpCategories: DEFAULT_FOLLOW_UP_CATEGORIES.map((category) => ({ ...category })),
   setupComplete: true,
   workspaceMode: "ent-clinical",
   workspaceName: "ENT Vault Command Center",
@@ -463,7 +472,7 @@ export const ENT_CLINICAL_SETTINGS: PluginSettings = {
 };
 
 export const DEFAULT_DATA: PluginData = {
-  version: 12,
+  version: DATA_VERSION,
   collections: [],
   pinnedPaths: [],
   nextStudyPaths: [],
@@ -486,7 +495,10 @@ export const DEFAULT_DATA: PluginData = {
   },
   selectedPath: "",
   activeTab: "curriculum",
-  settings: { ...DEFAULT_SETTINGS },
+  settings: {
+    ...DEFAULT_SETTINGS,
+    followUpCategories: DEFAULT_FOLLOW_UP_CATEGORIES.map((category) => ({ ...category })),
+  },
   layoutSnapshots: [],
   undoStack: [],
   redoStack: [],
@@ -2397,6 +2409,7 @@ function cleanSettings(input: unknown, legacyEnt = false): PluginSettings {
     enableAdvancedCanonicalActions: settings.enableAdvancedCanonicalActions === true,
     openNoteBehavior: isOpenNoteBehavior(settings.openNoteBehavior) ? settings.openNoteBehavior : base.openNoteBehavior,
     allowClinicalVisualGroupMoves: settings.allowClinicalVisualGroupMoves === true,
+    followUpCategories: cleanFollowUpCategoryDefinitions(settings.followUpCategories),
   };
 }
 
@@ -2711,7 +2724,7 @@ function migrateDataWithBudget(
   if (loadedVersion >= 3 || (loadedVersion === 0 && isRecognizedPluginData(loaded) && Object.keys(loaded).length > 0)) {
     const settings = cleanSettings(loaded.settings, loadedVersion > 0 && loadedVersion <= 5);
     const data: PluginData = {
-      version: 12,
+      version: DATA_VERSION,
       collections: cleanLayout(loaded.collections),
       pinnedPaths: asStringList(loaded.pinnedPaths),
       nextStudyPaths: asStringList(loaded.nextStudyPaths),
@@ -2745,7 +2758,7 @@ function migrateDataWithBudget(
     const rawSettings = loaded.settings && typeof loaded.settings === "object" ? loaded.settings as Record<string, unknown> : {};
     const settings = cleanSettings(rawSettings, true);
     const data: PluginData = {
-      version: 12,
+      version: DATA_VERSION,
       collections,
       pinnedPaths,
       nextStudyPaths,
@@ -2794,7 +2807,10 @@ function migrateDataWithBudget(
     ...structuredClone(DEFAULT_DATA),
     collections: cleanLayout(custom),
     selectedPath: asText(loaded.selectedPath),
-    settings: { ...ENT_CLINICAL_SETTINGS },
+    settings: {
+      ...ENT_CLINICAL_SETTINGS,
+      followUpCategories: ENT_CLINICAL_SETTINGS.followUpCategories.map((category) => ({ ...category })),
+    },
     migrationBackup: cleanMigrationBackup({ version: 1, headings: oldHeadings, migratedAt: Date.now() }),
   };
   return normalizeKnowledgeBaseLibrariesAndNavigation(data);
