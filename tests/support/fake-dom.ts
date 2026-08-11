@@ -213,6 +213,15 @@ export class FakeElement {
     this.ownText = "";
   }
 
+  remove(): void {
+    const parent = this.parentElement;
+    if (parent) {
+      const index = parent.children.indexOf(this);
+      if (index >= 0) parent.children.splice(index, 1);
+    }
+    this.parentElement = null;
+  }
+
   getAttribute(name: string): string | null { return this.attributes.get(name) ?? null; }
   hasAttribute(name: string): boolean { return this.attributes.has(name); }
   removeAttribute(name: string): void { this.attributes.delete(name); }

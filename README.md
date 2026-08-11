@@ -85,6 +85,12 @@ A non-empty search covers every available, non-archived knowledge base. Results 
 
 Search is Unicode-aware and normalizes common diacritic, apostrophe, Arabic, and Persian keyboard variants. Advanced filters include <code>domain:</code>, <code>priority:</code>, <code>kind:</code>, <code>type:</code>, <code>status:</code>, <code>review:</code>, <code>source:</code>, <code>safety:</code>, <code>dose:</code>, and <code>image:</code>. Broad searches report the full count and state **Showing the first 300 of _N_ results.** Browse views expose **Show more** instead of building an unbounded mobile DOM.
 
+### Obsidian Bases integration
+
+Obsidian `.base` files can select the plugin's **Knowledge hierarchy** view without becoming a Knowledge Base Command Center knowledge base. The stable view type remains <code>ent-hierarchy</code>. Its native Bases options choose title, ID, fallback group, status, and priority properties, a 25–300-row page size, and whether group counts appear.
+
+The view reads note, file, and formula values through Obsidian's Bases API. A `.base` file's filters, limit, sort, and **Group by** order remain authoritative. When no native Group by is configured, the fallback group property defaults to <code>note.domain</code>, then to the note's immediate folder. Large results are prepared in bounded slices, and **Previous** and **Next** replace one configured page at a time so offscreen rows do not accumulate. Narrow panes stack row metadata and retain 44-pixel row and pager targets. Opening a row opens the Markdown file and does not change frontmatter or plugin organization.
+
 ### Quick entry, hotkeys, and mobile toolbar
 
 Quick entry is available from the lightning-bolt desktop ribbon action and the Command Center header. On mobile, Obsidian exposes ribbon actions in its **Open** menu. Its focused commands can create a No note subject, heading, subheading, or note, and can add the current or an existing note. Library capture asks for the exact heading or subheading before it creates or classifies a note. The hub can switch the active knowledge base before opening an entry form.

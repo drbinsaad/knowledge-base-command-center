@@ -221,6 +221,22 @@ Unknown <code>word:</code> filters fail closed instead of becoming unexpectedly 
 
 Search reports the full match count but renders at most the strongest 300 rows. Browse views render at most 300 record rows and 300 structural sections at once, with **Show more** for the next page.
 
+## Obsidian Bases view
+
+This plugin also registers **Knowledge hierarchy** as a view for Obsidian `.base` files. This is a read-only presentation of the `.base` query result; it is separate from the independent plugin knowledge bases described elsewhere in this guide. Selecting it does not import a `.base`, change the active Command Center knowledge base, or write note properties.
+
+Use the Bases view-options menu to configure:
+
+- **Title** — defaults to <code>note.title</code>, then the filename;
+- **ID** — defaults to <code>note.curriculum_id</code>;
+- **Fallback group** — defaults to <code>note.domain</code>, then the immediate folder;
+- **Status** — defaults to <code>note.review_status</code>;
+- **Priority** — defaults to <code>note.priority</code>;
+- **Rows per page** — 100 by default and always bounded between 25 and 300; and
+- **Show group counts** — on by default.
+
+The properties may point to supported note, file, or formula values. Native Bases filters, limits, user sorting, and **Group by** remain authoritative. The fallback group is used only when the `.base` view has no native Group by. The view keeps that user order, uses semantic group headings, prepares large fallback groups in short generation-safe slices, and replaces one bounded page at a time with **Previous** and **Next**. Narrow panes place status and priority on a second clipped line while keeping rows and pager buttons at least 44 pixels high. A data refresh or pop-out-window move cancels or transfers delayed work so a stale result cannot replace the current one.
+
 ## Record details
 
 Selecting a record opens its inspector with identity, path/status information, note or study actions, and resolved related knowledge.

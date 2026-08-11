@@ -1,5 +1,5 @@
 import { normalizePath, Notice, Plugin, TFile, TFolder, type TAbstractFile } from "obsidian";
-import { EntHierarchyBasesView } from "./bases-view";
+import { ENT_HIERARCHY_BASES_VIEW_TYPE, EntHierarchyBasesView, hierarchyBasesViewOptions } from "./bases-view";
 import {
   asUnknownRecord,
   asStringList,
@@ -353,10 +353,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     // can later change between generic and ENT presets. The view itself also
     // works for generic notes by falling back to their folder grouping.
     try {
-      this.registerBasesView("ent-hierarchy", {
+      this.registerBasesView(ENT_HIERARCHY_BASES_VIEW_TYPE, {
         name: "Knowledge hierarchy",
         icon: "folder-tree",
         factory: (controller, containerEl) => new EntHierarchyBasesView(controller, containerEl),
+        options: () => hierarchyBasesViewOptions(),
       });
     } catch (error) {
       console.warn("Knowledge Base Command Center: custom Bases view unavailable", error);

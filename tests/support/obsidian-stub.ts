@@ -28,6 +28,11 @@ export class Notice {
   static messages: string[] = [];
   constructor(public message: string, public duration?: number) { Notice.messages.push(message); }
 }
+export class NullValue {
+  static value = new NullValue();
+  toString(): string { return "null"; }
+  isTruthy(): boolean { return false; }
+}
 
 export class Plugin {
   app: unknown;
