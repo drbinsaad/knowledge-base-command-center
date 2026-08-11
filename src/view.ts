@@ -367,7 +367,9 @@ export class EntVaultCommandCenterView extends ItemView {
   private setupTimer: number | null = null;
   private selectionSaveTimer: number | null = null;
   private selectionSavePromise: Promise<void> | null = null;
-  private readonly timerWindow: Window = window.activeWindow ?? window;
+  /** Window that owns the currently rendered leaf and therefore its timers. */
+  private timerWindow: Window = window.activeWindow ?? window;
+  private windowMigrationCleanup: (() => void) | null = null;
   private editMode = false;
   private curriculumArrangeMode = false;
   private mobileInspectorOpen = false;
@@ -426,18 +428,14 @@ export class EntVaultCommandCenterView extends ItemView {
 
   async onOpen(): Promise<void> {
     this.viewClosed = false;
+    this.bindWindowMigration();
     this.measureAndApplyPaneLayout(false);
     await this.reload();
     this.bindPaneLayout();
     this.bindSearchViewportLayout();
     if (!this.plugin.data.settings.setupComplete && !this.setupPromptShown) {
-      const ownsBase = this.createOpenedBaseGuard();
       this.setupPromptShown = true;
-      this.setupTimer = this.timerWindow.setTimeout(() => {
-        this.setupTimer = null;
-        if (!ownsBase()) return;
-        this.openSetupWizard();
-      }, 100);
+      this.scheduleSetupPrompt();
     }
   }
 
@@ -445,6 +443,7 @@ export class EntVaultCommandCenterView extends ItemView {
     this.viewClosed = true;
     this.globalSearchRequestGeneration += 1;
     this.globalSearchPendingKey = "";
+    this.unbindWindowMigration();
     this.unbindPaneLayout();
     this.unbindSearchViewportLayout();
     const selectionSavePending = this.selectionSaveTimer !== null;
@@ -467,12 +466,108 @@ export class EntVaultCommandCenterView extends ItemView {
 
   onResize(): void {
     if (this.viewClosed) return;
+    const ownerWindow = this.contentEl.ownerDocument.defaultView;
+    if (ownerWindow && ownerWindow !== this.timerWindow) {
+      // Fallback for Obsidian builds or test hosts that do not expose
+      // HTMLElement.onWindowMigrated(). The migration hook remains the
+      // deterministic path; onResize keeps older hosts safe.
+      this.handleWindowMigration(ownerWindow);
+      return;
+    }
     // Obsidian can adopt a leaf into a pop-out window. Rebind both observers
     // to the element's current owner instead of retaining the original window.
     this.bindPaneLayout();
     this.bindSearchViewportLayout();
     this.measureAndApplyPaneLayout();
     this.syncSearchViewportLayout();
+  }
+
+  /**
+   * Obsidian migrates an existing leaf element when it moves into or out of a
+   * pop-out. Rebind every window-owned observer and move pending timers before
+   * the old window can be closed or background-throttled.
+   */
+  private bindWindowMigration(): void {
+    this.unbindWindowMigration();
+    const ownerWindow = this.contentEl.ownerDocument.defaultView;
+    if (ownerWindow) this.timerWindow = ownerWindow;
+    if (typeof this.contentEl.onWindowMigrated !== "function") return;
+    this.windowMigrationCleanup = this.contentEl.onWindowMigrated((migratedWindow) => {
+      this.handleWindowMigration(migratedWindow);
+    });
+  }
+
+  private unbindWindowMigration(): void {
+    this.windowMigrationCleanup?.();
+    this.windowMigrationCleanup = null;
+  }
+
+  private handleWindowMigration(migratedWindow: Window): void {
+    if (this.viewClosed) return;
+    // The callback argument is Obsidian's authoritative destination window.
+    // ownerDocument is expected to agree after adoption, while the explicit
+    // value also keeps this deterministic during the migration callback.
+    const ownerWindow = migratedWindow;
+    const previousWindow = this.timerWindow;
+    const setupPending = this.setupTimer !== null;
+    const searchPending = this.searchDebounce !== null;
+    const selectionPending = this.selectionSaveTimer !== null;
+    if (previousWindow !== ownerWindow) {
+      for (const timer of [this.setupTimer, this.searchDebounce, this.selectionSaveTimer]) {
+        if (timer !== null) previousWindow.clearTimeout(timer);
+      }
+      this.setupTimer = null;
+      this.searchDebounce = null;
+      this.selectionSaveTimer = null;
+      this.timerWindow = ownerWindow;
+    }
+    this.bindPaneLayout();
+    this.bindSearchViewportLayout();
+    this.measureAndApplyPaneLayout();
+    this.syncSearchViewportLayout();
+    if (setupPending) this.scheduleSetupPrompt();
+    if (searchPending) this.scheduleSearchRefresh(0);
+    if (selectionPending) this.scheduleSelectionSave();
+  }
+
+  private scheduleSetupPrompt(delay = 100): void {
+    if (this.viewClosed || this.plugin.data.settings.setupComplete) return;
+    if (this.setupTimer !== null) this.timerWindow.clearTimeout(this.setupTimer);
+    const ownsBase = this.createOpenedBaseGuard();
+    this.setupTimer = this.timerWindow.setTimeout(() => {
+      this.setupTimer = null;
+      if (this.viewClosed || !ownsBase()) return;
+      this.openSetupWizard();
+    }, delay);
+  }
+
+  private scheduleSearchRefresh(delay = 120): void {
+    if (this.searchDebounce !== null) this.timerWindow.clearTimeout(this.searchDebounce);
+    const scheduledQuery = this.query;
+    const scheduledBaseId = this.loadedBaseId;
+    const scheduledDataEpoch = this.loadedDataEpoch;
+    this.searchDebounce = this.timerWindow.setTimeout(() => {
+      this.searchDebounce = null;
+      if (this.viewClosed
+        || scheduledQuery !== this.query
+        || scheduledBaseId !== this.plugin.getActiveKnowledgeBaseId()
+        || scheduledDataEpoch !== this.currentDataEpoch()) return;
+      this.renderTree();
+      this.resetSearchScrollPosition();
+      this.timerWindow.requestAnimationFrame(() => {
+        if (!this.viewClosed && scheduledQuery === this.query) this.resetSearchScrollPosition();
+      });
+    }, delay);
+  }
+
+  private scheduleSelectionSave(delay = 1000): void {
+    if (this.selectionSaveTimer !== null) this.timerWindow.clearTimeout(this.selectionSaveTimer);
+    const ownsBase = this.createOpenedBaseGuard();
+    this.selectionSaveTimer = this.timerWindow.setTimeout(() => {
+      this.selectionSaveTimer = null;
+      if (this.viewClosed || !ownsBase()) return;
+      this.run(() => this.saveSelectionState());
+    }, delay);
   }
 
   async reload(): Promise<void> {
@@ -1952,6 +2047,8 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private revealActiveTab(tablist: HTMLElement): void {
     this.timerWindow.setTimeout(() => {
+      if (this.viewClosed
+        || (typeof this.contentEl?.contains === "function" && !this.contentEl.contains(tablist))) return;
       const active = tablist.querySelector<HTMLElement>('[aria-selected="true"]');
       active?.scrollIntoView({ block: "nearest", inline: "center" });
     }, 0);
@@ -2051,6 +2148,7 @@ export class EntVaultCommandCenterView extends ItemView {
     });
     input.addEventListener("blur", () => {
       this.timerWindow.setTimeout(() => {
+        if (this.viewClosed || !this.contentEl.contains(searchRow) || !this.contentEl.contains(parent)) return;
         if (!searchRow.contains(input.ownerDocument.activeElement)) {
           parent.removeClass("is-search-focused", "is-virtual-keyboard-open");
           parent.style.removeProperty("--ent-cc-search-visual-height");
@@ -2068,13 +2166,7 @@ export class EntVaultCommandCenterView extends ItemView {
       this.parsedQuery = parseQuery(this.query);
       clear.hidden = !this.query;
       if (bulkButton) bulkButton.disabled = !this.query.trim();
-      if (this.searchDebounce !== null) this.timerWindow.clearTimeout(this.searchDebounce);
-      this.searchDebounce = this.timerWindow.setTimeout(() => {
-        this.searchDebounce = null;
-        this.renderTree();
-        this.resetSearchScrollPosition();
-        this.timerWindow.requestAnimationFrame(() => this.resetSearchScrollPosition());
-      }, 120);
+      this.scheduleSearchRefresh();
     });
     input.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && this.query) {
@@ -3278,11 +3370,7 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     // Selection is transient UI state; persisting it on every click rewrites the
     // whole plugin data file and drives needless vault-sync traffic.
-    if (this.selectionSaveTimer !== null) this.timerWindow.clearTimeout(this.selectionSaveTimer);
-    this.selectionSaveTimer = this.timerWindow.setTimeout(() => {
-      this.selectionSaveTimer = null;
-      this.run(() => this.saveSelectionState());
-    }, 1000);
+    this.scheduleSelectionSave();
     if (compact) this.render();
     else {
       this.renderTree();
@@ -3299,6 +3387,7 @@ export class EntVaultCommandCenterView extends ItemView {
     this.mobileInspectorNeedsFocus = false;
     this.render();
     this.timerWindow.setTimeout(() => {
+      if (this.viewClosed || this.mobileInspectorOpen) return;
       if (this.workspaceEl) this.workspaceEl.scrollTop = this.mobileTreeScrollTop;
       const selected = this.treeEl?.querySelector<HTMLElement>(".ent-cc-subject-row.is-selected .ent-cc-subject-title");
       (selected ?? this.treeEl)?.focus({ preventScroll: true });
@@ -3390,7 +3479,10 @@ export class EntVaultCommandCenterView extends ItemView {
       this.inspectorField(body, "Note status", "Not created or linked");
       if (mobileOpen && this.mobileInspectorNeedsFocus) {
         this.mobileInspectorNeedsFocus = false;
-        this.timerWindow.setTimeout(() => this.inspectorEl?.querySelector<HTMLElement>(".ent-cc-inspector-close")?.focus(), 0);
+        this.timerWindow.setTimeout(() => {
+          if (this.viewClosed || !this.mobileInspectorOpen || !this.inspectorEl?.contains(body)) return;
+          this.inspectorEl.querySelector<HTMLElement>(".ent-cc-inspector-close")?.focus();
+        }, 0);
       }
       return;
     }
@@ -3462,7 +3554,7 @@ export class EntVaultCommandCenterView extends ItemView {
     if (mobileOpen && this.mobileInspectorNeedsFocus) {
       this.mobileInspectorNeedsFocus = false;
       this.timerWindow.setTimeout(() => {
-        if (!this.mobileInspectorOpen || !this.inspectorEl) return;
+        if (this.viewClosed || !this.mobileInspectorOpen || !this.inspectorEl?.contains(body)) return;
         body.scrollTop = this.mobileInspectorScrollTop;
         this.inspectorEl.querySelector<HTMLElement>(".ent-cc-inspector-close")?.focus();
       }, 0);

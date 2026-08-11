@@ -360,25 +360,37 @@ test("moving a command-center leaf to a pop-out rebinds the pane observer", asyn
   const view = createView(firstDom.window, [source]);
   const content = firstDom.document.body.createDiv({ cls: "view-content" });
   content.setBoundingClientRect({ width: 1200 });
+  let migrationListener: ((viewWindow: Window) => void) | null = null;
+  let migrationListenerRemoved = false;
+  (content as unknown as {
+    onWindowMigrated(listener: (viewWindow: Window) => void): () => void;
+  }).onWindowMigrated = (listener) => {
+    migrationListener = listener;
+    return () => { migrationListenerRemoved = true; };
+  };
   const harness = view as unknown as {
     contentEl: HTMLElement;
     paneResizeWindow: Window | null;
+    timerWindow: Window;
   };
   harness.contentEl = asHtmlElement(content);
   await view.onOpen();
   assert.equal(firstObservers.length, 1);
+  assert.ok(migrationListener, "the view must subscribe to Obsidian's deterministic migration hook");
 
   (content as unknown as { ownerDocument: typeof secondDom.document }).ownerDocument = secondDom.document;
   content.setBoundingClientRect({ width: 820 });
-  view.onResize();
+  migrationListener(secondDom.window);
 
   assert.equal(firstObservers[0]?.disconnected, true);
   assert.equal(secondObservers.length, 1);
   assert.equal(harness.paneResizeWindow, secondDom.window as unknown as Window);
+  assert.equal(harness.timerWindow, secondDom.window as unknown as Window);
   assert.equal(content.hasClass("is-pane-compact"), true);
 
   await view.onClose();
   assert.equal(secondObservers[0]?.disconnected, true);
+  assert.equal(migrationListenerRemoved, true);
 });
 
 test("real mobile search focus applies the keyboard viewport and resets every scroll owner", () => {
@@ -649,6 +661,8 @@ test("stacked-pane CSS responds to leaf classes without viewport-relative view s
   assert.match(styles, /\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-header-actions\s*\{[^}]*overflow-x: auto;/s);
   assert.match(styles, /\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-search-row\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\) repeat\(3, 44px\);/s);
   assert.match(styles, /\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-shell\.is-inspector-route \.ent-cc-inspector\.is-mobile-open/s);
+  assert.match(styles, /\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-shell\.is-inspector-route \.ent-cc-related-record,\s*\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-shell\.is-inspector-route \.ent-cc-study-action\s*\{\s*min-height:\s*44px;/s);
+  assert.match(styles, /\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-shell\.is-inspector-route \.ent-cc-inspector-actions \.ent-cc-icon-button\s*\{[^}]*min-width:\s*44px;[^}]*min-height:\s*44px;/s);
   assert.match(styles, /\.ent-cc-view\.is-pane-narrow \.ent-cc-quick-entry-button\s*\{[^}]*min-width: 44px;/s);
   assert.match(styles, /\.ent-cc-search-icon\s*\{[^}]*inset-inline-start: 11px;/s);
   assert.match(styles, /\.ent-cc-search-clear\s*\{[^}]*inset-inline-end: 2px;/s);

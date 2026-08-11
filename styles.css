@@ -3590,7 +3590,14 @@
 }
 
 .ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-shell.is-inspector-route .ent-cc-inspector-actions .ent-cc-button,
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-shell.is-inspector-route .ent-cc-related-record,
 .ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-shell.is-inspector-route .ent-cc-study-action {
+  min-height: 44px;
+}
+
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-shell.is-inspector-route .ent-cc-inspector-actions .ent-cc-icon-button {
+  width: 44px;
+  min-width: 44px;
   min-height: 44px;
 }
 

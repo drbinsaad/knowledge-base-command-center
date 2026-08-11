@@ -2916,6 +2916,124 @@ test("closing the compact record inspector hides it and restores row focus", () 
   assert.equal(focusCount, 1);
 });
 
+test("zero-delay inspector restoration does not touch a view closed before the callback", () => {
+  let callback: (() => void) | null = null;
+  let focusCount = 0;
+  const workspace = { scrollTop: 0 };
+  const selected = { focus: () => { focusCount += 1; } };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    mobileInspectorOpen: boolean;
+    mobileInspectorNeedsFocus: boolean;
+    mobileTreeScrollTop: number;
+    viewClosed: boolean;
+    workspaceEl: typeof workspace;
+    treeEl: { querySelector(): typeof selected; focus(): void };
+    timerWindow: { setTimeout(scheduled: () => void): number };
+    render(): void;
+    closeMobileInspector(): void;
+  };
+  view.mobileInspectorOpen = true;
+  view.mobileInspectorNeedsFocus = true;
+  view.mobileTreeScrollTop = 73;
+  view.viewClosed = false;
+  view.workspaceEl = workspace;
+  view.treeEl = { querySelector: () => selected, focus: () => { focusCount += 1; } };
+  view.render = () => undefined;
+  view.timerWindow = { setTimeout: (scheduled) => { callback = scheduled; return 1; } };
+
+  view.closeMobileInspector();
+  view.viewClosed = true;
+  callback?.();
+
+  assert.equal(workspace.scrollTop, 0);
+  assert.equal(focusCount, 0);
+});
+
+test("zero-delay tab reveal ignores DOM replaced before the callback", () => {
+  const dom = createFakeDom();
+  const content = dom.document.body.createDiv();
+  const tablist = content.createDiv();
+  const active = tablist.createEl("button", { attr: { "aria-selected": "true" } });
+  let callback: (() => void) | null = null;
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    contentEl: HTMLElement;
+    viewClosed: boolean;
+    timerWindow: { setTimeout(scheduled: () => void): number };
+    revealActiveTab(tablist: HTMLElement): void;
+  };
+  view.contentEl = content as unknown as HTMLElement;
+  view.viewClosed = false;
+  view.timerWindow = { setTimeout: (scheduled) => { callback = scheduled; return 1; } };
+
+  view.revealActiveTab(tablist as unknown as HTMLElement);
+  content.empty();
+  callback?.();
+
+  assert.equal(active.scrollIntoViewCalls, 0);
+});
+
+test("window migration rehomes pending view timers before rebinding observers", () => {
+  const cleared: number[] = [];
+  const rebound: string[] = [];
+  const scheduledDelays: number[] = [];
+  let nextTimer = 20;
+  const previousWindow = { clearTimeout: (timer: number) => { cleared.push(timer); } } as unknown as Window;
+  const nextWindow = {
+    setTimeout: (_callback: () => void, delay = 0) => {
+      scheduledDelays.push(delay);
+      nextTimer += 1;
+      return nextTimer;
+    },
+  } as unknown as Window;
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    viewClosed: boolean;
+    setupTimer: number | null;
+    searchDebounce: number | null;
+    selectionSaveTimer: number | null;
+    timerWindow: Window;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    query: string;
+    plugin: {
+      data: { settings: { setupComplete: boolean } };
+      getActiveKnowledgeBaseId(): string;
+      getDataEpoch(): number;
+    };
+    bindPaneLayout(): void;
+    bindSearchViewportLayout(): void;
+    measureAndApplyPaneLayout(): void;
+    syncSearchViewportLayout(): void;
+    handleWindowMigration(viewWindow: Window): void;
+  };
+  view.viewClosed = false;
+  view.setupTimer = 11;
+  view.searchDebounce = 12;
+  view.selectionSaveTimer = 13;
+  view.timerWindow = previousWindow;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 7;
+  view.query = "lary";
+  view.plugin = {
+    data: { settings: { setupComplete: false } },
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 7,
+  };
+  view.bindPaneLayout = () => { rebound.push("pane"); };
+  view.bindSearchViewportLayout = () => { rebound.push("viewport"); };
+  view.measureAndApplyPaneLayout = () => { rebound.push("measure"); };
+  view.syncSearchViewportLayout = () => { rebound.push("sync"); };
+
+  view.handleWindowMigration(nextWindow);
+
+  assert.deepEqual(cleared, [11, 12, 13]);
+  assert.equal(view.timerWindow, nextWindow);
+  assert.deepEqual(rebound, ["pane", "viewport", "measure", "sync"]);
+  assert.deepEqual(scheduledDelays, [100, 0, 1000]);
+  assert.equal(view.setupTimer, 21);
+  assert.equal(view.searchDebounce, 22);
+  assert.equal(view.selectionSaveTimer, 23);
+});
+
 test("mobile search resets both possible result scroll containers", () => {
   const content = { scrollTop: 125 };
   const workspace = { scrollTop: 840 };

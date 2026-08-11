@@ -86,7 +86,7 @@ function makeAvailableNamesUnique(entries: KnowledgeBaseEntry[]): boolean {
 }
 
 /**
- * Merge two already-migrated v11 envelopes by stable base ID. Separate bases
+ * Merge two already-migrated current-version envelopes by stable base ID. Separate bases
  * are independent conflict units; the newer `updatedAt` wins only within the
  * same base. Archive timestamps act as tombstones because archived entries are
  * retained rather than deleted.

@@ -6,7 +6,7 @@
 
 ### Fixed
 
-- Made the Command Center respond to its actual Obsidian leaf width, including stacked tabs and pop-out windows. Compact and narrow leaves now use a focused record-details route, scroll-safe header actions, and bounded tabs/search instead of retaining the wide two-column dashboard from the surrounding window.
+- Made the Command Center respond to its actual Obsidian leaf width, including stacked tabs and pop-out windows. Compact mode now begins below 1050 px of leaf width (not window width); compact and narrow leaves use a focused record-details route, scroll-safe header actions, and bounded tabs/search instead of retaining the wide two-column dashboard from the surrounding window.
 - Kept Create Note and library-specific creation forms inside the visible iPhone viewport while the software keyboard is open. The modal now reconciles Obsidian's native keyboard inset with the browser visual viewport, keeps the action footer visible, and makes the form body the only scrolling region.
 - Resynchronized focused fields throughout the iOS keyboard animation and scrolled the active control into view without retaining listeners or timers after the modal closes.
 
