@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.12.0
 
 ### Added
 
+- Expanded the stable **Knowledge hierarchy** view for Obsidian `.base` files into a configurable Generic view. Title, ID, fallback group, status, priority, page size, and group counts can be set through native Bases view options; native Base grouping, formulas, limits, and user sort remain authoritative.
 - Added bounded multi-base portfolio export/import for up to 50 available knowledge bases. Each bundle contains a strict manifest and independent existing-format portable packages per base, with source-to-destination mapping, per-base Merge/Replace, and per-source component and Library selection.
 - Added an exact dry-run portfolio plan used verbatim by apply, with categorized base, heading, subject, Library, conflict, folder/template fallback, and explicit will-not-change previews. Replace requires typed confirmation and writes a same-vault recovery for every affected destination before mutation.
 - Added a path-safe **Sync & recovery center** command and an entry under **Manage index → Diagnostics**. It reports the active base, semantic revision and shortened head, local save/reload history, bounded conflict-rescue counts and ages, confirmed recovery age, protection reason, device-local profile context, and active-base concurrent-edit evidence using local public APIs only.
@@ -22,6 +23,10 @@
 
 ### Fixed
 
+- Made the Command Center respond to its actual Obsidian leaf width, including stacked tabs and pop-out windows. Compact mode now begins below 1050 px of leaf width (not window width); compact and narrow leaves use a focused record-details route, scroll-safe header actions, and bounded tabs/search instead of retaining the wide two-column dashboard from the surrounding window.
+- Kept Create Note and library-specific creation forms inside the visible iPhone viewport while the software keyboard is open. The modal now reconciles Obsidian's native keyboard inset with the browser visual viewport, keeps the action footer visible, and makes the form body the only scrolling region.
+- Resynchronized focused fields throughout the iOS keyboard animation and scrolled the active control into view without retaining listeners or timers after the modal closes.
+- Kept custom Bases headings, row metadata, and pagination inside narrow panes, with 44-pixel row and pager targets at compact widths and visible keyboard focus.
 - Buffered attachment folder, marker, and heading text settings before persistence, avoiding a full plugin-data rewrite and Sync revision on every keystroke.
 - Required Quick append Undo to target the exact original note object, so a deleted-and-recreated same-path note cannot receive an older note's rollback.
 - Rejected workspace imports that would leave Quick append with no active category, and validated imported fixed attachment folders before applying settings.
@@ -37,28 +42,19 @@
 - Detected equal-revision divergent semantic edits explicitly, wrote every possible losing complete envelope to a private in-vault conflict rescue before adoption, and failed closed without selecting a winner when that rescue could not be created.
 - Added a fenced view-state save path that waits for base, transaction, Sync, and adapter queues and copies only the explicit device-local whitelist onto the last committed semantic snapshot, preventing navigation saves from carrying unsaved organization changes.
 
+### Performance
+
+- Replaced the custom Bases view's synchronous whole-result metadata projection and sort with generation-safe 250-entry grouping slices and bounded 25–300-row pages. A 10,000-entry result keeps only the configured page in the DOM while **Previous** and **Next** replace that page.
+
 ### Security
 
 - Kept portfolios free of note bodies, attachments, exact note bindings, and private recovery; rejected malicious IDs, paths, mismatched manifests, oversized packages, and aggregate budget overruns through the existing strict portable parser.
 - Kept Sync and Recovery diagnostics device-local and telemetry-free. The center does not probe Obsidian Sync or the network, read export JSON or Markdown bodies, or display vault/base identifiers, custom configuration names, export filenames, or full paths; artifact inspection is capped at 2,000 direct export-folder entries.
 - Made Quick append atomic and fail-closed: it checks <code>ai_lock</code> inside the write transaction, preserves all text outside the strict managed block, enforces bounded input and entry counts, and keeps only compact in-memory fingerprints for a five-minute exact undo. Note bodies and appended text are never stored in plugin data.
 
-## 0.11.1
+## 0.11.1 (unpublished; folded into 0.12.0)
 
-### Added
-
-- Expanded the stable **Knowledge hierarchy** view for Obsidian `.base` files into a configurable Generic view. Title, ID, fallback group, status, priority, page size, and group counts can be set through native Bases view options; native Base grouping, formulas, limits, and user sort remain authoritative.
-
-### Fixed
-
-- Made the Command Center respond to its actual Obsidian leaf width, including stacked tabs and pop-out windows. Compact mode now begins below 1050 px of leaf width (not window width); compact and narrow leaves use a focused record-details route, scroll-safe header actions, and bounded tabs/search instead of retaining the wide two-column dashboard from the surrounding window.
-- Kept Create Note and library-specific creation forms inside the visible iPhone viewport while the software keyboard is open. The modal now reconciles Obsidian's native keyboard inset with the browser visual viewport, keeps the action footer visible, and makes the form body the only scrolling region.
-- Resynchronized focused fields throughout the iOS keyboard animation and scrolled the active control into view without retaining listeners or timers after the modal closes.
-- Kept custom Bases headings, row metadata, and pagination inside narrow panes, with 44-pixel row and pager targets at compact widths and visible keyboard focus.
-
-### Performance
-
-- Replaced the custom Bases view's synchronous whole-result metadata projection and sort with generation-safe 250-entry grouping slices and bounded 25–300-row pages. A 10,000-entry result keeps only the configured page in the DOM while **Previous** and **Next** replace that page.
+This candidate was never tagged or released. Its completed iPhone, stacked-pane, and configurable Bases work is included in 0.12.0.
 
 ## 0.11.0
 

@@ -196,8 +196,7 @@ Recovery is a standalone replacement, never a merge with portable sections. Curr
 
 - At most 50 available and archived knowledge bases and 50 active and archived Libraries per knowledge base are retained.
 - The active knowledge base is plugin-wide; every open Command Center view switches together.
-- Export, import, snapshots, and Undo history are base-local.
-- Export and import operate on the active base; switch bases to handle each one separately.
+- Single-base portable export/import, snapshots, and Undo history are base-local. Multi-base portfolio transfer bundles independent per-base packages without combining their identities.
 - Portable exports include selected active Libraries; confirmed private recovery preserves archived Library state.
 - Concurrent or offline edits to the same established base use whole-base deterministic conflict resolution after private rescue, not field-level merging. Avoid editing the same base on two devices at once, let Sync settle before switching devices, and keep current recovery exports.
 - The Sync and recovery center cannot report network, provider queue, remote-device, or Obsidian Sync status. Its absence of a warning is not proof that remote work has settled.
@@ -205,7 +204,7 @@ Recovery is a standalone replacement, never a merge with portable sections. Curr
 - Desktop offers drag-and-drop; touch devices use labelled row action menus.
 - Same-vault recovery is intentionally not portable.
 - Real-iPhone keyboard, safe-area, Dynamic Type, landscape, import/export, and destructive recovery behavior needs explicit physical-device evidence. Automated DOM checks are not a substitute.
-- Version 0.11.0 adds automated compact-layout coverage for Quick entry, but its complete physical-iPhone toolbar and Apple Shortcuts matrix still requires manual release evidence.
+- Version 0.12.0 expands automated compact-layout and privacy coverage across Quick entry, Quick append, attachments, profiles, portfolio transfer, and recovery diagnostics, but its complete physical-iPhone matrix still requires manual release evidence.
 
 ## Other installation methods
 
