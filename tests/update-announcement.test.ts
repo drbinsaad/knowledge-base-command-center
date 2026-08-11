@@ -317,6 +317,7 @@ test("What’s New modal is semantic, owner-document local, touch-sized, and saf
 });
 
 test("What’s New source has no network API and its responsive modal has one bounded scroll owner", () => {
+  const dom = createFakeDom();
   const source = readFileSync(new URL("../src/update-announcement-modal.ts", import.meta.url), "utf8")
     + readFileSync(new URL("../src/update-announcement.ts", import.meta.url), "utf8");
   const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
@@ -328,7 +329,12 @@ test("What’s New source has no network API and its responsive modal has one bo
   assert.match(styles, /\.ent-cc-whats-new-actions \.ent-cc-button\s*\{[^}]*min-height:\s*44px/su);
   assert.match(styles, /\.ent-cc-whats-new-actions \.ent-cc-button\s*\{[^}]*font-size:\s*var\(--font-ui-small\)/su);
   assert.match(styles, /\.ent-cc-whats-new-modal\s*\{[^}]*100dvh/su);
-  assert.match(styles, /\.ent-cc-whats-new-modal\s*>\s*\.modal-title\s*\{[^}]*padding-inline-end:\s*calc\(44px \+ var\(--size-4-3, 12px\)\)/su);
-  assert.match(styles, /\.ent-cc-whats-new-modal\s*>\s*\.modal-title\s*\{[^}]*overflow:\s*visible[^}]*text-overflow:\s*clip/su);
-  assert.match(styles, /\.ent-cc-whats-new-modal\s*>\s*\.modal-title\s*\{[^}]*overflow-wrap:\s*anywhere[^}]*white-space:\s*normal/su);
+  const hostModal = dom.document.body.createDiv({ cls: "ent-cc-whats-new-modal" });
+  const hostHeader = hostModal.createDiv({ cls: "modal-header" });
+  const hostTitle = hostHeader.createDiv({ cls: "modal-title" });
+  assert.equal(hostTitle.parentElement, hostHeader);
+  assert.equal(hostHeader.parentElement, hostModal, "the fixture preserves Obsidian's inspected modal header nesting");
+  assert.match(styles, /\.ent-cc-whats-new-modal\s*>\s*\.modal-header\s*>\s*\.modal-title\s*\{[^}]*padding-inline-end:\s*calc\(44px \+ var\(--size-4-3, 12px\)\)/su);
+  assert.match(styles, /\.ent-cc-whats-new-modal\s*>\s*\.modal-header\s*>\s*\.modal-title\s*\{[^}]*overflow:\s*visible[^}]*text-overflow:\s*clip/su);
+  assert.match(styles, /\.ent-cc-whats-new-modal\s*>\s*\.modal-header\s*>\s*\.modal-title\s*\{[^}]*overflow-wrap:\s*anywhere[^}]*white-space:\s*normal/su);
 });

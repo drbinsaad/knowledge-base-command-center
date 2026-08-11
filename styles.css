@@ -20,7 +20,7 @@
   overflow: hidden;
 }
 
-.ent-cc-whats-new-modal > .modal-title {
+.ent-cc-whats-new-modal > .modal-header > .modal-title {
   flex: 0 0 auto;
   min-width: 0;
   padding-inline-end: calc(44px + var(--size-4-3, 12px));
