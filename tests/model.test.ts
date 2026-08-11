@@ -68,6 +68,7 @@ import {
   pathIsInsideFolder,
   portablePlaceholderPath,
   provisionalMigratedVaultFingerprint,
+  rebaseProvisionalVaultIdAfterDeterministicRepair,
   semanticPluginDataProjection,
   resolveExpectedParentPath,
   replaceCurriculumVisualPath,
@@ -890,6 +891,24 @@ test("current v14 envelopes require a valid semantic revision", () => {
   const fractional = structuredClone(current) as unknown as { bases: Array<Record<string, unknown>> };
   fractional.bases[0].semanticRevision = 1.5;
   assert.throws(() => migrateStore(fractional, 200), /invalid semantic revision/i);
+
+  const exhausted = structuredClone(current) as unknown as { bases: Array<Record<string, unknown>> };
+  exhausted.bases[0].semanticRevision = Number.MAX_SAFE_INTEGER;
+  assert.throws(() => migrateStore(exhausted, 200), /invalid semantic revision/i);
+});
+
+test("provisional rebasing rejects an unstamped semantic payload change", () => {
+  const legacy = migrateData(null);
+  legacy.version = DATA_VERSION - 2;
+  const before = migrateStore(legacy, 100);
+  const parent = structuredClone(before);
+  const after = structuredClone(parent);
+  after.bases[0]?.data.pinnedPaths.push("Knowledge Base/Unstamped.md");
+
+  assert.equal(rebaseProvisionalVaultIdAfterDeterministicRepair(before, after, {
+    parentStore: parent,
+    reason: "clinical-index-remediation",
+  }), false);
 });
 
 test("current v14 envelopes discard ancestry when the semantic head is missing, invalid, or self-referential", () => {

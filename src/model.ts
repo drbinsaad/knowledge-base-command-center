@@ -870,11 +870,16 @@ export interface DeterministicRepairRebaseContext {
   /** The safely normalized envelope immediately before deterministic repair. */
   parentStore: PluginStore;
   /** The fixed reason used to derive a causal child for repaired entries. */
-  reason?: string;
+  reason?: "clinical-index-remediation";
 }
 
 function sameSemanticMetadata(left: KnowledgeBaseEntry, right: KnowledgeBaseEntry): boolean {
-  return left.semanticRevision === right.semanticRevision
+  const leftFingerprint = semanticEntryFingerprint(left);
+  const rightFingerprint = semanticEntryFingerprint(right);
+  return left.semanticHash === leftFingerprint
+    && right.semanticHash === rightFingerprint
+    && leftFingerprint === rightFingerprint
+    && left.semanticRevision === right.semanticRevision
     && left.semanticHead === right.semanticHead
     && left.semanticHash === right.semanticHash
     && JSON.stringify(left.semanticLineage) === JSON.stringify(right.semanticLineage);
@@ -891,7 +896,7 @@ function isExactDeterministicRepairChild(
     [parent.semanticHead, ...parent.semanticLineage],
     semanticHead,
   );
-  return repaired.semanticRevision === Math.min(Number.MAX_SAFE_INTEGER, parent.semanticRevision + 1)
+  return repaired.semanticRevision === parent.semanticRevision + 1
     && repaired.semanticHash === semanticHash
     && repaired.semanticHead === semanticHead
     && JSON.stringify(repaired.semanticLineage) === JSON.stringify(semanticLineage);
@@ -906,9 +911,22 @@ function sameMigrationEnvelopeMetadata(
   const beforeIds = before.bases.map((entry) => entry.id).sort();
   const parentIds = parentStore.bases.map((entry) => entry.id).sort();
   const afterIds = after.bases.map((entry) => entry.id).sort();
-  if (parentStore.activeBaseId !== after.activeBaseId
+  const sourceHasCausalMetadata = Number(before.version) >= 14;
+  const identitySourceMetadataIsStable = before.bases.every((source) => {
+    const parent = parentStore.bases.find((entry) => entry.id === source.id);
+    return Boolean(parent
+      && source.createdAt === parent.createdAt
+      && source.updatedAt === parent.updatedAt
+      && source.archivedAt === parent.archivedAt
+      && (!sourceHasCausalMetadata || source.semanticRevision === parent.semanticRevision));
+  });
+  if (parentStore.vaultId !== after.vaultId
+    || parentStore.activeBaseId !== after.activeBaseId
     || JSON.stringify(beforeIds) !== JSON.stringify(parentIds)
     || JSON.stringify(beforeIds) !== JSON.stringify(afterIds)
+    || !identitySourceMetadataIsStable
+    || JSON.stringify(canonicalMigrationValue(before.deletedBaseIds))
+      !== JSON.stringify(canonicalMigrationValue(parentStore.deletedBaseIds))
     || canonicalMigrationValue(parentStore.deletedBaseIds) === undefined
     || JSON.stringify(canonicalMigrationValue(parentStore.deletedBaseIds))
       !== JSON.stringify(canonicalMigrationValue(after.deletedBaseIds))) return false;
@@ -2444,7 +2462,7 @@ function cleanTimestamp(input: unknown, fallback: number): number {
 
 function cleanSemanticRevision(input: unknown, fallback: number): number {
   const value = Number(input);
-  return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
+  return Number.isSafeInteger(value) && value >= 0 && value < Number.MAX_SAFE_INTEGER ? value : fallback;
 }
 
 function cleanSemanticLineage(input: unknown): string[] {

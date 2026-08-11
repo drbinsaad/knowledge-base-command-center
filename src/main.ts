@@ -836,7 +836,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         // payload, not an unrelated user edit. Every device derives the same
         // child for the same parent and repaired payload.
         const parentHead = entry.semanticHead;
-        entry.semanticRevision = Math.min(Number.MAX_SAFE_INTEGER, entry.semanticRevision + 1);
+        entry.semanticRevision += 1;
         entry.semanticHash = semanticHash;
         entry.semanticHead = deterministicSemanticHead(parentHead, semanticHash, "clinical-index-remediation");
         entry.semanticLineage = boundedSemanticLineage([parentHead, ...entry.semanticLineage], entry.semanticHead);
