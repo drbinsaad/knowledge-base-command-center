@@ -326,6 +326,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private pendingVaultRenames: PendingVaultRename[] = [];
   private vaultRenameRepairQueue: Promise<void> = Promise.resolve();
   private lastFollowUpUndo: { expiresAt: number; file: TFile; undo: FollowUpUndoMetadata } | null = null;
+  private readonly libraryCommandNames = new Map<string, string>();
   dataCompatibilityWarning = "";
 
   async onload(): Promise<void> {
@@ -474,6 +475,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         return true;
       },
     });
+    this.syncLibraryCommands();
 
     this.addSettingTab(new EntCommandCenterSettingsTab(this.app, this));
     // Registration happens once at plugin load, while the active index profile
@@ -520,6 +522,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   onunload(): void {
     this.unloaded = true;
     if (this.refreshTimer !== null) window.activeWindow.clearTimeout(this.refreshTimer);
+    for (const commandId of this.libraryCommandNames.keys()) this.removeCommand(commandId);
+    this.libraryCommandNames.clear();
   }
 
   async activateView(): Promise<EntVaultCommandCenterView> {
@@ -539,6 +543,43 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     } catch (error) {
       new Notice(error instanceof Error ? error.message : String(error));
     }
+  }
+
+  /**
+   * Active Libraries receive stable global commands so users can place them on
+   * Obsidian's mobile toolbar or assign their own hotkeys. Command callbacks
+   * carry only the stable Library ID and revalidate the current base at use.
+   */
+  private syncLibraryCommands(): void {
+    const desired = new Map<string, string>(
+      this.getLibraries().map((library) => [`open-library-${library.id}`, library.name] as const),
+    );
+    for (const [commandId, priorName] of [...this.libraryCommandNames]) {
+      const nextName = desired.get(commandId);
+      if (nextName === priorName) continue;
+      this.removeCommand(commandId);
+      this.libraryCommandNames.delete(commandId);
+    }
+    for (const [commandId, libraryName] of desired) {
+      if (this.libraryCommandNames.has(commandId)) continue;
+      const libraryId = commandId.slice("open-library-".length);
+      this.addCommand({
+        id: commandId,
+        name: `Open Library: ${libraryName}`,
+        icon: "library",
+        callback: () => this.run(() => this.openLibrary(libraryId)),
+      });
+      this.libraryCommandNames.set(commandId, libraryName);
+    }
+  }
+
+  private async openLibrary(libraryId: string): Promise<void> {
+    const library = this.getLibrary(libraryId);
+    if (!library || library.archivedAt !== null) {
+      throw new Error("That Library is no longer available in the active knowledge base.");
+    }
+    const view = await this.activateView();
+    await view.openLibrary(libraryId);
   }
 
   private run(action: () => Promise<unknown>): void {
@@ -5315,6 +5356,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   async refreshViews(invalidateRecords = true): Promise<void> {
+    this.syncLibraryCommands();
     if (invalidateRecords) this.invalidateRecordCache();
     for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
       if (leaf.view instanceof EntVaultCommandCenterView) await leaf.view.reload();

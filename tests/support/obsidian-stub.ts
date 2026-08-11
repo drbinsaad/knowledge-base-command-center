@@ -51,6 +51,7 @@ export class Plugin {
   registerHoverLinkSource(): void {}
   addRibbonIcon(): void {}
   addCommand(): void {}
+  removeCommand(): void {}
   addSettingTab(): void {}
   registerBasesView(): void {}
   registerEvent(): void {}

@@ -169,6 +169,60 @@ function pluginWith(data: unknown, initialDeviceState: unknown = null): EntVault
   return plugin;
 }
 
+test("active Library commands are stable, refreshed after rename/archive, and revalidate at use", async () => {
+  const data = migrateData(null);
+  data.portableIndex.libraries = [
+    { id: "library-alpha", name: "Alpha", singularName: "Alpha item", icon: "library", order: 0, sourceKind: null, archivedAt: null },
+    { id: "library-archived", name: "Archived", singularName: "Archived item", icon: "archive", order: 1, sourceKind: null, archivedAt: 100 },
+  ];
+  const plugin = pluginWith(createDefaultStore(data, 100, "vault-library-commands"));
+  await plugin.loadPluginData();
+
+  interface RegisteredCommand {
+    id: string;
+    name: string;
+    callback?: () => void;
+  }
+  const registered = new Map<string, RegisteredCommand>();
+  const removed: string[] = [];
+  const host = plugin as unknown as {
+    addCommand(command: RegisteredCommand): RegisteredCommand;
+    removeCommand(commandId: string): void;
+    syncLibraryCommands(): void;
+    activateView(): Promise<{ openLibrary(libraryId: string): Promise<void> }>;
+  };
+  host.addCommand = (command) => {
+    registered.set(command.id, command);
+    return command;
+  };
+  host.removeCommand = (commandId) => {
+    removed.push(commandId);
+    registered.delete(commandId);
+  };
+
+  host.syncLibraryCommands();
+  assert.deepEqual([...registered.keys()], ["open-library-library-alpha"]);
+  assert.equal(registered.get("open-library-library-alpha")?.name, "Open Library: Alpha");
+
+  const alpha = plugin.data.portableIndex.libraries.find((library) => library.id === "library-alpha");
+  assert.ok(alpha);
+  alpha.name = "Renamed Alpha";
+  host.syncLibraryCommands();
+  assert.deepEqual(removed, ["open-library-library-alpha"]);
+  assert.equal(registered.get("open-library-library-alpha")?.name, "Open Library: Renamed Alpha");
+
+  let opened = "";
+  host.activateView = async () => ({ openLibrary: async (libraryId) => { opened = libraryId; } });
+  registered.get("open-library-library-alpha")?.callback?.();
+  await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0));
+  assert.equal(opened, "library-alpha");
+
+  alpha.archivedAt = 200;
+  host.syncLibraryCommands();
+  assert.equal(registered.size, 0);
+  assert.deepEqual(removed, ["open-library-library-alpha", "open-library-library-alpha"]);
+});
+
 function pluginWithFiles(
   data: unknown,
   files: TFile[],

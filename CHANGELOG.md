@@ -11,6 +11,7 @@
 - Added an explicit **Attach file to current note…** command with per-knowledge-base storage policies: follow Obsidian, fixed vault folder, note-local folder, or ask each time. Generated links can be inserted at the editor cursor, a configured marker or heading, or the end of the note.
 - Added guarded binary import through Obsidian's vault APIs, including a 100-megabyte per-file ceiling, collision-safe filenames, immutable-source and <code>ai_lock</code> protection, replaced-note detection, and clear partial-success reporting when the file was copied but its link could not be inserted.
 - Added a Taxonomy Health Center for duplicate and visually confusable names, case/hyphen variants, parent or cycle problems, empty or unreachable structure, unavailable configured folders/templates, duplicate note bindings, and unresolved placeholders that may match local notes. Findings are read-only by default; the two deterministic parent-edge repairs require an explicit preview and are saved as one Undo-protected plugin-state transaction.
+- Added one stable **Open Library** command per active Library for user-assigned hotkeys, the mobile toolbar, and Obsidian Quick Action. Commands are refreshed after Library or base changes and revalidate the active base before opening.
 
 ### Changed
 

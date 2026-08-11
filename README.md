@@ -98,6 +98,8 @@ The view reads note, file, and formula values through Obsidian's Bases API. A `.
 
 Quick entry is available from the lightning-bolt desktop ribbon action and the Command Center header. On mobile, Obsidian exposes ribbon actions in its **Open** menu. Its focused commands can create a No note subject, heading, subheading, or note, add the current or an existing note, and open Quick append for the current or a chosen note. Library capture asks for the exact heading or subheading before it creates or classifies a note. The hub can switch the active knowledge base before opening an entry form.
 
+Every active Library also exposes its own **Open Library: …** global command. Assign it a hotkey, add it to the mobile toolbar, or use it as Obsidian's mobile Quick Action. The command uses the Library's stable internal ID and refuses to open an archived or unavailable Library.
+
 The plugin assigns no default key combinations. Choose your own under **Settings → Hotkeys**. On iPhone or iPad, open **Settings → Mobile → Manage toolbar options**, scroll to the bottom, choose **Add global command**, then search for and select **Quick entry…** or another focused command.
 
 Apple Shortcuts can open the hub with <code>obsidian://kbcc-quick-entry</code>, Quick append for the active note with <code>obsidian://kbcc-quick-append-current</code>, or the note picker with <code>obsidian://kbcc-quick-append-existing</code>. These routes are fixed and action-only. A URL containing <code>?title=</code>, <code>?path=</code>, or any other parameter fails closed; a URL can never prefill or submit note data.

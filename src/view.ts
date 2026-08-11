@@ -2145,6 +2145,14 @@ export class EntVaultCommandCenterView extends ItemView {
     if (focusTab) this.contentEl.querySelector<HTMLElement>(`[data-tab="${tab}"]`)?.focus();
   }
 
+  async openLibrary(libraryId: string): Promise<void> {
+    const library = this.plugin.getLibrary(libraryId);
+    if (!library || library.archivedAt !== null) {
+      throw new Error("That Library is no longer available in the active knowledge base.");
+    }
+    await this.changeTab(libraryTabId(libraryId), true);
+  }
+
   private tabCount(tab: MainTab): number {
     if (tab === "curriculum") {
       const topicsOnly = this.plugin.isClinicalMode();
