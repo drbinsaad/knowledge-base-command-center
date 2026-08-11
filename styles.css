@@ -20,6 +20,17 @@
   overflow: hidden;
 }
 
+.ent-cc-whats-new-modal > .modal-title {
+  flex: 0 0 auto;
+  min-width: 0;
+  padding-inline-end: calc(44px + var(--size-4-3, 12px));
+  overflow: visible;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+}
+
 .ent-cc-whats-new-modal > .modal-content.ent-cc-whats-new {
   display: flex;
   flex: 1 1 auto;

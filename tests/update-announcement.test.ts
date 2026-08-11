@@ -328,4 +328,7 @@ test("What’s New source has no network API and its responsive modal has one bo
   assert.match(styles, /\.ent-cc-whats-new-actions \.ent-cc-button\s*\{[^}]*min-height:\s*44px/su);
   assert.match(styles, /\.ent-cc-whats-new-actions \.ent-cc-button\s*\{[^}]*font-size:\s*var\(--font-ui-small\)/su);
   assert.match(styles, /\.ent-cc-whats-new-modal\s*\{[^}]*100dvh/su);
+  assert.match(styles, /\.ent-cc-whats-new-modal\s*>\s*\.modal-title\s*\{[^}]*padding-inline-end:\s*calc\(44px \+ var\(--size-4-3, 12px\)\)/su);
+  assert.match(styles, /\.ent-cc-whats-new-modal\s*>\s*\.modal-title\s*\{[^}]*overflow:\s*visible[^}]*text-overflow:\s*clip/su);
+  assert.match(styles, /\.ent-cc-whats-new-modal\s*>\s*\.modal-title\s*\{[^}]*overflow-wrap:\s*anywhere[^}]*white-space:\s*normal/su);
 });
