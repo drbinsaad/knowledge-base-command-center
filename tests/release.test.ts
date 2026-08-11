@@ -19,6 +19,24 @@ test("release metadata is internally consistent and mobile-compatible", async ()
   assert.equal(packageJson.license, "MIT");
 });
 
+test("the manifest release has curated one-time news and an exact immutable GitHub tag link", async () => {
+  const manifest = await readJson("manifest.json");
+  const version = String(manifest.version);
+  const announcement = await readFile(path.join(root, "src", "update-announcement.ts"), "utf8");
+  const main = await readFile(path.join(root, "src", "main.ts"), "utf8");
+  const escapedVersion = version.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  const exactUrl = `https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/${version}`;
+  const escapedUrl = exactUrl.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  assert.match(
+    announcement,
+    new RegExp(`version:\\s*"${escapedVersion}"[\\s\\S]*?releaseUrl:\\s*"${escapedUrl}"`, "u"),
+    "every published manifest version must carry curated news linked to its exact immutable release tag",
+  );
+  assert.match(main, /id: "open-whats-new"/u);
+  assert.match(main, /maybeShowUpdateAnnouncement\(initialLoad\)/u);
+  assert.doesNotMatch(announcement, /\b(?:fetch|XMLHttpRequest|WebSocket|requestUrl|sendBeacon)\b/u);
+});
+
 test("public repository metadata is present", async () => {
   const manifest = await readJson("manifest.json");
   const license = await readFile(path.join(root, "LICENSE"), "utf8");
@@ -68,6 +86,8 @@ test("public repository metadata is present", async () => {
   assert.match(iphoneChecklist, /Taxonomy health center/);
   assert.match(iphoneChecklist, /Manage categories/);
   assert.match(iphoneChecklist, /Turn on VoiceOver/);
+  assert.match(iphoneChecklist, /What’s new/);
+  assert.match(iphoneChecklist, /releases\/tag\/0\.12\.0/);
   const commandAppendix = userGuide.slice(userGuide.indexOf("\n## Commands\n"), userGuide.indexOf("\n## Safety boundary\n"));
   for (const command of [
     "Quick append: Add to current note…",
@@ -77,6 +97,7 @@ test("public repository metadata is present", async () => {
   assert.match(userGuide, /Any focused Quick Entry or Quick Append command/);
   assert.match(userGuide, /Open Library: _Library name_/);
   assert.match(packageJson, /tests\/follow-up\.test\.ts/);
+  assert.match(packageJson, /tests\/update-announcement\.test\.ts/);
 });
 
 test("manual release surface contains the three required nonempty assets", async () => {

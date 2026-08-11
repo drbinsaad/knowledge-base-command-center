@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added a one-time, device-local **What’s new** window after an existing installation upgrades to 0.12.0. It summarizes the release with an explicit, safe link to the exact GitHub release page; the plugin makes no request to GitHub, never shows the window on a truly fresh install, and also provides **Open what’s new** for deliberate reopening.
 - Expanded the stable **Knowledge hierarchy** view for Obsidian `.base` files into a configurable Generic view. Title, ID, fallback group, status, priority, page size, and group counts can be set through native Bases view options; native Base grouping, formulas, limits, and user sort remain authoritative.
 - Added bounded multi-base portfolio export/import for up to 50 available knowledge bases. Each bundle contains a strict manifest and independent existing-format portable packages per base, with source-to-destination mapping, per-base Merge/Replace, and per-source component and Library selection.
 - Added an exact dry-run portfolio plan used verbatim by apply, with categorized base, heading, subject, Library, conflict, folder/template fallback, and explicit will-not-change previews. Replace requires typed confirmation and writes a same-vault recovery for every affected destination before mutation.
@@ -33,7 +34,7 @@
 - Made the multi-base portfolio modal a labelled keyboard-operable tab interface with a persistent Cancel action, logical focus restoration after source/destination/acknowledgement/preview paging changes, and owner-window iOS keyboard geometry that keeps typed confirmation reachable.
 - Gave taxonomy repair previews a single bounded scrolling body with fixed, wrapping 44-point actions; made Quick Entry descriptions scale and wrap with bidirectional text; and gave text prompts persistent visible and programmatic labels.
 - Kept initial Sync & Recovery focus on the modal context, then announced each explicit local recheck and restored focus to its action.
-- Added a confirmed **Clear device-local data** command and Sync & Recovery action that removes this plugin's route, collapse, Undo/Redo, Quick append Undo, and local recovery facts without changing Markdown, attachments, exports, or synced organization. Pending view saves and recovery recorders remain suppressed until restart so an uninstall-session reset cannot recreate either local value.
+- Added a confirmed **Clear device-local data** command and Sync & Recovery action that removes this plugin's route, collapse, Undo/Redo, Quick append Undo, local recovery facts, and update-announcement history without changing Markdown, attachments, exports, or synced organization. Pending view saves and recovery recorders remain suppressed until restart so an uninstall-session reset cannot recreate either local value.
 - Kept portfolio preview announcements concise instead of making the full rich preview a live region, kept taxonomy repair preview focus on its title and context, and revalidated an exact taxonomy repair again at the queued mutation boundary.
 - Rewrote every compatible older same-vault envelope to the current outer and inner store versions after external Sync delivery, including equal-semantics and incoming-winning merges.
 - Buffered attachment folder, marker, and heading text settings before persistence, avoiding a full plugin-data rewrite and Sync revision on every keystroke.

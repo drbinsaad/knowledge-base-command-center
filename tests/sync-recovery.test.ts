@@ -135,6 +135,15 @@ test("device-local state is validated, bounded, and never treats a timestamp-les
   });
   assert.equal(parsed.lastExternalReloadOutcome, null);
   assert.equal(parsed.semanticConflicts.length, 50);
+  assert.equal(parsed.highestPluginVersionSeen, null);
+  assert.equal(parseSyncRecoveryLocalState({
+    ...base,
+    highestPluginVersionSeen: "0.12.0-rc.1",
+  }).highestPluginVersionSeen, "0.12.0-rc.1");
+  assert.equal(parseSyncRecoveryLocalState({
+    ...base,
+    highestPluginVersionSeen: `0.12.0+${"x".repeat(128)}`,
+  }).highestPluginVersionSeen, null);
   assert.throws(() => parseSyncRecoveryLocalState({ version: 2 }), /unsupported/i);
 });
 

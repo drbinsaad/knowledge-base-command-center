@@ -13,6 +13,10 @@ Start with a complete vault backup and a current private recovery export for eac
 
 Run **BRAT: Check for updates to all beta plugins and UPDATE** and verify that the matching GitHub release contains all three required assets.
 
+## The What’s New window did not appear
+
+The window appears automatically once per device only when a compatible Knowledge Base Command Center payload already existed before version 0.12.0 opened. It intentionally does not interrupt a fresh install, an incompatible/read-only startup, a downgrade, or a repeat reload. Run **Open what’s new** from the Command Palette to open the current release summary manually. Its GitHub link makes no request until you activate it.
+
 Before removing and re-adding the BRAT entry, export current organization and back up the vault.
 
 ## A note is missing from the Index
@@ -129,7 +133,7 @@ Do not edit IDs or identity fields by hand to bypass these checks. Use a current
 
 Before disabling the plugin, run **Knowledge Base Command Center: Clear device-local data…** from the Command Palette (or choose the same action in **Sync & recovery center**) and confirm. Then remove the plugin through Community Plugins or delete its manual plugin folder.
 
-Removing the folder removes <code>data.json</code> and the synced settings and organization stored there. It does not reliably remove device-only routes, collapsed sections, Undo/Redo history, or local Sync/Recovery facts because Obsidian keeps those two plugin-owned App-local values outside the folder. The clear action removes only those local values; it does not change <code>data.json</code>, Markdown notes, attachments, or recovery exports. Local tracking stays suppressed until Obsidian restarts, so disable or uninstall in that same session. If the plugin was already removed without clearing them, reinstall and enable the same or a newer release, run the clear action, then remove it again.
+Removing the folder removes <code>data.json</code> and the synced settings and organization stored there. It does not reliably remove device-only routes, collapsed sections, Undo/Redo history, local Sync/Recovery facts, or update-announcement history because Obsidian keeps those two plugin-owned App-local values outside the folder. The clear action removes only those local values; it does not change <code>data.json</code>, Markdown notes, attachments, or recovery exports. Local tracking stays suppressed until Obsidian restarts, so disable or uninstall in that same session. If the plugin was already removed without clearing them, reinstall and enable the same or a newer release, run the clear action, then remove it again.
 
 Before uninstalling, export current private recovery for every available base, temporarily restore any archived base that needs recovery, and back up the complete vault including <code>.obsidian</code>.
 

@@ -34,7 +34,7 @@
     "typecheck": "tsc -noEmit -skipLibCheck",
     "build": "npm run typecheck && node esbuild.config.mjs production",
     "lint": "eslint . --max-warnings 0 && node scripts/validate-json.mjs",
-    "test": "node --import tsx --import ./tests/support/register.mjs --test tests/model.test.ts tests/main.test.ts tests/view.test.ts tests/mobile-dom.test.ts tests/bases-view.test.ts tests/quick-entry.test.ts tests/attachment.test.ts tests/follow-up.test.ts tests/store-merge.test.ts tests/taxonomy-health.test.ts tests/portfolio.test.ts tests/sync-recovery.test.ts",
+    "test": "node --import tsx --import ./tests/support/register.mjs --test tests/model.test.ts tests/main.test.ts tests/view.test.ts tests/mobile-dom.test.ts tests/bases-view.test.ts tests/quick-entry.test.ts tests/attachment.test.ts tests/follow-up.test.ts tests/store-merge.test.ts tests/taxonomy-health.test.ts tests/portfolio.test.ts tests/sync-recovery.test.ts tests/update-announcement.test.ts",
     "test:release": "node --experimental-strip-types --test tests/release.test.ts",
     "verify-release": "npm run test:release",
     "verify-community": "node scripts/verify-community.mjs",

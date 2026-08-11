@@ -184,6 +184,12 @@ import {
   type SyncRecoveryLocalState,
 } from "./sync-recovery";
 import { ClearDeviceLocalDataModal, SyncRecoveryCenterModal } from "./sync-recovery-modal";
+import {
+  planUpdateAnnouncement,
+  updateAnnouncementForVersion,
+  type UpdateAnnouncement,
+} from "./update-announcement";
+import { UpdateAnnouncementModal } from "./update-announcement-modal";
 
 /** Bound stable inactive projections by records, not an arbitrary base count. */
 const MAX_INACTIVE_SEARCH_CACHED_RECORDS = 50_000;
@@ -234,6 +240,9 @@ interface AppWriteBarrier {
   logicalTail: Promise<void>;
   /** Sticky for the App lifetime; only a full Obsidian restart clears it. */
   uncertainty: { message: string; at: number } | null;
+  /** Synchronous, App-lifetime claims prevent replacement instances racing. */
+  updateAnnouncementClaims: Set<string>;
+  activeUpdateAnnouncementVersion: string | null;
 }
 
 export type { KnowledgeBaseSearchSource } from "./search";
@@ -349,12 +358,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private lastFollowUpUndo: { expiresAt: number; file: TFile; undo: FollowUpUndoMetadata } | null = null;
   private readonly libraryCommandNames = new Map<string, string>();
   private settingsTab: EntCommandCenterSettingsTab | null = null;
+  private updateAnnouncementHandled = false;
+  private activeUpdateAnnouncementModal: UpdateAnnouncementModal | null = null;
   dataCompatibilityWarning = "";
 
   async onload(): Promise<void> {
     this.activateAppWriteBarrier();
     this.loadSyncRecoveryLocalState();
-    await this.loadPluginData();
+    const initialLoad = await this.loadPluginData();
     this.registerView(VIEW_TYPE, (leaf) => new EntVaultCommandCenterView(leaf, this));
     this.registerHoverLinkSource("ent-vault-command-center", {
       display: "Knowledge Base Command Center",
@@ -371,6 +382,15 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.addCommand({ id: "manage-knowledge-index", name: "Manage index…", callback: () => void this.withView((view) => view.openIndexManager()) });
     this.addCommand({ id: "open-taxonomy-health", name: "Open taxonomy health center", callback: () => new TaxonomyHealthModal(this).open() });
     this.addCommand({ id: "open-sync-recovery-center", name: "Open sync & recovery center", icon: "shield-check", callback: () => new SyncRecoveryCenterModal(this).open() });
+    const currentUpdateAnnouncement = updateAnnouncementForVersion(this.manifest.version);
+    if (currentUpdateAnnouncement) {
+      this.addCommand({
+        id: "open-whats-new",
+        name: "Open what’s new",
+        icon: "sparkles",
+        callback: () => this.openCurrentUpdateAnnouncement(currentUpdateAnnouncement),
+      });
+    }
     this.addCommand({
       id: "clear-device-local-data",
       name: "Clear device-local data…",
@@ -565,11 +585,18 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         else if (this.app.workspace.getLeavesOfType(VIEW_TYPE).length > 0) this.scheduleRefresh(false);
       }));
       this.registerEvent(this.app.vault.on("rename", (file, oldPath) => this.handleVaultRenameEvent(file, oldPath)));
+      this.maybeShowUpdateAnnouncement(initialLoad);
     });
   }
 
   onunload(): void {
     this.unloaded = true;
+    const hadActiveUpdateAnnouncement = this.activeUpdateAnnouncementModal !== null;
+    this.activeUpdateAnnouncementModal?.close();
+    this.activeUpdateAnnouncementModal = null;
+    if (hadActiveUpdateAnnouncement && this.appWriteBarrier) {
+      this.appWriteBarrier.activeUpdateAnnouncementVersion = null;
+    }
     if (this.refreshTimer !== null) window.activeWindow.clearTimeout(this.refreshTimer);
     for (const commandId of this.libraryCommandNames.keys()) this.removeCommand(commandId);
     this.libraryCommandNames.clear();
@@ -942,18 +969,20 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
   }
 
-  private persistSyncRecoveryLocalState(): void {
-    if (this.deviceLocalPersistenceSuppressed) return;
+  private persistSyncRecoveryLocalState(): boolean {
+    if (this.deviceLocalPersistenceSuppressed) return false;
     this.loadSyncRecoveryLocalState();
     try {
       if (typeof this.app.saveLocalStorage === "function") {
         this.app.saveLocalStorage(SYNC_RECOVERY_LOCAL_STATE_KEY, this.syncRecoveryLocalState);
+        return true;
       }
     } catch {
       // Diagnostics must never turn a successful organization write into a
       // failure or echo a storage error that may contain a private identifier.
       console.warn("Knowledge Base Command Center could not persist device-local Sync and Recovery state.");
     }
+    return false;
   }
 
   private recordLocalSuccessfulSave(at = Date.now()): void {
@@ -1106,6 +1135,82 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // write or expose a potentially private view error in the confirmation.
       console.error("Knowledge Base Command Center cleared device-local data but could not refresh every open view.");
     }
+  }
+
+  /**
+   * Announcements are App-local and are marked before opening. That ordering
+   * makes an update window one-time even if another live plugin instance or a
+   * quick reload follows immediately. Failure to persist fails closed instead
+   * of showing the same announcement after every restart.
+   */
+  private maybeShowUpdateAnnouncement(
+    initialLoad: Pick<PluginDataLoadResult, "compatible" | "sourceWasMissing">,
+  ): void {
+    if (this.updateAnnouncementHandled || this.unloaded || this.deviceLocalPersistenceSuppressed) return;
+    this.updateAnnouncementHandled = true;
+    if (!this.claimUpdateAnnouncementSession(this.manifest.version)) return;
+    this.loadSyncRecoveryLocalState();
+    const plan = planUpdateAnnouncement(
+      this.manifest.version,
+      this.syncRecoveryLocalState.highestPluginVersionSeen,
+      initialLoad.compatible && !initialLoad.sourceWasMissing,
+    );
+    if (plan.shouldPersist && plan.nextHighestObservedVersion) {
+      this.syncRecoveryLocalState.highestPluginVersionSeen = plan.nextHighestObservedVersion;
+      if (!this.persistSyncRecoveryLocalState()) return;
+    }
+    if (!plan.announcement || this.unloaded || this.deviceLocalPersistenceSuppressed) return;
+    this.openUpdateAnnouncement(plan.announcement);
+  }
+
+  private openCurrentUpdateAnnouncement(announcement: UpdateAnnouncement): void {
+    if (this.unloaded || this.deviceLocalPersistenceSuppressed) return;
+    this.claimUpdateAnnouncementSession(this.manifest.version);
+    this.loadSyncRecoveryLocalState();
+    const plan = planUpdateAnnouncement(
+      this.manifest.version,
+      this.syncRecoveryLocalState.highestPluginVersionSeen,
+      false,
+    );
+    if (plan.shouldPersist && plan.nextHighestObservedVersion) {
+      this.syncRecoveryLocalState.highestPluginVersionSeen = plan.nextHighestObservedVersion;
+      this.persistSyncRecoveryLocalState();
+    }
+    this.updateAnnouncementHandled = true;
+    this.openUpdateAnnouncement(announcement);
+  }
+
+  private openUpdateAnnouncement(announcement: UpdateAnnouncement): void {
+    if (this.unloaded || this.deviceLocalPersistenceSuppressed || this.activeUpdateAnnouncementModal) return;
+    if (!this.appWriteBarrier) this.activateAppWriteBarrier();
+    if (this.appWriteBarrier?.activeUpdateAnnouncementVersion !== null) return;
+    const modal = new UpdateAnnouncementModal(this.app, announcement, () => {
+      if (this.activeUpdateAnnouncementModal === modal) this.activeUpdateAnnouncementModal = null;
+      if (this.appWriteBarrier?.activeUpdateAnnouncementVersion === announcement.version) {
+        this.appWriteBarrier.activeUpdateAnnouncementVersion = null;
+      }
+    });
+    this.activeUpdateAnnouncementModal = modal;
+    if (this.appWriteBarrier) this.appWriteBarrier.activeUpdateAnnouncementVersion = announcement.version;
+    try {
+      modal.open();
+    } catch {
+      if (this.activeUpdateAnnouncementModal === modal) this.activeUpdateAnnouncementModal = null;
+      if (this.appWriteBarrier?.activeUpdateAnnouncementVersion === announcement.version) {
+        this.appWriteBarrier.activeUpdateAnnouncementVersion = null;
+      }
+      // The release was already marked before presentation. Keep this generic:
+      // modal failures must not reveal vault, device, or plugin-data details.
+      console.warn("Knowledge Base Command Center could not open the update announcement.");
+    }
+  }
+
+  private claimUpdateAnnouncementSession(version: string): boolean {
+    if (!this.appWriteBarrier) this.activateAppWriteBarrier();
+    const claims = this.appWriteBarrier?.updateAnnouncementClaims;
+    if (!claims || claims.has(version)) return false;
+    claims.add(version);
+    return true;
   }
 
   /**
@@ -1669,6 +1774,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         tail: Promise.resolve(),
         logicalTail: Promise.resolve(),
         uncertainty: null,
+        updateAnnouncementClaims: new Set<string>(),
+        activeUpdateAnnouncementVersion: null,
       };
     const runtimeBarrier = barrier as unknown as Record<string, unknown>;
     const logicalTail = runtimeBarrier.logicalTail;
@@ -1680,6 +1787,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       barrier.logicalTail = barrier.tail;
     }
     if (!("uncertainty" in runtimeBarrier)) barrier.uncertainty = null;
+    if (!(runtimeBarrier.updateAnnouncementClaims instanceof Set)) {
+      barrier.updateAnnouncementClaims = new Set<string>();
+    }
+    if (typeof runtimeBarrier.activeUpdateAnnouncementVersion !== "string") {
+      barrier.activeUpdateAnnouncementVersion = null;
+    }
     const priorTail = barrier.tail;
     const priorLogicalTail = barrier.logicalTail;
     barrier.generation += 1;

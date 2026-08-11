@@ -1,3 +1,5 @@
+import { isSemanticVersion } from "./update-announcement";
+
 export const SYNC_RECOVERY_LOCAL_STATE_VERSION = 1 as const;
 export const SYNC_RECOVERY_EXPORT_FOLDER = "Knowledge Base Command Center Exports";
 export const MAX_SYNC_RECOVERY_ARTIFACT_ENTRIES = 2_000;
@@ -23,6 +25,8 @@ export interface SyncRecoveryLocalState {
   lastExternalReloadOutcome: ExternalReloadOutcome | null;
   lastRecoveryExportAt: number | null;
   semanticConflicts: RecordedSemanticConflict[];
+  /** Highest installed plugin release observed on this device. */
+  highestPluginVersionSeen: string | null;
 }
 
 export interface LocalRecoveryArtifact {
@@ -79,6 +83,7 @@ export function createDefaultSyncRecoveryLocalState(): SyncRecoveryLocalState {
     lastExternalReloadOutcome: null,
     lastRecoveryExportAt: null,
     semanticConflicts: [],
+    highestPluginVersionSeen: null,
   };
 }
 
@@ -121,6 +126,9 @@ export function parseSyncRecoveryLocalState(input: unknown): SyncRecoveryLocalSt
     lastExternalReloadOutcome: cleanTimestamp(record.lastExternalReloadAt) === null ? null : outcome,
     lastRecoveryExportAt: cleanTimestamp(record.lastRecoveryExportAt),
     semanticConflicts,
+    highestPluginVersionSeen: isSemanticVersion(record.highestPluginVersionSeen)
+      ? record.highestPluginVersionSeen
+      : null,
   };
 }
 

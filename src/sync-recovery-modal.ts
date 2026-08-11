@@ -281,7 +281,7 @@ export class ClearDeviceLocalDataModal extends Modal {
     this.contentEl.addClass("ent-cc-modal", "ent-cc-clear-device-local");
     this.titleEl.setText("Clear device-local data?");
     this.contentEl.createEl("p", {
-      text: "This clears this device's saved route, collapsed sections, undo and redo history, and local sync and recovery facts for this plugin.",
+      text: "This clears this device's saved route, collapsed sections, undo and redo history, local sync and recovery facts, and update-announcement history for this plugin.",
     });
     this.contentEl.createEl("p", {
       text: "Synced knowledge-base organization, settings, Markdown notes, attachments, and recovery export files are not changed.",
@@ -298,7 +298,7 @@ export class ClearDeviceLocalDataModal extends Modal {
       void this.plugin.clearDeviceLocalData().then(() => {
         this.close();
         this.onCleared();
-        new Notice("Device-local plugin data cleared. Disable or uninstall now; restarting Obsidian resumes local route and recovery tracking. Synced knowledge-base data and Markdown notes were not changed.", 10000);
+        new Notice("Device-local plugin data cleared. Disable or uninstall now; restarting Obsidian resumes local route, recovery, and update tracking. Synced knowledge-base data and Markdown notes were not changed.", 10000);
       }).catch(() => {
         this.busy = false;
         cancel.disabled = false;

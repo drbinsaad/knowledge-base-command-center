@@ -155,13 +155,15 @@ Let vault content and configuration Sync finish first. Avoid changing the same k
 
 After updating, confirm the plugin is enabled before opening its workspace. For a first multi-device upgrade, follow the earlier Sync precautions.
 
+An existing installation shows **What’s new in Knowledge Base Command Center 0.12.0** once on this device after the update. Its complete-release-notes action is a normal link to the exact 0.12.0 GitHub release and contacts GitHub only after you activate it; the plugin performs no background version check or network request. Fresh installs establish the local version marker without showing update news. Use **Open what’s new** in the Command Palette whenever you want to reopen the window.
+
 Current physical-iPhone evidence is recorded separately in [0.10.0 iPhone evidence](release-evidence/0.10.0-iphone.md).
 
 ## Uninstall
 
 Export current organization and back up the vault first. Run **Knowledge Base Command Center: Clear device-local data…** from the Command Palette (also available in **Sync & recovery center**) and confirm. Then disable and remove the plugin through Community Plugins, or remove its manual plugin folder.
 
-Removing the plugin folder removes its <code>data.json</code>, including synced knowledge-base definitions, settings, Libraries, Collections, pins, visual hierarchy, and named snapshots. It does not by itself reliably remove device-only routes, collapsed sections, Undo/Redo history, or local Sync/Recovery facts because Obsidian stores those App-local values outside the plugin folder. The clear command removes those two plugin-owned local values without changing <code>data.json</code>, Markdown notes, attachments, or recovery export files, and local tracking stays suppressed until Obsidian restarts. Disable or uninstall in that same session. If the plugin was already removed without clearing them, reinstall and enable the same or a newer release, run the command, then remove it again.
+Removing the plugin folder removes its <code>data.json</code>, including synced knowledge-base definitions, settings, Libraries, Collections, pins, visual hierarchy, and named snapshots. It does not by itself reliably remove device-only routes, collapsed sections, Undo/Redo history, local Sync/Recovery facts, or update-announcement history because Obsidian stores those App-local values outside the plugin folder. The clear command removes those two plugin-owned local values without changing <code>data.json</code>, Markdown notes, attachments, or recovery export files, and local tracking stays suppressed until Obsidian restarts. Disable or uninstall in that same session. If the plugin was already removed without clearing them, reinstall and enable the same or a newer release, run the command, then remove it again.
 
 ## Next
 

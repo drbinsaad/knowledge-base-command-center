@@ -10,6 +10,120 @@
   background: var(--background-primary);
 }
 
+.ent-cc-whats-new-modal {
+  display: flex;
+  width: min(640px, calc(100vw - 32px));
+  max-width: 640px;
+  max-height: calc(100vh - 40px);
+  max-height: calc(100dvh - 40px);
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ent-cc-whats-new-modal > .modal-content.ent-cc-whats-new {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ent-cc-whats-new-body {
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-padding-block: 12px 24px;
+  -webkit-overflow-scrolling: touch;
+}
+
+.ent-cc-whats-new-badge {
+  display: inline-flex;
+  width: fit-content;
+  min-height: 32px;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border: 1px solid color-mix(in srgb, var(--interactive-accent) 45%, var(--background-modifier-border));
+  border-radius: 999px;
+  color: var(--text-accent);
+  background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+  font-size: var(--font-ui-small);
+  font-weight: 700;
+}
+
+.ent-cc-whats-new-intro {
+  margin: 14px 0;
+  color: var(--text-normal);
+  line-height: 1.55;
+}
+
+.ent-cc-whats-new-body h3 {
+  margin: 16px 0 8px;
+}
+
+.ent-cc-whats-new-body ul {
+  margin: 0;
+  padding-inline-start: 1.4em;
+}
+
+.ent-cc-whats-new-body li {
+  margin-block: 8px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.ent-cc-whats-new-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: stretch;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 12px;
+  padding-bottom: max(0px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.ent-cc-whats-new-actions .ent-cc-button {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding-inline: 14px;
+  font-size: var(--font-ui-small);
+  text-align: center;
+  white-space: normal;
+}
+
+.ent-cc-whats-new-release-link {
+  color: var(--text-accent);
+  text-decoration: none;
+}
+
+.ent-cc-whats-new-release-link:hover,
+.ent-cc-whats-new-release-link:focus-visible {
+  color: var(--text-accent-hover);
+  text-decoration: none;
+}
+
+@media (max-width: 600px) {
+  .ent-cc-whats-new-modal {
+    width: calc(100vw - 16px);
+    max-height: calc(100dvh - 16px - env(safe-area-inset-top));
+  }
+
+  .ent-cc-whats-new-actions {
+    flex-direction: column;
+  }
+
+  .ent-cc-whats-new-actions .ent-cc-button {
+    width: 100%;
+  }
+}
+
 /* Portable index subjects intentionally keep the compact row geometry. */
 .ent-cc-placeholder-row {
   background: color-mix(in srgb, var(--background-secondary) 72%, transparent);

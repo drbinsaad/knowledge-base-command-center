@@ -239,11 +239,13 @@ Reload Obsidian and enable the plugin. Never mix files from different releases.
 
 Let vault and configuration Sync finish before updating and avoid editing the same knowledge base on another device. Update through Community Plugins or BRAT on the device, or replace all three manual assets together on desktop and wait for the hidden <code>.obsidian</code> folder to sync. Then confirm the plugin is enabled before opening the Command Center.
 
+After an existing installation first opens version 0.12.0, a one-time **What’s new** window summarizes the release. **Read complete release notes** is an ordinary external link to that exact GitHub release and opens only when you choose it—the plugin does not contact GitHub, check the network, or send telemetry. The window is not shown for a truly fresh install and is remembered only in this device's existing App-local Sync/Recovery record. Run **Open what’s new** from the Command Palette to reopen it deliberately.
+
 ### Uninstall
 
 Export current organization first. Then run **Knowledge Base Command Center: Clear device-local data…** and confirm before disabling and removing the plugin through Community Plugins (or deleting its manual plugin folder).
 
-The plugin folder contains <code>data.json</code> with synced knowledge bases, settings, Libraries, Collections, pins, hierarchy, and named snapshots. Device-only routes, collapsed sections, Undo/Redo history, and local Sync/Recovery facts are stored through Obsidian's App local storage outside that folder, so deleting only the folder does not reliably remove them. The clear command removes both plugin-owned local values without changing <code>data.json</code>, Markdown notes, attachments, or recovery export files, and local tracking stays suppressed until Obsidian restarts. Disable or uninstall in that same session. If you already removed the plugin without clearing them, reinstall and enable the same or a newer release, run the clear command, then remove it again.
+The plugin folder contains <code>data.json</code> with synced knowledge bases, settings, Libraries, Collections, pins, hierarchy, and named snapshots. Device-only routes, collapsed sections, Undo/Redo history, local Sync/Recovery facts, and the highest plugin version observed for one-time update announcements are stored through Obsidian's App local storage outside that folder, so deleting only the folder does not reliably remove them. The clear command removes both plugin-owned local values without changing <code>data.json</code>, Markdown notes, attachments, or recovery export files, and local tracking stays suppressed until Obsidian restarts. Disable or uninstall in that same session. If you already removed the plugin without clearing them, reinstall and enable the same or a newer release, run the clear command, then remove it again.
 
 ## Troubleshooting
 

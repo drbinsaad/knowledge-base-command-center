@@ -2711,7 +2711,7 @@ test("malformed or oversized device-local state is discarded to safe defaults", 
   }
 });
 
-test("clearing device-local data resets in-memory view/history and both local keys without saving data.json", async () => {
+test("clearing device-local data resets in-memory view/history and all local keys without saving data.json", async () => {
   const first = migrateData(null);
   const second = migrateData(null);
   second.settings.workspaceName = "Second";
@@ -2731,6 +2731,7 @@ test("clearing device-local data resets in-memory view/history and both local ke
       lastExternalReloadOutcome: "applied",
       lastRecoveryExportAt: 300,
       semanticConflicts: [{ baseId: "base-second", at: 400, count: 1 }],
+      highestPluginVersionSeen: "0.12.0",
     }],
   ]);
   const writes: Array<[string, unknown]> = [];
@@ -2765,8 +2766,15 @@ test("clearing device-local data resets in-memory view/history and both local ke
   assert.deepEqual(plugin.data.undoStack, []);
   assert.deepEqual(plugin.data.redoStack, []);
   assert.equal(plugin.savedData.length, 0, "clear never writes synced plugin data");
-  const localFacts = (plugin as unknown as { syncRecoveryLocalState: { lastLocalSaveAt: number | null; semanticConflicts: unknown[] } }).syncRecoveryLocalState;
+  const localFacts = (plugin as unknown as {
+    syncRecoveryLocalState: {
+      highestPluginVersionSeen: string | null;
+      lastLocalSaveAt: number | null;
+      semanticConflicts: unknown[];
+    };
+  }).syncRecoveryLocalState;
   assert.equal(localFacts.lastLocalSaveAt, null);
+  assert.equal(localFacts.highestPluginVersionSeen, null);
   assert.deepEqual(localFacts.semanticConflicts, []);
 
   const writesAfterClear = writes.length;
