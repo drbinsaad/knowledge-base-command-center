@@ -19,6 +19,7 @@ import {
   BUILTIN_LIBRARY_DEFINITIONS,
   BUILTIN_LIBRARY_IDS,
   cleanLibraryDefinitions,
+  cleanLibraryNoteProfiles,
   cloneLibraryLayouts,
   emptyLibraryLayouts,
   ensureSystemLibraries,
@@ -74,6 +75,7 @@ import {
   semanticPluginDataProjection,
   semanticEntryFingerprint,
   resolveExpectedParentPath,
+  resolveLibraryNoteProfile,
   replaceCurriculumVisualPath,
   replacePathMapKey,
   reconcileCurriculumVisual,
@@ -95,7 +97,9 @@ import {
   validateWritableFolderPath,
   validateProposalFolderPath,
   validateTemplateFilePath,
+  validateLibraryNoteProfile,
   visualPlacementPathSet,
+  type LibraryDefinition,
   type LayoutHeading,
   type VaultRecord,
 } from "../src/model.ts";
@@ -1773,6 +1777,125 @@ test("generic note paths, folder grouping, and template tokens are deterministic
   );
 });
 
+test("contextual template tokens are YAML-quoted while legacy tokens stay unchanged", () => {
+  const rendered = applyTemplateTokens(
+    [
+      "title: {{title}}",
+      "id: {{yaml:id}}",
+      "category: {{yaml:category}}",
+      "parent: {{yaml:parent}}",
+      "library: {{yaml:library}}",
+      "type: {{yaml:type}}",
+      "unknown: {{yaml:future}}",
+    ].join("\n"),
+    "A: title # kept legacy",
+    "2026-08-11",
+    "09:30",
+    {
+      id: "ID: [one]",
+      category: "Airway #1",
+      parent: "quoted \"parent\"\nline",
+      library: "مراجع",
+      type: "Paper",
+    },
+  );
+  assert.equal(rendered, [
+    "title: A: title # kept legacy",
+    "id: \"ID: [one]\"",
+    "category: \"Airway #1\"",
+    "parent: \"quoted \\\"parent\\\"\\nline\"",
+    "library: \"مراجع\"",
+    "type: \"Paper\"",
+    "unknown: {{yaml:future}}",
+  ].join("\n"));
+  assert.equal(applyTemplateTokens("id: {{yaml:id}}", "Title", "date", "time"), "id: \"\"");
+  assert.equal(
+    applyTemplateTokens(
+      "title: {{title}}\nid: {{yaml:id}}",
+      "{{yaml:id}}",
+      "date",
+      "time",
+      { id: "{{title}}\u0085unsafe" },
+    ),
+    "title: {{yaml:id}}\nid: \"{{title}}\\u0085unsafe\"",
+    "legacy values cannot inject contextual tokens and contextual values cannot trigger legacy expansion",
+  );
+});
+
+test("Library note profiles clean strictly, stay bounded to real Libraries, and inherit by field", () => {
+  const data = migrateData(null);
+  data.portableIndex.libraries = [{
+    id: "library-research",
+    name: "Research",
+    singularName: "Paper",
+    icon: "library",
+    order: 0,
+    sourceKind: null,
+    archivedAt: null,
+  }];
+  const cleaned = cleanLibraryNoteProfiles({
+    "library-research": { folder: " Research//Papers/ ", mode: "template", templatePath: "/Templates/Paper.md", ignored: "x" },
+    "missing-library": { folder: "Missing" },
+    "__proto__": { folder: "Unsafe" },
+    "library-bad-path": { folder: "../Outside" },
+  }, new Set(["library-research"]));
+  assert.deepEqual(cleaned, {
+    "library-research": { folder: "Research/Papers", mode: "template", templatePath: "Templates/Paper.md" },
+  });
+  data.settings.defaultNoteFolder = "Knowledge Base";
+  data.settings.defaultNewNoteMode = "empty";
+  data.settings.defaultTemplatePath = "Templates/Default.md";
+  data.settings.libraryNoteProfiles = { "library-research": { mode: "template" } };
+  assert.deepEqual(resolveLibraryNoteProfile(data.settings, "library-research"), {
+    folder: "Knowledge Base",
+    mode: "template",
+    templatePath: "Templates/Default.md",
+    inherited: { folder: true, mode: false, templatePath: true },
+  });
+  assert.equal(validateLibraryNoteProfile(
+    { folder: "Research", mode: "template", templatePath: "Templates/Paper.md" },
+    data.settings,
+    "library-research",
+    ".obsidian",
+  ), null);
+  assert.match(validateLibraryNoteProfile(
+    { folder: ".obsidian/plugins" },
+    data.settings,
+    "library-research",
+    ".obsidian",
+  ) ?? "", /cannot be inside/);
+});
+
+test("migration drops orphaned and hostile Library creation profiles without changing data version", () => {
+  const raw = migrateData(null) as unknown as Record<string, unknown>;
+  const portableIndex = structuredClone(raw.portableIndex) as ReturnType<typeof migrateData>["portableIndex"];
+  portableIndex.libraries = [{
+    id: "library-valid",
+    name: "Valid",
+    singularName: "Item",
+    icon: "library",
+    order: 0,
+    sourceKind: null,
+    archivedAt: Date.now(),
+  }];
+  const migrated = migrateData({
+    ...raw,
+    portableIndex,
+    settings: {
+      ...(raw.settings as object),
+      libraryNoteProfiles: {
+        "library-valid": { folder: "Archive", mode: "empty", templatePath: "" },
+        "library-orphan": { folder: "Orphan" },
+        "library-invalid": { folder: "05 Sources/_books/Book" },
+      },
+    },
+  });
+  assert.deepEqual(migrated.settings.libraryNoteProfiles, {
+    "library-valid": { folder: "Archive", mode: "empty", templatePath: "" },
+  });
+  assert.equal(migrated.version, DATA_VERSION);
+});
+
 test("writable folder validation protects the Obsidian configuration area", () => {
   assert.equal(validateWritableFolderPath("Knowledge Base", ".obsidian"), null);
   assert.match(validateWritableFolderPath(".obsidian/plugins", ".obsidian") ?? "", /cannot be inside/);
@@ -1994,17 +2117,102 @@ test("version 1 organization backups remain readable but carry no trusted vault 
 
 test("portable workspace configuration round-trips settings and group order without note paths", () => {
   const data = migrateData(null);
+  data.portableIndex.libraries = [{
+    id: "library-research",
+    name: "Research",
+    singularName: "Paper",
+    icon: "microscope",
+    order: 0,
+    sourceKind: null,
+    archivedAt: null,
+  }];
+  data.portableIndex.libraryLayouts = { "library-research": [] };
   data.settings.workspaceName = "Research Command Center";
   data.settings.allowClinicalVisualGroupMoves = true;
+  data.settings.libraryNoteProfiles = {
+    "library-research": { folder: "Research/Papers", mode: "template", templatePath: "Templates/Paper.md" },
+    "orphaned-library": { folder: "Private/Orphaned" },
+  };
   data.indexGroupOrder = ["Projects", "Reading"];
   data.manualIndexPaths = ["Private/Note.md"];
   const config = createWorkspaceConfig(data, "2026-08-07T00:00:00.000Z");
   const parsed = parseWorkspaceConfig(JSON.parse(JSON.stringify(config)) as unknown);
   assert.equal(parsed.settings.workspaceName, "Research Command Center");
   assert.equal(parsed.settings.allowClinicalVisualGroupMoves, true);
+  assert.deepEqual(parsed.settings.libraryNoteProfiles, {
+    "library-research": { folder: "Research/Papers", mode: "template", templatePath: "Templates/Paper.md" },
+  });
   assert.deepEqual(parsed.indexGroupOrder, ["Projects", "Reading"]);
   assert.equal("manualIndexPaths" in parsed, false);
   assert.equal(JSON.stringify(parsed).includes("Private/Note.md"), false);
+  assert.equal(JSON.stringify(parsed).includes("Private/Orphaned"), false);
+});
+
+test("legacy standalone workspace import drops profiles without destination Library identities", () => {
+  const source = migrateData(null);
+  const legacyConfig = createWorkspaceConfig(source, "2026-08-11T00:00:00.000Z");
+  legacyConfig.settings.libraryNoteProfiles = {
+    "library-local": { folder: "Local references", mode: "empty" },
+    "library-missing": { folder: "Missing references", mode: "empty" },
+  };
+  const value = parseAnyCommandCenterExport(JSON.parse(JSON.stringify(legacyConfig)) as unknown);
+  const target = migrateData(null);
+  target.portableIndex.libraries = [{
+    id: "library-local",
+    name: "Local",
+    singularName: "Reference",
+    icon: "book-open",
+    order: 0,
+    sourceKind: null,
+    archivedAt: null,
+  }];
+  target.portableIndex.libraryLayouts = { "library-local": [] };
+
+  applyPortableExport(target, value, portableSelection({ workspace: true }), "replace");
+
+  assert.deepEqual(target.settings.libraryNoteProfiles, {
+    "library-local": { folder: "Local references", mode: "empty" },
+  });
+  assert.equal(JSON.stringify(target.settings).includes("Missing references"), false);
+});
+
+test("portable workspace exports carry every Library needed by creation profiles", () => {
+  const source = migrateData(null);
+  const library: LibraryDefinition = {
+    id: "library-research",
+    name: "Research",
+    singularName: "Paper",
+    icon: "microscope",
+    order: 0,
+    sourceKind: null,
+    archivedAt: null,
+  };
+  source.portableIndex.libraries = [library];
+  source.portableIndex.libraryLayouts = { [library.id]: [] };
+  source.settings.libraryNoteProfiles = {
+    [library.id]: { folder: "Research/Papers", mode: "empty" },
+  };
+  const value = parsePortableExport(createPortableExport(
+    source,
+    [],
+    portableSelection({ workspace: true }),
+    "2026-08-11T00:00:00.000Z",
+  ));
+  assert.deepEqual(value.components.index?.libraries.map((item) => item.id), [library.id]);
+
+  const target = migrateData(null);
+  applyPortableExport(target, value, portableSelection({ workspace: true }), "replace");
+  assert.equal(target.portableIndex.libraries.find((item) => item.id === library.id)?.name, "Research");
+  assert.deepEqual(target.settings.libraryNoteProfiles[library.id], {
+    folder: "Research/Papers",
+    mode: "empty",
+  });
+
+  const missingDescriptor = structuredClone(value) as unknown as {
+    components: { index: { libraries: LibraryDefinition[] } };
+  };
+  missingDescriptor.components.index.libraries = [];
+  assert.throws(() => parsePortableExport(missingDescriptor), /references library library-research without a definition/i);
 });
 
 test("workspace imports preserve the destination knowledge-base identity", () => {
@@ -4023,6 +4231,9 @@ test("folder renames rewrite all path-valued settings recursively without treati
   data.settings.templatesFolder = "Vault Root/Templates";
   data.settings.defaultNoteFolder = "Vault Root/Knowledge/Inbox";
   data.settings.defaultTemplatePath = "Vault Root/Templates/Topic.md";
+  data.settings.libraryNoteProfiles = {
+    "library-research": { folder: "Vault Root/Research", templatePath: "Vault Root/Templates/Research.md" },
+  };
   data.indexGroupAliases = { Knowledge: "Study index" };
   data.indexGroupOrder = ["Study index"];
   const history = snapshotPersonal(data, "Saved settings", true);
@@ -4038,6 +4249,10 @@ test("folder renames rewrite all path-valued settings recursively without treati
     assert.equal(settings?.templatesFolder, "Renamed Root/Templates");
     assert.equal(settings?.defaultNoteFolder, "Renamed Root/Knowledge/Inbox");
     assert.equal(settings?.defaultTemplatePath, "Renamed Root/Templates/Topic.md");
+    assert.deepEqual(settings?.libraryNoteProfiles["library-research"], {
+      folder: "Renamed Root/Research",
+      templatePath: "Renamed Root/Templates/Research.md",
+    });
   }
   assert.deepEqual(data.indexGroupAliases, { Knowledge: "Study index" });
   assert.deepEqual(data.indexGroupOrder, ["Study index"]);
@@ -4138,6 +4353,9 @@ test("file renames update the configured template path through nested history on
   data.settings.primaryFolder = "Templates/Old topic.md";
   data.settings.templatesFolder = "Templates";
   data.settings.defaultTemplatePath = "Templates/Old topic.md";
+  data.settings.libraryNoteProfiles = {
+    "library-research": { folder: "Notes", templatePath: "Templates/Old topic.md" },
+  };
   const history = snapshotPersonal(data, "Template settings", true);
   history.layoutSnapshots = [snapshotPersonal(data, "Nested template settings", true)];
   data.layoutSnapshots = [structuredClone(history)];
@@ -4156,6 +4374,7 @@ test("file renames update the configured template path through nested history on
       .flatMap((stack) => [stack[0]?.settings, stack[0]?.layoutSnapshots?.[0]?.settings]),
   ]) {
     assert.equal(settings?.defaultTemplatePath, "Templates/New topic.md");
+    assert.equal(settings?.libraryNoteProfiles["library-research"]?.templatePath, "Templates/New topic.md");
     assert.equal(settings?.primaryFolder, "Templates/Old topic.md");
     assert.equal(settings?.templatesFolder, "Templates");
   }

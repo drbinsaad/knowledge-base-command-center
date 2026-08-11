@@ -6,6 +6,8 @@
 
 - Added Quick append for the active or a chosen Markdown note. Users can file repeated follow-up items beneath configurable Questions, Lectures to watch, Sources, Thoughts, To read, Other, or custom category headings without duplicating the managed section.
 - Added base-specific category management with stable marker IDs, rename/reorder/archive/restore, bullet or checkbox style, and optional dates, plus focused commands and fixed action-only Apple Shortcut URLs for current-note and note-picker entry.
+- Added optional note-creation profiles for active and archived Libraries. Each profile inherits the knowledge base defaults field by field or overrides its destination folder, Empty/Template mode, and template; the resolved Create note form remains editable per note.
+- Added explicit creation-time YAML-safe template tokens for Library context: `{{yaml:id}}`, `{{yaml:category}}`, `{{yaml:parent}}`, `{{yaml:library}}`, and `{{yaml:type}}`. Missing values become a quoted empty scalar, while legacy `{{title}}`, `{{date}}`, and `{{time}}` behavior remains unchanged.
 
 ### Changed
 
@@ -13,6 +15,9 @@
 
 ### Fixed
 
+- Preserved Library creation profiles through settings exports, portable workspace dependency descriptors, settings-bearing named snapshots and Undo/Redo entries, Library renames/archives, and vault folder/template renames; permanent Library deletion removes its profile atomically.
+- Made workspace imports reset unavailable, restricted, or out-of-folder Library templates to Empty inside the same Undo-protected transaction while still rejecting invalid destination folders; legacy standalone workspace imports report and omit profiles without a matching destination Library ID.
+- Kept the Library-profile editor inside the iPhone visual viewport during keyboard animation, with 44-point controls, safe-area padding, explicit effective-value summaries, and stale Sync/base guards.
 - Repair duplicate, missing, or unsafe collection, subheading, and saved-view IDs deterministically during ordinary plugin-data loading, so damaged synced data cannot make edits target the wrong item or remove multiple saved views at once.
 - Keep collection and Library heading identities globally unique across hierarchy levels during import and recovery, preserving existing local identities and making repeated Merge imports stable across reloads.
 - Replaced the four-base cross-base-search cache with a scan-resistant 50,000-record working set, retained unaffected projections across path-scoped vault changes, and restricted each uncached projection to its configured folders plus explicit references. Large multi-base vaults no longer rescan every Markdown path for every inactive base on each keystroke.

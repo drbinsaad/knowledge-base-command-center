@@ -48,6 +48,7 @@ import {
   snapshotStackDepthIsTruncated,
   TopicFormValue,
   PluginSettings,
+  TemplateTokenContext,
   unknownQueryTokens,
   validateWritableFolderPath,
   validateTemplateFilePath,
@@ -1293,8 +1294,17 @@ export class EntVaultCommandCenterView extends ItemView {
   private startCreateLibraryNote(libraryId: string, target: CatalogPlacementTarget = {}): void {
     const library = this.plugin.getLibrary(libraryId);
     if (!library || library.archivedAt !== null) return;
+    if (this.plugin.isClinicalMode() && library.sourceKind !== null) {
+      new Notice(`The built-in ${library.name} library follows native clinical source classification.`);
+      return;
+    }
     const ownsBase = this.createOpenedBaseGuard();
-    this.startCreateKnowledgeNote({}, false, async (file) => {
+    const profile = this.plugin.getEffectiveLibraryNoteProfile(libraryId);
+    this.startCreateKnowledgeNote({
+      folder: profile.folder,
+      mode: profile.mode,
+      templatePath: profile.templatePath,
+    }, false, async (file) => {
       if (!ownsBase()) return;
       await this.plugin.assignRecordToLibrary(file.path, libraryId, target);
     }, `${library.singularName} created and added to ${library.name}. The Markdown note was not rewritten.`, {
@@ -1302,7 +1312,46 @@ export class EntVaultCommandCenterView extends ItemView {
       contextNotice: target.headingId
         ? `This Markdown note will be classified in the selected heading or subheading in ${library.name} after creation.`
         : `This Markdown note will be classified in ${library.name} after creation. You can choose its heading or subheading from the record’s actions menu.`,
+      tokenContext: this.libraryTemplateTokenContext(library, target),
     });
+  }
+
+  private libraryTemplateTokenContext(
+    library: LibraryDefinition,
+    target: CatalogPlacementTarget = {},
+    record?: VaultRecord,
+  ): TemplateTokenContext {
+    const layout = this.plugin.data.portableIndex.libraryLayouts[library.id] ?? [];
+    const heading = target.headingId
+      ? layout.find((candidate) => candidate.id === target.headingId)
+      : target.subheadingId
+        ? layout.find((candidate) => candidate.subheadings.some((subheading) => subheading.id === target.subheadingId))
+        : undefined;
+    const subheading = target.subheadingId
+      ? heading?.subheadings.find((candidate) => candidate.id === target.subheadingId)
+      : undefined;
+    const subject = record?.portableId ? this.plugin.getPortableSubject(record.portableId) : null;
+    const parent = subject?.parentId ? this.plugin.getPortableSubject(subject.parentId) : null;
+    return {
+      id: record?.curriculumId ?? "",
+      category: subheading?.title ?? heading?.title ?? record?.domain ?? library.name,
+      parent: parent?.title ?? record?.parentTopic ?? "",
+      library: library.name,
+      type: library.singularName,
+    };
+  }
+
+  private libraryPlacementForSubject(libraryId: string, subjectId: string | undefined): CatalogPlacementTarget {
+    if (!subjectId) return {};
+    for (const heading of this.plugin.data.portableIndex.libraryLayouts[libraryId] ?? []) {
+      if (heading.subjects.includes(subjectId)) return { headingId: heading.id };
+      for (const subheading of heading.subheadings) {
+        if (subheading.subjects.includes(subjectId)) {
+          return { headingId: heading.id, subheadingId: subheading.id };
+        }
+      }
+    }
+    return {};
   }
 
   private startAddExistingToLibrary(libraryId: string, target: CatalogPlacementTarget = {}): void {
@@ -1462,7 +1511,9 @@ export class EntVaultCommandCenterView extends ItemView {
       return;
     }
     const settings = this.plugin.data.settings;
-    const actions = this.plugin.isClinicalMode()
+    const library = record.libraryId ? this.plugin.getLibrary(record.libraryId) : null;
+    const canCreateGenericNote = !this.plugin.isClinicalMode() || library?.sourceKind === null;
+    const actions = !canCreateGenericNote
       ? [
           ...(record.kind === "topic" ? [{ id: "proposal", title: "Create unverified proposal", description: "Create a safety-gated topic proposal in the configured clinical Inbox, then link it.", icon: "shield-alert" }] : []),
           { id: "link", title: "Link existing note", description: "Connect this subject to an existing Markdown note without changing that note.", icon: "link" },
@@ -1473,14 +1524,35 @@ export class EntVaultCommandCenterView extends ItemView {
           { id: "template", title: "Create from template", description: "Choose a local template, create a note, and retain this subject’s placement.", icon: "copy-plus" },
           { id: "link", title: "Link existing note", description: "Connect this subject to an existing Markdown note without changing that note.", icon: "link" },
           { id: "keep", title: "Keep placeholder", description: "Leave the subject in the index with no Markdown note for now.", icon: "bookmark" },
-        ];
+    ];
     new AddActionModal(this.app, actions, (action) => {
       if (!ownsBase()) return;
       const resolve = (file: TFile): Promise<void> => this.plugin.resolvePortableSubject(record.portableId ?? "", file.path);
+      const profile = library
+        ? this.plugin.getEffectiveLibraryNoteProfile(library.id)
+        : { folder: settings.defaultNoteFolder, mode: settings.defaultNewNoteMode, templatePath: settings.defaultTemplatePath };
+      const tokenContext = library
+        ? this.libraryTemplateTokenContext(
+            library,
+            this.libraryPlacementForSubject(library.id, record.portableId),
+            record,
+          )
+        : {
+            id: record.curriculumId,
+            category: record.domain,
+            parent: record.parentTopic,
+            library: "",
+            type: record.topicKind,
+          };
+      const formContext = library ? {
+        createLabel: library.singularName,
+        contextNotice: `This note will resolve “${record.title}” in ${library.name} without rewriting any existing Markdown note.`,
+        tokenContext,
+      } : { tokenContext };
       if (action.id === "empty") {
-        this.startCreateKnowledgeNote({ title: record.title, folder: settings.defaultNoteFolder, mode: "empty" }, false, resolve);
+        this.startCreateKnowledgeNote({ title: record.title, folder: profile.folder, mode: "empty", templatePath: profile.templatePath }, false, resolve, undefined, formContext);
       } else if (action.id === "template") {
-        this.startCreateKnowledgeNote({ title: record.title, folder: settings.defaultNoteFolder, mode: "template", templatePath: settings.defaultTemplatePath }, false, resolve);
+        this.startCreateKnowledgeNote({ title: record.title, folder: profile.folder, mode: "template", templatePath: profile.templatePath }, false, resolve, undefined, formContext);
       } else if (action.id === "proposal") {
         this.startCreateProposal({ title: record.title, domain: record.domain, topicKind: "condition", priority: "P2", safetyCritical: false }, resolve);
       } else if (action.id === "link") {
@@ -1496,7 +1568,7 @@ export class EntVaultCommandCenterView extends ItemView {
     indexAfterCreate = !this.plugin.isClinicalMode(),
     onCreated?: (file: TFile) => void | Promise<void>,
     completionMessage?: string,
-    formContext?: { createLabel?: string; contextNotice?: string },
+    formContext?: { createLabel?: string; contextNotice?: string; tokenContext?: TemplateTokenContext },
   ): void {
     if (!this.guardLoadedBase()) return;
     const ownsBase = this.createOpenedBaseGuard();
@@ -1517,7 +1589,7 @@ export class EntVaultCommandCenterView extends ItemView {
         : "The active knowledge base changed. Close and reopen this form.",
       onSubmit: async (value) => {
         if (!ownsBase()) return;
-        const file = await this.plugin.createKnowledgeNote(value);
+        const file = await this.plugin.createKnowledgeNote(value, formContext?.tokenContext);
         if (!ownsBase()) return;
         if (onCreated) {
           await onCreated(file);

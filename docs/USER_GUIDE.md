@@ -94,6 +94,20 @@ The ENT preset supplies Procedures, Medications, and Syndromes as protected sema
 
 Built-in ENT Libraries may be archived and restored but cannot be permanently deleted. Removing a record from a Library leaves it explicitly unassigned; it does not silently add the record to the Knowledge Index. Move it to the Index or another Library deliberately.
 
+### Library creation profiles
+
+Open **Settings → Libraries → Library creation profiles** to configure creation defaults for active or archived Libraries. Each Library can independently override:
+
+- destination folder;
+- starting content: Empty note or Copy a template; and
+- template path.
+
+Every field left on **Inherit** follows the active knowledge base's default. There are only two levels—knowledge-base defaults and one optional Library override. There is no content-type × Library matrix. The effective folder and content choice appear in the profile manager, and the Create note form remains editable for a one-note exception.
+
+Profiles use stable Library IDs, so a rename or reorder keeps the profile. Archiving keeps it for later restoration. Permanently deleting a custom Library deletes its profile in the same Undo-protected transaction. Folder and template-file renames inside the vault update current settings and history entries that carry settings, including settings-bearing named snapshots and Undo/Redo entries. Profiles never move or rewrite notes, frontmatter, or attachments.
+
+In the ENT preset, custom Libraries use these creation profiles. Protected source-derived Procedures, Medications, and Syndromes continue to follow their clinical classification safeguards rather than becoming a property-driven note generator.
+
 ## Collections
 
 Collections are personal reusable lists across the Index and Libraries. A record can belong to several Collection headings or subheadings without duplication or file movement.
@@ -123,6 +137,18 @@ Use **Add → Create note** or **Create note from template or empty note…**. T
 - optional Collection membership.
 
 Templates may use <code>{{title}}</code>, <code>{{date}}</code>, and <code>{{time}}</code>. Other template syntax is copied unchanged. The path preview shows the destination before creation. Missing destination folders are created safely, and existing files are never overwritten.
+
+When creation has an explicit Library context, templates may also use these quoted-scalar tokens:
+
+| Token | Creation-time value |
+| --- | --- |
+| <code>{{yaml:id}}</code> | Stable/configured subject ID when the placeholder already has one; otherwise <code>""</code>. |
+| <code>{{yaml:category}}</code> | Selected Library subheading or heading, then the record group/Library fallback. |
+| <code>{{yaml:parent}}</code> | Existing portable/configured parent title when known; otherwise <code>""</code>. |
+| <code>{{yaml:library}}</code> | Current Library name. |
+| <code>{{yaml:type}}</code> | Current Library's singular item label. |
+
+The <code>yaml:</code> prefix is deliberate. Values are emitted as YAML-compatible double-quoted scalars, including escaping quotes, line breaks, and control characters. A template can safely write <code>category: {{yaml:category}}</code>. Tokens resolve only during explicit note creation; they are not reevaluated when a note opens, a Library is renamed, or organization changes. Plain <code>{{id}}</code>, <code>{{category}}</code>, and other third-party template syntax remain untouched. Legacy title/date/time behavior is unchanged.
 
 Notes created through the primary action join the active Index or Library as requested, even when their destination is outside the automatically indexed folder and the profile permits manual membership.
 
@@ -280,6 +306,7 @@ Configurable Generic-base settings include:
 - indexed, Inbox, default note, and templates folders;
 - ID, group, and parent metadata mappings;
 - default starting content and template;
+- optional per-Library folder, starting-content, and template profiles;
 - default section and recent-change limit;
 - hover previews and note-opening behavior; and
 - active knowledge-base and Library management.

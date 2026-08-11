@@ -487,7 +487,15 @@ test("Library create and add services preserve the Quick Entry placement target"
     data,
     getActiveKnowledgeBaseId: () => "base-a",
     getDataEpoch: () => 1,
+    isClinicalMode: () => false,
     getLibrary: (id: string) => id === library.id ? library : null,
+    getEffectiveLibraryNoteProfile: () => ({
+      folder: data.settings.defaultNoteFolder,
+      mode: data.settings.defaultNewNoteMode,
+      templatePath: data.settings.defaultTemplatePath,
+      inherited: { folder: true, mode: true, templatePath: true },
+    }),
+    getPortableSubject: () => null,
     getVaultNoteFiles: () => [existingFile],
     async assignRecordToLibrary(path: string, libraryId: string, placement: CatalogPlacementTarget): Promise<void> {
       assignments.push({ path, libraryId, target: placement });

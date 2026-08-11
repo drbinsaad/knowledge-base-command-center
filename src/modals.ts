@@ -499,7 +499,7 @@ export class KnowledgeNoteModal extends Modal {
 
     const templateSetting = new Setting(formBody)
       .setName("Template")
-      .setDesc("Supports {{title}}, {{date}}, and {{time}}. Other template syntax is copied unchanged.")
+      .setDesc("Supports legacy {{title}}, {{date}}, and {{time}} tokens. {{yaml:id}}, {{yaml:category}}, {{yaml:parent}}, {{yaml:library}}, and {{yaml:type}} insert YAML-safe quoted scalars. Other syntax is copied unchanged.")
       .addButton((button) => {
         this.templateButton = button.buttonEl;
         button.buttonEl.setAttribute("aria-label", "Choose note template");

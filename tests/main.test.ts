@@ -5793,6 +5793,44 @@ test("custom-library names, headings, and groups stay identical on Turkish and A
   }
 });
 
+test("Library creation profiles inherit by field, validate paths, survive archive, and clean up with deletion Undo", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.defaultNoteFolder = "Knowledge Base";
+  data.settings.defaultNewNoteMode = "empty";
+  data.settings.defaultTemplatePath = "Templates/Default.md";
+  const plugin = pluginWith(data);
+  await plugin.loadPluginData();
+  const libraryId = await plugin.createLibrary({ name: "Research", singularName: "Paper", icon: "microscope" });
+
+  assert.equal(plugin.getLibraryNoteProfile(libraryId), null);
+  assert.deepEqual(plugin.getEffectiveLibraryNoteProfile(libraryId), {
+    folder: "Knowledge Base",
+    mode: "empty",
+    templatePath: "Templates/Default.md",
+    inherited: { folder: true, mode: true, templatePath: true },
+  });
+  await assert.rejects(plugin.setLibraryNoteProfile(libraryId, { folder: ".obsidian/plugins" }), /cannot be inside/i);
+  await plugin.setLibraryNoteProfile(libraryId, { folder: "Research/Papers", mode: "empty" });
+  assert.deepEqual(plugin.getEffectiveLibraryNoteProfile(libraryId), {
+    folder: "Research/Papers",
+    mode: "empty",
+    templatePath: "Templates/Default.md",
+    inherited: { folder: false, mode: false, templatePath: true },
+  });
+
+  await plugin.undo();
+  assert.equal(plugin.getLibraryNoteProfile(libraryId), null);
+  await plugin.redo();
+  assert.deepEqual(plugin.getLibraryNoteProfile(libraryId), { folder: "Research/Papers", mode: "empty" });
+  await plugin.archiveLibrary(libraryId);
+  assert.deepEqual(plugin.getLibraryNoteProfile(libraryId), { folder: "Research/Papers", mode: "empty" });
+  await plugin.deleteLibrary(libraryId, "unassigned");
+  assert.equal(plugin.getLibraryNoteProfile(libraryId), null);
+  await plugin.undo();
+  assert.deepEqual(plugin.getLibraryNoteProfile(libraryId), { folder: "Research/Papers", mode: "empty" });
+});
+
 test("library Create, Archive, and Delete restore navigation and defaults through Undo and Redo", async () => {
   const data = migrateData(null);
   data.settings.workspaceMode = "generic";
@@ -7219,6 +7257,71 @@ test("unlink rolls back in memory and on disk when its first save fails", async 
   } | undefined;
   const persistedActive = persisted?.bases?.find((entry) => entry.id === persisted.activeBaseId);
   assert.equal(persistedActive?.data?.portableIndex?.resolvedPathBySubjectId?.subject, linkedFile.path);
+});
+
+test("note creation applies explicit YAML-safe Library tokens without rewriting the template", async () => {
+  const templatesFolder = new TFolder("Templates");
+  const researchFolder = new TFolder("Research");
+  const template = new TFile("Templates/Paper.md");
+  const tree = trackedVaultTree([templatesFolder, researchFolder, template]);
+  const templateContent = [
+    "---",
+    "id: {{yaml:id}}",
+    "category: {{yaml:category}}",
+    "parent: {{yaml:parent}}",
+    "library: {{yaml:library}}",
+    "type: {{yaml:type}}",
+    "---",
+    "# {{title}}",
+  ].join("\n");
+  let createdContent = "";
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getAbstractFileByPath: (path: string) => tree.entries.get(path) ?? null,
+      getMarkdownFiles: () => tree.markdownFiles(),
+      createFolder: (path: string) => tree.createFolder(path),
+      cachedRead: async (file: TFile) => file === template ? templateContent : "",
+      create: async (path: string, content: string) => {
+        createdContent = content;
+        const file = new TFile(path);
+        tree.entries.set(path, file);
+        return file;
+      },
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+    fileManager: { trashFile: (file: TAbstractFile) => tree.trashFile(file) },
+  };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.templatesFolder = "Templates";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = data;
+  await plugin.loadPluginData();
+
+  const file = await plugin.createKnowledgeNote({
+    title: "Quoted: paper",
+    folder: "Research",
+    mode: "template",
+    templatePath: template.path,
+    addToCollection: false,
+  }, {
+    id: "REF: [1]",
+    category: "Evidence #1",
+    parent: "Airway \"review\"",
+    library: "Research",
+    type: "Paper",
+  });
+
+  assert.equal(file.path, "Research/Quoted- paper.md");
+  assert.match(createdContent, /id: "REF: \[1\]"/);
+  assert.match(createdContent, /category: "Evidence #1"/);
+  assert.match(createdContent, /parent: "Airway \\"review\\""/);
+  assert.match(createdContent, /library: "Research"/);
+  assert.match(createdContent, /type: "Paper"/);
+  assert.match(createdContent, /# Quoted: paper/);
+  assert.equal(await app.vault.cachedRead(template), templateContent);
 });
 
 test("failed note creation removes only folders created by that operation", async () => {

@@ -41,6 +41,7 @@ import {
   isRecognizedPluginStore,
   isRestrictedVaultPath,
   LibraryDefinition,
+  LibraryNoteProfile,
   LibraryKind,
   libraryTabId,
   subjectLibraryId,
@@ -88,11 +89,16 @@ import {
   semanticPluginDataProjection,
   nextSemanticHead,
   parseDeviceLocalPluginState,
+  cleanLibraryNoteProfiles,
+  resolveLibraryNoteProfile,
   snapshotPersonal,
   storedDataVersion,
   STORE_VERSION,
   SYNDROME_ROOT,
   TopicFormValue,
+  TemplateTokenContext,
+  EffectiveLibraryNoteProfile,
+  validateLibraryNoteProfile,
   validateProposalFolderPath,
   validateTemplateFilePath,
   validateWritableFolderPath,
@@ -2154,6 +2160,52 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return library ? { ...library } : null;
   }
 
+  getLibraryNoteProfile(libraryId: string): LibraryNoteProfile | null {
+    const profile = this.data.settings.libraryNoteProfiles[libraryId];
+    return profile ? { ...profile } : null;
+  }
+
+  getEffectiveLibraryNoteProfile(libraryId: string): EffectiveLibraryNoteProfile {
+    this.requireLibrary(libraryId);
+    return resolveLibraryNoteProfile(this.data.settings, libraryId);
+  }
+
+  validateLibraryNoteProfile(libraryId: string, profile: LibraryNoteProfile): string | null {
+    if (!this.getLibrary(libraryId)) return "That library is no longer available.";
+    const error = validateLibraryNoteProfile(profile, this.data.settings, libraryId, this.app.vault.configDir);
+    if (error) return error;
+    const effective = resolveLibraryNoteProfile({
+      ...this.data.settings,
+      libraryNoteProfiles: { ...this.data.settings.libraryNoteProfiles, [libraryId]: profile },
+    }, libraryId);
+    if (effective.mode !== "template") return null;
+    const template = this.app.vault.getAbstractFileByPath(normalizePath(effective.templatePath));
+    return template instanceof TFile && template.extension.toLocaleLowerCase() === "md"
+      ? null
+      : "The selected Library template could not be found.";
+  }
+
+  async setLibraryNoteProfile(libraryId: string, profile: LibraryNoteProfile | null): Promise<void> {
+    const library = this.requireLibrary(libraryId);
+    const cleaned = profile === null
+      ? null
+      : cleanLibraryNoteProfiles({ [libraryId]: profile }, new Set([libraryId]))[libraryId] ?? null;
+    if (profile !== null) {
+      if (!cleaned || Object.keys(cleaned).length !== Object.keys(profile).length) {
+        throw new Error("The Library profile contains an unsupported value or vault path.");
+      }
+      const error = this.validateLibraryNoteProfile(libraryId, cleaned);
+      if (error) throw new Error(error);
+    }
+    const current = this.data.settings.libraryNoteProfiles[libraryId] ?? null;
+    if (JSON.stringify(current) === JSON.stringify(cleaned)) return;
+    await this.mutate(`${cleaned ? "Update" : "Reset"} creation defaults for “${library.name}”`, () => {
+      this.requireLibrary(libraryId);
+      if (cleaned) this.data.settings.libraryNoteProfiles[libraryId] = { ...cleaned };
+      else delete this.data.settings.libraryNoteProfiles[libraryId];
+    }, { includeSettings: true, requireUndo: true });
+  }
+
   private libraryDefinitions(): LibraryDefinition[] {
     return this.data.portableIndex.libraries ??= [];
   }
@@ -2687,6 +2739,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         !sourceGroupIds.has(group.id) || referencedGroupIds.has(group.id)
       ));
       delete this.data.portableIndex.libraryLayouts[libraryId];
+      delete this.data.settings.libraryNoteProfiles[libraryId];
       this.data.portableIndex.libraries = this.libraryDefinitions()
         .filter((candidate) => candidate.id !== libraryId);
       this.normalizeLibraryOrder();
@@ -4505,7 +4558,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return null;
   }
 
-  async createKnowledgeNote(value: GenericNoteFormValue): Promise<TFile> {
+  async createKnowledgeNote(value: GenericNoteFormValue, tokenContext: TemplateTokenContext = {}): Promise<TFile> {
     this.assertDataWritable();
     const validation = this.validateGenericNote(value);
     if (validation) throw new Error(validation);
@@ -4516,7 +4569,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       const template = this.app.vault.getAbstractFileByPath(normalizePath(value.templatePath));
       if (!(template instanceof TFile)) throw new Error("The selected template could not be found.");
       const now = new Date();
-      content = applyTemplateTokens(await this.app.vault.cachedRead(template), value.title, this.today(), now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+      content = applyTemplateTokens(
+        await this.app.vault.cachedRead(template),
+        value.title,
+        this.today(),
+        now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        tokenContext,
+      );
     }
     const createdFolders: string[] = [];
     try {

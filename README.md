@@ -41,7 +41,7 @@ _Real iPhone portrait capture from version 0.10.0 showing one search state with 
 - **See the structure you already have.** Build a searchable visual index over a folder, then add eligible notes from elsewhere in the vault.
 - **Separate contexts cleanly.** Keep research, study, projects, or another subject area in independent knowledge bases within one installation.
 - **Organize without file churn.** Nest, reorder, group, classify, pin, and collect records in plugin data without moving or rewriting ordinary Markdown notes.
-- **Create consistently.** Start empty notes or copy a chosen template into a safely previewed destination.
+- **Create consistently.** Start empty notes or copy a chosen template into a safely previewed destination, with optional per-Library creation defaults.
 - **Capture from anywhere.** Open Quick entry from the desktop ribbon, the mobile **Open** menu, the Command Center header, a user-assigned hotkey, the mobile toolbar, or an action-only Obsidian URL.
 - **Transfer organization deliberately.** Export path-free index and Library blueprints, selected personal organization, or a private same-vault recovery package.
 - **Work on desktop and mobile.** Use drag-and-drop on desktop and labelled action menus on touch devices.
@@ -77,6 +77,8 @@ The index starts from a configured folder and optional ID, group, and parent pro
 
 Create, name, icon, reorder, archive, and restore custom Libraries. Inside a Library, add headings and nested subheadings, place existing records, and use an explicit Unplaced section when structure changes. Collections support cross-category, multi-membership lists.
 
+Under **Settings → Libraries → Library creation profiles**, each active or archived Library can inherit the knowledge base's note folder, empty/template mode, and template, or override any of those fields. This is intentionally a two-level model—knowledge-base defaults, then an optional Library override. The Create note form still exposes the resolved values for one-note changes. Renaming a Library keeps its profile because the profile uses the stable Library ID; deleting a custom Library removes its profile, while archiving retains it.
+
 The ENT preset supplies protected Procedures, Medications, and Syndromes Libraries. Custom Libraries remain visual containers and do not rewrite clinical files or frontmatter.
 
 ### Multiple knowledge bases and search
@@ -109,7 +111,11 @@ The operation uses Obsidian's atomic note-processing API, refuses <code>ai_lock:
 
 Create an empty note or copy a local Markdown template using <code>{{title}}</code>, <code>{{date}}</code>, and <code>{{time}}</code>. The destination is previewed, missing folders are created safely, and an existing file is never overwritten.
 
+Library templates may also use explicit YAML-scalar tokens: <code>{{yaml:id}}</code>, <code>{{yaml:category}}</code>, <code>{{yaml:parent}}</code>, <code>{{yaml:library}}</code>, and <code>{{yaml:type}}</code>. Each expands at explicit creation time to a quoted YAML-safe scalar; unavailable context becomes <code>""</code>. Use the <code>yaml:</code> prefix exactly—plain <code>{{id}}</code> and other template-plugin syntax are copied unchanged. Legacy title/date/time replacement is unchanged.
+
 Portable imports never create notes automatically. A path-free imported subject can remain a **No note** placeholder, link to an existing note, or—where the profile permits—create an empty or template-based note.
+
+Profiles and tokens affect newly created notes only. They never rewrite existing notes or frontmatter, infer Library placement from properties, move attachments, or introduce a content-type-by-Library rules matrix.
 
 ### Undo, snapshots, export, and recovery
 

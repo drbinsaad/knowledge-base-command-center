@@ -1,6 +1,7 @@
 import { Menu, Modal, Notice, Platform, Setting, TFile, setIcon } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
 import {
+  cleanLibraryNoteProfiles,
   createWorkspaceConfig,
   curriculumContainerKey,
   IndexDiagnostic,
@@ -9,6 +10,8 @@ import {
   normalizeSearchText,
   parseWorkspaceConfig,
   resetCurriculumVisualPath,
+  resolveLibraryNoteProfile,
+  validateTemplateFilePath,
   validateProposalFolderPath,
   validateWritableFolderPath,
   VaultRecord,
@@ -776,6 +779,14 @@ export class IndexManagerModal extends Modal {
           ? { primaryFolder: destinationSettings.primaryFolder }
           : {}),
       };
+      const importedProfileCount = Object.keys(importedSettings.libraryNoteProfiles).length;
+      const destinationLibraryIds = new Set(this.plugin.getLibraries(true).map((library) => library.id));
+      importedSettings.libraryNoteProfiles = Object.fromEntries(
+        Object.entries(importedSettings.libraryNoteProfiles)
+          .filter(([libraryId]) => destinationLibraryIds.has(libraryId))
+          .map(([libraryId, profile]) => [libraryId, { ...profile }]),
+      );
+      const droppedProfileCount = importedProfileCount - Object.keys(importedSettings.libraryNoteProfiles).length;
       for (const folder of [importedSettings.primaryFolder, importedSettings.defaultNoteFolder, importedSettings.templatesFolder]) {
         const error = validateWritableFolderPath(folder, this.app.vault.configDir);
         if (error) throw new Error(error);
@@ -790,7 +801,59 @@ export class IndexManagerModal extends Modal {
         importedSettings.defaultNewNoteMode = "empty";
         importedSettings.defaultTemplatePath = "";
       }
-      new ConfirmModal(this.app, "Import workspace configuration?", `Replace the current labels, compatible folders, metadata mappings, behavior settings, and group order with the configuration from ${config.exportedAt || "an unknown date"}? The destination base name, preset, and protected ENT scope will stay unchanged. Note contents and note-specific memberships will not change.${templateReset ? " The configured template is unavailable in this vault, so new notes will default to Empty." : ""}`, "Import workspace", async () => {
+      let profileTemplateResetCount = 0;
+      for (const [libraryId, profile] of Object.entries(importedSettings.libraryNoteProfiles)) {
+        if (profile.folder !== undefined) {
+          const cleanedFolder = cleanLibraryNoteProfiles(
+            { [libraryId]: { folder: profile.folder } },
+            new Set([libraryId]),
+          )[libraryId]?.folder;
+          if (cleanedFolder === undefined) {
+            throw new Error(`Library profile ${libraryId} contains an unsupported folder path.`);
+          }
+          const validation = validateWritableFolderPath(cleanedFolder, this.app.vault.configDir);
+          if (validation) throw new Error(validation);
+        }
+        if (profile.templatePath) {
+          const cleanedTemplate = cleanLibraryNoteProfiles(
+            { [libraryId]: { templatePath: profile.templatePath } },
+            new Set([libraryId]),
+          )[libraryId]?.templatePath;
+          const validation = cleanedTemplate === undefined ? "unsupported template path" : validateTemplateFilePath(
+            profile.templatePath,
+            importedSettings.templatesFolder,
+            this.app.vault.configDir,
+          );
+          if (validation) {
+            const resetProfile = { ...profile, mode: "empty" as const };
+            delete resetProfile.templatePath;
+            importedSettings.libraryNoteProfiles[libraryId] = resetProfile;
+            profileTemplateResetCount += 1;
+            continue;
+          }
+        }
+        const effective = resolveLibraryNoteProfile(importedSettings, libraryId);
+        if (effective.mode !== "template") continue;
+        const template = effective.templatePath
+          ? this.app.vault.getAbstractFileByPath(effective.templatePath)
+          : null;
+        if (template instanceof TFile && template.extension.toLowerCase() === "md") continue;
+        const resetProfile = { ...profile, mode: "empty" as const };
+        delete resetProfile.templatePath;
+        importedSettings.libraryNoteProfiles[libraryId] = resetProfile;
+        profileTemplateResetCount += 1;
+      }
+      importedSettings.libraryNoteProfiles = cleanLibraryNoteProfiles(
+        importedSettings.libraryNoteProfiles,
+        destinationLibraryIds,
+      );
+      const profileResetNotice = profileTemplateResetCount > 0
+        ? ` ${profileTemplateResetCount} Library ${profileTemplateResetCount === 1 ? "profile" : "profiles"} referenced unavailable templates and will use Empty note instead.`
+        : "";
+      const droppedProfileNotice = droppedProfileCount > 0
+        ? ` ${droppedProfileCount} Library ${droppedProfileCount === 1 ? "profile" : "profiles"} did not match a destination Library and will be omitted.`
+        : "";
+      new ConfirmModal(this.app, "Import workspace configuration?", `Replace the current labels, compatible folders, metadata mappings, behavior settings, and group order with the configuration from ${config.exportedAt || "an unknown date"}? The destination base name, preset, and protected ENT scope will stay unchanged. Note contents and note-specific memberships will not change.${templateReset ? " The configured template is unavailable in this vault, so new notes will default to Empty." : ""}${profileResetNotice}${droppedProfileNotice}`, "Import workspace", async () => {
         if (!this.guardOpenedBase()) return;
         await this.plugin.mutate("Import workspace configuration", () => {
           this.plugin.data.settings = importedSettings;
@@ -802,7 +865,7 @@ export class IndexManagerModal extends Modal {
         this.titleEl.setText(`Manage ${this.plugin.data.settings.indexLabel}`);
         if (this.plugin.isClinicalMode() && this.tab === "available") this.tab = "indexed";
         this.render();
-        new Notice("Workspace configuration imported. Markdown notes were not changed.");
+        new Notice(`Workspace configuration imported.${profileResetNotice}${droppedProfileNotice} Markdown notes were not changed.`);
       }).open();
     }).catch((error) => {
       if (!this.ownsOpenedBase()) {

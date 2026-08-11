@@ -6,6 +6,7 @@ import {
   buildCurriculumTree,
   canonicalIdIsValid,
   cleanLibraryLayouts,
+  cleanLibraryNoteProfiles,
   cloneCollections,
   cloneCurriculumVisual,
   createPersonalBackup,
@@ -869,6 +870,7 @@ export function createPortableExport(
   if (!portableSelectionHasAny(selection)) throw new Error("Choose at least one export component.");
   if (selectionNeedsSubjectCatalog(selection)) synchronizePortableRegistry(data, records);
   const libraryById = new Map(data.portableIndex.libraries.map((library) => [library.id, library]));
+  const workspaceConfig = selection.workspace ? createWorkspaceConfig(data, exportedAt) : undefined;
   for (const libraryId of selection.libraryIds) {
     let library = libraryById.get(libraryId);
     const builtin = BUILTIN_LIBRARY_DEFINITIONS.find((definition) => definition.id === libraryId);
@@ -954,8 +956,11 @@ export function createPortableExport(
     if (libraryId) dependencyLibraryIds.add(libraryId);
   }
   if (selection.workspace) {
-    const libraryId = libraryIdFromTab(data.settings.defaultTab);
-    if (libraryId) dependencyLibraryIds.add(libraryId);
+    const libraryId = libraryIdFromTab(workspaceConfig?.settings.defaultTab);
+    if (libraryId && libraryById.get(libraryId)?.archivedAt === null) dependencyLibraryIds.add(libraryId);
+    Object.keys(workspaceConfig?.settings.libraryNoteProfiles ?? {}).forEach((profileLibraryId) => {
+      if (libraryById.get(profileLibraryId)?.archivedAt === null) dependencyLibraryIds.add(profileLibraryId);
+    });
   }
   if (selection.savedViews) {
     for (const view of data.savedViews) {
@@ -971,7 +976,7 @@ export function createPortableExport(
     .sort((left, right) => left.order - right.order || left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
   const needsIndexComponent = selectionNeedsSubjectCatalog(selection) || libraries.length > 0;
   const components: PortableExportV1["components"] = {};
-  if (selection.workspace) components.workspace = createWorkspaceConfig(data, exportedAt);
+  if (workspaceConfig) components.workspace = workspaceConfig;
   if (needsIndexComponent) {
     components.index = {
       version: PORTABLE_EXPORT_VERSION,
@@ -1546,6 +1551,9 @@ export function parsePortableExport(input: unknown): PortableExportV1 {
     const referencedLibraryIds = new Set<string>();
     const defaultLibraryId = components.workspace ? libraryIdFromTab(components.workspace.settings.defaultTab) : null;
     if (defaultLibraryId) referencedLibraryIds.add(defaultLibraryId);
+    Object.keys(components.workspace?.settings.libraryNoteProfiles ?? {}).forEach((libraryId) => {
+      referencedLibraryIds.add(libraryId);
+    });
     for (const view of components.savedViews?.views ?? []) {
       const libraryId = libraryIdFromTab(view.tab);
       if (libraryId) referencedLibraryIds.add(libraryId);
@@ -1965,6 +1973,9 @@ function navigationLibraryIdsForSelection(
   if (selection.workspace && value.components.workspace) {
     const libraryId = libraryIdFromTab(value.components.workspace.settings.defaultTab);
     if (libraryId) libraryIds.add(libraryId);
+    Object.keys(value.components.workspace.settings.libraryNoteProfiles).forEach((profileLibraryId) => {
+      libraryIds.add(profileLibraryId);
+    });
   }
   if (selection.savedViews) {
     for (const view of value.components.savedViews?.views ?? []) {
@@ -2236,6 +2247,10 @@ export function applyPortableExport(
     const destinationMode = data.settings.workspaceMode;
     const protectedPrimaryFolder = data.settings.primaryFolder;
     const incomingSettings = structuredClone(incomingWorkspace.settings);
+    incomingSettings.libraryNoteProfiles = cleanLibraryNoteProfiles(
+      incomingSettings.libraryNoteProfiles,
+      new Set(state.libraries.map((library) => library.id)),
+    );
     if (!navigationTabIsAvailable(incomingSettings.defaultTab)) incomingSettings.defaultTab = "curriculum";
     data.settings = {
       ...incomingSettings,

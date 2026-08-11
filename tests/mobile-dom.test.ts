@@ -677,6 +677,16 @@ test("stacked-pane CSS responds to leaf classes without viewport-relative view s
   assert.doesNotMatch(styles, /(?:42|58)vw/);
 });
 
+test("Library creation-profile sheets remain keyboard-aware and touch-sized on iPhone", () => {
+  const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+  assert.match(styles, /\.ent-cc-library-profile-modal\s*\{[^}]*width:\s*min\(760px, calc\(100vw - 32px\)\);[^}]*max-height:\s*calc\(100dvh - 40px\);/s);
+  assert.match(styles, /@media \(max-width: 1024px\)\s*\{[\s\S]*?\.ent-cc-library-profile-modal\s*\{[^}]*height:\s*calc\(var\(--ent-cc-modal-visual-height, 100dvh\) - 16px\);[^}]*translate:\s*0 var\(--ent-cc-modal-visual-shift, 0\);/s);
+  assert.match(styles, /\.ent-cc-library-profile-modal input,\s*\.ent-cc-library-profile-modal select,\s*\.ent-cc-library-profile-modal button\s*\{\s*min-height:\s*44px;/s);
+  assert.match(styles, /\.ent-cc-library-profile-modal input,\s*\.ent-cc-library-profile-modal select\s*\{[^}]*font-size:\s*16px;/s);
+  assert.match(styles, /\.ent-cc-library-profile-footer \.setting-item-control\s*\{\s*display:\s*grid;\s*grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\);/s);
+  assert.match(styles, /@media \(max-width: 420px\)\s*\{\s*\.ent-cc-library-profile-footer \.setting-item-control\s*\{\s*grid-template-columns:\s*minmax\(0, 1fr\);/s);
+});
+
 test("desktop library drag and drop moves records across headings and reorders rows", async () => {
   const dom = createFakeDom();
   const view = createView(dom.window) as unknown as MobileViewHarness & {

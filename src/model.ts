@@ -82,6 +82,35 @@ export type OpenNoteBehavior = "new-tab" | "same-tab" | "split";
 export type WorkspaceMode = "generic" | "ent-clinical";
 export type NewNoteMode = "empty" | "template";
 
+/** Optional per-Library creation defaults. Missing fields inherit the active base defaults. */
+export interface LibraryNoteProfile {
+  folder?: string;
+  mode?: NewNoteMode;
+  templatePath?: string;
+}
+
+export type LibraryNoteProfiles = Record<string, LibraryNoteProfile>;
+
+export interface EffectiveLibraryNoteProfile {
+  folder: string;
+  mode: NewNoteMode;
+  templatePath: string;
+  inherited: {
+    folder: boolean;
+    mode: boolean;
+    templatePath: boolean;
+  };
+}
+
+/** Extra values available only through explicit YAML-quoted template tokens. */
+export interface TemplateTokenContext {
+  id?: string;
+  category?: string;
+  parent?: string;
+  library?: string;
+  type?: string;
+}
+
 export interface DomainDefinition {
   name: string;
   folder: string;
@@ -324,6 +353,8 @@ export interface PluginSettings {
   defaultNoteFolder: string;
   defaultNewNoteMode: NewNoteMode;
   defaultTemplatePath: string;
+  /** Stable Library IDs map to optional overrides; absent fields inherit base defaults. */
+  libraryNoteProfiles: LibraryNoteProfiles;
   defaultTab: MainTab;
   recentLimit: number;
   enableHoverPreview: boolean;
@@ -437,6 +468,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   defaultNoteFolder: "Knowledge Base",
   defaultNewNoteMode: "empty",
   defaultTemplatePath: "",
+  libraryNoteProfiles: {},
   defaultTab: "curriculum",
   recentLimit: 25,
   enableHoverPreview: true,
@@ -468,6 +500,7 @@ export const ENT_CLINICAL_SETTINGS: PluginSettings = {
   defaultNoteFolder: "01 Inbox",
   defaultNewNoteMode: "empty",
   defaultTemplatePath: "",
+  libraryNoteProfiles: {},
   proposalFolder: DEFAULT_PROPOSAL_FOLDER,
 };
 
@@ -498,6 +531,7 @@ export const DEFAULT_DATA: PluginData = {
   settings: {
     ...DEFAULT_SETTINGS,
     followUpCategories: DEFAULT_FOLLOW_UP_CATEGORIES.map((category) => ({ ...category })),
+    libraryNoteProfiles: {},
   },
   layoutSnapshots: [],
   undoStack: [],
@@ -1648,6 +1682,17 @@ function rewriteFolderPathSettings(settings: PluginSettings, oldPath: string, ne
       changed = true;
     }
   }
+  for (const profile of Object.values(settings.libraryNoteProfiles)) {
+    for (const key of ["folder", "templatePath"] as const) {
+      const current = profile[key];
+      if (current === undefined) continue;
+      const next = replacePathPrefix(current, oldPath, newPath);
+      if (next !== current) {
+        profile[key] = next;
+        changed = true;
+      }
+    }
+  }
   return changed;
 }
 
@@ -1793,6 +1838,11 @@ function rewriteSnapshotTemplatePathRename(snapshot: PersonalSnapshot, oldPath: 
       snapshot.settings.defaultTemplatePath = next;
       changed = true;
     }
+    for (const profile of Object.values(snapshot.settings.libraryNoteProfiles)) {
+      if (profile.templatePath !== oldPath) continue;
+      profile.templatePath = newPath;
+      changed = true;
+    }
   }
   for (const nested of snapshot.layoutSnapshots ?? []) {
     if (rewriteSnapshotTemplatePathRename(nested, oldPath, newPath)) changed = true;
@@ -1809,6 +1859,11 @@ export function rewritePluginDataTemplatePathRename(data: PluginData, oldPath: s
   const next = current === oldPath ? newPath : current;
   if (next !== current) {
     data.settings.defaultTemplatePath = next;
+    changed = true;
+  }
+  for (const profile of Object.values(data.settings.libraryNoteProfiles)) {
+    if (profile.templatePath !== oldPath) continue;
+    profile.templatePath = newPath;
     changed = true;
   }
   for (const snapshot of [...data.layoutSnapshots, ...data.undoStack, ...data.redoStack]) {
@@ -2040,6 +2095,103 @@ function isWorkspaceMode(value: unknown): value is WorkspaceMode {
 
 function isNewNoteMode(value: unknown): value is NewNoteMode {
   return value === "empty" || value === "template";
+}
+
+export const MAX_LIBRARY_NOTE_PROFILE_PATH_LENGTH = 1_024;
+
+function cleanProfilePathOverride(value: unknown, folder: boolean): string | undefined {
+  if (typeof value !== "string" || value.length > MAX_LIBRARY_NOTE_PROFILE_PATH_LENGTH) return undefined;
+  const normalized = value
+    .normalize("NFC")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/\/{2,}/g, "/")
+    .replace(folder ? /^\/+|\/+$/g : /^\/+/, "");
+  if (/[\p{Cc}\p{Cf}]/u.test(normalized)) return undefined;
+  const segments = normalized.split("/").map((segment) => segment.trim().toLowerCase());
+  if (segments.some((segment) => segment === "." || segment === "..")) return undefined;
+  if (segments[0] === ".trash" || isImmutableSourcePath(normalized)) return undefined;
+  return normalized;
+}
+
+/**
+ * Clean bounded, stable-ID keyed Library creation overrides. Unknown fields,
+ * unsafe IDs, invalid paths, and entries beyond the Library cap are dropped.
+ */
+export function cleanLibraryNoteProfiles(
+  input: unknown,
+  allowedLibraryIds?: ReadonlySet<string>,
+): LibraryNoteProfiles {
+  const output: LibraryNoteProfiles = {};
+  if (!input || typeof input !== "object" || Array.isArray(input)) return output;
+  let retained = 0;
+  for (const [libraryId, raw] of Object.entries(input as Record<string, unknown>)) {
+    if (retained >= MAX_LIBRARIES) break;
+    if (!isValidLibraryId(libraryId) || (allowedLibraryIds && !allowedLibraryIds.has(libraryId))) continue;
+    const value = asUnknownRecord(raw);
+    const profile: LibraryNoteProfile = {};
+    if (Object.prototype.hasOwnProperty.call(value, "folder")) {
+      const folder = cleanProfilePathOverride(value.folder, true);
+      if (folder !== undefined) profile.folder = folder;
+    }
+    if (Object.prototype.hasOwnProperty.call(value, "mode") && isNewNoteMode(value.mode)) {
+      profile.mode = value.mode;
+    }
+    if (Object.prototype.hasOwnProperty.call(value, "templatePath")) {
+      const templatePath = cleanProfilePathOverride(value.templatePath, false);
+      if (templatePath !== undefined) profile.templatePath = templatePath;
+    }
+    if (Object.keys(profile).length === 0) continue;
+    output[libraryId] = profile;
+    retained += 1;
+  }
+  return output;
+}
+
+export function resolveLibraryNoteProfile(
+  settings: Pick<PluginSettings, "defaultNoteFolder" | "defaultNewNoteMode" | "defaultTemplatePath" | "libraryNoteProfiles">,
+  libraryId: string,
+): EffectiveLibraryNoteProfile {
+  const profile = isValidLibraryId(libraryId) ? settings.libraryNoteProfiles[libraryId] : undefined;
+  return {
+    folder: profile?.folder ?? settings.defaultNoteFolder,
+    mode: profile?.mode ?? settings.defaultNewNoteMode,
+    templatePath: profile?.templatePath ?? settings.defaultTemplatePath,
+    inherited: {
+      folder: profile?.folder === undefined,
+      mode: profile?.mode === undefined,
+      templatePath: profile?.templatePath === undefined,
+    },
+  };
+}
+
+export function validateLibraryNoteProfile(
+  profile: LibraryNoteProfile,
+  baseSettings: Pick<PluginSettings, "defaultNoteFolder" | "defaultNewNoteMode" | "defaultTemplatePath" | "templatesFolder" | "libraryNoteProfiles">,
+  libraryId: string,
+  configDir: string,
+): string | null {
+  const cleaned = cleanLibraryNoteProfiles({ [libraryId]: profile }, new Set([libraryId]))[libraryId];
+  if (!cleaned || Object.keys(cleaned).length !== Object.keys(profile).length) {
+    return "The Library profile contains an unsupported value or vault path.";
+  }
+  if (cleaned.folder !== undefined) {
+    const folderError = validateWritableFolderPath(cleaned.folder, configDir);
+    if (folderError) return folderError;
+  }
+  if (cleaned.templatePath) {
+    const templateError = validateTemplateFilePath(
+      cleaned.templatePath,
+      baseSettings.templatesFolder,
+      configDir,
+    );
+    if (templateError) return templateError;
+  }
+  const effective = resolveLibraryNoteProfile({ ...baseSettings, libraryNoteProfiles: { [libraryId]: cleaned } }, libraryId);
+  if (effective.mode === "template") {
+    return validateTemplateFilePath(effective.templatePath, baseSettings.templatesFolder, configDir);
+  }
+  return null;
 }
 
 function cleanSavedViews(input: unknown): SavedView[] {
@@ -2401,6 +2553,7 @@ function cleanSettings(input: unknown, legacyEnt = false): PluginSettings {
     defaultNoteFolder: asText(settings.defaultNoteFolder, base.defaultNoteFolder).replace(/^\/+|\/+$/g, ""),
     defaultNewNoteMode: isNewNoteMode(settings.defaultNewNoteMode) ? settings.defaultNewNoteMode : base.defaultNewNoteMode,
     defaultTemplatePath: asText(settings.defaultTemplatePath, base.defaultTemplatePath).replace(/^\/+/, ""),
+    libraryNoteProfiles: cleanLibraryNoteProfiles(settings.libraryNoteProfiles),
     defaultTab: migrateMainTab(settings.defaultTab, base.defaultTab),
     recentLimit: Math.max(5, Math.min(100, Number(settings.recentLimit) || base.recentLimit)),
     enableHoverPreview: settings.enableHoverPreview !== false,
@@ -2686,6 +2839,10 @@ export function normalizeKnowledgeBaseLibrariesAndNavigation(data: PluginData): 
     }
   }
   reconcilePortableLibraryLayouts(data.portableIndex);
+  data.settings.libraryNoteProfiles = cleanLibraryNoteProfiles(
+    data.settings.libraryNoteProfiles,
+    new Set(data.portableIndex.libraries.map((definition) => definition.id)),
+  );
   const availableLibraryIds = new Set(data.portableIndex.libraries
     .filter((definition) => definition.archivedAt === null)
     .map((definition) => definition.id));
@@ -3332,11 +3489,45 @@ export function configuredGroupFromPath(path: string, primaryFolder: string, fal
   return segments.length > 1 ? segments[0] || fallback : fallback;
 }
 
-export function applyTemplateTokens(content: string, title: string, date: string, time: string): string {
-  return content
+function yamlQuotedTemplateScalar(value: string): string {
+  return JSON.stringify(value.normalize("NFC"))
+    .replace(/[\u007f-\u009f]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`)
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+export function applyTemplateTokens(
+  content: string,
+  title: string,
+  date: string,
+  time: string,
+  context: TemplateTokenContext = {},
+): string {
+  const contextualValues: Required<TemplateTokenContext> = {
+    id: context.id ?? "",
+    category: context.category ?? "",
+    parent: context.parent ?? "",
+    library: context.library ?? "",
+    type: context.type ?? "",
+  };
+  const protectedTokens: string[] = [];
+  let placeholderPrefix = "\u0000KBCC_YAML_TOKEN_";
+  while (content.includes(placeholderPrefix)) placeholderPrefix += "_";
+  const protectedContent = content.replace(/{{\s*yaml:(id|category|parent|library|type)\s*}}/gi, (_match, key: string) => {
+    const placeholder = `${placeholderPrefix}${protectedTokens.length}\u0000`;
+    protectedTokens.push(yamlQuotedTemplateScalar(
+      contextualValues[key.toLowerCase() as keyof TemplateTokenContext],
+    ));
+    return placeholder;
+  });
+  let rendered = protectedContent
     .replace(/{{\s*title\s*}}/gi, () => title)
     .replace(/{{\s*date\s*}}/gi, () => date)
     .replace(/{{\s*time\s*}}/gi, () => time);
+  protectedTokens.forEach((value, index) => {
+    rendered = rendered.replace(`${placeholderPrefix}${index}\u0000`, value);
+  });
+  return rendered;
 }
 
 export function validateWritableFolderPath(folder: string, configDir: string): string | null {
@@ -3717,13 +3908,55 @@ export interface WorkspaceConfig {
 }
 
 export function createWorkspaceConfig(data: PluginData, exportedAt: string): WorkspaceConfig {
+  const settings = structuredClone(data.settings);
+  settings.libraryNoteProfiles = cleanLibraryNoteProfiles(
+    settings.libraryNoteProfiles,
+    new Set(data.portableIndex.libraries
+      .filter((definition) => definition.archivedAt === null)
+      .map((definition) => definition.id)),
+  );
   return {
     kind: "knowledge-base-command-center-workspace",
     version: 1,
     exportedAt,
-    settings: structuredClone(data.settings),
+    settings,
     indexGroupOrder: [...data.indexGroupOrder],
   };
+}
+
+/**
+ * Transfer files need stricter destination-aware validation than persisted
+ * plugin data. Keep bounded path strings exactly as supplied until the import
+ * preflight can reject an unsafe folder or atomically reset an unusable
+ * template. Normal load/migration continues to use cleanLibraryNoteProfiles.
+ */
+function parseTransferredLibraryNoteProfiles(input: unknown): LibraryNoteProfiles {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const entries = Object.entries(input as Record<string, unknown>);
+  if (entries.length > MAX_LIBRARIES) {
+    throw new Error(`Workspace Library creation profiles exceed the ${MAX_LIBRARIES}-Library limit.`);
+  }
+  const profiles = cleanLibraryNoteProfiles(input);
+  for (const [libraryId, raw] of entries) {
+    if (!isValidLibraryId(libraryId)) continue;
+    const value = asUnknownRecord(raw);
+    const retainPath = (key: "folder" | "templatePath"): void => {
+      if (!Object.prototype.hasOwnProperty.call(value, key)) return;
+      const path = value[key];
+      if (typeof path !== "string") {
+        throw new Error(`Workspace Library profile ${libraryId} ${key} must be text.`);
+      }
+      if (path.length > MAX_LIBRARY_NOTE_PROFILE_PATH_LENGTH) {
+        throw new Error(`Workspace Library profile ${libraryId} ${key} is too long.`);
+      }
+      const profile = profiles[libraryId] ?? {};
+      profile[key] = path;
+      profiles[libraryId] = profile;
+    };
+    retainPath("folder");
+    retainPath("templatePath");
+  }
+  return profiles;
 }
 
 export function parseWorkspaceConfig(input: unknown): WorkspaceConfig {
@@ -3731,11 +3964,14 @@ export function parseWorkspaceConfig(input: unknown): WorkspaceConfig {
   const value = input as Record<string, unknown>;
   if (value.kind !== "knowledge-base-command-center-workspace" || value.version !== 1) throw new Error("Unsupported Command Center workspace configuration.");
   transferArrayLength(value.indexGroupOrder, "Workspace group order", MAX_TRANSFER_COLLECTIONS);
+  const rawSettings = asUnknownRecord(value.settings);
+  const settings = { ...cleanSettings(rawSettings), setupComplete: true };
+  settings.libraryNoteProfiles = parseTransferredLibraryNoteProfiles(rawSettings.libraryNoteProfiles);
   return {
     kind: "knowledge-base-command-center-workspace",
     version: 1,
     exportedAt: asText(value.exportedAt),
-    settings: { ...cleanSettings(value.settings), setupComplete: true },
+    settings,
     indexGroupOrder: [...new Set(asStringList(value.indexGroupOrder))],
   };
 }

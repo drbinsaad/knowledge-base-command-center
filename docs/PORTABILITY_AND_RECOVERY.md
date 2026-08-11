@@ -20,7 +20,7 @@ Export and import operate on the active knowledge base. Switch to each base and 
 
 | Component | Contents |
 | --- | --- |
-| **Workspace settings** | Labels, compatible configured folders and template location, metadata mappings, behavior, and visual group order. The destination base name and preset do not change. |
+| **Workspace settings** | Labels, compatible configured folders, base and per-Library creation profiles, template locations, metadata mappings, behavior, and visual group order. The destination base name and preset do not change. |
 | **Index blueprint** | Stable subject identities, titles, groups, nested parent relationships, record kinds, collapse state, and visual order. It contains no source note paths. |
 | **Each selected Library** | Stable Library identity, configured labels/icon, subject names, editable headings/subheadings, unplaced state, visual order, and portable identities. Doses, note bodies, source paths, and attachments are excluded. |
 | **Collections** | Collection and subheading structure with membership stored by portable subject identity. |
@@ -79,7 +79,9 @@ After choosing a JSON file, select only the available sections to apply and choo
 
 When source and destination use different Generic/ENT presets, Workspace settings is automatically excluded. Path-free Index, Library, Collection, and study components can still transfer without changing the destination's name or preset.
 
-Workspace folders are validated against the destination vault. If an imported default template is unavailable, restricted, or outside the configured templates folder, it safely falls back to an empty note.
+Workspace folders and Library-profile paths are validated against the destination vault. A portable workspace includes dependency descriptors for every Library referenced by a creation profile, even when that Library's subject catalog was not selected. An existing local archive decision remains authoritative. Legacy standalone workspace-configuration files cannot declare custom Library dependencies, so import retains only profiles whose stable Library IDs already exist in the destination and reports how many unmatched profiles were omitted. If an imported base or Library template is unavailable, restricted, or outside the configured templates folder, that creation default safely falls back to an empty note inside the same Undo-protected import; an invalid destination folder still blocks the import. The selected JSON package is not modified.
+
+Workspace settings can disclose Library-specific vault-relative folder and template paths. Deselect **Workspace settings** before sharing when those paths are private. Profiles contain no note bodies or attachments and never cause import to create or rewrite a Markdown note.
 
 Older standalone workspace exports and organization backups remain readable through the same center, subject to their legacy identity checks.
 

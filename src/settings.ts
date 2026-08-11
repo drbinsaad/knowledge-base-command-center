@@ -3,6 +3,7 @@ import { ManageKnowledgeBasesModal } from "./knowledge-base-modal";
 import { ManageLibrariesModal } from "./library-modal";
 import { FollowUpCategoryManagerModal } from "./follow-up-modal";
 import type { FollowUpCategoryDefinition } from "./follow-up";
+import { ManageLibraryNoteProfilesModal } from "./library-profile-modal";
 import type EntVaultCommandCenterPlugin from "./main";
 import {
   asUnknownRecord,
@@ -277,6 +278,21 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
               }));
           },
           ["create", "rename", "icon", "reorder", "archive", "restore", "delete", "library"],
+        ),
+        renderSetting(
+          "Library creation profiles",
+          "Optionally override the destination folder, empty/template mode, and template for each active or archived Library. Unconfigured Libraries inherit the knowledge base defaults, and every Create note form remains editable.",
+          (row) => {
+            row.addButton((button) => button
+              .setButtonText("Configure…")
+              .setIcon("file-cog")
+              .setDisabled(readOnly || allLibraries.length === 0)
+              .onClick(() => {
+                if (!ownsConfiguredBase()) return;
+                new ManageLibraryNoteProfilesModal(this.host as EntVaultCommandCenterPlugin, () => this.update()).open();
+              }));
+          },
+          ["template profile", "library folder", "default template", "note creation"],
         ),
       ],
     });

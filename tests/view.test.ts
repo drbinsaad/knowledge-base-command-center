@@ -16,10 +16,16 @@ import {
   portabilityLibraryUnavailableText,
   preparePortableExport,
 } from "../src/portability-modal.ts";
-import { createPortableExport, EMPTY_PORTABLE_SELECTION } from "../src/portability.ts";
+import {
+  applyPortableExport,
+  createPortableExport,
+  EMPTY_PORTABLE_SELECTION,
+  parsePortableExport,
+} from "../src/portability.ts";
 import {
   BUILTIN_LIBRARY_DEFINITIONS,
   createPersonalBackup,
+  createWorkspaceConfig,
   emptyCurriculumTree,
   libraryTabId,
   migrateData,
@@ -32,6 +38,7 @@ import {
 import { collectKnowledgeBaseSearchResults } from "../src/search.ts";
 import { EntCommandCenterSettingsTab } from "../src/settings.ts";
 import { LibraryEditorModal, ManageLibrariesModal } from "../src/library-modal.ts";
+import { LibraryNoteProfileEditorModal } from "../src/library-profile-modal.ts";
 import { createFakeDom } from "./support/fake-dom.ts";
 
 function record(path: string, title: string, kind: VaultRecord["kind"] = "topic"): VaultRecord {
@@ -166,6 +173,130 @@ test("a stale library editor cannot overwrite a changed, reordered, archived, or
     assert.equal(updates, 0, `${scenario.name} library must reject the stale editor`);
   }
   assert.equal(Notice.messages.filter((message) => /after the editor opened/i.test(message)).length, scenarios.length);
+});
+
+test("a same-base Sync replacement invalidates an open Library creation-profile editor", async () => {
+  Notice.messages.length = 0;
+  const data = migrateData(null);
+  const library = installLibrary(data);
+  let dataEpoch = 3;
+  let saves = 0;
+  const plugin = {
+    app: {},
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => dataEpoch,
+    getLibrary: (id: string) => id === library.id ? { ...library } : null,
+    getLibraryNoteProfile: () => null,
+    getEffectiveLibraryNoteProfile: () => ({
+      folder: "Knowledge Base",
+      mode: "empty" as const,
+      templatePath: "",
+      inherited: { folder: true, mode: true, templatePath: true },
+    }),
+    validateLibraryNoteProfile: () => null,
+    async setLibraryNoteProfile(): Promise<void> { saves += 1; },
+  };
+  const modal = new LibraryNoteProfileEditorModal(
+    plugin as unknown as ConstructorParameters<typeof LibraryNoteProfileEditorModal>[0],
+    library,
+  );
+  const harness = modal as unknown as { submit(reset: boolean): Promise<void> };
+
+  dataEpoch += 1;
+  await harness.submit(false);
+  await harness.submit(true);
+
+  assert.equal(saves, 0);
+  assert.equal(Notice.messages.filter((message) => /synced profile changed/i.test(message)).length, 1);
+});
+
+test("a Library creation-profile editor rejects same-object base-default and Library changes", async () => {
+  Notice.messages.length = 0;
+  const scenarios: Array<{
+    label: string;
+    mutate(data: PluginData, library: LibraryDefinition): void;
+  }> = [
+    {
+      label: "base defaults",
+      mutate: (data) => { data.settings.defaultNoteFolder = "Changed while open"; },
+    },
+    {
+      label: "Library rename",
+      mutate: (_data, library) => { library.name = "Renamed while open"; },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const data = migrateData(null);
+    const library = installLibrary(data);
+    let saves = 0;
+    const plugin = {
+      app: {},
+      data,
+      getActiveKnowledgeBaseId: () => "base-a",
+      getDataEpoch: () => 0,
+      getLibrary: (id: string) => id === library.id ? library : null,
+      getLibraryNoteProfile: () => null,
+      getEffectiveLibraryNoteProfile: () => ({
+        folder: data.settings.defaultNoteFolder,
+        mode: data.settings.defaultNewNoteMode,
+        templatePath: data.settings.defaultTemplatePath,
+        inherited: { folder: true, mode: true, templatePath: true },
+      }),
+      validateLibraryNoteProfile: () => null,
+      async setLibraryNoteProfile(): Promise<void> { saves += 1; },
+    };
+    const modal = new LibraryNoteProfileEditorModal(
+      plugin as unknown as ConstructorParameters<typeof LibraryNoteProfileEditorModal>[0],
+      library,
+    );
+    const harness = modal as unknown as { submit(reset: boolean): Promise<void> };
+
+    scenario.mutate(data, library);
+    await harness.submit(false);
+    await harness.submit(true);
+
+    assert.equal(saves, 0, scenario.label);
+  }
+  assert.equal(Notice.messages.filter((message) => /creation defaults.*changed/i.test(message)).length, 2);
+});
+
+test("Library profile folder Browse is visibly disabled until its override is enabled", () => {
+  const data = migrateData(null);
+  const library = installLibrary(data);
+  const plugin = {
+    app: {},
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    getLibrary: () => library,
+    getLibraryNoteProfile: () => null,
+    getEffectiveLibraryNoteProfile: () => ({
+      folder: "Knowledge Base",
+      mode: "empty" as const,
+      templatePath: "",
+      inherited: { folder: true, mode: true, templatePath: true },
+    }),
+  };
+  const modal = new LibraryNoteProfileEditorModal(
+    plugin as unknown as ConstructorParameters<typeof LibraryNoteProfileEditorModal>[0],
+    library,
+  );
+  const browseButton = { disabled: false };
+  const harness = modal as unknown as {
+    folderBrowseButton: typeof browseButton;
+    folderOverride: boolean;
+    syncControls(): void;
+  };
+  harness.folderBrowseButton = browseButton;
+  harness.folderOverride = false;
+  harness.syncControls();
+  assert.equal(browseButton.disabled, true);
+
+  harness.folderOverride = true;
+  harness.syncControls();
+  assert.equal(browseButton.disabled, false);
 });
 
 test("editing only a Library name preserves an imported unknown icon ID", async () => {
@@ -780,6 +911,18 @@ test("creating a note from a custom library carries its labels into the generic 
   data.settings.workspaceMode = "generic";
   data.settings.itemSingular = "note";
   const library = installLibrary(data);
+  data.settings.libraryNoteProfiles[library.id] = {
+    folder: "Reference notes",
+    mode: "template",
+    templatePath: "Templates/Reference.md",
+  };
+  data.portableIndex.libraryLayouts[library.id] = [{
+    id: "heading-evidence",
+    title: "Evidence",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{ id: "sub-guidelines", title: "Guidelines", collapsed: false, subjects: [] }],
+  }];
   data.activeTab = libraryTabId(library.id);
   const view = Object.create(EntVaultCommandCenterView.prototype) as {
     app: object;
@@ -790,11 +933,18 @@ test("creating a note from a custom library carries its labels into the generic 
       isClinicalMode(): boolean;
       getTemplateFiles(): [];
       getLibrary(id: string): LibraryDefinition | null;
+      getEffectiveLibraryNoteProfile(id: string): {
+        folder: string;
+        mode: "template";
+        templatePath: string;
+        inherited: { folder: false; mode: false; templatePath: false };
+      };
+      getPortableSubject(): null;
     };
     loadedBaseId: string;
     loadedDataEpoch: number;
     staleViewNoticeShown: boolean;
-    startCreateLibraryNote(libraryId: string): void;
+    startCreateLibraryNote(libraryId: string, target?: { headingId: string; subheadingId: string }): void;
   };
   view.app = {};
   view.plugin = {
@@ -804,22 +954,154 @@ test("creating a note from a custom library carries its labels into the generic 
     isClinicalMode: () => false,
     getTemplateFiles: () => [],
     getLibrary: (id) => id === library.id ? library : null,
+    getEffectiveLibraryNoteProfile: () => ({
+      folder: "Reference notes",
+      mode: "template",
+      templatePath: "Templates/Reference.md",
+      inherited: { folder: false, mode: false, templatePath: false },
+    }),
+    getPortableSubject: () => null,
   };
   view.loadedBaseId = "base-a";
   view.loadedDataEpoch = 0;
   view.staleViewNoticeShown = false;
-  let options: { createLabel?: string; contextNotice?: string } | null = null;
+  let options: {
+    createLabel?: string;
+    contextNotice?: string;
+    initial?: { folder: string; mode: string; templatePath: string };
+    tokenContext?: { library?: string; type?: string; category?: string };
+  } | null = null;
   KnowledgeNoteModal.prototype.open = function openForTest(): void {
     options = (this as unknown as { options: typeof options }).options;
   };
   try {
-    view.startCreateLibraryNote(library.id);
+    view.startCreateLibraryNote(library.id, { headingId: "heading-evidence", subheadingId: "sub-guidelines" });
   } finally {
     delete (KnowledgeNoteModal.prototype as { open?: () => void }).open;
   }
 
   assert.equal(options?.createLabel, "Reference");
-  assert.match(options?.contextNotice ?? "", /classified in Reference Sets after creation/i);
+  assert.match(options?.contextNotice ?? "", /classified in (?:the selected heading or subheading in )?Reference Sets after creation/i);
+  assert.deepEqual(options?.initial, {
+    title: "",
+    folder: "Reference notes",
+    mode: "template",
+    templatePath: "Templates/Reference.md",
+    addToCollection: false,
+  });
+  assert.deepEqual(options?.tokenContext, {
+    id: "",
+    category: "Guidelines",
+    parent: "",
+    library: "Reference Sets",
+    type: "Reference",
+  });
+});
+
+test("an ENT custom-Library placeholder uses its profile while protected built-in placeholders keep clinical actions", () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  const custom = installLibrary(data);
+  data.portableIndex.libraryLayouts[custom.id] = [{
+    id: "evidence",
+    title: "Evidence",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{ id: "guidelines", title: "Guidelines", collapsed: false, subjects: ["paper"] }],
+  }];
+  const placeholder = record("kbcc-placeholder:paper", "Airway evidence", "note");
+  Object.assign(placeholder, {
+    role: "placeholder",
+    portableId: "paper",
+    isPlaceholder: true,
+    portableIndexed: false,
+    libraryId: custom.id,
+    curriculumId: "REF-001",
+    domain: "Guidelines",
+    topicKind: "note",
+  });
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    isClinicalMode: () => true,
+    getLibrary: (id: string) => id === custom.id ? custom : BUILTIN_LIBRARY_DEFINITIONS.find((item) => item.id === id) ?? null,
+    getEffectiveLibraryNoteProfile: () => ({
+      folder: "Evidence",
+      mode: "template" as const,
+      templatePath: "Templates/Evidence.md",
+      inherited: { folder: false, mode: false, templatePath: false },
+    }),
+    getPortableSubject: () => ({
+      id: "paper",
+      title: "Airway evidence",
+      groupId: "evidence",
+      parentId: null,
+      order: 0,
+      indexed: false,
+      configuredId: "REF-001",
+      recordKind: "note" as const,
+      libraryId: custom.id,
+    }),
+  };
+  let created: {
+    initial: Record<string, unknown>;
+    context: { createLabel?: string; tokenContext?: Record<string, string> } | undefined;
+  } | null = null;
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: object;
+    plugin: typeof plugin;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    openPlaceholderActions(value: VaultRecord): void;
+    startCreateKnowledgeNote(
+      initial: Record<string, unknown>,
+      indexAfterCreate: boolean,
+      onCreated: unknown,
+      message: string | undefined,
+      context: { createLabel?: string; tokenContext?: Record<string, string> } | undefined,
+    ): void;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+  view.startCreateKnowledgeNote = (initial, _index, _created, _message, context) => { created = { initial, context }; };
+  let modalItems: ReturnType<AddActionModal["getItems"]> = [];
+  let chooseModalItem: ((item: ReturnType<AddActionModal["getItems"]>[number]) => void) | null = null;
+  const hadOwnOpen = Object.prototype.hasOwnProperty.call(AddActionModal.prototype, "open");
+  const originalOpen = Object.getOwnPropertyDescriptor(AddActionModal.prototype, "open");
+  AddActionModal.prototype.open = function openForTest(this: AddActionModal): void {
+    modalItems = this.getItems();
+    chooseModalItem = (item) => this.onChooseItem(item);
+  };
+  try {
+    view.openPlaceholderActions(placeholder);
+    assert.deepEqual(modalItems.map((item) => item.id), ["empty", "template", "link", "keep"]);
+    const empty = modalItems.find((item) => item.id === "empty");
+    assert.ok(empty);
+    chooseModalItem?.(empty);
+  } finally {
+    if (hadOwnOpen && originalOpen) Object.defineProperty(AddActionModal.prototype, "open", originalOpen);
+    else Reflect.deleteProperty(AddActionModal.prototype, "open");
+  }
+
+  assert.deepEqual(created?.initial, {
+    title: "Airway evidence",
+    folder: "Evidence",
+    mode: "empty",
+    templatePath: "Templates/Evidence.md",
+  });
+  assert.equal(created?.context?.createLabel, "Reference");
+  assert.deepEqual(created?.context?.tokenContext, {
+    id: "REF-001",
+    category: "Guidelines",
+    parent: "",
+    library: "Reference Sets",
+    type: "Reference",
+  });
 });
 
 test("library heading reorder is portable, undo-protected, and leaves Markdown outside the mutation", async () => {
@@ -2231,6 +2513,38 @@ test("settings callbacks stay bound to the knowledge base that rendered them", (
   assert.equal(Notice.messages.filter((message) => message.includes("active knowledge base changed")).length, 1);
 });
 
+test("Library creation profiles are discoverable through Obsidian settings search", () => {
+  const data = migrateData(null);
+  const library = installLibrary(data);
+  const host = {
+    app: { vault: {}, metadataCache: {} },
+    data,
+    dataCompatibilityWarning: "",
+    isDataReadOnly: () => false,
+    getKnowledgeBases: () => [{ id: "base-a", data }],
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    getIndexRecords: () => [],
+    getLibraries: (includeArchived = false) => includeArchived || library.archivedAt === null ? [library] : [],
+    librarySubjectCount: () => 0,
+    getTemplateFiles: () => [],
+    getIndexGroups: () => [],
+    savePluginData: async () => undefined,
+    refreshViews: async () => undefined,
+    switchKnowledgeBase: async () => undefined,
+    renameKnowledgeBase: async () => undefined,
+  };
+  const tab = new EntCommandCenterSettingsTab(
+    host.app as never,
+    host as never,
+  );
+  const libraries = tab.getSettingDefinitions().find((definition) => (
+    "heading" in definition && definition.heading === "Libraries"
+  ));
+  assert.ok(libraries && "items" in libraries);
+  assert.ok(libraries.items.some((item) => "name" in item && item.name === "Library creation profiles"));
+});
+
 test("a rejected direct setting save restores memory and reports the failure", async () => {
   Notice.messages.length = 0;
   const data = migrateData(null);
@@ -2715,16 +3029,43 @@ test("template fallback stays transactional and does not mutate the selected imp
   data.settings.defaultNewNoteMode = "template";
   data.settings.templatesFolder = "Templates";
   data.settings.defaultTemplatePath = "Templates/Missing.md";
-  const value = createPortableExport(
+  const library = installLibrary(data);
+  const restrictedLibrary = installLibrary(data, customLibrary("restricted-reference", "Restricted reference", "Reference", 1));
+  data.settings.libraryNoteProfiles[library.id] = {
+    folder: "Reference notes",
+    mode: "template",
+    templatePath: "Templates/Missing Reference.md",
+  };
+  data.settings.libraryNoteProfiles[restrictedLibrary.id] = {
+    folder: "Restricted reference notes",
+    mode: "empty",
+    templatePath: "Outside Templates/Private.md",
+  };
+  const rawValue = createPortableExport(
     data,
     [],
     { ...EMPTY_PORTABLE_SELECTION, workspace: true },
     "2026-08-08T00:00:00.000Z",
   );
+  const rawWorkspace = rawValue.components.workspace;
+  assert.ok(rawWorkspace);
+  rawWorkspace.settings.libraryNoteProfiles[library.id] = {
+    folder: "Reference notes",
+    mode: "template",
+    templatePath: "../Templates/Missing Reference.md",
+  };
+  rawWorkspace.settings.libraryNoteProfiles[restrictedLibrary.id] = {
+    folder: "Restricted reference notes",
+    mode: "empty",
+    templatePath: "05 Sources/Private.md",
+  };
+  const value = parsePortableExport(rawValue);
   const originalPackage = structuredClone(value);
   const localData = migrateData(null);
   const originalLocalData = structuredClone(localData);
   let fallbackObservedInsideMutation = false;
+  let libraryFallbackObservedInsideMutation = false;
+  let restrictedFallbackObservedInsideMutation = false;
   const plugin = {
     data: localData,
     isDataReadOnly(): boolean { return false; },
@@ -2733,6 +3074,12 @@ test("template fallback stays transactional and does not mutate the selected imp
       action();
       fallbackObservedInsideMutation = this.data.settings.defaultNewNoteMode === "empty"
         && this.data.settings.defaultTemplatePath === "";
+      libraryFallbackObservedInsideMutation = this.data.settings.libraryNoteProfiles[library.id]?.mode === "empty"
+        && this.data.settings.libraryNoteProfiles[library.id]?.templatePath === undefined
+        && this.data.settings.libraryNoteProfiles[library.id]?.folder === "Reference notes";
+      restrictedFallbackObservedInsideMutation = this.data.settings.libraryNoteProfiles[restrictedLibrary.id]?.mode === "empty"
+        && this.data.settings.libraryNoteProfiles[restrictedLibrary.id]?.templatePath === undefined
+        && this.data.settings.libraryNoteProfiles[restrictedLibrary.id]?.folder === "Restricted reference notes";
       this.data = before;
       throw new Error("simulated save failure");
     },
@@ -2760,8 +3107,251 @@ test("template fallback stays transactional and does not mutate the selected imp
 
   await assert.rejects(center.importSelected(), /simulated save failure/);
   assert.equal(fallbackObservedInsideMutation, true);
+  assert.equal(libraryFallbackObservedInsideMutation, true);
+  assert.equal(restrictedFallbackObservedInsideMutation, true);
   assert.deepEqual(value, originalPackage);
   assert.deepEqual(plugin.data, originalLocalData);
+});
+
+test("portable workspace preflight still rejects an invalid Library profile folder", () => {
+  const data = migrateData(null);
+  const library = installLibrary(data);
+  data.settings.libraryNoteProfiles[library.id] = { folder: "Safe notes", mode: "empty" };
+  const rawValue = createPortableExport(
+    data,
+    [],
+    { ...EMPTY_PORTABLE_SELECTION, workspace: true },
+    "2026-08-11T00:00:00.000Z",
+  );
+  const workspace = rawValue.components.workspace;
+  assert.ok(workspace);
+  workspace.settings.libraryNoteProfiles[library.id] = {
+    folder: "../Private",
+    mode: "empty",
+  };
+  const value = parsePortableExport(rawValue);
+  assert.equal(value.components.workspace?.settings.libraryNoteProfiles[library.id]?.folder, "../Private");
+  const center = Object.create(ExportImportCenterModal.prototype) as {
+    app: { vault: { configDir: string; getAbstractFileByPath(path: string): null } };
+    plugin: { data: typeof data };
+    validateWorkspaceComponent(
+      input: typeof value,
+      selection: typeof EMPTY_PORTABLE_SELECTION,
+    ): unknown;
+  };
+  center.app = { vault: { configDir: ".obsidian", getAbstractFileByPath: () => null } };
+  center.plugin = { data: migrateData(null) };
+
+  assert.throws(() => center.validateWorkspaceComponent(
+    value,
+    { ...EMPTY_PORTABLE_SELECTION, workspace: true },
+  ));
+});
+
+test("portable-v4 preflight retains and atomically resets every unsafe Library template class", () => {
+  const data = migrateData(null);
+  data.settings.templatesFolder = "Templates";
+  const cases = [
+    ["parent-template", "../Templates/Private.md"],
+    ["config-template", ".obsidian/Private.md"],
+    ["immutable-template", "05 Sources/Private.md"],
+    ["outside-template", "Other Templates/Private.md"],
+  ] as const;
+  for (const [libraryId] of cases) {
+    const library = installLibrary(data, customLibrary(libraryId, libraryId, "Item", data.portableIndex.libraries.length));
+    data.settings.libraryNoteProfiles[library.id] = { mode: "empty", templatePath: "Templates/Valid.md" };
+  }
+  const rawValue = createPortableExport(
+    data,
+    [],
+    { ...EMPTY_PORTABLE_SELECTION, workspace: true },
+    "2026-08-11T00:00:00.000Z",
+  );
+  const workspace = rawValue.components.workspace;
+  assert.ok(workspace);
+  for (const [libraryId, templatePath] of cases) {
+    workspace.settings.libraryNoteProfiles[libraryId] = { mode: "empty", templatePath };
+  }
+  const value = parsePortableExport(rawValue);
+  const center = Object.create(ExportImportCenterModal.prototype) as {
+    app: { vault: { configDir: string; getAbstractFileByPath(path: string): null } };
+    plugin: { data: typeof data };
+    validateWorkspaceComponent(
+      input: typeof value,
+      selection: typeof EMPTY_PORTABLE_SELECTION,
+    ): { libraryTemplateResetIds: string[] };
+  };
+  center.app = { vault: { configDir: ".obsidian", getAbstractFileByPath: () => null } };
+  center.plugin = { data: migrateData(null) };
+
+  const validation = center.validateWorkspaceComponent(
+    value,
+    { ...EMPTY_PORTABLE_SELECTION, workspace: true },
+  );
+  assert.deepEqual(new Set(validation.libraryTemplateResetIds), new Set(cases.map(([libraryId]) => libraryId)));
+  for (const [libraryId, templatePath] of cases) {
+    assert.equal(value.components.workspace?.settings.libraryNoteProfiles[libraryId]?.templatePath, templatePath);
+  }
+});
+
+test("workspace-only export omits archived Library profiles and descriptors so import cannot reactivate them", () => {
+  const source = migrateData(null);
+  const active = installLibrary(source, customLibrary("active-library", "Active", "Active item", 0));
+  const archived = installLibrary(source, customLibrary("archived-library", "Archived", "Archived item", 1, Date.now()));
+  source.settings.libraryNoteProfiles[active.id] = { mode: "empty", folder: "Active" };
+  source.settings.libraryNoteProfiles[archived.id] = { mode: "empty", folder: "Archived" };
+
+  const value = parsePortableExport(createPortableExport(
+    source,
+    [],
+    { ...EMPTY_PORTABLE_SELECTION, workspace: true },
+    "2026-08-11T00:00:00.000Z",
+  ));
+
+  assert.deepEqual(Object.keys(value.components.workspace?.settings.libraryNoteProfiles ?? {}), [active.id]);
+  assert.deepEqual(value.components.index?.libraries?.map((library) => library.id), [active.id]);
+  const destination = migrateData(null);
+  applyPortableExport(
+    destination,
+    value,
+    { ...EMPTY_PORTABLE_SELECTION, workspace: true },
+    "merge",
+  );
+  assert.equal(destination.portableIndex.libraries.some((library) => library.id === archived.id), false);
+  assert.equal(destination.settings.libraryNoteProfiles[archived.id], undefined);
+});
+
+test("standalone workspace import resets invalid templates and reports omitted Library profiles", async () => {
+  Notice.messages.length = 0;
+  const source = migrateData(null);
+  const library = installLibrary(source);
+  source.settings.templatesFolder = "Templates";
+  source.settings.libraryNoteProfiles[library.id] = {
+    folder: "Reference notes",
+    mode: "empty",
+    templatePath: "Outside Templates/Private.md",
+  };
+  const config = createWorkspaceConfig(source, "2026-08-11T00:00:00.000Z");
+  config.settings.libraryNoteProfiles[library.id] = {
+    folder: "Reference notes",
+    mode: "template",
+    templatePath: "../Private.md",
+  };
+  config.settings.libraryNoteProfiles["missing-library"] = {
+    folder: "Missing Library",
+    mode: "empty",
+  };
+
+  const destination = migrateData(null);
+  installLibrary(destination, { ...library });
+  let mutateOptions: { includeSettings?: boolean; requireUndo?: boolean } | null = null;
+  const plugin = {
+    data: destination,
+    getLibraries: () => destination.portableIndex.libraries,
+    isClinicalMode: () => false,
+    invalidateRecordCache(): void {},
+    async mutate(
+      _label: string,
+      action: () => void,
+      options: { includeSettings?: boolean; requireUndo?: boolean },
+    ): Promise<void> {
+      mutateOptions = options;
+      action();
+    },
+  };
+  const manager = Object.create(IndexManagerModal.prototype) as {
+    app: { vault: { configDir: string; getAbstractFileByPath(path: string): null } };
+    plugin: typeof plugin;
+    diagnosticsCache: unknown;
+    titleEl: { setText(value: string): void };
+    tab: "indexed" | "available";
+    guardOpenedBase(): boolean;
+    ownsOpenedBase(): boolean;
+    render(): void;
+    confirmWorkspaceImport(input: Promise<unknown>): void;
+  };
+  manager.app = { vault: { configDir: ".obsidian", getAbstractFileByPath: () => null } };
+  manager.plugin = plugin;
+  manager.diagnosticsCache = null;
+  manager.titleEl = { setText: () => undefined };
+  manager.tab = "indexed";
+  manager.guardOpenedBase = () => true;
+  manager.ownsOpenedBase = () => true;
+  manager.render = () => undefined;
+
+  const opened: Array<{ onConfirm(): void | Promise<void> }> = [];
+  const originalOpen = Object.getOwnPropertyDescriptor(ConfirmModal.prototype, "open");
+  ConfirmModal.prototype.open = function captureConfirm(): void {
+    opened.push(this);
+  };
+  try {
+    manager.confirmWorkspaceImport(Promise.resolve(config));
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(opened.length, 1);
+    await opened[0]?.onConfirm();
+  } finally {
+    if (originalOpen) Object.defineProperty(ConfirmModal.prototype, "open", originalOpen);
+    else Reflect.deleteProperty(ConfirmModal.prototype, "open");
+  }
+
+  assert.deepEqual(destination.settings.libraryNoteProfiles[library.id], {
+    folder: "Reference notes",
+    mode: "empty",
+  });
+  assert.equal(destination.settings.libraryNoteProfiles["missing-library"], undefined);
+  assert.deepEqual(mutateOptions, { includeSettings: true, requireUndo: true });
+  assert.ok(Notice.messages.some((message) => /1 Library profile referenced unavailable templates/i.test(message)));
+  assert.ok(Notice.messages.some((message) => /1 Library profile did not match a destination Library/i.test(message)));
+});
+
+test("standalone workspace import rejects a lossy-invalid Library folder before confirmation or mutation", async () => {
+  Notice.messages.length = 0;
+  const source = migrateData(null);
+  const library = installLibrary(source);
+  const config = createWorkspaceConfig(source, "2026-08-11T00:00:00.000Z");
+  config.settings.libraryNoteProfiles[library.id] = {
+    folder: "../Escaped notes",
+    mode: "empty",
+  };
+  const destination = migrateData(null);
+  installLibrary(destination, { ...library });
+  let mutationCount = 0;
+  const plugin = {
+    data: destination,
+    getLibraries: () => destination.portableIndex.libraries,
+    isClinicalMode: () => false,
+    invalidateRecordCache(): void {},
+    async mutate(): Promise<void> { mutationCount += 1; },
+  };
+  const manager = Object.create(IndexManagerModal.prototype) as {
+    app: { vault: { configDir: string; getAbstractFileByPath(path: string): null } };
+    plugin: typeof plugin;
+    guardOpenedBase(): boolean;
+    ownsOpenedBase(): boolean;
+    confirmWorkspaceImport(input: Promise<unknown>): void;
+  };
+  manager.app = { vault: { configDir: ".obsidian", getAbstractFileByPath: () => null } };
+  manager.plugin = plugin;
+  manager.guardOpenedBase = () => true;
+  manager.ownsOpenedBase = () => true;
+
+  const opened: unknown[] = [];
+  const originalOpen = Object.getOwnPropertyDescriptor(ConfirmModal.prototype, "open");
+  ConfirmModal.prototype.open = function captureConfirm(): void { opened.push(this); };
+  try {
+    manager.confirmWorkspaceImport(Promise.resolve(config));
+    await Promise.resolve();
+    await Promise.resolve();
+  } finally {
+    if (originalOpen) Object.defineProperty(ConfirmModal.prototype, "open", originalOpen);
+    else Reflect.deleteProperty(ConfirmModal.prototype, "open");
+  }
+
+  assert.equal(opened.length, 0);
+  assert.equal(mutationCount, 0);
+  assert.ok(Notice.messages.some((message) => /unsupported folder path/i.test(message)));
+  assert.equal(destination.settings.libraryNoteProfiles[library.id], undefined);
 });
 
 test("Index Manager refreshes stale state after a child portability mutation", () => {

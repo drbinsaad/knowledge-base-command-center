@@ -2,6 +2,8 @@ import { Modal, Notice, Platform, Setting, TFile, normalizePath } from "obsidian
 import type EntVaultCommandCenterPlugin from "./main";
 import {
   assertPersonalBackupMatchesVault,
+  cleanLibraryNoteProfiles,
+  resolveLibraryNoteProfile,
   subjectLibraryId,
   validateProposalFolderPath,
   validateTemplateFilePath,
@@ -36,6 +38,12 @@ type CenterMode = "export" | "import";
 type ComponentKey = "workspace" | "index" | "collections" | "study" | "savedViews" | "recovery";
 type BusyAction = "export" | "import" | "file";
 type LibraryDescriptor = Pick<PortableLibraryDefinition, "id" | "name" | "singularName" | "icon" | "order" | "sourceKind">;
+
+interface WorkspaceImportValidation {
+  defaultTemplateReset: boolean;
+  libraryTemplateResetIds: string[];
+  droppedLibraryProfileIds: string[];
+}
 
 const CENTER_MODES: readonly CenterMode[] = ["export", "import"];
 let portabilityCenterSequence = 0;
@@ -997,9 +1005,14 @@ export class ExportImportCenterModal extends Modal {
     if (!this.busyAction) this.render();
   }
 
-  private validateWorkspaceComponent(value: PortableExportV1, selection: PortableExportSelection): boolean {
+  private validateWorkspaceComponent(
+    value: PortableExportV1,
+    selection: PortableExportSelection,
+  ): WorkspaceImportValidation {
     const workspace = selection.workspace ? value.components.workspace : undefined;
-    if (!workspace) return false;
+    if (!workspace) {
+      return { defaultTemplateReset: false, libraryTemplateResetIds: [], droppedLibraryProfileIds: [] };
+    }
     const settings = workspace.settings;
     for (const folder of [settings.primaryFolder, settings.defaultNoteFolder, settings.templatesFolder]) {
       const validation = validateWritableFolderPath(folder, this.app.vault.configDir);
@@ -1010,17 +1023,73 @@ export class ExportImportCenterModal extends Modal {
       : validateWritableFolderPath(settings.proposalFolder, this.app.vault.configDir);
     if (proposalValidation) throw new Error(proposalValidation);
 
-    if (settings.defaultNewNoteMode !== "template") return false;
-    const templatePathError = validateTemplateFilePath(
-      settings.defaultTemplatePath,
-      settings.templatesFolder,
-      this.app.vault.configDir,
+    let defaultTemplateReset = false;
+    if (settings.defaultNewNoteMode === "template") {
+      const templatePathError = validateTemplateFilePath(
+        settings.defaultTemplatePath,
+        settings.templatesFolder,
+        this.app.vault.configDir,
+      );
+      const template = settings.defaultTemplatePath
+        ? this.app.vault.getAbstractFileByPath(normalizePath(settings.defaultTemplatePath))
+        : null;
+      defaultTemplateReset = Boolean(templatePathError)
+        || !(template instanceof TFile)
+        || template.extension.toLocaleLowerCase() !== "md";
+    }
+    const effectiveSettings = structuredClone(settings);
+    if (defaultTemplateReset) {
+      effectiveSettings.defaultNewNoteMode = "empty";
+      effectiveSettings.defaultTemplatePath = "";
+    }
+    const destinationLibraryIds = new Set(
+      this.plugin.data.portableIndex.libraries.map((library) => library.id),
     );
-    const template = settings.defaultTemplatePath
-      ? this.app.vault.getAbstractFileByPath(normalizePath(settings.defaultTemplatePath))
-      : null;
-    if (!templatePathError && template instanceof TFile && template.extension.toLocaleLowerCase() === "md") return false;
-    return true;
+    for (const library of value.components.index?.libraries ?? []) destinationLibraryIds.add(library.id);
+    const droppedLibraryProfileIds = Object.keys(effectiveSettings.libraryNoteProfiles)
+      .filter((libraryId) => !destinationLibraryIds.has(libraryId));
+    const libraryTemplateResetIds: string[] = [];
+    for (const [libraryId, profile] of Object.entries(effectiveSettings.libraryNoteProfiles)) {
+      if (!destinationLibraryIds.has(libraryId)) continue;
+      if (profile.folder !== undefined) {
+        const cleanedFolder = cleanLibraryNoteProfiles(
+          { [libraryId]: { folder: profile.folder } },
+          new Set([libraryId]),
+        )[libraryId]?.folder;
+        if (cleanedFolder === undefined) {
+          throw new Error(`Library profile ${libraryId} contains an unsupported folder path.`);
+        }
+        const validation = validateWritableFolderPath(cleanedFolder, this.app.vault.configDir);
+        if (validation) throw new Error(validation);
+      }
+      if (profile.templatePath) {
+        const cleanedTemplate = cleanLibraryNoteProfiles(
+          { [libraryId]: { templatePath: profile.templatePath } },
+          new Set([libraryId]),
+        )[libraryId]?.templatePath;
+        const validation = cleanedTemplate === undefined ? "unsupported template path" : validateTemplateFilePath(
+          profile.templatePath,
+          effectiveSettings.templatesFolder,
+          this.app.vault.configDir,
+        );
+        if (validation) {
+          libraryTemplateResetIds.push(libraryId);
+          const resetProfile = { ...profile, mode: "empty" as const };
+          delete resetProfile.templatePath;
+          effectiveSettings.libraryNoteProfiles[libraryId] = resetProfile;
+          continue;
+        }
+      }
+      const effective = resolveLibraryNoteProfile(effectiveSettings, libraryId);
+      if (effective.mode !== "template") continue;
+      const template = effective.templatePath
+        ? this.app.vault.getAbstractFileByPath(normalizePath(effective.templatePath))
+        : null;
+      if (!(template instanceof TFile) || template.extension.toLocaleLowerCase() !== "md") {
+        libraryTemplateResetIds.push(libraryId);
+      }
+    }
+    return { defaultTemplateReset, libraryTemplateResetIds, droppedLibraryProfileIds };
   }
 
   private async importSelected(): Promise<void> {
@@ -1056,7 +1125,7 @@ export class ExportImportCenterModal extends Modal {
         this.crossBaseRecoveryConfirmed,
       );
     }
-    const templateReset = this.validateWorkspaceComponent(value, selection);
+    const workspaceValidation = this.validateWorkspaceComponent(value, selection);
     // Reject an incompatible ENT Index package before mutate() creates Undo
     // state or applies any component. applyPortableExport repeats this check
     // defensively for non-UI callers.
@@ -1093,12 +1162,26 @@ export class ExportImportCenterModal extends Modal {
             this.plugin.data.settings.workspaceName,
             this.crossBaseRecoveryConfirmed,
           );
-          if (templateReset && firstSelection.workspace) {
+          if (workspaceValidation.defaultTemplateReset && firstSelection.workspace) {
             // Keep destination-only template sanitization inside the same
             // undo-protected mutation as the workspace import. The selected
             // package remains immutable and a failed save rolls this back.
             this.plugin.data.settings.defaultNewNoteMode = "empty";
             this.plugin.data.settings.defaultTemplatePath = "";
+          }
+          if (firstSelection.workspace) {
+            for (const libraryId of workspaceValidation.libraryTemplateResetIds) {
+              const importedProfile = value.components.workspace?.settings.libraryNoteProfiles[libraryId];
+              const profile = this.plugin.data.settings.libraryNoteProfiles[libraryId]
+                ?? (importedProfile ? cleanLibraryNoteProfiles(
+                  { [libraryId]: importedProfile },
+                  new Set([libraryId]),
+                )[libraryId] : undefined)
+                ?? {};
+              const resetProfile = { ...profile, mode: "empty" as const };
+              delete resetProfile.templatePath;
+              this.plugin.data.settings.libraryNoteProfiles[libraryId] = resetProfile;
+            }
           }
           this.plugin.invalidateRecordCache();
         }
@@ -1133,7 +1216,13 @@ export class ExportImportCenterModal extends Modal {
     const subjectText = selectionUsesSubjectCatalog(selection)
       ? ` ${imported.addedSubjects} added, ${imported.matchedSubjects} matched, and ${imported.unresolvedSubjects} awaiting a note.`
       : "";
-    new Notice(`Import complete.${subjectText}${templateReset ? " The missing source template was reset to Empty note." : ""} Markdown notes were not changed.`, 10000);
+    const profileResetText = workspaceValidation.libraryTemplateResetIds.length > 0
+      ? ` ${workspaceValidation.libraryTemplateResetIds.length} Library ${workspaceValidation.libraryTemplateResetIds.length === 1 ? "profile was" : "profiles were"} reset to Empty note because its template is unavailable.`
+      : "";
+    const droppedProfileText = workspaceValidation.droppedLibraryProfileIds.length > 0
+      ? ` ${workspaceValidation.droppedLibraryProfileIds.length} Library ${workspaceValidation.droppedLibraryProfileIds.length === 1 ? "profile was" : "profiles were"} omitted because the destination has no matching Library.`
+      : "";
+    new Notice(`Import complete.${subjectText}${workspaceValidation.defaultTemplateReset ? " The missing source template was reset to Empty note." : ""}${profileResetText}${droppedProfileText} Markdown notes were not changed.`, 10000);
     this.close();
   }
 
