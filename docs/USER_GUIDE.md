@@ -155,6 +155,7 @@ When creation has an explicit Library context, templates may also use these quot
 
 | Token | Creation-time value |
 | --- | --- |
+| <code>{{yaml:title}}</code> | The note title as one quoted YAML scalar. Prefer this over plain <code>{{title}}</code> inside frontmatter. |
 | <code>{{yaml:id}}</code> | Stable/configured subject ID when the placeholder already has one; otherwise <code>""</code>. |
 | <code>{{yaml:category}}</code> | Selected Library subheading or heading, then the record group/Library fallback. |
 | <code>{{yaml:parent}}</code> | Existing portable/configured parent title when known; otherwise <code>""</code>. |

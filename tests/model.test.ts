@@ -1780,7 +1780,7 @@ test("generic note paths, folder grouping, and template tokens are deterministic
 test("contextual template tokens are YAML-quoted while legacy tokens stay unchanged", () => {
   const rendered = applyTemplateTokens(
     [
-      "title: {{title}}",
+      "title: {{yaml:title}}",
       "id: {{yaml:id}}",
       "category: {{yaml:category}}",
       "parent: {{yaml:parent}}",
@@ -1800,7 +1800,7 @@ test("contextual template tokens are YAML-quoted while legacy tokens stay unchan
     },
   );
   assert.equal(rendered, [
-    "title: A: title # kept legacy",
+    "title: \"A: title # kept legacy\"",
     "id: \"ID: [one]\"",
     "category: \"Airway #1\"",
     "parent: \"quoted \\\"parent\\\"\\nline\"",
@@ -1808,7 +1808,10 @@ test("contextual template tokens are YAML-quoted while legacy tokens stay unchan
     "type: \"Paper\"",
     "unknown: {{yaml:future}}",
   ].join("\n"));
-  assert.equal(applyTemplateTokens("id: {{yaml:id}}", "Title", "date", "time"), "id: \"\"");
+  assert.equal(
+    applyTemplateTokens("title: {{yaml:title}}\nid: {{yaml:id}}", "A: title", "date", "time"),
+    "title: \"A: title\"\nid: \"\"",
+  );
   assert.equal(
     applyTemplateTokens(
       "title: {{title}}\nid: {{yaml:id}}",

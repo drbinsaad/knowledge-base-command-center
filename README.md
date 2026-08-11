@@ -114,7 +114,7 @@ The operation uses Obsidian's atomic note-processing API, refuses <code>ai_lock:
 
 Create an empty note or copy a local Markdown template using <code>{{title}}</code>, <code>{{date}}</code>, and <code>{{time}}</code>. The destination is previewed, missing folders are created safely, and an existing file is never overwritten.
 
-Library templates may also use explicit YAML-scalar tokens: <code>{{yaml:id}}</code>, <code>{{yaml:category}}</code>, <code>{{yaml:parent}}</code>, <code>{{yaml:library}}</code>, and <code>{{yaml:type}}</code>. Each expands at explicit creation time to a quoted YAML-safe scalar; unavailable context becomes <code>""</code>. Use the <code>yaml:</code> prefix exactly—plain <code>{{id}}</code> and other template-plugin syntax are copied unchanged. Legacy title/date/time replacement is unchanged.
+Library templates may also use explicit YAML-scalar tokens: <code>{{yaml:title}}</code>, <code>{{yaml:id}}</code>, <code>{{yaml:category}}</code>, <code>{{yaml:parent}}</code>, <code>{{yaml:library}}</code>, and <code>{{yaml:type}}</code>. Each expands at explicit creation time to a quoted YAML-safe scalar; unavailable context becomes <code>""</code>. Use the <code>yaml:</code> prefix exactly—plain <code>{{id}}</code> and other template-plugin syntax are copied unchanged. Legacy title/date/time replacement is unchanged.
 
 Portable imports never create notes automatically. A path-free imported subject can remain a **No note** placeholder, link to an existing note, or—where the profile permits—create an empty or template-based note.
 

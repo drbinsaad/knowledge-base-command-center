@@ -106,6 +106,7 @@ export interface EffectiveLibraryNoteProfile {
 
 /** Extra values available only through explicit YAML-quoted template tokens. */
 export interface TemplateTokenContext {
+  title?: string;
   id?: string;
   category?: string;
   parent?: string;
@@ -3538,7 +3539,8 @@ export function applyTemplateTokens(
   time: string,
   context: TemplateTokenContext = {},
 ): string {
-  const contextualValues: Required<TemplateTokenContext> = {
+  const contextualValues = {
+    title: context.title ?? title,
     id: context.id ?? "",
     category: context.category ?? "",
     parent: context.parent ?? "",
@@ -3548,10 +3550,10 @@ export function applyTemplateTokens(
   const protectedTokens: string[] = [];
   let placeholderPrefix = "\u0000KBCC_YAML_TOKEN_";
   while (content.includes(placeholderPrefix)) placeholderPrefix += "_";
-  const protectedContent = content.replace(/{{\s*yaml:(id|category|parent|library|type)\s*}}/gi, (_match, key: string) => {
+  const protectedContent = content.replace(/{{\s*yaml:(title|id|category|parent|library|type)\s*}}/gi, (_match, key: string) => {
     const placeholder = `${placeholderPrefix}${protectedTokens.length}\u0000`;
     protectedTokens.push(yamlQuotedTemplateScalar(
-      contextualValues[key.toLowerCase() as keyof TemplateTokenContext],
+      contextualValues[key.toLowerCase() as keyof typeof contextualValues],
     ));
     return placeholder;
   });
