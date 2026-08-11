@@ -26,10 +26,12 @@ import {
   configuredGroupFromPath,
   createDefaultStore,
   createDeviceLocalPluginState,
+  createDeviceLocalPluginStateWithReport,
   createKnowledgeBaseEntry,
   createPersonalBackup,
   createWorkspaceConfig,
   DATA_VERSION,
+  DEVICE_LOCAL_STATE_VERSION,
   deterministicSemanticHead,
   curriculumContainerKey,
   expectedParentCurriculumId,
@@ -6386,6 +6388,8 @@ test("device-local state round-trips active base, routes, collapse, and bounded 
 
   const parsed = parseDeviceLocalPluginState(createDeviceLocalPluginState(store));
 
+  assert.equal(parsed.version, DEVICE_LOCAL_STATE_VERSION);
+  assert.equal(parsed.vaultId, "vault-device-state");
   assert.equal(parsed.activeBaseId, "base-default");
   assert.equal(parsed.bases[0]?.view.selectedPath, "Knowledge/Topic.md");
   assert.equal(parsed.bases[0]?.view.activeTab, "collections");
@@ -6395,14 +6399,47 @@ test("device-local state round-trips active base, routes, collapse, and bounded 
 
 test("device-local state rejects malformed and oversized payloads without partial parsing", () => {
   assert.throws(() => parseDeviceLocalPluginState({
-    version: 1,
+    version: DEVICE_LOCAL_STATE_VERSION,
+    vaultId: "vault-device-state",
     activeBaseId: "base-default",
     bases: [{ baseId: "base-default", view: { activeTab: "not-a-tab" } }],
   }), /invalid active tab|malformed/i);
   assert.throws(() => parseDeviceLocalPluginState({
-    version: 1,
+    version: DEVICE_LOCAL_STATE_VERSION,
+    vaultId: "vault-device-state",
     activeBaseId: "base-default",
     bases: [],
     padding: "x".repeat(MAX_DEVICE_LOCAL_STATE_BYTES + 1),
   }), /too large/i);
+  assert.throws(() => parseDeviceLocalPluginState({
+    version: 1,
+    activeBaseId: "base-default",
+    bases: [],
+  }), /unsupported|malformed/i, "legacy unbound state is never attached to a vault");
+});
+
+test("device-local bounding retains deterministic newest history suffixes", () => {
+  const first = migrateData(null);
+  const store = createDefaultStore(first, 100, "vault-large-device-state");
+  for (let baseIndex = 0; baseIndex < 5; baseIndex += 1) {
+    const data = baseIndex === 0 ? store.bases[0]?.data : migrateData(null);
+    assert.ok(data);
+    const paths = Array.from({ length: 1_500 }, (_, index) => `Knowledge/${baseIndex}/${String(index).padStart(4, "0")}-${"x".repeat(28)}.md`);
+    data.undoStack = Array.from({ length: 20 }, (_, index) => {
+      const snapshot = snapshotPersonal(data, `base-${baseIndex}-undo-${index}`);
+      snapshot.pinnedPaths = paths;
+      return snapshot;
+    });
+    if (baseIndex > 0) store.bases.push(createKnowledgeBaseEntry(data, `base-${baseIndex}`, 100 + baseIndex));
+  }
+  store.activeBaseId = "base-default";
+
+  const built = createDeviceLocalPluginStateWithReport(store);
+  assert.equal(built.historyTruncated, true);
+  assert.ok(new TextEncoder().encode(JSON.stringify(built.state)).byteLength <= MAX_DEVICE_LOCAL_STATE_BYTES);
+  for (const base of built.state.bases) {
+    const labels = base.view.undoStack.map((snapshot) => snapshot.label);
+    const source = store.bases.find((entry) => entry.id === base.baseId)?.data.undoStack.map((snapshot) => snapshot.label) ?? [];
+    assert.deepEqual(labels, source.slice(source.length - labels.length), `${base.baseId} retains only a newest suffix`);
+  }
 });

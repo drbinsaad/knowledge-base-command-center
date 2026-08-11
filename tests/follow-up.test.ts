@@ -4,6 +4,7 @@ import {
   appendFollowUpEntry,
   allocateFollowUpCategoryId,
   assertFollowUpNoteWritable,
+  assertMarkdownAiLockWritable,
   cleanFollowUpCategoryDefinitions,
   DEFAULT_FOLLOW_UP_CATEGORIES,
   FOLLOW_UP_END_MARKER,
@@ -49,15 +50,22 @@ test("allocates readable stable category IDs without collisions or unsafe object
 });
 
 test("ai_lock is enforced from the exact content inside the atomic write", () => {
+  assert.doesNotThrow(() => assertMarkdownAiLockWritable("# No frontmatter\n"));
+  assert.doesNotThrow(() => assertMarkdownAiLockWritable("---\nai_lock: false\n---\n# Writable\n"));
+  assert.doesNotThrow(() => assertMarkdownAiLockWritable("--- \nai_lock: false\n...\t\n# Writable\n"));
+  assert.doesNotThrow(() => assertMarkdownAiLockWritable("---\ntitle: Writable\n---\n"));
   assert.doesNotThrow(() => assertFollowUpNoteWritable("# No frontmatter\n"));
   assert.doesNotThrow(() => assertFollowUpNoteWritable("---\nai_lock: false\n---\n# Writable\n"));
   assert.doesNotThrow(() => assertFollowUpNoteWritable("---\nai_lock: null # intentionally unset\n---\nai_lock: true in body\n"));
   for (const content of [
     "---\nai_lock: true\n---\n",
+    "---\t\nai_lock: true\n--- \n",
     "---\n'ai_lock': yes\n---\n",
     "---\nai_lock: \"false\"\n---\n",
     "---\nnested_ai_lock: false\n---\n",
     "---\nai_lock: false\nai_lock: false\n---\n",
+    "--- \nai_lock: true\nai_lock: false\n...\t\n",
+    "---\n\"ai_l\\u006fck\": false\nai_lock: false\n---\n",
     "---\nai_lock: false\n",
     "---\n\"ai_l\\u006fck\": true\n---\n",
     "---\n\"\\x61i_lock\": true\n---\n",

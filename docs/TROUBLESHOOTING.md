@@ -127,7 +127,9 @@ Do not edit IDs or identity fields by hand to bypass these checks. Use a current
 
 ## Uninstall or reset
 
-Removing the plugin folder removes <code>data.json</code> and all plugin-owned settings and organization. It does not remove Markdown notes.
+Before disabling the plugin, run **Knowledge Base Command Center: Clear device-local data…** from the Command Palette (or choose the same action in **Sync & recovery center**) and confirm. Then remove the plugin through Community Plugins or delete its manual plugin folder.
+
+Removing the folder removes <code>data.json</code> and the synced settings and organization stored there. It does not reliably remove device-only routes, collapsed sections, Undo/Redo history, or local Sync/Recovery facts because Obsidian keeps those two plugin-owned App-local values outside the folder. The clear action removes only those local values; it does not change <code>data.json</code>, Markdown notes, attachments, or recovery exports. Local tracking stays suppressed until Obsidian restarts, so disable or uninstall in that same session. If the plugin was already removed without clearing them, reinstall and enable the same or a newer release, run the clear action, then remove it again.
 
 Before uninstalling, export current private recovery for every available base, temporarily restore any archived base that needs recovery, and back up the complete vault including <code>.obsidian</code>.
 

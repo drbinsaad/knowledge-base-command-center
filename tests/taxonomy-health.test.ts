@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { migrateData, portablePlaceholderPath, type VaultRecord } from "../src/model.ts";
 import EntVaultCommandCenterPlugin from "../src/main.ts";
+import { TaxonomyRepairPreviewModal } from "../src/taxonomy-health-modal.ts";
 import {
   applyTaxonomyRepairToData,
   buildTaxonomyHealthFindings,
@@ -10,6 +11,7 @@ import {
   taxonomyConfusableSkeleton,
   taxonomyVariantKey,
 } from "../src/taxonomy-health.ts";
+import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
 
 function record(path: string, title: string, overrides: Partial<VaultRecord> = {}): VaultRecord {
   return {
@@ -120,6 +122,39 @@ test("the plugin repair service revalidates the finding and requires one Undo tr
   assert.equal(data.curriculumVisual.parentByPath[child.path], undefined);
 });
 
+test("queued taxonomy repair revalidates its exact preview at the mutation boundary", async () => {
+  const data = migrateData(null);
+  const child = record("Knowledge Base/child.md", "Child");
+  data.curriculumVisual.parentByPath[child.path] = "Knowledge Base/missing.md";
+  const finding = analyze(data, [child]).find((item) => item.repair?.kind === "clear-visual-parent");
+  assert.ok(finding?.repair);
+  let checks = 0;
+  const plugin = Object.create(EntVaultCommandCenterPlugin.prototype) as EntVaultCommandCenterPlugin & {
+    data: typeof data;
+    getTaxonomyHealthFindings: () => Array<typeof finding>;
+    mutate: (label: string, action: () => void) => Promise<void>;
+    invalidateRecordCache: () => void;
+  };
+  plugin.data = data;
+  plugin.getTaxonomyHealthFindings = () => {
+    checks += 1;
+    return checks === 1 ? [finding] : [];
+  };
+  plugin.invalidateRecordCache = () => undefined;
+  plugin.mutate = async (_label, action) => {
+    // Represents a queued transaction resuming after the formerly missing
+    // parent appeared in the vault without a plugin data-epoch change.
+    action();
+  };
+
+  await assert.rejects(
+    plugin.applyTaxonomyHealthRepair(finding.id, finding.repair),
+    /changed after the preview/i,
+  );
+  assert.equal(checks, 2);
+  assert.equal(data.curriculumVisual.parentByPath[child.path], "Knowledge Base/missing.md");
+});
+
 test("cycles and ambiguous identity findings remain report-only", () => {
   const data = migrateData(null);
   const a = record("Knowledge Base/a.md", "A");
@@ -223,10 +258,40 @@ test("taxonomy repair preview has definite mobile scroll ownership and large-tex
   assert.match(source, /class TaxonomyRepairPreviewModal/);
   assert.match(source, /role: "region", "aria-label": "Taxonomy repair details", tabindex: "0"/);
   assert.match(source, /text: repair\.label, attr: \{ dir: "auto" \}/);
+  assert.doesNotMatch(source, /apply\.focus\(\)/);
   assert.match(styles, /\.ent-cc-taxonomy-preview-modal\s*\{[^}]*height:[^;}]*100dvh[^}]*max-height:[^;}]*100dvh/s);
   assert.match(styles, /\.ent-cc-taxonomy-preview-modal > \.modal-content\.ent-cc-taxonomy-preview\s*\{[^}]*flex:\s*1 1 0;[^}]*height:\s*0;[^}]*min-height:\s*0/s);
   assert.match(styles, /\.ent-cc-taxonomy-preview-body\s*\{[^}]*flex:\s*1 1 auto;[^}]*min-height:\s*0;[^}]*overflow-y:\s*auto/s);
   assert.match(styles, /\.ent-cc-taxonomy-footer,[\s\S]*?\.ent-cc-taxonomy-preview-actions\s*\{[^}]*flex:\s*0 0 auto;[^}]*flex-wrap:\s*wrap/s);
   assert.match(styles, /\.ent-cc-taxonomy-preview-actions \.ent-cc-button\s*\{[^}]*min-height:\s*44px;[^}]*white-space:\s*normal/s);
   assert.doesNotMatch(styles, /\.ent-cc-taxonomy-preview\s*\{[^}]*overflow-y:\s*auto/s);
+});
+
+test("taxonomy repair preview leaves initial focus on modal context instead of Apply", () => {
+  const data = migrateData(null);
+  const child = record("Knowledge Base/child.md", "Child");
+  data.curriculumVisual.parentByPath[child.path] = "Knowledge Base/missing.md";
+  const finding = analyze(data, [child]).find((item) => item.repair?.kind === "clear-visual-parent");
+  assert.ok(finding?.repair);
+  const dom = createFakeDom();
+  const plugin = {
+    app: {},
+    getActiveKnowledgeBaseId: () => "base",
+    getDataEpoch: () => 1,
+    applyTaxonomyHealthRepair: async () => undefined,
+  };
+  const modal = new TaxonomyRepairPreviewModal(plugin as never, finding, () => undefined) as TaxonomyRepairPreviewModal & {
+    modalEl: HTMLElement;
+    contentEl: HTMLElement;
+    titleEl: HTMLElement;
+  };
+  modal.modalEl = asHtmlElement(dom.document.body.createDiv());
+  modal.contentEl = asHtmlElement(dom.document.body.createDiv());
+  modal.titleEl = asHtmlElement(dom.document.body.createEl("h2"));
+  modal.onOpen();
+
+  assert.equal(dom.document.activeElement, null);
+  assert.equal(modal.titleEl.textContent, "Review taxonomy repair");
+  assert.match(modal.contentEl.querySelector(".ent-cc-taxonomy-preview-body")?.textContent ?? "", /Undo/u);
+  assert.equal(modal.contentEl.querySelector(".ent-cc-taxonomy-preview-actions .mod-cta")?.textContent, "Apply repair");
 });

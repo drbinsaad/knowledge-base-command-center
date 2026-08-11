@@ -584,7 +584,19 @@ export class PortfolioTransferModal extends Modal {
   }
 
   private renderPlan(plan: PortfolioImportPlan): void {
-    const preview = this.renderParent().createDiv({ cls: "ent-cc-portfolio-preview", attr: { "aria-live": "polite" } });
+    const previewItemCount = PORTFOLIO_DIFF_CATEGORIES.reduce(
+      (total, category) => total + plan.diff[category].length,
+      0,
+    );
+    this.renderParent().createDiv({
+      cls: "ent-cc-portfolio-preview-status",
+      text: `Exact preview ready. ${plan.operations.length} mapped source${plan.operations.length === 1 ? "" : "s"}; ${previewItemCount} summarized change item${previewItemCount === 1 ? "" : "s"}.`,
+      attr: { role: "status", "aria-live": "polite", "aria-atomic": "true" },
+    });
+    // Keep the rich, potentially 50-row-per-section preview outside the live
+    // region. Screen readers receive the concise status above once, then can
+    // browse the headings and lists at their own pace.
+    const preview = this.renderParent().createDiv({ cls: "ent-cc-portfolio-preview" });
     preview.createEl("h3", { text: "Exact change preview" });
     preview.createEl("p", {
       text: `${plan.operations.length} mapped source${plan.operations.length === 1 ? "" : "s"}. ${plan.recoveryPackages.length} Replace recovery export${plan.recoveryPackages.length === 1 ? "" : "s"} will be written before the atomic store mutation.`,

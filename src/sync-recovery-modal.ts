@@ -7,6 +7,7 @@ export class SyncRecoveryCenterModal extends Modal {
   private openedDataEpoch = 0;
   private staleNoticeShown = false;
   private focusTimer: number | null = null;
+  private announcementTimer: number | null = null;
   private recheckAnnouncement = "";
 
   constructor(private readonly plugin: EntVaultCommandCenterPlugin) {
@@ -27,9 +28,14 @@ export class SyncRecoveryCenterModal extends Modal {
   }
 
   onClose(): void {
+    const ownerWindow = this.contentEl.ownerDocument.defaultView;
     if (this.focusTimer !== null) {
-      this.contentEl.ownerDocument.defaultView?.clearTimeout(this.focusTimer);
+      ownerWindow?.clearTimeout(this.focusTimer);
       this.focusTimer = null;
+    }
+    if (this.announcementTimer !== null) {
+      ownerWindow?.clearTimeout(this.announcementTimer);
+      this.announcementTimer = null;
     }
   }
 
@@ -65,11 +71,11 @@ export class SyncRecoveryCenterModal extends Modal {
     const modeIcon = mode.createSpan({ attr: { "aria-hidden": "true" } });
     setIcon(modeIcon, snapshot.readOnly ? "shield-alert" : "shield-check");
     mode.createSpan({ text: snapshot.readOnly ? "Protected read-only" : "Writable" });
-    intro.createDiv({
+    const recheckStatus = intro.createDiv({
       cls: "ent-cc-sync-recovery-recheck-status",
-      text: this.recheckAnnouncement,
       attr: { role: "status", "aria-live": "polite", "aria-atomic": "true" },
     });
+    this.announceRecheck(recheckStatus);
 
     const scroll = this.contentEl.createDiv({
       cls: "ent-cc-sync-recovery-scroll",
@@ -89,6 +95,9 @@ export class SyncRecoveryCenterModal extends Modal {
     const recheck = this.actionButton(actions, "refresh-cw", "Recheck local facts", () => {
       this.recheckAnnouncement = "Local facts rechecked.";
       this.render(true);
+    });
+    this.actionButton(actions, "trash-2", "Clear device-local data…", () => {
+      new ClearDeviceLocalDataModal(this.plugin, () => this.close()).open();
     });
     this.actionButton(actions, "x", "Close", () => this.close());
     if (focusAction) this.focusFromOwnerWindow(recheck);
@@ -226,6 +235,8 @@ export class SyncRecoveryCenterModal extends Modal {
       element.focus();
       return;
     }
+    if (this.focusTimer !== null) ownerWindow.clearTimeout(this.focusTimer);
+    this.focusTimer = null;
     let firedSynchronously = false;
     const timer = ownerWindow.setTimeout(() => {
       firedSynchronously = true;
@@ -233,5 +244,67 @@ export class SyncRecoveryCenterModal extends Modal {
       if (this.ownsOpenedBase() && this.contentEl.contains(element)) element.focus();
     }, 0);
     if (!firedSynchronously) this.focusTimer = timer;
+  }
+
+  private announceRecheck(element: HTMLElement): void {
+    const message = this.recheckAnnouncement;
+    this.recheckAnnouncement = "";
+    if (!message) return;
+    const ownerWindow = this.contentEl.ownerDocument.defaultView;
+    if (!ownerWindow) {
+      element.setText(message);
+      return;
+    }
+    if (this.announcementTimer !== null) ownerWindow.clearTimeout(this.announcementTimer);
+    this.announcementTimer = null;
+    let firedSynchronously = false;
+    const timer = ownerWindow.setTimeout(() => {
+      firedSynchronously = true;
+      this.announcementTimer = null;
+      if (this.ownsOpenedBase() && this.contentEl.contains(element)) element.setText(message);
+    }, 0);
+    if (!firedSynchronously) this.announcementTimer = timer;
+  }
+}
+
+export class ClearDeviceLocalDataModal extends Modal {
+  private busy = false;
+
+  constructor(
+    private readonly plugin: EntVaultCommandCenterPlugin,
+    private readonly onCleared: () => void = () => undefined,
+  ) {
+    super(plugin.app);
+  }
+
+  onOpen(): void {
+    this.contentEl.addClass("ent-cc-modal", "ent-cc-clear-device-local");
+    this.titleEl.setText("Clear device-local data?");
+    this.contentEl.createEl("p", {
+      text: "This clears this device's saved route, collapsed sections, undo and redo history, and local sync and recovery facts for this plugin.",
+    });
+    this.contentEl.createEl("p", {
+      text: "Synced knowledge-base organization, settings, Markdown notes, attachments, and recovery export files are not changed.",
+    });
+    const actions = this.contentEl.createDiv({ cls: "ent-cc-sync-recovery-actions" });
+    const cancel = actions.createEl("button", { cls: "ent-cc-button", type: "button", text: "Cancel" });
+    const clear = actions.createEl("button", { cls: "ent-cc-button mod-warning", type: "button", text: "Clear device-local data" });
+    cancel.addEventListener("click", () => this.close());
+    clear.addEventListener("click", () => {
+      if (this.busy) return;
+      this.busy = true;
+      cancel.disabled = true;
+      clear.disabled = true;
+      void this.plugin.clearDeviceLocalData().then(() => {
+        this.close();
+        this.onCleared();
+        new Notice("Device-local plugin data cleared. Disable or uninstall now; restarting Obsidian resumes local route and recovery tracking. Synced knowledge-base data and Markdown notes were not changed.", 10000);
+      }).catch(() => {
+        this.busy = false;
+        cancel.disabled = false;
+        clear.disabled = false;
+        new Notice("Device-local plugin data could not be cleared. Synced knowledge-base data and Markdown notes were not changed.", 8000);
+      });
+    });
   }
 }

@@ -345,6 +345,8 @@ The artifact scan examines at most 2,000 direct children of the export folder an
 
 This is not a Sync-status surface. It makes no network request, calls no private Obsidian Sync API, and cannot tell whether a provider is online, queued, caught up, or safe for a device handoff. It never reads note bodies. Full paths, export filenames, custom configuration names, vault/base identifiers, and full semantic fingerprints are not shown.
 
+Choose **Clear device-local data…** in this center, or run the command of the same name, when preparing to uninstall or intentionally resetting this device. A confirmation explains that it clears only this plugin's App-local route, disclosure, Undo/Redo, and local diagnostic facts. It does not write synced <code>data.json</code> or change Markdown, attachments, or recovery exports. Tracking remains suppressed until Obsidian restarts, so disable or uninstall in the same session; restart only when you want local tracking to resume.
+
 ## Settings
 
 Configurable Generic-base settings include:

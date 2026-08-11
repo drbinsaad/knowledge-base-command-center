@@ -235,62 +235,95 @@ export function allocateFollowUpCategoryId(label: string, existingIds: ReadonlyS
   return candidate;
 }
 
-/**
- * Fail closed on a top-level ai_lock property inside the leading YAML block.
- * Only an explicit unquoted false/null value is writable; ambiguous YAML is
- * treated as locked without needing a second non-atomic metadata read.
- */
-export function assertFollowUpNoteWritable(content: string): void {
-  const normalized = content.startsWith("\uFEFF") ? content.slice(1) : content;
-  const lines = normalized.split(/\r\n|\n|\r/u);
-  if (lines[0] !== "---") return;
-  let closed = false;
-  let closingIndex = -1;
-  let lockOccurrences = 0;
-  for (let index = 1; index < lines.length; index += 1) {
-    const line = lines[index] ?? "";
-    if (line === "---" || line === "...") {
-      closed = true;
-      closingIndex = index;
-      break;
-    }
-    if (!line.includes("ai_lock")) continue;
-    const match = /^(?:ai_lock|'ai_lock'|"ai_lock")[ \t]*:[ \t]*(.*)$/u.exec(line);
-    if (!match) fail("the YAML contains an ambiguous ai_lock declaration.");
-    lockOccurrences += 1;
-    const value = (match[1] ?? "").trim();
-    if (!/^(?:false|null|~)(?:[ \t]+#.*)?$/iu.test(value)) {
-      fail("this note has ai_lock enabled and cannot be changed.");
+function decodedYamlKey(line: string): string | null {
+  const match = /^("(?:\\.|[^"])*"|'(?:''|[^'])*'|[A-Za-z0-9_-]+)[ \t]*:/u.exec(line);
+  const raw = match?.[1];
+  if (!raw) return null;
+  if (raw.startsWith("\"")) {
+    try {
+      return JSON.parse(raw) as string;
+    } catch {
+      return null;
     }
   }
-  if (!closed) fail("the YAML frontmatter is not closed.");
+  return raw.startsWith("'") ? raw.slice(1, -1).replace(/''/gu, "'") : raw;
+}
+
+/**
+ * One fail-closed ai_lock gate shared by every operation that may rewrite a
+ * note. Only an absent key or one explicit unquoted false/null declaration is
+ * writable. Duplicate, escaped-duplicate, merged, nested, or malformed forms
+ * are refused before a caller performs any write.
+ */
+export function assertMarkdownAiLockWritable(content: string): void {
+  const normalized = content.startsWith("\uFEFF") ? content.slice(1) : content;
+  const lines = normalized.split(/\r\n|\n|\r/u);
+  if (!/^---[ \t]*$/u.test(lines[0] ?? "")) return;
+  const closingIndex = lines.findIndex((line, index) => index > 0 && /^(?:---|\.\.\.)[ \t]*$/u.test(line));
+  if (closingIndex < 0) throw new Error("This note has malformed YAML frontmatter because the block is not closed.");
+  let lockOccurrences = 0;
+  for (let index = 1; index < closingIndex; index += 1) {
+    const line = lines[index] ?? "";
+    const key = decodedYamlKey(line);
+    if (key !== "ai_lock") {
+      if (line.includes("ai_lock")) {
+        throw new Error("This note has malformed YAML frontmatter with an ambiguous ai_lock declaration.");
+      }
+      continue;
+    }
+    if (!/^(?:ai_lock|'ai_lock'|"ai_lock")[ \t]*:/u.test(line)) {
+      throw new Error("This note has malformed YAML frontmatter with an ambiguous ai_lock declaration.");
+    }
+    const separator = line.indexOf(":");
+    if (separator < 0) {
+      throw new Error("This note has malformed YAML frontmatter with an ambiguous ai_lock declaration.");
+    }
+    lockOccurrences += 1;
+    const value = line.slice(separator + 1).trim();
+    if (!/^(?:false|null|~)(?:[ \t]+#.*)?$/iu.test(value)) {
+      throw new Error("This note has ai_lock enabled (ai_lock: true or another non-writable value) and cannot be changed.");
+    }
+  }
   let parsed: unknown;
   try {
     parsed = parseYaml(lines.slice(1, closingIndex).join("\n")) as unknown;
   } catch {
-    fail("the YAML frontmatter could not be parsed safely.");
+    throw new Error("This note has malformed YAML frontmatter that could not be parsed safely.");
   }
   if (parsed !== null && parsed !== undefined
     && (typeof parsed !== "object" || Array.isArray(parsed))) {
-    fail("the YAML frontmatter must be a property mapping.");
+    throw new Error("This note has malformed YAML frontmatter that is not a property mapping.");
   }
   const parsedProperties = (parsed ?? {}) as Record<string, unknown>;
   const hasParsedLock = Object.prototype.hasOwnProperty.call(parsedProperties, "ai_lock");
   if (hasParsedLock) {
     const value = parsedProperties.ai_lock;
     if (value !== false && value !== null) {
-      fail("this note has ai_lock enabled and cannot be changed.");
+      throw new Error("This note has ai_lock enabled (ai_lock: true or another non-writable value) and cannot be changed.");
     }
     // An escaped, merged, flow-style, or otherwise non-canonical key may parse
     // as ai_lock even though the conservative line audit cannot prove that it
     // is one unambiguous top-level declaration. Refuse it rather than guessing.
-    if (lockOccurrences !== 1) fail("the YAML contains an ambiguous ai_lock declaration.");
+    if (lockOccurrences !== 1) {
+      throw new Error("This note has malformed YAML frontmatter with an ambiguous ai_lock declaration.");
+    }
   } else if (lockOccurrences > 0) {
-    fail("the YAML contains an ambiguous ai_lock declaration.");
+    throw new Error("This note has malformed YAML frontmatter with an ambiguous ai_lock declaration.");
   }
   // Duplicate explicit-false keys are still malformed/ambiguous YAML. The
   // standard single key remains writable.
-  if (lockOccurrences > 1) fail("the YAML contains duplicate ai_lock declarations.");
+  if (lockOccurrences > 1) {
+    throw new Error("This note has malformed YAML frontmatter with duplicate ai_lock declarations.");
+  }
+}
+
+/** Fail closed with the workflow-specific prefix expected by Quick Append. */
+export function assertFollowUpNoteWritable(content: string): void {
+  try {
+    assertMarkdownAiLockWritable(content);
+  } catch (error) {
+    fail(error instanceof Error ? error.message : "the YAML frontmatter could not be checked safely.");
+  }
 }
 
 function validIsoDate(value: string): boolean {

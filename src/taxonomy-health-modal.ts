@@ -4,7 +4,7 @@ import type { TaxonomyHealthFinding } from "./taxonomy-health";
 
 const PAGE_SIZE = 200;
 
-class TaxonomyRepairPreviewModal extends Modal {
+export class TaxonomyRepairPreviewModal extends Modal {
   private openedBaseId = "";
   private openedDataEpoch = 0;
 
@@ -60,7 +60,6 @@ class TaxonomyRepairPreviewModal extends Modal {
         new Notice(error instanceof Error ? error.message : "The taxonomy repair failed.", 8000);
       });
     });
-    apply.focus();
   }
 }
 

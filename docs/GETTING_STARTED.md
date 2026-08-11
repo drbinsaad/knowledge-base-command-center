@@ -159,9 +159,9 @@ Current physical-iPhone evidence is recorded separately in [0.10.0 iPhone eviden
 
 ## Uninstall
 
-Export current organization and back up the vault first. Disable and remove the plugin through Community Plugins, or remove its manual plugin folder.
+Export current organization and back up the vault first. Run **Knowledge Base Command Center: Clear device-local data…** from the Command Palette (also available in **Sync & recovery center**) and confirm. Then disable and remove the plugin through Community Plugins, or remove its manual plugin folder.
 
-Removing the plugin folder also removes its <code>data.json</code>, including knowledge-base definitions, settings, Libraries, Collections, pins, visual hierarchy, snapshots, and Undo history. It does not remove Markdown notes.
+Removing the plugin folder removes its <code>data.json</code>, including synced knowledge-base definitions, settings, Libraries, Collections, pins, visual hierarchy, and named snapshots. It does not by itself reliably remove device-only routes, collapsed sections, Undo/Redo history, or local Sync/Recovery facts because Obsidian stores those App-local values outside the plugin folder. The clear command removes those two plugin-owned local values without changing <code>data.json</code>, Markdown notes, attachments, or recovery export files, and local tracking stays suppressed until Obsidian restarts. Disable or uninstall in that same session. If the plugin was already removed without clearing them, reinstall and enable the same or a newer release, run the command, then remove it again.
 
 ## Next
 

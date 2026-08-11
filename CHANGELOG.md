@@ -21,6 +21,7 @@
 ### Changed
 
 - Advanced the multi-base store to version 14 and separated semantic organization revisions from device-local view state. Selection, active tabs, live collapse state, and Undo/Redo history no longer advance Sync conflict ordering, while existing version 11–13 stores migrate with a zero semantic baseline and newer stores remain read-only in older builds.
+- Bound device-local state to the exact vault identity and moved legacy version 11–13 routes, collapse state, and the newest Undo/Redo history into a four-megabyte App-local profile before neutralizing synced data. Legacy unbound profiles are discarded; a valid profile for another identity is retained but never applied unless that exact established vault arrives after a temporarily missing store.
 - Advanced standalone Workspace settings exports to version 2 so older builds reject settings they do not understand instead of silently dropping Quick append, attachment, or Library-profile configuration; version 1 remains importable.
 
 ### Fixed
@@ -32,6 +33,9 @@
 - Made the multi-base portfolio modal a labelled keyboard-operable tab interface with a persistent Cancel action, logical focus restoration after source/destination/acknowledgement/preview paging changes, and owner-window iOS keyboard geometry that keeps typed confirmation reachable.
 - Gave taxonomy repair previews a single bounded scrolling body with fixed, wrapping 44-point actions; made Quick Entry descriptions scale and wrap with bidirectional text; and gave text prompts persistent visible and programmatic labels.
 - Kept initial Sync & Recovery focus on the modal context, then announced each explicit local recheck and restored focus to its action.
+- Added a confirmed **Clear device-local data** command and Sync & Recovery action that removes this plugin's route, collapse, Undo/Redo, Quick append Undo, and local recovery facts without changing Markdown, attachments, exports, or synced organization. Pending view saves and recovery recorders remain suppressed until restart so an uninstall-session reset cannot recreate either local value.
+- Kept portfolio preview announcements concise instead of making the full rich preview a live region, kept taxonomy repair preview focus on its title and context, and revalidated an exact taxonomy repair again at the queued mutation boundary.
+- Rewrote every compatible older same-vault envelope to the current outer and inner store versions after external Sync delivery, including equal-semantics and incoming-winning merges.
 - Buffered attachment folder, marker, and heading text settings before persistence, avoiding a full plugin-data rewrite and Sync revision on every keystroke.
 - Required Quick append Undo to target the exact original note object, so a deleted-and-recreated same-path note cannot receive an older note's rollback.
 - Rejected workspace imports that would leave Quick append with no active category, and validated imported fixed attachment folders before applying settings.
@@ -56,6 +60,7 @@
 - Kept portfolios free of note bodies, attachments, exact note bindings, and private recovery; rejected malicious IDs, paths, mismatched manifests, oversized packages, and aggregate budget overruns through the existing strict portable parser.
 - Kept Sync and Recovery diagnostics device-local and telemetry-free. The center does not probe Obsidian Sync or the network, read export JSON or Markdown bodies, or display vault/base identifiers, custom configuration names, export filenames, or full paths; artifact inspection is capped at 2,000 direct export-folder entries.
 - Made Quick append atomic and fail-closed: it checks <code>ai_lock</code> inside the write transaction, preserves all text outside the strict managed block, enforces bounded input and entry counts, and keeps only compact in-memory fingerprints for a five-minute exact undo. Note bodies and appended text are never stored in plugin data.
+- Shared one strict fail-closed <code>ai_lock</code> parser between Quick append and attachment writes. Duplicate, escaped, nested, merged, or malformed declarations are refused before a binary or Markdown write; only an absent key or one explicit false/null declaration is writable.
 
 ## 0.11.1 (unpublished; folded into 0.12.0)
 

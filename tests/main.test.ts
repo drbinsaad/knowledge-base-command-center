@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import EntVaultCommandCenterPlugin from "../src/main.ts";
+import EntVaultCommandCenterPlugin, {
+  DEVICE_LOCAL_STATE_KEY,
+  SYNC_RECOVERY_LOCAL_STATE_KEY,
+} from "../src/main.ts";
 import { ExportImportCenterModal } from "../src/portability-modal.ts";
 import {
   boundedSemanticLineage,
@@ -12,6 +15,7 @@ import {
   createKnowledgeBaseEntry,
   curriculumContainerKey,
   DATA_VERSION,
+  DEVICE_LOCAL_STATE_VERSION,
   libraryTabId,
   MAX_DELETED_KNOWLEDGE_BASE_IDS,
   MAX_KNOWLEDGE_BASES,
@@ -179,6 +183,33 @@ function pluginWith(data: unknown, initialDeviceState: unknown = null): EntVault
   plugin.loadedData = data;
   plugin.deviceLocalWrites = deviceLocalWrites;
   return plugin;
+}
+
+function pluginWithKeyedLocalStorage(
+  data: unknown,
+  initialValues: ReadonlyMap<string, unknown> = new Map(),
+): {
+  plugin: EntVaultCommandCenterPlugin & TestPluginBase;
+  localValues: Map<string, unknown>;
+  localWrites: Array<[string, unknown]>;
+} {
+  const localValues = new Map([...initialValues].map(([key, value]) => [key, structuredClone(value)]));
+  const localWrites: Array<[string, unknown]> = [];
+  const app = {
+    vault: emptyWritableTestVault(),
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null },
+    fileManager: {},
+    loadLocalStorage: (key: string) => structuredClone(localValues.get(key) ?? null),
+    saveLocalStorage: (key: string, value: unknown) => {
+      localValues.set(key, structuredClone(value));
+      localWrites.push([key, structuredClone(value)]);
+    },
+  };
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = data;
+  plugin.deviceLocalWrites = localWrites.map(([, value]) => value);
+  return { plugin, localValues, localWrites };
 }
 
 test("active Library commands are stable, refreshed after rename/archive, and revalidate at use", async () => {
@@ -2535,10 +2566,139 @@ test("cold start restores strictly parsed per-vault state by stable base ID", as
   assert.equal(plugin.data.undoStack[0]?.label, "Local undo");
 });
 
+test("a retained device profile never attaches after data.json was removed and reinstalled", async () => {
+  const former = createDefaultStore(migrateData(null), 100, "vault-before-reinstall");
+  former.bases[0].data.selectedPath = "Knowledge/Former.md";
+  former.bases[0].data.activeTab = "collections";
+  former.bases[0].data.undoStack = [snapshotPersonal(former.bases[0].data, "Former undo")];
+  const retained = createDeviceLocalPluginState(former);
+  const plugin = pluginWith(null, retained);
+
+  await plugin.loadPluginData(false);
+
+  assert.notEqual(plugin.getVaultId(), former.vaultId);
+  assert.equal(plugin.data.selectedPath, "");
+  assert.equal(plugin.data.activeTab, plugin.data.settings.defaultTab);
+  assert.deepEqual(plugin.data.undoStack, []);
+  assert.equal(plugin.deviceLocalWrites.length, 0, "a valid mismatched profile is retained but never applied to the fresh identity");
+});
+
+test("transient missing startup retains and later applies the matching established vault profile", async () => {
+  const profileSource = createDefaultStore(migrateData(null), 100, "vault-established-transient");
+  profileSource.bases[0].data.selectedPath = "Knowledge/Retain.md";
+  profileSource.bases[0].data.activeTab = "collections";
+  profileSource.bases[0].data.undoStack = [snapshotPersonal(profileSource.bases[0].data, "Retained undo")];
+  const retained = createDeviceLocalPluginState(profileSource);
+  const incoming = structuredClone(profileSource);
+  resetPluginViewState(incoming.bases[0].data);
+  const { plugin, localValues, localWrites } = pluginWithKeyedLocalStorage(
+    null,
+    new Map([[DEVICE_LOCAL_STATE_KEY, retained]]),
+  );
+
+  await plugin.loadPluginData(false);
+  assert.equal(plugin.data.selectedPath, "", "the random missing-data fallback never receives another vault's route");
+  plugin.data.selectedPath = "Knowledge/Temporary fallback click.md";
+  await plugin.saveViewState();
+  assert.deepEqual(localValues.get(DEVICE_LOCAL_STATE_KEY), retained, "transient missing data does not erase the established profile");
+  assert.equal(localWrites.some(([key]) => key === DEVICE_LOCAL_STATE_KEY), false);
+
+  plugin.loadedData = incoming;
+  await plugin.onExternalSettingsChange();
+
+  assert.equal(plugin.getVaultId(), incoming.vaultId);
+  assert.equal(plugin.data.selectedPath, "Knowledge/Retain.md");
+  assert.equal(plugin.data.activeTab, "collections");
+  assert.equal(plugin.data.undoStack.at(-1)?.label, "Retained undo");
+});
+
+test("transient missing startup migrates route and Undo when the established v13 store arrives through Sync", async () => {
+  const data = migrateData(null);
+  data.selectedPath = "Knowledge/Legacy arrival.md";
+  data.activeTab = "collections";
+  data.undoStack = [snapshotPersonal(data, "Legacy arriving undo")];
+  const incoming = createDefaultStore(data, 100, "vault-established-v13-arrival") as PluginStore & { version: number };
+  incoming.version = 13;
+  const { plugin, localValues } = pluginWithKeyedLocalStorage(null);
+
+  await plugin.loadPluginData(false);
+  plugin.loadedData = incoming;
+  await plugin.onExternalSettingsChange();
+
+  assert.equal(plugin.getVaultId(), incoming.vaultId);
+  assert.equal(plugin.data.selectedPath, "Knowledge/Legacy arrival.md");
+  assert.equal(plugin.data.activeTab, "collections");
+  assert.equal(plugin.data.undoStack.at(-1)?.label, "Legacy arriving undo");
+  const local = localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
+  assert.equal(local?.vaultId, incoming.vaultId);
+  assert.equal(local?.bases[0]?.view.undoStack.at(-1)?.label, "Legacy arriving undo");
+  const written = plugin.savedData.at(-1) as PluginStore | undefined;
+  assert.equal(written?.version, STORE_VERSION);
+  assert.deepEqual(written?.bases[0]?.data.undoStack, [], "the rewritten v14 envelope is neutral only after local migration");
+});
+
+test("v13 startup migrates route, collapse, and Undo into vault-bound local state before neutral writeback", async () => {
+  const data = migrateData(null);
+  data.selectedPath = "Knowledge/Legacy route.md";
+  data.activeTab = "collections";
+  data.collapsed.curriculumDomains = ["Legacy group"];
+  data.undoStack = [snapshotPersonal(data, "Legacy newest undo")];
+  const raw = createDefaultStore(data, 100, "vault-v13-device-migration") as PluginStore & { version: number };
+  raw.version = 13;
+  const plugin = pluginWith(raw);
+
+  await plugin.loadPluginData();
+
+  const local = plugin.deviceLocalWrites.find((value) => (
+    value && typeof value === "object" && (value as { vaultId?: string }).vaultId === raw.vaultId
+  )) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
+  assert.equal(local?.version, DEVICE_LOCAL_STATE_VERSION);
+  assert.equal(local?.vaultId, raw.vaultId);
+  assert.equal(local?.bases[0]?.view.selectedPath, "Knowledge/Legacy route.md");
+  assert.deepEqual(local?.bases[0]?.view.collapsed.curriculumDomains, ["Legacy group"]);
+  assert.equal(local?.bases[0]?.view.undoStack.at(-1)?.label, "Legacy newest undo");
+  const written = plugin.savedData.at(-1) as PluginStore | undefined;
+  assert.equal(written?.version, STORE_VERSION);
+  assert.equal(written?.bases[0]?.data.version, DATA_VERSION);
+  assert.equal(written?.bases[0]?.data.selectedPath, "");
+  assert.deepEqual(written?.bases[0]?.data.undoStack, []);
+});
+
+test("oversized v13 history arriving through Sync keeps newest entries and reports truncation", async () => {
+  Notice.messages.length = 0;
+  const first = migrateData(null);
+  const raw = createDefaultStore(first, 100, "vault-v13-large-local") as PluginStore & { version: number };
+  for (let baseIndex = 0; baseIndex < 30; baseIndex += 1) {
+    const data = baseIndex === 0 ? raw.bases[0]?.data : migrateData(null);
+    assert.ok(data);
+    data.undoStack = Array.from({ length: 20 }, (_, historyIndex) => {
+      const snapshot = snapshotPersonal(data, `${String(historyIndex).padStart(2, "0")}-${"x".repeat(8_900)}`);
+      snapshot.at = historyIndex + 1;
+      return snapshot;
+    });
+    if (baseIndex > 0) raw.bases.push(createKnowledgeBaseEntry(data, `base-large-${baseIndex}`, 100 + baseIndex));
+  }
+  raw.version = 13;
+  const { plugin, localValues } = pluginWithKeyedLocalStorage(null);
+
+  await plugin.loadPluginData(false);
+  plugin.loadedData = raw;
+  await plugin.onExternalSettingsChange();
+
+  const local = localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
+  assert.ok(local);
+  assert.ok(new TextEncoder().encode(JSON.stringify(local)).byteLength <= 4 * 1024 * 1024);
+  assert.ok(local.bases[0]?.view.undoStack.at(-1)?.label.startsWith("19-"), "the newest active-base snapshot survives");
+  assert.ok(Notice.messages.some((message) => /exceeded the safe local limit.*Newest entries were retained/iu.test(message)));
+  const written = plugin.savedData.at(-1) as PluginStore | undefined;
+  assert.equal(written?.version, STORE_VERSION);
+  assert.ok(written?.bases.every((entry) => entry.data.undoStack.length === 0));
+});
+
 test("malformed or oversized device-local state is discarded to safe defaults", async () => {
   for (const local of [
-    { version: 1, activeBaseId: "base-default", bases: [{ baseId: "base-default", view: { activeTab: "bad" } }] },
-    { version: 1, activeBaseId: "base-default", bases: [], padding: "x".repeat(4 * 1024 * 1024 + 1) },
+    { version: DEVICE_LOCAL_STATE_VERSION, vaultId: "vault-malformed-local", activeBaseId: "base-default", bases: [{ baseId: "base-default", view: { activeTab: "bad" } }] },
+    { version: DEVICE_LOCAL_STATE_VERSION, vaultId: "vault-malformed-local", activeBaseId: "base-default", bases: [], padding: "x".repeat(4 * 1024 * 1024 + 1) },
   ]) {
     const data = migrateData(null);
     data.selectedPath = "Synced.md";
@@ -2549,6 +2709,79 @@ test("malformed or oversized device-local state is discarded to safe defaults", 
     assert.deepEqual(plugin.data.undoStack, []);
     assert.equal(plugin.deviceLocalWrites.at(-1), null, "damaged state is cleared from localStorage");
   }
+});
+
+test("clearing device-local data resets in-memory view/history and both local keys without saving data.json", async () => {
+  const first = migrateData(null);
+  const second = migrateData(null);
+  second.settings.workspaceName = "Second";
+  second.selectedPath = "Knowledge/Second route.md";
+  second.activeTab = "collections";
+  second.collapsed.curriculumDomains = ["Expanded elsewhere"];
+  second.undoStack = [snapshotPersonal(second, "Device undo")];
+  const store = createDefaultStore(first, 100, "vault-clear-device-local");
+  store.bases.push(createKnowledgeBaseEntry(second, "base-second", 200));
+  store.activeBaseId = "base-second";
+  const localValues = new Map<string, unknown>([
+    [DEVICE_LOCAL_STATE_KEY, createDeviceLocalPluginState(store)],
+    [SYNC_RECOVERY_LOCAL_STATE_KEY, {
+      version: 1,
+      lastLocalSaveAt: 100,
+      lastExternalReloadAt: 200,
+      lastExternalReloadOutcome: "applied",
+      lastRecoveryExportAt: 300,
+      semanticConflicts: [{ baseId: "base-second", at: 400, count: 1 }],
+    }],
+  ]);
+  const writes: Array<[string, unknown]> = [];
+  const app = {
+    vault: emptyWritableTestVault(),
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null },
+    fileManager: {},
+    loadLocalStorage: (key: string) => structuredClone(localValues.get(key) ?? null),
+    saveLocalStorage: (key: string, value: unknown) => {
+      localValues.set(key, structuredClone(value));
+      writes.push([key, structuredClone(value)]);
+    },
+  };
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = store;
+  await plugin.loadPluginData(false);
+  plugin.savedData.length = 0;
+
+  await plugin.clearDeviceLocalData();
+
+  assert.deepEqual(writes.slice(-2), [
+    [DEVICE_LOCAL_STATE_KEY, null],
+    [SYNC_RECOVERY_LOCAL_STATE_KEY, null],
+  ]);
+  assert.equal(localValues.get(DEVICE_LOCAL_STATE_KEY), null);
+  assert.equal(localValues.get(SYNC_RECOVERY_LOCAL_STATE_KEY), null);
+  assert.equal(plugin.getActiveKnowledgeBaseId(), "base-default");
+  assert.equal(plugin.data.selectedPath, "");
+  assert.equal(plugin.data.activeTab, plugin.data.settings.defaultTab);
+  assert.deepEqual(plugin.data.collapsed.curriculumDomains, []);
+  assert.deepEqual(plugin.data.undoStack, []);
+  assert.deepEqual(plugin.data.redoStack, []);
+  assert.equal(plugin.savedData.length, 0, "clear never writes synced plugin data");
+  const localFacts = (plugin as unknown as { syncRecoveryLocalState: { lastLocalSaveAt: number | null; semanticConflicts: unknown[] } }).syncRecoveryLocalState;
+  assert.equal(localFacts.lastLocalSaveAt, null);
+  assert.deepEqual(localFacts.semanticConflicts, []);
+
+  const writesAfterClear = writes.length;
+  plugin.data.selectedPath = "Knowledge/Do not recreate.md";
+  await plugin.saveViewState();
+  plugin.recordRecoveryExport(900);
+  const currentStore = structuredClone((plugin as unknown as { store: PluginStore }).store);
+  currentStore.bases.forEach((entry) => resetPluginViewState(entry.data));
+  plugin.loadedData = currentStore;
+  await plugin.onExternalSettingsChange();
+  await plugin.saveViewState(); // equivalent to a pending view onClose flush
+
+  assert.equal(writes.length, writesAfterClear, "later view saves and local fact recorders stay suppressed until restart");
+  assert.equal(localValues.get(DEVICE_LOCAL_STATE_KEY), null);
+  assert.equal(localValues.get(SYNC_RECOVERY_LOCAL_STATE_KEY), null);
 });
 
 test("one semantic save advances its base revision exactly once", async () => {
@@ -2763,6 +2996,51 @@ test("view-only Sync divergence needs neither writeback nor conflict rescue", as
   assert.equal(plugin.savedData.length, 0);
   assert.equal(rescueFiles, 0);
   assert.equal(plugin.dataCompatibilityWarning, "");
+});
+
+test("equal-semantics v13 external capture is rewritten as a v14 store with current inner data", async () => {
+  const current = createDefaultStore(migrateData(null), 100, "vault-external-v13-equal");
+  const plugin = pluginWith(structuredClone(current));
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+  const incoming = structuredClone(current) as PluginStore & { version: number };
+  incoming.version = 13;
+  (incoming.bases[0]?.data as { version: number }).version = 12;
+  plugin.loadedData = incoming;
+
+  await plugin.onExternalSettingsChange();
+
+  const written = plugin.savedData.at(-1) as PluginStore | undefined;
+  assert.equal(written?.version, STORE_VERSION);
+  assert.equal(written?.bases[0]?.data.version, DATA_VERSION);
+});
+
+test("incoming-winning v13 external capture is adopted and rewritten as v14", async () => {
+  const localData = migrateData(null);
+  localData.settings.workspaceName = "AAA local";
+  const local = createDefaultStore(localData, 100, "vault-external-v13-incoming");
+  const incoming = structuredClone(local) as PluginStore & { version: number };
+  incoming.version = 13;
+  (incoming.bases[0]?.data as { version: number }).version = 12;
+  const incomingBase = incoming.bases[0];
+  assert.ok(incomingBase);
+  incomingBase.data.settings.workspaceName = "ZZZ incoming";
+  incomingBase.updatedAt = 500;
+  const migratedIncoming = migrateStore(incoming);
+  const preview = mergeKnowledgeBaseStores(migrateStore(local), migratedIncoming);
+  assert.equal(preview.semanticConflicts[0]?.winner, "incoming", "fixture must exercise incoming adoption");
+
+  const plugin = pluginWith(local);
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+  plugin.loadedData = incoming;
+  await plugin.onExternalSettingsChange();
+
+  assert.equal(plugin.data.settings.workspaceName, "ZZZ incoming");
+  const written = plugin.savedData.at(-1) as PluginStore | undefined;
+  assert.equal(written?.version, STORE_VERSION);
+  assert.equal(written?.bases[0]?.data.version, DATA_VERSION);
+  assert.equal(written?.bases[0]?.data.settings.workspaceName, "ZZZ incoming");
 });
 
 test("same-revision semantic conflicts rescue the losing complete envelope before adoption", async () => {
@@ -7615,7 +7893,7 @@ test("explicit attachment upload uses the configured folder and appends under on
   assert.equal(markdown, "---\ntitle: Topic\n---\n\n## Attachments\n\n![[old.png]]\n![[Assets/Uploads/scan.png]]\n\n## Notes\n- Keep\n");
 });
 
-test("attachment upload refuses YAML-escaped ai_lock and a replaced note identity", async () => {
+test("attachment upload refuses every ambiguous ai_lock form before copying and a replaced note identity", async () => {
   const note = new TFile("Knowledge/Locked.md");
   let current: TAbstractFile = note;
   let markdown = "---\n\"ai_l\\u006fck\": true\n---\n";
@@ -7641,8 +7919,19 @@ test("attachment upload refuses YAML-escaped ai_lock and a replaced note identit
   await plugin.loadPluginData();
   const value = { file: new File(["x"], "x.txt"), requestedFolder: "", insertionMode: "end" as const };
 
-  await assert.rejects(plugin.attachFileToNote(note, value), /ai_lock: true/i);
-  assert.equal(binaryCreates, 0);
+  for (const unsafe of [
+    "---\n\"ai_l\\u006fck\": true\n---\n",
+    "--- \nai_lock: true\n...\t\n",
+    "---\nai_lock: true\nai_lock: false\n---\n",
+    "---\t\nai_lock: true\nai_lock: false\n--- \n",
+    "---\nai_lock: false\nai_lock: true\n---\n",
+    "---\n\"ai_l\\u006fck\": false\nai_lock: false\n---\n",
+    "---\nai_lock: false\n",
+  ]) {
+    markdown = unsafe;
+    await assert.rejects(plugin.attachFileToNote(note, value), /ai_lock: true|malformed YAML frontmatter/i);
+    assert.equal(binaryCreates, 0);
+  }
   markdown = "# Safe\n";
   current = new TFile(note.path);
   await assert.rejects(plugin.attachFileToNote(note, value), /changed or was replaced/i);

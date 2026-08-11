@@ -276,7 +276,7 @@ test("modal renders read-only local facts in its owner document with accessible 
   assert.equal(scroll.ownerDocument, dom.document as unknown as Document);
   assert.equal(actions.ownerDocument, dom.document as unknown as Document);
   assert.equal(scroll.getAttribute("role"), "region");
-  assert.equal(actions.querySelectorAll('button[type="button"]').length, 2);
+  assert.equal(actions.querySelectorAll('button[type="button"]').length, 3);
   assert.equal(ownerWindowTimers, 0, "initial modal context is not skipped by footer autofocus");
   assert.equal(dom.document.activeElement, null);
   assert.match(modal.contentEl.textContent ?? "", /Protected read-only/);
@@ -285,12 +285,56 @@ test("modal renders read-only local facts in its owner document with accessible 
   const recheck = actions.querySelector('button[type="button"]');
   assert.ok(recheck);
   recheck.click();
-  assert.equal(ownerWindowTimers, 1, "Recheck focus restoration uses the modal owner window");
+  assert.equal(ownerWindowTimers, 2, "Recheck announcement and focus restoration use the modal owner window");
   assert.equal(dom.document.activeElement?.textContent, "Recheck local facts");
   const announcement = modal.contentEl.querySelector(".ent-cc-sync-recovery-recheck-status");
   assert.equal(announcement?.getAttribute("role"), "status");
   assert.equal(announcement?.getAttribute("aria-live"), "polite");
   assert.equal(announcement?.textContent, "Local facts rechecked.");
+  assert.match(actions.textContent ?? "", /Clear device-local data…/u);
+});
+
+test("recheck attaches an empty live region before announcing and clears pending owner-window timers", () => {
+  const dom = createFakeDom();
+  let nextTimer = 1;
+  const pending = new Map<number, () => void>();
+  dom.window.setTimeout = (callback) => {
+    const id = nextTimer;
+    nextTimer += 1;
+    if (typeof callback === "function") pending.set(id, callback as () => void);
+    return id;
+  };
+  dom.window.clearTimeout = (id) => { pending.delete(id); };
+  const plugin = {
+    app: {},
+    getActiveKnowledgeBaseId: () => "base",
+    getDataEpoch: () => 1,
+    getSyncRecoveryCenterSnapshot: () => snapshot(),
+  };
+  const modal = new SyncRecoveryCenterModal(plugin as never) as SyncRecoveryCenterModal & {
+    modalEl: HTMLElement;
+    contentEl: HTMLElement;
+    titleEl: HTMLElement;
+  };
+  modal.modalEl = asHtmlElement(dom.document.body.createDiv());
+  modal.contentEl = asHtmlElement(dom.document.body.createDiv());
+  modal.titleEl = asHtmlElement(dom.document.body.createEl("h2"));
+  modal.onOpen();
+  const recheck = modal.contentEl.querySelector<HTMLButtonElement>(".ent-cc-sync-recovery-actions button");
+  assert.ok(recheck);
+  recheck.click();
+  const live = modal.contentEl.querySelector(".ent-cc-sync-recovery-recheck-status");
+  assert.equal(live?.textContent, "", "the attached live region starts empty");
+  assert.equal(pending.size, 2);
+  for (const callback of [...pending.values()]) callback();
+  pending.clear();
+  assert.equal(live?.textContent, "Local facts rechecked.");
+  assert.equal(dom.document.activeElement?.textContent, "Recheck local facts");
+
+  recheck.click();
+  assert.equal(pending.size, 2);
+  modal.onClose();
+  assert.equal(pending.size, 0);
 });
 
 test("Sync and Recovery UI is bounded, has one scroll owner, and keeps mobile actions touch-sized", () => {

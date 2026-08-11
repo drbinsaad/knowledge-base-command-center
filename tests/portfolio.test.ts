@@ -617,6 +617,8 @@ test("portfolio mobile source declares stable focus keys, a sole scroll panel, a
   assert.match(source, /calculateModalViewportLayout/);
   assert.match(source, /--keyboard-height/);
   assert.match(source, /visualViewport\?\.removeEventListener/);
+  assert.match(source, /ent-cc-portfolio-preview-status[\s\S]*?role: "status"[\s\S]*?"aria-atomic": "true"/);
+  assert.doesNotMatch(source, /ent-cc-portfolio-preview", attr: \{ "aria-live"/);
   assert.match(styles, /\.ent-cc-portfolio-panel\s*\{[^}]*overflow-y:\s*auto/s);
   assert.doesNotMatch(styles, /\.ent-cc-portfolio-center\s*\{[^}]*overflow-y:\s*auto/s);
   assert.match(styles, /\.ent-cc-portfolio-footer \.ent-cc-button\s*\{[^}]*min-height:\s*44px/s);

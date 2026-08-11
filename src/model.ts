@@ -20,7 +20,7 @@ export const MAX_LIBRARIES = 50;
 export const MAX_SEMANTIC_LINEAGE = 64;
 /** Device-local routes, disclosure state, and bounded history must fit comfortably in localStorage. */
 export const MAX_DEVICE_LOCAL_STATE_BYTES = 4 * 1024 * 1024;
-export const DEVICE_LOCAL_STATE_VERSION = 1;
+export const DEVICE_LOCAL_STATE_VERSION = 2;
 /** Permanent base-deletion tombstones are small, but remain bounded and are never silently evicted. */
 export const MAX_DELETED_KNOWLEDGE_BASE_IDS = 10_000;
 export const DEFAULT_KNOWLEDGE_BASE_ID = "base-default";
@@ -455,6 +455,8 @@ export interface DeviceLocalKnowledgeBaseState {
 /** Stored through App.saveLocalStorage, never through plugin data.json. */
 export interface DeviceLocalPluginState {
   version: typeof DEVICE_LOCAL_STATE_VERSION;
+  /** Prevents a retained App-local payload from attaching to a reinstalled or different vault store. */
+  vaultId: string;
   activeBaseId: string;
   bases: DeviceLocalKnowledgeBaseState[];
 }
@@ -2454,7 +2456,7 @@ function cleanPathMap(input: unknown): Record<string, string> {
   return output;
 }
 
-function cleanSnapshots(input: unknown, allowNested = true, maxCount = 20): PersonalSnapshot[] {
+function cleanSnapshots(input: unknown, allowNested = true, maxCount = 20, maxBytes?: number): PersonalSnapshot[] {
   if (!Array.isArray(input)) return [];
   const snapshots: PersonalSnapshot[] = [];
   // Histories are untrusted synced input. Limit the raw entries before cloning
@@ -2501,7 +2503,7 @@ function cleanSnapshots(input: unknown, allowNested = true, maxCount = 20): Pers
         : undefined,
     });
   }
-  return limitSnapshotStack(snapshots, maxCount);
+  return limitSnapshotStack(snapshots, maxCount, maxBytes);
 }
 
 function cleanMigrationBackup(input: unknown): MigrationBackup | undefined {
@@ -2788,7 +2790,11 @@ export function migrateStore(input: unknown, now = Date.now()): PluginStore {
       ? cleanSemanticRevision(entry.semanticRevision, -1)
       : 0;
     if (semanticRevision < 0) throw new Error(`Knowledge base ${id} has an invalid semantic revision.`);
-    const migratedData = migrateDataWithBudget(entry.data, envelopeValidationBudget);
+    const migratedData = migrateDataWithBudget(
+      entry.data,
+      envelopeValidationBudget,
+      sourceStoreVersion < STORE_VERSION,
+    );
     let semanticLineage = sourceStoreVersion >= 14
       ? cleanSemanticLineage(entry.semanticLineage)
       : [];
@@ -2903,6 +2909,7 @@ export function migrateData(input: unknown): PluginData {
 function migrateDataWithBudget(
   input: unknown,
   validationBudget = createPluginLoadValidationBudget(),
+  preserveLegacyDeviceHistory = false,
 ): PluginData {
   if (!input || typeof input !== "object") return structuredClone(DEFAULT_DATA);
   if (!isPlainRecord(input)) throw new Error("Plugin data must be an object.");
@@ -2935,8 +2942,11 @@ function migrateDataWithBudget(
       activeTab: migrateMainTab(loaded.activeTab, settings.defaultTab),
       settings,
       layoutSnapshots: cleanSnapshots(loaded.layoutSnapshots, true, MAX_TRANSFER_SNAPSHOTS),
-      undoStack: cleanSnapshots(loaded.undoStack),
-      redoStack: cleanSnapshots(loaded.redoStack),
+      // v11-v13 kept device history inside data.json. Preserve its validated
+      // newest 20 entries here long enough for main.ts to move the aggregate
+      // into the vault-bound 4 MiB local payload before semantic writeback.
+      undoStack: cleanSnapshots(loaded.undoStack, true, 20, preserveLegacyDeviceHistory ? MAX_PORTABLE_UNDO_BYTES : undefined),
+      redoStack: cleanSnapshots(loaded.redoStack, true, 20, preserveLegacyDeviceHistory ? MAX_PORTABLE_UNDO_BYTES : undefined),
       collapsed: cleanCollapseState(loaded.collapsed),
       migrationBackup: cleanMigrationBackup(loaded.migrationBackup),
       v2MigrationBackup: cleanV2MigrationBackup(loaded.v2MigrationBackup),
@@ -4742,6 +4752,7 @@ export function parseDeviceLocalPluginState(input: unknown): DeviceLocalPluginSt
   if (value.version !== DEVICE_LOCAL_STATE_VERSION || !Array.isArray(value.bases) || value.bases.length > MAX_KNOWLEDGE_BASES) {
     throw new Error("Device-local state has an unsupported or malformed shape.");
   }
+  const vaultId = cleanKnowledgeBaseId(value.vaultId, "Device-local vault");
   const activeBaseId = cleanKnowledgeBaseId(value.activeBaseId, "Device-local active knowledge base");
   const baseIds = new Set<string>();
   const budget = { structures: 0 };
@@ -4793,37 +4804,97 @@ export function parseDeviceLocalPluginState(input: unknown): DeviceLocalPluginSt
       },
     };
   });
-  return { version: DEVICE_LOCAL_STATE_VERSION, activeBaseId, bases };
+  return { version: DEVICE_LOCAL_STATE_VERSION, vaultId, activeBaseId, bases };
 }
 
-/** Build a bounded localStorage payload, preferring the active base under pressure. */
-export function createDeviceLocalPluginState(store: PluginStore): DeviceLocalPluginState {
+export interface DeviceLocalPluginStateBuildResult {
+  state: DeviceLocalPluginState;
+  historyTruncated: boolean;
+  viewStateTruncated: boolean;
+}
+
+/**
+ * Build a bounded localStorage payload. Under aggregate pressure, discard the
+ * oldest history depth across bases first while preserving a suffix containing
+ * each stack's newest entries. Ties are deterministic and favor retaining the
+ * active base. Route/collapse data is reduced only after all history is gone.
+ */
+export function createDeviceLocalPluginStateWithReport(store: PluginStore): DeviceLocalPluginStateBuildResult {
   const available = store.bases.filter((entry) => entry.archivedAt === null);
   const activeBaseId = available.some((entry) => entry.id === store.activeBaseId)
     ? store.activeBaseId
     : available[0]?.id ?? store.bases[0]?.id ?? DEFAULT_KNOWLEDGE_BASE_ID;
   const state: DeviceLocalPluginState = {
     version: DEVICE_LOCAL_STATE_VERSION,
+    vaultId: store.vaultId,
     activeBaseId,
     bases: store.bases.map((entry) => ({ baseId: entry.id, view: capturePluginViewState(entry.data) })),
   };
-  if (serializedUtf8Bytes(state) <= MAX_DEVICE_LOCAL_STATE_BYTES) return state;
+  if (serializedUtf8Bytes(state) <= MAX_DEVICE_LOCAL_STATE_BYTES) {
+    return { state, historyTruncated: false, viewStateTruncated: false };
+  }
 
+  type HistoryCandidate = {
+    activeRank: number;
+    baseId: string;
+    index: number;
+    recencyDepth: number;
+    snapshot: PersonalSnapshot;
+    stack: "redo" | "undo";
+  };
+  const candidates: HistoryCandidate[] = [];
+  const originalHistory = new Map(state.bases.map((base) => [base.baseId, {
+    undo: [...base.view.undoStack],
+    redo: [...base.view.redoStack],
+  }]));
   for (const base of state.bases) {
-    if (base.baseId === activeBaseId) continue;
-    base.view.undoStack = [];
-    base.view.redoStack = [];
+    for (const [stack, snapshots] of [
+      ["undo", base.view.undoStack],
+      ["redo", base.view.redoStack],
+    ] as const) {
+      snapshots.forEach((snapshot, index) => candidates.push({
+        activeRank: base.baseId === activeBaseId ? 1 : 0,
+        baseId: base.baseId,
+        index,
+        recencyDepth: snapshots.length - index,
+        snapshot,
+        stack,
+      }));
+    }
   }
-  if (serializedUtf8Bytes(state) <= MAX_DEVICE_LOCAL_STATE_BYTES) return state;
-  const active = state.bases.find((base) => base.baseId === activeBaseId);
-  if (active) {
-    active.view.undoStack = [];
-    active.view.redoStack = [];
+  candidates.sort((left, right) => right.recencyDepth - left.recencyDepth
+    || left.activeRank - right.activeRank
+    || left.baseId.localeCompare(right.baseId)
+    || left.stack.localeCompare(right.stack)
+    || left.index - right.index);
+  const rank = new Map(candidates.map((candidate, index) => [candidate.snapshot, index]));
+  const applyHistoryDropCount = (dropCount: number): void => {
+    for (const base of state.bases) {
+      const original = originalHistory.get(base.baseId);
+      base.view.undoStack = (original?.undo ?? []).filter((snapshot) => (rank.get(snapshot) ?? candidates.length) >= dropCount);
+      base.view.redoStack = (original?.redo ?? []).filter((snapshot) => (rank.get(snapshot) ?? candidates.length) >= dropCount);
+    }
+  };
+  let low = 0;
+  let high = candidates.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    applyHistoryDropCount(middle);
+    if (serializedUtf8Bytes(state) <= MAX_DEVICE_LOCAL_STATE_BYTES) high = middle;
+    else low = middle + 1;
   }
-  if (serializedUtf8Bytes(state) <= MAX_DEVICE_LOCAL_STATE_BYTES) return state;
+  applyHistoryDropCount(low);
+  const historyTruncated = low > 0;
+  if (serializedUtf8Bytes(state) <= MAX_DEVICE_LOCAL_STATE_BYTES) {
+    return { state, historyTruncated, viewStateTruncated: false };
+  }
 
+  const active = state.bases.find((base) => base.baseId === activeBaseId);
+  const viewStateTruncated = state.bases.length > (active ? 1 : 0);
   state.bases = active ? [active] : [];
-  if (serializedUtf8Bytes(state) <= MAX_DEVICE_LOCAL_STATE_BYTES) return state;
+  if (serializedUtf8Bytes(state) <= MAX_DEVICE_LOCAL_STATE_BYTES) {
+    return { state, historyTruncated, viewStateTruncated };
+  }
   if (active) {
     active.view.selectedPath = "";
     active.view.collapsed = structuredClone(DEFAULT_DATA.collapsed);
@@ -4831,7 +4902,12 @@ export function createDeviceLocalPluginState(store: PluginStore): DeviceLocalPlu
     active.view.libraryLayouts = [];
   }
   if (serializedUtf8Bytes(state) > MAX_DEVICE_LOCAL_STATE_BYTES) throw new Error("Device-local state could not be bounded safely.");
-  return state;
+  return { state, historyTruncated, viewStateTruncated: true };
+}
+
+/** Build the ordinary bounded localStorage payload without migration metadata. */
+export function createDeviceLocalPluginState(store: PluginStore): DeviceLocalPluginState {
+  return createDeviceLocalPluginStateWithReport(store).state;
 }
 
 export interface PersonalBackupVaultCheck {

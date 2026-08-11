@@ -1,4 +1,4 @@
-import { MarkdownView, normalizePath, Notice, parseYaml, Platform, Plugin, TFile, TFolder, type TAbstractFile } from "obsidian";
+import { MarkdownView, normalizePath, Notice, Platform, Plugin, TFile, TFolder, type TAbstractFile } from "obsidian";
 import {
   attachmentFileName,
   attachmentPathCandidate,
@@ -36,6 +36,7 @@ import {
   curriculumContainerKey,
   createDefaultStore,
   createDeviceLocalPluginState,
+  createDeviceLocalPluginStateWithReport,
   deterministicSemanticHead,
   createKnowledgeBaseEntry,
   DATA_VERSION,
@@ -130,6 +131,7 @@ import {
 } from "./portfolio";
 import {
   appendFollowUpEntry,
+  assertMarkdownAiLockWritable,
   assertFollowUpNoteWritable,
   cleanFollowUpCategoryDefinitions,
   reverseFollowUpAppend,
@@ -181,32 +183,13 @@ import {
   type SyncRecoveryCenterSnapshot,
   type SyncRecoveryLocalState,
 } from "./sync-recovery";
-import { SyncRecoveryCenterModal } from "./sync-recovery-modal";
+import { ClearDeviceLocalDataModal, SyncRecoveryCenterModal } from "./sync-recovery-modal";
 
 /** Bound stable inactive projections by records, not an arbitrary base count. */
 const MAX_INACTIVE_SEARCH_CACHED_RECORDS = 50_000;
-const DEVICE_LOCAL_STATE_KEY = "ent-vault-command-center.device-state.v1";
-const SYNC_RECOVERY_LOCAL_STATE_KEY = "ent-vault-command-center.sync-recovery-state.v1";
+export const DEVICE_LOCAL_STATE_KEY = "ent-vault-command-center.device-state.v1";
+export const SYNC_RECOVERY_LOCAL_STATE_KEY = "ent-vault-command-center.sync-recovery-state.v1";
 const FOLLOW_UP_UNDO_WINDOW_MS = 5 * 60 * 1000;
-
-function markdownHasAiLock(markdown: string): boolean {
-  const opening = /^\uFEFF?---[ \t]*\r?\n/u.exec(markdown);
-  if (!opening) return false;
-  const remainder = markdown.slice(opening[0].length);
-  const closing = /^---[ \t]*(?:\r?\n|$)/mu.exec(remainder);
-  if (!closing) {
-    throw new Error("This note has malformed YAML frontmatter. Repair it before attaching a file through the plugin.");
-  }
-  try {
-    const yaml = remainder.slice(0, closing.index).replace(/\r?\n$/u, "");
-    const parsed = parseYaml(yaml) as unknown;
-    return Boolean(parsed && typeof parsed === "object" && (parsed as Record<string, unknown>).ai_lock === true);
-  } catch {
-    // A malformed frontmatter block is not safe to rewrite through a plugin
-    // attachment action. The user can repair or attach through Obsidian Core.
-    throw new Error("This note has malformed YAML frontmatter. Repair it before attaching a file through the plugin.");
-  }
-}
 
 interface PluginDataLoadResult {
   recognizedStore: boolean;
@@ -218,6 +201,10 @@ interface PluginDataLoadResult {
   sourceWasMissing: boolean;
   sourceVersion: number;
   compatible: boolean;
+  /** Validated pre-v14 view/history awaiting acceptance of an external store. */
+  legacyDeviceState?: DeviceLocalPluginState;
+  legacyDeviceStateHistoryTruncated?: boolean;
+  legacyDeviceStateViewTruncated?: boolean;
 }
 
 type PluginDataRead = { value: unknown } | { error: unknown };
@@ -328,6 +315,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private lastConflictRescuePath = "";
   private deviceLocalState: DeviceLocalPluginState | null = null;
   private deviceLocalStateLoaded = false;
+  /** Sticky until restart after the explicit privacy reset. */
+  private deviceLocalPersistenceSuppressed = false;
   private syncRecoveryLocalState: SyncRecoveryLocalState = createDefaultSyncRecoveryLocalState();
   private syncRecoveryLocalStateLoaded = false;
   /** Saves that may have reached data.json before their promise rejected. */
@@ -382,6 +371,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.addCommand({ id: "manage-knowledge-index", name: "Manage index…", callback: () => void this.withView((view) => view.openIndexManager()) });
     this.addCommand({ id: "open-taxonomy-health", name: "Open taxonomy health center", callback: () => new TaxonomyHealthModal(this).open() });
     this.addCommand({ id: "open-sync-recovery-center", name: "Open sync & recovery center", icon: "shield-check", callback: () => new SyncRecoveryCenterModal(this).open() });
+    this.addCommand({
+      id: "clear-device-local-data",
+      name: "Clear device-local data…",
+      icon: "trash-2",
+      callback: () => new ClearDeviceLocalDataModal(this).open(),
+    });
     this.addCommand({ id: "new-knowledge-base", name: "New knowledge base…", callback: () => new CreateKnowledgeBaseModal(this).open() });
     this.addCommand({ id: "switch-knowledge-base", name: "Switch knowledge base…", callback: () => new ManageKnowledgeBasesModal(this).open() });
     this.addCommand({ id: "manage-knowledge-bases", name: "Manage knowledge bases…", callback: () => new ManageKnowledgeBasesModal(this).open() });
@@ -817,22 +812,47 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return snapshot;
   }
 
-  private applyDeviceLocalState(store: PluginStore): void {
+  private applyDeviceLocalState(store: PluginStore, state = this.deviceLocalState): void {
     for (const entry of store.bases) resetPluginViewState(entry.data);
-    const state = this.deviceLocalState;
-    if (state) {
+    if (state?.vaultId === store.vaultId) {
       for (const local of state.bases) {
         const entry = store.bases.find((candidate) => candidate.id === local.baseId);
         if (entry) applyPluginViewState(entry.data, local.view, true);
       }
     }
-    const requested = state?.activeBaseId ?? "";
+    const requested = state?.vaultId === store.vaultId ? state.activeBaseId : "";
     const active = store.bases.find((entry) => entry.id === requested && entry.archivedAt === null)
       ?? store.bases.find((entry) => entry.archivedAt === null);
     if (active) store.activeBaseId = active.id;
   }
 
+  private storeDeviceLocalState(state: DeviceLocalPluginState, requireStorage = false): void {
+    if (this.deviceLocalPersistenceSuppressed) return;
+    if (typeof this.app.saveLocalStorage === "function") {
+      this.app.saveLocalStorage(DEVICE_LOCAL_STATE_KEY, state);
+    } else if (requireStorage) {
+      throw new Error("Device-local storage is unavailable.");
+    }
+    this.deviceLocalState = state;
+    this.deviceLocalStateLoaded = true;
+  }
+
+  private noticeLegacyDeviceStateTruncation(historyTruncated: boolean, viewStateTruncated: boolean): void {
+    if (!historyTruncated && !viewStateTruncated) return;
+    new Notice(
+      viewStateTruncated
+        ? "Legacy device-local view state exceeded the safe local limit. The active base and newest available history were retained; preserve a pre-upgrade copy of plugin data if older device state may be needed."
+        : "Legacy device-local Undo or Redo history exceeded the safe local limit. Newest entries were retained; preserve a pre-upgrade copy of plugin data if older history may be needed.",
+      12000,
+    );
+  }
+
   private loadDeviceLocalState(): void {
+    if (this.deviceLocalPersistenceSuppressed) {
+      this.deviceLocalState = null;
+      this.deviceLocalStateLoaded = true;
+      return;
+    }
     if (this.deviceLocalStateLoaded) return;
     this.deviceLocalStateLoaded = true;
     try {
@@ -841,9 +861,15 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         return;
       }
       const loaded = this.app.loadLocalStorage(DEVICE_LOCAL_STATE_KEY) as unknown;
-      this.deviceLocalState = loaded === null || loaded === undefined
+      const parsed = loaded === null || loaded === undefined
         ? null
         : parseDeviceLocalPluginState(loaded);
+      // A missing data.json creates an intentionally untrusted random fallback
+      // while Sync may still be delivering this vault's established store.
+      // Retain a valid foreign-ID profile but apply it only after an exact
+      // vault-ID match; erasing it here would destroy the established vault's
+      // route/history during that transient startup window.
+      this.deviceLocalState = parsed;
     } catch (error) {
       this.deviceLocalState = null;
       try {
@@ -856,6 +882,16 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private captureLiveDeviceLocalState(): void {
+    if (this.deviceLocalPersistenceSuppressed) return;
+    if (!this.committedStoreSnapshot
+      && this.deviceLocalState
+      && this.deviceLocalState.vaultId !== this.store.vaultId) {
+      // Startup may currently expose only a random missing-data fallback. A
+      // retained profile for another identity may be the exact established
+      // vault Sync is about to deliver, so never replace it with this
+      // uncommitted bootstrap's empty route/history.
+      return;
+    }
     try {
       this.deviceLocalState = createDeviceLocalPluginState(this.store);
       this.deviceLocalStateLoaded = true;
@@ -865,10 +901,16 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private persistDeviceLocalState(): void {
+    if (this.deviceLocalPersistenceSuppressed) return;
+    if (!this.committedStoreSnapshot
+      && this.deviceLocalState
+      && this.deviceLocalState.vaultId !== this.store.vaultId) {
+      // Do not let a selection/onClose save from the uncommitted random
+      // missing-data fallback replace a retained established-vault profile.
+      return;
+    }
     const state = createDeviceLocalPluginState(this.store);
-    if (typeof this.app.saveLocalStorage === "function") this.app.saveLocalStorage(DEVICE_LOCAL_STATE_KEY, state);
-    this.deviceLocalState = state;
-    this.deviceLocalStateLoaded = true;
+    this.storeDeviceLocalState(state);
   }
 
   private persistDeviceLocalStateSafely(): void {
@@ -881,6 +923,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private loadSyncRecoveryLocalState(): void {
+    if (this.deviceLocalPersistenceSuppressed) {
+      this.syncRecoveryLocalState = createDefaultSyncRecoveryLocalState();
+      this.syncRecoveryLocalStateLoaded = true;
+      return;
+    }
     if (this.syncRecoveryLocalStateLoaded) return;
     this.syncRecoveryLocalStateLoaded = true;
     try {
@@ -896,6 +943,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private persistSyncRecoveryLocalState(): void {
+    if (this.deviceLocalPersistenceSuppressed) return;
     this.loadSyncRecoveryLocalState();
     try {
       if (typeof this.app.saveLocalStorage === "function") {
@@ -909,12 +957,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private recordLocalSuccessfulSave(at = Date.now()): void {
+    if (this.deviceLocalPersistenceSuppressed) return;
     this.loadSyncRecoveryLocalState();
     this.syncRecoveryLocalState.lastLocalSaveAt = at;
     this.persistSyncRecoveryLocalState();
   }
 
   private recordExternalReload(outcome: ExternalReloadOutcome, at = Date.now()): void {
+    if (this.deviceLocalPersistenceSuppressed) return;
     this.loadSyncRecoveryLocalState();
     this.syncRecoveryLocalState.lastExternalReloadAt = at;
     this.syncRecoveryLocalState.lastExternalReloadOutcome = outcome;
@@ -922,6 +972,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private recordSemanticConflicts(conflicts: readonly { baseId: string }[], at = Date.now()): void {
+    if (this.deviceLocalPersistenceSuppressed) return;
     if (conflicts.length === 0) return;
     this.loadSyncRecoveryLocalState();
     const counts = new Map<string, number>();
@@ -936,6 +987,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   /** Record an explicitly created same-vault recovery without retaining its path. */
   recordRecoveryExport(at = Date.now()): void {
+    if (this.deviceLocalPersistenceSuppressed) return;
     this.loadSyncRecoveryLocalState();
     this.syncRecoveryLocalState.lastRecoveryExportAt = at;
     this.persistSyncRecoveryLocalState();
@@ -1010,6 +1062,50 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       configProfile: describeConfigProfile(this.app.vault.configDir),
       deviceLocalStateProfile,
     };
+  }
+
+  /**
+   * Remove only this plugin's App-local state. This intentionally does not use
+   * saveData/saveStoreSnapshot and therefore cannot rewrite synced data.json.
+   */
+  async clearDeviceLocalData(): Promise<void> {
+    if (this.unloaded) throw new Error("The plugin is unloading.");
+    if (this.baseOperationBusy || this.dataTransactionBusy || this.directSaveBusyCount > 0 || this.externalReloadBusy) {
+      throw new Error("Finish the current knowledge-base operation before clearing device-local data.");
+    }
+    if (typeof this.app.saveLocalStorage !== "function") {
+      throw new Error("Obsidian's device-local storage API is unavailable.");
+    }
+    let clearFailed = false;
+    for (const key of [DEVICE_LOCAL_STATE_KEY, SYNC_RECOVERY_LOCAL_STATE_KEY]) {
+      try {
+        this.app.saveLocalStorage(key, null);
+      } catch {
+        clearFailed = true;
+      }
+    }
+    if (clearFailed) throw new Error("One or more device-local values could not be cleared.");
+
+    // Keep both values absent for the rest of this plugin session. Pending
+    // selection timers, view onClose hooks, successful saves, or Sync reloads
+    // must not silently recreate privacy-reset state before uninstall/restart.
+    this.deviceLocalPersistenceSuppressed = true;
+    const neutral = this.neutralSyncedStore(this.store);
+    this.store = neutral;
+    this.useActiveData(this.requireActiveBase().data);
+    this.deviceLocalState = null;
+    this.deviceLocalStateLoaded = true;
+    this.syncRecoveryLocalState = createDefaultSyncRecoveryLocalState();
+    this.syncRecoveryLocalStateLoaded = true;
+    this.lastFollowUpUndo = null;
+    try {
+      await this.refreshViews(false);
+    } catch {
+      // The local values are already cleared. Reopening the view is sufficient
+      // if an unrelated leaf failed to refresh; never turn this into a data
+      // write or expose a potentially private view error in the confirmation.
+      console.error("Knowledge Base Command Center cleared device-local data but could not refresh every open view.");
+    }
   }
 
   /**
@@ -1100,13 +1196,46 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       return { recognizedStore: false, hasVaultId: false, identityNeedsWriteback: false, structuralRepairNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing, sourceVersion, compatible: false };
     }
     let structuralRepairNeedsWriteback = false;
+    let legacyDeviceStateMigrationBlocked = false;
+    let pendingLegacyDeviceState: DeviceLocalPluginState | undefined;
+    let pendingLegacyHistoryTruncated = false;
+    let pendingLegacyViewTruncated = false;
     try {
       this.store = migrateStore(loaded);
       structuralRepairNeedsWriteback = recognizedStore
         && sourceVersion === STORE_VERSION
         && pluginStoreNeedsNormalization(loaded, this.store);
-      if (capturedRead === undefined) this.loadDeviceLocalState();
-      this.applyDeviceLocalState(this.store);
+      if (capturedRead === undefined) {
+        this.loadDeviceLocalState();
+        const needsLegacyDeviceStateMigration = !this.deviceLocalPersistenceSuppressed
+          && recognizedStore
+          && sourceVersion < STORE_VERSION
+          && this.deviceLocalState?.vaultId !== this.store.vaultId;
+        if (needsLegacyDeviceStateMigration) {
+          try {
+            const built = createDeviceLocalPluginStateWithReport(this.store);
+            this.storeDeviceLocalState(built.state, true);
+            this.noticeLegacyDeviceStateTruncation(built.historyTruncated, built.viewStateTruncated);
+          } catch {
+            legacyDeviceStateMigrationBlocked = true;
+          }
+        }
+      } else if (!this.deviceLocalPersistenceSuppressed
+        && recognizedStore
+        && sourceVersion < STORE_VERSION
+        && this.deviceLocalState?.vaultId !== this.store.vaultId) {
+        // An established pre-v14 store can first arrive through a Sync callback
+        // after startup observed a transient missing data.json. Preserve its
+        // embedded local route/history, but do not write or adopt the profile
+        // until the external merge accepts this exact vault identity.
+        const built = createDeviceLocalPluginStateWithReport(this.store);
+        pendingLegacyDeviceState = built.state;
+        pendingLegacyHistoryTruncated = built.historyTruncated;
+        pendingLegacyViewTruncated = built.viewStateTruncated;
+      }
+      if (!legacyDeviceStateMigrationBlocked) {
+        this.applyDeviceLocalState(this.store, pendingLegacyDeviceState ?? this.deviceLocalState);
+      }
       this.useActiveData(this.requireActiveBase().data);
       if (capturedRead === undefined) this.rollbackStoreSnapshot = this.neutralSyncedStore(this.store);
     } catch (error) {
@@ -1115,6 +1244,20 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.dataCompatibilityWarning = `Knowledge-base data could not be migrated (${error instanceof Error ? error.message : String(error)}). The existing data.json remains read-only and was not overwritten.`;
       new Notice(this.dataCompatibilityWarning, 10000);
       return { recognizedStore, hasVaultId: hadFinalVaultId, identityNeedsWriteback: false, structuralRepairNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing, sourceVersion, compatible: false };
+    }
+    if (legacyDeviceStateMigrationBlocked) {
+      this.dataCompatibilityWarning = "Legacy route and Undo history could not be moved into protected device-local storage. Knowledge-base organization remains read-only and the existing data.json was not overwritten.";
+      new Notice(this.dataCompatibilityWarning, 12000);
+      return {
+        recognizedStore,
+        hasVaultId: hadFinalVaultId,
+        identityNeedsWriteback: false,
+        structuralRepairNeedsWriteback: false,
+        remediationNeedsWriteback: false,
+        sourceWasMissing,
+        sourceVersion,
+        compatible: false,
+      };
     }
     if (recognizedStore && sourceVersion > STORE_VERSION) {
       this.dataCompatibilityWarning = `Plugin data version ${sourceVersion} is newer than this build (v${STORE_VERSION}). All knowledge bases are read-only to prevent data loss.`;
@@ -1212,6 +1355,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       sourceWasMissing,
       sourceVersion,
       compatible: true,
+      ...(pendingLegacyDeviceState ? { legacyDeviceState: pendingLegacyDeviceState } : {}),
+      ...(pendingLegacyHistoryTruncated ? { legacyDeviceStateHistoryTruncated: true } : {}),
+      ...(pendingLegacyViewTruncated ? { legacyDeviceStateViewTruncated: true } : {}),
     };
   }
 
@@ -1951,9 +2097,26 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
                   const merged = await this.mergeStoresWithSemanticRescue(workingStore, incomingStore, preferredActiveId);
                   workingStore = merged.store;
                   latestNeedsWriteback = merged.incomingNeedsWriteback
+                    || loaded.sourceVersion !== STORE_VERSION
                     || loaded.structuralRepairNeedsWriteback
                     || loaded.remediationNeedsWriteback
                     || recoverableLegacyCapture;
+                }
+                // Every compatible legacy envelope must be rewritten after its
+                // in-memory schema upgrade, even when merge semantics are
+                // otherwise equal and neither side requests conflict writeback.
+                latestNeedsWriteback ||= loaded.sourceVersion !== STORE_VERSION;
+                if (loaded.legacyDeviceState?.vaultId === workingStore.vaultId) {
+                  // Only now is the external identity accepted. Apply the
+                  // migrated route/history to the final semantic winner and
+                  // durably bind it before the v14 write can neutralize the
+                  // legacy fields in data.json.
+                  this.applyDeviceLocalState(workingStore, loaded.legacyDeviceState);
+                  this.storeDeviceLocalState(createDeviceLocalPluginState(workingStore), true);
+                  this.noticeLegacyDeviceStateTruncation(
+                    loaded.legacyDeviceStateHistoryTruncated === true,
+                    loaded.legacyDeviceStateViewTruncated === true,
+                  );
                 }
                 this.store = workingStore;
                 this.useActiveData(this.requireActiveBase().data);
@@ -4590,6 +4753,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       throw new Error("This finding changed after the preview. Recheck Taxonomy health before applying a repair.");
     }
     await this.mutate(repair.label, () => {
+      // The transaction may have waited behind another save while vault files
+      // or metadata changed without advancing the plugin data epoch. Rebuild
+      // the finding at the commit boundary so the exact preview remains true.
+      const currentAtCommit = this.getTaxonomyHealthFindings().find((finding) => finding.id === findingId);
+      if (!currentAtCommit?.repair || JSON.stringify(currentAtCommit.repair) !== JSON.stringify(repair)) {
+        throw new Error("This finding changed after the preview. Recheck Taxonomy health before applying a repair.");
+      }
       if (!applyTaxonomyRepairToData(this.data, repair)) {
         throw new Error("This relationship changed after the preview. No repair was applied.");
       }
@@ -5099,7 +5269,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       throw new Error("Open this note in the Markdown editor to insert at the cursor, or choose marker, heading, or end of note.");
     }
     const currentMarkdown = editorOwnsNote ? editorView.editor.getValue() : await this.app.vault.cachedRead(note);
-    if (markdownHasAiLock(currentMarkdown)) throw new Error("This note has ai_lock: true and cannot be changed.");
+    assertMarkdownAiLockWritable(currentMarkdown);
 
     const createdFolders: TFolder[] = [];
     let destination: string;
@@ -5129,7 +5299,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         const view = this.app.workspace.getActiveViewOfType(MarkdownView);
         if (view?.file !== note) throw new Error("The active editor changed before the link was inserted.");
         this.assertAttachmentOperationCurrent(note, policy);
-        if (markdownHasAiLock(view.editor.getValue())) throw new Error("This note now has ai_lock: true.");
+        assertMarkdownAiLockWritable(view.editor.getValue());
         view.editor.replaceRange(reference, view.editor.getCursor());
       } else {
         const insertionTarget = value.insertionMode === "marker" ? "marker"
@@ -5137,7 +5307,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         this.assertAttachmentOperationCurrent(note, policy);
         await this.app.vault.process(note, (markdown) => {
           this.assertAttachmentOperationCurrent(note, policy);
-          if (markdownHasAiLock(markdown)) throw new Error("This note now has ai_lock: true.");
+          assertMarkdownAiLockWritable(markdown);
           return insertAttachmentReference(
             markdown,
             reference,

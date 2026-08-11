@@ -241,7 +241,9 @@ Let vault and configuration Sync finish before updating and avoid editing the sa
 
 ### Uninstall
 
-Export current organization first. Disable and remove the plugin through Community Plugins, or remove its manual plugin folder. Removing that folder also removes its <code>data.json</code>, including knowledge bases, settings, Libraries, Collections, pins, hierarchy, snapshots, and Undo history. Markdown notes are not removed.
+Export current organization first. Then run **Knowledge Base Command Center: Clear device-local data…** and confirm before disabling and removing the plugin through Community Plugins (or deleting its manual plugin folder).
+
+The plugin folder contains <code>data.json</code> with synced knowledge bases, settings, Libraries, Collections, pins, hierarchy, and named snapshots. Device-only routes, collapsed sections, Undo/Redo history, and local Sync/Recovery facts are stored through Obsidian's App local storage outside that folder, so deleting only the folder does not reliably remove them. The clear command removes both plugin-owned local values without changing <code>data.json</code>, Markdown notes, attachments, or recovery export files, and local tracking stays suppressed until Obsidian restarts. Disable or uninstall in that same session. If you already removed the plugin without clearing them, reinstall and enable the same or a newer release, run the clear command, then remove it again.
 
 ## Troubleshooting
 
