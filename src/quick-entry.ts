@@ -7,8 +7,19 @@ import type { Command } from "obsidian";
  */
 export const QUICK_ENTRY_PROTOCOL_ACTIONS = ["kbcc-quick-entry"] as const;
 export type QuickEntryProtocolAction = typeof QUICK_ENTRY_PROTOCOL_ACTIONS[number];
+export const QUICK_ENTRY_FOCUSED_PROTOCOL_ACTIONS = [
+  "kbcc-create-subject",
+  "kbcc-create-heading",
+  "kbcc-create-subheading",
+  "kbcc-create-note",
+  "kbcc-add-current-note",
+  "kbcc-add-existing-note",
+] as const;
+export type QuickEntryFocusedProtocolAction = typeof QUICK_ENTRY_FOCUSED_PROTOCOL_ACTIONS[number];
 export const QUICK_APPEND_PROTOCOL_ACTIONS = ["kbcc-quick-append-current", "kbcc-quick-append-existing"] as const;
 export type QuickAppendProtocolAction = typeof QUICK_APPEND_PROTOCOL_ACTIONS[number];
+export const ATTACHMENT_PROTOCOL_ACTIONS = ["kbcc-attach-current"] as const;
+export type AttachmentProtocolAction = typeof ATTACHMENT_PROTOCOL_ACTIONS[number];
 
 /**
  * Quick Entry URLs are intentionally action-only. Titles, paths, note content,
@@ -57,6 +68,37 @@ export interface QuickEntryCommandHandlers {
   addExistingNote: () => void;
   appendCurrentNote: () => void;
   appendExistingNote: () => void;
+}
+
+type QuickEntryFocusedHandlerName =
+  | "createSubject"
+  | "createHeading"
+  | "createSubheading"
+  | "createNote"
+  | "addCurrentNote"
+  | "addExistingNote";
+
+const QUICK_ENTRY_FOCUSED_PROTOCOL_HANDLER_BY_ACTION: Readonly<
+  Record<QuickEntryFocusedProtocolAction, QuickEntryFocusedHandlerName>
+> = Object.freeze({
+  "kbcc-create-subject": "createSubject",
+  "kbcc-create-heading": "createHeading",
+  "kbcc-create-subheading": "createSubheading",
+  "kbcc-create-note": "createNote",
+  "kbcc-add-current-note": "addCurrentNote",
+  "kbcc-add-existing-note": "addExistingNote",
+});
+
+/**
+ * Dispatch one fixed Quick Entry action through the same guarded handler used
+ * by its Command Palette and mobile-toolbar command. The route carries no
+ * title, path, content, or other user data.
+ */
+export function runQuickEntryFocusedProtocolAction(
+  action: QuickEntryFocusedProtocolAction,
+  handlers: QuickEntryCommandHandlers,
+): void {
+  handlers[QUICK_ENTRY_FOCUSED_PROTOCOL_HANDLER_BY_ACTION[action]]();
 }
 
 /**

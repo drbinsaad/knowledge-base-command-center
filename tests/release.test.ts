@@ -45,8 +45,15 @@ test("public repository metadata is present", async () => {
   assert.match(readme, /Portable packages created by version .* use format version 4/i);
   assert.match(readme, /Current v9 (?:snapshots|files)/i);
   assert.match(readme, /obsidian:\/\/kbcc-quick-entry/);
+  assert.match(readme, /obsidian:\/\/kbcc-create-subject/);
+  assert.match(readme, /obsidian:\/\/kbcc-create-heading/);
+  assert.match(readme, /obsidian:\/\/kbcc-create-subheading/);
+  assert.match(readme, /obsidian:\/\/kbcc-create-note/);
+  assert.match(readme, /obsidian:\/\/kbcc-add-current-note/);
+  assert.match(readme, /obsidian:\/\/kbcc-add-existing-note/);
   assert.match(readme, /obsidian:\/\/kbcc-quick-append-current/);
   assert.match(readme, /obsidian:\/\/kbcc-quick-append-existing/);
+  assert.match(readme, /obsidian:\/\/kbcc-attach-current/);
   assert.match(readme, /Quick append follow-up notes/);
   assert.match(readme, /Settings → Mobile → Manage toolbar options/);
   const latestChangelogVersion = /^##\s+(\d+\.\d+\.\d+)\s*$/m.exec(changelog)?.[1];

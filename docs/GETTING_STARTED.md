@@ -92,11 +92,21 @@ Quick entry opens one focused hub for the active knowledge base. It can switch b
 - **Inside the Command Center:** choose **Quick entry** in the header.
 - **Keyboard:** open **Settings → Hotkeys**, search for `Quick entry`, and assign only the combinations you want. The plugin installs no default hotkeys.
 - **iPhone or iPad toolbar:** open **Settings → Mobile → Manage toolbar options**, scroll to the bottom, choose **Add global command**, then search for and select **Quick entry…** or any focused Quick Entry command.
-- **Apple Shortcuts:** use **Open URLs** with exactly `obsidian://kbcc-quick-entry`.
+- **Apple Shortcuts:** use **Open URLs** with one exact action-only URL:
+  - `obsidian://kbcc-quick-entry` — hub;
+  - `obsidian://kbcc-create-subject` — No note subject;
+  - `obsidian://kbcc-create-heading` — heading;
+  - `obsidian://kbcc-create-subheading` — subheading;
+  - `obsidian://kbcc-create-note` — blank Create note flow;
+  - `obsidian://kbcc-add-current-note` — classify the locally active note;
+  - `obsidian://kbcc-add-existing-note` — choose a local note;
+  - `obsidian://kbcc-quick-append-current` — append to the locally active note;
+  - `obsidian://kbcc-quick-append-existing` — choose a note for Quick append; or
+  - `obsidian://kbcc-attach-current` — attach a file to the locally active eligible Markdown note.
 
 When a Library is the destination, Quick Entry asks for its heading or subheading before continuing. If that Library has no headings yet, it asks you to create the first heading and then continues with the selected action.
 
-The URL is action-only. Do not add query fields. A URL with `?title=`, `?path=`, `?content=`, or any other parameter is rejected and does not open the hub. The form always requires local, visible user input before an entry can be created.
+Every URL is action-only. Do not add query fields. A URL with `?title=`, `?path=`, `?content=`, or any other parameter is rejected and does not open a hub, picker, or form. Current-note actions get the active note only from Obsidian's local workspace, and every flow still requires local, visible user input before it changes anything.
 
 ## Add another knowledge base
 

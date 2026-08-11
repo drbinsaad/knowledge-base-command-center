@@ -211,11 +211,20 @@ Create an Apple Shortcut with **Open URLs** and use one exact action URL:
 
 ~~~text
 obsidian://kbcc-quick-entry
+obsidian://kbcc-create-subject
+obsidian://kbcc-create-heading
+obsidian://kbcc-create-subheading
+obsidian://kbcc-create-note
+obsidian://kbcc-add-current-note
+obsidian://kbcc-add-existing-note
 obsidian://kbcc-quick-append-current
 obsidian://kbcc-quick-append-existing
+obsidian://kbcc-attach-current
 ~~~
 
-The first URL opens only the hub. The second opens a blank Quick append form for the active Markdown note, and the third opens the note picker first. They cannot prefill a title, path, content, category, or clinical field. Each protocol accepts only Obsidian's intrinsic action value. Any additional query key—including `title`, `path`, `content`, or an unknown key—fails closed and no form opens.
+The first URL opens only the hub. The next six invoke the matching focused Quick Entry command: create a subject, heading, subheading, or note; classify the locally active note; or choose an existing note. The two Quick append URLs open a blank form for the locally active note or open the note picker first. The final URL opens Attach file only when the locally active Markdown note is eligible; otherwise it gives a generic notice without disclosing the note or protection reason.
+
+All ten routes use the same guarded blank flows as their commands. They cannot prefill a title, path, content, category, clinical field, or file. Current-note routes resolve the note only from Obsidian's local active workspace and never accept a note path in the URL. Each protocol accepts only Obsidian's intrinsic action value. Any additional query key—including `title`, `path`, `content`, or an unknown key—fails closed before a hub, picker, or form opens.
 
 ## Quick append
 

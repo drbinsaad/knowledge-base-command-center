@@ -139,11 +139,14 @@ import {
 import { QuickAppendModal } from "./follow-up-modal";
 import { VaultFilePickerModal } from "./modals";
 import {
+  ATTACHMENT_PROTOCOL_ACTIONS,
   createQuickEntryCommands,
   privacySafeFixedActionRequest,
   privacySafeQuickEntryRequest,
   QUICK_APPEND_PROTOCOL_ACTIONS,
+  QUICK_ENTRY_FOCUSED_PROTOCOL_ACTIONS,
   QUICK_ENTRY_PROTOCOL_ACTIONS,
+  runQuickEntryFocusedProtocolAction,
 } from "./quick-entry";
 import {
   BoundedKnowledgeBaseSearchCollector,
@@ -391,12 +394,16 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       name: "Attach file to current note…",
       checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile();
-        if (!(file instanceof TFile) || file.extension !== "md" || isImmutableSourcePath(file.path)) return false;
+        if (!(file instanceof TFile)
+          || file.extension.toLocaleLowerCase() !== "md"
+          || isImmutableSourcePath(file.path)
+          || this.app.vault.getAbstractFileByPath(file.path) !== file
+          || this.isDataReadOnly()) return false;
         if (!checking) this.openAttachmentImport(file);
         return true;
       },
     });
-    for (const command of createQuickEntryCommands({
+    const quickEntryHandlers = {
       openHub: () => {
         const currentPath = this.app.workspace.getActiveFile()?.path;
         void this.withView((view) => view.openQuickEntry(currentPath));
@@ -412,7 +419,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       addExistingNote: () => void this.withView((view) => view.startQuickAddExistingNote()),
       appendCurrentNote: () => this.openQuickAppendCurrentNote(),
       appendExistingNote: () => this.openQuickAppendExistingNote(),
-    })) this.addCommand(command);
+    };
+    for (const command of createQuickEntryCommands(quickEntryHandlers)) this.addCommand(command);
 
     for (const action of QUICK_ENTRY_PROTOCOL_ACTIONS) {
       this.registerObsidianProtocolHandler(action, (parameters) => {
@@ -423,11 +431,23 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         void this.withView((view) => view.openQuickEntry(currentPath));
       });
     }
+    for (const action of QUICK_ENTRY_FOCUSED_PROTOCOL_ACTIONS) {
+      this.registerObsidianProtocolHandler(action, (parameters) => {
+        if (!privacySafeFixedActionRequest(parameters, action)) return;
+        runQuickEntryFocusedProtocolAction(action, quickEntryHandlers);
+      });
+    }
     for (const action of QUICK_APPEND_PROTOCOL_ACTIONS) {
       this.registerObsidianProtocolHandler(action, (parameters) => {
         if (!privacySafeFixedActionRequest(parameters, action)) return;
         if (action === "kbcc-quick-append-current") this.openQuickAppendCurrentNote();
         else this.openQuickAppendExistingNote();
+      });
+    }
+    for (const action of ATTACHMENT_PROTOCOL_ACTIONS) {
+      this.registerObsidianProtocolHandler(action, (parameters) => {
+        if (!privacySafeFixedActionRequest(parameters, action)) return;
+        this.openPrivacySafeAttachmentImportCurrentNote();
       });
     }
     this.addCommand({
@@ -5024,6 +5044,21 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         await this.attachFileToNote(note, value, policy);
       },
     ).open();
+  }
+
+  private openPrivacySafeAttachmentImportCurrentNote(): void {
+    const note = this.app.workspace.getActiveFile();
+    if (!(note instanceof TFile)
+      || note.extension.toLocaleLowerCase() !== "md"
+      || isImmutableSourcePath(note.path)
+      || this.app.vault.getAbstractFileByPath(note.path) !== note
+      || this.isDataReadOnly()) {
+      // Keep protocol notices independent of the active path, title, or reason.
+      // The route carries no note identity; it may act only on local UI state.
+      new Notice("No eligible active Markdown note is available for attach file.", 7000);
+      return;
+    }
+    this.openAttachmentImport(note);
   }
 
   private captureAttachmentPolicy(): AttachmentOperationPolicy {

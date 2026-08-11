@@ -103,7 +103,20 @@ Every active Library also exposes its own **Open Library: …** global command. 
 
 The plugin assigns no default key combinations. Choose your own under **Settings → Hotkeys**. On iPhone or iPad, open **Settings → Mobile → Manage toolbar options**, scroll to the bottom, choose **Add global command**, then search for and select **Quick entry…** or another focused command.
 
-Apple Shortcuts can open the hub with <code>obsidian://kbcc-quick-entry</code>, Quick append for the active note with <code>obsidian://kbcc-quick-append-current</code>, or the note picker with <code>obsidian://kbcc-quick-append-existing</code>. These routes are fixed and action-only. A URL containing <code>?title=</code>, <code>?path=</code>, or any other parameter fails closed; a URL can never prefill or submit note data.
+Apple Shortcuts can use **Open URLs** with one exact action-only URL:
+
+- <code>obsidian://kbcc-quick-entry</code> — open the hub;
+- <code>obsidian://kbcc-create-subject</code> — create a No note subject;
+- <code>obsidian://kbcc-create-heading</code> — create a heading;
+- <code>obsidian://kbcc-create-subheading</code> — create a subheading;
+- <code>obsidian://kbcc-create-note</code> — open blank note creation;
+- <code>obsidian://kbcc-add-current-note</code> — classify the locally active note;
+- <code>obsidian://kbcc-add-existing-note</code> — open the local note picker;
+- <code>obsidian://kbcc-quick-append-current</code> — append to the locally active note;
+- <code>obsidian://kbcc-quick-append-existing</code> — choose a note for Quick append; or
+- <code>obsidian://kbcc-attach-current</code> — open Attach file for the locally active eligible Markdown note.
+
+These routes invoke the same guarded blank flows as their commands. Current-note actions resolve only Obsidian's local active note; no note path is carried in the URL. A URL containing <code>?title=</code>, <code>?path=</code>, <code>?content=</code>, or any other parameter fails closed before a form or picker opens.
 
 ### Quick append follow-up notes
 
@@ -170,7 +183,7 @@ The ENT preset is an organization workflow, not medical advice, a medical record
 - Content reads are targeted to an explicitly chosen template or JSON import, to the note explicitly selected for Quick append inside Obsidian's atomic process operation, to an explicit attachment destination note, and to the disclosed ENT proposal-promotion and canonical-placement workflows. An attachment action also reads the one external file selected in the operating-system picker and copies its binary bytes into the vault.
 - Copy buttons write only the plugin-generated command, wikilink, or path you selected; the plugin never reads clipboard contents.
 - Settings and organization are stored in Obsidian's plugin <code>data.json</code>. Sync reconciliation, schema migration, and vault renames can update that file automatically.
-- The Quick entry Obsidian protocol accepts only its intrinsic action. Any query parameter is rejected before a form opens; titles, paths, and content cannot be supplied by URL.
+- Quick entry, Quick append, and Attach file Obsidian protocols accept only their fixed intrinsic actions. Any query parameter is rejected before a hub, picker, or form opens; titles, paths, content, and files cannot be supplied by URL. Current-note actions use only the locally active eligible note.
 - No export contains Markdown note bodies or attachment binaries. Workspace settings can contain configured vault-relative folders, and saved searches preserve literal query text.
 - Same-vault recovery and automatic conflict rescues contain exact vault-relative paths. Keep them private.
 - The plugin never writes outside the vault and never enumerates external files. The explicit Attach file command reads only the one external file the user selects in the operating-system picker. Desktop JSON export/import also uses operating-system download/file-picker surfaces, so files go where the user chooses.
