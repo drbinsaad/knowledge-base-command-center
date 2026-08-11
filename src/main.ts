@@ -491,9 +491,15 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       return { recognizedStore: false, hasVaultId: false, identityNeedsWriteback: false, structuralRepairNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing, sourceVersion, compatible: false };
     }
     if (!recognizedStore && sourceVersion > DATA_VERSION && isRecognizedPluginData(loaded)) {
-      this.useActiveData(migrateData(loaded));
-      this.store = createDefaultStore(this.data);
-      this.dataCompatibilityWarning = `Plugin data version ${sourceVersion} is newer than this build (v${DATA_VERSION}). Personal organization is read-only to prevent data loss.`;
+      try {
+        this.useActiveData(migrateData(loaded));
+        this.store = createDefaultStore(this.data);
+        this.dataCompatibilityWarning = `Plugin data version ${sourceVersion} is newer than this build (v${DATA_VERSION}). Personal organization is read-only to prevent data loss.`;
+      } catch (error) {
+        this.useActiveData(structuredClone(DEFAULT_DATA));
+        this.store = createDefaultStore(this.data);
+        this.dataCompatibilityWarning = `Newer plugin data could not be safely inspected (${error instanceof Error ? error.message : String(error)}). Personal organization is read-only and the existing data.json was not overwritten.`;
+      }
       new Notice(this.dataCompatibilityWarning, 10000);
       return { recognizedStore: false, hasVaultId: false, identityNeedsWriteback: false, structuralRepairNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing, sourceVersion, compatible: false };
     }

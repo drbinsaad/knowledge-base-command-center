@@ -31,6 +31,10 @@ export const MAX_TRANSFER_LIST_ITEMS = 50_000;
 export const MAX_TRANSFER_TOTAL_REFERENCES = 250_000;
 export const MAX_TRANSFER_COLLECTIONS = 10_000;
 export const MAX_TRANSFER_SNAPSHOTS = 10;
+/** Any individual persisted label, path, query, or other consumed text value. */
+export const MAX_TRANSFER_TEXT_LENGTH = 10_000;
+/** Aggregate raw UTF-8 text bytes per store envelope or retained history candidate. */
+export const MAX_TRANSFER_TOTAL_TEXT_LENGTH = 64 * 1024 * 1024;
 /** Per retained legacy backup; a store keeps at most one v1 and one v2 payload. */
 export const MAX_MIGRATION_BACKUP_BYTES = 2 * 1024 * 1024;
 const MAX_MIGRATION_BACKUP_DEPTH = 16;
@@ -725,6 +729,13 @@ export function asStringList(value: unknown): string[] {
   return [];
 }
 
+/** Persisted JSON dictionaries must be ordinary own-property records. */
+export function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype: unknown = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
 export function asUnknownRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -867,7 +878,7 @@ export function cleanLibraryDefinitions(
       ids.add(id);
     }
   }
-  const layouts = asUnknownRecord(legacyLayouts);
+  const layouts = isPlainRecord(legacyLayouts) ? legacyLayouts : {};
   for (const kind of LIBRARY_KINDS) {
     const id = BUILTIN_LIBRARY_IDS[kind];
     const usedByLayout = Array.isArray(layouts[id]) && layouts[id].length > 0;
@@ -1052,7 +1063,7 @@ export function cleanLibraryLayouts(
   subjects: PortableSubjectDefinition[],
   libraries?: readonly LibraryDefinition[],
 ): LibraryLayouts {
-  const value = asUnknownRecord(input);
+  const value = isPlainRecord(input) ? input : {};
   const definitions = libraries ?? cleanLibraryDefinitions(undefined, input, subjects);
   const layouts = emptyLibraryLayouts(definitions);
   for (const definition of definitions) {
@@ -1910,7 +1921,7 @@ export function cleanPortableIndex(input: unknown): PortableIndexLocalState {
   const validSubjects = new Set(subjects.map((subject) => subject.id));
   const resolvedPathBySubjectId: Record<string, string> = {};
   const usedPaths = new Set<string>();
-  const rawBindings = asUnknownRecord(value.resolvedPathBySubjectId);
+  const rawBindings = isPlainRecord(value.resolvedPathBySubjectId) ? value.resolvedPathBySubjectId : {};
   for (const [subjectId, rawPath] of Object.entries(rawBindings)) {
     const path = asText(rawPath);
     if (!isSafeObjectKey(subjectId) || !validSubjects.has(subjectId) || !path || usedPaths.has(path) || isPortablePlaceholderPath(path)) continue;
@@ -1948,18 +1959,18 @@ function cleanCollapseState(input: unknown): ViewCollapseState {
 }
 
 export function cleanCurriculumVisual(input: unknown): CurriculumVisualState {
-  if (!input || typeof input !== "object") return { parentByPath: {}, orderByContainer: {} };
-  const raw = input as Record<string, unknown>;
+  if (!isPlainRecord(input)) return { parentByPath: {}, orderByContainer: {} };
+  const raw = input;
   const parentByPath: Record<string, string | null> = {};
-  if (raw.parentByPath && typeof raw.parentByPath === "object") {
-    for (const [path, parent] of Object.entries(raw.parentByPath as Record<string, unknown>)) {
+  if (isPlainRecord(raw.parentByPath)) {
+    for (const [path, parent] of Object.entries(raw.parentByPath)) {
       const cleanPath = asText(path);
       if (isSafeObjectKey(cleanPath) && cleanPath && (parent === null || typeof parent === "string")) parentByPath[cleanPath] = parent === null ? null : asText(parent);
     }
   }
   const orderByContainer: Record<string, string[]> = {};
-  if (raw.orderByContainer && typeof raw.orderByContainer === "object") {
-    for (const [key, paths] of Object.entries(raw.orderByContainer as Record<string, unknown>)) {
+  if (isPlainRecord(raw.orderByContainer)) {
+    for (const [key, paths] of Object.entries(raw.orderByContainer)) {
       const cleanKey = asText(key);
       if (isSafeObjectKey(cleanKey) && cleanKey) orderByContainer[cleanKey] = [...new Set(asStringList(paths))];
     }
@@ -1968,9 +1979,9 @@ export function cleanCurriculumVisual(input: unknown): CurriculumVisualState {
 }
 
 function cleanPathMap(input: unknown): Record<string, string> {
-  if (!input || typeof input !== "object") return {};
+  if (!isPlainRecord(input)) return {};
   const output: Record<string, string> = {};
-  for (const [path, value] of Object.entries(input as Record<string, unknown>)) {
+  for (const [path, value] of Object.entries(input)) {
     const cleanPath = asText(path);
     const cleanValue = asText(value);
     if (isSafeObjectKey(cleanPath) && cleanPath && cleanValue) output[cleanPath] = cleanValue;
@@ -1984,6 +1995,21 @@ function cleanSnapshots(input: unknown, allowNested = true, maxCount = 20): Pers
   // Histories are untrusted synced input. Limit the raw entries before cloning
   // nested structures, then apply the same byte budget used by local writes.
   for (const [snapshotIndex, raw] of (input as unknown[]).slice(-maxCount).entries()) {
+    try {
+      // Invalid history is non-authoritative and may be dropped. Validate one
+      // retained candidate before allocating its cleaned maps/lists; this keeps
+      // a hostile Undo entry from making otherwise-valid primary data read-only.
+      validateRecoverySnapshot(
+        raw,
+        "Stored history",
+        { references: 0, collectionStructures: 0, snapshots: 0 },
+        allowNested ? 1 : 0,
+        true,
+      );
+      validateLoadedSnapshotText(raw, "Stored history", createLoadTextValidationBudget(), allowNested ? 1 : 0, true);
+    } catch {
+      continue;
+    }
     const snapshot = asUnknownRecord(raw);
     const rawAt = Number(snapshot.at);
     snapshots.push({
@@ -2015,10 +2041,14 @@ function cleanSnapshots(input: unknown, allowNested = true, maxCount = 20): Pers
 
 function cleanMigrationBackup(input: unknown): MigrationBackup | undefined {
   try {
-    const value = asUnknownRecord(input);
+    const value = optionalPlainRecord(input, "Migration backup");
     if (value.version !== 1
       || !Array.isArray(value.headings)
       || value.headings.length > MAX_TRANSFER_COLLECTIONS) return undefined;
+    const validationBudget = createPluginLoadValidationBudget();
+    validateRecoveryCollections(value.headings, "Migration backup headings", validationBudget.transfer);
+    validateLoadedLayoutText(value.headings, "Migration backup headings", validationBudget.text);
+    validateLoadedNumber(value.migratedAt, "Migration backup timestamp");
     return boundedMigrationBackup<MigrationBackup>({
       version: 1,
       headings: value.headings,
@@ -2031,7 +2061,7 @@ function cleanMigrationBackup(input: unknown): MigrationBackup | undefined {
 
 function cleanV2MigrationBackup(input: unknown): V2MigrationBackup | undefined {
   try {
-    const value = asUnknownRecord(input);
+    const value = optionalPlainRecord(input, "V2 migration backup");
     if (value.version !== 2) return undefined;
     const budget: TransferValidationBudget = { references: 0, collectionStructures: 0, snapshots: 0 };
     validateRecoveryCollections(value.collections, "V2 migration backup collections", budget);
@@ -2039,6 +2069,13 @@ function cleanV2MigrationBackup(input: unknown): V2MigrationBackup | undefined {
     validateRecoveryReferenceList(value.nextStudyPaths, "V2 migration backup Next list", budget);
     transferArrayLength(value.savedViews, "V2 migration backup saved views", MAX_TRANSFER_COLLECTIONS);
     ownEntryCount(value.settings, "V2 migration backup settings");
+    const textBudget = createLoadTextValidationBudget();
+    validateLoadedLayoutText(value.collections, "V2 migration backup collections", textBudget);
+    validateLoadedTextList(value.pinnedPaths, "V2 migration backup pins", textBudget);
+    validateLoadedTextList(value.nextStudyPaths, "V2 migration backup Next list", textBudget);
+    validateLoadedSavedViewsText(value.savedViews, "V2 migration backup saved views", textBudget);
+    validateLoadedSettingsText(value.settings, "V2 migration backup settings", textBudget);
+    validateLoadedNumber(value.migratedAt, "V2 migration backup timestamp");
     return boundedMigrationBackup<V2MigrationBackup>({
       version: 2,
       migratedAt: cleanMigrationTimestamp(value.migratedAt),
@@ -2085,18 +2122,43 @@ function cleanSettings(input: unknown, legacyEnt = false): PluginSettings {
   };
 }
 
+function parseExplicitVersion(input: Record<string, unknown>, label: string): number {
+  if (!Object.prototype.hasOwnProperty.call(input, "version")) return 0;
+  const rawVersion = input.version;
+  if (typeof rawVersion !== "number" && typeof rawVersion !== "string") {
+    throw new Error(`${label} version must be a positive finite integer.`);
+  }
+  if (typeof rawVersion === "string" && rawVersion.length > 64) {
+    throw new Error(`${label} version must be a positive finite integer.`);
+  }
+  const version = Number(rawVersion);
+  if (!Number.isFinite(version) || !Number.isInteger(version) || version <= 0) {
+    throw new Error(`${label} version must be a positive finite integer.`);
+  }
+  return version;
+}
+
 export function storedDataVersion(input: unknown): number {
-  if (!input || typeof input !== "object") return 0;
-  const version = Number((input as Record<string, unknown>).version);
-  return Number.isFinite(version) && version > 0 ? version : 0;
+  if (!isPlainRecord(input)) return 0;
+  try {
+    return parseExplicitVersion(input, "Plugin data");
+  } catch {
+    return 0;
+  }
 }
 
 export function isRecognizedPluginData(input: unknown): boolean {
-  if (!input || typeof input !== "object" || Array.isArray(input)) return false;
-  const loaded = input as Record<string, unknown>;
+  if (!isPlainRecord(input)) return false;
+  const loaded = input;
+  let version = 0;
+  try {
+    version = parseExplicitVersion(loaded, "Plugin data");
+  } catch {
+    return false;
+  }
   if (Object.keys(loaded).length === 0) return true;
-  if (storedDataVersion(loaded) === 1 && Array.isArray(loaded.headings)) return true;
-  if (storedDataVersion(loaded) === 2) return true;
+  if (version === 1 && Array.isArray(loaded.headings)) return true;
+  if (version === 2) return true;
   return [
     "collections",
     "pinnedPaths",
@@ -2160,9 +2222,15 @@ function limitStoreMigrationBackups(bases: KnowledgeBaseEntry[]): void {
 }
 
 export function isRecognizedPluginStore(input: unknown): boolean {
-  if (!input || typeof input !== "object" || Array.isArray(input)) return false;
-  const value = input as Record<string, unknown>;
-  return value.kind === STORE_KIND && Number(value.version) >= MIN_RECOGNIZED_STORE_VERSION && Array.isArray(value.bases);
+  if (!isPlainRecord(input)) return false;
+  const value = input;
+  let version = 0;
+  try {
+    version = parseExplicitVersion(value, "Knowledge-base store");
+  } catch {
+    return false;
+  }
+  return value.kind === STORE_KIND && version >= MIN_RECOGNIZED_STORE_VERSION && Array.isArray(value.bases);
 }
 
 /**
@@ -2190,34 +2258,42 @@ export function migrateStore(input: unknown, now = Date.now()): PluginStore {
     throw new Error(`The knowledge-base store must contain between 1 and ${MAX_KNOWLEDGE_BASES} bases.`);
   }
   const ids = new Set<string>();
+  // One budget spans the full envelope. Without this, fifty individually
+  // valid bases could multiply the documented reference/text caps fifty-fold
+  // and exhaust memory on a synced mobile device.
+  const envelopeValidationBudget = createPluginLoadValidationBudget();
   const bases: KnowledgeBaseEntry[] = rawBases.map((raw, index) => {
-    const entry = asUnknownRecord(raw);
+    const entry = requiredPlainRecord(raw, `Knowledge base ${index + 1}`);
     const id = cleanKnowledgeBaseId(entry.id, `Knowledge base ${index + 1}`);
     if (ids.has(id)) throw new Error(`Duplicate knowledge-base ID: ${id}`);
     ids.add(id);
     if (!isRecognizedPluginData(entry.data)) throw new Error(`Knowledge base ${id} has unrecognized data.`);
     const innerVersion = storedDataVersion(entry.data);
     if (innerVersion > DATA_VERSION) throw new Error(`Knowledge base ${id} uses unsupported data version ${innerVersion}.`);
+    validateLoadedNumber(entry.createdAt, `Knowledge base ${id} createdAt`);
+    validateLoadedNumber(entry.updatedAt, `Knowledge base ${id} updatedAt`);
+    validateLoadedNumber(entry.archivedAt, `Knowledge base ${id} archivedAt`, true);
     const createdAt = cleanTimestamp(entry.createdAt, now);
     const updatedAt = cleanTimestamp(entry.updatedAt, createdAt);
     const archivedValue = entry.archivedAt;
     const archivedAt = archivedValue === null || archivedValue === undefined
       ? null
       : cleanTimestamp(archivedValue, now);
-    return { id, createdAt, updatedAt, archivedAt, data: migrateData(entry.data) };
+    return { id, createdAt, updatedAt, archivedAt, data: migrateDataWithBudget(entry.data, envelopeValidationBudget) };
   });
   limitStoreMigrationBackups(bases);
   const rawDeletedBaseIds = value.deletedBaseIds;
-  if (rawDeletedBaseIds !== undefined && (!rawDeletedBaseIds || typeof rawDeletedBaseIds !== "object" || Array.isArray(rawDeletedBaseIds))) {
+  if (rawDeletedBaseIds !== undefined && !isPlainRecord(rawDeletedBaseIds)) {
     throw new Error("Deleted knowledge-base IDs must be a timestamp map.");
   }
-  const deletedEntries = Object.entries((rawDeletedBaseIds ?? {}) as Record<string, unknown>);
+  const deletedEntries = Object.entries(rawDeletedBaseIds ?? {});
   if (deletedEntries.length > MAX_DELETED_KNOWLEDGE_BASE_IDS) {
     throw new Error(`The knowledge-base store contains more than ${MAX_DELETED_KNOWLEDGE_BASE_IDS.toLocaleString()} permanent-deletion tombstones.`);
   }
   const deletedBaseIds: Record<string, number> = {};
   for (const [rawId, rawTimestamp] of deletedEntries) {
     const id = cleanKnowledgeBaseId(rawId, "Deleted knowledge base");
+    validateLoadedNumber(rawTimestamp, `Deleted knowledge base ${id} timestamp`);
     const deletedAt = Number(rawTimestamp);
     if (!Number.isFinite(deletedAt) || deletedAt <= 0) throw new Error(`Deleted knowledge base ${id} has an invalid timestamp.`);
     if (ids.has(id)) throw new Error(`Deleted knowledge base ${id} is still present in the base list.`);
@@ -2275,9 +2351,22 @@ export function normalizeKnowledgeBaseLibrariesAndNavigation(data: PluginData): 
 }
 
 export function migrateData(input: unknown): PluginData {
+  return migrateDataWithBudget(input);
+}
+
+function migrateDataWithBudget(
+  input: unknown,
+  validationBudget = createPluginLoadValidationBudget(),
+): PluginData {
   if (!input || typeof input !== "object") return structuredClone(DEFAULT_DATA);
-  const loaded = input as Record<string, unknown>;
-  const loadedVersion = storedDataVersion(loaded);
+  if (!isPlainRecord(input)) throw new Error("Plugin data must be an object.");
+  const loaded = input;
+  const loadedVersion = parseExplicitVersion(loaded, "Plugin data");
+  if (loadedVersion === 1) validateLegacyV1LoadShape(loaded, validationBudget);
+  else if (loadedVersion >= 2
+    || (loadedVersion === 0 && isRecognizedPluginData(loaded) && Object.keys(loaded).length > 0)) {
+    validatePluginDataLoadShape(loaded, validationBudget);
+  }
   // Versions newer than this plugin are read through the latest compatible
   // shape instead of being mistaken for v1. main.ts keeps them read-only.
   if (loadedVersion >= 3 || (loadedVersion === 0 && isRecognizedPluginData(loaded) && Object.keys(loaded).length > 0)) {
@@ -2309,7 +2398,7 @@ export function migrateData(input: unknown): PluginData {
     return normalizeKnowledgeBaseLibrariesAndNavigation(data);
   }
 
-  if (loaded.version === 2) {
+  if (loadedVersion === 2) {
     const collections = cleanLayout(loaded.collections);
     const pinnedPaths = asStringList(loaded.pinnedPaths);
     const nextStudyPaths = asStringList(loaded.nextStudyPaths);
@@ -2345,7 +2434,9 @@ export function migrateData(input: unknown): PluginData {
         pinnedPaths: [...pinnedPaths],
         nextStudyPaths: [...nextStudyPaths],
         savedViews: savedViews.map((view) => ({ ...view })),
-        settings: structuredClone(rawSettings),
+        // cleanV2MigrationBackup performs its own bounded JSON clone. Avoid an
+        // eager clone of untrusted legacy settings before that budget applies.
+        settings: rawSettings,
       }),
     };
     return normalizeKnowledgeBaseLibrariesAndNavigation(data);
@@ -3378,8 +3469,32 @@ interface TransferValidationBudget {
   snapshots: number;
 }
 
+interface PluginLoadValidationBudget {
+  transfer: TransferValidationBudget;
+  text: LoadTextValidationBudget;
+}
+
+function createPluginLoadValidationBudget(): PluginLoadValidationBudget {
+  return {
+    transfer: { references: 0, collectionStructures: 0, snapshots: 0 },
+    text: createLoadTextValidationBudget(),
+  };
+}
+
+function optionalPlainRecord(input: unknown, label: string): Record<string, unknown> {
+  if (input === undefined) return {};
+  if (!isPlainRecord(input)) throw new Error(`${label} must be an object.`);
+  return input;
+}
+
+function requiredPlainRecord(input: unknown, label: string): Record<string, unknown> {
+  if (!isPlainRecord(input)) throw new Error(`${label} must be an object.`);
+  return input;
+}
+
 function transferArrayLength(input: unknown, label: string, max: number): number {
-  if (!Array.isArray(input)) return 0;
+  if (input === undefined) return 0;
+  if (!Array.isArray(input)) throw new Error(`${label} must be a list.`);
   if (input.length > max) throw new Error(`${label} has too many entries.`);
   return input.length;
 }
@@ -3393,14 +3508,24 @@ function addTransferReferenceCount(budget: TransferValidationBudget, count: numb
 }
 
 function validateRecoveryReferenceList(input: unknown, label: string, budget: TransferValidationBudget): void {
-  const count = Array.isArray(input) ? input.length : typeof input === "string" && input.trim() ? 1 : 0;
+  if (input === undefined) return;
+  if (typeof input === "string") {
+    addTransferReferenceCount(budget, input.trim() ? 1 : 0, label);
+    return;
+  }
+  if (!Array.isArray(input)) throw new Error(`${label} must be a text list.`);
+  input.forEach((item, index) => {
+    if (typeof item !== "string") throw new Error(`${label} ${index + 1} must be text.`);
+  });
+  const count = input.length;
   addTransferReferenceCount(budget, count, label);
 }
 
 function ownEntryCount(input: unknown, label: string): number {
-  if (!input || typeof input !== "object" || Array.isArray(input)) return 0;
+  if (input === undefined) return 0;
+  if (!isPlainRecord(input)) throw new Error(`${label} must be an object.`);
   let count = 0;
-  for (const key in input as Record<string, unknown>) {
+  for (const key in input) {
     if (!Object.prototype.hasOwnProperty.call(input, key)) continue;
     count += 1;
     if (count > MAX_TRANSFER_LIST_ITEMS) throw new Error(`${label} has too many entries.`);
@@ -3409,16 +3534,30 @@ function ownEntryCount(input: unknown, label: string): number {
 }
 
 function validateRecoveryPortableIndex(input: unknown, label: string, budget: TransferValidationBudget): void {
-  const value = asUnknownRecord(input);
-  transferArrayLength(value.groups, `${label} groups`, MAX_TRANSFER_COLLECTIONS);
-  transferArrayLength(value.subjects, `${label} subjects`, MAX_TRANSFER_LIST_ITEMS);
-  transferArrayLength(value.libraries, `${label} libraries`, MAX_LIBRARIES);
+  const value = optionalPlainRecord(input, label);
+  addTransferReferenceCount(
+    budget,
+    transferArrayLength(value.groups, `${label} groups`, MAX_TRANSFER_COLLECTIONS),
+    `${label} groups`,
+  );
+  addTransferReferenceCount(
+    budget,
+    transferArrayLength(value.subjects, `${label} subjects`, MAX_TRANSFER_LIST_ITEMS),
+    `${label} subjects`,
+  );
+  addTransferReferenceCount(
+    budget,
+    transferArrayLength(value.libraries, `${label} libraries`, MAX_LIBRARIES),
+    `${label} libraries`,
+  );
   addTransferReferenceCount(budget, ownEntryCount(value.resolvedPathBySubjectId, `${label} note bindings`), `${label} note bindings`);
   validateRecoveryReferenceList(value.relinkableSubjectIds, `${label} relinkable identities`, budget);
-  const libraryLayouts = asUnknownRecord(value.libraryLayouts);
-  if (ownEntryCount(libraryLayouts, `${label} library layouts`) > MAX_LIBRARIES) {
+  const libraryLayouts = optionalPlainRecord(value.libraryLayouts, `${label} library layouts`);
+  const libraryLayoutCount = ownEntryCount(libraryLayouts, `${label} library layouts`);
+  if (libraryLayoutCount > MAX_LIBRARIES) {
     throw new Error(`${label} has too many library layouts.`);
   }
+  addTransferReferenceCount(budget, libraryLayoutCount, `${label} library layouts`);
   for (const [libraryId, layout] of Object.entries(libraryLayouts)) {
     if (!isValidLibraryId(libraryId)) throw new Error(`${label} has an invalid library ID.`);
     validateRecoveryCollections(layout, `${label} ${libraryId} layout`, budget);
@@ -3426,11 +3565,15 @@ function validateRecoveryPortableIndex(input: unknown, label: string, budget: Tr
 }
 
 function validateRecoveryVisual(input: unknown, label: string, budget: TransferValidationBudget): void {
-  const value = asUnknownRecord(input);
+  const value = optionalPlainRecord(input, label);
   const parentCount = ownEntryCount(value.parentByPath, `${label} parent map`);
   addTransferReferenceCount(budget, parentCount, `${label} parent map`);
-  const orders = asUnknownRecord(value.orderByContainer);
-  ownEntryCount(orders, `${label} order containers`);
+  const orders = optionalPlainRecord(value.orderByContainer, `${label} order containers`);
+  addTransferReferenceCount(
+    budget,
+    ownEntryCount(orders, `${label} order containers`),
+    `${label} order containers`,
+  );
   for (const [key, paths] of Object.entries(orders)) {
     validateRecoveryReferenceList(paths, `${label} order ${key}`, budget);
   }
@@ -3444,7 +3587,7 @@ function validateRecoveryCollections(input: unknown, label: string, budget: Tran
   budget.collectionStructures += collectionCount;
   if (!Array.isArray(input)) return;
   for (const [collectionIndex, raw] of input.entries()) {
-    const collection = asUnknownRecord(raw);
+    const collection = requiredPlainRecord(raw, `${label} ${collectionIndex + 1}`);
     validateRecoveryReferenceList(collection.subjects, `${label} ${collectionIndex + 1} subjects`, budget);
     const subheadingCount = transferArrayLength(collection.subheadings, `${label} ${collectionIndex + 1} subheadings`, MAX_TRANSFER_COLLECTIONS);
     if (budget.collectionStructures > MAX_TRANSFER_COLLECTIONS - subheadingCount) {
@@ -3453,7 +3596,7 @@ function validateRecoveryCollections(input: unknown, label: string, budget: Tran
     budget.collectionStructures += subheadingCount;
     if (!Array.isArray(collection.subheadings)) continue;
     for (const [subheadingIndex, rawSubheading] of collection.subheadings.entries()) {
-      const subheading = asUnknownRecord(rawSubheading);
+      const subheading = requiredPlainRecord(rawSubheading, `${label} ${collectionIndex + 1} subheading ${subheadingIndex + 1}`);
       validateRecoveryReferenceList(
         subheading.subjects,
         `${label} ${collectionIndex + 1} subheading ${subheadingIndex + 1} subjects`,
@@ -3463,8 +3606,14 @@ function validateRecoveryCollections(input: unknown, label: string, budget: Tran
   }
 }
 
-function validateRecoverySnapshot(input: unknown, label: string, budget: TransferValidationBudget, remainingSnapshotLevels: number): void {
-  const value = asUnknownRecord(input);
+function validateRecoverySnapshot(
+  input: unknown,
+  label: string,
+  budget: TransferValidationBudget,
+  remainingSnapshotLevels: number,
+  trimExcessSnapshots = false,
+): void {
+  const value = requiredPlainRecord(input, label);
   validateRecoveryCollections(value.collections, `${label} collections`, budget);
   for (const [key, list] of [
     ["pins", value.pinnedPaths],
@@ -3472,29 +3621,330 @@ function validateRecoverySnapshot(input: unknown, label: string, budget: Transfe
     ["manual index", value.manualIndexPaths],
     ["hidden index", value.excludedIndexPaths],
   ] as const) validateRecoveryReferenceList(list, `${label} ${key}`, budget);
-  transferArrayLength(value.savedViews, `${label} saved views`, MAX_TRANSFER_COLLECTIONS);
-  transferArrayLength(value.indexGroupOrder, `${label} group order`, MAX_TRANSFER_COLLECTIONS);
+  addTransferReferenceCount(
+    budget,
+    transferArrayLength(value.savedViews, `${label} saved views`, MAX_TRANSFER_COLLECTIONS),
+    `${label} saved views`,
+  );
+  addTransferReferenceCount(
+    budget,
+    transferArrayLength(value.indexGroupOrder, `${label} group order`, MAX_TRANSFER_COLLECTIONS),
+    `${label} group order`,
+  );
   addTransferReferenceCount(budget, ownEntryCount(value.indexGroupByPath, `${label} visual groups`), `${label} visual groups`);
   addTransferReferenceCount(budget, ownEntryCount(value.displayNameByPath, `${label} display names`), `${label} display names`);
   addTransferReferenceCount(budget, ownEntryCount(value.indexGroupAliases, `${label} group aliases`), `${label} group aliases`);
   validateRecoveryVisual(value.curriculumVisual, `${label} visual hierarchy`, budget);
   if (value.portableIndex !== undefined) validateRecoveryPortableIndex(value.portableIndex, `${label} portable index`, budget);
   if (remainingSnapshotLevels <= 0 || value.layoutSnapshots === undefined) return;
-  const snapshotCount = transferArrayLength(value.layoutSnapshots, `${label} named snapshots`, MAX_TRANSFER_SNAPSHOTS);
+  const rawSnapshots = value.layoutSnapshots;
+  const retainedSnapshots = trimExcessSnapshots && Array.isArray(rawSnapshots)
+    ? rawSnapshots.slice(-MAX_TRANSFER_SNAPSHOTS)
+    : rawSnapshots;
+  const snapshotCount = transferArrayLength(retainedSnapshots, `${label} named snapshots`, MAX_TRANSFER_SNAPSHOTS);
   if (budget.snapshots > MAX_TRANSFER_SNAPSHOTS - snapshotCount) throw new Error(`The recovery backup contains too many named snapshots.`);
   budget.snapshots += snapshotCount;
-  if (!Array.isArray(value.layoutSnapshots)) return;
-  value.layoutSnapshots.forEach((snapshot, index) => validateRecoverySnapshot(
+  if (!Array.isArray(retainedSnapshots)) return;
+  retainedSnapshots.forEach((snapshot, index) => validateRecoverySnapshot(
     snapshot,
     `${label} snapshot ${index + 1}`,
     budget,
     remainingSnapshotLevels - 1,
+    trimExcessSnapshots,
   ));
+}
+
+interface LoadTextValidationBudget {
+  bytes: number;
+  byteLengthByText: Map<string, number>;
+}
+
+function createLoadTextValidationBudget(): LoadTextValidationBudget {
+  return { bytes: 0, byteLengthByText: new Map<string, number>() };
+}
+
+function loadedTextByteLength(input: string, budget: LoadTextValidationBudget): number {
+  // Cache only a bounded set of long repeated values (for example a hostile
+  // repeated 10k title). Short unique IDs are cheaper to scan than to retain
+  // in another potentially 250k-entry map.
+  const cacheable = input.length >= 256;
+  const cached = cacheable ? budget.byteLengthByText.get(input) : undefined;
+  if (cached !== undefined) return cached;
+  let asciiOnly = true;
+  for (let index = 0; index < input.length; index += 1) {
+    if (input.charCodeAt(index) > 0x7f) {
+      asciiOnly = false;
+      break;
+    }
+  }
+  const bytes = asciiOnly ? input.length : snapshotUtf8Encoder.encode(input).byteLength;
+  if (cacheable && budget.byteLengthByText.size < 1_024) budget.byteLengthByText.set(input, bytes);
+  return bytes;
+}
+
+function validateLoadedBoolean(input: unknown, label: string): void {
+  if (input !== undefined && typeof input !== "boolean") throw new Error(`${label} must be true or false.`);
+}
+
+function validateLoadedNumber(input: unknown, label: string, allowNull = false): void {
+  if (input === undefined || (allowNull && input === null)) return;
+  if (typeof input !== "number" && typeof input !== "string") {
+    throw new Error(`${label} must be a number${allowNull ? " or null" : ""}.`);
+  }
+  if (typeof input === "string" && input.length > 64) throw new Error(`${label} is too long.`);
+  if (!Number.isFinite(Number(input))) throw new Error(`${label} must be a finite number.`);
+}
+
+function validateLoadedText(
+  input: unknown,
+  label: string,
+  budget: LoadTextValidationBudget,
+  allowNull = false,
+): void {
+  if (input === undefined || (allowNull && input === null)) return;
+  if (typeof input !== "string") throw new Error(`${label} must be text${allowNull ? " or null" : ""}.`);
+  // Bound individual raw allocations, then charge their exact raw UTF-8 size.
+  // Counting pre-trim bytes prevents whitespace padding from evading the
+  // envelope cap, while UTF-8 measurement correctly charges multibyte text.
+  if (input.length > MAX_TRANSFER_TEXT_LENGTH) {
+    throw new Error(`${label} is longer than ${MAX_TRANSFER_TEXT_LENGTH.toLocaleString()} characters.`);
+  }
+  const bytes = loadedTextByteLength(input, budget);
+  if (budget.bytes > MAX_TRANSFER_TOTAL_TEXT_LENGTH - bytes) {
+    throw new Error(`Plugin data contains more than ${MAX_TRANSFER_TOTAL_TEXT_LENGTH.toLocaleString()} bytes of text.`);
+  }
+  budget.bytes += bytes;
+}
+
+function validateLoadedTextList(input: unknown, label: string, budget: LoadTextValidationBudget): void {
+  if (input === undefined) return;
+  if (typeof input === "string") {
+    validateLoadedText(input, label, budget);
+    return;
+  }
+  if (!Array.isArray(input)) throw new Error(`${label} must be a text list.`);
+  input.forEach((item, index) => {
+    if (typeof item !== "string") throw new Error(`${label} ${index + 1} must be text.`);
+    validateLoadedText(item, `${label} ${index + 1}`, budget);
+  });
+}
+
+function validateLoadedTextMap(
+  input: unknown,
+  label: string,
+  budget: LoadTextValidationBudget,
+  allowNullValues = false,
+): void {
+  const value = optionalPlainRecord(input, label);
+  for (const key in value) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    validateLoadedText(key, `${label} key`, budget);
+    validateLoadedText(value[key], `${label} value`, budget, allowNullValues);
+  }
+}
+
+function validateLoadedLayoutText(input: unknown, label: string, budget: LoadTextValidationBudget): void {
+  if (input === undefined) return;
+  if (!Array.isArray(input)) throw new Error(`${label} must be a list.`);
+  input.forEach((rawHeading, headingIndex) => {
+    const headingLabel = `${label} ${headingIndex + 1}`;
+    const heading = requiredPlainRecord(rawHeading, headingLabel);
+    validateLoadedText(heading.id, `${headingLabel} ID`, budget);
+    validateLoadedText(heading.title, `${headingLabel} title`, budget);
+    validateLoadedTextList(heading.subjects, `${headingLabel} subjects`, budget);
+    if (heading.collapsed !== undefined && typeof heading.collapsed !== "boolean") {
+      throw new Error(`${headingLabel} collapsed state must be true or false.`);
+    }
+    if (heading.subheadings === undefined) return;
+    if (!Array.isArray(heading.subheadings)) throw new Error(`${headingLabel} subheadings must be a list.`);
+    heading.subheadings.forEach((rawSubheading, subheadingIndex) => {
+      const subheadingLabel = `${headingLabel} subheading ${subheadingIndex + 1}`;
+      const subheading = requiredPlainRecord(rawSubheading, subheadingLabel);
+      validateLoadedText(subheading.id, `${subheadingLabel} ID`, budget);
+      validateLoadedText(subheading.title, `${subheadingLabel} title`, budget);
+      validateLoadedTextList(subheading.subjects, `${subheadingLabel} subjects`, budget);
+      if (subheading.collapsed !== undefined && typeof subheading.collapsed !== "boolean") {
+        throw new Error(`${subheadingLabel} collapsed state must be true or false.`);
+      }
+    });
+  });
+}
+
+function validateLoadedSavedViewsText(input: unknown, label: string, budget: LoadTextValidationBudget): void {
+  if (input === undefined) return;
+  if (!Array.isArray(input)) throw new Error(`${label} must be a list.`);
+  input.forEach((rawView, index) => {
+    const viewLabel = `${label} ${index + 1}`;
+    const view = requiredPlainRecord(rawView, viewLabel);
+    validateLoadedText(view.id, `${viewLabel} ID`, budget);
+    validateLoadedText(view.name, `${viewLabel} name`, budget);
+    validateLoadedText(view.tab, `${viewLabel} tab`, budget);
+    validateLoadedText(view.query, `${viewLabel} query`, budget);
+  });
+}
+
+function validateLoadedVisualText(input: unknown, label: string, budget: LoadTextValidationBudget): void {
+  const value = optionalPlainRecord(input, label);
+  validateLoadedTextMap(value.parentByPath, `${label} parent map`, budget, true);
+  const orders = optionalPlainRecord(value.orderByContainer, `${label} order containers`);
+  for (const key in orders) {
+    if (!Object.prototype.hasOwnProperty.call(orders, key)) continue;
+    validateLoadedText(key, `${label} order-container key`, budget);
+    validateLoadedTextList(orders[key], `${label} order`, budget);
+  }
+}
+
+function validateLoadedSettingsText(input: unknown, label: string, budget: LoadTextValidationBudget): void {
+  const settings = optionalPlainRecord(input, label);
+  for (const key of [
+    "workspaceMode",
+    "workspaceName",
+    "workspaceSubtitle",
+    "indexLabel",
+    "itemSingular",
+    "itemPlural",
+    "groupLabel",
+    "primaryFolder",
+    "inboxLabel",
+    "idProperty",
+    "groupProperty",
+    "parentProperty",
+    "templatesFolder",
+    "defaultNoteFolder",
+    "defaultNewNoteMode",
+    "defaultTemplatePath",
+    "defaultTab",
+    "proposalFolder",
+    "openNoteBehavior",
+  ] as const) validateLoadedText(settings[key], `${label} ${key}`, budget);
+  for (const key of [
+    "setupComplete",
+    "enableHoverPreview",
+    "showSafetyBadges",
+    "enableAdvancedCanonicalActions",
+    "allowClinicalVisualGroupMoves",
+  ] as const) validateLoadedBoolean(settings[key], `${label} ${key}`);
+  validateLoadedNumber(settings.recentLimit, `${label} recentLimit`);
+}
+
+function validateLoadedPortableIndexText(input: unknown, label: string, budget: LoadTextValidationBudget): void {
+  const value = optionalPlainRecord(input, label);
+  validateLoadedNumber(value.version, `${label} version`);
+  if (value.groups !== undefined && !Array.isArray(value.groups)) throw new Error(`${label} groups must be a list.`);
+  if (Array.isArray(value.groups)) value.groups.forEach((rawGroup, index) => {
+    const group = requiredPlainRecord(rawGroup, `${label} group ${index + 1}`);
+    validateLoadedText(group.id, `${label} group ${index + 1} ID`, budget);
+    validateLoadedText(group.title, `${label} group ${index + 1} title`, budget);
+    validateLoadedNumber(group.order, `${label} group ${index + 1} order`);
+  });
+  if (value.subjects !== undefined && !Array.isArray(value.subjects)) throw new Error(`${label} subjects must be a list.`);
+  if (Array.isArray(value.subjects)) value.subjects.forEach((rawSubject, index) => {
+    const subjectLabel = `${label} subject ${index + 1}`;
+    const subject = requiredPlainRecord(rawSubject, subjectLabel);
+    for (const key of ["id", "title", "groupId", "parentId", "configuredId", "recordKind", "libraryId"] as const) {
+      validateLoadedText(subject[key], `${subjectLabel} ${key}`, budget, key === "parentId" || key === "libraryId");
+    }
+    validateLoadedNumber(subject.order, `${subjectLabel} order`);
+    validateLoadedBoolean(subject.indexed, `${subjectLabel} indexed`);
+  });
+  validateLoadedTextMap(value.resolvedPathBySubjectId, `${label} note bindings`, budget);
+  validateLoadedTextList(value.relinkableSubjectIds, `${label} relinkable identities`, budget);
+  if (value.libraries !== undefined && !Array.isArray(value.libraries)) throw new Error(`${label} libraries must be a list.`);
+  if (Array.isArray(value.libraries)) value.libraries.forEach((rawLibrary, index) => {
+    const libraryLabel = `${label} library ${index + 1}`;
+    const library = requiredPlainRecord(rawLibrary, libraryLabel);
+    for (const key of ["id", "name", "singularName", "icon", "sourceKind"] as const) {
+      validateLoadedText(library[key], `${libraryLabel} ${key}`, budget, key === "sourceKind");
+    }
+    validateLoadedNumber(library.order, `${libraryLabel} order`);
+    validateLoadedNumber(library.archivedAt, `${libraryLabel} archivedAt`, true);
+  });
+  const layouts = optionalPlainRecord(value.libraryLayouts, `${label} library layouts`);
+  for (const key in layouts) {
+    if (!Object.prototype.hasOwnProperty.call(layouts, key)) continue;
+    validateLoadedText(key, `${label} library-layout ID`, budget);
+    validateLoadedLayoutText(layouts[key], `${label} ${key} layout`, budget);
+  }
+}
+
+function validateLoadedSnapshotText(
+  input: unknown,
+  label: string,
+  budget: LoadTextValidationBudget,
+  remainingSnapshotLevels: number,
+  trimExcessSnapshots = false,
+): void {
+  const value = requiredPlainRecord(input, label);
+  validateLoadedText(value.label, `${label} label`, budget);
+  validateLoadedText(value.activeTab, `${label} active tab`, budget);
+  validateLoadedNumber(value.at, `${label} timestamp`);
+  validateLoadedLayoutText(value.collections, `${label} collections`, budget);
+  for (const [name, list] of [
+    ["pins", value.pinnedPaths],
+    ["Next list", value.nextStudyPaths],
+    ["manual index", value.manualIndexPaths],
+    ["hidden index", value.excludedIndexPaths],
+    ["group order", value.indexGroupOrder],
+  ] as const) validateLoadedTextList(list, `${label} ${name}`, budget);
+  validateLoadedSavedViewsText(value.savedViews, `${label} saved views`, budget);
+  validateLoadedVisualText(value.curriculumVisual, `${label} visual hierarchy`, budget);
+  validateLoadedTextMap(value.indexGroupByPath, `${label} visual groups`, budget);
+  validateLoadedTextMap(value.displayNameByPath, `${label} display names`, budget);
+  validateLoadedTextMap(value.indexGroupAliases, `${label} group aliases`, budget);
+  if (value.portableIndex !== undefined) validateLoadedPortableIndexText(value.portableIndex, `${label} portable index`, budget);
+  if (value.settings !== undefined) validateLoadedSettingsText(value.settings, `${label} settings`, budget);
+  if (remainingSnapshotLevels <= 0 || value.layoutSnapshots === undefined) return;
+  if (!Array.isArray(value.layoutSnapshots)) throw new Error(`${label} named snapshots must be a list.`);
+  const snapshots = trimExcessSnapshots
+    ? value.layoutSnapshots.slice(-MAX_TRANSFER_SNAPSHOTS)
+    : value.layoutSnapshots;
+  snapshots.forEach((snapshot, index) => validateLoadedSnapshotText(
+    snapshot,
+    `${label} snapshot ${index + 1}`,
+    budget,
+    remainingSnapshotLevels - 1,
+    trimExcessSnapshots,
+  ));
+}
+
+function validatePluginDataLoadShape(
+  input: Record<string, unknown>,
+  validationBudget = createPluginLoadValidationBudget(),
+): void {
+  const { transfer: transferBudget, text: textBudget } = validationBudget;
+  parseExplicitVersion(input, "Plugin data");
+  // Named snapshots and Undo/Redo are independently bounded and safely
+  // droppable by cleanSnapshots. Primary organization is authoritative and
+  // therefore fails read-only instead of being silently truncated.
+  validateRecoverySnapshot(input, "Plugin data", transferBudget, 0);
+  const collapsed = optionalPlainRecord(input.collapsed, "Plugin data collapsed state");
+  for (const [name, list] of [
+    ["collapsed curriculum domains", collapsed.curriculumDomains],
+    ["collapsed curriculum nodes", collapsed.curriculumNodes],
+    ["collapsed queues", collapsed.queues],
+  ] as const) validateRecoveryReferenceList(list, `Plugin data ${name}`, transferBudget);
+
+  validateLoadedSnapshotText(input, "Plugin data", textBudget, 0);
+  validateLoadedText(input.selectedPath, "Plugin data selected path", textBudget);
+  validateLoadedTextList(collapsed.curriculumDomains, "Plugin data collapsed curriculum domains", textBudget);
+  validateLoadedTextList(collapsed.curriculumNodes, "Plugin data collapsed curriculum nodes", textBudget);
+  validateLoadedTextList(collapsed.queues, "Plugin data collapsed queues", textBudget);
+}
+
+function validateLegacyV1LoadShape(
+  input: Record<string, unknown>,
+  validationBudget = createPluginLoadValidationBudget(),
+): void {
+  if (!Array.isArray(input.headings)) throw new Error("Legacy plugin headings must be a list.");
+  validateRecoveryCollections(input.headings, "Legacy plugin headings", validationBudget.transfer);
+  validateLoadedLayoutText(input.headings, "Legacy plugin headings", validationBudget.text);
+  validateLoadedText(input.selectedPath, "Legacy plugin selected path", validationBudget.text);
 }
 
 function validatePersonalBackupTransferShape(value: Record<string, unknown>): void {
   const budget: TransferValidationBudget = { references: 0, collectionStructures: 0, snapshots: 0 };
   validateRecoverySnapshot(value, "Recovery", budget, 2);
+  validateLoadedSnapshotText(value, "Recovery", createLoadTextValidationBudget(), 2);
 }
 
 export function parsePersonalBackup(input: unknown): PersonalBackup {

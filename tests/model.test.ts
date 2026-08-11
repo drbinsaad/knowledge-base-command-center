@@ -33,6 +33,7 @@ import {
   isPortablePlaceholderPath,
   isExtensionCurriculumId,
   isRecognizedPluginData,
+  isRecognizedPluginStore,
   isSafeObjectKey,
   isValidLibraryId,
   libraryIdFromTab,
@@ -45,6 +46,8 @@ import {
   MAX_MIGRATION_BACKUP_BYTES,
   MAX_TRANSFER_LIST_ITEMS,
   MAX_TRANSFER_SNAPSHOTS,
+  MAX_TRANSFER_TEXT_LENGTH,
+  MAX_TRANSFER_TOTAL_TEXT_LENGTH,
   MAX_TRANSFER_TOTAL_REFERENCES,
   MAX_UNDO_BYTES,
   metadataHasGap,
@@ -1121,6 +1124,33 @@ test("v2 data migrates to v11 with the ENT clinical preset and safe settings", (
   assert.equal(data.settings.enableAdvancedCanonicalActions, false);
   assert.equal(data.settings.openNoteBehavior, "new-tab");
   assert.equal(data.settings.allowClinicalVisualGroupMoves, false);
+  assert.equal(data.v2MigrationBackup?.version, 2);
+});
+
+test("numeric-string v2 data follows the v2 migration without losing organization", () => {
+  const data = migrateData({
+    version: "2",
+    collections: [{
+      id: "legacy-reading",
+      title: "Legacy Reading",
+      collapsed: false,
+      subjects: ["Knowledge Base/Legacy topic.md"],
+      subheadings: [],
+    }],
+    pinnedPaths: ["Knowledge Base/Pinned.md"],
+    nextStudyPaths: ["Knowledge Base/Next.md"],
+    savedViews: [{ id: "legacy-view", name: "Legacy view", tab: "collections", query: "legacy" }],
+    settings: { workspaceName: "Legacy numeric-string v2", defaultTab: "collections" },
+  });
+
+  assert.equal(data.version, DATA_VERSION);
+  assert.equal(data.settings.workspaceMode, "ent-clinical");
+  assert.equal(data.settings.workspaceName, "Legacy numeric-string v2");
+  assert.equal(data.collections[0]?.title, "Legacy Reading");
+  assert.deepEqual(data.collections[0]?.subjects, ["Knowledge Base/Legacy topic.md"]);
+  assert.deepEqual(data.pinnedPaths, ["Knowledge Base/Pinned.md"]);
+  assert.deepEqual(data.nextStudyPaths, ["Knowledge Base/Next.md"]);
+  assert.equal(data.savedViews[0]?.name, "Legacy view");
   assert.equal(data.v2MigrationBackup?.version, 2);
 });
 
@@ -3645,21 +3675,37 @@ test("row keyboard shortcuts only run from the row itself", () => {
 });
 
 test("versionless modern data is preserved instead of being mistaken for legacy ENT data", () => {
-  for (const version of [undefined, 0, -1, Number.NaN]) {
-    const data = migrateData({
-      version,
-      collections: [{ id: "research", title: "Research", collapsed: false, subjects: ["Notes/Paper.md"], subheadings: [] }],
-      pinnedPaths: ["Notes/Paper.md"],
-      settings: { workspaceMode: "generic", workspaceName: "My research KB", setupComplete: true },
-    });
-    assert.equal(data.version, DATA_VERSION);
-    assert.equal(data.settings.workspaceMode, "generic");
-    assert.equal(data.settings.workspaceName, "My research KB");
-    assert.equal(data.collections[0]?.title, "Research");
-    assert.deepEqual(data.pinnedPaths, ["Notes/Paper.md"]);
-  }
+  const data = migrateData({
+    collections: [{ id: "research", title: "Research", collapsed: false, subjects: ["Notes/Paper.md"], subheadings: [] }],
+    pinnedPaths: ["Notes/Paper.md"],
+    settings: { workspaceMode: "generic", workspaceName: "My research KB", setupComplete: true },
+  });
+  assert.equal(data.version, DATA_VERSION);
+  assert.equal(data.settings.workspaceMode, "generic");
+  assert.equal(data.settings.workspaceName, "My research KB");
+  assert.equal(data.collections[0]?.title, "Research");
+  assert.deepEqual(data.pinnedPaths, ["Notes/Paper.md"]);
   assert.equal(isRecognizedPluginData({ unrelated: true }), false);
   assert.equal(isRecognizedPluginData({ settings: { workspaceMode: "generic" } }), true);
+});
+
+test("explicit malformed inner and outer versions are never treated as versionless", () => {
+  const malformedVersions: unknown[] = [undefined, 0, -1, Number.NaN, "1e999", "2.5", "banana"];
+  for (const version of malformedVersions) {
+    const flat = { version, collections: [], settings: { workspaceMode: "generic" } };
+    assert.equal(isRecognizedPluginData(flat), false);
+    assert.throws(() => migrateData(flat), /version must be a positive finite integer/i);
+
+    const innerStore = createDefaultStore(migrateData(null), 100, `vault-inner-${String(version)}`);
+    (innerStore.bases[0]?.data as unknown as Record<string, unknown>).version = version;
+    assert.throws(() => migrateStore(innerStore), /unrecognized data|version must be a positive finite integer/i);
+
+    const outerStore = createDefaultStore(migrateData(null), 100, `vault-outer-${String(version)}`) as unknown as Record<string, unknown>;
+    outerStore.version = version;
+    assert.equal(isRecognizedPluginStore(outerStore), false);
+    assert.throws(() => migrateStore(outerStore), /unrecognized or damaged shape/i);
+  }
+  assert.equal(storedDataVersion({ version: "2" }), 2);
 });
 
 test("folder renames rewrite every descendant reference, including snapshots and collapse state", () => {
@@ -4078,6 +4124,222 @@ test("loading synced plugin data bounds named, Undo, Redo, and nested snapshot h
   );
   assert.ok(new TextEncoder().encode(JSON.stringify(cleaned.undoStack)).byteLength <= MAX_UNDO_BYTES);
   assert.ok(new TextEncoder().encode(JSON.stringify(cleaned.redoStack)).byteLength <= MAX_UNDO_BYTES);
+});
+
+test("current and historical authoritative maps reject arrays and non-plain records", () => {
+  for (const field of ["displayNameByPath", "indexGroupByPath", "indexGroupAliases"] as const) {
+    const source = migrateData(null) as unknown as Record<string, unknown>;
+    source[field] = [];
+    assert.throws(() => migrateData(source), new RegExp(`${field === "displayNameByPath" ? "display names" : field === "indexGroupByPath" ? "visual groups" : "group aliases"} must be an object`, "i"));
+  }
+
+  const parentArray = migrateData(null) as unknown as Record<string, unknown>;
+  parentArray.curriculumVisual = { parentByPath: [], orderByContainer: {} };
+  assert.throws(() => migrateData(parentArray), /parent map must be an object/i);
+
+  const orderArray = migrateData(null) as unknown as Record<string, unknown>;
+  orderArray.curriculumVisual = { parentByPath: {}, orderByContainer: [] };
+  assert.throws(() => migrateData(orderArray), /order containers must be an object/i);
+
+  const inherited = Object.create({ inherited: "value" }) as Record<string, unknown>;
+  const nonPlain = migrateData(null) as unknown as Record<string, unknown>;
+  nonPlain.displayNameByPath = inherited;
+  assert.throws(() => migrateData(nonPlain), /display names must be an object/i);
+
+  const withHistory = migrateData(null);
+  const badHistory = snapshotPersonal(withHistory, "Damaged history") as unknown as Record<string, unknown>;
+  badHistory.displayNameByPath = [];
+  badHistory.curriculumVisual = { parentByPath: {}, orderByContainer: { root: ["safe", ["nested"]] } };
+  withHistory.undoStack = [badHistory as unknown as typeof withHistory.undoStack[number]];
+  assert.deepEqual(migrateData(withHistory).undoStack, [], "invalid non-authoritative history is dropped before cleaning");
+  const envelope = createDefaultStore(withHistory, 100, "vault-damaged-history");
+  assert.deepEqual(migrateStore(envelope).bases[0]?.data.undoStack, [], "current envelopes apply the same history guard");
+});
+
+test("persisted text lists never coerce nested or non-string values", () => {
+  const cases: Array<[string, (source: Record<string, unknown>) => void]> = [
+    ["pins", (source) => { source.pinnedPaths = ["Knowledge Base/Good.md", ["nested"]]; }],
+    ["subjects", (source) => {
+      const collections = source.collections as Array<Record<string, unknown>>;
+      collections.push({ id: "h", title: "Heading", subjects: ["ok", { path: "bad" }], subheadings: [] });
+    }],
+    ["collapse list", (source) => { source.collapsed = { curriculumDomains: ["ENT", 7], curriculumNodes: [], queues: [] }; }],
+    ["visual order", (source) => { source.curriculumVisual = { parentByPath: {}, orderByContainer: { root: ["ok", false] } }; }],
+    ["relinkable identities", (source) => {
+      (source.portableIndex as Record<string, unknown>).relinkableSubjectIds = ["subject-one", null];
+    }],
+  ];
+  for (const [label, mutate] of cases) {
+    const source = migrateData(null) as unknown as Record<string, unknown>;
+    mutate(source);
+    assert.throws(() => migrateData(source), /must be text/i, label);
+  }
+
+  const wrongMapValue = migrateData(null) as unknown as Record<string, unknown>;
+  wrongMapValue.displayNameByPath = { "Knowledge Base/Note.md": 42 };
+  assert.throws(() => migrateData(wrongMapValue), /display names value must be text/i);
+
+  const exactCleaned = migrateData(null);
+  exactCleaned.pinnedPaths = [` ${"x".repeat(MAX_TRANSFER_TEXT_LENGTH - 2)} `];
+  assert.equal(migrateData(exactCleaned).pinnedPaths[0]?.length, MAX_TRANSFER_TEXT_LENGTH - 2);
+});
+
+test("recognized legacy and current shapes fail closed only when defined authoritative fields are damaged", () => {
+  assert.throws(() => migrateData({ version: 1, selectedPath: "Legacy.md" }), /headings must be a list/i);
+  assert.throws(() => migrateData({ version: 2, collections: {}, settings: { workspaceMode: "generic" } }), /collections must be a list/i);
+  assert.throws(() => migrateData({ collections: {}, settings: { workspaceMode: "generic" } }), /collections must be a list/i);
+  assert.throws(() => migrateData({ version: DATA_VERSION, collections: [], savedViews: {}, settings: {} }), /saved views must be a list/i);
+
+  const compatibleSparseV2 = migrateData({ version: 2, settings: { workspaceMode: "generic" } });
+  assert.deepEqual(compatibleSparseV2.collections, []);
+  assert.equal(compatibleSparseV2.version, DATA_VERSION);
+
+  const current = migrateData(null);
+  const envelope = createDefaultStore(current, 100, "vault-damaged-map");
+  (envelope.bases[0]?.data as unknown as Record<string, unknown>).indexGroupByPath = [];
+  assert.throws(() => migrateStore(envelope), /visual groups must be an object/i);
+});
+
+test("multi-base envelopes share one aggregate load budget", () => {
+  const shared = "Knowledge Base/Shared.md";
+  const makeLargeBase = (): ReturnType<typeof migrateData> => {
+    const data = migrateData(null);
+    data.pinnedPaths = Array(45_000).fill(shared) as string[];
+    data.nextStudyPaths = Array(45_000).fill(shared) as string[];
+    data.manualIndexPaths = Array(40_001).fill(shared) as string[];
+    return data;
+  };
+  const first = makeLargeBase();
+  const store = createDefaultStore(first, 100, "vault-envelope-budget");
+  store.bases.push(createKnowledgeBaseEntry(makeLargeBase(), "base-second", 101));
+  assert.throws(() => migrateStore(store), new RegExp(MAX_TRANSFER_TOTAL_REFERENCES.toLocaleString()));
+
+  const whitespace = " ".repeat(MAX_TRANSFER_TEXT_LENGTH);
+  const groupsPerBase = Math.floor((MAX_TRANSFER_TOTAL_TEXT_LENGTH / 2) / whitespace.length) + 10;
+  const makeRawTextGroups = (): Array<{ id: string; title: string; order: number }> => Array.from(
+    { length: groupsPerBase },
+    (_, index) => ({ id: `group-${index}`, title: whitespace, order: index }),
+  );
+  const textStore = createDefaultStore(migrateData(null), 100, "vault-envelope-text-budget");
+  textStore.bases.push(createKnowledgeBaseEntry(migrateData(null), "base-second", 101));
+  for (const entry of textStore.bases) {
+    (entry.data.portableIndex as unknown as Record<string, unknown>).groups = makeRawTextGroups();
+  }
+  assert.throws(() => migrateStore(textStore), /contains more than .* bytes of text/i);
+});
+
+test("current plugin data rejects oversized primary lists, maps, structures, and text before cleaning", () => {
+  const oversizedCollections = migrateData(null) as unknown as Record<string, unknown>;
+  oversizedCollections.collections = Array.from({ length: 10_001 }, () => null);
+  assert.throws(() => migrateData(oversizedCollections), /Plugin data collections has too many entries/i);
+
+  const oversizedSubjects = migrateData(null) as unknown as Record<string, unknown>;
+  (oversizedSubjects.portableIndex as Record<string, unknown>).subjects = Array.from(
+    { length: MAX_TRANSFER_LIST_ITEMS + 1 },
+    () => null,
+  );
+  assert.throws(() => migrateData(oversizedSubjects), /portable index subjects has too many entries/i);
+
+  const oversizedMap = migrateData(null) as unknown as Record<string, unknown>;
+  oversizedMap.displayNameByPath = Object.fromEntries(Array.from(
+    { length: MAX_TRANSFER_LIST_ITEMS + 1 },
+    (_, index) => [`Knowledge Base/Note ${index}.md`, "Note"],
+  ));
+  assert.throws(() => migrateData(oversizedMap), /display names has too many entries/i);
+
+  const oversizedQuery = migrateData(null) as unknown as Record<string, unknown>;
+  oversizedQuery.savedViews = [{
+    id: "view-long",
+    name: "Long",
+    tab: "curriculum",
+    query: "x".repeat(MAX_TRANSFER_TEXT_LENGTH + 1),
+  }];
+  assert.throws(() => migrateData(oversizedQuery), /saved views 1 query is longer/i);
+
+  const oversizedTitle = migrateData(null) as unknown as Record<string, unknown>;
+  (oversizedTitle.portableIndex as Record<string, unknown>).groups = [{
+    id: "group-long",
+    title: "x".repeat(MAX_TRANSFER_TEXT_LENGTH + 1),
+    order: 0,
+  }];
+  assert.throws(() => migrateData(oversizedTitle), /portable index group 1 title is longer/i);
+
+  const totalText = migrateData(null) as unknown as Record<string, unknown>;
+  const maximumText = "x".repeat(MAX_TRANSFER_TEXT_LENGTH);
+  (totalText.portableIndex as Record<string, unknown>).groups = Array.from({ length: 7_000 }, (_, index) => ({
+    id: `group-${index}`,
+    title: maximumText,
+    order: index,
+  }));
+  assert.throws(() => migrateData(totalText), /contains more than .* bytes of text/i);
+
+  const atBoundary = migrateData(null);
+  atBoundary.savedViews = [{ id: "view-boundary", name: "Boundary", tab: "curriculum", query: maximumText }];
+  assert.equal(migrateData(atBoundary).savedViews[0]?.query.length, MAX_TRANSFER_TEXT_LENGTH);
+});
+
+test("aggregate text limits charge raw whitespace and multibyte UTF-8 bytes", () => {
+  const makeGroups = (title: string, count: number): Array<{ id: string; title: string; order: number }> => Array.from(
+    { length: count },
+    (_, index) => ({ id: `group-${index}`, title, order: index }),
+  );
+
+  const whitespace = " ".repeat(MAX_TRANSFER_TEXT_LENGTH);
+  const whitespaceSource = migrateData(null) as unknown as Record<string, unknown>;
+  (whitespaceSource.portableIndex as Record<string, unknown>).groups = makeGroups(
+    whitespace,
+    Math.floor(MAX_TRANSFER_TOTAL_TEXT_LENGTH / whitespace.length) + 1,
+  );
+  assert.throws(() => migrateData(whitespaceSource), /contains more than .* bytes of text/i);
+
+  const cjk = "界".repeat(9_000);
+  const cjkBytes = new TextEncoder().encode(cjk).byteLength;
+  assert.equal(cjkBytes, 27_000);
+  const cjkSource = migrateData(null) as unknown as Record<string, unknown>;
+  (cjkSource.portableIndex as Record<string, unknown>).groups = makeGroups(
+    cjk,
+    Math.floor(MAX_TRANSFER_TOTAL_TEXT_LENGTH / cjkBytes) + 1,
+  );
+  assert.throws(() => migrateData(cjkSource), /contains more than .* bytes of text/i);
+});
+
+test("current plugin data enforces the aggregate transfer budget across otherwise-valid lists", () => {
+  const source = migrateData(null) as unknown as Record<string, unknown>;
+  const references = Array(MAX_TRANSFER_LIST_ITEMS).fill("Knowledge Base/Shared.md") as string[];
+  source.pinnedPaths = references;
+  source.nextStudyPaths = references;
+  source.manualIndexPaths = references;
+  source.excludedIndexPaths = references;
+  source.collapsed = {
+    curriculumDomains: references,
+    curriculumNodes: ["Knowledge Base/One more.md"],
+    queues: [],
+  };
+
+  assert.throws(() => migrateData(source), new RegExp(MAX_TRANSFER_TOTAL_REFERENCES.toLocaleString()));
+});
+
+test("normal current-data validation and migration stay linear at a large supported catalog", () => {
+  const source = migrateData(null) as unknown as Record<string, unknown>;
+  const count = 20_000;
+  (source.portableIndex as Record<string, unknown>).groups = [{ id: "group-large", title: "Large", order: 0 }];
+  (source.portableIndex as Record<string, unknown>).subjects = Array.from({ length: count }, (_, index) => ({
+    id: `subject-${index}`,
+    title: `Subject ${index}`,
+    groupId: "group-large",
+    parentId: null,
+    order: index,
+    indexed: true,
+    configuredId: "",
+    recordKind: "topic",
+  }));
+
+  const startedAt = performance.now();
+  const cleaned = migrateData(source);
+  const duration = performance.now() - startedAt;
+
+  assert.equal(cleaned.portableIndex.subjects.length, count);
+  assert.ok(duration < 1_500, `current-data validation and migration took ${duration.toFixed(1)} ms`);
 });
 
 test("synced history limits count UTF-8 bytes rather than JavaScript code units", () => {

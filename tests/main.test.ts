@@ -13,6 +13,7 @@ import {
   MAX_DELETED_KNOWLEDGE_BASE_IDS,
   MAX_KNOWLEDGE_BASES,
   MAX_LIBRARIES,
+  MAX_TRANSFER_TEXT_LENGTH,
   migrateData,
   migrateStore,
   isFreshVaultId,
@@ -578,6 +579,40 @@ test("combined structural and clinical repair rebases once to the final converge
   assert.doesNotThrow(() => mergeKnowledgeBaseStores(leftSaved, rightSaved, leftSaved.activeBaseId));
 });
 
+test("numeric-string v2 startup migration preserves legacy organization and writes one envelope", async () => {
+  const original = {
+    version: "2",
+    collections: [{
+      id: "legacy-reading",
+      title: "Legacy Reading",
+      collapsed: false,
+      subjects: ["Knowledge Base/Legacy topic.md"],
+      subheadings: [],
+    }],
+    pinnedPaths: ["Knowledge Base/Pinned.md"],
+    nextStudyPaths: ["Knowledge Base/Next.md"],
+    savedViews: [{ id: "legacy-view", name: "Legacy view", tab: "collections", query: "legacy" }],
+    settings: { workspaceName: "Legacy v2 workspace", defaultTab: "collections" },
+  };
+  const before = structuredClone(original);
+  const plugin = pluginWith(original);
+
+  const result = await plugin.loadPluginData();
+
+  assert.equal(result.compatible, true);
+  assert.equal(plugin.data.settings.workspaceName, "Legacy v2 workspace");
+  assert.equal(plugin.data.collections[0]?.title, "Legacy Reading");
+  assert.deepEqual(plugin.data.collections[0]?.subjects, ["Knowledge Base/Legacy topic.md"]);
+  assert.deepEqual(plugin.data.pinnedPaths, ["Knowledge Base/Pinned.md"]);
+  assert.deepEqual(plugin.data.nextStudyPaths, ["Knowledge Base/Next.md"]);
+  assert.equal(plugin.data.savedViews[0]?.name, "Legacy view");
+  assert.equal(plugin.data.v2MigrationBackup?.version, 2);
+  assert.equal(plugin.savedData.length, 1);
+  assert.deepEqual(original, before, "startup migration never mutates the source object in place");
+  const saved = plugin.savedData[0] as { bases?: Array<{ data?: { collections?: Array<{ title?: string }> } }> };
+  assert.equal(saved.bases?.[0]?.data?.collections?.[0]?.title, "Legacy Reading");
+});
+
 test("an interim deterministic migrated vault ID rotates once and is persisted", async () => {
   const data = migrateData(null);
   data.settings.workspaceName = "MY MAIN NOTE KB";
@@ -1119,6 +1154,186 @@ test("future data versions enter read-only mode rather than being downgraded", a
   await plugin.loadPluginData();
   assert.match(plugin.dataCompatibilityWarning, /newer than this build/i);
   assert.equal(plugin.savedData.length, 0);
+});
+
+test("oversized current plugin data opens read-only and never overwrites the original envelope", async () => {
+  const data = migrateData(null);
+  data.savedViews = [{
+    id: "view-long",
+    name: "Long query",
+    tab: "curriculum",
+    query: "x".repeat(MAX_TRANSFER_TEXT_LENGTH + 1),
+  }];
+  const original = createDefaultStore(data, 100, "vault-oversized-current");
+  const before = structuredClone(original);
+  const plugin = pluginWith(original);
+
+  const result = await plugin.loadPluginData();
+
+  assert.equal(result.compatible, false);
+  assert.match(plugin.dataCompatibilityWarning, /could not be migrated.*longer than/i);
+  assert.equal(plugin.isDataReadOnly(), true);
+  assert.equal(plugin.savedData.length, 0);
+  assert.deepEqual(original, before, "validation must not mutate the unsafe source object");
+  await plugin.savePluginData();
+  assert.equal(plugin.savedData.length, 0, "read-only mode cannot replace the unsafe data.json");
+});
+
+test("oversized newer flat data also fails closed without crashing or writing defaults", async () => {
+  const original = {
+    version: DATA_VERSION + 1,
+    collections: [],
+    savedViews: [{
+      id: "future-long",
+      name: "Future",
+      tab: "curriculum",
+      query: "x".repeat(MAX_TRANSFER_TEXT_LENGTH + 1),
+    }],
+    settings: { workspaceMode: "generic" },
+  };
+  const plugin = pluginWith(original);
+
+  const result = await plugin.loadPluginData();
+
+  assert.equal(result.compatible, false);
+  assert.match(plugin.dataCompatibilityWarning, /could not be safely inspected.*read-only/i);
+  assert.equal(plugin.savedData.length, 0);
+});
+
+test("an oversized current Sync capture leaves the committed base active and the capture untouched", async () => {
+  const localData = migrateData(null);
+  localData.settings.workspaceName = "Committed local base";
+  const local = createDefaultStore(localData, 100, "vault-oversized-sync");
+  const plugin = pluginWith(structuredClone(local));
+  await plugin.loadPluginData(false);
+  plugin.savedData.length = 0;
+
+  const incoming = structuredClone(local);
+  const incomingBase = incoming.bases[0];
+  assert.ok(incomingBase);
+  incomingBase.updatedAt = 200;
+  incomingBase.data.savedViews = [{
+    id: "remote-long",
+    name: "Remote long query",
+    tab: "curriculum",
+    query: "x".repeat(MAX_TRANSFER_TEXT_LENGTH + 1),
+  }];
+  const before = structuredClone(incoming);
+  plugin.loadedData = incoming;
+
+  await plugin.onExternalSettingsChange();
+
+  assert.equal(plugin.data.settings.workspaceName, "Committed local base");
+  assert.deepEqual(plugin.data.savedViews, []);
+  assert.match(plugin.dataCompatibilityWarning, /could not be migrated.*longer than/i);
+  assert.equal(plugin.savedData.length, 0, "the incompatible Sync capture remains authoritative on disk");
+  assert.deepEqual(incoming, before, "the captured unsafe value is never cleaned in place");
+});
+
+test("damaged recognized flat and current shapes start read-only without one corrective write", async () => {
+  const current = createDefaultStore(migrateData(null), 100, "vault-damaged-startup");
+  (current.bases[0]?.data as unknown as Record<string, unknown>).displayNameByPath = [];
+  const cases: Array<[string, unknown]> = [
+    ["legacy v1 without headings", { version: 1, selectedPath: "Legacy.md" }],
+    ["legacy v2 with an invalid collection shape", { version: 2, collections: {}, settings: { workspaceMode: "generic" } }],
+    ["current envelope with an invalid path map", current],
+  ];
+
+  for (const [label, original] of cases) {
+    const before = structuredClone(original);
+    const plugin = pluginWith(original);
+    const result = await plugin.loadPluginData();
+    assert.equal(result.compatible, false, label);
+    assert.equal(plugin.isDataReadOnly(), true, label);
+    assert.equal(plugin.savedData.length, 0, label);
+    assert.deepEqual(original, before, `${label} must not be cleaned in place`);
+    await plugin.savePluginData();
+    assert.equal(plugin.savedData.length, 0, `${label} remains protected after a save request`);
+  }
+});
+
+test("malformed explicit inner and outer versions start read-only without overwriting data", async () => {
+  const malformedVersions: unknown[] = ["1e999", "2.5", "banana"];
+  for (const location of ["inner", "outer"] as const) {
+    for (const version of malformedVersions) {
+      const original = createDefaultStore(migrateData(null), 100, `vault-malformed-${location}-${String(version)}`);
+      if (location === "inner") {
+        (original.bases[0]?.data as unknown as Record<string, unknown>).version = version;
+      } else {
+        (original as unknown as Record<string, unknown>).version = version;
+      }
+      const before = structuredClone(original);
+      const plugin = pluginWith(original);
+
+      const result = await plugin.loadPluginData();
+
+      assert.equal(result.compatible, false, `${location} ${String(version)}`);
+      assert.equal(plugin.isDataReadOnly(), true, `${location} ${String(version)}`);
+      assert.equal(plugin.savedData.length, 0, `${location} ${String(version)}`);
+      assert.deepEqual(original, before, `${location} ${String(version)} source must remain untouched`);
+      await plugin.savePluginData();
+      assert.equal(plugin.savedData.length, 0, `${location} ${String(version)} remains protected`);
+    }
+  }
+});
+
+test("same-identity Sync rejects malformed inner and outer versions without a writeback", async () => {
+  const malformedVersions: unknown[] = ["1e999", "2.5", "banana"];
+  for (const location of ["inner", "outer"] as const) {
+    for (const version of malformedVersions) {
+      const localData = migrateData(null);
+      localData.settings.workspaceName = `Committed ${location} ${String(version)}`;
+      const local = createDefaultStore(localData, 100, `vault-sync-version-${location}-${String(version)}`);
+      const plugin = pluginWith(structuredClone(local));
+      await plugin.loadPluginData(false);
+      plugin.savedData.length = 0;
+
+      const incoming = structuredClone(local);
+      const incomingBase = incoming.bases[0];
+      assert.ok(incomingBase);
+      incomingBase.updatedAt = 200;
+      if (location === "inner") {
+        (incomingBase.data as unknown as Record<string, unknown>).version = version;
+      } else {
+        (incoming as unknown as Record<string, unknown>).version = version;
+      }
+      const before = structuredClone(incoming);
+      plugin.loadedData = incoming;
+
+      await plugin.onExternalSettingsChange();
+
+      assert.equal(plugin.data.settings.workspaceName, `Committed ${location} ${String(version)}`);
+      assert.equal(plugin.isDataReadOnly(), true, `${location} ${String(version)}`);
+      assert.equal(plugin.savedData.length, 0, `${location} ${String(version)} must not write back`);
+      assert.deepEqual(incoming, before, `${location} ${String(version)} Sync capture remains untouched`);
+      assert.match(plugin.dataCompatibilityWarning, /unrecognized shape|could not be migrated/i);
+    }
+  }
+});
+
+test("a wrong-type authoritative list from Sync never replaces or rewrites the committed store", async () => {
+  const localData = migrateData(null);
+  localData.settings.workspaceName = "Committed before damaged Sync";
+  const local = createDefaultStore(localData, 100, "vault-damaged-sync-shape");
+  const plugin = pluginWith(structuredClone(local));
+  await plugin.loadPluginData(false);
+  plugin.savedData.length = 0;
+
+  const incoming = structuredClone(local);
+  const incomingBase = incoming.bases[0];
+  assert.ok(incomingBase);
+  incomingBase.updatedAt = 200;
+  (incomingBase.data as unknown as Record<string, unknown>).pinnedPaths = ["Knowledge Base/Good.md", { nested: true }];
+  const before = structuredClone(incoming);
+  plugin.loadedData = incoming;
+
+  await plugin.onExternalSettingsChange();
+
+  assert.equal(plugin.data.settings.workspaceName, "Committed before damaged Sync");
+  assert.deepEqual(plugin.data.pinnedPaths, []);
+  assert.equal(plugin.savedData.length, 0, "the damaged Sync file remains untouched on disk");
+  assert.deepEqual(incoming, before);
+  assert.match(plugin.dataCompatibilityWarning, /could not be migrated.*must be text/i);
 });
 
 test("archiving the active knowledge base switches atomically and never archives the last available base", async () => {
