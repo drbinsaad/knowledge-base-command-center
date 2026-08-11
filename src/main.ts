@@ -1,4 +1,4 @@
-import { normalizePath, Notice, Plugin, TFile, TFolder } from "obsidian";
+import { normalizePath, Notice, Plugin, TFile, TFolder, type TAbstractFile } from "obsidian";
 import { EntHierarchyBasesView } from "./bases-view";
 import {
   asUnknownRecord,
@@ -105,7 +105,8 @@ import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge
 import { ManageLibrariesModal } from "./library-modal";
 import { mergeKnowledgeBaseStores } from "./store-merge";
 
-const MAX_INACTIVE_SEARCH_BASE_CACHES = 4;
+/** Bound stable inactive projections by records, not an arbitrary base count. */
+const MAX_INACTIVE_SEARCH_CACHED_RECORDS = 50_000;
 
 interface PluginDataLoadResult {
   recognizedStore: boolean;
@@ -171,8 +172,16 @@ export const LIBRARY_ICON_IDS = [
 
 interface KnowledgeBaseSearchVaultSnapshot {
   files: readonly TFile[];
+  filesByPath: ReadonlyMap<string, TFile>;
+  clinicalProposalFiles: readonly TFile[];
   frontmatterByPath: ReadonlyMap<string, Record<string, unknown>>;
   generation: number;
+}
+
+interface PendingVaultRename {
+  oldPath: string;
+  newPath: string;
+  folderRename: boolean;
 }
 
 export default class EntVaultCommandCenterPlugin extends Plugin {
@@ -201,8 +210,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private searchGeneration = 0;
   private knowledgeBaseSearchVaultSnapshot: KnowledgeBaseSearchVaultSnapshot | null = null;
   private recordsCacheByBase = new Map<string, VaultRecord[]>();
-  /** Bounded search-only projections avoid rebuilding every inactive base on each keystroke. */
-  private inactiveSearchRecordsCache = new Map<string, { generation: number; records: VaultRecord[] }>();
+  /** Stable search-only projections are bounded by retained records across bases. */
+  private inactiveSearchRecordsCache = new Map<string, VaultRecord[]>();
+  private inactiveSearchCachedRecordCount = 0;
   private recordPathsCacheByBase = new Map<string, Set<string>>();
   private librarySubjectCountsCacheByBase = new Map<string, ReadonlyMap<string, number>>();
   private referencedPathsCacheByBase = new Map<string, Set<string>>();
@@ -211,6 +221,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private recordLinkIndexBaseId = "";
   private backlinkIndex: Map<string, string[]> | null = null;
   private refreshShouldInvalidateRecords = false;
+  /**
+   * Session overlay applied only to persisted path references while the durable
+   * all-base rename repair waits behind Sync or another operation. Failed
+   * repairs intentionally retain their overlay so search never resurrects the
+   * old path from stale plugin data.
+   */
+  private pendingVaultRenames: PendingVaultRename[] = [];
+  private vaultRenameRepairQueue: Promise<void> = Promise.resolve();
   dataCompatibilityWarning = "";
 
   async onload(): Promise<void> {
@@ -367,12 +385,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         if (this.invalidateRecordCachesForPath(file.path)) this.scheduleRefresh(false);
         else if (this.app.workspace.getLeavesOfType(VIEW_TYPE).length > 0) this.scheduleRefresh(false);
       }));
-      this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
-        if (file instanceof TFile || file instanceof TFolder) {
-          this.invalidateKnowledgeBaseSearchSnapshot();
-          this.run(() => this.handleRename(oldPath, file.path, file instanceof TFolder));
-        }
-      }));
+      this.registerEvent(this.app.vault.on("rename", (file, oldPath) => this.handleVaultRenameEvent(file, oldPath)));
     });
   }
 
@@ -1811,7 +1824,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   invalidateRecordCache(membershipChanged = true): void {
     this.invalidateKnowledgeBaseSearchSnapshot();
     this.recordsCacheByBase.clear();
-    this.inactiveSearchRecordsCache.clear();
+    this.clearInactiveSearchRecordsCache();
     this.recordPathsCacheByBase.clear();
     this.librarySubjectCountsCacheByBase.clear();
     if (membershipChanged) {
@@ -1850,6 +1863,105 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const paths = new Set(data.excludedIndexPaths);
     this.excludedPathsCacheByBase.set(baseId, paths);
     return paths;
+  }
+
+  private clearInactiveSearchRecordsCache(): void {
+    this.inactiveSearchRecordsCache.clear();
+    this.inactiveSearchCachedRecordCount = 0;
+  }
+
+  private deleteInactiveSearchRecords(baseId: string): void {
+    const records = this.inactiveSearchRecordsCache.get(baseId);
+    if (!records) return;
+    this.inactiveSearchRecordsCache.delete(baseId);
+    this.inactiveSearchCachedRecordCount = Math.max(0, this.inactiveSearchCachedRecordCount - records.length);
+    if (!this.recordsCacheByBase.has(baseId)) this.recordPathsCacheByBase.delete(baseId);
+  }
+
+  private getInactiveSearchRecords(baseId: string): VaultRecord[] | undefined {
+    return this.inactiveSearchRecordsCache.get(baseId);
+  }
+
+  private retainInactiveSearchRecords(baseId: string, records: VaultRecord[]): void {
+    // Every global search visits every base in the same pass, so ordinary LRU
+    // admission is pathological: the first miss evicts a later hit and the
+    // entire cache churns forever. Keep the already-admitted working set stable;
+    // path/configuration invalidation removes only entries that must be rebuilt.
+    if (this.inactiveSearchRecordsCache.has(baseId)) return;
+    if (records.length > MAX_INACTIVE_SEARCH_CACHED_RECORDS) return;
+    if (this.inactiveSearchCachedRecordCount + records.length > MAX_INACTIVE_SEARCH_CACHED_RECORDS) return;
+    this.inactiveSearchRecordsCache.set(baseId, records);
+    this.inactiveSearchCachedRecordCount += records.length;
+    if (!this.recordsCacheByBase.has(baseId)) {
+      this.recordPathsCacheByBase.set(baseId, new Set(records.map((record) => record.path)));
+    }
+  }
+
+  private projectPendingRenamePath(path: string): string {
+    let projected = path;
+    for (const rename of this.pendingVaultRenames) {
+      projected = replacePathPrefix(projected, rename.oldPath, rename.newPath);
+    }
+    return projected;
+  }
+
+  private projectPendingRenamePathMap(source: Record<string, string>): Map<string, string> {
+    const projected: Record<string, string> = Object.create(null) as Record<string, string>;
+    for (const [path, value] of Object.entries(source)) projected[path] = value;
+    // Match rewritePluginDataPathPrefix exactly: a renamed source key replaces
+    // any stale destination key, irrespective of object insertion order.
+    for (const rename of this.pendingVaultRenames) {
+      for (const [path, value] of Object.entries(projected)) {
+        const next = replacePathPrefix(path, rename.oldPath, rename.newPath);
+        if (next === path) continue;
+        projected[next] = value;
+        delete projected[path];
+      }
+    }
+    return new Map(Object.entries(projected));
+  }
+
+  private filesForSearchEntry(
+    entry: KnowledgeBaseEntry,
+    snapshot: KnowledgeBaseSearchVaultSnapshot,
+  ): readonly TFile[] {
+    const settings = entry.data.settings;
+    const primaryFolder = normalizePath(this.projectPendingRenamePath(settings.primaryFolder)).replace(/^\/+|\/+$/gu, "");
+    if (!primaryFolder) return snapshot.files;
+    const candidates = new Map<string, TFile>();
+    const addPath = (path: string): void => {
+      const file = snapshot.filesByPath.get(path);
+      if (file) candidates.set(file.path, file);
+    };
+    const addRoot = (folder: string): void => {
+      const clean = normalizePath(folder).replace(/^\/+|\/+$/gu, "");
+      if (!clean) return;
+      addPath(clean);
+      const prefix = `${clean}/`;
+      let low = 0;
+      let high = snapshot.files.length;
+      while (low < high) {
+        const middle = (low + high) >>> 1;
+        if ((snapshot.files[middle]?.path ?? "") < prefix) low = middle + 1;
+        else high = middle;
+      }
+      for (let index = low; index < snapshot.files.length; index += 1) {
+        const file = snapshot.files[index];
+        if (!file?.path.startsWith(prefix)) break;
+        candidates.set(file.path, file);
+      }
+    };
+
+    addRoot(primaryFolder);
+    addRoot(this.projectPendingRenamePath(settings.proposalFolder));
+    if (settings.workspaceMode === "ent-clinical") {
+      for (const root of [PROCEDURE_ROOT, MEDICATION_ROOT, SYNDROME_ROOT, "07 Evidence Updates/"]) addRoot(root);
+      for (const file of snapshot.clinicalProposalFiles) candidates.set(file.path, file);
+    }
+    for (const path of this.referencedPaths(entry.data, entry.id)) addPath(this.projectPendingRenamePath(path));
+    for (const path of this.excludedPaths(entry.data, entry.id)) addPath(this.projectPendingRenamePath(path));
+    for (const path of Object.keys(entry.data.indexGroupByPath)) addPath(this.projectPendingRenamePath(path));
+    return [...candidates.values()];
   }
 
   private rebuildRecordLinkIndex(records: VaultRecord[]): void {
@@ -1912,28 +2024,25 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     };
     if (cancelled()) return null;
 
-    // Vault events advance the search generation without necessarily clearing
-    // every path-scoped inactive projection. Remove those stale generations
-    // before enforcing the bounded cache size; otherwise four dead entries can
-    // occupy all slots forever and force every later keystroke to rescan.
-    for (const [baseId, cache] of this.inactiveSearchRecordsCache) {
-      if (cache.generation !== requestGeneration) this.inactiveSearchRecordsCache.delete(baseId);
-    }
     const needsVaultSnapshot = entries.some((entry) => {
-      const searchCache = this.inactiveSearchRecordsCache.get(entry.id);
-      return !this.recordsCacheByBase.has(entry.id) && searchCache?.generation !== requestGeneration;
+      return !this.recordsCacheByBase.has(entry.id) && !this.inactiveSearchRecordsCache.has(entry.id);
     });
     let vaultSnapshot = this.knowledgeBaseSearchVaultSnapshot;
     if (needsVaultSnapshot && vaultSnapshot?.generation !== requestGeneration) vaultSnapshot = null;
     if (needsVaultSnapshot && !vaultSnapshot) {
-      const files = this.app.vault.getMarkdownFiles();
+      const files = [...this.app.vault.getMarkdownFiles()]
+        .sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+      const filesByPath = new Map(files.map((file) => [file.path, file]));
+      const clinicalProposalFiles: TFile[] = [];
       const frontmatterByPath = new Map<string, Record<string, unknown>>();
       for (const file of files) {
-        frontmatterByPath.set(file.path, asUnknownRecord(this.app.metadataCache.getFileCache(file)?.frontmatter));
+        const frontmatter = asUnknownRecord(this.app.metadataCache.getFileCache(file)?.frontmatter);
+        frontmatterByPath.set(file.path, frontmatter);
+        if (frontmatter.type === "topic-proposal") clinicalProposalFiles.push(file);
         if (!await checkpoint()) return null;
       }
       if (cancelled()) return null;
-      vaultSnapshot = { files, frontmatterByPath, generation: requestGeneration };
+      vaultSnapshot = { files, filesByPath, clinicalProposalFiles, frontmatterByPath, generation: requestGeneration };
       this.knowledgeBaseSearchVaultSnapshot = vaultSnapshot;
     }
     const files = vaultSnapshot?.files ?? [];
@@ -1943,21 +2052,16 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (cancelled()) return null;
       const entry = entries[baseIndex];
       if (!entry) continue;
-      const inactiveCache = this.inactiveSearchRecordsCache.get(entry.id);
-      const cached = this.recordsCacheByBase.get(entry.id)
-        ?? (inactiveCache?.generation === requestGeneration ? inactiveCache.records : undefined);
+      const cached = this.recordsCacheByBase.get(entry.id) ?? this.getInactiveSearchRecords(entry.id);
       const scannedRecords: VaultRecord[] | null = cached ? null : [];
-      const scan: Iterable<VaultRecord | null> = cached ?? this.iterateRecordScanForEntry(entry, files, frontmatterByPath);
+      const entryFiles = cached || !vaultSnapshot ? files : this.filesForSearchEntry(entry, vaultSnapshot);
+      const scan: Iterable<VaultRecord | null> = cached ?? this.iterateRecordScanForEntry(entry, entryFiles, frontmatterByPath);
       for (const record of scan) {
         if (record && scannedRecords) scannedRecords.push(record);
         if (record) collector.consider(baseIndex, record);
         if (!await checkpoint()) return null;
       }
-      if (scannedRecords
-        && entry.id !== activeBaseId
-        && this.inactiveSearchRecordsCache.size < MAX_INACTIVE_SEARCH_BASE_CACHES) {
-        this.inactiveSearchRecordsCache.set(entry.id, { generation: requestGeneration, records: scannedRecords });
-      }
+      if (scannedRecords && entry.id !== activeBaseId) this.retainInactiveSearchRecords(entry.id, scannedRecords);
     }
     return cancelled() ? null : collector.finish();
   }
@@ -1993,14 +2097,17 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const data = entry.data;
     const clinicalMode = data.settings.workspaceMode === "ent-clinical";
     const canMoveAcrossGroups = !clinicalMode || data.settings.allowClinicalVisualGroupMoves;
-    const referenced = this.referencedPaths(data, entry.id);
-    const proposalFolder = normalizePath(data.settings.proposalFolder);
+    const referenced = new Set([...this.referencedPaths(data, entry.id)].map((path) => this.projectPendingRenamePath(path)));
+    const proposalFolder = normalizePath(this.projectPendingRenamePath(data.settings.proposalFolder));
     const proposalRoot = proposalFolder ? `${proposalFolder}/` : "";
     const settings = data.settings;
+    const primaryFolder = this.projectPendingRenamePath(settings.primaryFolder);
     // Membership lookups run once per markdown file, so they must not be linear
     // scans of the manual/hidden arrays.
-    const manual = new Set(data.manualIndexPaths);
-    const excluded = this.excludedPaths(data, entry.id);
+    const manual = new Set(data.manualIndexPaths.map((path) => this.projectPendingRenamePath(path)));
+    const excluded = new Set([...this.excludedPaths(data, entry.id)].map((path) => this.projectPendingRenamePath(path)));
+    const projectedIndexGroupByPath = this.projectPendingRenamePathMap(data.indexGroupByPath);
+    const projectedDisplayNameByPath = this.projectPendingRenamePathMap(data.displayNameByPath);
     const recordPaths = new Set<string>();
     const portableIdByPath = new Map<string, string>();
     const portableSubjectById = new Map(data.portableIndex.subjects.map((subject) => [subject.id, subject]));
@@ -2028,12 +2135,23 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       }
     }
     for (const [subjectId, path] of Object.entries(data.portableIndex.resolvedPathBySubjectId)) {
-      if (path && !portableIdByPath.has(path)) portableIdByPath.set(path, subjectId);
+      const projectedPath = this.projectPendingRenamePath(path);
+      if (projectedPath && !portableIdByPath.has(projectedPath)) portableIdByPath.set(projectedPath, subjectId);
     }
     for (const file of files) {
       let frontmatter = frontmatterByPath?.get(file.path) ?? {};
       if (!frontmatterByPath && clinicalMode) frontmatter = asUnknownRecord(this.app.metadataCache.getFileCache(file)?.frontmatter);
-      const identity = this.identityForFile(file, frontmatter, data, clinicalMode, referenced, proposalRoot, manual, excluded);
+      const identity = this.identityForFile(
+        file,
+        frontmatter,
+        data,
+        clinicalMode,
+        referenced,
+        proposalRoot,
+        manual,
+        excluded,
+        primaryFolder,
+      );
       if (!identity) {
         yield null;
         continue;
@@ -2072,13 +2190,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       const entDomains = asStringList(frontmatter.ent_domains);
       const titleFallback = file.basename.replace(/^(Procedure|Drug|Syndrome)\s*-\s*/i, "");
       const configuredGroup = asStringList(frontmatter[settings.groupProperty])[0] ?? "";
-      const visualGroup = canMoveAcrossGroups ? asText(data.indexGroupByPath[file.path]) : "";
+      const visualGroup = canMoveAcrossGroups ? asText(projectedIndexGroupByPath.get(file.path)) : "";
       const configuredIdValue = frontmatter[settings.idProperty];
       const configuredId = typeof configuredIdValue === "number" ? String(configuredIdValue) : asText(configuredIdValue);
       const sourceDomain = detectedRole === "proposal"
         ? asText(frontmatter.proposed_domain, settings.inboxLabel)
         : detectedKind === "topic"
-          ? configuredGroup || (clinicalMode ? asText(frontmatter.domain, cleanDomainFolder(file.path)) : configuredGroupFromPath(file.path, settings.primaryFolder))
+          ? configuredGroup || (clinicalMode ? asText(frontmatter.domain, cleanDomainFolder(file.path)) : configuredGroupFromPath(file.path, primaryFolder))
           : detectedKind === "procedure"
             ? asText(frontmatter.domain, "Procedures")
             : detectedKind === "medication"
@@ -2115,7 +2233,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         ? "topic"
         : clinicalMode ? detectedKind : portableSubject?.recordKind ?? detectedKind;
       const sourceTitle = asText(frontmatter.title, asText(frontmatter.canonical_name, titleFallback));
-      const displayTitle = asText(data.displayNameByPath[file.path]);
+      const displayTitle = asText(projectedDisplayNameByPath.get(file.path));
       const aliases = asStringList(frontmatter.aliases);
       if (displayTitle && sourceTitle && displayTitle !== sourceTitle && !aliases.includes(sourceTitle)) aliases.push(sourceTitle);
       const record: VaultRecord = {
@@ -2141,7 +2259,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         imageStatus: asText(frontmatter.image_status),
         doseStatus: asText(frontmatter.dose_status),
         sourceCoverage: asText(frontmatter.source_coverage),
-        folderOrder: kind === "topic" ? this.indexGroupSortKey(data, domain, file.path) : role === "proposal" ? "00" : "99",
+        folderOrder: kind === "topic" ? this.indexGroupSortKey(data, domain, file.path, primaryFolder) : role === "proposal" ? "00" : "99",
         mtime: file.stat.mtime,
         aiLock: frontmatter.ai_lock === true,
         ...(portableId ? { portableId } : {}),
@@ -2153,7 +2271,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       yield record;
     }
     for (const subject of data.portableIndex.subjects) {
-      const resolvedPath = data.portableIndex.resolvedPathBySubjectId[subject.id] || "";
+      const resolvedPath = this.projectPendingRenamePath(data.portableIndex.resolvedPathBySubjectId[subject.id] || "");
       if (resolvedPath && recordPaths.has(resolvedPath)) {
         yield null;
         continue;
@@ -2171,9 +2289,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       const libraryHeading = libraryId
         ? portableLibraryHeadingBySubject.get(libraryHeadingKey(libraryId, subject.id)) ?? ""
         : "";
-      const domain = libraryHeading || (canMoveAcrossGroups ? asText(data.indexGroupByPath[path]) : "")
+      const domain = libraryHeading || (canMoveAcrossGroups ? asText(projectedIndexGroupByPath.get(path)) : "")
         || asText(data.indexGroupAliases[sourceGroup], sourceGroup);
-      const displayTitle = asText(data.displayNameByPath[path]);
+      const displayTitle = asText(projectedDisplayNameByPath.get(path));
       const record: VaultRecord = {
         path,
         title: displayTitle || subject.title,
@@ -2195,7 +2313,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         imageStatus: "",
         doseStatus: "",
         sourceCoverage: "",
-        folderOrder: this.indexGroupSortKey(data, domain, path),
+        folderOrder: this.indexGroupSortKey(data, domain, path, primaryFolder),
         mtime: 0,
         aiLock: false,
         portableId: subject.id,
@@ -2217,10 +2335,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     proposalRoot: string,
     manual: Set<string>,
     excluded: Set<string>,
+    primaryFolder = data.settings.primaryFolder,
   ): { kind: RecordKind; role: RecordRole } | null {
     if (!clinicalMode && manual.has(file.path)) return { kind: "topic", role: "canonical" };
     if ((proposalRoot && file.path.startsWith(proposalRoot)) || (clinicalMode && frontmatter.type === "topic-proposal")) return { kind: "proposal", role: "proposal" };
-    if (pathIsInsideFolder(file.path, data.settings.primaryFolder)) {
+    if (pathIsInsideFolder(file.path, primaryFolder)) {
       if (!clinicalMode && excluded.has(file.path)) {
         return referenced.has(file.path) ? { kind: "note", role: "vault-note" } : null;
       }
@@ -3201,7 +3320,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (!wasCachedRecord && !isClinicalProposal && !this.isRelevantToBase(path, entry.data, entry.id)) continue;
       relevant = true;
       this.recordsCacheByBase.delete(entry.id);
-      this.inactiveSearchRecordsCache.delete(entry.id);
+      this.deleteInactiveSearchRecords(entry.id);
       this.recordPathsCacheByBase.delete(entry.id);
       this.librarySubjectCountsCacheByBase.delete(entry.id);
       if (entry.id === this.store.activeBaseId) activeBaseInvalidated = true;
@@ -3837,6 +3956,36 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return new Error(`${operationMessage} Automatic ${operation} rollback also failed (${rollbackMessage}). Inspect “${originalPath}” and “${destination}” before retrying; no further automatic changes were attempted.`);
   }
 
+  private handleVaultRenameEvent(file: TAbstractFile, oldPath: string): void {
+    if (!(file instanceof TFile) && !(file instanceof TFolder)) return;
+    this.pendingVaultRenames.push({ oldPath, newPath: file.path, folderRename: file instanceof TFolder });
+    // The file has already moved while handleRename may still be waiting behind
+    // Sync or another transaction. Evict every projection now so a search can
+    // never publish the old path during that wait (or after a read-only rename
+    // repair is rejected).
+    this.invalidateRecordCache();
+    const repair = this.vaultRenameRepairQueue.then(async () => {
+      // Process physical renames in event order. If one durable repair fails,
+      // later overlays remain composed in memory instead of being removed from
+      // underneath an earlier stale persisted path.
+      while (this.pendingVaultRenames.length > 0) {
+        const pending = this.pendingVaultRenames[0];
+        if (!pending) break;
+        await this.handleRename(pending.oldPath, pending.newPath, pending.folderRename);
+        if (this.pendingVaultRenames[0] === pending) this.pendingVaultRenames.shift();
+        else {
+          const index = this.pendingVaultRenames.indexOf(pending);
+          if (index >= 0) this.pendingVaultRenames.splice(index, 1);
+        }
+        // The durable store is authoritative through this event. Cancel every
+        // projection that was built with the now-removed temporary overlay.
+        this.invalidateRecordCache();
+      }
+    });
+    this.vaultRenameRepairQueue = repair.catch(() => {});
+    this.run(() => repair);
+  }
+
   private async handleRename(oldPath: string, newPath: string, folderRename = false): Promise<void> {
     // A vault rename is an all-base transaction. A Sync callback can begin in
     // either await window below, so merely sampling externalReloadPromise once
@@ -3955,10 +4104,15 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       + heading.subheadings.reduce((sum, subheading) => sum + Number(subheading.subjects.includes(path)), 0), 0);
   }
 
-  private indexGroupSortKey(data: PluginData, domain: string, path: string): string {
+  private indexGroupSortKey(
+    data: PluginData,
+    domain: string,
+    path: string,
+    primaryFolder = data.settings.primaryFolder,
+  ): string {
     if (data.settings.workspaceMode === "ent-clinical" && !data.settings.allowClinicalVisualGroupMoves
-      && pathIsInsideFolder(path, data.settings.primaryFolder)) {
-      const root = normalizePath(data.settings.primaryFolder);
+      && pathIsInsideFolder(path, primaryFolder)) {
+      const root = normalizePath(primaryFolder);
       const relative = normalizePath(path).slice(root.length + 1);
       return relative.split("/")[0] || "99";
     }

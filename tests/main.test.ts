@@ -19,11 +19,14 @@ import {
   portablePlaceholderPath,
   provisionalInterimEnvelopeVaultFingerprint,
   provisionalMigratedVaultFingerprint,
+  rewritePluginDataPathPrefix,
   restoreSnapshot,
   snapshotPersonal,
   STORE_KIND,
   STORE_VERSION,
+  type KnowledgeBaseEntry,
   type PluginStore,
+  type VaultRecord,
 } from "../src/model.ts";
 import {
   createPortableExport,
@@ -6443,7 +6446,8 @@ test("cross-base search streams uncached bases through one bounded catalog witho
   const { plugin, metadataReadCount, vaultEnumerationCount } = pluginWithFiles(store, files, frontmatterByPath);
   const internal = plugin as unknown as {
     recordsCacheByBase: Map<string, unknown[]>;
-    inactiveSearchRecordsCache: Map<string, { generation: number; records: unknown[] }>;
+    inactiveSearchRecordsCache: Map<string, unknown[]>;
+    inactiveSearchCachedRecordCount: number;
     invalidateKnowledgeBaseSearchSnapshot(): void;
   };
   await plugin.loadPluginData();
@@ -6461,12 +6465,13 @@ test("cross-base search streams uncached bases through one bounded catalog witho
   assert.deepEqual([...internal.recordsCacheByBase.keys()], ["base-default"], "search does not retain full inactive-base records");
   assert.deepEqual(
     [...internal.inactiveSearchRecordsCache.keys()],
-    ["base-10", "base-11", "base-12", "base-2"],
-    "a bounded search-only cache retains the first inactive projections",
+    ["base-10", "base-11", "base-12", "base-2", "base-3", "base-4", "base-5", "base-6", "base-7", "base-8", "base-9"],
+    "the record budget retains every small inactive projection",
   );
   assert.equal(vaultEnumerationCount(), 2, "the active cache and lazy cross-base catalog each enumerate once");
   assert.equal(metadataReadCount(), files.length * 2, "the catalog reads each file once, not once per base");
-  const retainedInactiveRecord = internal.inactiveSearchRecordsCache.get("base-10")?.records[0];
+  assert.equal(internal.inactiveSearchCachedRecordCount, 11 * files.length);
+  const retainedInactiveRecord = internal.inactiveSearchRecordsCache.get("base-10")?.[0];
 
   const secondResults = await plugin.searchKnowledgeBases("topic 1", { yieldEvery: Number.MAX_SAFE_INTEGER });
 
@@ -6474,7 +6479,7 @@ test("cross-base search streams uncached bases through one bounded catalog witho
   assert.equal(vaultEnumerationCount(), 2, "later queries reuse the bounded catalog generation");
   assert.equal(metadataReadCount(), files.length * 2, "later queries do not reread unchanged metadata");
   assert.deepEqual([...internal.recordsCacheByBase.keys()], ["base-default"]);
-  assert.equal(internal.inactiveSearchRecordsCache.size, 4, "inactive search projections stay memory-bounded");
+  assert.equal(internal.inactiveSearchRecordsCache.size, 11);
   assert.equal(
     secondResults.groups.find((group) => group.source.baseId === "base-10")?.records.includes(retainedInactiveRecord as never),
     true,
@@ -6484,20 +6489,310 @@ test("cross-base search streams uncached bases through one bounded catalog witho
   internal.invalidateKnowledgeBaseSearchSnapshot();
   const afterVaultEvent = await plugin.searchKnowledgeBases("topic 1", { yieldEvery: Number.MAX_SAFE_INTEGER });
   assert.ok(afterVaultEvent);
-  assert.equal(internal.inactiveSearchRecordsCache.size, 4, "stale generations do not occupy the bounded cache slots");
-  const rebuiltInactiveRecord = internal.inactiveSearchRecordsCache.get("base-10")?.records[0];
-  assert.notEqual(rebuiltInactiveRecord, retainedInactiveRecord, "the first post-event query rebuilds inactive projections");
-  assert.equal(vaultEnumerationCount(), 3);
-  assert.equal(metadataReadCount(), files.length * 3);
+  assert.equal(internal.inactiveSearchRecordsCache.size, 11);
+  const rebuiltInactiveRecord = internal.inactiveSearchRecordsCache.get("base-10")?.[0];
+  assert.equal(rebuiltInactiveRecord, retainedInactiveRecord, "an unrelated snapshot refresh preserves path-scoped projections");
+  assert.equal(vaultEnumerationCount(), 2);
+  assert.equal(metadataReadCount(), files.length * 2);
 
   const afterEventSecondQuery = await plugin.searchKnowledgeBases("topic", { yieldEvery: Number.MAX_SAFE_INTEGER });
   assert.ok(afterEventSecondQuery);
-  assert.equal(vaultEnumerationCount(), 3, "the rebuilt projections are reused on the next keystroke");
-  assert.equal(metadataReadCount(), files.length * 3);
+  assert.equal(vaultEnumerationCount(), 2, "retained projections are reused on the next keystroke");
+  assert.equal(metadataReadCount(), files.length * 2);
   assert.equal(
     afterEventSecondQuery.groups.find((group) => group.source.baseId === "base-10")?.records.includes(rebuiltInactiveRecord as never),
     true,
   );
+});
+
+test("inactive search projections keep a scan-resistant record-budgeted working set", () => {
+  const plugin = pluginWith(createDefaultStore(migrateData(null), 1, "vault-search-lru-test"));
+  const internal = plugin as unknown as {
+    inactiveSearchRecordsCache: Map<string, Array<{ path: string }>>;
+    inactiveSearchCachedRecordCount: number;
+    retainInactiveSearchRecords(baseId: string, records: Array<{ path: string }>): void;
+    getInactiveSearchRecords(baseId: string): Array<{ path: string }> | undefined;
+  };
+  const records = (baseId: string, count: number): Array<{ path: string }> => (
+    Array.from({ length: count }, (_, index) => ({ path: `${baseId}/${index}.md` }))
+  );
+
+  internal.retainInactiveSearchRecords("base-a", records("a", 30_000));
+  internal.retainInactiveSearchRecords("base-b", records("b", 20_000));
+  assert.equal(internal.inactiveSearchCachedRecordCount, 50_000);
+  assert.ok(internal.getInactiveSearchRecords("base-a"));
+  internal.retainInactiveSearchRecords("base-c", records("c", 10_000));
+
+  assert.deepEqual([...internal.inactiveSearchRecordsCache.keys()], ["base-a", "base-b"]);
+  assert.equal(internal.inactiveSearchCachedRecordCount, 50_000);
+  assert.equal(internal.inactiveSearchRecordsCache.has("base-c"), false, "a sequential miss must not evict a later cache hit");
+});
+
+test("over-budget cross-base searches reuse the stable working set on every later query", async () => {
+  const files = Array.from({ length: 10_000 }, (_, index) => new TFile(`Shared/Topic ${index}.md`));
+  const frontmatterByPath = Object.fromEntries(files.map((file, index) => [file.path, { title: `Topic ${index}` }]));
+  const active = migrateData(null);
+  active.settings.workspaceMode = "generic";
+  active.settings.primaryFolder = "Shared";
+  active.settings.workspaceName = "Active";
+  const store = createDefaultStore(active, 1, "vault-over-budget-search-cache");
+  for (let index = 1; index <= 6; index += 1) {
+    const data = migrateData(null);
+    data.settings.workspaceMode = "generic";
+    data.settings.primaryFolder = "Shared";
+    data.settings.workspaceName = `Inactive ${index}`;
+    store.bases.push(createKnowledgeBaseEntry(data, `base-${index}`, index + 1));
+  }
+  const { plugin } = pluginWithFiles(store, files, frontmatterByPath);
+  const internal = plugin as unknown as {
+    inactiveSearchRecordsCache: Map<string, unknown[]>;
+    iterateRecordScanForEntry(
+      entry: KnowledgeBaseEntry,
+      files: readonly TFile[],
+      frontmatterByPath?: ReadonlyMap<string, Record<string, unknown>>,
+    ): Generator<VaultRecord | null>;
+  };
+  await plugin.loadPluginData();
+  plugin.getRecords();
+  const originalScan = internal.iterateRecordScanForEntry.bind(plugin);
+  let projectionScans = 0;
+  internal.iterateRecordScanForEntry = function* (...args): Generator<VaultRecord | null> {
+    projectionScans += 1;
+    yield* originalScan(...args);
+  };
+
+  await plugin.searchKnowledgeBases("topic", { yieldEvery: Number.MAX_SAFE_INTEGER });
+  assert.equal(projectionScans, 6);
+  assert.equal(internal.inactiveSearchRecordsCache.size, 5);
+
+  projectionScans = 0;
+  await plugin.searchKnowledgeBases("topic 9", { yieldEvery: Number.MAX_SAFE_INTEGER });
+  assert.equal(projectionScans, 1, "only the one projection outside the record budget is rebuilt");
+  assert.equal(internal.inactiveSearchRecordsCache.size, 5);
+});
+
+test("a vault rename overlays stale portable paths while asynchronous repair is delayed or rejected", async () => {
+  const oldFile = new TFile("Inactive/Old topic.md");
+  const newPath = "Inactive/New topic.md";
+  const files = [oldFile];
+  const frontmatterByPath: Record<string, Record<string, unknown>> = {
+    [oldFile.path]: { title: "Old topic" },
+  };
+  const active = migrateData(null);
+  active.settings.workspaceMode = "generic";
+  active.settings.primaryFolder = "Active";
+  const inactive = migrateData(null);
+  inactive.settings.workspaceMode = "generic";
+  inactive.settings.primaryFolder = "Inactive";
+  inactive.portableIndex.groups = [{ id: "group-inactive", title: "Inactive", order: 0 }];
+  inactive.portableIndex.subjects = [{
+    id: "subject-old-topic",
+    title: "Old topic",
+    groupId: "group-inactive",
+    parentId: null,
+    order: 0,
+    indexed: true,
+    configuredId: "",
+    recordKind: "topic",
+  }];
+  inactive.portableIndex.resolvedPathBySubjectId = { "subject-old-topic": oldFile.path };
+  inactive.displayNameByPath = {
+    [oldFile.path]: "Renamed display",
+    [newPath]: "Stale destination display",
+  };
+  inactive.indexGroupByPath = {
+    [oldFile.path]: "Renamed group",
+    [newPath]: "Stale destination group",
+  };
+  const store = createDefaultStore(active, 1, "vault-rename-search-cache");
+  store.bases.push(createKnowledgeBaseEntry(inactive, "base-inactive", 2));
+  const { plugin } = pluginWithFiles(store, files, frontmatterByPath);
+  const repairRelease = deferred();
+  const internal = plugin as unknown as {
+    inactiveSearchRecordsCache: Map<string, Array<{ path: string }>>;
+    pendingVaultRenames: Array<{ oldPath: string; newPath: string }>;
+    handleRename(oldPath: string, newPath: string, folderRename?: boolean): Promise<void>;
+    handleVaultRenameEvent(file: TAbstractFile, oldPath: string): void;
+  };
+  await plugin.loadPluginData();
+  plugin.getRecords();
+  const warm = await plugin.searchKnowledgeBases("old topic", { yieldEvery: Number.MAX_SAFE_INTEGER });
+  assert.equal(warm?.groups[0]?.records[0]?.path, oldFile.path);
+  assert.equal(internal.inactiveSearchRecordsCache.has("base-inactive"), true);
+
+  const newFile = new TFile(newPath);
+  files.splice(0, 1, newFile);
+  delete frontmatterByPath[oldFile.path];
+  frontmatterByPath[newFile.path] = { title: "New topic" };
+  internal.handleRename = async () => {
+    await repairRelease.promise;
+    throw new Error("simulated read-only rename rejection");
+  };
+  internal.handleVaultRenameEvent(newFile, oldFile.path);
+
+  assert.equal(internal.inactiveSearchRecordsCache.size, 0, "rename eviction is synchronous");
+  const duringRepair = await plugin.searchKnowledgeBases("renamed display", { yieldEvery: Number.MAX_SAFE_INTEGER });
+  const duringRecords = duringRepair?.groups.flatMap((group) => group.records) ?? [];
+  assert.deepEqual(duringRecords.map((record) => record.path), [newFile.path]);
+  assert.equal(duringRecords[0]?.portableId, "subject-old-topic", "the pending overlay keeps the linked identity on the new file");
+  assert.equal(duringRecords[0]?.title, "Renamed display", "source path display metadata must win a destination-key collision");
+  assert.equal(duringRecords[0]?.domain, "Renamed group", "source path group metadata must win a destination-key collision");
+  assert.equal(duringRepair?.groups.some((group) => group.records.some((record) => record.path === oldFile.path)), false);
+  repairRelease.resolve();
+  await repairRelease.promise;
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(internal.pendingVaultRenames.length, 1, "a rejected durable repair keeps its safe session overlay");
+  const afterRejection = await plugin.searchKnowledgeBases("renamed display", { yieldEvery: Number.MAX_SAFE_INTEGER });
+  const afterRecords = afterRejection?.groups.flatMap((group) => group.records) ?? [];
+  assert.deepEqual(afterRecords.map((record) => record.path), [newFile.path]);
+  assert.equal(afterRecords[0]?.portableId, "subject-old-topic");
+});
+
+test("a successful queued rename repair removes its overlay only after durable state advances", async () => {
+  const oldFile = new TFile("Knowledge Base/A.md");
+  const newFile = new TFile("Knowledge Base/B.md");
+  const files = [oldFile];
+  const frontmatterByPath: Record<string, Record<string, unknown>> = { [oldFile.path]: { title: "Topic" } };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.primaryFolder = "Knowledge Base";
+  data.portableIndex.groups = [{ id: "group", title: "Group", order: 0 }];
+  data.portableIndex.subjects = [{
+    id: "subject",
+    title: "Topic",
+    groupId: "group",
+    parentId: null,
+    order: 0,
+    indexed: true,
+    configuredId: "",
+    recordKind: "topic",
+  }];
+  data.portableIndex.resolvedPathBySubjectId = { subject: oldFile.path };
+  const { plugin } = pluginWithFiles(createDefaultStore(data, 1, "vault-rename-success"), files, frontmatterByPath);
+  const internal = plugin as unknown as {
+    pendingVaultRenames: Array<{ oldPath: string; newPath: string }>;
+    vaultRenameRepairQueue: Promise<void>;
+    handleRename(oldPath: string, newPath: string, folderRename?: boolean): Promise<void>;
+    handleVaultRenameEvent(file: TAbstractFile, oldPath: string): void;
+  };
+  await plugin.loadPluginData();
+  internal.handleRename = async (oldPath, newPath) => {
+    rewritePluginDataPathPrefix(plugin.data, oldPath, newPath);
+  };
+
+  files.splice(0, 1, newFile);
+  delete frontmatterByPath[oldFile.path];
+  frontmatterByPath[newFile.path] = { title: "Topic" };
+  internal.handleVaultRenameEvent(newFile, oldFile.path);
+  await internal.vaultRenameRepairQueue;
+
+  assert.deepEqual(internal.pendingVaultRenames, []);
+  assert.equal(plugin.data.portableIndex.resolvedPathBySubjectId.subject, newFile.path);
+  const result = await plugin.searchKnowledgeBases("topic", { yieldEvery: Number.MAX_SAFE_INTEGER });
+  const records = result?.groups.flatMap((group) => group.records) ?? [];
+  assert.deepEqual(records.map((record) => record.path), [newFile.path]);
+  assert.equal(records[0]?.portableId, "subject");
+});
+
+test("ordered rename repair keeps a complete A-to-C overlay when the first durable step keeps failing", async () => {
+  const fileA = new TFile("Inactive/A.md");
+  const fileB = new TFile("Inactive/B.md");
+  const fileC = new TFile("Inactive/C.md");
+  const files = [fileA];
+  const frontmatterByPath: Record<string, Record<string, unknown>> = { [fileA.path]: { title: "Chain topic" } };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.primaryFolder = "Inactive";
+  data.portableIndex.groups = [{ id: "group", title: "Group", order: 0 }];
+  data.portableIndex.subjects = [{
+    id: "subject-chain",
+    title: "Chain topic",
+    groupId: "group",
+    parentId: null,
+    order: 0,
+    indexed: true,
+    configuredId: "",
+    recordKind: "topic",
+  }];
+  data.portableIndex.resolvedPathBySubjectId = { "subject-chain": fileA.path };
+  const { plugin } = pluginWithFiles(createDefaultStore(data, 1, "vault-rename-chain"), files, frontmatterByPath);
+  const calls: string[] = [];
+  const internal = plugin as unknown as {
+    pendingVaultRenames: Array<{ oldPath: string; newPath: string }>;
+    vaultRenameRepairQueue: Promise<void>;
+    handleRename(oldPath: string, newPath: string): Promise<void>;
+    handleVaultRenameEvent(file: TAbstractFile, oldPath: string): void;
+  };
+  await plugin.loadPluginData();
+  internal.handleRename = async (oldPath, newPath) => {
+    calls.push(`${oldPath}->${newPath}`);
+    if (oldPath === fileA.path) throw new Error("first durable step remains read-only");
+  };
+
+  files.splice(0, 1, fileB);
+  delete frontmatterByPath[fileA.path];
+  frontmatterByPath[fileB.path] = { title: "Chain topic" };
+  internal.handleVaultRenameEvent(fileB, fileA.path);
+  files.splice(0, 1, fileC);
+  delete frontmatterByPath[fileB.path];
+  frontmatterByPath[fileC.path] = { title: "Chain topic" };
+  internal.handleVaultRenameEvent(fileC, fileB.path);
+  await internal.vaultRenameRepairQueue;
+
+  assert.deepEqual(calls, [`${fileA.path}->${fileB.path}`, `${fileA.path}->${fileB.path}`]);
+  assert.deepEqual(internal.pendingVaultRenames.map((rename) => `${rename.oldPath}->${rename.newPath}`), [
+    `${fileA.path}->${fileB.path}`,
+    `${fileB.path}->${fileC.path}`,
+  ]);
+  const result = await plugin.searchKnowledgeBases("chain topic", { yieldEvery: Number.MAX_SAFE_INTEGER });
+  const records = result?.groups.flatMap((group) => group.records) ?? [];
+  assert.deepEqual(records.map((record) => record.path), [fileC.path]);
+  assert.equal(records[0]?.portableId, "subject-chain");
+});
+
+test("search projection candidates are restricted to each configured base plus explicit references", () => {
+  const rootFiles = Array.from({ length: 12 }, (_, index) => new TFile(`Knowledge A/Topic ${index}.md`));
+  const unrelated = Array.from({ length: 500 }, (_, index) => new TFile(`Unrelated/Note ${index}.md`));
+  const manual = new TFile("Manual/Outside.md");
+  const proposal = new TFile("Incoming/Proposal.md");
+  const files = [...rootFiles, ...unrelated, manual, proposal]
+    .sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.primaryFolder = "Knowledge A";
+  data.manualIndexPaths = [manual.path];
+  const entry = createKnowledgeBaseEntry(data, "base-a", 1);
+  const plugin = pluginWith(createDefaultStore(data, 1, "vault-search-candidates-test"));
+  const internal = plugin as unknown as {
+    filesForSearchEntry(
+      candidate: typeof entry,
+      snapshot: {
+        files: readonly TFile[];
+        filesByPath: ReadonlyMap<string, TFile>;
+        clinicalProposalFiles: readonly TFile[];
+        frontmatterByPath: ReadonlyMap<string, Record<string, unknown>>;
+        generation: number;
+      },
+    ): readonly TFile[];
+  };
+  const snapshot = {
+    files,
+    filesByPath: new Map(files.map((file) => [file.path, file])),
+    clinicalProposalFiles: [proposal],
+    frontmatterByPath: new Map<string, Record<string, unknown>>(),
+    generation: 1,
+  };
+
+  const genericCandidates = internal.filesForSearchEntry(entry, snapshot);
+  assert.equal(genericCandidates.length, rootFiles.length + 1);
+  assert.equal(genericCandidates.some((file) => file.path === manual.path), true);
+  assert.equal(genericCandidates.some((file) => file.path.startsWith("Unrelated/")), false);
+  assert.equal(genericCandidates.some((file) => file.path === proposal.path), false);
+
+  entry.data.settings.workspaceMode = "ent-clinical";
+  const clinicalCandidates = internal.filesForSearchEntry(entry, snapshot);
+  assert.equal(clinicalCandidates.some((file) => file.path === proposal.path), true);
 });
 
 test("an invalidated yielded search never publishes a deleted inactive out-of-folder proposal", async () => {
