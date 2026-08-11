@@ -890,6 +890,10 @@ function isExactDeterministicRepairChild(
   repaired: KnowledgeBaseEntry,
   reason: string,
 ): boolean {
+  if (!Number.isSafeInteger(parent.semanticRevision)
+    || parent.semanticRevision < 0
+    || parent.semanticRevision >= Number.MAX_SAFE_INTEGER
+    || !Number.isSafeInteger(repaired.semanticRevision)) return false;
   const semanticHash = semanticEntryFingerprint(repaired);
   const semanticHead = deterministicSemanticHead(parent.semanticHead, semanticHash, reason);
   const semanticLineage = boundedSemanticLineage(

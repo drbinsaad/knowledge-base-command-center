@@ -8,6 +8,7 @@ import {
   buildIndexDiagnostics,
   buildCanonicalMarkdown,
   buildProposalMarkdown,
+  boundedSemanticLineage,
   canonicalInterimEnvelopeString,
   canonicalIdIsValid,
   canonicalHierarchyIssue,
@@ -28,6 +29,7 @@ import {
   createPersonalBackup,
   createWorkspaceConfig,
   DATA_VERSION,
+  deterministicSemanticHead,
   curriculumContainerKey,
   expectedParentCurriculumId,
   genericNotePath,
@@ -70,6 +72,7 @@ import {
   provisionalMigratedVaultFingerprint,
   rebaseProvisionalVaultIdAfterDeterministicRepair,
   semanticPluginDataProjection,
+  semanticEntryFingerprint,
   resolveExpectedParentPath,
   replaceCurriculumVisualPath,
   replacePathMapKey,
@@ -909,6 +912,33 @@ test("provisional rebasing rejects an unstamped semantic payload change", () => 
     parentStore: parent,
     reason: "clinical-index-remediation",
   }), false);
+
+  const exhaustedBefore = structuredClone(before);
+  const exhaustedParent = structuredClone(parent);
+  const exhaustedAfter = structuredClone(parent);
+  const sourceEntry = exhaustedBefore.bases[0];
+  const parentEntry = exhaustedParent.bases[0];
+  const repairedEntry = exhaustedAfter.bases[0];
+  assert.ok(sourceEntry && parentEntry && repairedEntry);
+  sourceEntry.semanticRevision = Number.MAX_SAFE_INTEGER;
+  parentEntry.semanticRevision = Number.MAX_SAFE_INTEGER;
+  repairedEntry.data.pinnedPaths.push("Knowledge Base/Overflow.md");
+  repairedEntry.semanticRevision = Number.MAX_SAFE_INTEGER + 1;
+  repairedEntry.semanticHash = semanticEntryFingerprint(repairedEntry);
+  repairedEntry.semanticHead = deterministicSemanticHead(
+    parentEntry.semanticHead,
+    repairedEntry.semanticHash,
+    "clinical-index-remediation",
+  );
+  repairedEntry.semanticLineage = boundedSemanticLineage(
+    [parentEntry.semanticHead, ...parentEntry.semanticLineage],
+    repairedEntry.semanticHead,
+  );
+  assert.equal(rebaseProvisionalVaultIdAfterDeterministicRepair(
+    exhaustedBefore,
+    exhaustedAfter,
+    { parentStore: exhaustedParent, reason: "clinical-index-remediation" },
+  ), false);
 });
 
 test("current v14 envelopes discard ancestry when the semantic head is missing, invalid, or self-referential", () => {
