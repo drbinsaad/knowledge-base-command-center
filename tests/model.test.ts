@@ -50,6 +50,7 @@ import {
   MAX_DELETED_KNOWLEDGE_BASE_IDS,
   MAX_MIGRATION_BACKUP_BYTES,
   MAX_DEVICE_LOCAL_STATE_BYTES,
+  MAX_LIBRARIES,
   MAX_TRANSFER_LIST_ITEMS,
   MAX_TRANSFER_SNAPSHOTS,
   MAX_TRANSFER_TEXT_LENGTH,
@@ -4672,6 +4673,25 @@ test("current plugin data rejects oversized primary lists, maps, structures, and
   assert.throws(
     () => migrateData(oversizedAttachmentSetting),
     /settings attachmentMarker is longer/i,
+  );
+
+  const oversizedFollowUpCategories = migrateData(null) as unknown as Record<string, unknown>;
+  (oversizedFollowUpCategories.settings as Record<string, unknown>).followUpCategories = Array.from(
+    { length: 31 },
+    (_, index) => ({ id: `category-${index}`, label: `Category ${index}`, style: "bullet", includeDate: false, archived: false }),
+  );
+  assert.throws(
+    () => migrateData(oversizedFollowUpCategories),
+    /settings followUpCategories has too many entries/i,
+  );
+
+  const oversizedLibraryProfiles = migrateData(null) as unknown as Record<string, unknown>;
+  (oversizedLibraryProfiles.settings as Record<string, unknown>).libraryNoteProfiles = Object.fromEntries(
+    Array.from({ length: MAX_LIBRARIES + 1 }, (_, index) => [`library-${index}`, { folder: `Folder ${index}` }]),
+  );
+  assert.throws(
+    () => migrateData(oversizedLibraryProfiles),
+    /settings libraryNoteProfiles has too many entries/i,
   );
 
   const totalText = migrateData(null) as unknown as Record<string, unknown>;

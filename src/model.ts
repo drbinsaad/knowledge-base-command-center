@@ -1,6 +1,7 @@
 import {
   cleanFollowUpCategoryDefinitions,
   DEFAULT_FOLLOW_UP_CATEGORIES,
+  MAX_FOLLOW_UP_CATEGORIES,
   type FollowUpCategoryDefinition,
 } from "./follow-up";
 
@@ -4458,6 +4459,34 @@ function validateLoadedSettingsText(input: unknown, label: string, budget: LoadT
     "allowClinicalVisualGroupMoves",
   ] as const) validateLoadedBoolean(settings[key], `${label} ${key}`);
   validateLoadedNumber(settings.recentLimit, `${label} recentLimit`);
+
+  const categories = settings.followUpCategories;
+  if (categories !== undefined) {
+    if (!Array.isArray(categories)) throw new Error(`${label} followUpCategories must be a list.`);
+    if (categories.length > MAX_FOLLOW_UP_CATEGORIES) {
+      throw new Error(`${label} followUpCategories has too many entries.`);
+    }
+    categories.forEach((rawCategory, index) => {
+      const category = requiredPlainRecord(rawCategory, `${label} followUpCategories ${index + 1}`);
+      validateLoadedText(category.id, `${label} followUpCategories ${index + 1} ID`, budget);
+      validateLoadedText(category.label, `${label} followUpCategories ${index + 1} label`, budget);
+      validateLoadedText(category.style, `${label} followUpCategories ${index + 1} style`, budget);
+      validateLoadedBoolean(category.includeDate, `${label} followUpCategories ${index + 1} includeDate`);
+      validateLoadedBoolean(category.archived, `${label} followUpCategories ${index + 1} archived`);
+    });
+  }
+
+  const profiles = optionalPlainRecord(settings.libraryNoteProfiles, `${label} libraryNoteProfiles`);
+  let profileCount = 0;
+  for (const [libraryId, rawProfile] of Object.entries(profiles)) {
+    profileCount += 1;
+    if (profileCount > MAX_LIBRARIES) throw new Error(`${label} libraryNoteProfiles has too many entries.`);
+    validateLoadedText(libraryId, `${label} libraryNoteProfiles key`, budget);
+    const profile = requiredPlainRecord(rawProfile, `${label} libraryNoteProfiles ${libraryId}`);
+    validateLoadedText(profile.folder, `${label} libraryNoteProfiles ${libraryId} folder`, budget);
+    validateLoadedText(profile.mode, `${label} libraryNoteProfiles ${libraryId} mode`, budget);
+    validateLoadedText(profile.templatePath, `${label} libraryNoteProfiles ${libraryId} templatePath`, budget);
+  }
 }
 
 function validateLoadedPortableIndexText(input: unknown, label: string, budget: LoadTextValidationBudget): void {
