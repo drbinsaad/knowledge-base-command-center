@@ -54,6 +54,7 @@ import {
   pathIsInsideFolder,
   portablePlaceholderPath,
   portableSubjectIdFromPath,
+  pluginStoreNeedsNormalization,
   PortableSubjectDefinition,
   PluginData,
   PluginStore,
@@ -110,6 +111,7 @@ interface PluginDataLoadResult {
   recognizedStore: boolean;
   hasVaultId: boolean;
   identityNeedsWriteback: boolean;
+  structuralRepairNeedsWriteback: boolean;
   remediationNeedsWriteback: boolean;
   /** True only when no persisted plugin payload existed at read time. */
   sourceWasMissing: boolean;
@@ -449,7 +451,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.store = createDefaultStore(this.data);
       this.dataCompatibilityWarning = `Plugin data could not be parsed (${error instanceof Error ? error.message : String(error)}). Personal organization is read-only so the existing data.json is not overwritten; repair or remove that file to continue.`;
       new Notice(this.dataCompatibilityWarning, 10000);
-      return { recognizedStore: false, hasVaultId: false, identityNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing: false, sourceVersion: 0, compatible: false };
+      return { recognizedStore: false, hasVaultId: false, identityNeedsWriteback: false, structuralRepairNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing: false, sourceVersion: 0, compatible: false };
     }
     const sourceWasMissing = loaded === null
       || loaded === undefined
@@ -459,51 +461,69 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const recognizedStore = isRecognizedPluginStore(loaded);
     const rawVaultId = typeof loadedRecord.vaultId === "string" ? loadedRecord.vaultId.trim() : "";
     const hadFinalVaultId = recognizedStore && Boolean(rawVaultId) && !isLegacyDeterministicMigratedVaultId(rawVaultId);
+    // migrateStore below is the authoritative validation boundary. Retain the
+    // earliest supported envelope so a still-pristine provisional identity can
+    // be rebased if schema migration or deterministic repair changes its
+    // fingerprint. The snapshot is used only after migrateStore has validated
+    // the complete envelope successfully.
+    const preMigrationStore = recognizedStore && sourceVersion <= STORE_VERSION && rawVaultId
+      ? loaded as PluginStore
+      : null;
     if (sourceVersion === 0 && Object.keys(loadedRecord).length > 0 && !isRecognizedPluginData(loaded) && !recognizedStore) {
       this.useActiveData(structuredClone(DEFAULT_DATA));
       this.store = createDefaultStore(this.data);
       this.dataCompatibilityWarning = "Plugin data has an unrecognized shape. Personal organization is read-only so the original data is not overwritten; export or repair data.json before continuing.";
       new Notice(this.dataCompatibilityWarning, 10000);
-      return { recognizedStore: false, hasVaultId: false, identityNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing, sourceVersion, compatible: false };
+      return { recognizedStore: false, hasVaultId: false, identityNeedsWriteback: false, structuralRepairNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing, sourceVersion, compatible: false };
     }
     if (!recognizedStore && sourceVersion > DATA_VERSION && isRecognizedPluginData(loaded)) {
       this.useActiveData(migrateData(loaded));
       this.store = createDefaultStore(this.data);
       this.dataCompatibilityWarning = `Plugin data version ${sourceVersion} is newer than this build (v${DATA_VERSION}). Personal organization is read-only to prevent data loss.`;
       new Notice(this.dataCompatibilityWarning, 10000);
-      return { recognizedStore: false, hasVaultId: false, identityNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing, sourceVersion, compatible: false };
+      return { recognizedStore: false, hasVaultId: false, identityNeedsWriteback: false, structuralRepairNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing, sourceVersion, compatible: false };
     }
+    let structuralRepairNeedsWriteback = false;
     try {
       this.store = migrateStore(loaded);
+      structuralRepairNeedsWriteback = recognizedStore
+        && sourceVersion === STORE_VERSION
+        && pluginStoreNeedsNormalization(loaded, this.store);
       this.useActiveData(this.requireActiveBase().data);
     } catch (error) {
       this.useActiveData(structuredClone(DEFAULT_DATA));
       this.store = createDefaultStore(this.data);
       this.dataCompatibilityWarning = `Knowledge-base data could not be migrated (${error instanceof Error ? error.message : String(error)}). The existing data.json remains read-only and was not overwritten.`;
       new Notice(this.dataCompatibilityWarning, 10000);
-      return { recognizedStore, hasVaultId: hadFinalVaultId, identityNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing, sourceVersion, compatible: false };
+      return { recognizedStore, hasVaultId: hadFinalVaultId, identityNeedsWriteback: false, structuralRepairNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing, sourceVersion, compatible: false };
     }
     if (recognizedStore && sourceVersion > STORE_VERSION) {
       this.dataCompatibilityWarning = `Plugin data version ${sourceVersion} is newer than this build (v${STORE_VERSION}). All knowledge bases are read-only to prevent data loss.`;
       new Notice(this.dataCompatibilityWarning, 10000);
-      return { recognizedStore, hasVaultId: hadFinalVaultId, identityNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing, sourceVersion, compatible: false };
+      return { recognizedStore, hasVaultId: hadFinalVaultId, identityNeedsWriteback: false, structuralRepairNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing, sourceVersion, compatible: false };
     }
     const preRemediationStore = structuredClone(this.store);
     const remediationNeedsWriteback = this.remediateInvalidClinicalIndexes();
     if (remediationNeedsWriteback) {
-      // Migration identities fingerprint their pristine payload so two
-      // devices upgrading the same old data can converge. ENT invariant
-      // repair is deterministic and happens in the same atomic write, so
-      // rebase any still-pristine provisional identity to the repaired payload
-      // while retaining the device's random nonce. The helper rejects normal
-      // identities and any provisional store edited after migration.
-      rebaseProvisionalVaultIdAfterDeterministicRepair(preRemediationStore, this.store);
       this.useActiveData(this.requireActiveBase().data);
       this.invalidateRecordCache();
     }
+    const schemaMigrationNeedsWriteback = recognizedStore && sourceVersion < STORE_VERSION;
+    if (schemaMigrationNeedsWriteback || structuralRepairNeedsWriteback || remediationNeedsWriteback) {
+      // Migration identities fingerprint their pristine payload so two
+      // devices upgrading the same old data can converge. Rebase once from
+      // the earliest pre-repair envelope to the final deterministically
+      // repaired payload, retaining the random nonce. The helper rejects
+      // normal identities and any provisional store edited after migration.
+      rebaseProvisionalVaultIdAfterDeterministicRepair(
+        preMigrationStore ?? preRemediationStore,
+        this.store,
+      );
+    }
     try {
       if (persistMigration && !sourceWasMissing
-        && (!recognizedStore || !hadFinalVaultId || sourceVersion !== STORE_VERSION || remediationNeedsWriteback)) {
+        && (!recognizedStore || !hadFinalVaultId || sourceVersion !== STORE_VERSION
+          || structuralRepairNeedsWriteback || remediationNeedsWriteback)) {
         // Migration and every-base clinical remediation share one atomic store
         // write. A large vault therefore never receives one save per base.
         await this.saveStoreSnapshot();
@@ -528,6 +548,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       recognizedStore,
       hasVaultId: recognizedStore && Boolean(this.store.vaultId),
       identityNeedsWriteback: recognizedStore && !hadFinalVaultId,
+      structuralRepairNeedsWriteback,
       remediationNeedsWriteback,
       sourceWasMissing,
       sourceVersion,
@@ -816,6 +837,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
                   latestNeedsWriteback = recoverableLegacyCapture
                     || loaded.sourceVersion !== STORE_VERSION
                     || loaded.identityNeedsWriteback
+                    || loaded.structuralRepairNeedsWriteback
                     || loaded.remediationNeedsWriteback;
                 } else if (baselineTrust === "fresh") {
                   const localBootstrapOnly = freshStoreHasOnlyBootstrapChanges(workingStore);
@@ -825,7 +847,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
                     if (workingStore.vaultId === incomingStore.vaultId) {
                       const merged = mergeKnowledgeBaseStores(workingStore, incomingStore, preferredActiveId);
                       workingStore = merged.store;
-                      latestNeedsWriteback = merged.incomingNeedsWriteback || loaded.remediationNeedsWriteback;
+                      latestNeedsWriteback = merged.incomingNeedsWriteback
+                        || loaded.structuralRepairNeedsWriteback
+                        || loaded.remediationNeedsWriteback;
                     } else if (localBootstrapOnly && !incomingBootstrapOnly) {
                       workingStore = structuredClone(incomingStore);
                     } else if (!localBootstrapOnly && incomingBootstrapOnly) {
@@ -876,6 +900,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
                     latestNeedsWriteback = recoverableLegacyCapture
                       || loaded.sourceVersion !== STORE_VERSION
                       || loaded.identityNeedsWriteback
+                      || loaded.structuralRepairNeedsWriteback
                       || loaded.remediationNeedsWriteback;
                   }
                 } else if ((baselineTrust === "identified" || baselineTrust === "legacy-provisional")
@@ -907,11 +932,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
                   baselineTrust = "identified";
                   latestNeedsWriteback = loaded.sourceVersion !== STORE_VERSION
                     || loaded.identityNeedsWriteback
+                    || loaded.structuralRepairNeedsWriteback
                     || loaded.remediationNeedsWriteback;
                 } else {
                   const merged = mergeKnowledgeBaseStores(workingStore, incomingStore, preferredActiveId);
                   workingStore = merged.store;
                   latestNeedsWriteback = merged.incomingNeedsWriteback
+                    || loaded.structuralRepairNeedsWriteback
                     || loaded.remediationNeedsWriteback
                     || recoverableLegacyCapture;
                 }

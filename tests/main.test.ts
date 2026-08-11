@@ -47,6 +47,29 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve };
 }
 
+function migrationFingerprintForTest(value: unknown): string {
+  const canonical = (input: unknown): unknown => {
+    if (Array.isArray(input)) return input.map((item) => canonical(item) ?? null);
+    if (!input || typeof input !== "object") return input;
+    const output = Object.create(null) as Record<string, unknown>;
+    for (const key of Object.keys(input).sort()) {
+      const normalized = canonical((input as Record<string, unknown>)[key]);
+      if (normalized !== undefined) output[key] = normalized;
+    }
+    return output;
+  };
+  const text = JSON.stringify(canonical(value));
+  const hash = (seed: number): string => {
+    let result = seed >>> 0;
+    for (let index = 0; index < text.length; index += 1) {
+      result ^= text.charCodeAt(index);
+      result = Math.imul(result, 0x01000193) >>> 0;
+    }
+    return result.toString(16).padStart(8, "0");
+  };
+  return `${hash(0x811c9dc5)}${hash(0x9e3779b9)}`;
+}
+
 function emptyWritableTestVault(): {
   configDir: string;
   getMarkdownFiles: () => TFile[];
@@ -307,6 +330,251 @@ test("versionless modern plugin data is migrated and saved without losing organi
   assert.deepEqual(saved.bases?.[0]?.data?.pinnedPaths, ["Notes/Paper.md"]);
 });
 
+test("ordinary current-version loading persists structural ID repair exactly once", async () => {
+  const active = migrateData(null);
+  active.settings.workspaceName = "Primary research";
+  active.pinnedPaths = ["Knowledge Base/Important.md"];
+  const inactive = migrateData(null);
+  inactive.settings.workspaceName = "Secondary research";
+  const store = createDefaultStore(active, 100, "vault-current-structural-repair");
+  store.bases[0].updatedAt = 150;
+  const inactiveEntry = createKnowledgeBaseEntry(inactive, "base-secondary", 200);
+  inactiveEntry.updatedAt = 250;
+  store.bases.push(inactiveEntry);
+
+  const raw = structuredClone(store) as unknown as {
+    bases: Array<{ data: Record<string, unknown> }>;
+  };
+  raw.bases[0].data.collections = [
+    { id: "shared", title: "Local heading", collapsed: false, subjects: [], subheadings: [] },
+    {
+      id: "shared",
+      title: "Damaged duplicate",
+      collapsed: false,
+      subjects: [],
+      subheadings: [{ id: "__proto__", title: "Unsafe child", collapsed: false, subjects: [] }],
+    },
+  ];
+  raw.bases[1].data.savedViews = [
+    { id: "saved", name: "First", tab: "curriculum", query: "first" },
+    { id: "saved", name: "Second", tab: "collections", query: "second" },
+  ];
+  const plugin = pluginWith(raw);
+
+  const first = await plugin.loadPluginData();
+
+  assert.equal(first.structuralRepairNeedsWriteback, true);
+  assert.equal(plugin.savedData.length, 1, "all current-store repairs share one atomic writeback");
+  assert.equal(plugin.getKnowledgeBases(true)[0]?.updatedAt, 150, "repair preserves semantic conflict timestamps");
+  assert.equal(plugin.getKnowledgeBases(true)[1]?.updatedAt, 250);
+  assert.equal(plugin.data.settings.workspaceName, "Primary research");
+  assert.deepEqual(plugin.data.pinnedPaths, ["Knowledge Base/Important.md"]);
+  const activeIds = plugin.data.collections.flatMap((heading) => [
+    heading.id,
+    ...heading.subheadings.map((subheading) => subheading.id),
+  ]);
+  const inactiveIds = plugin.getKnowledgeBases(true)[1]?.data.savedViews.map((view) => view.id) ?? [];
+  assert.equal(new Set(activeIds).size, activeIds.length);
+  assert.equal(activeIds.includes("__proto__"), false);
+  assert.equal(new Set(inactiveIds).size, inactiveIds.length);
+
+  plugin.loadedData = plugin.savedData[0];
+  plugin.savedData.length = 0;
+  const second = await plugin.loadPluginData();
+  assert.equal(second.structuralRepairNeedsWriteback, false);
+  assert.equal(plugin.savedData.length, 0, "the normalized store does not enter a writeback loop");
+  assert.equal(plugin.data.settings.workspaceName, "Primary research");
+  assert.deepEqual(plugin.data.pinnedPaths, ["Knowledge Base/Important.md"]);
+});
+
+test("current structural repair rebases a pristine provisional migration identity", async () => {
+  const data = migrateData(null);
+  const store = createDefaultStore(data, 100, "vault-current-repair-placeholder");
+  store.bases[0].data.collections = [
+    { id: "shared", title: "First", collapsed: false, subjects: [], subheadings: [] },
+    { id: "shared", title: "Duplicate", collapsed: false, subjects: [], subheadings: [] },
+  ];
+  const oldFingerprint = migrationFingerprintForTest(store.bases[0].data);
+  store.vaultId = `vault-migrated-${oldFingerprint}-abcdefghijkl`;
+  const plugin = pluginWith(store);
+
+  const loaded = await plugin.loadPluginData();
+
+  const repairedFingerprint = migrationFingerprintForTest(plugin.data);
+  assert.equal(loaded.structuralRepairNeedsWriteback, true);
+  assert.notEqual(repairedFingerprint, oldFingerprint);
+  assert.equal(provisionalMigratedVaultFingerprint(plugin.getVaultId()), repairedFingerprint);
+  assert.match(plugin.getVaultId(), /-abcdefghijkl$/);
+  assert.equal(plugin.savedData.length, 1);
+});
+
+test("current structural repair rebases legacy deterministic provisional IDs after rotation", async () => {
+  const data = migrateData(null);
+  const template = createDefaultStore(data, 100, "vault-current-repair-placeholder");
+  template.bases[0].data.collections = [
+    { id: "shared", title: "First", collapsed: false, subjects: [], subheadings: [] },
+    { id: "shared", title: "Duplicate", collapsed: false, subjects: [], subheadings: [] },
+  ];
+  const oldFingerprint = migrationFingerprintForTest(template.bases[0].data);
+  template.vaultId = `vault-migrated-${oldFingerprint}`;
+  const left = pluginWith(structuredClone(template));
+  const right = pluginWith(structuredClone(template));
+
+  await left.loadPluginData();
+  await right.loadPluginData();
+
+  const leftSaved = left.savedData[0] as PluginStore;
+  const rightSaved = right.savedData[0] as PluginStore;
+  const repairedFingerprint = migrationFingerprintForTest(leftSaved.bases[0]?.data);
+  assert.notEqual(repairedFingerprint, oldFingerprint);
+  assert.equal(provisionalMigratedVaultFingerprint(leftSaved.vaultId), repairedFingerprint);
+  assert.equal(provisionalMigratedVaultFingerprint(rightSaved.vaultId), repairedFingerprint);
+  assert.doesNotThrow(() => mergeKnowledgeBaseStores(leftSaved, rightSaved, leftSaved.activeBaseId));
+});
+
+test("current structural repair preserves identity-less envelope convergence across devices", async () => {
+  const data = migrateData(null);
+  const template = createDefaultStore(data, 100, "vault-current-envelope-placeholder");
+  template.bases[0].data.collections = [
+    { id: "shared", title: "First", collapsed: false, subjects: [], subheadings: [] },
+    { id: "shared", title: "Duplicate", collapsed: false, subjects: [], subheadings: [] },
+  ];
+  const identityMaterial = {
+    kind: STORE_KIND,
+    version: STORE_VERSION,
+    bases: template.bases,
+    deletedBaseIds: template.deletedBaseIds,
+  };
+  const oldFingerprint = migrationFingerprintForTest(identityMaterial);
+  const leftStore = structuredClone(template);
+  const rightStore = structuredClone(template);
+  leftStore.vaultId = `vault-envelope-migrated-${oldFingerprint}-aaaaaaaaaaaa`;
+  rightStore.vaultId = `vault-envelope-migrated-${oldFingerprint}-bbbbbbbbbbbb`;
+  const left = pluginWith(leftStore);
+  const right = pluginWith(rightStore);
+
+  await left.loadPluginData();
+  await right.loadPluginData();
+
+  const leftSaved = left.savedData[0] as PluginStore;
+  const rightSaved = right.savedData[0] as PluginStore;
+  const repairedMaterial = {
+    kind: STORE_KIND,
+    version: STORE_VERSION,
+    bases: leftSaved.bases,
+    deletedBaseIds: leftSaved.deletedBaseIds,
+  };
+  const repairedFingerprint = migrationFingerprintForTest(repairedMaterial);
+  assert.notEqual(repairedFingerprint, oldFingerprint);
+  assert.equal(provisionalInterimEnvelopeVaultFingerprint(leftSaved.vaultId), repairedFingerprint);
+  assert.equal(provisionalInterimEnvelopeVaultFingerprint(rightSaved.vaultId), repairedFingerprint);
+  assert.doesNotThrow(() => mergeKnowledgeBaseStores(leftSaved, rightSaved, leftSaved.activeBaseId));
+});
+
+test("old-schema migration rebases pristine provisional identities across devices", async () => {
+  const legacyData = migrateData(null);
+  legacyData.settings.workspaceName = "Legacy migrated knowledge base";
+  (legacyData as { version: number }).version = DATA_VERSION - 2;
+  const template = createDefaultStore(legacyData, 100, "vault-old-schema-placeholder");
+  (template as { version: number }).version = STORE_VERSION - 2;
+  const oldFingerprint = migrationFingerprintForTest(template.bases[0]?.data);
+  const leftStore = structuredClone(template);
+  const rightStore = structuredClone(template);
+  leftStore.vaultId = `vault-migrated-${oldFingerprint}-aaaaaaaaaaaa`;
+  rightStore.vaultId = `vault-migrated-${oldFingerprint}-bbbbbbbbbbbb`;
+  const left = pluginWith(leftStore);
+  const right = pluginWith(rightStore);
+
+  const leftLoad = await left.loadPluginData();
+  const rightLoad = await right.loadPluginData();
+
+  assert.equal(leftLoad.sourceVersion, STORE_VERSION - 2);
+  assert.equal(rightLoad.sourceVersion, STORE_VERSION - 2);
+  assert.equal(leftLoad.structuralRepairNeedsWriteback, false, "schema migration has its own writeback signal");
+  assert.equal(left.savedData.length, 1);
+  assert.equal(right.savedData.length, 1);
+  const leftSaved = left.savedData[0] as PluginStore;
+  const rightSaved = right.savedData[0] as PluginStore;
+  const migratedFingerprint = migrationFingerprintForTest(leftSaved.bases[0]?.data);
+  assert.notEqual(migratedFingerprint, oldFingerprint);
+  assert.equal(leftSaved.bases[0]?.data.settings.workspaceName, "Legacy migrated knowledge base");
+  assert.equal(provisionalMigratedVaultFingerprint(leftSaved.vaultId), migratedFingerprint);
+  assert.equal(provisionalMigratedVaultFingerprint(rightSaved.vaultId), migratedFingerprint);
+  assert.doesNotThrow(() => mergeKnowledgeBaseStores(leftSaved, rightSaved, leftSaved.activeBaseId));
+});
+
+test("old-schema migration rebases pristine identity-less envelope IDs across devices", async () => {
+  const legacyData = migrateData(null);
+  legacyData.settings.workspaceName = "Legacy envelope knowledge base";
+  (legacyData as { version: number }).version = DATA_VERSION - 2;
+  const template = createDefaultStore(legacyData, 100, "vault-old-envelope-placeholder");
+  (template as { version: number }).version = STORE_VERSION - 2;
+  const oldIdentityMaterial = {
+    kind: STORE_KIND,
+    version: STORE_VERSION,
+    bases: template.bases,
+    deletedBaseIds: template.deletedBaseIds,
+  };
+  const oldFingerprint = migrationFingerprintForTest(oldIdentityMaterial);
+  const leftStore = structuredClone(template);
+  const rightStore = structuredClone(template);
+  leftStore.vaultId = `vault-envelope-migrated-${oldFingerprint}-aaaaaaaaaaaa`;
+  rightStore.vaultId = `vault-envelope-migrated-${oldFingerprint}-bbbbbbbbbbbb`;
+  const left = pluginWith(leftStore);
+  const right = pluginWith(rightStore);
+
+  await left.loadPluginData();
+  await right.loadPluginData();
+
+  assert.equal(left.savedData.length, 1);
+  assert.equal(right.savedData.length, 1);
+  const leftSaved = left.savedData[0] as PluginStore;
+  const rightSaved = right.savedData[0] as PluginStore;
+  const migratedIdentityMaterial = {
+    kind: STORE_KIND,
+    version: STORE_VERSION,
+    bases: leftSaved.bases,
+    deletedBaseIds: leftSaved.deletedBaseIds,
+  };
+  const migratedFingerprint = migrationFingerprintForTest(migratedIdentityMaterial);
+  assert.notEqual(migratedFingerprint, oldFingerprint);
+  assert.equal(leftSaved.bases[0]?.data.settings.workspaceName, "Legacy envelope knowledge base");
+  assert.equal(provisionalInterimEnvelopeVaultFingerprint(leftSaved.vaultId), migratedFingerprint);
+  assert.equal(provisionalInterimEnvelopeVaultFingerprint(rightSaved.vaultId), migratedFingerprint);
+  assert.doesNotThrow(() => mergeKnowledgeBaseStores(leftSaved, rightSaved, leftSaved.activeBaseId));
+});
+
+test("combined structural and clinical repair rebases once to the final convergent payload", async () => {
+  const medication = new TFile("06 Clinical Tools/Medications/Drug - Allergodil.md");
+  const data = invalidEntMedicationIndexData(medication);
+  data.collections = [
+    { id: "shared", title: "First", collapsed: false, subjects: [], subheadings: [] },
+    { id: "shared", title: "Duplicate", collapsed: false, subjects: [], subheadings: [] },
+  ];
+  const oldFingerprint = migrationFingerprintForTest(data);
+  const template = createDefaultStore(data, 100, `vault-migrated-${oldFingerprint}-aaaaaaaaaaaa`);
+  const other = structuredClone(template);
+  other.vaultId = `vault-migrated-${oldFingerprint}-bbbbbbbbbbbb`;
+  const frontmatter = { [medication.path]: { title: "Allergodil" } };
+  const left = pluginWithFiles(template, [medication], frontmatter).plugin;
+  const right = pluginWithFiles(other, [medication], frontmatter).plugin;
+
+  const leftLoad = await left.loadPluginData();
+  const rightLoad = await right.loadPluginData();
+
+  assert.equal(leftLoad.structuralRepairNeedsWriteback, true);
+  assert.equal(leftLoad.remediationNeedsWriteback, true);
+  assert.equal(rightLoad.structuralRepairNeedsWriteback, true);
+  assert.equal(rightLoad.remediationNeedsWriteback, true);
+  const leftSaved = left.savedData[0] as PluginStore;
+  const rightSaved = right.savedData[0] as PluginStore;
+  const finalFingerprint = migrationFingerprintForTest(leftSaved.bases[0]?.data);
+  assert.equal(provisionalMigratedVaultFingerprint(leftSaved.vaultId), finalFingerprint);
+  assert.equal(provisionalMigratedVaultFingerprint(rightSaved.vaultId), finalFingerprint);
+  assert.equal(leftSaved.bases[0]?.data.portableIndex.subjects[0]?.indexed, false);
+  assert.doesNotThrow(() => mergeKnowledgeBaseStores(leftSaved, rightSaved, leftSaved.activeBaseId));
+});
+
 test("an interim deterministic migrated vault ID rotates once and is persisted", async () => {
   const data = migrateData(null);
   data.settings.workspaceName = "MY MAIN NOTE KB";
@@ -316,6 +584,7 @@ test("an interim deterministic migrated vault ID rotates once and is persisted",
   const result = await plugin.loadPluginData();
 
   assert.equal(result.compatible, true);
+  assert.equal(result.structuralRepairNeedsWriteback, false, "identity rotation is not misclassified as payload repair");
   assert.equal(result.hasVaultId, true, "the rotated in-memory identity is available to Sync");
   assert.match(plugin.getVaultId(), /^vault-migrated-0123456789abcdef-[a-z0-9]{12,64}$/i);
   assert.notEqual(plugin.getVaultId(), "vault-migrated-0123456789abcdef");

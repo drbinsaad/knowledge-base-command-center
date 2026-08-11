@@ -487,12 +487,23 @@ export function makeId(prefix: string): string {
 function canonicalMigrationValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map((item) => canonicalMigrationValue(item) ?? null);
   if (!value || typeof value !== "object") return value;
-  const output: Record<string, unknown> = {};
+  const output = Object.create(null) as Record<string, unknown>;
   for (const key of Object.keys(value).sort()) {
     const normalized = canonicalMigrationValue((value as Record<string, unknown>)[key]);
     if (normalized !== undefined) output[key] = normalized;
   }
   return output;
+}
+
+/** Whether a current persisted envelope differs from its safely cleaned form. */
+export function pluginStoreNeedsNormalization(input: unknown, normalized: PluginStore): boolean {
+  const raw = asUnknownRecord(input);
+  // Vault-identity creation/rotation has its own writeback signal in main.ts.
+  // Excluding it here keeps this predicate specific to deterministic payload
+  // and envelope-structure repair.
+  const comparableNormalized = { ...normalized, vaultId: raw.vaultId };
+  return JSON.stringify(canonicalMigrationValue(input))
+    !== JSON.stringify(canonicalMigrationValue(comparableNormalized));
 }
 
 function fingerprintText(text: string): string {
@@ -655,22 +666,36 @@ function sameMigrationEnvelopeMetadata(before: PluginStore, after: PluginStore):
 }
 
 /**
- * Rebase a still-pristine provisional migration identity after a deterministic
- * schema repair changes only knowledge-base payload data. The original random
- * nonce remains intact, so independently upgraded devices stay distinct while
- * carrying the same repaired fingerprint and can converge through Sync.
+ * Rebase a still-pristine provisional migration identity after deterministic
+ * schema migration or repair changes only knowledge-base payload data. The
+ * original random nonce remains intact, so independently upgraded devices stay
+ * distinct while carrying the same repaired fingerprint and can converge
+ * through Sync.
  *
- * The caller must provide the snapshot from immediately before the repair.
- * Normal identities, edited provisional stores, and metadata-changing repairs
+ * The caller must provide the earliest envelope from before migration/repair.
+ * Normal identities, edited provisional stores, and metadata-changing changes
  * are deliberately rejected.
  */
 export function rebaseProvisionalVaultIdAfterDeterministicRepair(
   before: PluginStore,
   after: PluginStore,
 ): boolean {
-  if (before.vaultId !== after.vaultId || !sameMigrationEnvelopeMetadata(before, after)) return false;
+  if (!sameMigrationEnvelopeMetadata(before, after)) return false;
 
-  const flatMatch = /^vault-migrated-([0-9a-f]{16})-([a-z0-9]{12,64})$/i.exec(before.vaultId.trim());
+  // migrateStore rotates the supported legacy deterministic flat identity to
+  // a nonce-bearing provisional ID before callers can apply later structural
+  // repairs. Accept only that exact fingerprint-preserving transition; every
+  // other identity change remains ineligible for rebasing.
+  const legacyFlatMatch = /^vault-migrated-([0-9a-f]{16})$/i.exec(before.vaultId.trim());
+  const rotatedFlatMatch = /^vault-migrated-([0-9a-f]{16})-([a-z0-9]{12,64})$/i.exec(after.vaultId.trim());
+  const validLegacyRotation = Boolean(legacyFlatMatch
+    && rotatedFlatMatch
+    && legacyFlatMatch[1]?.toLowerCase() === rotatedFlatMatch[1]?.toLowerCase());
+  if (before.vaultId !== after.vaultId && !validLegacyRotation) return false;
+
+  const flatMatch = validLegacyRotation
+    ? rotatedFlatMatch
+    : /^vault-migrated-([0-9a-f]{16})-([a-z0-9]{12,64})$/i.exec(before.vaultId.trim());
   if (flatMatch && pristineProvisionalMigratedStoreFingerprint(before)) {
     const entry = after.bases[0];
     if (!entry) return false;
@@ -870,11 +895,20 @@ export function ensureSystemLibraries(state: PortableIndexLocalState): void {
   state.libraries.sort((left, right) => left.order - right.order || left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
 }
 
-function deterministicLayoutId(preferred: string, used: Set<string>): string {
+function deterministicLayoutId(
+  preferred: string,
+  used: Set<string>,
+  reserved: ReadonlySet<string> = used,
+  preserveReservedPreferred = true,
+): string {
   const base = preferred.trim() || "layout";
+  if (!used.has(base) && (preserveReservedPreferred || !reserved.has(base))) {
+    used.add(base);
+    return base;
+  }
   let candidate = base;
   let suffix = 2;
-  while (used.has(candidate)) {
+  while (used.has(candidate) || reserved.has(candidate)) {
     candidate = `${base}-${suffix}`;
     suffix += 1;
   }
@@ -924,6 +958,26 @@ function cleanLibraryLayout(
 ): LayoutHeading[] {
   const allowed = new Set(librarySubjectsById(subjects, libraryId).map((subject) => subject.id));
   const placed = new Set<string>();
+  // Reserve every intact identity before generating replacements. Without
+  // this first pass, an earlier missing/unsafe node can take the fallback ID
+  // of a later intact heading or subheading, forcing that intact node to be
+  // renamed merely because of array order.
+  const reservedIds = new Set<string>();
+  if (Array.isArray(input)) {
+    for (const rawHeading of input) {
+      const heading = asUnknownRecord(rawHeading);
+      if (!asText(heading.title)) continue;
+      const headingId = asText(heading.id);
+      if (headingId && isSafeObjectKey(headingId)) reservedIds.add(headingId);
+      if (!Array.isArray(heading.subheadings)) continue;
+      for (const rawSubheading of heading.subheadings) {
+        const subheading = asUnknownRecord(rawSubheading);
+        if (!asText(subheading.title)) continue;
+        const subheadingId = asText(subheading.id);
+        if (subheadingId && isSafeObjectKey(subheadingId)) reservedIds.add(subheadingId);
+      }
+    }
+  }
   const structureIds = new Set<string>();
   const headings: LayoutHeading[] = [];
   if (Array.isArray(input)) {
@@ -931,11 +985,15 @@ function cleanLibraryLayout(
       const heading = asUnknownRecord(rawHeading);
       const title = asText(heading.title);
       if (!title) continue;
+      const preferredHeadingId = asText(heading.id);
+      const hasSafeHeadingId = Boolean(preferredHeadingId && isSafeObjectKey(preferredHeadingId));
       const headingId = deterministicLayoutId(
-        isSafeObjectKey(asText(heading.id)) && asText(heading.id)
-          ? asText(heading.id)
+        hasSafeHeadingId
+          ? preferredHeadingId
           : `library-${libraryId}-heading-${headingIndex + 1}`,
         structureIds,
+        reservedIds,
+        hasSafeHeadingId,
       );
       const takeSubjects = (rawSubjects: unknown): string[] => {
         const output: string[] = [];
@@ -953,12 +1011,16 @@ function cleanLibraryLayout(
           const subheading = asUnknownRecord(rawSubheading);
           const subheadingTitle = asText(subheading.title);
           if (!subheadingTitle) continue;
+          const preferredSubheadingId = asText(subheading.id);
+          const hasSafeSubheadingId = Boolean(preferredSubheadingId && isSafeObjectKey(preferredSubheadingId));
           subheadings.push({
             id: deterministicLayoutId(
-              isSafeObjectKey(asText(subheading.id)) && asText(subheading.id)
-                ? asText(subheading.id)
+              hasSafeSubheadingId
+                ? preferredSubheadingId
                 : `${headingId}-subheading-${subheadingIndex + 1}`,
               structureIds,
+              reservedIds,
+              hasSafeSubheadingId,
             ),
             title: subheadingTitle,
             collapsed: subheading.collapsed === true,
@@ -1599,19 +1661,53 @@ function recoveredLegacyId(prefix: string, parts: unknown[]): string {
 
 function cleanLayout(input: unknown): LayoutHeading[] {
   if (!Array.isArray(input)) return [];
+  const reservedIds = new Set<string>();
+  for (const raw of input as unknown[]) {
+    const value = asUnknownRecord(raw);
+    if (!asText(value.title)) continue;
+    const headingId = asText(value.id);
+    if (headingId && isSafeObjectKey(headingId)) reservedIds.add(headingId);
+    if (!Array.isArray(value.subheadings)) continue;
+    for (const rawSub of value.subheadings as unknown[]) {
+      const subheading = asUnknownRecord(rawSub);
+      if (!asText(subheading.title)) continue;
+      const subheadingId = asText(subheading.id);
+      if (subheadingId && isSafeObjectKey(subheadingId)) reservedIds.add(subheadingId);
+    }
+  }
   const headings: LayoutHeading[] = [];
+  const structureIds = new Set<string>();
   for (const [headingIndex, raw] of (input as unknown[]).entries()) {
     const value = asUnknownRecord(raw);
     const title = asText(value.title);
     if (!title) continue;
+    const preferredHeadingId = asText(value.id);
+    const hasSafeHeadingId = Boolean(preferredHeadingId && isSafeObjectKey(preferredHeadingId));
+    const headingId = deterministicLayoutId(
+      hasSafeHeadingId
+        ? preferredHeadingId
+        : recoveredLegacyId("collection", [headingIndex, title]),
+      structureIds,
+      reservedIds,
+      hasSafeHeadingId,
+    );
     const subheadings: LayoutSubheading[] = [];
     if (Array.isArray(value.subheadings)) {
       for (const [subheadingIndex, rawSub] of (value.subheadings as unknown[]).entries()) {
         const sub = asUnknownRecord(rawSub);
         const subTitle = asText(sub.title);
         if (!subTitle) continue;
+        const preferredSubheadingId = asText(sub.id);
+        const hasSafeSubheadingId = Boolean(preferredSubheadingId && isSafeObjectKey(preferredSubheadingId));
         subheadings.push({
-          id: asText(sub.id) || recoveredLegacyId("subheading", [headingIndex, subheadingIndex, subTitle]),
+          id: deterministicLayoutId(
+            hasSafeSubheadingId
+              ? preferredSubheadingId
+              : recoveredLegacyId("subheading", [headingIndex, subheadingIndex, subTitle]),
+            structureIds,
+            reservedIds,
+            hasSafeSubheadingId,
+          ),
           title: subTitle,
           collapsed: sub.collapsed === true,
           subjects: asStringList(sub.subjects),
@@ -1619,7 +1715,7 @@ function cleanLayout(input: unknown): LayoutHeading[] {
       }
     }
     headings.push({
-      id: asText(value.id) || recoveredLegacyId("collection", [headingIndex, title]),
+      id: headingId,
       title,
       collapsed: value.collapsed === true,
       subjects: asStringList(value.subjects),
@@ -1647,7 +1743,15 @@ function isNewNoteMode(value: unknown): value is NewNoteMode {
 
 function cleanSavedViews(input: unknown): SavedView[] {
   if (!Array.isArray(input)) return [];
+  const reservedIds = new Set<string>();
+  for (const raw of input as unknown[]) {
+    const view = asUnknownRecord(raw);
+    if (!asText(view.name) || (!isMainTab(view.tab) && !legacyLibraryIdFromTab(view.tab))) continue;
+    const id = asText(view.id);
+    if (id && isSafeObjectKey(id)) reservedIds.add(id);
+  }
   const views: SavedView[] = [];
+  const usedIds = new Set<string>();
   for (const [viewIndex, raw] of (input as unknown[]).entries()) {
     const view = asUnknownRecord(raw);
     const name = asText(view.name);
@@ -1655,8 +1759,17 @@ function cleanSavedViews(input: unknown): SavedView[] {
     const tab = migrateMainTab(view.tab, "curriculum");
     if (!name) continue;
     const query = asText(view.query);
+    const preferredId = asText(view.id);
+    const hasSafeId = Boolean(preferredId && isSafeObjectKey(preferredId));
     views.push({
-      id: asText(view.id) || recoveredLegacyId("view", [viewIndex, name, tab, query]),
+      id: deterministicLayoutId(
+        hasSafeId
+          ? preferredId
+          : recoveredLegacyId("view", [viewIndex, name, tab, query]),
+        usedIds,
+        reservedIds,
+        hasSafeId,
+      ),
       name,
       tab,
       query,

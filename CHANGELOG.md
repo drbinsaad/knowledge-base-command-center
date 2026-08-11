@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Repair duplicate, missing, or unsafe collection, subheading, and saved-view IDs deterministically during ordinary plugin-data loading, so damaged synced data cannot make edits target the wrong item or remove multiple saved views at once.
+- Keep collection and Library heading identities globally unique across hierarchy levels during import and recovery, preserving existing local identities and making repeated Merge imports stable across reloads.
+
 ## 0.11.1
 
 ### Fixed

@@ -164,6 +164,10 @@ function portableFixture(): PortableExportV1 {
   };
 }
 
+function layoutStructureIds(layout: LayoutHeading[]): string[] {
+  return layout.flatMap((heading) => [heading.id, ...heading.subheadings.map((subheading) => subheading.id)]);
+}
+
 test("unknown metadata is narrowed to a mutable record at one boundary", () => {
   const metadata: Record<string, unknown> = { title: "Laryngeal Cleft" };
   assert.equal(asUnknownRecord(metadata), metadata);
@@ -305,6 +309,543 @@ test("hand-edited legacy records missing IDs and snapshot times still converge d
   assert.equal(firstData?.savedViews[0]?.id, secondData?.savedViews[0]?.id);
   assert.equal(firstData?.undoStack[0]?.at, 1);
   assert.equal(firstData?.undoStack[0]?.at, secondData?.undoStack[0]?.at);
+});
+
+test("normal loading deterministically repairs duplicate and unsafe layout or saved-view IDs", () => {
+  const malformed = structuredClone(migrateData(null)) as unknown as Record<string, unknown>;
+  malformed.collections = [
+    {
+      id: "duplicate",
+      title: "First",
+      collapsed: false,
+      subjects: [],
+      subheadings: [{ id: "duplicate", title: "First child", collapsed: false, subjects: [] }],
+    },
+    {
+      id: "duplicate",
+      title: "Second",
+      collapsed: false,
+      subjects: [],
+      subheadings: [{ id: "__proto__", title: "Unsafe child", collapsed: false, subjects: [] }],
+    },
+    {
+      id: "duplicate-2",
+      title: "Stable later heading",
+      collapsed: false,
+      subjects: [],
+      subheadings: [{ id: "duplicate-3", title: "Stable later child", collapsed: false, subjects: [] }],
+    },
+  ];
+  malformed.savedViews = [
+    { id: "view", name: "First view", tab: "curriculum", query: "first" },
+    { id: "view", name: "Second view", tab: "collections", query: "second" },
+    { id: "view-2", name: "Stable later view", tab: "curriculum", query: "stable" },
+    { id: "toString", name: "Unsafe view", tab: "queues", query: "third" },
+  ];
+
+  const first = migrateData(structuredClone(malformed));
+  const second = migrateData(structuredClone(malformed));
+  const layoutIds = first.collections.flatMap((heading) => [
+    heading.id,
+    ...heading.subheadings.map((subheading) => subheading.id),
+  ]);
+  const viewIds = first.savedViews.map((view) => view.id);
+
+  assert.deepEqual(layoutIds.slice(0, 3), ["duplicate", "duplicate-4", "duplicate-5"]);
+  assert.deepEqual(layoutIds.slice(-2), ["duplicate-2", "duplicate-3"]);
+  assert.equal(new Set(layoutIds).size, layoutIds.length);
+  assert.equal(layoutIds.includes("__proto__"), false);
+  assert.deepEqual(viewIds.slice(0, 3), ["view", "view-3", "view-2"]);
+  assert.equal(new Set(viewIds).size, viewIds.length);
+  assert.equal(viewIds.includes("toString"), false);
+  assert.deepEqual(first.collections, second.collections);
+  assert.deepEqual(first.savedViews, second.savedViews);
+  assert.deepEqual(migrateData(structuredClone(first)), first, "the repaired IDs must remain stable on the next load");
+});
+
+test("library layout repair reserves later intact heading and subheading IDs globally", () => {
+  const malformed = structuredClone(migrateData(null)) as unknown as Record<string, unknown>;
+  const portableIndex = asUnknownRecord(malformed.portableIndex);
+  portableIndex.libraries = [{
+    id: "reading",
+    name: "Reading",
+    singularName: "Reading item",
+    icon: "book-open",
+    order: 0,
+    sourceKind: null,
+    archivedAt: null,
+  }];
+  portableIndex.libraryLayouts = {
+    reading: [
+      {
+        title: "Earlier missing IDs",
+        collapsed: false,
+        subjects: [],
+        subheadings: [{ title: "Earlier missing child", collapsed: false, subjects: [] }],
+      },
+      {
+        id: "library-reading-heading-1",
+        title: "Later intact heading",
+        collapsed: false,
+        subjects: [],
+        subheadings: [{
+          id: "library-reading-heading-1-2-subheading-1",
+          title: "Later intact child",
+          collapsed: false,
+          subjects: [],
+        }],
+      },
+      {
+        id: "shared",
+        title: "First shared identity",
+        collapsed: false,
+        subjects: [],
+        subheadings: [{ id: "shared", title: "Duplicate child", collapsed: false, subjects: [] }],
+      },
+      {
+        id: "shared-2",
+        title: "Later intact suffix",
+        collapsed: false,
+        subjects: [],
+        subheadings: [{ id: "__proto__", title: "Unsafe child", collapsed: false, subjects: [] }],
+      },
+    ],
+  };
+
+  const first = migrateData(structuredClone(malformed));
+  const layout = first.portableIndex.libraryLayouts.reading ?? [];
+  const ids = layoutStructureIds(layout);
+  assert.deepEqual(ids.slice(0, 4), [
+    "library-reading-heading-1-2",
+    "library-reading-heading-1-2-subheading-1-2",
+    "library-reading-heading-1",
+    "library-reading-heading-1-2-subheading-1",
+  ]);
+  assert.equal(layout[2]?.id, "shared");
+  assert.notEqual(layout[2]?.subheadings[0]?.id, "shared");
+  assert.equal(layout[3]?.id, "shared-2", "the duplicate repair cannot steal a later intact suffix");
+  assert.equal(ids.includes("__proto__"), false);
+  assert.equal(new Set(ids).size, ids.length);
+  assert.deepEqual(
+    migrateData(structuredClone(first)).portableIndex.libraryLayouts.reading,
+    layout,
+    "the globally repaired library namespace is stable on reload",
+  );
+});
+
+test("malformed IDs are repaired throughout named, nested, Undo, and Redo snapshots", () => {
+  const data = migrateData(null);
+  data.portableIndex.libraries = [{
+    id: "reading",
+    name: "Reading",
+    singularName: "Reading item",
+    icon: "book-open",
+    order: 0,
+    sourceKind: null,
+    archivedAt: null,
+  }];
+  data.portableIndex.libraryLayouts = { reading: [] };
+  const malformedCollections = (): unknown[] => [
+    {
+      id: "shared",
+      title: "First",
+      collapsed: false,
+      subjects: [],
+      subheadings: [{ id: "shared", title: "Duplicate child", collapsed: false, subjects: [] }],
+    },
+    {
+      id: "shared-2",
+      title: "Later intact suffix",
+      collapsed: false,
+      subjects: [],
+      subheadings: [{ id: "toString", title: "Unsafe child", collapsed: false, subjects: [] }],
+    },
+  ];
+  const malformedViews = (): unknown[] => [
+    { id: "view", name: "First", tab: "curriculum", query: "one" },
+    { id: "view", name: "Duplicate", tab: "collections", query: "two" },
+    { id: "view-2", name: "Later intact", tab: "curriculum", query: "three" },
+    { id: "__proto__", name: "Unsafe", tab: "queues", query: "four" },
+  ];
+  const malformedSnapshot = (label: string): Record<string, unknown> => {
+    const snapshot = snapshotPersonal(data, label, true, true) as unknown as Record<string, unknown>;
+    snapshot.collections = malformedCollections();
+    snapshot.savedViews = malformedViews();
+    const portableIndex = asUnknownRecord(snapshot.portableIndex);
+    portableIndex.libraryLayouts = {
+      reading: [{
+        id: "library-duplicate",
+        title: "Library heading",
+        collapsed: false,
+        subjects: [],
+        subheadings: [{ id: "library-duplicate", title: "Duplicate library child", collapsed: false, subjects: [] }],
+      }],
+    };
+    return snapshot;
+  };
+  const nested = malformedSnapshot("Nested");
+  const named = malformedSnapshot("Named");
+  named.layoutSnapshots = [nested];
+  const raw = structuredClone(data) as unknown as Record<string, unknown>;
+  raw.layoutSnapshots = [named];
+  raw.undoStack = [malformedSnapshot("Undo")];
+  raw.redoStack = [malformedSnapshot("Redo")];
+
+  const cleaned = migrateData(raw);
+  const snapshots = [
+    cleaned.layoutSnapshots[0],
+    cleaned.layoutSnapshots[0]?.layoutSnapshots?.[0],
+    cleaned.undoStack[0],
+    cleaned.redoStack[0],
+  ];
+  for (const snapshot of snapshots) {
+    assert.ok(snapshot);
+    const ids = layoutStructureIds(snapshot.collections);
+    assert.equal(new Set(ids).size, ids.length, `${snapshot.label}: collection IDs are globally unique`);
+    assert.equal(ids.includes("toString"), false);
+    assert.equal(snapshot.collections[1]?.id, "shared-2", `${snapshot.label}: later intact suffix survives`);
+    const viewIds = snapshot.savedViews.map((view) => view.id);
+    assert.equal(new Set(viewIds).size, viewIds.length, `${snapshot.label}: saved-view IDs are unique`);
+    assert.equal(viewIds.includes("__proto__"), false);
+    assert.equal(snapshot.savedViews[2]?.id, "view-2", `${snapshot.label}: later intact view suffix survives`);
+    const libraryIds = layoutStructureIds(snapshot.portableIndex?.libraryLayouts.reading ?? []);
+    assert.equal(new Set(libraryIds).size, libraryIds.length, `${snapshot.label}: library IDs are globally unique`);
+  }
+  assert.deepEqual(migrateData(structuredClone(cleaned)), cleaned, "all repaired history remains stable on reload");
+});
+
+test("recovery parsing and application repair malformed structure IDs before replacement", () => {
+  const source = migrateData(null);
+  source.settings.workspaceName = "Recovery source";
+  const backup = createPersonalBackup(
+    source,
+    "2026-08-11T00:00:00.000Z",
+    "vault-recovery-id-repair",
+    "base-recovery-id-repair",
+    "Recovery source",
+  ) as unknown as Record<string, unknown>;
+  const malformedCollections = [
+    {
+      id: "shared",
+      title: "First",
+      collapsed: false,
+      subjects: [],
+      subheadings: [{ id: "shared", title: "Duplicate child", collapsed: false, subjects: [] }],
+    },
+    {
+      id: "shared-2",
+      title: "Later intact",
+      collapsed: false,
+      subjects: [],
+      subheadings: [{ id: "__proto__", title: "Unsafe child", collapsed: false, subjects: [] }],
+    },
+  ];
+  const snapshot = snapshotPersonal(source, "Recovered snapshot", true, true) as unknown as Record<string, unknown>;
+  snapshot.collections = structuredClone(malformedCollections);
+  snapshot.savedViews = [
+    { id: "view", name: "First", tab: "curriculum", query: "one" },
+    { id: "view", name: "Duplicate", tab: "collections", query: "two" },
+    { id: "view-2", name: "Later intact", tab: "queues", query: "three" },
+  ];
+  const nested = structuredClone(snapshot);
+  delete nested.layoutSnapshots;
+  snapshot.layoutSnapshots = [nested];
+  backup.collections = structuredClone(malformedCollections);
+  backup.savedViews = structuredClone(snapshot.savedViews);
+  backup.layoutSnapshots = [snapshot];
+
+  const parsed = parsePersonalBackup(backup);
+  const parsedLayouts = [
+    parsed.collections,
+    parsed.layoutSnapshots[0]?.collections ?? [],
+    parsed.layoutSnapshots[0]?.layoutSnapshots?.[0]?.collections ?? [],
+  ];
+  for (const layout of parsedLayouts) {
+    const ids = layoutStructureIds(layout);
+    assert.equal(new Set(ids).size, ids.length);
+    assert.equal(ids.includes("__proto__"), false);
+    assert.equal(layout[1]?.id, "shared-2");
+  }
+  const recoveredViews = parsed.layoutSnapshots[0]?.savedViews.map((view) => view.id) ?? [];
+  assert.equal(new Set(recoveredViews).size, recoveredViews.length);
+  assert.equal(recoveredViews[2], "view-2");
+  assert.deepEqual(parsed.savedViews.map((view) => view.id), recoveredViews);
+
+  const target = migrateData(null);
+  const envelope: PortableExportV1 = {
+    kind: PORTABLE_EXPORT_KIND,
+    version: 1,
+    exportedAt: "2026-08-11T00:00:00.000Z",
+    sourceWorkspace: "Recovery source",
+    components: { recovery: parsed },
+  };
+  applyPortableExport(
+    target,
+    envelope,
+    portableSelection({ recovery: true }),
+    "replace",
+    "vault-recovery-id-repair",
+    undefined,
+    "base-recovery-id-repair",
+    "Recovery source",
+  );
+  assert.deepEqual(target.collections, parsed.collections);
+  assert.deepEqual(target.savedViews, parsed.savedViews);
+  assert.deepEqual(target.layoutSnapshots, parsed.layoutSnapshots);
+  assert.deepEqual(
+    migrateData(structuredClone(target)).layoutSnapshots,
+    target.layoutSnapshots,
+    "an applied repaired recovery remains stable on ordinary load",
+  );
+});
+
+test("portable collection validation uses the same global structure ID namespace as normal loading", () => {
+  const collision = portableFixture();
+  collision.components.collections = {
+    version: 1,
+    collections: [
+      {
+        id: "heading-one",
+        title: "First heading",
+        collapsed: false,
+        subjectIds: [],
+        subheadings: [{ id: "shared", title: "First child", collapsed: false, subjectIds: [] }],
+      },
+      {
+        id: "heading-two",
+        title: "Second heading",
+        collapsed: false,
+        subjectIds: [],
+        subheadings: [{ id: "shared", title: "Second child", collapsed: false, subjectIds: [] }],
+      },
+    ],
+  };
+  assert.throws(
+    () => parsePortableExport(structuredClone(collision)),
+    /duplicate collection or subheading ID: shared/i,
+  );
+
+  collision.components.collections.collections[1] = {
+    id: "shared",
+    title: "Heading colliding with a child",
+    collapsed: false,
+    subjectIds: [],
+    subheadings: [],
+  };
+  assert.throws(
+    () => parsePortableExport(structuredClone(collision)),
+    /duplicate collection or subheading ID: shared/i,
+  );
+
+  const source = migrateData(null);
+  source.collections = [{
+    id: "heading-one",
+    title: "First heading",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{ id: "child-one", title: "First child", collapsed: false, subjects: [] }],
+  }, {
+    id: "heading-two",
+    title: "Second heading",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{ id: "child-two", title: "Second child", collapsed: false, subjects: [] }],
+  }];
+  const exported = createPortableExport(
+    source,
+    [],
+    portableSelection({ collections: true }),
+    "2026-08-11T00:00:00.000Z",
+  );
+  const parsed = parsePortableExport(structuredClone(exported));
+  const target = migrateData(null);
+  applyPortableExport(target, parsed, portableSelection({ collections: true }), "replace");
+  const reloaded = migrateData(structuredClone(target));
+  assert.deepEqual(reloaded.collections, target.collections);
+});
+
+test("portable collection Merge preserves one global identity namespace across levels and parents", () => {
+  const heading = (
+    id: string,
+    title: string,
+    subheadings: LayoutHeading["subheadings"] = [],
+    collapsed = false,
+  ): LayoutHeading => ({ id, title, collapsed, subjects: [], subheadings });
+  const child = (id: string, title: string, collapsed = false): LayoutHeading["subheadings"][number] => ({
+    id,
+    title,
+    collapsed,
+    subjects: [],
+  });
+  const cases: Array<{
+    name: string;
+    destination: LayoutHeading[];
+    incoming: LayoutHeading[];
+    verify: (layout: LayoutHeading[]) => void;
+  }> = [
+    {
+      name: "destination heading versus incoming child",
+      destination: [heading("shared", "Local heading")],
+      incoming: [heading("incoming-parent", "Incoming parent", [child("shared", "Incoming child")])],
+      verify: (layout) => {
+        assert.equal(layout.find((item) => item.id === "shared")?.title, "Local heading");
+        assert.notEqual(layout.find((item) => item.id === "incoming-parent")?.subheadings[0]?.id, "shared");
+      },
+    },
+    {
+      name: "destination child versus incoming heading",
+      destination: [heading("local-parent", "Local parent", [child("shared", "Local child")])],
+      incoming: [heading("shared", "Incoming heading")],
+      verify: (layout) => {
+        assert.equal(layout.find((item) => item.id === "local-parent")?.subheadings[0]?.id, "shared");
+        assert.notEqual(layout.find((item) => item.title === "Incoming heading")?.id, "shared");
+      },
+    },
+    {
+      name: "destination child under an earlier parent versus incoming child under a later parent",
+      destination: [
+        heading("parent-a", "Parent A", [child("shared", "Shared child")]),
+        heading("parent-b", "Parent B"),
+      ],
+      incoming: [heading("parent-b", "Parent B", [child("shared", "Shared child")])],
+      verify: (layout) => {
+        assert.equal(layout.find((item) => item.id === "parent-a")?.subheadings[0]?.id, "shared");
+        assert.notEqual(layout.find((item) => item.id === "parent-b")?.subheadings[0]?.id, "shared");
+      },
+    },
+    {
+      name: "destination child under a later parent versus incoming child under an earlier parent",
+      destination: [
+        heading("parent-b", "Parent B"),
+        heading("parent-a", "Parent A", [child("shared", "Shared child")]),
+      ],
+      incoming: [heading("parent-b", "Parent B", [child("shared", "Shared child")])],
+      verify: (layout) => {
+        assert.equal(layout.find((item) => item.id === "parent-a")?.subheadings[0]?.id, "shared");
+        assert.notEqual(layout.find((item) => item.id === "parent-b")?.subheadings[0]?.id, "shared");
+      },
+    },
+    {
+      name: "same heading ID with a different semantic title",
+      destination: [heading("shared", "Local heading")],
+      incoming: [heading("shared", "Incoming heading")],
+      verify: (layout) => {
+        assert.equal(layout.length, 2);
+        assert.equal(layout.find((item) => item.id === "shared")?.title, "Local heading");
+      },
+    },
+    {
+      name: "same child ID under one parent with a different semantic title",
+      destination: [heading("parent", "Parent", [child("shared", "Local child")])],
+      incoming: [heading("parent", "Parent", [child("shared", "Incoming child")])],
+      verify: (layout) => {
+        const children = layout[0]?.subheadings ?? [];
+        assert.equal(children.length, 2);
+        assert.equal(children.find((item) => item.id === "shared")?.title, "Local child");
+      },
+    },
+    {
+      name: "same child ID and title under a different effective parent",
+      destination: [
+        heading("parent-a", "Parent A", [child("shared", "Shared child")]),
+        heading("parent-b", "Parent B"),
+      ],
+      incoming: [heading("parent-b", "Parent B", [child("shared", "Shared child")])],
+      verify: (layout) => assert.equal(layout.find((item) => item.id === "parent-a")?.subheadings[0]?.id, "shared"),
+    },
+    {
+      name: "same heading ID and normalized title is an exact semantic match",
+      destination: [heading("shared", "Shared heading", [], true)],
+      incoming: [heading("shared", " shared heading ")],
+      verify: (layout) => {
+        assert.equal(layout.length, 1);
+        assert.equal(layout[0]?.id, "shared");
+        assert.equal(layout[0]?.collapsed, true, "a merge preserves local view state");
+      },
+    },
+    {
+      name: "same child ID and title under the same effective parent is an exact match",
+      destination: [heading("parent", "Parent", [child("shared", "Shared child", true)])],
+      incoming: [heading("parent", "Parent", [child("shared", "shared child")])],
+      verify: (layout) => {
+        assert.equal(layout[0]?.subheadings.length, 1);
+        assert.equal(layout[0]?.subheadings[0]?.id, "shared");
+        assert.equal(layout[0]?.subheadings[0]?.collapsed, true);
+      },
+    },
+    {
+      name: "a title-matched parent still permits a safe exact child match",
+      destination: [heading("local-parent", "Parent", [child("shared", "Shared child")])],
+      incoming: [heading("incoming-parent", "Parent", [child("shared", "Shared child")])],
+      verify: (layout) => {
+        assert.equal(layout.length, 1);
+        assert.equal(layout[0]?.id, "local-parent");
+        assert.equal(layout[0]?.subheadings[0]?.id, "shared");
+      },
+    },
+    {
+      name: "weak heading title matching cannot steal a later exact ID match",
+      destination: [heading("later", "Repeated")],
+      incoming: [heading("earlier", "Repeated"), heading("later", "Repeated")],
+      verify: (layout) => {
+        assert.equal(layout.length, 2);
+        assert.equal(layout.find((item) => item.id === "later")?.title, "Repeated");
+      },
+    },
+    {
+      name: "weak child title matching cannot steal a later exact ID match",
+      destination: [heading("parent", "Parent", [child("later", "Repeated")])],
+      incoming: [heading("parent", "Parent", [child("earlier", "Repeated"), child("later", "Repeated")])],
+      verify: (layout) => {
+        assert.equal(layout[0]?.subheadings.length, 2);
+        assert.equal(layout[0]?.subheadings.find((item) => item.id === "later")?.title, "Repeated");
+      },
+    },
+    {
+      name: "a pre-existing deterministic fork cannot become a weak-title candidate on reapply",
+      destination: [
+        heading("local", "Shared"),
+        heading("owner", "Owner", [child("x", "Owned child")]),
+      ],
+      incoming: [heading("b", "Shared"), heading("x", "Shared")],
+      verify: (layout) => {
+        assert.equal(layout.length, 3);
+        assert.equal(layout.find((item) => item.id === "local")?.title, "Shared");
+        assert.equal(layout.find((item) => item.id === "owner")?.subheadings[0]?.id, "x");
+      },
+    },
+  ];
+
+  for (const scenario of cases) {
+    const source = migrateData(null);
+    source.collections = cloneCollections(scenario.incoming);
+    const exported = parsePortableExport(createPortableExport(
+      source,
+      [],
+      portableSelection({ collections: true }),
+      "2026-08-11T00:00:00.000Z",
+    ));
+    const target = migrateData(null);
+    target.collections = cloneCollections(scenario.destination);
+
+    applyPortableExport(target, exported, portableSelection({ collections: true }), "merge");
+    const afterFirstApply = cloneCollections(target.collections);
+    const ids = layoutStructureIds(afterFirstApply);
+    assert.equal(new Set(ids).size, ids.length, `${scenario.name}: IDs are globally unique`);
+    assert.deepEqual(
+      migrateData(structuredClone(target)).collections,
+      afterFirstApply,
+      `${scenario.name}: ordinary reload does not rename either side`,
+    );
+    scenario.verify(afterFirstApply);
+
+    applyPortableExport(target, exported, portableSelection({ collections: true }), "merge");
+    assert.deepEqual(
+      target.collections,
+      afterFirstApply,
+      `${scenario.name}: an identical second import reuses the deterministic fork`,
+    );
+  }
 });
 
 test("a v11 multi-base envelope migrates to v12 without being mistaken for damaged flat data", () => {
