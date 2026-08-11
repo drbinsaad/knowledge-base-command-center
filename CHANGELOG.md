@@ -8,6 +8,8 @@
 - Added base-specific category management with stable marker IDs, rename/reorder/archive/restore, bullet or checkbox style, and optional dates, plus focused commands and fixed action-only Apple Shortcut URLs for current-note and note-picker entry.
 - Added optional note-creation profiles for active and archived Libraries. Each profile inherits the knowledge base defaults field by field or overrides its destination folder, Empty/Template mode, and template; the resolved Create note form remains editable per note.
 - Added explicit creation-time YAML-safe template tokens for Library context: `{{yaml:id}}`, `{{yaml:category}}`, `{{yaml:parent}}`, `{{yaml:library}}`, and `{{yaml:type}}`. Missing values become a quoted empty scalar, while legacy `{{title}}`, `{{date}}`, and `{{time}}` behavior remains unchanged.
+- Added an explicit **Attach file to current note…** command with per-knowledge-base storage policies: follow Obsidian, fixed vault folder, note-local folder, or ask each time. Generated links can be inserted at the editor cursor, a configured marker or heading, or the end of the note.
+- Added guarded binary import through Obsidian's vault APIs, including a 100-megabyte per-file ceiling, collision-safe filenames, immutable-source and <code>ai_lock</code> protection, replaced-note detection, and clear partial-success reporting when the file was copied but its link could not be inserted.
 
 ### Changed
 

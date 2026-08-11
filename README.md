@@ -42,6 +42,7 @@ _Real iPhone portrait capture from version 0.10.0 showing one search state with 
 - **Separate contexts cleanly.** Keep research, study, projects, or another subject area in independent knowledge bases within one installation.
 - **Organize without file churn.** Nest, reorder, group, classify, pin, and collect records in plugin data without moving or rewriting ordinary Markdown notes.
 - **Create consistently.** Start empty notes or copy a chosen template into a safely previewed destination, with optional per-Library creation defaults.
+- **Attach deliberately.** Copy one user-selected file into the vault and insert its Markdown link using a per-base policy, without intercepting ordinary paste or drag-and-drop.
 - **Capture from anywhere.** Open Quick entry from the desktop ribbon, the mobile **Open** menu, the Command Center header, a user-assigned hotkey, the mobile toolbar, or an action-only Obsidian URL.
 - **Transfer organization deliberately.** Export path-free index and Library blueprints, selected personal organization, or a private same-vault recovery package.
 - **Work on desktop and mobile.** Use drag-and-drop on desktop and labelled action menus on touch devices.
@@ -117,6 +118,12 @@ Portable imports never create notes automatically. A path-free imported subject 
 
 Profiles and tokens affect newly created notes only. They never rewrite existing notes or frontmatter, infer Library placement from properties, move attachments, or introduce a content-type-by-Library rules matrix.
 
+### Explicit attachments
+
+Use **Attach file to current note…** only after opening the destination Markdown note. Each knowledge base can follow Obsidian's attachment setting, use a fixed vault folder, create a folder beside the note, or ask for a vault-relative folder on every upload. The generated link can go at the current editor cursor, under a configured marker or heading, or at the end of the note.
+
+This command copies one explicitly selected file, up to 100 megabytes, into the vault. It never moves the external original, never moves existing vault attachments, and never intercepts ordinary paste or drag-and-drop. It refuses immutable source-book notes, replaced note identities, malformed YAML, and <code>ai_lock: true</code>. If copying succeeds but link insertion fails, the new vault file is retained and its path is reported so the user can link it manually. Portable exports and same-vault recovery continue to exclude binary contents.
+
 ### Undo, snapshots, export, and recovery
 
 Personal organization supports Undo/Redo and named snapshots. Portable exports can carry workspace settings, a path-free Index blueprint, selected Libraries, Collections, study state, and saved views. Same-vault recovery is a separate private restoration format containing exact vault-relative paths.
@@ -149,13 +156,13 @@ The ENT preset is an organization workflow, not medical advice, a medical record
 
 - The plugin enumerates whole-vault Markdown file paths and cached Markdown metadata to build and reconcile indexes, offer note/template choices, and diagnose stale references.
 - It enumerates all loaded vault entries before retaining folder paths for settings pickers, and enumerates all vault file paths before retaining JSON packages for the in-vault picker. Path enumeration alone does not read note bodies.
-- Content reads are targeted to an explicitly chosen template or JSON import, to the note explicitly selected for Quick append inside Obsidian's atomic process operation, and to the disclosed ENT proposal-promotion and canonical-placement workflows.
+- Content reads are targeted to an explicitly chosen template or JSON import, to the note explicitly selected for Quick append inside Obsidian's atomic process operation, to an explicit attachment destination note, and to the disclosed ENT proposal-promotion and canonical-placement workflows. An attachment action also reads the one external file selected in the operating-system picker and copies its binary bytes into the vault.
 - Copy buttons write only the plugin-generated command, wikilink, or path you selected; the plugin never reads clipboard contents.
 - Settings and organization are stored in Obsidian's plugin <code>data.json</code>. Sync reconciliation, schema migration, and vault renames can update that file automatically.
 - The Quick entry Obsidian protocol accepts only its intrinsic action. Any query parameter is rejected before a form opens; titles, paths, and content cannot be supplied by URL.
-- No export contains Markdown note bodies or attachments. Workspace settings can contain configured vault-relative folders, and saved searches preserve literal query text.
+- No export contains Markdown note bodies or attachment binaries. Workspace settings can contain configured vault-relative folders, and saved searches preserve literal query text.
 - Same-vault recovery and automatic conflict rescues contain exact vault-relative paths. Keep them private.
-- The plugin itself does not read or write outside the vault. On desktop, export and import use operating-system download/file-picker surfaces, so files go where the user chooses.
+- The plugin never writes outside the vault and never enumerates external files. The explicit Attach file command reads only the one external file the user selects in the operating-system picker. Desktop JSON export/import also uses operating-system download/file-picker surfaces, so files go where the user chooses.
 
 See [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md) for the exact export boundary and [Security](SECURITY.md) for the trust model.
 

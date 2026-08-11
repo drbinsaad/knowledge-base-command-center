@@ -1,4 +1,17 @@
-import { normalizePath, Notice, Plugin, TFile, TFolder, type TAbstractFile } from "obsidian";
+import { MarkdownView, normalizePath, Notice, parseYaml, Plugin, TFile, TFolder, type TAbstractFile } from "obsidian";
+import {
+  attachmentFileName,
+  attachmentPathCandidate,
+  canonicalAttachmentFolder,
+  insertAttachmentReference,
+  MAX_ATTACHMENT_BYTES,
+  noteAttachmentFolder,
+} from "./attachment";
+import {
+  AttachmentImportModal,
+  type AttachmentImportValue,
+  type AttachmentOperationPolicy,
+} from "./attachment-modal";
 import { ENT_HIERARCHY_BASES_VIEW_TYPE, EntHierarchyBasesView, hierarchyBasesViewOptions } from "./bases-view";
 import {
   applyPluginViewState,
@@ -139,6 +152,25 @@ import { mergeKnowledgeBaseStores, type StoreMergeResult } from "./store-merge";
 const MAX_INACTIVE_SEARCH_CACHED_RECORDS = 50_000;
 const DEVICE_LOCAL_STATE_KEY = "ent-vault-command-center.device-state.v1";
 const FOLLOW_UP_UNDO_WINDOW_MS = 5 * 60 * 1000;
+
+function markdownHasAiLock(markdown: string): boolean {
+  const opening = /^\uFEFF?---[ \t]*\r?\n/u.exec(markdown);
+  if (!opening) return false;
+  const remainder = markdown.slice(opening[0].length);
+  const closing = /^---[ \t]*(?:\r?\n|$)/mu.exec(remainder);
+  if (!closing) {
+    throw new Error("This note has malformed YAML frontmatter. Repair it before attaching a file through the plugin.");
+  }
+  try {
+    const yaml = remainder.slice(0, closing.index).replace(/\r?\n$/u, "");
+    const parsed = parseYaml(yaml) as unknown;
+    return Boolean(parsed && typeof parsed === "object" && (parsed as Record<string, unknown>).ai_lock === true);
+  } catch {
+    // A malformed frontmatter block is not safe to rewrite through a plugin
+    // attachment action. The user can repair or attach through Obsidian Core.
+    throw new Error("This note has malformed YAML frontmatter. Repair it before attaching a file through the plugin.");
+  }
+}
 
 interface PluginDataLoadResult {
   recognizedStore: boolean;
@@ -313,6 +345,16 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.addCommand({ id: "manage-libraries", name: "Manage libraries…", callback: () => new ManageLibrariesModal(this, () => void this.refreshViews()).open() });
     this.addCommand({ id: "export-import-center", name: "Open export / import center", callback: () => void this.withView((view) => view.openPortabilityCenter()) });
     this.addCommand({ id: "create-knowledge-note", name: "Create note from template or empty note…", callback: () => void this.withView((view) => view.startCreateKnowledgeNote()) });
+    this.addCommand({
+      id: "attach-file-to-current-note",
+      name: "Attach file to current note…",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        if (!(file instanceof TFile) || file.extension !== "md" || isImmutableSourcePath(file.path)) return false;
+        if (!checking) this.openAttachmentImport(file);
+        return true;
+      },
+    });
     for (const command of createQuickEntryCommands({
       openHub: () => {
         const currentPath = this.app.workspace.getActiveFile()?.path;
@@ -4577,7 +4619,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         tokenContext,
       );
     }
-    const createdFolders: string[] = [];
+    const createdFolders: TFolder[] = [];
     try {
       await this.ensureFolder(folder, createdFolders);
       const file = await this.app.vault.create(path, content);
@@ -4587,6 +4629,163 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       await this.removeCreatedEmptyFolders(createdFolders);
       throw error;
     }
+  }
+
+  openAttachmentImport(note = this.app.workspace.getActiveFile()): void {
+    if (!(note instanceof TFile) || note.extension !== "md") {
+      new Notice("Open the Markdown note that should receive the attachment, then try again.", 7000);
+      return;
+    }
+    if (isImmutableSourcePath(note.path)) {
+      new Notice("Immutable source-book notes cannot receive plugin attachments.", 7000);
+      return;
+    }
+    const policy = this.captureAttachmentPolicy();
+    new AttachmentImportModal(
+      this.app,
+      note.path,
+      policy,
+      policy.storageMode === "ask"
+        ? this.app.vault.getAllLoadedFiles()
+          .filter((file): file is TFolder => file instanceof TFolder)
+          .map((folder) => folder.path)
+          .filter(Boolean)
+          .sort((left, right) => left.localeCompare(right))
+        : [],
+      this.data.settings.attachmentInsertionMode,
+      async (value) => {
+        this.assertAttachmentOperationCurrent(note, policy);
+        await this.attachFileToNote(note, value, policy);
+      },
+    ).open();
+  }
+
+  private captureAttachmentPolicy(): AttachmentOperationPolicy {
+    const settings = this.data.settings;
+    return Object.freeze({
+      expectedBaseId: this.getActiveKnowledgeBaseId(),
+      expectedDataEpoch: this.getDataEpoch(),
+      storageMode: settings.attachmentStorageMode,
+      configuredFolder: settings.attachmentFolder,
+      marker: settings.attachmentMarker,
+      heading: settings.attachmentHeading,
+    });
+  }
+
+  private assertAttachmentOperationCurrent(note: TFile, policy: AttachmentOperationPolicy): void {
+    if (policy.expectedBaseId !== this.getActiveKnowledgeBaseId() || policy.expectedDataEpoch !== this.getDataEpoch()) {
+      throw new Error("The active knowledge base or its synced data changed. Reopen Attach file before continuing.");
+    }
+    const current = this.app.vault.getAbstractFileByPath(note.path);
+    if (current !== note || note.extension !== "md") {
+      throw new Error("The selected note changed or was replaced. Reopen it before attaching the file.");
+    }
+    if (isImmutableSourcePath(note.path)) throw new Error("Immutable source-book notes cannot receive plugin attachments.");
+  }
+
+  async attachFileToNote(
+    note: TFile,
+    value: AttachmentImportValue,
+    policy = this.captureAttachmentPolicy(),
+  ): Promise<TFile> {
+    this.assertDataWritable();
+    this.assertAttachmentOperationCurrent(note, policy);
+    if (value.file.size > MAX_ATTACHMENT_BYTES) throw new Error("The selected file is larger than the 100 MB attachment limit.");
+    if (value.file.size < 0) throw new Error("The selected file has an invalid size.");
+    const editorView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    const editorOwnsNote = editorView?.file === note;
+    if (value.insertionMode === "cursor" && !editorOwnsNote) {
+      throw new Error("Open this note in the Markdown editor to insert at the cursor, or choose marker, heading, or end of note.");
+    }
+    const currentMarkdown = editorOwnsNote ? editorView.editor.getValue() : await this.app.vault.cachedRead(note);
+    if (markdownHasAiLock(currentMarkdown)) throw new Error("This note has ai_lock: true and cannot be changed.");
+
+    const createdFolders: TFolder[] = [];
+    let destination: string;
+    let bytes: ArrayBuffer;
+    try {
+      destination = await this.availableAttachmentDestination(note, value.file.name, value.requestedFolder, policy, createdFolders);
+      this.assertAttachmentOperationCurrent(note, policy);
+      bytes = await value.file.arrayBuffer();
+      this.assertAttachmentOperationCurrent(note, policy);
+    } catch (error) {
+      await this.removeCreatedEmptyFolders(createdFolders);
+      throw error;
+    }
+    let created: TFile;
+    try {
+      created = await this.app.vault.createBinary(destination, bytes);
+    } catch (error) {
+      await this.removeCreatedEmptyFolders(createdFolders);
+      console.error("Knowledge Base Command Center could not copy the selected attachment", error);
+      throw new Error(`The attachment could not be copied to ${destination}.`);
+    }
+    try {
+      this.assertAttachmentOperationCurrent(note, policy);
+      const reference = this.app.fileManager.generateMarkdownLink(created, note.path);
+      if (!reference.trim()) throw new Error("Obsidian generated an empty attachment link.");
+      if (value.insertionMode === "cursor") {
+        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (view?.file !== note) throw new Error("The active editor changed before the link was inserted.");
+        this.assertAttachmentOperationCurrent(note, policy);
+        if (markdownHasAiLock(view.editor.getValue())) throw new Error("This note now has ai_lock: true.");
+        view.editor.replaceRange(reference, view.editor.getCursor());
+      } else {
+        const insertionTarget = value.insertionMode === "marker" ? "marker"
+          : value.insertionMode === "heading" ? "heading" : "end";
+        this.assertAttachmentOperationCurrent(note, policy);
+        await this.app.vault.process(note, (markdown) => {
+          this.assertAttachmentOperationCurrent(note, policy);
+          if (markdownHasAiLock(markdown)) throw new Error("This note now has ai_lock: true.");
+          return insertAttachmentReference(
+            markdown,
+            reference,
+            insertionTarget,
+            policy.marker,
+            policy.heading,
+          );
+        });
+      }
+    } catch (error) {
+      console.error("Knowledge Base Command Center copied an attachment but could not insert its link", error);
+      throw new Error(`The file was copied to ${created.path}, but its Markdown link could not be inserted. Add the link manually.`);
+    }
+    new Notice(`Attached ${attachmentFileName(value.file.name)} inside the vault.`, 5000);
+    return created;
+  }
+
+  private async availableAttachmentDestination(
+    note: TFile,
+    originalName: string,
+    requestedFolder: string,
+    policy: AttachmentOperationPolicy,
+    createdFolders: TFolder[],
+  ): Promise<string> {
+    const mode = policy.storageMode;
+    if (mode === "obsidian") {
+      const destination = normalizePath(await this.app.fileManager.getAvailablePathForAttachment(attachmentFileName(originalName), note.path));
+      const folder = destination.includes("/") ? destination.slice(0, destination.lastIndexOf("/")) : "";
+      const error = validateWritableFolderPath(folder, this.app.vault.configDir);
+      if (error || isImmutableSourcePath(destination)) throw new Error(error ?? "Obsidian selected an immutable source-book folder.");
+      return destination;
+    }
+
+    const rawFolder = mode === "note-subfolder"
+      ? noteAttachmentFolder(note.path)
+      : mode === "ask"
+        ? requestedFolder
+        : policy.configuredFolder;
+    const folder = canonicalAttachmentFolder(rawFolder);
+    const error = validateWritableFolderPath(folder, this.app.vault.configDir);
+    if (error) throw new Error(error);
+    if (isImmutableSourcePath(`${folder}/attachment`)) throw new Error("Attachments cannot be stored inside immutable source-book folders.");
+    await this.ensureFolder(folder, createdFolders);
+    for (let suffix = 0; suffix <= 10_000; suffix += 1) {
+      const path = attachmentPathCandidate(folder, originalName, suffix);
+      if (isImmutableSourcePath(path)) throw new Error("Attachments cannot be stored inside immutable source-book folders.");
+      if (!this.app.vault.getAbstractFileByPath(path)) return path;
+    }
+    throw new Error("No collision-free attachment filename could be created in that folder.");
   }
 
   getPortableJsonFiles(): TFile[] {
@@ -4634,7 +4833,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       path = `${basePath}-${suffix}.json`;
       suffix += 1;
     }
-    const createdFolders: string[] = [];
+    const createdFolders: TFolder[] = [];
     try {
       await this.ensureFolder(folder, createdFolders);
       return await this.app.vault.create(path, content);
@@ -4698,7 +4897,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       priority: value.priority,
       safetyCritical: value.safetyCritical,
     }, this.today());
-    const createdFolders: string[] = [];
+    const createdFolders: TFolder[] = [];
     try {
       await this.ensureFolder(path.substring(0, path.lastIndexOf("/")), createdFolders);
       const file = await this.app.vault.create(path, content);
@@ -4725,7 +4924,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       priority: value.priority,
       safetyCritical: value.safetyCritical,
     }, this.today());
-    const createdFolders: string[] = [];
+    const createdFolders: TFolder[] = [];
     try {
       await this.ensureFolder(path.substring(0, path.lastIndexOf("/")), createdFolders);
       const file = await this.app.vault.create(path, content);
@@ -4750,7 +4949,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const destination = normalizePath(canonicalPath(value, this.data.settings.primaryFolder));
     const originalContent = await this.app.vault.read(source);
     const originalPath = source.path;
-    const createdFolders: string[] = [];
+    const createdFolders: TFolder[] = [];
     let current = source;
     try {
       await this.ensureFolder(destination.substring(0, destination.lastIndexOf("/")), createdFolders);
@@ -4804,7 +5003,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       : normalizePath(canonicalPath(value, this.data.settings.primaryFolder));
     const originalContent = await this.app.vault.read(source);
     const originalPath = source.path;
-    const createdFolders: string[] = [];
+    const createdFolders: TFolder[] = [];
     let current = source;
     try {
       if (destination !== originalPath) {
@@ -4855,7 +5054,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return `${year}-${month}-${day}`;
   }
 
-  private async ensureFolder(path: string, createdPaths: string[] = []): Promise<void> {
+  private async ensureFolder(path: string, createdFolders: TFolder[] = []): Promise<void> {
     const normalized = normalizePath(path);
     if (!normalized) return;
     let built = "";
@@ -4864,21 +5063,21 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       const existing = this.app.vault.getAbstractFileByPath(built);
       if (existing instanceof TFolder) continue;
       if (existing) throw new Error(`${built} exists but is not a folder.`);
-      await this.app.vault.createFolder(built);
-      createdPaths.push(built);
+      const created = await this.app.vault.createFolder(built);
+      if (created instanceof TFolder) createdFolders.push(created);
     }
   }
 
   /** Remove only folders created by the failed operation and still confirmed empty. */
-  private async removeCreatedEmptyFolders(createdPaths: string[]): Promise<void> {
-    for (const path of [...createdPaths].reverse()) {
-      const folder = this.app.vault.getAbstractFileByPath(path);
-      if (!(folder instanceof TFolder) || folder.children.length > 0) continue;
+  private async removeCreatedEmptyFolders(createdFolders: TFolder[]): Promise<void> {
+    for (const folder of [...createdFolders].reverse()) {
+      const current = this.app.vault.getAbstractFileByPath(folder.path);
+      if (current !== folder || folder.children.length > 0) continue;
       try {
         await this.app.fileManager.trashFile(folder);
       } catch (error) {
         // Leaving an empty folder is safer than broadening rollback deletion.
-        console.warn(`Knowledge Base Command Center could not remove the empty rollback folder ${path}`, error);
+        console.warn(`Knowledge Base Command Center could not remove the empty rollback folder ${folder.path}`, error);
       }
     }
   }

@@ -81,6 +81,8 @@ export type MainTab = CoreTab | LibraryTab;
 export type OpenNoteBehavior = "new-tab" | "same-tab" | "split";
 export type WorkspaceMode = "generic" | "ent-clinical";
 export type NewNoteMode = "empty" | "template";
+export type AttachmentStorageMode = "obsidian" | "fixed-folder" | "note-subfolder" | "ask";
+export type AttachmentInsertionMode = "cursor" | "marker" | "heading" | "end";
 
 /** Optional per-Library creation defaults. Missing fields inherit the active base defaults. */
 export interface LibraryNoteProfile {
@@ -355,6 +357,11 @@ export interface PluginSettings {
   defaultTemplatePath: string;
   /** Stable Library IDs map to optional overrides; absent fields inherit base defaults. */
   libraryNoteProfiles: LibraryNoteProfiles;
+  attachmentStorageMode: AttachmentStorageMode;
+  attachmentFolder: string;
+  attachmentInsertionMode: AttachmentInsertionMode;
+  attachmentMarker: string;
+  attachmentHeading: string;
   defaultTab: MainTab;
   recentLimit: number;
   enableHoverPreview: boolean;
@@ -469,6 +476,11 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   defaultNewNoteMode: "empty",
   defaultTemplatePath: "",
   libraryNoteProfiles: {},
+  attachmentStorageMode: "obsidian",
+  attachmentFolder: "Attachments",
+  attachmentInsertionMode: "cursor",
+  attachmentMarker: "<!-- kbcc:attachments -->",
+  attachmentHeading: "Attachments",
   defaultTab: "curriculum",
   recentLimit: 25,
   enableHoverPreview: true,
@@ -1626,6 +1638,7 @@ const FOLDER_PATH_SETTING_KEYS = [
   "templatesFolder",
   "defaultNoteFolder",
   "defaultTemplatePath",
+  "attachmentFolder",
 ] as const satisfies ReadonlyArray<keyof PluginSettings>;
 
 interface FolderDerivedGroupState {
@@ -2194,6 +2207,14 @@ export function validateLibraryNoteProfile(
   return null;
 }
 
+function isAttachmentStorageMode(value: unknown): value is AttachmentStorageMode {
+  return value === "obsidian" || value === "fixed-folder" || value === "note-subfolder" || value === "ask";
+}
+
+function isAttachmentInsertionMode(value: unknown): value is AttachmentInsertionMode {
+  return value === "cursor" || value === "marker" || value === "heading" || value === "end";
+}
+
 function cleanSavedViews(input: unknown): SavedView[] {
   if (!Array.isArray(input)) return [];
   const reservedIds = new Set<string>();
@@ -2554,6 +2575,20 @@ function cleanSettings(input: unknown, legacyEnt = false): PluginSettings {
     defaultNewNoteMode: isNewNoteMode(settings.defaultNewNoteMode) ? settings.defaultNewNoteMode : base.defaultNewNoteMode,
     defaultTemplatePath: asText(settings.defaultTemplatePath, base.defaultTemplatePath).replace(/^\/+/, ""),
     libraryNoteProfiles: cleanLibraryNoteProfiles(settings.libraryNoteProfiles),
+    attachmentStorageMode: isAttachmentStorageMode(settings.attachmentStorageMode)
+      ? settings.attachmentStorageMode
+      : base.attachmentStorageMode,
+    attachmentFolder: asText(settings.attachmentFolder, base.attachmentFolder).replace(/^\/+|\/+$/g, ""),
+    attachmentInsertionMode: isAttachmentInsertionMode(settings.attachmentInsertionMode)
+      ? settings.attachmentInsertionMode
+      : base.attachmentInsertionMode,
+    attachmentMarker: asText(settings.attachmentMarker, base.attachmentMarker).replace(/[\r\n]+/gu, " ").trim() || base.attachmentMarker,
+    attachmentHeading: asText(settings.attachmentHeading, base.attachmentHeading)
+      .replace(/[\r\n]+/gu, " ")
+      .trim()
+      .replace(/^#{1,6}\s+/u, "")
+      .replace(/\s+#+\s*$/u, "")
+      || base.attachmentHeading,
     defaultTab: migrateMainTab(settings.defaultTab, base.defaultTab),
     recentLimit: Math.max(5, Math.min(100, Number(settings.recentLimit) || base.recentLimit)),
     enableHoverPreview: settings.enableHoverPreview !== false,
@@ -4404,6 +4439,11 @@ function validateLoadedSettingsText(input: unknown, label: string, budget: LoadT
     "defaultNoteFolder",
     "defaultNewNoteMode",
     "defaultTemplatePath",
+    "attachmentStorageMode",
+    "attachmentFolder",
+    "attachmentInsertionMode",
+    "attachmentMarker",
+    "attachmentHeading",
     "defaultTab",
     "proposalFolder",
     "openNoteBehavior",

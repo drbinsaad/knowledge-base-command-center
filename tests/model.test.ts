@@ -4663,6 +4663,14 @@ test("current plugin data rejects oversized primary lists, maps, structures, and
   }];
   assert.throws(() => migrateData(oversizedTitle), /portable index group 1 title is longer/i);
 
+  const oversizedAttachmentSetting = migrateData(null) as unknown as Record<string, unknown>;
+  (oversizedAttachmentSetting.settings as Record<string, unknown>).attachmentMarker =
+    "x".repeat(MAX_TRANSFER_TEXT_LENGTH + 1);
+  assert.throws(
+    () => migrateData(oversizedAttachmentSetting),
+    /settings attachmentMarker is longer/i,
+  );
+
   const totalText = migrateData(null) as unknown as Record<string, unknown>;
   const maximumText = "x".repeat(MAX_TRANSFER_TEXT_LENGTH);
   (totalText.portableIndex as Record<string, unknown>).groups = Array.from({ length: 7_000 }, (_, index) => ({

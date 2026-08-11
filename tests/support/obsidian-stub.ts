@@ -61,6 +61,14 @@ export class ItemView {
   contentEl = {};
   constructor(public leaf: unknown) { this.app = (leaf as { app?: unknown })?.app ?? {}; }
 }
+export class MarkdownView {
+  file: TFile | null = null;
+  editor = {
+    getValue: (): string => "",
+    getCursor: (): { line: number; ch: number } => ({ line: 0, ch: 0 }),
+    replaceRange: (): void => {},
+  };
+}
 export class Modal {
   app: unknown;
   modalEl = {};

@@ -13,6 +13,8 @@ import {
   validateProposalFolderPath,
   validateWritableFolderPath,
   type LibraryDefinition,
+  type AttachmentInsertionMode,
+  type AttachmentStorageMode,
   type MainTab,
   type NewNoteMode,
   type OpenNoteBehavior,
@@ -509,6 +511,89 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
               this.update();
             }));
           }, ["template file"]),
+          renderSetting("Attachment storage", "Used only by the explicit Attach file command. Ordinary paste and drag-and-drop continue to follow Obsidian's Files & Links setting.", (row) => {
+            row.addDropdown((dropdown) => dropdown
+              .addOptions({
+                obsidian: "Follow Obsidian attachment setting",
+                "fixed-folder": "Use a fixed vault folder",
+                "note-subfolder": "Use a folder beside each note",
+                ask: "Ask for a folder each time",
+              })
+              .setValue(settings.attachmentStorageMode)
+              .setDisabled(readOnly)
+              .onChange(async (value) => {
+                if (!ownsConfiguredBase()) return;
+                settings.attachmentStorageMode = value as AttachmentStorageMode;
+                await this.save(false);
+                if (ownsConfiguredBase()) this.update();
+              }));
+          }, ["attachments", "files", "upload", "folder"]),
+          renderSetting("Fixed attachment folder", "Used only when Attachment storage is set to a fixed vault folder.", (row) => {
+            const disabled = readOnly || settings.attachmentStorageMode !== "fixed-folder";
+            row.addText((text) => text
+              .setPlaceholder("Attachments")
+              .setValue(settings.attachmentFolder)
+              .setDisabled(disabled)
+              .onChange(async (value) => {
+                if (!ownsConfiguredBase()) return;
+                const clean = value.trim().replace(/^\/+|\/+$/g, "");
+                const error = validateWritableFolderPath(clean, this.host.app.vault.configDir);
+                text.inputEl.toggleClass("is-error", Boolean(error));
+                if (error) return;
+                settings.attachmentFolder = clean;
+                await this.save(false);
+              }));
+            row.addButton((button) => button.setButtonText("Browse…").setDisabled(disabled).onClick(() => {
+              if (!ownsConfiguredBase()) return;
+              new StringPickerModal(this.host.app, folderPaths(), "Choose attachment folder", "Search vault folders…", async (path) => {
+                if (!ownsConfiguredBase()) return;
+                const error = validateWritableFolderPath(path, this.host.app.vault.configDir);
+                if (error) return;
+                settings.attachmentFolder = path;
+                await this.save(false);
+                if (ownsConfiguredBase()) this.update();
+              }).open();
+            }));
+          }, ["attachments", "fixed folder"]),
+          renderSetting("Attachment link location", "Default insertion point for the generated Markdown link. It can be changed for each upload.", (row) => {
+            row.addDropdown((dropdown) => dropdown
+              .addOptions({
+                cursor: "Current editor cursor",
+                marker: "Configured marker",
+                heading: "Configured heading",
+                end: "End of note",
+              })
+              .setValue(settings.attachmentInsertionMode)
+              .setDisabled(readOnly)
+              .onChange(async (value) => {
+                if (!ownsConfiguredBase()) return;
+                settings.attachmentInsertionMode = value as AttachmentInsertionMode;
+                await this.save(false);
+                if (ownsConfiguredBase()) this.update();
+              }));
+          }, ["insert", "embed", "cursor", "heading", "marker"]),
+          renderSetting("Attachment marker", "Exact standalone line used when the link location is Configured marker.", (row) => {
+            row.addText((text) => text
+              .setPlaceholder("<!-- kbcc:attachments -->")
+              .setValue(settings.attachmentMarker)
+              .setDisabled(readOnly || settings.attachmentInsertionMode !== "marker")
+              .onChange(async (value) => {
+                if (!ownsConfiguredBase() || !value.trim()) return;
+                settings.attachmentMarker = value.trim();
+                await this.save(false);
+              }));
+          }, ["attachment marker"]),
+          renderSetting("Attachment heading", "Heading title used when the link location is Configured heading.", (row) => {
+            row.addText((text) => text
+              .setPlaceholder("Attachments")
+              .setValue(settings.attachmentHeading)
+              .setDisabled(readOnly || settings.attachmentInsertionMode !== "heading")
+              .onChange(async (value) => {
+                if (!ownsConfiguredBase() || !value.trim()) return;
+                settings.attachmentHeading = value.trim().replace(/^#{1,6}\s+/u, "").replace(/\s+#+\s*$/u, "");
+                await this.save(false);
+              }));
+          }, ["attachment heading"]),
           renderSetting("Inbox folder", settings.workspaceMode === "ent-clinical" ? "Clinical proposals must stay inside 01 Inbox." : "Notes in this folder appear in the Inbox section.", (row) => {
             const description = settings.workspaceMode === "ent-clinical" ? "Clinical proposals must stay inside 01 Inbox." : "Notes in this folder appear in the Inbox section.";
             row.addText((text) => text.setPlaceholder(DEFAULT_PROPOSAL_FOLDER).setValue(settings.proposalFolder).setDisabled(readOnly).onChange(async (value) => {

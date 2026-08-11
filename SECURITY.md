@@ -47,7 +47,7 @@ Security-relevant reports include:
 
 ## Trust boundary
 
-Knowledge Base Command Center runs inside the current Obsidian vault. It intentionally enumerates Markdown paths and cached metadata to build indexes and enumerates vault entries for folder and in-vault JSON pickers. Content reads are targeted to a selected template or import, to the note explicitly selected for Quick append inside Obsidian's atomic process operation, and to separately disclosed ENT canonical workflows.
+Knowledge Base Command Center runs inside the current Obsidian vault. It intentionally enumerates Markdown paths and cached metadata to build indexes and enumerates vault entries for folder and in-vault JSON pickers. Content reads are targeted to a selected template or import, to the note explicitly selected for Quick append inside Obsidian's atomic process operation, to an explicit attachment destination note, and to separately disclosed ENT canonical workflows. The explicit Attach file command reads only the external file selected by the user and writes its bytes to a validated vault path; it does not enumerate external files, request direct camera access or capture, intercept paste/drop, or transmit the binary. On mobile, any camera or photo-library source offered by the operating system's file picker remains an explicit user choice.
 
 The plugin has no intended analytics, telemetry, advertising, account, payment, or network requests. Ordinary organization changes plugin data only.
 
@@ -58,6 +58,8 @@ The Quick entry and Quick append protocol routes are fixed and action-only. They
 Quick append is an explicit Markdown-write workflow. It uses the selected note's latest content inside Obsidian's atomic process operation, refuses <code>ai_lock: true</code> or ambiguous lock declarations, and changes only a strictly marked managed block. Its short undo retains only a file reference, offsets, and integrity fingerprints in memory; neither note bodies nor appended text are written to plugin data. The feature does not import, move, or manage attachments.
 
 Two ENT-only workflows—proposal promotion and advanced canonical placement—can move a selected note and update structural frontmatter and its top-level heading after explicit action. They refuse <code>ai_lock: true</code>, preview their destination, and attempt rollback.
+
+The attachment command can create a new binary file and insert one generated Markdown link after an explicit user action. Existing attachments are never moved or deleted. If link insertion fails after the binary write, the plugin keeps the binary and reports its vault path rather than deleting data automatically. Attachment contents are excluded from plugin exports and recovery packages.
 
 ## Coordinated disclosure
 

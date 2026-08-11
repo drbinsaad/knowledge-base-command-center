@@ -339,7 +339,7 @@ function trackedVaultTree(initial: TAbstractFile[]): {
   entries: Map<string, TAbstractFile>;
   createdFolders: string[];
   trashedFolders: string[];
-  createFolder(path: string): Promise<void>;
+  createFolder(path: string): Promise<TFolder>;
   renameFile(file: TFile, destination: string): Promise<void>;
   trashFile(file: TAbstractFile): Promise<void>;
   markdownFiles(): TFile[];
@@ -363,10 +363,11 @@ function trackedVaultTree(initial: TAbstractFile[]): {
     entries,
     createdFolders,
     trashedFolders,
-    async createFolder(path): Promise<void> {
+    async createFolder(path): Promise<TFolder> {
       const folder = new TFolder(path);
       attach(folder);
       createdFolders.push(path);
+      return folder;
     },
     async renameFile(file, destination): Promise<void> {
       detach(file);
@@ -7358,6 +7359,354 @@ test("failed note creation removes only folders created by that operation", asyn
   assert.equal(tree.entries.get("Existing"), existing, "the pre-existing parent is preserved");
   assert.equal(tree.entries.has("Existing/New"), false);
   assert.equal(tree.entries.has("Existing/New/Deep"), false);
+});
+
+test("explicit attachment upload uses the configured folder and appends under one heading", async () => {
+  const note = new TFile("Knowledge/Topic.md");
+  const files = new Map<string, TAbstractFile>([[note.path, note]]);
+  let markdown = "---\ntitle: Topic\n---\n\n## Attachments\n\n![[old.png]]\n\n## Notes\n- Keep\n";
+  const createdFolders: string[] = [];
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getAbstractFileByPath: (path: string) => files.get(path) ?? null,
+      getMarkdownFiles: () => [note],
+      cachedRead: async () => markdown,
+      process: async (file: TFile, update: (value: string) => string) => {
+        assert.equal(file, note);
+        markdown = update(markdown);
+      },
+      createFolder: async (path: string) => {
+        createdFolders.push(path);
+        files.set(path, new TFolder(path));
+      },
+      createBinary: async (path: string, bytes: ArrayBuffer) => {
+        assert.equal(bytes.byteLength, 3);
+        const file = new TFile(path);
+        files.set(path, file);
+        return file;
+      },
+    },
+    workspace: { getLeavesOfType: () => [], getActiveViewOfType: () => null, getActiveFile: () => note },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+    fileManager: {
+      generateMarkdownLink: (file: TFile) => `![[${file.path}]]`,
+      getAvailablePathForAttachment: async () => "unused",
+    },
+  };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.attachmentStorageMode = "fixed-folder";
+  data.settings.attachmentFolder = "Assets/Uploads";
+  data.settings.attachmentInsertionMode = "heading";
+  data.settings.attachmentHeading = "Attachments";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-attachment-test");
+  await plugin.loadPluginData();
+
+  const created = await plugin.attachFileToNote(note, {
+    file: new File([new Uint8Array([1, 2, 3])], "scan.png"),
+    requestedFolder: "",
+    insertionMode: "heading",
+  });
+
+  assert.equal(created.path, "Assets/Uploads/scan.png");
+  assert.deepEqual(createdFolders, ["Assets", "Assets/Uploads"]);
+  assert.equal(markdown, "---\ntitle: Topic\n---\n\n## Attachments\n\n![[old.png]]\n![[Assets/Uploads/scan.png]]\n\n## Notes\n- Keep\n");
+});
+
+test("attachment upload refuses YAML-escaped ai_lock and a replaced note identity", async () => {
+  const note = new TFile("Knowledge/Locked.md");
+  let current: TAbstractFile = note;
+  let markdown = "---\n\"ai_l\\u006fck\": true\n---\n";
+  let binaryCreates = 0;
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getAbstractFileByPath: () => current,
+      getMarkdownFiles: () => [note],
+      cachedRead: async () => markdown,
+      process: async (_file: TFile, update: (value: string) => string) => { markdown = update(markdown); },
+      createFolder: async () => {},
+      createBinary: async (path: string) => { binaryCreates += 1; return new TFile(path); },
+    },
+    workspace: { getLeavesOfType: () => [], getActiveViewOfType: () => null, getActiveFile: () => note },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+    fileManager: { generateMarkdownLink: () => "[[x]]", getAvailablePathForAttachment: async () => "Attachments/x" },
+  };
+  const data = migrateData(null);
+  data.settings.attachmentStorageMode = "obsidian";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-attachment-lock-test");
+  await plugin.loadPluginData();
+  const value = { file: new File(["x"], "x.txt"), requestedFolder: "", insertionMode: "end" as const };
+
+  await assert.rejects(plugin.attachFileToNote(note, value), /ai_lock: true/i);
+  assert.equal(binaryCreates, 0);
+  markdown = "# Safe\n";
+  current = new TFile(note.path);
+  await assert.rejects(plugin.attachFileToNote(note, value), /changed or was replaced/i);
+  assert.equal(binaryCreates, 0);
+});
+
+test("attachment upload rejects malformed frontmatter and canonical immutable destinations", async () => {
+  const note = new TFile("Knowledge/Topic.md");
+  const files = new Map<string, TAbstractFile>([[note.path, note]]);
+  let markdown = "---\nai_lock: true\n# missing closing delimiter\n";
+  let binaryCreates = 0;
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getAbstractFileByPath: (path: string) => files.get(path) ?? null,
+      getMarkdownFiles: () => [note],
+      cachedRead: async () => markdown,
+      process: async (_file: TFile, update: (value: string) => string) => { markdown = update(markdown); },
+      createFolder: async (path: string) => {
+        const folder = new TFolder(path);
+        files.set(path, folder);
+        return folder;
+      },
+      createBinary: async (path: string) => { binaryCreates += 1; return new TFile(path); },
+    },
+    workspace: { getLeavesOfType: () => [], getActiveViewOfType: () => null, getActiveFile: () => note },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+    fileManager: { generateMarkdownLink: () => "[[x]]", getAvailablePathForAttachment: async () => "Attachments/x" },
+  };
+  const data = migrateData(null);
+  data.settings.attachmentStorageMode = "fixed-folder";
+  data.settings.attachmentFolder = "Assets";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-attachment-malformed-test");
+  await plugin.loadPluginData();
+  const value = { file: new File(["x"], "x.txt"), requestedFolder: "", insertionMode: "end" as const };
+
+  await assert.rejects(plugin.attachFileToNote(note, value), /malformed YAML frontmatter/i);
+  assert.equal(binaryCreates, 0);
+
+  markdown = "# Safe\n";
+  plugin.data.settings.attachmentFolder = "05 Sources//_books";
+  await assert.rejects(plugin.attachFileToNote(note, value), /immutable source-book folders/i);
+  assert.equal(binaryCreates, 0);
+});
+
+test("attachment partial failures retain and report the copied path without touching a replacement note", async () => {
+  const note = new TFile("Knowledge/Topic.md");
+  let current: TAbstractFile = note;
+  let markdown = "# Safe\n";
+  let processCalls = 0;
+  let replaceDuringCreate = false;
+  let replaceDuringProcess = false;
+  let failLinkGeneration = true;
+  let plugin: EntVaultCommandCenterPlugin & TestPluginBase;
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getAbstractFileByPath: () => current,
+      getMarkdownFiles: () => [note],
+      cachedRead: async () => markdown,
+      process: async (_file: TFile, update: (value: string) => string) => {
+        processCalls += 1;
+        if (replaceDuringProcess) {
+          current = new TFile(note.path);
+          (plugin as unknown as { dataEpoch: number }).dataEpoch += 1;
+        }
+        markdown = update(markdown);
+      },
+      createFolder: async () => {},
+      createBinary: async (path: string) => {
+        if (replaceDuringCreate) current = new TFile(note.path);
+        return new TFile(path);
+      },
+    },
+    workspace: { getLeavesOfType: () => [], getActiveViewOfType: () => null, getActiveFile: () => note },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+    fileManager: {
+      generateMarkdownLink: (file: TFile) => {
+        if (failLinkGeneration) throw new Error("simulated link generator failure");
+        return `[[${file.path}]]`;
+      },
+      getAvailablePathForAttachment: async () => "Attachments/report.pdf",
+    },
+  };
+  const data = migrateData(null);
+  data.settings.attachmentStorageMode = "obsidian";
+  plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-attachment-partial-test");
+  await plugin.loadPluginData();
+  const value = { file: new File(["x"], "report.pdf"), requestedFolder: "", insertionMode: "end" as const };
+
+  await assert.rejects(plugin.attachFileToNote(note, value), /copied to Attachments\/report\.pdf[\s\S]*manually/i);
+  assert.equal(processCalls, 0);
+
+  failLinkGeneration = false;
+  replaceDuringCreate = true;
+  await assert.rejects(plugin.attachFileToNote(note, value), /copied to Attachments\/report\.pdf[\s\S]*manually/i);
+  assert.equal(processCalls, 0, "a replacement note at the same path is never modified");
+
+  current = note;
+  replaceDuringCreate = false;
+  replaceDuringProcess = true;
+  await assert.rejects(plugin.attachFileToNote(note, value), /copied to Attachments\/report\.pdf[\s\S]*manually/i);
+  assert.equal(processCalls, 1, "the atomic process callback ran but refused the replacement before returning content");
+  assert.equal(markdown, "# Safe\n");
+});
+
+test("attachment upload freezes consented policy and aborts on a mid-operation data epoch change", async () => {
+  const note = new TFile("Knowledge/Topic.md");
+  const files = new Map<string, TAbstractFile>([[note.path, note]]);
+  let markdown = "# Safe\n";
+  let plugin: EntVaultCommandCenterPlugin & TestPluginBase;
+  let binaryCreates = 0;
+  const trashedFolders: string[] = [];
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getAbstractFileByPath: (path: string) => files.get(path) ?? null,
+      getMarkdownFiles: () => [note],
+      cachedRead: async () => markdown,
+      process: async (_file: TFile, update: (value: string) => string) => { markdown = update(markdown); },
+      createFolder: async (path: string) => {
+        const folder = new TFolder(path);
+        files.set(path, folder);
+        return folder;
+      },
+      createBinary: async (path: string) => {
+        binaryCreates += 1;
+        plugin.data.settings.attachmentMarker = "<!-- changed-after-consent -->";
+        const file = new TFile(path);
+        files.set(path, file);
+        return file;
+      },
+    },
+    workspace: { getLeavesOfType: () => [], getActiveViewOfType: () => null, getActiveFile: () => note },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+    fileManager: {
+      generateMarkdownLink: (file: TFile) => `[[${file.path}]]`,
+      getAvailablePathForAttachment: async () => "Attachments/x.txt",
+      trashFile: async (file: TFolder) => {
+        trashedFolders.push(file.path);
+        files.delete(file.path);
+      },
+    },
+  };
+  const data = migrateData(null);
+  data.settings.attachmentStorageMode = "fixed-folder";
+  data.settings.attachmentFolder = "Assets/Frozen";
+  data.settings.attachmentInsertionMode = "marker";
+  data.settings.attachmentMarker = "<!-- frozen-consent -->";
+  plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-attachment-policy-test");
+  await plugin.loadPluginData();
+
+  await plugin.attachFileToNote(note, {
+    file: new File(["x"], "x.txt"),
+    requestedFolder: "",
+    insertionMode: "marker",
+  });
+  assert.match(markdown, /<!-- frozen-consent -->\n\[\[Assets\/Frozen\/x\.txt\]\]/u);
+  assert.doesNotMatch(markdown, /changed-after-consent/u);
+
+  const internal = plugin as unknown as { dataEpoch: number };
+  const epochChangingFile = {
+    name: "later.txt",
+    size: 1,
+    arrayBuffer: async () => {
+      internal.dataEpoch += 1;
+      return new Uint8Array([1]).buffer;
+    },
+  } as File;
+  plugin.data.settings.attachmentFolder = "Stale/New";
+  await assert.rejects(plugin.attachFileToNote(note, {
+    file: epochChangingFile,
+    requestedFolder: "",
+    insertionMode: "end",
+  }), /synced data changed/i);
+  assert.equal(binaryCreates, 1, "the epoch change is detected before a second binary is created");
+  assert.deepEqual(trashedFolders, ["Stale/New", "Stale"], "empty folders created before the stale epoch are rolled back");
+  assert.equal(files.has("Stale"), false);
+
+  plugin.data.settings.attachmentFolder = "Race";
+  const replacement = new TFolder("Race");
+  const replacingFile = {
+    name: "race.txt",
+    size: 1,
+    arrayBuffer: async () => {
+      files.set("Race", replacement);
+      internal.dataEpoch += 1;
+      return new Uint8Array([1]).buffer;
+    },
+  } as File;
+  await assert.rejects(plugin.attachFileToNote(note, {
+    file: replacingFile,
+    requestedFolder: "",
+    insertionMode: "end",
+  }), /synced data changed/i);
+  assert.equal(files.get("Race"), replacement, "rollback never trashes a different folder recreated at the same path");
+  assert.deepEqual(trashedFolders, ["Stale/New", "Stale"]);
+});
+
+test("attachment storage modes remain collision-safe and cursor insertion uses the exact active editor", async () => {
+  const note = new TFile("Knowledge/Topic.md");
+  const files = new Map<string, TAbstractFile>([[note.path, note]]);
+  let markdown = "---\n---\n# Safe\n";
+  let cursorInsert = "";
+  const editor = {
+    getValue: () => markdown,
+    getCursor: () => ({ line: 2, ch: 6 }),
+    replaceRange: (value: string) => { cursorInsert = value; },
+  };
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getAbstractFileByPath: (path: string) => files.get(path) ?? null,
+      getMarkdownFiles: () => [note],
+      cachedRead: async () => markdown,
+      process: async (_file: TFile, update: (value: string) => string) => { markdown = update(markdown); },
+      createFolder: async (path: string) => { files.set(path, new TFolder(path)); },
+      createBinary: async (path: string) => {
+        const file = new TFile(path);
+        files.set(path, file);
+        return file;
+      },
+    },
+    workspace: {
+      getLeavesOfType: () => [],
+      getActiveViewOfType: () => ({ file: note, editor }),
+      getActiveFile: () => note,
+    },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+    fileManager: {
+      generateMarkdownLink: (file: TFile) => `[[${file.path}]]`,
+      getAvailablePathForAttachment: async () => "Core/core.pdf",
+    },
+  };
+  const data = migrateData(null);
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-attachment-modes-test");
+  await plugin.loadPluginData();
+
+  plugin.data.settings.attachmentStorageMode = "note-subfolder";
+  const first = await plugin.attachFileToNote(note, {
+    file: new File(["a"], "scan.png"), requestedFolder: "", insertionMode: "end",
+  });
+  const second = await plugin.attachFileToNote(note, {
+    file: new File(["b"], "scan.png"), requestedFolder: "", insertionMode: "end",
+  });
+  assert.equal(first.path, "Knowledge/Topic attachments/scan.png");
+  assert.equal(second.path, "Knowledge/Topic attachments/scan 1.png");
+
+  plugin.data.settings.attachmentStorageMode = "ask";
+  const asked = await plugin.attachFileToNote(note, {
+    file: new File(["c"], "asked.txt"), requestedFolder: "/Chosen//Folder/", insertionMode: "end",
+  });
+  assert.equal(asked.path, "Chosen/Folder/asked.txt");
+
+  plugin.data.settings.attachmentStorageMode = "obsidian";
+  const core = await plugin.attachFileToNote(note, {
+    file: new File(["d"], "core.pdf"), requestedFolder: "", insertionMode: "cursor",
+  });
+  assert.equal(core.path, "Core/core.pdf");
+  assert.equal(cursorInsert, "[[Core/core.pdf]]");
 });
 
 test("portable JSON serialization fails before creating an export folder", async () => {

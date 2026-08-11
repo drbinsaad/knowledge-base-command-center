@@ -3575,6 +3575,19 @@ export class EntVaultCommandCenterView extends ItemView {
     const open = actions.createEl("button", { cls: "ent-cc-button ent-cc-primary-button" });
     setIcon(open.createSpan(), "external-link"); open.createSpan({ text: "Open note" });
     open.addEventListener("click", () => this.run(() => this.openRecord(record.path)));
+    if (!record.isPlaceholder) {
+      const attach = actions.createEl("button", { cls: "ent-cc-button" });
+      setIcon(attach.createSpan(), "paperclip"); attach.createSpan({ text: "Attach file…" });
+      attach.disabled = record.aiLock;
+      attach.addEventListener("click", () => {
+        const file = this.app.vault.getAbstractFileByPath(record.path);
+        if (!(file instanceof TFile)) {
+          new Notice("The selected note is not currently available in the vault.", 7000);
+          return;
+        }
+        this.plugin.openAttachmentImport(file);
+      });
+    }
     const add = actions.createEl("button", { cls: "ent-cc-button" });
     setIcon(add.createSpan(), "folder-plus"); add.createSpan({ text: "Add to collection" });
     add.addEventListener("click", () => this.openCollectionPicker(record.path));
