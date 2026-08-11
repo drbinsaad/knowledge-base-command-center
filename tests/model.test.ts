@@ -2133,6 +2133,15 @@ test("portable workspace configuration round-trips settings and group order with
   data.portableIndex.libraryLayouts = { "library-research": [] };
   data.settings.workspaceName = "Research Command Center";
   data.settings.allowClinicalVisualGroupMoves = true;
+  data.settings.attachmentStorageMode = "fixed-folder";
+  data.settings.attachmentFolder = "Assets/Knowledge attachments";
+  data.settings.followUpCategories = [{
+    id: "questions",
+    label: "Questions to resolve",
+    style: "checkbox",
+    includeDate: true,
+    archived: false,
+  }];
   data.settings.libraryNoteProfiles = {
     "library-research": { folder: "Research/Papers", mode: "template", templatePath: "Templates/Paper.md" },
     "orphaned-library": { folder: "Private/Orphaned" },
@@ -2143,6 +2152,9 @@ test("portable workspace configuration round-trips settings and group order with
   const parsed = parseWorkspaceConfig(JSON.parse(JSON.stringify(config)) as unknown);
   assert.equal(parsed.settings.workspaceName, "Research Command Center");
   assert.equal(parsed.settings.allowClinicalVisualGroupMoves, true);
+  assert.equal(parsed.settings.attachmentStorageMode, "fixed-folder");
+  assert.equal(parsed.settings.attachmentFolder, "Assets/Knowledge attachments");
+  assert.deepEqual(parsed.settings.followUpCategories, data.settings.followUpCategories);
   assert.deepEqual(parsed.settings.libraryNoteProfiles, {
     "library-research": { folder: "Research/Papers", mode: "template", templatePath: "Templates/Paper.md" },
   });
@@ -2150,6 +2162,22 @@ test("portable workspace configuration round-trips settings and group order with
   assert.equal("manualIndexPaths" in parsed, false);
   assert.equal(JSON.stringify(parsed).includes("Private/Note.md"), false);
   assert.equal(JSON.stringify(parsed).includes("Private/Orphaned"), false);
+});
+
+test("workspace parsing rejects Quick Append settings without an active category", () => {
+  const data = migrateData(null);
+  const archived = createWorkspaceConfig(data, "2026-08-12T00:00:00.000Z");
+  archived.settings.followUpCategories = archived.settings.followUpCategories.map((category) => ({
+    ...category,
+    archived: true,
+  }));
+  assert.throws(() => parseWorkspaceConfig(archived), /at least one active category/u);
+
+  const malformed = createWorkspaceConfig(data, "2026-08-12T00:00:00.000Z") as unknown as {
+    settings: { followUpCategories: unknown };
+  };
+  malformed.settings.followUpCategories = [{ id: "bad id", label: "", style: "unknown" }];
+  assert.throws(() => parseWorkspaceConfig(malformed), /at least one active category/u);
 });
 
 test("legacy standalone workspace import drops profiles without destination Library identities", () => {

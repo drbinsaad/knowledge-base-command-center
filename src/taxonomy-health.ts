@@ -3,8 +3,11 @@ import {
   normalizeWikiLink,
   pathIsInsideFolder,
   recordBelongsToIndex,
+  resolveLibraryNoteProfile,
   resetCurriculumVisualPath,
   subjectLibraryId,
+  validateTemplateFilePath,
+  validateWritableFolderPath,
   type LayoutHeading,
   type PluginData,
   type VaultRecord,
@@ -442,6 +445,51 @@ function addPathFindings(findings: TaxonomyHealthFinding[], input: TaxonomyHealt
     title: "Template mode has no default template", scope: "Settings",
     detail: "New-note defaults request a template, but no template path is configured. Choose a template or switch the default to Empty note.",
   });
+
+  if (data.settings.attachmentStorageMode === "fixed-folder") {
+    const folder = data.settings.attachmentFolder;
+    const validation = validateWritableFolderPath(folder, input.configDir);
+    if (validation || (folder && !existingFolderPaths.has(folder))) findings.push({
+      id: findingId("unavailable-path", "attachment-folder", folder || "vault-root"),
+      kind: "unavailable-path",
+      severity: validation ? "warning" : "info",
+      title: validation ? "Fixed attachment folder cannot be used" : "Fixed attachment folder is not created yet",
+      scope: "Attachments",
+      detail: validation
+        ? `The fixed attachment folder “${folder || "Vault root"}” is unsafe: ${validation}`
+        : `The fixed attachment folder “${folder}” is not currently available. The explicit Attach file command will create it when first used; ordinary paste and drag-and-drop are unaffected.`,
+    });
+  }
+
+  const libraryById = new Map(data.portableIndex.libraries.map((library) => [library.id, library]));
+  for (const [libraryId, profile] of Object.entries(data.settings.libraryNoteProfiles)) {
+    const libraryName = libraryById.get(libraryId)?.name ?? libraryId;
+    const scope = `Library profile: ${libraryName}`;
+    if (profile.folder !== undefined) {
+      const validation = validateWritableFolderPath(profile.folder, input.configDir);
+      if (validation || (profile.folder && !existingFolderPaths.has(profile.folder))) findings.push({
+        id: findingId("unavailable-path", "library-folder", libraryId, profile.folder || "vault-root"),
+        kind: "unavailable-path", severity: "warning", title: "Library note folder is unavailable", scope,
+        detail: validation
+          ? `The Library creation profile folder “${profile.folder || "Vault root"}” cannot be used: ${validation}`
+          : `The Library creation profile folder “${profile.folder}” is not currently available. It may still be arriving through Sync.`,
+      });
+    }
+    const effective = resolveLibraryNoteProfile(data.settings, libraryId);
+    const configuredTemplate = profile.templatePath;
+    if (!configuredTemplate && !(profile.mode === "template" && effective.templatePath !== data.settings.defaultTemplatePath)) continue;
+    const template = configuredTemplate ?? effective.templatePath;
+    const validation = validateTemplateFilePath(template, data.settings.templatesFolder, input.configDir);
+    if (!template || validation || !existingMarkdownPaths.has(template)) findings.push({
+      id: findingId("unavailable-path", "library-template", libraryId, template || "missing"),
+      kind: "unavailable-path", severity: "warning", title: "Library template is unavailable", scope,
+      detail: !template
+        ? "The Library creation profile requests Template mode without a template."
+        : validation
+          ? `The Library template “${template}” cannot be used: ${validation}`
+          : `The Library template “${template}” is not currently available. It may still be arriving through Sync.`,
+    });
+  }
 }
 
 function addBindingFindings(findings: TaxonomyHealthFinding[], data: PluginData, records: VaultRecord[]): void {

@@ -724,19 +724,21 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
           }, ["attachments", "files", "upload", "folder"]),
           renderSetting("Fixed attachment folder", "Used only when Attachment storage is set to a fixed vault folder.", (row) => {
             const disabled = readOnly || settings.attachmentStorageMode !== "fixed-folder";
-            row.addText((text) => text
-              .setPlaceholder("Attachments")
-              .setValue(settings.attachmentFolder)
-              .setDisabled(disabled)
-              .onChange(async (value) => {
-                if (!ownsConfiguredBase()) return;
-                const clean = value.trim().replace(/^\/+|\/+$/g, "");
-                const error = validateWritableFolderPath(clean, this.host.app.vault.configDir);
-                text.inputEl.toggleClass("is-error", Boolean(error));
-                if (error) return;
-                settings.attachmentFolder = clean;
-                await this.save(false);
-              }));
+            row.addText((text) => {
+              text.setPlaceholder("Attachments")
+                .setValue(settings.attachmentFolder)
+                .setDisabled(disabled)
+                .onChange((value) => {
+                  if (!ownsConfiguredBase()) return;
+                  const clean = value.trim().replace(/^\/+|\/+$/g, "");
+                  const error = validateWritableFolderPath(clean, this.host.app.vault.configDir);
+                  text.inputEl.toggleClass("is-error", Boolean(error));
+                  if (error) return;
+                  settings.attachmentFolder = clean;
+                  this.scheduleTextSave(false);
+                });
+              this.bindBufferedTextCommit(text.inputEl);
+            });
             row.addButton((button) => button.setButtonText("Browse…").setDisabled(disabled).onClick(() => {
               if (!ownsConfiguredBase()) return;
               new StringPickerModal(this.host.app, folderPaths(), "Choose attachment folder", "Search vault folders…", async (path) => {
@@ -767,26 +769,30 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
               }));
           }, ["insert", "embed", "cursor", "heading", "marker"]),
           renderSetting("Attachment marker", "Exact standalone line used when the link location is Configured marker.", (row) => {
-            row.addText((text) => text
-              .setPlaceholder("<!-- kbcc:attachments -->")
-              .setValue(settings.attachmentMarker)
-              .setDisabled(readOnly || settings.attachmentInsertionMode !== "marker")
-              .onChange(async (value) => {
-                if (!ownsConfiguredBase() || !value.trim()) return;
-                settings.attachmentMarker = value.trim();
-                await this.save(false);
-              }));
+            row.addText((text) => {
+              text.setPlaceholder("<!-- kbcc:attachments -->")
+                .setValue(settings.attachmentMarker)
+                .setDisabled(readOnly || settings.attachmentInsertionMode !== "marker")
+                .onChange((value) => {
+                  if (!ownsConfiguredBase() || !value.trim()) return;
+                  settings.attachmentMarker = value.trim();
+                  this.scheduleTextSave(false);
+                });
+              this.bindBufferedTextCommit(text.inputEl);
+            });
           }, ["attachment marker"]),
           renderSetting("Attachment heading", "Heading title used when the link location is Configured heading.", (row) => {
-            row.addText((text) => text
-              .setPlaceholder("Attachments")
-              .setValue(settings.attachmentHeading)
-              .setDisabled(readOnly || settings.attachmentInsertionMode !== "heading")
-              .onChange(async (value) => {
-                if (!ownsConfiguredBase() || !value.trim()) return;
-                settings.attachmentHeading = value.trim().replace(/^#{1,6}\s+/u, "").replace(/\s+#+\s*$/u, "");
-                await this.save(false);
-              }));
+            row.addText((text) => {
+              text.setPlaceholder("Attachments")
+                .setValue(settings.attachmentHeading)
+                .setDisabled(readOnly || settings.attachmentInsertionMode !== "heading")
+                .onChange((value) => {
+                  if (!ownsConfiguredBase() || !value.trim()) return;
+                  settings.attachmentHeading = value.trim().replace(/^#{1,6}\s+/u, "").replace(/\s+#+\s*$/u, "");
+                  this.scheduleTextSave(false);
+                });
+              this.bindBufferedTextCommit(text.inputEl);
+            });
           }, ["attachment heading"]),
           renderSetting("Inbox folder", settings.workspaceMode === "ent-clinical" ? "Clinical proposals must stay inside 01 Inbox." : "Notes in this folder appear in the Inbox section.", (row) => {
             const description = settings.workspaceMode === "ent-clinical" ? "Clinical proposals must stay inside 01 Inbox." : "Notes in this folder appear in the Inbox section.";

@@ -4004,6 +4004,9 @@ export function parseWorkspaceConfig(input: unknown): WorkspaceConfig {
   transferArrayLength(value.indexGroupOrder, "Workspace group order", MAX_TRANSFER_COLLECTIONS);
   const rawSettings = asUnknownRecord(value.settings);
   const settings = { ...cleanSettings(rawSettings), setupComplete: true };
+  if (!settings.followUpCategories.some((category) => !category.archived)) {
+    throw new Error("Workspace Quick Append settings must contain at least one active category.");
+  }
   settings.libraryNoteProfiles = parseTransferredLibraryNoteProfiles(rawSettings.libraryNoteProfiles);
   return {
     kind: "knowledge-base-command-center-workspace",

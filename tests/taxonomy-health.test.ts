@@ -145,6 +145,20 @@ test("health center finds empty structure, unavailable configuration, and possib
   data.settings.primaryFolder = "Missing folder";
   data.settings.defaultNewNoteMode = "template";
   data.settings.defaultTemplatePath = "Templates/Missing.md";
+  data.settings.attachmentStorageMode = "fixed-folder";
+  data.settings.attachmentFolder = "Assets/Attachments";
+  data.portableIndex.libraries = [{
+    id: "library-research", name: "Research", singularName: "Paper", icon: "microscope",
+    order: 0, sourceKind: null, archivedAt: null,
+  }];
+  data.portableIndex.libraryLayouts = { "library-research": [] };
+  data.settings.libraryNoteProfiles = {
+    "library-research": {
+      folder: "Missing Library notes",
+      mode: "template",
+      templatePath: "Templates/Missing Paper.md",
+    },
+  };
   data.portableIndex.groups = [{ id: "group", title: "Research", order: 0 }];
   data.portableIndex.subjects = [{
     id: "placeholder", title: "Matching note", groupId: "group", parentId: null,
@@ -155,6 +169,9 @@ test("health center finds empty structure, unavailable configuration, and possib
   const findings = analyze(data, [local, placeholder]);
   assert.ok(findings.some((item) => item.kind === "empty-structure"));
   assert.ok(findings.some((item) => item.kind === "unavailable-path" && item.detail.includes("Missing folder")));
+  assert.ok(findings.some((item) => item.scope === "Attachments" && item.detail.includes("Assets/Attachments")));
+  assert.ok(findings.some((item) => item.scope === "Library profile: Research" && item.detail.includes("Missing Library notes")));
+  assert.ok(findings.some((item) => item.scope === "Library profile: Research" && item.detail.includes("Missing Paper.md")));
   assert.ok(findings.some((item) => item.kind === "placeholder-match" && item.path === local.path));
 });
 

@@ -2914,6 +2914,87 @@ test("Library creation profiles are discoverable through Obsidian settings searc
   assert.ok(libraries.items.some((item) => "name" in item && item.name === "Library creation profiles"));
 });
 
+test("attachment text settings use the buffered non-refresh save pipeline", () => {
+  const data = migrateData(null);
+  const host = {
+    app: {
+      vault: { configDir: ".obsidian", getAllLoadedFiles: () => [] },
+      metadataCache: {},
+    },
+    data,
+    dataCompatibilityWarning: "",
+    isDataReadOnly: () => false,
+    getKnowledgeBases: () => [{ id: "base-a", data }],
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    getExternalChangeGeneration: () => 0,
+    getIndexRecords: () => [],
+    getLibraries: () => [],
+    librarySubjectCount: () => 0,
+    getTemplateFiles: () => [],
+    getIndexGroups: () => [],
+    getFollowUpCategories: () => [],
+    replaceFollowUpCategories: async () => undefined,
+    savePluginData: async () => undefined,
+    saveCompensatingRollback: async () => undefined,
+    markPersistenceUncertain: () => undefined,
+    refreshViews: async () => undefined,
+    switchKnowledgeBase: async () => undefined,
+    renameKnowledgeBase: async () => undefined,
+  };
+  const tab = new EntCommandCenterSettingsTab(host.app as never, host as never);
+  const requestedRefreshes: boolean[] = [];
+  (tab as unknown as { scheduleTextSave(refresh?: boolean): void }).scheduleTextSave = (refresh = true) => {
+    requestedRefreshes.push(refresh);
+  };
+  const folders = tab.getSettingDefinitions().find((definition) => (
+    "heading" in definition && definition.heading === "Folders and templates"
+  ));
+  assert.ok(folders && "items" in folders);
+
+  const renderAndChange = (name: string, value: string): void => {
+    const definition = folders.items.find((item) => "name" in item && item.name === name);
+    assert.ok(definition && "render" in definition);
+    let change: ((next: string) => void | Promise<void>) | null = null;
+    const inputEl = {
+      addEventListener: () => undefined,
+      blur: () => undefined,
+      toggleClass: () => undefined,
+    };
+    const text = {
+      inputEl,
+      setPlaceholder(): typeof text { return this; },
+      setValue(): typeof text { return this; },
+      setDisabled(): typeof text { return this; },
+      onChange(callback: (next: string) => void | Promise<void>): typeof text {
+        change = callback;
+        return this;
+      },
+    };
+    const button = {
+      setButtonText(): typeof button { return this; },
+      setDisabled(): typeof button { return this; },
+      onClick(): typeof button { return this; },
+    };
+    definition.render({
+      settingEl: { addClass: () => undefined },
+      addText(callback: (component: typeof text) => void) { callback(text); return this; },
+      addButton(callback: (component: typeof button) => void) { callback(button); return this; },
+    } as never);
+    assert.ok(change);
+    void change(value);
+  };
+
+  renderAndChange("Fixed attachment folder", "/Assets/Uploads/");
+  renderAndChange("Attachment marker", "  <!-- custom:attachments -->  ");
+  renderAndChange("Attachment heading", "### Imported files ###");
+
+  assert.deepEqual(requestedRefreshes, [false, false, false]);
+  assert.equal(data.settings.attachmentFolder, "Assets/Uploads");
+  assert.equal(data.settings.attachmentMarker, "<!-- custom:attachments -->");
+  assert.equal(data.settings.attachmentHeading, "Imported files");
+});
+
 test("a rejected direct setting save restores memory and reports the failure", async () => {
   Notice.messages.length = 0;
   const data = migrateData(null);
@@ -3515,6 +3596,33 @@ test("portable workspace preflight still rejects an invalid Library profile fold
     value,
     { ...EMPTY_PORTABLE_SELECTION, workspace: true },
   ));
+});
+
+test("workspace import preflight rejects an unsafe fixed attachment folder", () => {
+  const data = migrateData(null);
+  data.settings.attachmentStorageMode = "fixed-folder";
+  data.settings.attachmentFolder = "Safe attachments";
+  const rawValue = createPortableExport(
+    data,
+    [],
+    { ...EMPTY_PORTABLE_SELECTION, workspace: true },
+    "2026-08-12T00:00:00.000Z",
+  );
+  assert.ok(rawValue.components.workspace);
+  rawValue.components.workspace.settings.attachmentFolder = "../Outside";
+  const value = parsePortableExport(rawValue);
+  const center = Object.create(ExportImportCenterModal.prototype) as {
+    app: { vault: { configDir: string; getAbstractFileByPath(path: string): null } };
+    plugin: { data: typeof data };
+    validateWorkspaceComponent(input: typeof value, selection: typeof EMPTY_PORTABLE_SELECTION): unknown;
+  };
+  center.app = { vault: { configDir: ".obsidian", getAbstractFileByPath: () => null } };
+  center.plugin = { data: migrateData(null) };
+
+  assert.throws(
+    () => center.validateWorkspaceComponent(value, { ...EMPTY_PORTABLE_SELECTION, workspace: true }),
+    /\.\./u,
+  );
 });
 
 test("portable-v4 preflight retains and atomically resets every unsafe Library template class", () => {

@@ -112,20 +112,20 @@ A base can be renamed, duplicated, archived, and restored. At least one availabl
 
 Permanent deletion is available only for an archived base and requires typed confirmation. It removes that base's plugin-owned organization, never its Markdown notes. Before deletion, restore the base, switch to it, export a private same-vault recovery, then archive it again.
 
-## Upgrade from the old single-base format
+## Upgrade and Sync compatibility
 
-Version 0.10.x wraps earlier single-base organization into one knowledge base without intentionally resetting it. The first upgraded copy receives a random full vault identity plus a non-secret fingerprint of its legacy organization.
+Version 0.10 and later wrap earlier single-base organization into one knowledge base without intentionally resetting it. The first upgraded copy receives a random full vault identity plus a non-secret fingerprint of its legacy organization.
 
 When upgrading a synced vault on several devices:
 
-1. Install the same 0.10.x build everywhere.
+1. Install the same current release line everywhere. For this release, every device that can edit the synced plugin data must run 0.12.x before organization work resumes.
 2. Let the plugin file and <code>data.json</code> finish syncing before organizing, importing, or exporting recovery.
 3. Confirm the same knowledge bases and counts on each device.
 4. Export new recovery files after identity convergence.
 
 Identical pristine upgrades can converge through Sync. If exactly one same-origin copy was edited before convergence, that edited copy wins because the other has no unique work. Two independently edited copies are not guessed together; the plugin preserves data and enters a protected read-only state.
 
-A 0.8.3 device that encounters the newer version-13 store preserves it read-only but may describe the event as a migration failure. That is downgrade protection, not proof of corruption. Do not keep editing with the older build.
+An older device that encounters the version-14 store and schema-13 knowledge-base data preserves it read-only. It may describe the event as a migration failure because it cannot faithfully save the newer settings and causal Sync metadata. That is downgrade protection, not proof of corruption. Update every synced device before editing; do not keep working with an older build.
 
 Recovery exported before first-upgrade identity convergence may carry the losing provisional identity and is intentionally rejected afterward. Export it again once Sync has settled.
 

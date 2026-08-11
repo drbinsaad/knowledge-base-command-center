@@ -80,7 +80,7 @@ The plugin detected unrecognized, damaged, or newer plugin data and intentionall
 5. Update every device to the same current plugin version.
 6. Report the issue without attaching private plugin data publicly.
 
-A 0.8.3 device can describe a version-13 multi-base store as a migration failure. That is expected downgrade protection; reopen it with 0.10.x.
+An older device can describe the version-14 store with schema-13 knowledge-base data as a migration failure. That is expected downgrade protection. Update every synced device to the same current 0.12.x release before editing again.
 
 ## Export/import center is in salvage mode
 
@@ -90,7 +90,7 @@ Other sections may be available as a one-time salvage export. Newly generated po
 
 ## First upgrade differs across devices
 
-Install the same 0.10.x build everywhere and stop organizing until Sync settles. Identical pristine upgrades can converge; two independently edited upgrades remain protected rather than being guessed together.
+Install the same current 0.12.x build everywhere and stop organizing until Sync settles. Identical pristine upgrades can converge; two independently edited upgrades remain protected rather than being guessed together.
 
 If a recovery was exported before identity convergence, export it again afterward. A file carrying a losing provisional identity is intentionally rejected.
 

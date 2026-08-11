@@ -800,6 +800,10 @@ export class IndexManagerModal extends Modal {
         ? validateProposalFolderPath(importedSettings.proposalFolder, this.app.vault.configDir)
         : validateWritableFolderPath(importedSettings.proposalFolder, this.app.vault.configDir);
       if (inboxError) throw new Error(inboxError);
+      if (importedSettings.attachmentStorageMode === "fixed-folder") {
+        const attachmentError = validateWritableFolderPath(importedSettings.attachmentFolder, this.app.vault.configDir);
+        if (attachmentError) throw new Error(attachmentError);
+      }
       const configuredTemplate = importedSettings.defaultTemplatePath ? this.app.vault.getAbstractFileByPath(importedSettings.defaultTemplatePath) : null;
       const templateReset = importedSettings.defaultNewNoteMode === "template" && !(configuredTemplate instanceof TFile);
       if (templateReset) {

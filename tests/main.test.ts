@@ -8919,6 +8919,53 @@ test("Quick Append refuses immutable source books and same-path file replacement
   assert.equal(processCalls, 0, "both refusals happen before Vault.process can commit anything");
 });
 
+test("Quick Append undo refuses a same-path replacement before and during the atomic transform", async () => {
+  const selected = new TFile("Knowledge Base/Undo identity.md");
+  let currentFile = selected;
+  let content = "# Undo identity\n";
+  let replaceBeforeTransform = false;
+  let processCalls = 0;
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getMarkdownFiles: () => [currentFile],
+      getAbstractFileByPath: (path: string) => path === currentFile.path ? currentFile : null,
+      process: async (_file: TFile, transform: (value: string) => string) => {
+        processCalls += 1;
+        if (replaceBeforeTransform) {
+          replaceBeforeTransform = false;
+          currentFile = new TFile(selected.path);
+        }
+        content = transform(content);
+      },
+      createFolder: async () => {},
+      create: async (path: string) => new TFile(path),
+    },
+    workspace: { getLeavesOfType: () => [], getActiveFile: () => currentFile },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+    fileManager: {},
+  };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-quick-append-undo-identity-test");
+  await plugin.loadPluginData();
+  const internal = plugin as unknown as { undoLastFollowUpAppend(): Promise<void> };
+
+  await plugin.appendFollowUpToFile(selected, "questions", "First append");
+  currentFile = new TFile(selected.path);
+  await assert.rejects(() => internal.undoLastFollowUpAppend(), /no recent Quick Append change/u);
+  assert.equal(processCalls, 1, "a replacement detected by the command check is never processed");
+
+  currentFile = selected;
+  await plugin.appendFollowUpToFile(selected, "questions", "Second append");
+  const appendedContent = content;
+  replaceBeforeTransform = true;
+  await assert.rejects(() => internal.undoLastFollowUpAppend(), /changed or was replaced/u);
+  assert.equal(content, appendedContent, "a replacement during Vault.process is never rewritten");
+  assert.notEqual(currentFile, selected);
+});
+
 test("Quick Append existing-note picker refuses a base or data-epoch change before opening the form", async () => {
   Notice.messages.length = 0;
   const file = new TFile("Knowledge Base/Topic.md");

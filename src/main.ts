@@ -1982,7 +1982,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.lastFollowUpUndo = null;
       return false;
     }
-    return this.app.vault.getAbstractFileByPath(pending.file.path) instanceof TFile;
+    const currentFile = this.app.vault.getAbstractFileByPath(pending.file.path);
+    if (currentFile !== pending.file) {
+      this.lastFollowUpUndo = null;
+      return false;
+    }
+    return true;
   }
 
   private async undoLastFollowUpAppend(): Promise<void> {
@@ -1990,8 +1995,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const pending = this.lastFollowUpUndo;
     if (!pending || !this.canUndoLastFollowUpAppend()) throw new Error("There is no recent Quick Append change to undo.");
     const currentFile = this.app.vault.getAbstractFileByPath(pending.file.path);
-    if (!(currentFile instanceof TFile)) throw new Error("The note changed location and the transient Quick Append undo is unavailable.");
+    if (!(currentFile instanceof TFile) || currentFile !== pending.file) {
+      throw new Error("The note changed or was replaced and the transient Quick Append undo is unavailable.");
+    }
     await this.app.vault.process(currentFile, (content) => {
+      if (this.app.vault.getAbstractFileByPath(pending.file.path) !== pending.file) {
+        throw new Error("The note changed or was replaced and the transient Quick Append undo is unavailable.");
+      }
       assertFollowUpNoteWritable(content);
       return reverseFollowUpAppend(content, pending.undo);
     });

@@ -1022,6 +1022,10 @@ export class ExportImportCenterModal extends Modal {
       ? validateProposalFolderPath(settings.proposalFolder, this.app.vault.configDir)
       : validateWritableFolderPath(settings.proposalFolder, this.app.vault.configDir);
     if (proposalValidation) throw new Error(proposalValidation);
+    if (settings.attachmentStorageMode === "fixed-folder") {
+      const attachmentValidation = validateWritableFolderPath(settings.attachmentFolder, this.app.vault.configDir);
+      if (attachmentValidation) throw new Error(attachmentValidation);
+    }
 
     let defaultTemplateReset = false;
     if (settings.defaultNewNoteMode === "template") {
