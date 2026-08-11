@@ -3,9 +3,12 @@ import test from "node:test";
 import EntVaultCommandCenterPlugin from "../src/main.ts";
 import { ExportImportCenterModal } from "../src/portability-modal.ts";
 import {
+  boundedSemanticLineage,
+  canonicalInterimEnvelopeString,
   BUILTIN_LIBRARY_DEFINITIONS,
   buildCurriculumTree,
   createDefaultStore,
+  createDeviceLocalPluginState,
   createKnowledgeBaseEntry,
   curriculumContainerKey,
   DATA_VERSION,
@@ -16,16 +19,20 @@ import {
   MAX_TRANSFER_TEXT_LENGTH,
   migrateData,
   migrateStore,
+  nextSemanticHead,
   isFreshVaultId,
   portablePlaceholderPath,
   provisionalInterimEnvelopeVaultFingerprint,
   provisionalMigratedVaultFingerprint,
   rewritePluginDataPathPrefix,
+  resetPluginViewState,
   restoreSnapshot,
+  semanticEntryFingerprint,
   snapshotPersonal,
   STORE_KIND,
   STORE_VERSION,
   type KnowledgeBaseEntry,
+  type PluginData,
   type PluginStore,
   type VaultRecord,
 } from "../src/model.ts";
@@ -37,12 +44,14 @@ import {
 } from "../src/portability.ts";
 import { IndexManagerModal } from "../src/index-manager.ts";
 import { ConfirmModal, IndexGroupModal, StringPickerModal, TextPromptModal } from "../src/modals.ts";
+import { EntCommandCenterSettingsTab } from "../src/settings.ts";
 import { Notice, Plugin, TFile, TFolder, type TAbstractFile } from "obsidian";
 import { mergeKnowledgeBaseStores } from "../src/store-merge.ts";
 
 interface TestPluginBase {
   loadedData: unknown;
   savedData: unknown[];
+  deviceLocalWrites: unknown[];
 }
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
@@ -74,6 +83,55 @@ function migrationFingerprintForTest(value: unknown): string {
   return `${hash(0x811c9dc5)}${hash(0x9e3779b9)}`;
 }
 
+async function bounded<T>(promise: Promise<T>, label: string, milliseconds = 1000): Promise<T> {
+  let timer: ReturnType<typeof globalThis.setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = globalThis.setTimeout(() => reject(new Error(`Timed out: ${label}`)), milliseconds);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) globalThis.clearTimeout(timer);
+  }
+}
+
+function settingsTabForPlugin(plugin: EntVaultCommandCenterPlugin): EntCommandCenterSettingsTab & {
+  save(refresh?: boolean): Promise<boolean>;
+} {
+  const tab = Object.create(EntCommandCenterSettingsTab.prototype) as EntCommandCenterSettingsTab & Record<string, unknown>;
+  Object.assign(tab, {
+    host: plugin,
+    persistedDataSnapshot: structuredClone(plugin.data),
+    settingsSaveRevision: 0,
+    persistedSettingsRevision: 0,
+    pendingSettingsSaves: 0,
+    update: () => {},
+  });
+  return tab as EntCommandCenterSettingsTab & { save(refresh?: boolean): Promise<boolean> };
+}
+
+function advanceStoreEntry(
+  entry: NonNullable<PluginStore["bases"][number]>,
+  change: () => void,
+  updatedAt = entry.updatedAt + 1,
+): void {
+  const parentHead = entry.semanticHead;
+  change();
+  entry.semanticRevision += 1;
+  entry.semanticHash = semanticEntryFingerprint(entry);
+  entry.semanticHead = nextSemanticHead(parentHead, entry.semanticHash);
+  entry.semanticLineage = boundedSemanticLineage([parentHead, ...entry.semanticLineage], entry.semanticHead);
+  entry.updatedAt = updatedAt;
+}
+
+function neutralSyncedData(data: PluginData): PluginData {
+  const snapshot = structuredClone(data);
+  resetPluginViewState(snapshot);
+  return snapshot;
+}
+
 function emptyWritableTestVault(): {
   configDir: string;
   getMarkdownFiles: () => TFile[];
@@ -90,15 +148,23 @@ function emptyWritableTestVault(): {
   };
 }
 
-function pluginWith(data: unknown): EntVaultCommandCenterPlugin & TestPluginBase {
+function pluginWith(data: unknown, initialDeviceState: unknown = null): EntVaultCommandCenterPlugin & TestPluginBase {
+  const deviceLocalWrites: unknown[] = [];
+  let deviceState = structuredClone(initialDeviceState);
   const app = {
     vault: emptyWritableTestVault(),
     workspace: { getLeavesOfType: () => [] },
     metadataCache: { getFileCache: () => null },
     fileManager: {},
+    loadLocalStorage: () => structuredClone(deviceState),
+    saveLocalStorage: (_key: string, value: unknown) => {
+      deviceState = structuredClone(value);
+      deviceLocalWrites.push(structuredClone(value));
+    },
   };
   const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
   plugin.loadedData = data;
+  plugin.deviceLocalWrites = deviceLocalWrites;
   return plugin;
 }
 
@@ -106,6 +172,7 @@ function pluginWithFiles(
   data: unknown,
   files: TFile[],
   frontmatterByPath: Record<string, Record<string, unknown>>,
+  initialDeviceState: unknown = null,
 ): {
   plugin: EntVaultCommandCenterPlugin & TestPluginBase;
   metadataReadCount: () => number;
@@ -115,6 +182,8 @@ function pluginWithFiles(
   let metadataReads = 0;
   let sourceMutations = 0;
   let vaultEnumerations = 0;
+  const deviceLocalWrites: unknown[] = [];
+  let deviceState = structuredClone(initialDeviceState);
   const forbiddenSourceMutation = (): never => {
     sourceMutations += 1;
     throw new Error("A plugin-only organization action attempted to mutate a vault file.");
@@ -145,9 +214,15 @@ function pluginWithFiles(
       renameFile: forbiddenSourceMutation,
       processFrontMatter: forbiddenSourceMutation,
     },
+    loadLocalStorage: () => structuredClone(deviceState),
+    saveLocalStorage: (_key: string, value: unknown) => {
+      deviceState = structuredClone(value);
+      deviceLocalWrites.push(structuredClone(value));
+    },
   };
   const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
   plugin.loadedData = data;
+  plugin.deviceLocalWrites = deviceLocalWrites;
   return {
     plugin,
     metadataReadCount: () => metadataReads,
@@ -443,13 +518,9 @@ test("current structural repair preserves identity-less envelope convergence acr
     { id: "shared", title: "First", collapsed: false, subjects: [], subheadings: [] },
     { id: "shared", title: "Duplicate", collapsed: false, subjects: [], subheadings: [] },
   ];
-  const identityMaterial = {
-    kind: STORE_KIND,
-    version: STORE_VERSION,
-    bases: template.bases,
-    deletedBaseIds: template.deletedBaseIds,
-  };
-  const oldFingerprint = migrationFingerprintForTest(identityMaterial);
+  const oldFingerprint = migrationFingerprintForTest(
+    JSON.parse(canonicalInterimEnvelopeString(template)),
+  );
   const leftStore = structuredClone(template);
   const rightStore = structuredClone(template);
   leftStore.vaultId = `vault-envelope-migrated-${oldFingerprint}-aaaaaaaaaaaa`;
@@ -462,13 +533,9 @@ test("current structural repair preserves identity-less envelope convergence acr
 
   const leftSaved = left.savedData[0] as PluginStore;
   const rightSaved = right.savedData[0] as PluginStore;
-  const repairedMaterial = {
-    kind: STORE_KIND,
-    version: STORE_VERSION,
-    bases: leftSaved.bases,
-    deletedBaseIds: leftSaved.deletedBaseIds,
-  };
-  const repairedFingerprint = migrationFingerprintForTest(repairedMaterial);
+  const repairedFingerprint = migrationFingerprintForTest(
+    JSON.parse(canonicalInterimEnvelopeString(leftSaved)),
+  );
   assert.notEqual(repairedFingerprint, oldFingerprint);
   assert.equal(provisionalInterimEnvelopeVaultFingerprint(leftSaved.vaultId), repairedFingerprint);
   assert.equal(provisionalInterimEnvelopeVaultFingerprint(rightSaved.vaultId), repairedFingerprint);
@@ -513,13 +580,9 @@ test("old-schema migration rebases pristine identity-less envelope IDs across de
   (legacyData as { version: number }).version = DATA_VERSION - 2;
   const template = createDefaultStore(legacyData, 100, "vault-old-envelope-placeholder");
   (template as { version: number }).version = STORE_VERSION - 2;
-  const oldIdentityMaterial = {
-    kind: STORE_KIND,
-    version: STORE_VERSION,
-    bases: template.bases,
-    deletedBaseIds: template.deletedBaseIds,
-  };
-  const oldFingerprint = migrationFingerprintForTest(oldIdentityMaterial);
+  const oldFingerprint = migrationFingerprintForTest(
+    JSON.parse(canonicalInterimEnvelopeString(template)),
+  );
   const leftStore = structuredClone(template);
   const rightStore = structuredClone(template);
   leftStore.vaultId = `vault-envelope-migrated-${oldFingerprint}-aaaaaaaaaaaa`;
@@ -534,13 +597,9 @@ test("old-schema migration rebases pristine identity-less envelope IDs across de
   assert.equal(right.savedData.length, 1);
   const leftSaved = left.savedData[0] as PluginStore;
   const rightSaved = right.savedData[0] as PluginStore;
-  const migratedIdentityMaterial = {
-    kind: STORE_KIND,
-    version: STORE_VERSION,
-    bases: leftSaved.bases,
-    deletedBaseIds: leftSaved.deletedBaseIds,
-  };
-  const migratedFingerprint = migrationFingerprintForTest(migratedIdentityMaterial);
+  const migratedFingerprint = migrationFingerprintForTest(
+    JSON.parse(canonicalInterimEnvelopeString(leftSaved)),
+  );
   assert.notEqual(migratedFingerprint, oldFingerprint);
   assert.equal(leftSaved.bases[0]?.data.settings.workspaceName, "Legacy envelope knowledge base");
   assert.equal(provisionalInterimEnvelopeVaultFingerprint(leftSaved.vaultId), migratedFingerprint);
@@ -953,9 +1012,10 @@ test("Undo repairs a historical ENT snapshot before persisting it", async () => 
   const medication = new TFile("06 Clinical Tools/Medications/Drug - Allergodil.md");
   const data = invalidEntMedicationIndexData(medication);
   data.undoStack = [snapshotPersonal(data, "Pre-invariant layout", false, true)];
+  const initialDeviceState = createDeviceLocalPluginState(createDefaultStore(structuredClone(data), 100, "vault-legacy-undo"));
   const { plugin } = pluginWithFiles(data, [medication], {
     [medication.path]: { title: "Allergodil", ent_domains: ["Rhinology"] },
-  });
+  }, initialDeviceState);
   await plugin.loadPluginData();
   plugin.savedData.length = 0;
 
@@ -967,9 +1027,8 @@ test("Undo repairs a historical ENT snapshot before persisting it", async () => 
     { indexed: false, kind: "medication", libraryId: "medication" },
   );
   assert.deepEqual(plugin.data.manualIndexPaths, []);
-  assert.equal(plugin.savedData.length, 1);
-  const persisted = plugin.savedData[0] as PluginStore;
-  assert.equal(persisted.bases[0]?.data.portableIndex.subjects[0]?.indexed, false);
+  assert.equal(plugin.savedData.length, 0, "normalization returned to the committed semantics; only local history changed");
+  assert.ok(plugin.deviceLocalWrites.length > 0);
 });
 
 test("organization snapshot restoration repairs historical ENT Index membership atomically", async () => {
@@ -1012,14 +1071,16 @@ test("Undo normalizes built-in Libraries and stale navigation from a legacy ENT 
   const data = migrateData(null);
   data.settings.workspaceMode = "ent-clinical";
   data.undoStack = [legacyEntSnapshotWithoutLibraries("Legacy Undo")];
-  const plugin = pluginWith(createDefaultStore(data, 100, "vault-legacy-undo-libraries"));
+  const store = createDefaultStore(data, 100, "vault-legacy-undo-libraries");
+  const plugin = pluginWith(store, createDeviceLocalPluginState(store));
   await plugin.loadPluginData();
   plugin.savedData.length = 0;
 
   await plugin.undo();
 
   assertEntLibrariesAndNavigationAreNormalized(plugin.data);
-  assert.equal(plugin.savedData.length, 1);
+  assert.equal(plugin.savedData.length, 0, "an equivalent normalized Undo changes only device-local history");
+  assert.ok(plugin.deviceLocalWrites.length > 0);
 });
 
 test("named snapshot restoration normalizes legacy ENT Libraries and navigation", async () => {
@@ -1037,7 +1098,8 @@ test("named snapshot restoration normalizes legacy ENT Libraries and navigation"
   );
 
   assertEntLibrariesAndNavigationAreNormalized(plugin.data);
-  assert.equal(plugin.savedData.length, 1);
+  assert.equal(plugin.savedData.length, 0, "equivalent normalized restoration changes only device-local history");
+  assert.ok(plugin.deviceLocalWrites.length > 0);
 });
 
 test("failed named-snapshot restoration rolls back settings, navigation, snapshots, and portable data", async () => {
@@ -1071,6 +1133,71 @@ test("failed named-snapshot restoration rolls back settings, navigation, snapsho
 
   assert.deepEqual(plugin.data, before);
   assert.equal(saveAttempts, 2, "the failed write is followed by one persisted full-data rollback");
+  assert.equal(plugin.getActiveKnowledgeBase().semanticRevision, 2, "the compensating rollback causally outranks the rejected revision 1 write");
+});
+
+test("a write-then-reject mutation publishes a causal compensating rollback", async () => {
+  const store = createDefaultStore(migrateData(null), 100, "vault-write-then-reject");
+  const plugin = pluginWith(store);
+  await plugin.loadPluginData(false);
+  let attempted: PluginStore | null = null;
+  let disk = structuredClone(store);
+  let writes = 0;
+  plugin.saveData = async (value: unknown) => {
+    writes += 1;
+    disk = structuredClone(value) as PluginStore;
+    if (writes === 1) {
+      attempted = structuredClone(disk);
+      throw new Error("adapter rejected after replacing data.json");
+    }
+  };
+
+  await assert.rejects(plugin.mutate("Rejected pin", () => {
+    plugin.data.pinnedPaths = ["Rejected.md"];
+  }), /adapter rejected after replacing/i);
+
+  assert.ok(attempted);
+  assert.equal(writes, 2);
+  assert.deepEqual(plugin.data.pinnedPaths, []);
+  assert.deepEqual(disk.bases[0].data.pinnedPaths, []);
+  assert.ok(disk.bases[0].semanticLineage.includes(attempted.bases[0].semanticHead));
+  const merged = mergeKnowledgeBaseStores(attempted, disk, disk.activeBaseId);
+  assert.equal(merged.semanticConflicts.length, 0);
+  assert.equal(merged.store.bases[0].semanticHead, disk.bases[0].semanticHead);
+});
+
+test("write-then-reject Undo and Redo each publish a causal rollback and restore local history", async () => {
+  for (const direction of ["undo", "redo"] as const) {
+    const data = migrateData(null);
+    data.pinnedPaths = ["Current.md"];
+    const historical = structuredClone(data);
+    historical.pinnedPaths = ["Historical.md"];
+    const snapshot = snapshotPersonal(historical, `${direction} target`);
+    if (direction === "undo") data.undoStack = [snapshot];
+    else data.redoStack = [snapshot];
+    const store = createDefaultStore(data, 100, `vault-rejected-${direction}`);
+    const plugin = pluginWith(store, createDeviceLocalPluginState(store));
+    await plugin.loadPluginData(false);
+    let attempted: PluginStore | null = null;
+    let disk = structuredClone(store);
+    let writes = 0;
+    plugin.saveData = async (value: unknown) => {
+      writes += 1;
+      disk = structuredClone(value) as PluginStore;
+      if (writes === 1) {
+        attempted = structuredClone(disk);
+        throw new Error(`rejected ${direction} after write`);
+      }
+    };
+
+    await assert.rejects(direction === "undo" ? plugin.undo() : plugin.redo(), new RegExp(`rejected ${direction}`));
+
+    assert.ok(attempted);
+    assert.equal(writes, 2);
+    assert.deepEqual(plugin.data.pinnedPaths, ["Current.md"]);
+    assert.ok(disk.bases[0].semanticLineage.includes(attempted.bases[0].semanticHead));
+    assert.equal(direction === "undo" ? plugin.data.undoStack.length : plugin.data.redoStack.length, 1);
+  }
 });
 
 test("recovery restoration normalizes legacy empty ENT Libraries and navigation", async () => {
@@ -1096,7 +1223,8 @@ test("recovery restoration normalizes legacy empty ENT Libraries and navigation"
   });
 
   assertEntLibrariesAndNavigationAreNormalized(plugin.data);
-  assert.equal(plugin.savedData.length, 1);
+  assert.equal(plugin.savedData.length, 0, "equivalent normalized recovery changes only device-local history");
+  assert.ok(plugin.deviceLocalWrites.length > 0);
 });
 
 test("a failed ENT startup remediation write restores the complete pre-remediation store", async () => {
@@ -1336,6 +1464,22 @@ test("a wrong-type authoritative list from Sync never replaces or rewrites the c
   assert.match(plugin.dataCompatibilityWarning, /could not be migrated.*must be text/i);
 });
 
+test("an older build treats a future semantic store envelope as read-only", async () => {
+  const future = createDefaultStore(migrateData(null), 100, "vault-future-semantic-store");
+  future.version = STORE_VERSION + 1;
+  future.bases[0].semanticRevision = 42;
+  future.bases[0].data.settings.workspaceName = "Future organization";
+  const plugin = pluginWith(future);
+
+  await plugin.loadPluginData();
+
+  assert.match(plugin.dataCompatibilityWarning, /newer than this build/i);
+  assert.equal(plugin.data.settings.workspaceName, "Future organization");
+  assert.equal(plugin.getActiveKnowledgeBase().semanticRevision, 42);
+  assert.equal(plugin.savedData.length, 0);
+  await plugin.savePluginData();
+  assert.equal(plugin.savedData.length, 0);
+});
 test("archiving the active knowledge base switches atomically and never archives the last available base", async () => {
   const first = migrateData(null);
   first.settings.workspaceName = "First KB";
@@ -1410,6 +1554,7 @@ test("deleting an archived base frees one of the fifty lifecycle slots", async (
     const entry = createKnowledgeBaseEntry(data, `base-archived-${index}`, 100 + index);
     entry.archivedAt = 1_000 + index;
     entry.updatedAt = entry.archivedAt;
+    entry.semanticRevision = index;
     store.bases.push(entry);
   }
   const plugin = pluginWith(store);
@@ -1438,6 +1583,7 @@ test("a failed archived-base deletion save restores both the base and its tombst
   const archived = createKnowledgeBaseEntry(second, "base-archived", 200);
   archived.archivedAt = 300;
   archived.updatedAt = 300;
+  archived.semanticRevision = 1;
   store.bases.push(archived);
   const plugin = pluginWith(store);
   await plugin.loadPluginData();
@@ -1455,6 +1601,7 @@ test("permanent deletion refuses to evict an older tombstone when its safety map
   const archived = createKnowledgeBaseEntry(migrateData(null), "base-archived", 200);
   archived.archivedAt = 300;
   archived.updatedAt = 300;
+  archived.semanticRevision = 1;
   store.bases.push(archived);
   store.deletedBaseIds = Object.fromEntries(Array.from(
     { length: MAX_DELETED_KNOWLEDGE_BASE_IDS },
@@ -1471,7 +1618,7 @@ test("permanent deletion refuses to evict an older tombstone when its safety map
   assert.equal(plugin.getKnowledgeBases(true).some((entry) => entry.id === archived.id), true);
 });
 
-test("failed knowledge-base switching and creation restore the active base and base list", async () => {
+test("knowledge-base switching is device-local while failed creation restores the active base and base list", async () => {
   const first = migrateData(null);
   first.settings.workspaceName = "First KB";
   const second = migrateData(null);
@@ -1481,25 +1628,279 @@ test("failed knowledge-base switching and creation restore the active base and b
   const plugin = pluginWith(store);
   await plugin.loadPluginData();
   let saveAttempts = 0;
-  plugin.saveData = () => {
+  let compensated: PluginStore | null = null;
+  plugin.saveData = (value: unknown) => {
     saveAttempts += 1;
-    return Promise.reject(new Error("simulated knowledge-base save failure"));
+    if (saveAttempts === 1) return Promise.reject(new Error("simulated knowledge-base save failure"));
+    compensated = structuredClone(value) as PluginStore;
+    return Promise.resolve();
   };
 
-  await assert.rejects(plugin.switchKnowledgeBase("base-second"), /simulated knowledge-base save failure/);
-  assert.equal(plugin.getActiveKnowledgeBaseId(), "base-default");
-  assert.equal(plugin.data.settings.workspaceName, "First KB");
+  await plugin.switchKnowledgeBase("base-second");
+  assert.equal(plugin.getActiveKnowledgeBaseId(), "base-second");
+  assert.equal(plugin.data.settings.workspaceName, "Second KB");
   assert.deepEqual(plugin.getKnowledgeBases(true).map((entry) => entry.id), ["base-default", "base-second"]);
 
   await assert.rejects(
     plugin.createKnowledgeBase("Unsaved KB", "generic", "Knowledge Base"),
     /simulated knowledge-base save failure/,
   );
-  assert.equal(plugin.getActiveKnowledgeBaseId(), "base-default");
-  assert.equal(plugin.data.settings.workspaceName, "First KB");
+  assert.equal(plugin.getActiveKnowledgeBaseId(), "base-second");
+  assert.equal(plugin.data.settings.workspaceName, "Second KB");
   assert.deepEqual(plugin.getKnowledgeBases(true).map((entry) => entry.id), ["base-default", "base-second"]);
   assert.equal(plugin.getKnowledgeBases(true).some((entry) => entry.data.settings.workspaceName === "Unsaved KB"), false);
-  assert.equal(saveAttempts, 2);
+  assert.equal(saveAttempts, 2, "the rejected creation is followed by a tombstone compensation for its stable ID");
+  assert.equal(Object.keys(compensated?.deletedBaseIds ?? {}).length, 1);
+  assert.equal(plugin.isDataReadOnly(), false);
+});
+
+test("Sync captures of rejected create, duplicate, archive, and restore operations converge on their compensated envelopes", async () => {
+  for (const kind of ["create", "duplicate", "archive", "restore"] as const) {
+    const app = {
+      vault: emptyWritableTestVault(),
+      workspace: { getLeavesOfType: () => [] },
+      metadataCache: { getFileCache: () => null },
+      fileManager: {},
+    };
+    const primary = migrateData(null);
+    primary.settings.workspaceName = "Primary";
+    let disk = createDefaultStore(primary, 100, `vault-rejected-envelope-${kind}`);
+    const secondary = createKnowledgeBaseEntry(migrateData(null), "base-secondary", 200);
+    secondary.data.settings.workspaceName = "Secondary";
+    if (kind === "restore") {
+      secondary.archivedAt = 300;
+      secondary.updatedAt = 300;
+      secondary.semanticRevision = 1;
+      secondary.semanticHash = semanticEntryFingerprint(secondary);
+      secondary.semanticHead = secondary.semanticHash;
+    }
+    disk.bases.push(secondary);
+    const baseline = structuredClone(disk);
+    const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never);
+    plugin.loadData = async () => structuredClone(disk);
+    const partialWriteReachedDisk = deferred();
+    const releaseRejection = deferred();
+    let writes = 0;
+    let rejectedEnvelope: PluginStore | null = null;
+    plugin.saveData = async (value: unknown) => {
+      writes += 1;
+      disk = structuredClone(value) as PluginStore;
+      if (writes === 1) {
+        rejectedEnvelope = structuredClone(disk);
+        partialWriteReachedDisk.resolve();
+        await releaseRejection.promise;
+        throw new Error(`rejected ${kind} after replacing data.json`);
+      }
+    };
+    await plugin.loadPluginData(false);
+
+    const operation = kind === "create"
+      ? plugin.createKnowledgeBase("Created", "generic", "Knowledge Base")
+      : kind === "duplicate"
+        ? plugin.duplicateKnowledgeBase("base-default", "Duplicated")
+        : kind === "archive"
+          ? plugin.archiveKnowledgeBase("base-secondary")
+          : plugin.restoreKnowledgeBase("base-secondary");
+    await partialWriteReachedDisk.promise;
+    const reload = plugin.onExternalSettingsChange();
+    releaseRejection.resolve();
+
+    await assert.rejects(operation, new RegExp(`rejected ${kind}`, "i"));
+    await reload;
+
+    assert.ok(rejectedEnvelope);
+    assert.equal(plugin.isDataReadOnly(), false, `${kind} has a monotonic safe compensation`);
+    assert.equal(writes, 2, `${kind} writes one authoritative compensation after the rejected envelope`);
+    if (kind === "create" || kind === "duplicate") {
+      const rejectedIds = rejectedEnvelope.bases
+        .map((entry) => entry.id)
+        .filter((id) => !baseline.bases.some((entry) => entry.id === id));
+      assert.equal(rejectedIds.length, 1);
+      assert.equal(plugin.getKnowledgeBases(true).some((entry) => entry.id === rejectedIds[0]), false);
+      assert.equal(Object.prototype.hasOwnProperty.call(disk.deletedBaseIds, rejectedIds[0] ?? ""), true);
+    } else {
+      const restored = plugin.getKnowledgeBases(true).find((entry) => entry.id === "base-secondary");
+      assert.equal(restored?.archivedAt, baseline.bases.find((entry) => entry.id === "base-secondary")?.archivedAt);
+      assert.equal(disk.bases.find((entry) => entry.id === "base-secondary")?.archivedAt, restored?.archivedAt);
+    }
+  }
+});
+
+test("a direct save requested behind a queued Sync reload rejects without deadlocking the reload", async () => {
+  let disk = createDefaultStore(migrateData(null), 100, "vault-reload-before-direct-save");
+  const plugin = pluginWith(disk);
+  plugin.loadData = async () => structuredClone(disk);
+  plugin.saveData = async (value: unknown) => { disk = structuredClone(value) as PluginStore; };
+  await plugin.loadPluginData(false);
+
+  const reload = plugin.onExternalSettingsChange();
+  plugin.data.pinnedPaths = ["Too-late local edit.md"];
+  const save = plugin.savePluginData();
+  const [reloadResult, saveResult] = await bounded(
+    Promise.allSettled([reload, save]),
+    "Sync reload followed by direct save",
+  );
+
+  assert.equal(reloadResult.status, "fulfilled");
+  assert.equal(saveResult.status, "rejected");
+  assert.deepEqual(plugin.data.pinnedPaths, [], "the late edit is restored before the Sync payload is adopted");
+  assert.equal(plugin.isDataReadOnly(), false);
+});
+
+test("a real SettingsTab compensation behind Sync completes without a logical-barrier deadlock", async () => {
+  let disk = createDefaultStore(migrateData(null), 100, "vault-settings-sync-progress");
+  const plugin = pluginWith(disk);
+  plugin.loadData = async () => structuredClone(disk);
+  const firstWriteStarted = deferred();
+  const releaseFirstWrite = deferred();
+  let writes = 0;
+  plugin.saveData = async (value: unknown) => {
+    writes += 1;
+    if (writes === 1) {
+      firstWriteStarted.resolve();
+      await releaseFirstWrite.promise;
+    }
+    disk = structuredClone(value) as PluginStore;
+  };
+  await plugin.loadPluginData(false);
+  const settingsTab = settingsTabForPlugin(plugin);
+
+  plugin.data.settings.workspaceSubtitle = "Overlapping settings edit";
+  const settingsSave = settingsTab.save(false);
+  await firstWriteStarted.promise;
+  const remote = createDefaultStore(migrateData(null), 100, "vault-settings-sync-progress");
+  const remoteEntry = remote.bases[0];
+  if (!remoteEntry) throw new Error("The test remote store has no active base.");
+  advanceStoreEntry(remoteEntry, () => { remoteEntry.data.nextStudyPaths = ["Remote.md"]; });
+  disk = remote;
+  const reload = plugin.onExternalSettingsChange();
+  releaseFirstWrite.resolve();
+
+  const [settingsResult, reloadResult] = await bounded(
+    Promise.all([settingsSave, reload]),
+    "SettingsTab rollback delegated to Sync reload",
+  );
+  assert.equal(settingsResult, false);
+  assert.equal(reloadResult, undefined);
+  assert.equal(plugin.data.settings.workspaceSubtitle, migrateData(null).settings.workspaceSubtitle);
+  assert.equal(
+    disk.bases.find((entry) => entry.id === disk.activeBaseId)?.data.settings.workspaceSubtitle,
+    migrateData(null).settings.workspaceSubtitle,
+    "the reload worker publishes the restored setting after the rejected adapter write",
+  );
+  assert.equal(writes, 2, "one rejected setting write is followed by one authoritative Sync writeback");
+  assert.equal(plugin.isDataReadOnly(), false);
+});
+
+test("an unloaded SettingsTab does not poison a successful host compensation", async () => {
+  const sharedApp = {
+    vault: emptyWritableTestVault(),
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null },
+    fileManager: {},
+  };
+  let disk = createDefaultStore(migrateData(null), 100, "vault-unloaded-settings-compensation");
+  const oldPlugin = new EntVaultCommandCenterPlugin(sharedApp as never, {} as never);
+  oldPlugin.loadData = async () => structuredClone(disk);
+  await oldPlugin.loadPluginData(false);
+  const firstWriteStarted = deferred();
+  const releaseFirstWrite = deferred();
+  let writes = 0;
+  oldPlugin.saveData = async (value: unknown) => {
+    writes += 1;
+    disk = structuredClone(value) as PluginStore;
+    if (writes === 1) {
+      firstWriteStarted.resolve();
+      await releaseFirstWrite.promise;
+      throw new Error("setting rejected after replacing data.json");
+    }
+  };
+  const settingsTab = settingsTabForPlugin(oldPlugin);
+  oldPlugin.data.settings.workspaceSubtitle = "Rejected partial setting";
+  const settingsSave = settingsTab.save(false);
+  await firstWriteStarted.promise;
+  oldPlugin.onunload();
+
+  const replacement = new EntVaultCommandCenterPlugin(sharedApp as never, {} as never);
+  replacement.loadData = async () => structuredClone(disk);
+  const replacementLoad = replacement.loadPluginData(false);
+  releaseFirstWrite.resolve();
+  assert.equal(await bounded(settingsSave, "unloaded SettingsTab fallback"), false);
+  await bounded(replacementLoad, "replacement after host compensation");
+
+  assert.equal(writes, 2, "the host writes one causal compensation; the stale tab adds no third write");
+  assert.equal(replacement.data.settings.workspaceSubtitle, migrateData(null).settings.workspaceSubtitle);
+  assert.equal(replacement.isDataReadOnly(), false);
+});
+
+test("a rejected permanent deletion with a captured tombstone fails closed across replacement instances", async () => {
+  const app = {
+    vault: emptyWritableTestVault(),
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null },
+    fileManager: {},
+  };
+  let disk = createDefaultStore(migrateData(null), 100, "vault-rejected-permanent-delete");
+  const archived = createKnowledgeBaseEntry(migrateData(null), "base-archived", 200);
+  archived.archivedAt = 300;
+  archived.updatedAt = 300;
+  archived.semanticRevision = 1;
+  archived.semanticHash = semanticEntryFingerprint(archived);
+  archived.semanticHead = archived.semanticHash;
+  disk.bases.push(archived);
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never);
+  plugin.loadData = async () => structuredClone(disk);
+  const partialWriteReachedDisk = deferred();
+  const releaseRejection = deferred();
+  let writes = 0;
+  plugin.saveData = async (value: unknown) => {
+    writes += 1;
+    disk = structuredClone(value) as PluginStore;
+    partialWriteReachedDisk.resolve();
+    await releaseRejection.promise;
+    throw new Error("rejected permanent delete after replacing data.json");
+  };
+  await plugin.loadPluginData(false);
+
+  const deletion = plugin.deleteArchivedKnowledgeBase(archived.id, archived.updatedAt);
+  await partialWriteReachedDisk.promise;
+  const reload = plugin.onExternalSettingsChange();
+  releaseRejection.resolve();
+  await assert.rejects(deletion, /rejected permanent delete/i);
+  await reload;
+
+  assert.equal(writes, 1, "an irreversible tombstone is never followed by a pretend resurrection write");
+  assert.equal(plugin.getKnowledgeBases(true).some((entry) => entry.id === archived.id), true, "the in-memory recovery remains exportable");
+  assert.equal(plugin.isDataReadOnly(), true);
+  assert.match(plugin.dataCompatibilityWarning, /permanent knowledge-base deletion|tombstone/i);
+
+  plugin.onunload();
+  const replacement = new EntVaultCommandCenterPlugin(app as never, {} as never);
+  replacement.loadData = async () => structuredClone(disk);
+  await replacement.loadPluginData(false);
+  assert.equal(replacement.isDataReadOnly(), true, "the shared App uncertainty marker survives plugin replacement");
+  assert.match(replacement.dataCompatibilityWarning, /permanent knowledge-base deletion|tombstone/i);
+});
+
+test("a failed base-operation compensation enters sticky uncertain-persistence mode", async () => {
+  const store = createDefaultStore(migrateData(null), 100, "vault-base-compensation-failure");
+  const plugin = pluginWith(store);
+  await plugin.loadPluginData(false);
+  let writes = 0;
+  plugin.saveData = async () => {
+    writes += 1;
+    throw new Error(writes === 1 ? "base write rejected" : "base compensation rejected");
+  };
+
+  await assert.rejects(
+    plugin.createKnowledgeBase("Uncertain create", "generic", "Knowledge Base"),
+    /organization is now read-only/i,
+  );
+
+  assert.equal(writes, 2);
+  assert.equal(plugin.isDataReadOnly(), true);
+  assert.match(plugin.dataCompatibilityWarning, /compensating rollback could not be saved/i);
+  await assert.rejects(plugin.createKnowledgeBase("Blocked", "generic", "Knowledge Base"), /read-only|compensating rollback/i);
 });
 
 test("queued saves retain their call-time base snapshot while a knowledge-base switch waits", async () => {
@@ -1513,8 +1914,6 @@ test("queued saves retain their call-time base snapshot while a knowledge-base s
   await plugin.loadPluginData();
   const firstSaveStarted = deferred();
   const releaseFirstSave = deferred();
-  const secondSaveStarted = deferred();
-  const releaseSecondSave = deferred();
   const snapshots: Array<{
     activeBaseId?: string;
     bases?: Array<{ id?: string; data?: { settings?: { workspaceName?: string } } }>;
@@ -1527,11 +1926,6 @@ test("queued saves retain their call-time base snapshot while a knowledge-base s
     if (call === 0) {
       firstSaveStarted.resolve();
       await releaseFirstSave.promise;
-      return;
-    }
-    if (call === 1) {
-      secondSaveStarted.resolve();
-      await releaseSecondSave.promise;
       return;
     }
     throw new Error("Unexpected extra save");
@@ -1549,18 +1943,9 @@ test("queued saves retain their call-time base snapshot while a knowledge-base s
 
   releaseFirstSave.resolve();
   await pendingSave;
-  await secondSaveStarted.promise;
-  assert.equal(plugin.getActiveKnowledgeBaseId(), "base-second");
-  assert.equal(snapshots[1]?.activeBaseId, "base-second");
-  assert.equal(
-    snapshots[1]?.bases?.find((entry) => entry.id === "base-default")?.data?.settings?.workspaceName,
-    "First changed after save call",
-  );
-  assert.equal(snapshots[1]?.bases?.find((entry) => entry.id === "base-second")?.data?.settings?.workspaceName, "Second KB");
-
-  releaseSecondSave.resolve();
   await pendingSwitch;
-  assert.equal(saveCall, 2);
+  assert.equal(plugin.getActiveKnowledgeBaseId(), "base-second");
+  assert.equal(saveCall, 1, "switching active bases writes only per-vault localStorage");
 });
 
 test("a replacement plugin instance waits for an old in-flight write before reading data", async () => {
@@ -1623,17 +2008,204 @@ test("a replacement plugin instance waits for an old in-flight write before read
   assert.deepEqual(persisted?.nextStudyPaths, ["Replacement-instance.md"]);
 });
 
-test("a rejected direct save restores the base timestamp when no later save owns it", async () => {
+test("replacement waits for an old write-then-reject transaction through compensation", async () => {
+  for (const compensationFails of [false, true]) {
+    const app = {
+      vault: emptyWritableTestVault(),
+      workspace: { getLeavesOfType: () => [] },
+      metadataCache: { getFileCache: () => null },
+      fileManager: {},
+    };
+    const initial = createDefaultStore(migrateData(null), 100, `vault-replacement-compensation-${compensationFails}`);
+    let disk = structuredClone(initial);
+    const oldPlugin = new EntVaultCommandCenterPlugin(app as never, {} as never);
+    oldPlugin.loadData = async () => structuredClone(disk);
+    await oldPlugin.loadPluginData(false);
+    const firstWriteStarted = deferred();
+    const releaseFirstWrite = deferred();
+    let writes = 0;
+    oldPlugin.saveData = async (value: unknown) => {
+      writes += 1;
+      disk = structuredClone(value) as PluginStore;
+      if (writes === 1) {
+        firstWriteStarted.resolve();
+        await releaseFirstWrite.promise;
+        throw new Error("old instance rejected after write");
+      }
+      if (compensationFails) throw new Error("old instance compensation rejected");
+    };
+    oldPlugin.data.pinnedPaths = ["Old rejected.md"];
+    const oldSave = oldPlugin.savePluginData();
+    await firstWriteStarted.promise;
+    oldPlugin.onunload();
+
+    const replacement = new EntVaultCommandCenterPlugin(app as never, {} as never);
+    let readStarted = false;
+    replacement.loadData = async () => {
+      readStarted = true;
+      return structuredClone(disk);
+    };
+    const replacementLoad = replacement.loadPluginData(false);
+    await Promise.resolve();
+    assert.equal(readStarted, false, "replacement read waits for the old logical transaction, not only its first adapter write");
+    releaseFirstWrite.resolve();
+    await assert.rejects(oldSave, /old instance rejected after write|compensating rollback also failed/i);
+    await replacementLoad;
+
+    assert.equal(writes, 2);
+    assert.deepEqual(disk.bases[0]?.data.pinnedPaths, []);
+    assert.deepEqual(replacement.data.pinnedPaths, []);
+    assert.equal(replacement.isDataReadOnly(), compensationFails);
+    if (compensationFails) assert.match(replacement.dataCompatibilityWarning, /compensating rollback could not be saved/i);
+  }
+});
+
+test("replacement waits for an old external-Sync writeback to fail closed after a partial write", async () => {
+  const medication = new TFile("06 Clinical Tools/Medications/Drug - Allergodil.md");
+  const app = {
+    vault: {
+      ...emptyWritableTestVault(),
+      getMarkdownFiles: () => [medication],
+      getAbstractFileByPath: (path: string) => path === medication.path ? medication : null,
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: {
+      getFileCache: (file: TFile) => file.path === medication.path
+        ? { frontmatter: { title: "Allergodil", ent_domains: ["Rhinology"] } }
+        : null,
+      resolvedLinks: {},
+    },
+    fileManager: {},
+  };
+  const initialData = migrateData(null);
+  initialData.settings.workspaceMode = "ent-clinical";
+  const initial = createDefaultStore(initialData, 100, "vault-replacement-external-writeback");
+  let disk: PluginStore = structuredClone(initial);
+  const oldPlugin = new EntVaultCommandCenterPlugin(app as never, {} as never);
+  oldPlugin.loadData = async () => structuredClone(disk);
+  await oldPlugin.loadPluginData(false);
+
+  // The incoming file places a medication in the protected topic index. Its
+  // deterministic invariant repair requires an authoritative writeback.
+  const invalidIncoming = structuredClone(initial);
+  const invalidEntry = invalidIncoming.bases[0];
+  assert.ok(invalidEntry);
+  advanceStoreEntry(invalidEntry, () => {
+    invalidEntry.data.portableIndex.groups = [{ id: "remote-index", title: "Remote Index", order: 0 }];
+    invalidEntry.data.portableIndex.subjects = [{
+      id: "remote-medication",
+      title: "Remote topic label",
+      groupId: "remote-index",
+      parentId: null,
+      order: 0,
+      indexed: true,
+      configuredId: "",
+      recordKind: "topic",
+    }];
+    invalidEntry.data.portableIndex.resolvedPathBySubjectId = { "remote-medication": medication.path };
+    invalidEntry.data.manualIndexPaths = [medication.path];
+  }, 200);
+  disk = invalidIncoming;
+  const writeStarted = deferred();
+  const releaseWrite = deferred();
+  oldPlugin.saveData = async (value: unknown) => {
+    disk = structuredClone(value) as PluginStore;
+    writeStarted.resolve();
+    await releaseWrite.promise;
+    throw new Error("old external writeback rejected after replacing data.json");
+  };
+
+  const oldReload = oldPlugin.onExternalSettingsChange();
+  await writeStarted.promise;
+  oldPlugin.onunload();
+  const replacement = new EntVaultCommandCenterPlugin(app as never, {} as never);
+  replacement.loadData = async () => structuredClone(disk);
+  let replacementLoaded = false;
+  const replacementLoad = replacement.loadPluginData(false).then(() => { replacementLoaded = true; });
+  await Promise.resolve();
+  assert.equal(replacementLoaded, false, "replacement cannot read the partial write before the old Sync worker settles");
+
+  releaseWrite.resolve();
+  await oldReload;
+  await replacementLoad;
+
+  assert.equal(replacement.isDataReadOnly(), true);
+  assert.match(replacement.dataCompatibilityWarning, /may have reached data\.json|uncertain partial write/i);
+  await assert.rejects(replacement.savePluginData(), /may have reached data\.json|uncertain partial write/i);
+});
+
+test("a rejected direct save restores data and publishes a newer causal rollback", async () => {
   const store = createDefaultStore(migrateData(null), 100, "vault-direct-save-timestamp");
   const plugin = pluginWith(store);
   await plugin.loadPluginData();
-  const before = plugin.getActiveKnowledgeBase().updatedAt;
-  plugin.saveData = async () => { throw new Error("adapter rejected direct save"); };
+  const beforeRevision = plugin.getActiveKnowledgeBase().semanticRevision;
+  let writes = 0;
+  let attempted: PluginStore | null = null;
+  let final: PluginStore | null = null;
+  plugin.saveData = async (value: unknown) => {
+    writes += 1;
+    if (writes === 1) {
+      attempted = structuredClone(value) as PluginStore;
+      throw new Error("adapter rejected direct save");
+    }
+    final = structuredClone(value) as PluginStore;
+  };
   plugin.data.settings.workspaceSubtitle = "Rejected change";
 
   await assert.rejects(plugin.savePluginData(), /adapter rejected direct save/);
 
-  assert.equal(plugin.getActiveKnowledgeBase().updatedAt, before);
+  assert.equal(plugin.data.settings.workspaceSubtitle, migrateData(null).settings.workspaceSubtitle);
+  assert.equal(plugin.getActiveKnowledgeBase().semanticRevision, beforeRevision + 2);
+  assert.equal(writes, 2);
+  assert.ok(attempted && final);
+  assert.ok(final.bases[0].semanticLineage.includes(attempted.bases[0].semanticHead));
+});
+
+test("direct save transactions serialize baseline capture through compensation in both rejection orders", async () => {
+  for (const rejectedCall of [1, 2] as const) {
+    const store = createDefaultStore(migrateData(null), 100, `vault-serialized-direct-${rejectedCall}`);
+    const plugin = pluginWith(store);
+    await plugin.loadPluginData(false);
+    let disk = structuredClone(store);
+    const firstWriteStarted = deferred();
+    const releaseFirstWrite = deferred();
+    let writes = 0;
+    plugin.saveData = async (value: unknown) => {
+      writes += 1;
+      if (writes === 1) {
+        firstWriteStarted.resolve();
+        await releaseFirstWrite.promise;
+      }
+      disk = structuredClone(value) as PluginStore;
+      if (writes === rejectedCall) throw new Error(`rejected direct call ${rejectedCall} after write`);
+    };
+
+    plugin.data.pinnedPaths = ["First.md"];
+    const first = plugin.savePluginData();
+    await firstWriteStarted.promise;
+    plugin.data.nextStudyPaths = ["Second.md"];
+    const second = plugin.savePluginData();
+    releaseFirstWrite.resolve();
+    const outcomes = await Promise.allSettled([first, second]);
+
+    assert.equal(outcomes[rejectedCall - 1]?.status, "rejected");
+    assert.equal(outcomes[rejectedCall === 1 ? 1 : 0]?.status, "fulfilled");
+    const persisted = disk.bases.find((entry) => entry.id === disk.activeBaseId)?.data;
+    if (rejectedCall === 1) {
+      assert.deepEqual(plugin.data.pinnedPaths, ["First.md"], "the later successful snapshot includes the still-live first setting");
+      assert.deepEqual(plugin.data.nextStudyPaths, ["Second.md"]);
+      assert.deepEqual(persisted?.pinnedPaths, ["First.md"]);
+      assert.deepEqual(persisted?.nextStudyPaths, ["Second.md"]);
+      assert.equal(writes, 2);
+    } else {
+      assert.deepEqual(plugin.data.pinnedPaths, ["First.md"], "the rejected later save restores the fulfilled first snapshot");
+      assert.deepEqual(plugin.data.nextStudyPaths, []);
+      assert.deepEqual(persisted?.pinnedPaths, ["First.md"]);
+      assert.deepEqual(persisted?.nextStudyPaths, []);
+      assert.equal(writes, 3, "the later rejection is followed by one causal compensation");
+    }
+    assert.equal(plugin.isDataReadOnly(), false);
+  }
 });
 
 test("switching bases does not manufacture a newer payload timestamp", async () => {
@@ -1675,6 +2247,35 @@ test("a missing data file stays uncommitted and adopts the first identified Sync
   assert.equal(plugin.savedData.length, 0, "the already-current identified capture needs no writeback");
 });
 
+test("a rejected first edit from a missing-data cold start restores its bootstrap baseline", async () => {
+  const plugin = pluginWith(null);
+  const loaded = await plugin.loadPluginData(false);
+  assert.equal(loaded.sourceWasMissing, true);
+  const original = structuredClone(plugin.data);
+  let disk: PluginStore | null = null;
+  let attempted: PluginStore | null = null;
+  let writes = 0;
+  plugin.saveData = async (value: unknown) => {
+    writes += 1;
+    disk = structuredClone(value) as PluginStore;
+    if (writes === 1) {
+      attempted = structuredClone(disk);
+      throw new Error("rejected first cold-start edit after write");
+    }
+  };
+  plugin.data.settings.workspaceSubtitle = "Rejected bootstrap edit";
+
+  await assert.rejects(plugin.savePluginData(), /rejected first cold-start edit/i);
+
+  assert.ok(attempted);
+  assert.equal(writes, 2);
+  assert.deepEqual(plugin.data, original, "the rejected action cannot remain live in memory");
+  assert.deepEqual(disk?.bases[0]?.data.settings.workspaceSubtitle, original.settings.workspaceSubtitle);
+  assert.ok(disk?.bases[0]?.semanticLineage.includes(attempted.bases[0].semanticHead));
+  await plugin.savePluginData();
+  assert.equal(writes, 2, "a later no-op cannot republish the rejected first action");
+});
+
 test("a transient missing data file restores the last committed store", async () => {
   const originalData = migrateData(null);
   originalData.settings.workspaceName = "Committed knowledge base";
@@ -1709,11 +2310,157 @@ test("the first real edit persists a fresh store that began without data.json", 
   assert.equal(persisted.bases[0]?.data.settings.workspaceName, "New offline knowledge base");
 });
 
+test("safe view-state saves do not advance semantic revision or the semantic timestamp", async () => {
+  const store = createDefaultStore(migrateData(null), 100, "vault-view-save");
+  store.bases[0].semanticRevision = 8;
+  const plugin = pluginWith(store);
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+
+  plugin.data.selectedPath = "Knowledge/Viewed.md";
+  plugin.data.activeTab = "collections";
+  plugin.data.collapsed.curriculumDomains = ["ENT"];
+  await plugin.saveViewState();
+
+  assert.equal(plugin.savedData.length, 0, "device-only state never rewrites synced data.json");
+  assert.equal(plugin.getActiveKnowledgeBase().semanticRevision, 8);
+  assert.equal(plugin.getActiveKnowledgeBase().updatedAt, 100);
+  const persisted = plugin.deviceLocalWrites.at(-1) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
+  assert.equal(persisted?.bases[0]?.view.selectedPath, "Knowledge/Viewed.md");
+  assert.equal(persisted?.bases[0]?.view.activeTab, "collections");
+});
+
+test("cold start never adopts synced route or Undo history when device-local state is absent", async () => {
+  const data = migrateData(null);
+  data.selectedPath = "Other device.md";
+  data.activeTab = "collections";
+  data.undoStack = [snapshotPersonal(data, "Other device undo")];
+  const plugin = pluginWith(createDefaultStore(data, 100, "vault-no-local-state"));
+
+  await plugin.loadPluginData(false);
+
+  assert.equal(plugin.data.selectedPath, "");
+  assert.equal(plugin.data.activeTab, plugin.data.settings.defaultTab);
+  assert.deepEqual(plugin.data.undoStack, []);
+  assert.deepEqual(plugin.data.redoStack, []);
+});
+
+test("cold start restores strictly parsed per-vault state by stable base ID", async () => {
+  const first = migrateData(null);
+  const second = migrateData(null);
+  second.settings.workspaceName = "Second";
+  second.selectedPath = "Second/Local.md";
+  second.activeTab = "collections";
+  second.undoStack = [snapshotPersonal(second, "Local undo")];
+  const store = createDefaultStore(first, 100, "vault-local-state");
+  store.bases.push(createKnowledgeBaseEntry(second, "base-second", 200));
+  store.activeBaseId = "base-second";
+  const local = createDeviceLocalPluginState(store);
+  const synced = structuredClone(store);
+  synced.activeBaseId = "base-default";
+  synced.bases[1].data.selectedPath = "Other device.md";
+  synced.bases[1].data.undoStack = [];
+  const plugin = pluginWith(synced, local);
+
+  await plugin.loadPluginData(false);
+
+  assert.equal(plugin.getActiveKnowledgeBaseId(), "base-second");
+  assert.equal(plugin.data.selectedPath, "Second/Local.md");
+  assert.equal(plugin.data.activeTab, "collections");
+  assert.equal(plugin.data.undoStack[0]?.label, "Local undo");
+});
+
+test("malformed or oversized device-local state is discarded to safe defaults", async () => {
+  for (const local of [
+    { version: 1, activeBaseId: "base-default", bases: [{ baseId: "base-default", view: { activeTab: "bad" } }] },
+    { version: 1, activeBaseId: "base-default", bases: [], padding: "x".repeat(4 * 1024 * 1024 + 1) },
+  ]) {
+    const data = migrateData(null);
+    data.selectedPath = "Synced.md";
+    data.undoStack = [snapshotPersonal(data, "Synced undo")];
+    const plugin = pluginWith(createDefaultStore(data, 100, "vault-malformed-local"), local);
+    await plugin.loadPluginData(false);
+    assert.equal(plugin.data.selectedPath, "");
+    assert.deepEqual(plugin.data.undoStack, []);
+    assert.equal(plugin.deviceLocalWrites.at(-1), null, "damaged state is cleared from localStorage");
+  }
+});
+
+test("one semantic save advances its base revision exactly once", async () => {
+  const store = createDefaultStore(migrateData(null), 100, "vault-semantic-save");
+  store.bases[0].semanticRevision = 8;
+  const plugin = pluginWith(store);
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+
+  plugin.data.pinnedPaths = ["Knowledge/Structural.md"];
+  await plugin.savePluginData();
+
+  const persisted = plugin.savedData.at(-1) as PluginStore | undefined;
+  assert.equal(plugin.savedData.length, 1);
+  assert.equal(persisted?.bases[0]?.semanticRevision, 9);
+  assert.ok((persisted?.bases[0]?.updatedAt ?? 0) > 100);
+  assert.equal(persisted?.bases[0]?.data.selectedPath, "");
+  assert.deepEqual(persisted?.bases[0]?.data.undoStack, []);
+  assert.deepEqual(persisted?.bases[0]?.data.redoStack, []);
+});
+
+test("safe view-state save rejects rather than smuggling an unsaved semantic change", async () => {
+  const store = createDefaultStore(migrateData(null), 100, "vault-view-no-smuggle");
+  const plugin = pluginWith(store);
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+
+  plugin.data.selectedPath = "Knowledge/Viewed.md";
+  plugin.data.pinnedPaths = ["Knowledge/Unsaved.md"];
+
+  await assert.rejects(plugin.saveViewState(), /unsaved organization change/i);
+  assert.equal(plugin.savedData.length, 0);
+  assert.equal(plugin.getActiveKnowledgeBase().semanticRevision, 0);
+  assert.equal(plugin.getActiveKnowledgeBase().updatedAt, 100);
+});
+
+test("safe view-state save waits for an active semantic transaction and adds no revision", async () => {
+  const store = createDefaultStore(migrateData(null), 100, "vault-view-waits");
+  const plugin = pluginWith(store);
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+  const semanticWriteStarted = deferred();
+  const releaseSemanticWrite = deferred();
+  let writeCalls = 0;
+  plugin.saveData = async (value: unknown): Promise<void> => {
+    writeCalls += 1;
+    if (writeCalls === 1) {
+      semanticWriteStarted.resolve();
+      await releaseSemanticWrite.promise;
+    }
+    plugin.savedData.push(structuredClone(value));
+  };
+
+  const semanticSave = plugin.mutate("Structural edit", () => {
+    plugin.data.pinnedPaths = ["Knowledge/Committed.md"];
+    plugin.data.selectedPath = "Knowledge/Committed.md";
+  });
+  await semanticWriteStarted.promise;
+  const viewSave = plugin.saveViewState();
+  await Promise.resolve();
+  assert.equal(writeCalls, 1, "the view save must wait behind the semantic transaction");
+
+  releaseSemanticWrite.resolve();
+  await Promise.all([semanticSave, viewSave]);
+
+  assert.equal(writeCalls, 1, "the following view save uses per-vault localStorage only");
+  const semanticSnapshot = plugin.savedData[0] as PluginStore;
+  assert.equal(semanticSnapshot.bases[0]?.semanticRevision, 1);
+  const viewSnapshot = plugin.deviceLocalWrites.at(-1) as ReturnType<typeof createDeviceLocalPluginState>;
+  assert.equal(viewSnapshot.bases[0]?.view.selectedPath, "Knowledge/Committed.md");
+});
+
 test("an automatic fresh-device selection save cannot defeat an established Sync store", async () => {
   const plugin = pluginWith(null);
   await plugin.loadPluginData();
   plugin.data.selectedPath = "Knowledge Base/Auto-selected.md";
-  await plugin.savePluginData();
+  await plugin.saveViewState();
   assert.equal(isFreshVaultId(plugin.getVaultId()), true);
 
   const authoritativeData = migrateData(null);
@@ -1806,6 +2553,160 @@ test("a same-identity fresh Sync callback does not create a false conflict rescu
   assert.equal(plugin.dataCompatibilityWarning, "");
   assert.equal(plugin.getVaultId(), persisted.vaultId);
   assert.equal(createdFiles, 0);
+});
+
+test("view-only Sync divergence needs neither writeback nor conflict rescue", async () => {
+  const localData = migrateData(null);
+  localData.selectedPath = "Knowledge/Local view.md";
+  localData.activeTab = "collections";
+  const local = createDefaultStore(localData, 100, "vault-view-only-sync");
+  local.bases[0].semanticRevision = 2;
+  const plugin = pluginWith(structuredClone(local), createDeviceLocalPluginState(local));
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+  let rescueFiles = 0;
+  const app = plugin.app as unknown as {
+    vault: {
+      configDir: string;
+      getMarkdownFiles(): TFile[];
+      getAbstractFileByPath(path: string): TAbstractFile | null;
+      createFolder(path: string): Promise<void>;
+      create(path: string, content: string): Promise<TFile>;
+    };
+  };
+  app.vault = {
+    configDir: ".obsidian",
+    getMarkdownFiles: () => [],
+    getAbstractFileByPath: () => null,
+    createFolder: async () => {},
+    create: async (path) => {
+      rescueFiles += 1;
+      return new TFile(path);
+    },
+  };
+  const incoming = structuredClone((plugin as unknown as { store: PluginStore }).store);
+  incoming.bases[0].data.selectedPath = "Knowledge/Incoming view.md";
+  incoming.bases[0].data.activeTab = "curriculum";
+  incoming.bases[0].updatedAt = 50_000;
+  plugin.loadedData = incoming;
+
+  await plugin.onExternalSettingsChange();
+
+  assert.equal(plugin.data.selectedPath, "Knowledge/Local view.md");
+  assert.equal(plugin.data.activeTab, "collections");
+  assert.equal(plugin.getActiveKnowledgeBase().semanticRevision, 2);
+  assert.equal(plugin.savedData.length, 0);
+  assert.equal(rescueFiles, 0);
+  assert.equal(plugin.dataCompatibilityWarning, "");
+});
+
+test("same-revision semantic conflicts rescue the losing complete envelope before adoption", async () => {
+  Notice.messages.length = 0;
+  const localData = migrateData(null);
+  localData.settings.workspaceName = "Alpha organization";
+  const local = createDefaultStore(localData, 100, "vault-semantic-conflict");
+  local.bases[0].semanticRevision = 5;
+  const incoming = structuredClone(local);
+  incoming.bases[0].data.settings.workspaceName = "Beta organization";
+  incoming.bases[0].updatedAt = 50_000;
+  const expected = mergeKnowledgeBaseStores(local, incoming, local.activeBaseId);
+  const expectedConflict = expected.semanticConflicts[0];
+  assert.ok(expectedConflict);
+  const losing = expectedConflict.winner === "local" ? incoming : local;
+  const expectedWinnerName = expected.store.bases[0]?.data.settings.workspaceName;
+
+  const plugin = pluginWith(structuredClone(local));
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+  const events: string[] = [];
+  let rescueContent = "";
+  const app = plugin.app as unknown as {
+    vault: {
+      configDir: string;
+      getMarkdownFiles(): TFile[];
+      getAbstractFileByPath(path: string): TAbstractFile | null;
+      createFolder(path: string): Promise<void>;
+      create(path: string, content: string): Promise<TFile>;
+    };
+  };
+  app.vault = {
+    configDir: ".obsidian",
+    getMarkdownFiles: () => [],
+    getAbstractFileByPath: () => null,
+    createFolder: async () => {},
+    create: async (path, content) => {
+      events.push("rescue");
+      rescueContent = content;
+      return new TFile(path);
+    },
+  };
+  plugin.refreshViews = async () => { events.push("refresh"); };
+  plugin.saveData = async (value: unknown) => {
+    events.push("writeback");
+    plugin.savedData.push(structuredClone(value));
+  };
+  plugin.loadedData = incoming;
+
+  await plugin.onExternalSettingsChange();
+
+  assert.equal(events[0], "rescue", "the losing envelope must be durable before adoption or writeback");
+  assert.equal(plugin.data.settings.workspaceName, expectedWinnerName);
+  const rescue = JSON.parse(rescueContent) as { kind: string; store: PluginStore };
+  assert.equal(rescue.kind, "knowledge-base-command-center-conflict-rescue");
+  assert.equal(rescue.store.bases[0]?.data.settings.workspaceName, losing.bases[0]?.data.settings.workspaceName);
+  const conflictNotice = Notice.messages.find((message) => message.includes("concurrent knowledge-base edit"));
+  assert.ok(conflictNotice);
+  assert.equal(conflictNotice.includes("Knowledge Base Command Center Exports"), false, "the conflict notice is path-free");
+  assert.equal(plugin.dataCompatibilityWarning, "");
+});
+
+test("a failed same-revision conflict rescue fails closed and retains the captured payload", async () => {
+  const localData = migrateData(null);
+  localData.settings.workspaceName = "Local organization";
+  const local = createDefaultStore(localData, 100, "vault-semantic-rescue-failure");
+  local.bases[0].semanticRevision = 3;
+  const incoming = structuredClone(local);
+  incoming.bases[0].data.settings.workspaceName = "Incoming organization";
+  const plugin = pluginWith(structuredClone(local));
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+  const app = plugin.app as unknown as {
+    vault: {
+      configDir: string;
+      getMarkdownFiles(): TFile[];
+      getAbstractFileByPath(path: string): TAbstractFile | null;
+      createFolder(path: string): Promise<void>;
+      create(path: string, content: string): Promise<TFile>;
+    };
+  };
+  app.vault = {
+    configDir: ".obsidian",
+    getMarkdownFiles: () => [],
+    getAbstractFileByPath: () => null,
+    createFolder: async () => {},
+    create: async () => { throw new Error("simulated rescue disk failure"); },
+  };
+  plugin.loadedData = incoming;
+
+  await plugin.onExternalSettingsChange();
+
+  assert.equal(plugin.data.settings.workspaceName, "Local organization");
+  assert.match(plugin.dataCompatibilityWarning, /could not be preserved.*read-only/i);
+  assert.equal(plugin.savedData.length, 0);
+  const retained = (plugin as unknown as { retainedExternalSettingsPayload: unknown }).retainedExternalSettingsPayload;
+  assert.deepEqual(retained, incoming);
+
+  const later = structuredClone(incoming);
+  later.bases[0].semanticRevision = 4;
+  later.bases[0].data.settings.workspaceName = "Later incoming organization";
+  plugin.loadedData = later;
+  await plugin.onExternalSettingsChange();
+  assert.equal(plugin.data.settings.workspaceName, "Local organization", "fail-closed state is sticky until restart");
+  assert.deepEqual(
+    (plugin as unknown as { retainedExternalSettingsPayload: unknown }).retainedExternalSettingsPayload,
+    incoming,
+    "the original unrescued capture remains retained",
+  );
 });
 
 test("an established store silently replaces an incoming bootstrap-only fresh store on disk", async () => {
@@ -2123,6 +3024,7 @@ test("external Sync merges disjoint base edits and preserves this device's activ
   assert.ok(localEnt);
   localEnt.data.pinnedPaths = ["ENT/Airway.md"];
   localEnt.updatedAt = 300;
+  localEnt.semanticRevision = 300;
   await plugin.savePluginData();
   plugin.savedData.length = 0;
   const incoming = structuredClone(original);
@@ -2131,6 +3033,7 @@ test("external Sync merges disjoint base edits and preserves this device's activ
   assert.ok(incomingResearch);
   incomingResearch.data.pinnedPaths = ["Research/Paper.md"];
   incomingResearch.updatedAt = 400;
+  incomingResearch.semanticRevision = 400;
   plugin.loadedData = incoming;
 
   await plugin.onExternalSettingsChange();
@@ -2153,24 +3056,24 @@ test("external Sync remediates an invalid ENT Index payload and writes the corre
   await plugin.loadPluginData();
   plugin.savedData.length = 0;
 
-  const incoming = structuredClone(local);
+  const incoming = structuredClone((plugin as unknown as { store: PluginStore }).store);
   const incomingBase = incoming.bases[0];
   assert.ok(incomingBase);
-  incomingBase.updatedAt = 200;
-  incomingBase.data.portableIndex.groups = [{ id: "remote-index", title: "Remote Index", order: 0 }];
-  incomingBase.data.portableIndex.subjects = [{
-    id: "remote-medication",
-    title: "Remote topic label",
-    groupId: "remote-index",
-    parentId: null,
-    order: 0,
-    indexed: true,
-    configuredId: "",
-    recordKind: "topic",
-    libraryId: null,
-  }];
-  incomingBase.data.portableIndex.resolvedPathBySubjectId = { "remote-medication": medication.path };
-  incomingBase.data.manualIndexPaths = [medication.path];
+  advanceStoreEntry(incomingBase, () => {
+    incomingBase.data.portableIndex.groups = [{ id: "remote-index", title: "Remote Index", order: 0 }];
+    incomingBase.data.portableIndex.subjects = [{
+      id: "remote-medication",
+      title: "Remote topic label",
+      groupId: "remote-index",
+      parentId: null,
+      order: 0,
+      indexed: true,
+      configuredId: "",
+      recordKind: "topic",
+    }];
+    incomingBase.data.portableIndex.resolvedPathBySubjectId = { "remote-medication": medication.path };
+    incomingBase.data.manualIndexPaths = [medication.path];
+  }, 200);
   plugin.loadedData = incoming;
 
   await plugin.onExternalSettingsChange();
@@ -2190,9 +3093,19 @@ test("external Sync remediates an invalid ENT Index payload and writes the corre
   assert.equal(sourceMutationCount(), 0);
 });
 
-test("external Sync captures a newer payload before an in-flight local save can overwrite it", async () => {
+test("external Sync rescues a concurrent payload before a rejected local write is compensated", async () => {
+  const rescueContents: string[] = [];
   const app = {
-    vault: { configDir: ".obsidian", getMarkdownFiles: () => [] },
+    vault: {
+      configDir: ".obsidian",
+      getMarkdownFiles: () => [],
+      getAbstractFileByPath: () => null,
+      createFolder: async () => {},
+      create: async (path: string, content: string) => {
+        rescueContents.push(content);
+        return new TFile(path);
+      },
+    },
     workspace: { getLeavesOfType: () => [] },
     metadataCache: { getFileCache: () => null },
     fileManager: {},
@@ -2223,8 +3136,9 @@ test("external Sync captures a newer payload before an in-flight local save can 
   const incoming = structuredClone(disk);
   const incomingBase = incoming.bases[0];
   assert.ok(incomingBase);
-  incomingBase.data.nextStudyPaths = ["Remote.md"];
-  incomingBase.updatedAt = localTimestamp - 1;
+  advanceStoreEntry(incomingBase, () => {
+    incomingBase.data.nextStudyPaths = ["Remote.md"];
+  }, localTimestamp - 1);
   disk = incoming;
 
   const pendingReload = plugin.onExternalSettingsChange();
@@ -2234,18 +3148,29 @@ test("external Sync captures a newer payload before an in-flight local save can 
   await pendingReload;
 
   assert.deepEqual(plugin.data.pinnedPaths, [], "the overlapping local edit is rolled back instead of silently winning");
-  assert.deepEqual(plugin.data.nextStudyPaths, ["Remote.md"], "the captured newer Sync edit survives in memory");
+  assert.deepEqual(plugin.data.nextStudyPaths, [], "the causal rollback deterministically supersedes the rejected local attempt");
   const persistedBase = disk.bases.find((entry) => entry.id === disk.activeBaseId);
   assert.deepEqual(persistedBase?.data.pinnedPaths, []);
-  assert.deepEqual(persistedBase?.data.nextStudyPaths, ["Remote.md"], "the captured Sync edit is written back after the stale local save settles");
-  assert.equal(persistedBase?.updatedAt, incomingBase.updatedAt, "rollback bookkeeping must not outrank the captured remote edit");
+  assert.deepEqual(persistedBase?.data.nextStudyPaths, []);
+  assert.ok(rescueContents.some((content) => content.includes("Remote.md")), "the unrelated remote envelope is rescued before adoption");
+  assert.ok((persistedBase?.semanticRevision ?? 0) > incomingBase.semanticRevision);
   assert.equal(plugin.dataCompatibilityWarning, "");
   assert.equal(saveCalls, 2, "one stale local write is followed by one authoritative merged writeback");
 });
 
 test("external Sync discards rejected direct and queued saves by merging from the committed baseline", async () => {
+  const rescueContents: string[] = [];
   const app = {
-    vault: { configDir: ".obsidian", getMarkdownFiles: () => [] },
+    vault: {
+      configDir: ".obsidian",
+      getMarkdownFiles: () => [],
+      getAbstractFileByPath: () => null,
+      createFolder: async () => {},
+      create: async (path: string, content: string) => {
+        rescueContents.push(content);
+        return new TFile(path);
+      },
+    },
     workspace: { getLeavesOfType: () => [] },
     metadataCache: { getFileCache: () => null },
     fileManager: {},
@@ -2268,18 +3193,20 @@ test("external Sync discards rejected direct and queued saves by merging from th
   };
   await plugin.loadPluginData(false);
 
-  plugin.data.selectedPath = "Local-A.md";
+  plugin.data.selectedPath = "Local-route.md";
+  plugin.data.pinnedPaths = ["Local-A.md"];
   const firstLocalSave = plugin.savePluginData();
   await saveStarted.promise;
-  plugin.data.pinnedPaths = ["Local-B.md"];
+  plugin.data.manualIndexPaths = ["Local-B.md"];
   const secondLocalSave = plugin.savePluginData();
   const interruptedTimestamp = plugin.getKnowledgeBases(true)[0]?.updatedAt ?? 0;
 
   const incoming = structuredClone(disk);
   const incomingBase = incoming.bases[0];
   assert.ok(incomingBase);
-  incomingBase.data.nextStudyPaths = ["Remote.md"];
-  incomingBase.updatedAt = interruptedTimestamp - 1;
+  advanceStoreEntry(incomingBase, () => {
+    incomingBase.data.nextStudyPaths = ["Remote.md"];
+  }, interruptedTimestamp - 1);
   disk = incoming;
 
   const pendingReload = plugin.onExternalSettingsChange();
@@ -2288,19 +3215,22 @@ test("external Sync discards rejected direct and queued saves by merging from th
   await pendingReload;
 
   assert.equal(localResults.every((result) => result.status === "rejected"), true);
-  assert.equal(plugin.data.selectedPath, "", "the rejected direct selection save is not treated as committed state");
-  assert.deepEqual(plugin.data.pinnedPaths, [], "the rejected queued pin save is not treated as committed state");
-  assert.deepEqual(plugin.data.nextStudyPaths, ["Remote.md"]);
+  assert.equal(plugin.data.selectedPath, "Local-route.md", "the device-local route survives the rejected semantic saves");
+  assert.deepEqual(plugin.data.pinnedPaths, [], "the rejected direct pin save is not treated as committed state");
+  assert.deepEqual(plugin.data.manualIndexPaths, [], "the rejected queued manual-path save is not treated as committed state");
+  assert.deepEqual(plugin.data.nextStudyPaths, [], "the compensating rollback causally supersedes the rejected write");
   const persistedBase = disk.bases.find((entry) => entry.id === disk.activeBaseId);
   assert.equal(persistedBase?.data.selectedPath, "");
   assert.deepEqual(persistedBase?.data.pinnedPaths, []);
-  assert.deepEqual(persistedBase?.data.nextStudyPaths, ["Remote.md"]);
-  assert.equal(persistedBase?.updatedAt, incomingBase.updatedAt);
+  assert.deepEqual(persistedBase?.data.manualIndexPaths, []);
+  assert.deepEqual(persistedBase?.data.nextStudyPaths, []);
+  assert.ok(rescueContents.some((content) => content.includes("Remote.md")), "the unrelated remote envelope is rescued before rollback adoption");
+  assert.ok((persistedBase?.semanticRevision ?? 0) > incomingBase.semanticRevision);
   assert.equal(saveCalls, 2, "the queued stale save aborts before the adapter and one authoritative writeback follows");
   assert.equal(plugin.dataCompatibilityWarning, "");
 });
 
-test("external Sync preserves the committed active base when an overlapping switch is rejected", async () => {
+test("external Sync preserves this device's active base without syncing the switch", async () => {
   const app = {
     vault: { configDir: ".obsidian", getMarkdownFiles: () => [] },
     workspace: { getLeavesOfType: () => [] },
@@ -2315,37 +3245,28 @@ test("external Sync preserves the committed active base when an overlapping swit
   disk.bases.push(createKnowledgeBaseEntry(second, "base-second", 100));
   const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never);
   plugin.loadData = async () => structuredClone(disk);
-  const switchSaveStarted = deferred();
-  const releaseSwitchSave = deferred();
   let saveCalls = 0;
   plugin.saveData = async (value: unknown) => {
     saveCalls += 1;
-    if (saveCalls === 1) {
-      switchSaveStarted.resolve();
-      await releaseSwitchSave.promise;
-    }
     disk = structuredClone(value) as typeof disk;
   };
   await plugin.loadPluginData(false);
 
-  const pendingSwitch = plugin.switchKnowledgeBase("base-second");
-  await switchSaveStarted.promise;
+  await plugin.switchKnowledgeBase("base-second");
   const incoming = structuredClone(disk);
   const incomingCommitted = incoming.bases.find((entry) => entry.id === "base-default");
   assert.ok(incomingCommitted);
-  incomingCommitted.data.nextStudyPaths = ["Remote.md"];
-  incomingCommitted.updatedAt = 1_000;
+  advanceStoreEntry(incomingCommitted, () => {
+    incomingCommitted.data.nextStudyPaths = ["Remote.md"];
+  }, 1_000);
   disk = incoming;
 
-  const pendingReload = plugin.onExternalSettingsChange();
-  releaseSwitchSave.resolve();
-  await assert.rejects(pendingSwitch, /Sync while this edit was saving/i);
-  await pendingReload;
+  await plugin.onExternalSettingsChange();
 
-  assert.equal(plugin.getActiveKnowledgeBaseId(), "base-default");
+  assert.equal(plugin.getActiveKnowledgeBaseId(), "base-second");
   assert.equal(disk.activeBaseId, "base-default");
   assert.deepEqual(plugin.getKnowledgeBases(true).find((entry) => entry.id === "base-default")?.data.nextStudyPaths, ["Remote.md"]);
-  assert.equal(saveCalls, 2, "the stale switch write is followed by one authoritative writeback");
+  assert.equal(saveCalls, 0, "the local switch and already-authoritative Sync payload require no write");
 });
 
 test("external Sync resolves every queued capture before starting one authoritative writeback", async () => {
@@ -2355,6 +3276,7 @@ test("external Sync resolves every queued capture before starting one authoritat
   const localSecondary = migrateData(null);
   localSecondary.settings.workspaceName = "Shared secondary";
   const local = createDefaultStore(localPrimary, 300, "vault-capture-batch");
+  local.bases[0].semanticRevision = 1;
   local.bases.push(createKnowledgeBaseEntry(localSecondary, "base-secondary", 100));
   const plugin = pluginWith(structuredClone(local));
   await plugin.loadPluginData(false);
@@ -2365,13 +3287,16 @@ test("external Sync resolves every queued capture before starting one authoritat
   assert.ok(incomingAPrimary && incomingASecondary);
   incomingAPrimary.data.pinnedPaths = [];
   incomingAPrimary.updatedAt = 100;
+  incomingAPrimary.semanticRevision = 0;
   incomingASecondary.data.nextStudyPaths = ["A.md"];
   incomingASecondary.updatedAt = 400;
+  incomingASecondary.semanticRevision = 1;
   const incomingB = structuredClone(incomingA);
   const incomingBSecondary = incomingB.bases.find((entry) => entry.id === "base-secondary");
   assert.ok(incomingBSecondary);
   incomingBSecondary.data.nextStudyPaths = ["B.md"];
   incomingBSecondary.updatedAt = 500;
+  incomingBSecondary.semanticRevision = 2;
 
   const releaseSecondRead = deferred();
   let readCalls = 0;
@@ -2413,6 +3338,7 @@ test("a missing capture after a valid batched Sync update does not discard that 
   assert.ok(validBase);
   validBase.data.nextStudyPaths = ["Remote-before-missing.md"];
   validBase.updatedAt = 200;
+  validBase.semanticRevision = 1;
   const captures: unknown[] = [valid, null];
   plugin.loadData = async () => structuredClone(captures.shift());
 
@@ -2456,6 +3382,7 @@ test("an incompatible capture in a later Sync worker rescues the committed valid
   assert.ok(validBase);
   validBase.data.nextStudyPaths = ["Remote-before-future.md"];
   validBase.updatedAt = 200;
+  validBase.semanticRevision = 1;
   plugin.loadedData = valid;
   await plugin.onExternalSettingsChange();
   assert.deepEqual(plugin.data.nextStudyPaths, ["Remote-before-future.md"]);
@@ -2499,8 +3426,9 @@ test("external Sync starts a fresh worker for a callback during worker finalizat
   const incomingA = structuredClone(initial);
   const incomingABase = incomingA.bases[0];
   assert.ok(incomingABase);
-  incomingABase.data.nextStudyPaths = ["A.md"];
-  incomingABase.updatedAt = 200;
+  advanceStoreEntry(incomingABase, () => {
+    incomingABase.data.nextStudyPaths = ["A.md"];
+  }, 200);
   disk = incomingA;
 
   const refreshStarted = deferred();
@@ -2520,8 +3448,9 @@ test("external Sync starts a fresh worker for a callback during worker finalizat
   const incomingB = structuredClone(incomingA);
   const incomingBBase = incomingB.bases[0];
   assert.ok(incomingBBase);
-  incomingBBase.data.nextStudyPaths = ["B.md"];
-  incomingBBase.updatedAt = 300;
+  advanceStoreEntry(incomingBBase, () => {
+    incomingBBase.data.nextStudyPaths = ["B.md"];
+  }, 300);
   disk = incomingB;
 
   const secondReload: { current: Promise<void> | null } = { current: null };
@@ -2609,6 +3538,7 @@ test("external Sync restores a future capture that arrives during an authoritati
   const secondary = migrateData(null);
   secondary.settings.workspaceName = "Secondary";
   const local = createDefaultStore(primary, 300, "vault-nested-future");
+  local.bases[0].semanticRevision = 1;
   local.bases.push(createKnowledgeBaseEntry(secondary, "base-secondary", 100));
   let disk = structuredClone(local);
   const plugin = pluginWith(structuredClone(local));
@@ -2632,8 +3562,10 @@ test("external Sync restores a future capture that arrives during an authoritati
   assert.ok(remotePrimary && remoteSecondary);
   remotePrimary.data.pinnedPaths = [];
   remotePrimary.updatedAt = 100;
+  remotePrimary.semanticRevision = 0;
   remoteSecondary.data.nextStudyPaths = ["REMOTE-1.md"];
   remoteSecondary.updatedAt = 400;
+  remoteSecondary.semanticRevision = 1;
   disk = remote;
   const firstReload = plugin.onExternalSettingsChange();
   await writebackStarted.promise;
@@ -2644,6 +3576,7 @@ test("external Sync restores a future capture that arrives during an authoritati
   assert.ok(futureSecondary);
   futureSecondary.data.nextStudyPaths = ["FUTURE-ONLY.md"];
   futureSecondary.updatedAt = 500;
+  futureSecondary.semanticRevision = 2;
   disk = future;
   const secondReload = plugin.onExternalSettingsChange();
   releaseWriteback.resolve();
@@ -2652,7 +3585,7 @@ test("external Sync restores a future capture that arrives during an authoritati
   assert.equal(disk.version, STORE_VERSION + 1);
   assert.deepEqual(disk.bases.find((entry) => entry.id === "base-secondary")?.data.nextStudyPaths, ["FUTURE-ONLY.md"]);
   assert.match(plugin.dataCompatibilityWarning, /newer than this build/i);
-  assert.equal(saveCalls, 2, "the interrupted v13 writeback is followed by exact v14 restoration");
+  assert.equal(saveCalls, 2, "the interrupted v14 writeback is followed by exact v15 restoration");
 });
 
 test("a valid identified Sync capture recovers after a transient startup data read failure", async () => {
@@ -2727,6 +3660,7 @@ test("external Sync falls back only when this device's active base was archived"
   assert.ok(archived);
   archived.archivedAt = 500;
   archived.updatedAt = 500;
+  archived.semanticRevision = 1;
   incoming.activeBaseId = "base-research";
   plugin.loadedData = incoming;
 
@@ -2789,7 +3723,7 @@ test("switching knowledge bases is rejected while a mutate transaction is saving
   assert.equal(plugin.getActiveKnowledgeBaseId(), "base-default");
 });
 
-test("mutate rejects without running its action while a base switch is being saved", async () => {
+test("mutate rejects without running its action while a base lifecycle change is being saved", async () => {
   const first = migrateData(null);
   first.settings.workspaceName = "First KB";
   const second = migrateData(null);
@@ -2798,27 +3732,26 @@ test("mutate rejects without running its action while a base switch is being sav
   store.bases.push(createKnowledgeBaseEntry(second, "base-second", 200));
   const plugin = pluginWith(store);
   await plugin.loadPluginData();
-  const switchSaveStarted = deferred();
-  const releaseSwitchSave = deferred();
+  const baseSaveStarted = deferred();
+  const releaseBaseSave = deferred();
   plugin.saveData = async () => {
-    switchSaveStarted.resolve();
-    await releaseSwitchSave.promise;
+    baseSaveStarted.resolve();
+    await releaseBaseSave.promise;
   };
 
-  const pendingSwitch = plugin.switchKnowledgeBase("base-second");
-  await switchSaveStarted.promise;
+  const pendingCreate = plugin.createKnowledgeBase("Third KB", "generic", "Knowledge Base");
+  await baseSaveStarted.promise;
   let actionRan = false;
   await assert.rejects(
     plugin.mutate("Racing organization edit", () => { actionRan = true; }),
     /finish switching knowledge bases before changing its organization/i,
   );
   assert.equal(actionRan, false);
-  assert.equal(plugin.getActiveKnowledgeBaseId(), "base-second");
-  assert.equal(plugin.data.settings.workspaceName, "Second KB");
+  assert.equal(plugin.data.settings.workspaceName, "Third KB");
 
-  releaseSwitchSave.resolve();
-  await pendingSwitch;
-  assert.equal(plugin.getActiveKnowledgeBaseId(), "base-second");
+  releaseBaseSave.resolve();
+  await pendingCreate;
+  assert.equal(plugin.data.settings.workspaceName, "Third KB");
 });
 
 test("a vault rename waits when external Sync starts in its initial idle yield", async () => {
@@ -2832,8 +3765,9 @@ test("a vault rename waits when external Sync starts in its initial idle yield",
   const incoming = structuredClone(original);
   const incomingBase = incoming.bases[0];
   assert.ok(incomingBase);
-  incomingBase.data.nextStudyPaths = ["Remote.md"];
-  incomingBase.updatedAt = 200;
+  advanceStoreEntry(incomingBase, () => {
+    incomingBase.data.nextStudyPaths = ["Remote.md"];
+  }, 200);
   plugin.loadedData = incoming;
 
   const originalWindow = globalThis.window;
@@ -2856,6 +3790,7 @@ test("a vault rename waits when external Sync starts in its initial idle yield",
 });
 
 test("a vault rename retries after repeated Sync callbacks and rewrites every base once", async () => {
+  const rescueContents: string[] = [];
   const future = Date.now() + 1_000_000;
   const active = migrateData(null);
   active.settings.workspaceName = "Active";
@@ -2869,12 +3804,22 @@ test("a vault rename retries after repeated Sync callbacks and rewrites every ba
   const original = createDefaultStore(active, future, "vault-rename-sync-retry");
   original.bases.push(createKnowledgeBaseEntry(inactive, "base-inactive", future + 10));
   const archivedEntry = createKnowledgeBaseEntry(archived, "base-archived", future + 20);
-  archivedEntry.archivedAt = future + 21;
-  archivedEntry.updatedAt = future + 21;
+  advanceStoreEntry(archivedEntry, () => {
+    archivedEntry.archivedAt = future + 21;
+  }, future + 21);
   original.bases.push(archivedEntry);
 
   const app = {
-    vault: { configDir: ".obsidian", getMarkdownFiles: () => [] },
+    vault: {
+      configDir: ".obsidian",
+      getMarkdownFiles: () => [],
+      getAbstractFileByPath: () => null,
+      createFolder: async () => {},
+      create: async (path: string, content: string) => {
+        rescueContents.push(content);
+        return new TFile(path);
+      },
+    },
     workspace: { getLeavesOfType: () => [] },
     metadataCache: { getFileCache: () => null },
     fileManager: {},
@@ -2898,17 +3843,20 @@ test("a vault rename retries after repeated Sync callbacks and rewrites every ba
   const incomingA = structuredClone(original);
   const incomingActive = incomingA.bases.find((entry) => entry.id === "base-default");
   assert.ok(incomingActive);
-  incomingActive.data.nextStudyPaths = ["Remote active.md"];
-  incomingActive.updatedAt = future + 100;
+  advanceStoreEntry(incomingActive, () => {
+    incomingActive.data.nextStudyPaths = ["Remote active.md"];
+  }, future + 100);
   const incomingB = structuredClone(incomingA);
   const incomingInactive = incomingB.bases.find((entry) => entry.id === "base-inactive");
   const incomingArchived = incomingB.bases.find((entry) => entry.id === "base-archived");
   assert.ok(incomingInactive);
   assert.ok(incomingArchived);
-  incomingInactive.data.pinnedPaths = ["Remote inactive.md"];
-  incomingInactive.updatedAt = future + 110;
-  incomingArchived.data.nextStudyPaths = ["Remote archived.md"];
-  incomingArchived.updatedAt = future + 120;
+  advanceStoreEntry(incomingInactive, () => {
+    incomingInactive.data.pinnedPaths = ["Remote inactive.md"];
+  }, future + 110);
+  advanceStoreEntry(incomingArchived, () => {
+    incomingArchived.data.nextStudyPaths = ["Remote archived.md"];
+  }, future + 120);
 
   const originalWindow = globalThis.window;
   Object.defineProperty(globalThis, "window", {
@@ -2933,14 +3881,17 @@ test("a vault rename retries after repeated Sync callbacks and rewrites every ba
   const finalInactive = plugin.getKnowledgeBases(true).find((entry) => entry.id === "base-inactive");
   const finalArchived = plugin.getKnowledgeBases(true).find((entry) => entry.id === "base-archived");
   assert.deepEqual(finalActive?.data.pinnedPaths, ["New/Active.md"]);
-  assert.deepEqual(finalActive?.data.nextStudyPaths, ["Remote active.md"]);
   assert.deepEqual(finalInactive?.data.nextStudyPaths, ["New/Inactive.md"]);
-  assert.deepEqual(finalInactive?.data.pinnedPaths, ["Remote inactive.md"]);
   assert.deepEqual(finalArchived?.data.collections[0]?.subjects, ["New/Archived.md"]);
-  assert.deepEqual(finalArchived?.data.nextStudyPaths, ["Remote archived.md"]);
-  assert.equal(finalActive?.updatedAt, incomingActive.updatedAt + 1);
-  assert.equal(finalInactive?.updatedAt, incomingInactive.updatedAt + 1);
-  assert.equal(finalArchived?.updatedAt, incomingArchived.updatedAt + 1);
+  const remoteWasPreserved = (livePaths: string[] | undefined, path: string): boolean => (
+    Boolean(livePaths?.includes(path)) || rescueContents.some((content) => content.includes(path))
+  );
+  assert.equal(remoteWasPreserved(finalActive?.data.nextStudyPaths, "Remote active.md"), true);
+  assert.equal(remoteWasPreserved(finalInactive?.data.pinnedPaths, "Remote inactive.md"), true);
+  assert.equal(remoteWasPreserved(finalArchived?.data.nextStudyPaths, "Remote archived.md"), true);
+  assert.ok((finalActive?.semanticRevision ?? 0) > incomingActive.semanticRevision);
+  assert.ok((finalInactive?.semanticRevision ?? 0) > incomingInactive.semanticRevision);
+  assert.ok((finalArchived?.semanticRevision ?? 0) > incomingArchived.semanticRevision);
   assert.equal(finalArchived?.archivedAt, future + 21);
   assert.deepEqual(disk, {
     ...disk,
@@ -2968,6 +3919,68 @@ test("the plugin rename handler preserves every note below a renamed folder and 
   assert.deepEqual(plugin.data.collections[0]?.subjects, ["New/One.md"]);
   assert.deepEqual(plugin.data.pinnedPaths, ["New/Nested/Two.md"]);
   assert.equal(plugin.savedData.length, 1);
+});
+
+test("a rename confined to route and local history does not advance semantic causality", async () => {
+  const data = migrateData(null);
+  data.selectedPath = "Old/Viewed.md";
+  const historySource = structuredClone(data);
+  historySource.pinnedPaths = ["Old/Historical.md"];
+  data.undoStack = [snapshotPersonal(historySource, "Local history")];
+  const store = createDefaultStore(data, 100, "vault-view-only-rename");
+  const plugin = pluginWith(store, createDeviceLocalPluginState(store));
+  await plugin.loadPluginData(false);
+  plugin.savedData.length = 0;
+  plugin.deviceLocalWrites.length = 0;
+  const before = plugin.getActiveKnowledgeBase();
+  const beforeRevision = before.semanticRevision;
+  const beforeHead = before.semanticHead;
+  const originalWindow = globalThis.window;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { activeWindow: { clearTimeout: () => {}, setTimeout: () => 1 } },
+  });
+  try {
+    const handler = plugin as unknown as { handleRename(oldPath: string, newPath: string, folderRename: boolean): Promise<void> };
+    await handler.handleRename("Old", "New", true);
+  } finally {
+    Object.defineProperty(globalThis, "window", { configurable: true, value: originalWindow });
+  }
+
+  assert.equal(plugin.data.selectedPath, "New/Viewed.md");
+  assert.deepEqual(plugin.data.undoStack[0]?.pinnedPaths, ["New/Historical.md"]);
+  assert.equal(plugin.getActiveKnowledgeBase().semanticRevision, beforeRevision);
+  assert.equal(plugin.getActiveKnowledgeBase().semanticHead, beforeHead);
+  assert.equal(plugin.savedData.length, 0);
+  assert.equal(plugin.deviceLocalWrites.length, 1);
+});
+
+test("a failed vault-rename compensation enters the same sticky uncertain-persistence mode", async () => {
+  const data = migrateData(null);
+  data.pinnedPaths = ["Old/Topic.md"];
+  const plugin = pluginWith(createDefaultStore(data, 100, "vault-rename-compensation-failure"));
+  await plugin.loadPluginData(false);
+  let writes = 0;
+  plugin.saveData = async () => {
+    writes += 1;
+    throw new Error(writes === 1 ? "rename write rejected" : "rename compensation rejected");
+  };
+  const originalWindow = globalThis.window;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { activeWindow: { clearTimeout: () => {}, setTimeout: () => 1 } },
+  });
+  try {
+    const handler = plugin as unknown as { handleRename(oldPath: string, newPath: string, folderRename: boolean): Promise<void> };
+    await assert.rejects(handler.handleRename("Old", "New", true), /organization is now read-only/i);
+  } finally {
+    Object.defineProperty(globalThis, "window", { configurable: true, value: originalWindow });
+  }
+
+  assert.equal(writes, 2);
+  assert.deepEqual(plugin.data.pinnedPaths, ["Old/Topic.md"]);
+  assert.equal(plugin.isDataReadOnly(), true);
+  assert.match(plugin.dataCompatibilityWarning, /vault-rename rewrite|compensating rollback/i);
 });
 
 test("an inactive-base rename advances only that base's timestamp monotonically", async () => {
@@ -3164,8 +4177,10 @@ test("root-folder renames rewrite active, inactive, archived, and nested snapsho
     const expectedPrimary = `Renamed Root/${entry.data.settings.workspaceName === "Active"
       ? "Knowledge"
       : entry.data.settings.workspaceName === "Inactive" ? "Research" : "Archive"}`;
-    const savedSettings = [entry.data.layoutSnapshots, entry.data.undoStack, entry.data.redoStack]
-      .flatMap((stack) => [stack[0]?.settings, stack[0]?.layoutSnapshots?.[0]?.settings]);
+    const savedSettings = [
+      entry.data.layoutSnapshots[0]?.settings,
+      entry.data.layoutSnapshots[0]?.layoutSnapshots?.[0]?.settings,
+    ];
     for (const settings of [entry.data.settings, ...savedSettings]) {
       assert.equal(settings?.primaryFolder, expectedPrimary);
       assert.equal(settings?.proposalFolder, "Renamed Root/Inbox/Topic Proposals");
@@ -3173,6 +4188,8 @@ test("root-folder renames rewrite active, inactive, archived, and nested snapsho
       assert.equal(settings?.defaultNoteFolder, `${expectedPrimary}/Inbox`);
       assert.equal(settings?.defaultTemplatePath, "Renamed Root/Templates/Topic.md");
     }
+    assert.deepEqual(entry.data.undoStack, [], "cold start never adopts synced undo history");
+    assert.deepEqual(entry.data.redoStack, [], "cold start never adopts synced redo history");
   }
   assert.equal(plugin.savedData.length, 1);
 });
@@ -3204,12 +4221,14 @@ test("template file renames update current and nested saved settings without gro
 
   for (const settings of [
     plugin.data.settings,
-    ...[plugin.data.layoutSnapshots, plugin.data.undoStack, plugin.data.redoStack]
-      .flatMap((stack) => [stack[0]?.settings, stack[0]?.layoutSnapshots?.[0]?.settings]),
+    plugin.data.layoutSnapshots[0]?.settings,
+    plugin.data.layoutSnapshots[0]?.layoutSnapshots?.[0]?.settings,
   ]) {
     assert.equal(settings?.defaultTemplatePath, "Templates/New topic.md");
     assert.equal(settings?.primaryFolder, "Knowledge Base");
   }
+  assert.deepEqual(plugin.data.undoStack, []);
+  assert.deepEqual(plugin.data.redoStack, []);
   assert.deepEqual(plugin.data.indexGroupAliases, { "Old topic.md": "Do not migrate this group" });
   assert.equal(plugin.savedData.length, 1);
 });
@@ -3708,10 +4727,29 @@ test("reconciliation preserves a temporarily missing synced note binding", async
 
   const changed = await plugin.reconcileRecords(plugin.getRecords());
 
-  assert.equal(changed, false);
+  assert.equal(changed, true, "cold-start route selection may choose the retained placeholder locally");
   assert.deepEqual(plugin.data.portableIndex.resolvedPathBySubjectId, { "subject-airway": stalePath });
   assert.deepEqual(plugin.data.manualIndexPaths, [stalePath]);
+  assert.equal(plugin.data.selectedPath, stalePath);
   assert.equal(plugin.savedData.length, 0);
+});
+
+test("selection-only reconciliation uses the non-semantic view-state save path", async () => {
+  const data = migrateData(null);
+  data.selectedPath = "Knowledge/Missing.md";
+  const store = createDefaultStore(data, 100, "vault-selection-reconcile");
+  store.bases[0].semanticRevision = 6;
+  const plugin = pluginWith(store);
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+
+  const changed = await plugin.reconcileRecords([{ path: "Knowledge/Fallback.md" } as never]);
+
+  assert.equal(changed, true);
+  assert.equal(plugin.data.selectedPath, "Knowledge/Fallback.md");
+  assert.equal(plugin.savedData.length, 0, "device-local route changes never rewrite data.json");
+  assert.equal(plugin.getKnowledgeBases(true)[0]?.semanticRevision, 6);
+  assert.equal(plugin.getKnowledgeBases(true)[0]?.updatedAt, 100);
 });
 
 test("portable JSON writes do not create a second success notice", async () => {
@@ -3930,7 +4968,7 @@ test("a failed Undo save restores the current data and both history stacks", asy
     activeBaseId?: string;
     bases?: Array<{ id?: string; data?: unknown }>;
   } | undefined;
-  assert.deepEqual(persisted?.bases?.find((entry) => entry.id === persisted.activeBaseId)?.data, expected);
+  assert.deepEqual(persisted?.bases?.find((entry) => entry.id === persisted.activeBaseId)?.data, neutralSyncedData(expected));
 });
 
 test("a failed Redo save restores the current data and both history stacks", async () => {
@@ -3962,7 +5000,7 @@ test("a failed Redo save restores the current data and both history stacks", asy
     activeBaseId?: string;
     bases?: Array<{ id?: string; data?: unknown }>;
   } | undefined;
-  assert.deepEqual(persisted?.bases?.find((entry) => entry.id === persisted.activeBaseId)?.data, expected);
+  assert.deepEqual(persisted?.bases?.find((entry) => entry.id === persisted.activeBaseId)?.data, neutralSyncedData(expected));
 });
 
 test("an ordinary mutate save failure restores personal state and existing history", async () => {
@@ -4017,7 +5055,7 @@ test("an ordinary mutate save failure restores personal state and existing histo
     activeBaseId?: string;
     bases?: Array<{ id?: string; data?: unknown }>;
   } | undefined;
-  assert.deepEqual(persisted?.bases?.find((entry) => entry.id === persisted.activeBaseId)?.data, expected);
+  assert.deepEqual(persisted?.bases?.find((entry) => entry.id === persisted.activeBaseId)?.data, neutralSyncedData(expected));
 });
 
 test("resolving a portable placeholder preserves placement and Undo only unlinks the note", async () => {
@@ -4749,7 +5787,7 @@ test("library Create, Archive, and Delete restore navigation and defaults throug
   assert.equal(plugin.data.activeTab, tab);
   await plugin.undo();
   assert.equal(plugin.getLibrary(libraryId), null);
-  assert.equal(plugin.data.activeTab, "collections");
+  assert.equal(plugin.data.activeTab, "queues", "cold start uses the configured default rather than a synced route");
   assert.equal(plugin.data.settings.defaultTab, "queues");
   await plugin.redo();
   assert.ok(plugin.getLibrary(libraryId));
@@ -5010,7 +6048,7 @@ test("a failed custom-library deletion save restores the exact definition, subje
     activeBaseId?: string;
     bases?: Array<{ id?: string; data?: unknown }>;
   } | undefined;
-  assert.deepEqual(persisted?.bases?.find((entry) => entry.id === persisted.activeBaseId)?.data, expected);
+  assert.deepEqual(persisted?.bases?.find((entry) => entry.id === persisted.activeBaseId)?.data, neutralSyncedData(expected));
   assert.equal(sourceMutationCount(), 0);
 });
 
@@ -5242,9 +6280,15 @@ test("classification survives a store reload and Undo or Redo never loses pins, 
   await firstHarness.plugin.assignRecordToCatalog(file.path, "medication", { headingTitle: "Nasal medications" });
   const subjectId = firstHarness.plugin.getRecord(file.path)?.portableId ?? "";
   const persisted = structuredClone(firstHarness.plugin.savedData.at(-1));
+  const deviceState = structuredClone(firstHarness.plugin.deviceLocalWrites.at(-1));
   assert.ok(subjectId && persisted);
 
-  const reloadedHarness = pluginWithFiles(persisted, [file], { [file.path]: { title: "Allergodil" } });
+  const reloadedHarness = pluginWithFiles(
+    persisted,
+    [file],
+    { [file.path]: { title: "Allergodil" } },
+    deviceState,
+  );
   const plugin = reloadedHarness.plugin;
   await plugin.loadPluginData();
   const assertPersonalMemberships = (): void => {
@@ -6657,6 +7701,7 @@ test("cross-base search streams uncached bases through one bounded catalog witho
   const archivedEntry = createKnowledgeBaseEntry(archivedData, "base-archived-search", 13);
   archivedEntry.archivedAt = 14;
   archivedEntry.updatedAt = 14;
+  archivedEntry.semanticRevision = 1;
   store.bases.push(archivedEntry);
   const { plugin, metadataReadCount, vaultEnumerationCount } = pluginWithFiles(store, files, frontmatterByPath);
   const internal = plugin as unknown as {

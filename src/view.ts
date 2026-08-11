@@ -624,7 +624,7 @@ export class EntVaultCommandCenterView extends ItemView {
       .some((tab) => tab.id === this.plugin.data.activeTab)
       && !this.plugin.isDataReadOnly()) {
       this.plugin.data.activeTab = "curriculum";
-      await this.plugin.savePluginData();
+      await this.plugin.saveViewState();
       if (!this.guardLoadedBase()) return;
     }
     this.curriculum = buildCurriculumTree(
@@ -761,7 +761,7 @@ export class EntVaultCommandCenterView extends ItemView {
   private saveSelectionState(): Promise<void> {
     if (!this.guardLoadedBase()) return Promise.resolve();
     const previous = this.selectionSavePromise?.catch(() => undefined) ?? Promise.resolve();
-    const save = previous.then(() => this.plugin.savePluginData());
+    const save = previous.then(() => this.plugin.saveViewState());
     this.selectionSavePromise = save;
     return save.finally(() => {
       if (this.selectionSavePromise === save) this.selectionSavePromise = null;
@@ -775,7 +775,7 @@ export class EntVaultCommandCenterView extends ItemView {
       curriculumNodes: [...this.collapsedCurriculumNodes],
       queues: [...this.collapsedQueues],
     };
-    this.run(() => this.plugin.savePluginData());
+    this.run(() => this.plugin.saveViewState());
   }
 
   public openQuickEntry(explicitCurrentPath?: string): void {
@@ -1529,7 +1529,7 @@ export class EntVaultCommandCenterView extends ItemView {
           if (!ownsBase()) return;
         } else {
           this.plugin.data.selectedPath = file.path;
-          await this.plugin.savePluginData();
+          await this.plugin.saveViewState();
           if (!ownsBase()) return;
           await this.reload();
           if (!ownsBase()) return;
@@ -1672,7 +1672,7 @@ export class EntVaultCommandCenterView extends ItemView {
           this.plugin.data.selectedPath = file.path;
           this.mobileInspectorOpen = false;
           this.mobileInspectorNeedsFocus = false;
-          await this.plugin.savePluginData();
+          await this.plugin.saveViewState();
           if (!ownsBase()) return;
           await this.reload();
           if (!ownsBase()) return;
@@ -1680,7 +1680,7 @@ export class EntVaultCommandCenterView extends ItemView {
         } else {
           this.plugin.data.activeTab = "inbox";
           this.plugin.data.selectedPath = file.path;
-          await this.plugin.savePluginData();
+          await this.plugin.saveViewState();
           if (!ownsBase()) return;
           await this.reload();
           if (!ownsBase()) return;
@@ -1719,7 +1719,7 @@ export class EntVaultCommandCenterView extends ItemView {
         if (!ownsBase()) return;
         this.plugin.data.activeTab = "curriculum";
         this.plugin.data.selectedPath = file.path;
-        await this.plugin.savePluginData();
+        await this.plugin.saveViewState();
         if (!ownsBase()) return;
         await this.reload();
         if (!ownsBase()) return;
@@ -1773,7 +1773,7 @@ export class EntVaultCommandCenterView extends ItemView {
         if (!ownsBase()) return;
         this.plugin.data.activeTab = "curriculum";
         this.plugin.data.selectedPath = file.path;
-        await this.plugin.savePluginData();
+        await this.plugin.saveViewState();
         if (!ownsBase()) return;
         await this.reload();
         if (!ownsBase()) return;
@@ -1827,7 +1827,7 @@ export class EntVaultCommandCenterView extends ItemView {
         const file = await this.plugin.editCanonicalPlacement(record.path, value);
         if (!ownsBase()) return;
         this.plugin.data.selectedPath = file.path;
-        await this.plugin.savePluginData();
+        await this.plugin.saveViewState();
         if (!ownsBase()) return;
         await this.reload();
         if (!ownsBase()) return;
@@ -2063,7 +2063,7 @@ export class EntVaultCommandCenterView extends ItemView {
     this.plugin.data.activeTab = tab;
     this.editMode = false;
     this.curriculumArrangeMode = false;
-    await this.plugin.savePluginData();
+    await this.plugin.saveViewState();
     if (!this.guardLoadedBase()) return;
     this.render();
     if (focusTab) this.contentEl.querySelector<HTMLElement>(`[data-tab="${tab}"]`)?.focus();
@@ -2711,7 +2711,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const disclosure = disclosureButton(row, collapsed, heading.title);
     disclosure.addEventListener("click", () => this.run(async () => {
       heading.collapsed = !heading.collapsed;
-      if (mutable) await this.plugin.savePluginData();
+      if (mutable) await this.plugin.saveViewState();
       this.renderTree();
     }));
     const leading = row.createSpan({ cls: "ent-cc-leading-icon" });
@@ -2719,7 +2719,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const title = row.createEl("button", { cls: "ent-cc-row-title", text: heading.title, attr: { dir: "auto" } });
     title.addEventListener("click", () => this.run(async () => {
       heading.collapsed = !heading.collapsed;
-      if (mutable) await this.plugin.savePluginData();
+      if (mutable) await this.plugin.saveViewState();
       this.renderTree();
     }));
     const resolved = this.resolvableCount(heading);
@@ -2754,7 +2754,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const disclosure = disclosureButton(row, collapsed, subheading.title);
     disclosure.addEventListener("click", () => this.run(async () => {
       subheading.collapsed = !subheading.collapsed;
-      if (mutable) await this.plugin.savePluginData();
+      if (mutable) await this.plugin.saveViewState();
       this.renderTree();
     }));
     const leading = row.createSpan({ cls: "ent-cc-leading-icon" });
@@ -2762,7 +2762,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const title = row.createEl("button", { cls: "ent-cc-row-title", text: subheading.title, attr: { dir: "auto" } });
     title.addEventListener("click", () => this.run(async () => {
       subheading.collapsed = !subheading.collapsed;
-      if (mutable) await this.plugin.savePluginData();
+      if (mutable) await this.plugin.saveViewState();
       this.renderTree();
     }));
     row.createSpan({ text: String(subheading.subjects.filter((path) => this.recordByPath.has(path)).length), cls: "ent-cc-row-count" });
@@ -3844,7 +3844,7 @@ export class EntVaultCommandCenterView extends ItemView {
       const previous = currentHeading.collapsed;
       currentHeading.collapsed = !previous;
       try {
-        await this.plugin.savePluginData();
+        await this.plugin.saveViewState();
       } catch (error) {
         currentHeading.collapsed = previous;
         throw error;
@@ -3866,7 +3866,7 @@ export class EntVaultCommandCenterView extends ItemView {
       currentSubheading.collapsed = !previousSubheading;
       currentHeading.collapsed = false;
       try {
-        await this.plugin.savePluginData();
+        await this.plugin.saveViewState();
       } catch (error) {
         currentSubheading.collapsed = previousSubheading;
         currentHeading.collapsed = previousHeading;
@@ -4655,7 +4655,7 @@ export class EntVaultCommandCenterView extends ItemView {
           heading.subheadings.forEach((subheading) => { subheading.collapsed = false; });
         });
       }
-      if (this.plugin.data.activeTab === "collections" || activeLibraryId) await this.plugin.savePluginData();
+      if (this.plugin.data.activeTab === "collections" || activeLibraryId) await this.plugin.saveViewState();
       else this.persistCollapseState();
       if (!ownsBase()) return;
       this.renderTree();
@@ -4676,7 +4676,7 @@ export class EntVaultCommandCenterView extends ItemView {
           heading.subheadings.forEach((subheading) => { subheading.collapsed = true; });
         });
       }
-      if (this.plugin.data.activeTab === "collections" || activeLibraryId) await this.plugin.savePluginData();
+      if (this.plugin.data.activeTab === "collections" || activeLibraryId) await this.plugin.saveViewState();
       else this.persistCollapseState();
       if (!ownsBase()) return;
       this.renderTree();
@@ -4980,7 +4980,7 @@ export class EntVaultCommandCenterView extends ItemView {
         if (libraryId && (!library || library.archivedAt !== null)) {
           new Notice("That saved view points to an archived or removed library. Opened the knowledge index instead; the saved search text was preserved.");
         }
-        await this.plugin.savePluginData();
+        await this.plugin.saveViewState();
         if (!ownsBase()) return;
         this.render();
       })));

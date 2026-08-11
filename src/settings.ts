@@ -21,6 +21,8 @@ import { StringPickerModal, TextPromptModal, VaultFilePickerModal } from "./moda
 interface SettingsHost extends Plugin {
   data: PluginData;
   savePluginData(): Promise<void>;
+  saveCompensatingRollback(): Promise<void>;
+  markPersistenceUncertain(message: string): void;
   refreshViews(): Promise<void>;
   getTemplateFiles(): TFile[];
   getIndexGroups(): string[];
@@ -108,9 +110,9 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
     this.settingsSaveRevision = revision;
     const fallbackRollback = structuredClone(this.persistedDataSnapshot ?? this.host.data);
     this.host.data.settings.setupComplete = true;
-    // savePluginData snapshots synchronously at call time. Keep that exact
-    // attempted value: a later input event may mutate the live object before
-    // this promise settles.
+    // Keep the exact attempted value independently from the host transaction:
+    // a later input event may mutate the live object before this promise
+    // settles, and three-way rollback must never read that newer value.
     const attempted = structuredClone(this.host.data);
     this.pendingSettingsSaves += 1;
     try {
@@ -122,6 +124,12 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
       // revision will either persist it or restore the last successful attempt.
       if (revision !== this.settingsSaveRevision) return false;
       this.rollbackAttemptedData(this.persistedDataSnapshot ?? fallbackRollback, attempted, directDataFields);
+      try {
+        await this.host.saveCompensatingRollback();
+      } catch (rollbackError) {
+        console.error("Knowledge Base Command Center could not persist a rejected setting rollback", rollbackError);
+        this.host.markPersistenceUncertain("A rejected setting may have reached Sync, and its compensating rollback could not be saved. Knowledge bases remain read-only until Obsidian is restarted after the plugin data.json is copied or a same-vault recovery is exported.");
+      }
       new Notice(`The setting was not saved and has been restored: ${error instanceof Error ? error.message : String(error)}`, 8000);
       try {
         await this.host.refreshViews();

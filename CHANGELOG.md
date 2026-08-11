@@ -2,11 +2,18 @@
 
 ## Unreleased
 
+### Changed
+
+- Advanced the multi-base store to version 14 and separated semantic organization revisions from device-local view state. Selection, active tabs, live collapse state, and Undo/Redo history no longer advance Sync conflict ordering, while existing version 11–13 stores migrate with a zero semantic baseline and newer stores remain read-only in older builds.
+
 ### Fixed
 
 - Repair duplicate, missing, or unsafe collection, subheading, and saved-view IDs deterministically during ordinary plugin-data loading, so damaged synced data cannot make edits target the wrong item or remove multiple saved views at once.
 - Keep collection and Library heading identities globally unique across hierarchy levels during import and recovery, preserving existing local identities and making repeated Merge imports stable across reloads.
 - Replaced the four-base cross-base-search cache with a scan-resistant 50,000-record working set, retained unaffected projections across path-scoped vault changes, and restricted each uncached projection to its configured folders plus explicit references. Large multi-base vaults no longer rescan every Markdown path for every inactive base on each keystroke.
+- Prevented a newer selection-only or collapse-only save from replacing structural work made on another device. Sync now compares monotonic per-base semantic revisions, overlays this device's view state by stable heading/subheading IDs, and clears stale local history only when remote semantic organization replaces it.
+- Detected equal-revision divergent semantic edits explicitly, wrote every possible losing complete envelope to a private in-vault conflict rescue before adoption, and failed closed without selecting a winner when that rescue could not be created.
+- Added a fenced view-state save path that waits for base, transaction, Sync, and adapter queues and copies only the explicit device-local whitelist onto the last committed semantic snapshot, preventing navigation saves from carrying unsaved organization changes.
 
 ## 0.11.1
 

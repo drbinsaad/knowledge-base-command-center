@@ -1187,6 +1187,7 @@ test("global expand and collapse controls apply to the active dynamic library hi
     isClinicalMode: () => false,
     isDataReadOnly: () => false,
     savePluginData: async () => { saves += 1; },
+    saveViewState: async () => { saves += 1; },
   };
   const view = Object.create(EntVaultCommandCenterView.prototype) as {
     app: object;
@@ -1472,7 +1473,7 @@ test("reload returns to the index when the active dynamic library tab no longer 
       getLibraries(): LibraryDefinition[];
       isClinicalMode(): boolean;
       isDataReadOnly(): boolean;
-      savePluginData(): Promise<void>;
+      saveViewState(): Promise<void>;
     };
     render(): void;
     reload(): Promise<void>;
@@ -1489,7 +1490,7 @@ test("reload returns to the index when the active dynamic library tab no longer 
     getLibraries: () => [],
     isClinicalMode: () => false,
     isDataReadOnly: () => false,
-    savePluginData: async () => { saves += 1; },
+    saveViewState: async () => { saves += 1; },
   };
   view.render = () => { renders += 1; };
 
@@ -2101,7 +2102,7 @@ test("stale rendered rows cannot write selection or collapse state into a newly 
     plugin: {
       data: typeof data;
       getActiveKnowledgeBaseId(): string;
-      savePluginData(): Promise<void>;
+      saveViewState(): Promise<void>;
     };
     loadedBaseId: string;
     staleViewNoticeShown: boolean;
@@ -2114,7 +2115,7 @@ test("stale rendered rows cannot write selection or collapse state into a newly 
   view.plugin = {
     data,
     getActiveKnowledgeBaseId: () => activeBaseId,
-    savePluginData: async () => { saves += 1; },
+    saveViewState: async () => { saves += 1; },
   };
   view.loadedBaseId = "base-a";
   view.staleViewNoticeShown = false;
@@ -2150,6 +2151,7 @@ test("reload cancels A selection and search timers before adopting B", async () 
     getLibraries: (): LibraryDefinition[] => [],
     isDataReadOnly: () => false,
     savePluginData: async () => { savesIntoB += 1; },
+    saveViewState: async () => { savesIntoB += 1; },
   };
   const view = Object.create(EntVaultCommandCenterView.prototype) as {
     plugin: typeof plugin;
@@ -2235,10 +2237,12 @@ test("a rejected direct setting save restores memory and reports the failure", a
   data.settings.workspaceSubtitle = "Persisted subtitle";
   let refreshes = 0;
   let updates = 0;
+  let compensations = 0;
   const settingsTab = Object.create(EntCommandCenterSettingsTab.prototype) as {
     host: {
       data: typeof data;
       savePluginData(): Promise<void>;
+      saveCompensatingRollback(): Promise<void>;
       refreshViews(): Promise<void>;
     };
     persistedDataSnapshot: typeof data;
@@ -2251,6 +2255,7 @@ test("a rejected direct setting save restores memory and reports the failure", a
   settingsTab.host = {
     data,
     savePluginData: async () => { throw new Error("Sync reload won the race"); },
+    saveCompensatingRollback: async () => { compensations += 1; },
     refreshViews: async () => { refreshes += 1; },
   };
   settingsTab.persistedDataSnapshot = structuredClone(data);
@@ -2264,6 +2269,7 @@ test("a rejected direct setting save restores memory and reports the failure", a
   assert.equal(data.settings.workspaceSubtitle, "Persisted subtitle");
   assert.equal(refreshes, 1);
   assert.equal(updates, 1);
+  assert.equal(compensations, 1);
   assert.equal(Notice.messages.some((message) => message.includes("not saved") && message.includes("Sync reload")), true);
 });
 
@@ -2277,10 +2283,12 @@ test("overlapping direct setting saves roll back to the latest successful attemp
   const secondGate = new Promise<void>((_resolve, reject) => { rejectSecond = reject; });
   const persisted: PluginData[] = [];
   let saveCalls = 0;
+  let compensations = 0;
   const settingsTab = Object.create(EntCommandCenterSettingsTab.prototype) as {
     host: {
       data: typeof data;
       savePluginData(): Promise<void>;
+      saveCompensatingRollback(): Promise<void>;
       refreshViews(): Promise<void>;
     };
     persistedDataSnapshot: typeof data;
@@ -2302,6 +2310,7 @@ test("overlapping direct setting saves roll back to the latest successful attemp
         await secondGate;
       }
     },
+    saveCompensatingRollback: async () => { compensations += 1; },
     refreshViews: async () => {},
   };
   settingsTab.persistedDataSnapshot = structuredClone(data);
@@ -2323,6 +2332,7 @@ test("overlapping direct setting saves roll back to the latest successful attemp
   assert.equal(data.settings.workspaceSubtitle, "First edit", "memory follows the newest successful disk snapshot");
   assert.equal(settingsTab.persistedDataSnapshot.settings.workspaceSubtitle, "First edit");
   assert.equal(settingsTab.pendingSettingsSaves, 0);
+  assert.equal(compensations, 1);
 });
 
 test("a failed setting save preserves concurrent organization and newer view changes", async () => {
@@ -2330,10 +2340,12 @@ test("a failed setting save preserves concurrent organization and newer view cha
   data.settings.workspaceSubtitle = "Persisted subtitle";
   let rejectSave: (error: Error) => void = () => {};
   const saveGate = new Promise<void>((_resolve, reject) => { rejectSave = reject; });
+  let compensations = 0;
   const settingsTab = Object.create(EntCommandCenterSettingsTab.prototype) as {
     host: {
       data: typeof data;
       savePluginData(): Promise<void>;
+      saveCompensatingRollback(): Promise<void>;
       refreshViews(): Promise<void>;
     };
     persistedDataSnapshot: typeof data;
@@ -2346,6 +2358,7 @@ test("a failed setting save preserves concurrent organization and newer view cha
   settingsTab.host = {
     data,
     savePluginData: async () => { await saveGate; },
+    saveCompensatingRollback: async () => { compensations += 1; },
     refreshViews: async () => {},
   };
   settingsTab.persistedDataSnapshot = structuredClone(data);
@@ -2377,6 +2390,7 @@ test("a failed setting save preserves concurrent organization and newer view cha
   assert.deepEqual(data.pinnedPaths, ["Concurrent organization.md"]);
   assert.equal(data.selectedPath, "Concurrent selection.md");
   assert.deepEqual(data.indexGroupOrder, ["Concurrent group"]);
+  assert.equal(compensations, 1);
 });
 
 test("a create-note form cannot submit into a different active knowledge base", async () => {
@@ -2822,7 +2836,7 @@ test("closing the view waits for a pending selection save", async () => {
     staleViewNoticeShown: boolean;
     timerWindow: { clearTimeout(timer: number): void };
     plugin: {
-      savePluginData(): Promise<void>;
+      saveViewState(): Promise<void>;
       getActiveKnowledgeBaseId(): string;
       getDataEpoch(): number;
     };
@@ -2837,7 +2851,7 @@ test("closing the view waits for a pending selection save", async () => {
   view.staleViewNoticeShown = false;
   view.timerWindow = { clearTimeout: (timer) => { cleared.push(timer); } };
   view.plugin = {
-    savePluginData: async () => {
+    saveViewState: async () => {
       await saveGate;
       saveFinished = true;
     },
@@ -2866,7 +2880,7 @@ test("closing the view also waits for a selection save already in flight", async
     selectionSaveTimer: number | null;
     selectionSavePromise: Promise<void> | null;
     timerWindow: { clearTimeout(timer: number): void };
-    plugin: { savePluginData(): Promise<void> };
+    plugin: { saveViewState(): Promise<void> };
     onClose(): Promise<void>;
   };
   view.setupTimer = null;
@@ -2874,7 +2888,7 @@ test("closing the view also waits for a selection save already in flight", async
   view.selectionSaveTimer = null;
   view.selectionSavePromise = inFlight;
   view.timerWindow = { clearTimeout: () => {} };
-  view.plugin = { savePluginData: () => Promise.resolve() };
+  view.plugin = { saveViewState: () => Promise.resolve() };
 
   const closing = view.onClose().then(() => { closeFinished = true; });
   await Promise.resolve();

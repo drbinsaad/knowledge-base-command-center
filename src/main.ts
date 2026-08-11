@@ -1,6 +1,8 @@
 import { normalizePath, Notice, Plugin, TFile, TFolder, type TAbstractFile } from "obsidian";
 import { ENT_HIERARCHY_BASES_VIEW_TYPE, EntHierarchyBasesView, hierarchyBasesViewOptions } from "./bases-view";
 import {
+  applyPluginViewState,
+  boundedSemanticLineage,
   asUnknownRecord,
   asStringList,
   asText,
@@ -15,10 +17,13 @@ import {
   canonicalHierarchyIssue,
   canonicalPath,
   canonicalPathInputsUnchanged,
+  capturePluginViewState,
   cleanDomainFolder,
   configuredGroupFromPath,
   curriculumContainerKey,
   createDefaultStore,
+  createDeviceLocalPluginState,
+  deterministicSemanticHead,
   createKnowledgeBaseEntry,
   DATA_VERSION,
   DEFAULT_DATA,
@@ -57,6 +62,8 @@ import {
   pluginStoreNeedsNormalization,
   PortableSubjectDefinition,
   PluginData,
+  DeviceLocalPluginState,
+  PluginViewState,
   PluginStore,
   KnowledgeBaseEntry,
   PROCEDURE_ROOT,
@@ -69,6 +76,7 @@ import {
   RecordRole,
   replacePathPrefix,
   resetCurriculumVisualPath,
+  resetPluginViewState,
   restoreSnapshot,
   rewriteTopLevelHeading,
   rewriteActivePluginDataPathPrefix,
@@ -76,6 +84,10 @@ import {
   rewritePluginDataPathPrefix,
   rewritePluginDataTemplatePathRename,
   sanitizeFileName,
+  semanticEntryFingerprint,
+  semanticPluginDataProjection,
+  nextSemanticHead,
+  parseDeviceLocalPluginState,
   snapshotPersonal,
   storedDataVersion,
   STORE_VERSION,
@@ -103,10 +115,11 @@ import { EntCommandCenterSettingsTab } from "./settings";
 import { EntVaultCommandCenterView, VIEW_TYPE } from "./view";
 import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge-base-modal";
 import { ManageLibrariesModal } from "./library-modal";
-import { mergeKnowledgeBaseStores } from "./store-merge";
+import { mergeKnowledgeBaseStores, type StoreMergeResult } from "./store-merge";
 
 /** Bound stable inactive projections by records, not an arbitrary base count. */
 const MAX_INACTIVE_SEARCH_CACHED_RECORDS = 50_000;
+const DEVICE_LOCAL_STATE_KEY = "ent-vault-command-center.device-state.v1";
 
 interface PluginDataLoadResult {
   recognizedStore: boolean;
@@ -127,13 +140,26 @@ interface ExternalPluginDataCapture {
   adapterWriteGeneration: number;
 }
 
+interface RejectedSemanticAttempt {
+  revision: number;
+  head: string;
+  hash: string;
+  lineage: string[];
+}
+
 class ExternalSettingsSupersededError extends Error {}
+class SemanticConflictRescueError extends Error {}
 
 const APP_WRITE_BARRIER_KEY = Symbol.for("knowledge-base-command-center.adapter-write-barrier.v1");
 
 interface AppWriteBarrier {
   generation: number;
+  /** Adapter writes from every live/replaced instance. */
   tail: Promise<void>;
+  /** Complete logical transactions, including any compensating write. */
+  logicalTail: Promise<void>;
+  /** Sticky for the App lifetime; only a full Obsidian restart clears it. */
+  uncertainty: { message: string; at: number } | null;
 }
 
 export type { KnowledgeBaseSearchSource } from "./search";
@@ -188,22 +214,35 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   data: PluginData = structuredClone(DEFAULT_DATA);
   private store: PluginStore = createDefaultStore(this.data);
   private committedStoreSnapshot: PluginStore | null = null;
+  /** Safe in-memory rollback point even while a missing data.json is uncommitted. */
+  private rollbackStoreSnapshot: PluginStore | null = null;
   private saveQueue: Promise<void> = Promise.resolve();
+  private directSaveTransactionQueue: Promise<void> = Promise.resolve();
   private appWriteBarrier: AppWriteBarrier | null = null;
   private appReadBarrier: Promise<void> = Promise.resolve();
   private appWriteGeneration = 0;
+  private activeLogicalOperationDepth = 0;
   private unloaded = false;
   private adapterWriteGeneration = 0;
   private externalChangeGeneration = 0;
   private baseOperationBusy = false;
   private dataTransactionBusy = false;
+  private directSaveBusyCount = 0;
   private externalReloadBusy = false;
   private externalReloadPending = false;
   private externalReloadPromise: Promise<void> | null = null;
   private externalReloadCaptures: Array<Promise<ExternalPluginDataCapture>> = [];
   private retainedExternalSettingsPayload: unknown = null;
+  /** Sticky until restart: an unrescued semantic conflict must never auto-resume adoption. */
+  private semanticConflictRescueFailed = false;
+  /** Sticky until restart: data.json may contain a write whose compensation is unproven. */
+  private persistenceUncertain = false;
   private lastConflictRescueStore = "";
   private lastConflictRescuePath = "";
+  private deviceLocalState: DeviceLocalPluginState | null = null;
+  private deviceLocalStateLoaded = false;
+  /** Saves that may have reached data.json before their promise rejected. */
+  private rejectedSemanticAttemptsByBase = new Map<string, RejectedSemanticAttempt[]>();
   private dataEpoch = 0;
   private operationIdleResolvers: Array<() => void> = [];
   private refreshTimer: number | null = null;
@@ -424,12 +463,38 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return active;
   }
 
-  private replaceActiveData(next: PluginData, restoredUpdatedAt?: number): void {
+  private replaceActiveData(
+    next: PluginData,
+    restored?: Pick<KnowledgeBaseEntry, "updatedAt" | "semanticRevision" | "semanticHead" | "semanticHash" | "semanticLineage">,
+  ): void {
     const active = this.requireActiveBase();
+    const preserveNewerCompensation = restored !== undefined
+      && active.semanticRevision > restored.semanticRevision
+      && semanticEntryFingerprint({ createdAt: active.createdAt, archivedAt: active.archivedAt, data: next }) === active.semanticHash;
     active.data = next;
-    if (restoredUpdatedAt === undefined) this.bumpEntryUpdatedAt(active);
-    else active.updatedAt = restoredUpdatedAt;
+    if (restored === undefined) this.bumpEntrySemanticRevision(active);
+    else if (!preserveNewerCompensation) {
+      active.updatedAt = restored.updatedAt;
+      active.semanticRevision = restored.semanticRevision;
+      active.semanticHead = restored.semanticHead;
+      active.semanticHash = restored.semanticHash;
+      active.semanticLineage = [...restored.semanticLineage];
+    }
     this.useActiveData(next);
+  }
+
+  private preserveNewerCausalMetadata(target: PluginStore, source = this.store): void {
+    for (const targetEntry of target.bases) {
+      const sourceEntry = source.bases.find((candidate) => candidate.id === targetEntry.id);
+      if (!sourceEntry
+        || sourceEntry.semanticRevision <= targetEntry.semanticRevision
+        || semanticEntryFingerprint(targetEntry) !== sourceEntry.semanticHash) continue;
+      targetEntry.updatedAt = sourceEntry.updatedAt;
+      targetEntry.semanticRevision = sourceEntry.semanticRevision;
+      targetEntry.semanticHead = sourceEntry.semanticHead;
+      targetEntry.semanticHash = sourceEntry.semanticHash;
+      targetEntry.semanticLineage = [...sourceEntry.semanticLineage];
+    }
   }
 
   private useActiveData(next: PluginData): void {
@@ -439,8 +504,223 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
   }
 
-  private bumpEntryUpdatedAt(entry: KnowledgeBaseEntry, timestamp = Date.now()): void {
+  private rejectedAttempts(entryId: string): RejectedSemanticAttempt[] {
+    return this.rejectedSemanticAttemptsByBase.get(entryId) ?? [];
+  }
+
+  private unsupersededRejectedAttempts(entry: KnowledgeBaseEntry): RejectedSemanticAttempt[] {
+    return this.rejectedAttempts(entry.id).filter((attempt) => (
+      attempt.head !== entry.semanticHead && !entry.semanticLineage.includes(attempt.head)
+    ));
+  }
+
+  private bumpEntrySemanticRevision(entry: KnowledgeBaseEntry, timestamp = Date.now()): boolean {
+    const semanticHash = semanticEntryFingerprint(entry);
+    const rejected = this.unsupersededRejectedAttempts(entry);
+    if (semanticHash === entry.semanticHash && rejected.length === 0) return false;
+    if (!Number.isSafeInteger(entry.semanticRevision) || entry.semanticRevision < 0
+      || entry.semanticRevision >= Number.MAX_SAFE_INTEGER) {
+      throw new Error("The knowledge base semantic revision cannot be advanced safely. Export the base before repairing plugin data.");
+    }
+    const highestRejectedRevision = rejected.reduce((highest, attempt) => Math.max(highest, attempt.revision), -1);
+    const nextRevision = Math.max(entry.semanticRevision, highestRejectedRevision) + 1;
+    if (!Number.isSafeInteger(nextRevision)) {
+      throw new Error("The knowledge base semantic revision cannot be advanced safely. Export the base before repairing plugin data.");
+    }
+    const parentHead = entry.semanticHead;
+    const rejectedAncestry: string[] = [];
+    for (const attempt of rejected) rejectedAncestry.push(attempt.head, ...attempt.lineage);
+    entry.semanticRevision = nextRevision;
+    entry.semanticHash = semanticHash;
+    entry.semanticHead = nextSemanticHead(parentHead, semanticHash);
+    entry.semanticLineage = boundedSemanticLineage([
+      ...rejectedAncestry,
+      parentHead,
+      ...entry.semanticLineage,
+    ], entry.semanticHead);
     entry.updatedAt = Math.max(timestamp, entry.updatedAt + 1);
+    return true;
+  }
+
+  private advanceRejectedSemanticAttempts(): boolean {
+    let changed = false;
+    for (const entry of this.store.bases) {
+      if (this.unsupersededRejectedAttempts(entry).length === 0) continue;
+      changed = this.bumpEntrySemanticRevision(entry) || changed;
+    }
+    return changed;
+  }
+
+  private recordRejectedSemanticAttempts(snapshot: PluginStore): void {
+    const committed = this.committedStoreSnapshot;
+    for (const entry of snapshot.bases) {
+      const prior = committed?.bases.find((candidate) => candidate.id === entry.id);
+      if (prior && prior.semanticHead === entry.semanticHead && prior.semanticHash === entry.semanticHash) continue;
+      const attempts = this.rejectedAttempts(entry.id);
+      if (attempts.some((attempt) => attempt.head === entry.semanticHead)) continue;
+      attempts.unshift({
+        revision: entry.semanticRevision,
+        head: entry.semanticHead,
+        hash: entry.semanticHash,
+        lineage: [...entry.semanticLineage],
+      });
+      this.rejectedSemanticAttemptsByBase.set(entry.id, attempts.slice(0, 64));
+    }
+  }
+
+  private clearSupersededRejectedAttempts(snapshot: PluginStore): void {
+    for (const entry of snapshot.bases) {
+      const retained = this.rejectedAttempts(entry.id).filter((attempt) => (
+        attempt.head !== entry.semanticHead && !entry.semanticLineage.includes(attempt.head)
+      ));
+      if (retained.length > 0) this.rejectedSemanticAttemptsByBase.set(entry.id, retained);
+      else this.rejectedSemanticAttemptsByBase.delete(entry.id);
+    }
+    for (const id of Object.keys(snapshot.deletedBaseIds)) {
+      this.rejectedSemanticAttemptsByBase.delete(id);
+    }
+  }
+
+  /**
+   * Reconcile envelope-level effects of a rejected base operation after memory
+   * has been restored to `baseline`. A created/duplicated base can be safely
+   * cancelled with a deletion tombstone for its never-committed stable ID.
+   * Removing a base or publishing a permanent-deletion tombstone is not
+   * reversible under the store's monotonic tombstone model and must fail closed.
+   */
+  private prepareRejectedEnvelopeRollback(
+    baseline: PluginStore,
+    attempted: PluginStore,
+  ): { changed: boolean; unsafeReason: string } {
+    const baselineById = new Map(baseline.bases.map((entry) => [entry.id, entry]));
+    const attemptedById = new Map(attempted.bases.map((entry) => [entry.id, entry]));
+    const removedBaseIds = [...baselineById.keys()].filter((id) => !attemptedById.has(id));
+    const tombstoneIds = new Set([
+      ...Object.keys(baseline.deletedBaseIds),
+      ...Object.keys(attempted.deletedBaseIds),
+    ]);
+    const changedTombstoneIds = [...tombstoneIds].filter((id) => (
+      baseline.deletedBaseIds[id] !== attempted.deletedBaseIds[id]
+    ));
+    if (removedBaseIds.length > 0 || changedTombstoneIds.length > 0) {
+      return {
+        changed: false,
+        unsafeReason: "A rejected permanent knowledge-base deletion or tombstone update may already have reached Sync. That monotonic deletion cannot be safely undone automatically.",
+      };
+    }
+
+    const createdEntries = attempted.bases.filter((entry) => !baselineById.has(entry.id));
+    if (createdEntries.length === 0) return { changed: false, unsafeReason: "" };
+    const existingTombstones = Object.keys(this.store.deletedBaseIds).length;
+    if (existingTombstones + createdEntries.length > MAX_DELETED_KNOWLEDGE_BASE_IDS) {
+      return {
+        changed: false,
+        unsafeReason: "A rejected knowledge-base creation may already have reached Sync, but its stable ID cannot be cancelled because the deletion-tombstone safety limit is full.",
+      };
+    }
+    for (const entry of createdEntries) {
+      this.store.deletedBaseIds[entry.id] = Math.max(Date.now(), entry.updatedAt + 1);
+    }
+    return { changed: true, unsafeReason: "" };
+  }
+
+  private neutralSyncedStore(source: PluginStore): PluginStore {
+    const snapshot = structuredClone(source);
+    for (const entry of snapshot.bases) resetPluginViewState(entry.data);
+    const available = snapshot.bases
+      .filter((entry) => entry.archivedAt === null)
+      .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+    snapshot.activeBaseId = available[0]?.id ?? snapshot.bases[0]?.id ?? snapshot.activeBaseId;
+    return snapshot;
+  }
+
+  private applyDeviceLocalState(store: PluginStore): void {
+    for (const entry of store.bases) resetPluginViewState(entry.data);
+    const state = this.deviceLocalState;
+    if (state) {
+      for (const local of state.bases) {
+        const entry = store.bases.find((candidate) => candidate.id === local.baseId);
+        if (entry) applyPluginViewState(entry.data, local.view, true);
+      }
+    }
+    const requested = state?.activeBaseId ?? "";
+    const active = store.bases.find((entry) => entry.id === requested && entry.archivedAt === null)
+      ?? store.bases.find((entry) => entry.archivedAt === null);
+    if (active) store.activeBaseId = active.id;
+  }
+
+  private loadDeviceLocalState(): void {
+    if (this.deviceLocalStateLoaded) return;
+    this.deviceLocalStateLoaded = true;
+    try {
+      if (typeof this.app.loadLocalStorage !== "function") {
+        this.deviceLocalState = null;
+        return;
+      }
+      const loaded = this.app.loadLocalStorage(DEVICE_LOCAL_STATE_KEY) as unknown;
+      this.deviceLocalState = loaded === null || loaded === undefined
+        ? null
+        : parseDeviceLocalPluginState(loaded);
+    } catch (error) {
+      this.deviceLocalState = null;
+      try {
+        if (typeof this.app.saveLocalStorage === "function") this.app.saveLocalStorage(DEVICE_LOCAL_STATE_KEY, null);
+      } catch (clearError) {
+        console.error("Knowledge Base Command Center could not clear malformed device-local state", clearError);
+      }
+      console.warn("Knowledge Base Command Center ignored malformed device-local state", error);
+    }
+  }
+
+  private captureLiveDeviceLocalState(): void {
+    try {
+      this.deviceLocalState = createDeviceLocalPluginState(this.store);
+      this.deviceLocalStateLoaded = true;
+    } catch (error) {
+      console.error("Knowledge Base Command Center could not capture device-local state", error);
+    }
+  }
+
+  private persistDeviceLocalState(): void {
+    const state = createDeviceLocalPluginState(this.store);
+    if (typeof this.app.saveLocalStorage === "function") this.app.saveLocalStorage(DEVICE_LOCAL_STATE_KEY, state);
+    this.deviceLocalState = state;
+    this.deviceLocalStateLoaded = true;
+  }
+
+  private persistDeviceLocalStateSafely(): void {
+    try {
+      this.persistDeviceLocalState();
+    } catch (error) {
+      console.error("Knowledge Base Command Center could not persist device-local state", error);
+      new Notice("The knowledge base was saved, but this device's current route or undo history could not be remembered.", 8000);
+    }
+  }
+
+  /**
+   * Enter the one conservative state used whenever a write may have reached
+   * data.json but its compensating write could not be proven. The marker lives
+   * on the shared App object so a replacement plugin instance cannot silently
+   * reopen the uncertain file as writable.
+   */
+  markPersistenceUncertain(message: string): void {
+    if (!this.appWriteBarrier) this.activateAppWriteBarrier();
+    const barrier = this.appWriteBarrier;
+    const firstLocalWarning = !this.persistenceUncertain;
+    if (barrier && !barrier.uncertainty) {
+      barrier.uncertainty = { message, at: Date.now() };
+    }
+    this.persistenceUncertain = true;
+    this.dataCompatibilityWarning = barrier?.uncertainty?.message ?? message;
+    if (firstLocalWarning) new Notice(this.dataCompatibilityWarning, 15000);
+  }
+
+  private adoptSharedPersistenceUncertainty(): boolean {
+    const uncertainty = this.appWriteBarrier?.uncertainty;
+    if (!uncertainty) return false;
+    this.persistenceUncertain = true;
+    this.dataCompatibilityWarning = uncertainty.message;
+    return true;
   }
 
   async loadPluginData(persistMigration = true, capturedRead?: PluginDataRead): Promise<PluginDataLoadResult> {
@@ -452,9 +732,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // final old-instance edit with its first save.
       await this.appReadBarrier;
       if (this.unloaded) throw new Error("This plugin instance was unloaded before its data could be read.");
+      this.adoptSharedPersistenceUncertainty();
     }
     let loaded: unknown = null;
-    this.dataCompatibilityWarning = "";
+    if (!this.persistenceUncertain) this.dataCompatibilityWarning = "";
     try {
       if (capturedRead && "error" in capturedRead) throw capturedRead.error;
       loaded = capturedRead ? capturedRead.value : await this.loadData() as unknown;
@@ -509,7 +790,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       structuralRepairNeedsWriteback = recognizedStore
         && sourceVersion === STORE_VERSION
         && pluginStoreNeedsNormalization(loaded, this.store);
+      if (capturedRead === undefined) this.loadDeviceLocalState();
+      this.applyDeviceLocalState(this.store);
       this.useActiveData(this.requireActiveBase().data);
+      if (capturedRead === undefined) this.rollbackStoreSnapshot = this.neutralSyncedStore(this.store);
     } catch (error) {
       this.useActiveData(structuredClone(DEFAULT_DATA));
       this.store = createDefaultStore(this.data);
@@ -522,9 +806,41 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       new Notice(this.dataCompatibilityWarning, 10000);
       return { recognizedStore, hasVaultId: hadFinalVaultId, identityNeedsWriteback: false, structuralRepairNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing, sourceVersion, compatible: false };
     }
+    if (this.persistenceUncertain) {
+      new Notice(this.dataCompatibilityWarning, 15000);
+      return {
+        recognizedStore,
+        hasVaultId: hadFinalVaultId,
+        identityNeedsWriteback: false,
+        structuralRepairNeedsWriteback: false,
+        remediationNeedsWriteback: false,
+        sourceWasMissing,
+        sourceVersion,
+        compatible: false,
+      };
+    }
     const preRemediationStore = structuredClone(this.store);
     const remediationNeedsWriteback = this.remediateInvalidClinicalIndexes();
     if (remediationNeedsWriteback) {
+      // Migration identities fingerprint their pristine payload so two
+      // devices upgrading the same old data can converge. ENT invariant
+      // repair is deterministic and happens in the same atomic write, so
+      // rebase any still-pristine provisional identity to the repaired payload
+      // while retaining the device's random nonce. The helper rejects normal
+      // identities and any provisional store edited after migration.
+      for (const entry of this.store.bases) {
+        const before = preRemediationStore.bases.find((candidate) => candidate.id === entry.id);
+        const semanticHash = semanticEntryFingerprint(entry);
+        if (before && semanticHash === before.semanticHash) continue;
+        // Deterministic migration repair is a causal child of the parsed
+        // payload, not an unrelated user edit. Every device derives the same
+        // child for the same parent and repaired payload.
+        const parentHead = entry.semanticHead;
+        entry.semanticRevision = Math.min(Number.MAX_SAFE_INTEGER, entry.semanticRevision + 1);
+        entry.semanticHash = semanticHash;
+        entry.semanticHead = deterministicSemanticHead(parentHead, semanticHash, "clinical-index-remediation");
+        entry.semanticLineage = boundedSemanticLineage([parentHead, ...entry.semanticLineage], entry.semanticHead);
+      }
       this.useActiveData(this.requireActiveBase().data);
       this.invalidateRecordCache();
     }
@@ -538,6 +854,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       rebaseProvisionalVaultIdAfterDeterministicRepair(
         preMigrationStore ?? preRemediationStore,
         this.store,
+        {
+          parentStore: preRemediationStore,
+          reason: remediationNeedsWriteback ? "clinical-index-remediation" : undefined,
+        },
       );
     }
     try {
@@ -553,13 +873,17 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         this.store = preRemediationStore;
         this.useActiveData(this.requireActiveBase().data);
         this.invalidateRecordCache();
+        this.markPersistenceUncertain("Automatic startup repair was rejected while saving and may already have reached data.json. The pre-repair organization remains available in memory, but knowledge bases stay read-only until Obsidian is restarted after data.json and a same-vault recovery are preserved.");
       }
       throw error;
     }
     // A missing data.json is an untrusted bootstrap state, not an authoritative
     // empty store. Do not persist or commit it merely because this device
     // enabled the plugin before Obsidian Sync delivered the existing payload.
-    if (capturedRead === undefined && !sourceWasMissing) this.committedStoreSnapshot = structuredClone(this.store);
+    if (capturedRead === undefined && !sourceWasMissing) {
+      this.committedStoreSnapshot = this.neutralSyncedStore(this.store);
+      this.rollbackStoreSnapshot = structuredClone(this.committedStoreSnapshot);
+    }
     // A recognized interim deterministic identity is usable after migrateStore
     // rotates it in memory. External Sync can therefore reconcile it with a
     // concurrently rotated pristine copy instead of misclassifying it as flat
@@ -577,26 +901,83 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   async savePluginData(): Promise<void> {
+    // A reload worker is itself queued on the shared logical barrier and waits
+    // for every already-started local transaction to become idle. Registering
+    // a new busy direct save behind that worker would deadlock: the worker
+    // waits for the save, while the save cannot start until the worker exits.
+    // Reject the late edit synchronously through the normal rollback guard,
+    // without advertising an operation that can never begin.
+    if (this.externalReloadBusy) return this.savePluginDataOperation();
+    this.directSaveBusyCount += 1;
+    const operation = this.enqueueAppLogicalOperation(() => this.savePluginDataOperation());
+    this.directSaveTransactionQueue = operation.then(() => undefined, () => undefined);
+    try {
+      await operation;
+    } finally {
+      this.directSaveBusyCount -= 1;
+      this.announceOperationsIdle();
+    }
+  }
+
+  private async savePluginDataOperation(): Promise<void> {
     if (this.unloaded) throw new Error("This plugin instance was unloaded before the change could be saved.");
+    if (this.persistenceUncertain) throw new Error(this.dataCompatibilityWarning);
     if (this.dataCompatibilityWarning) return;
+    // Resolve the owning base before the external-reload guard. A direct save
+    // that was queued behind an adapter write can discover the Sync callback
+    // only when its turn begins; its already-mutated live data must then be
+    // restored to the last trusted snapshot instead of leaking into the merge
+    // worker as if it had committed.
+    const baseId = this.store.activeBaseId;
+    const entry = this.store.bases.find((candidate) => candidate.id === baseId);
+    if (!entry) throw new Error("The knowledge base being saved is unavailable.");
     if (this.externalReloadBusy) {
       // An opaque PluginData snapshot cannot be safely merged with a synced
       // update to the same base: even a selection-only save could resurrect
       // stale collections or settings. Let the external file win atomically
       // and ask the user to repeat the overlapping local action instead.
+      const rollbackEntry = (this.committedStoreSnapshot ?? this.rollbackStoreSnapshot)
+        ?.bases.find((candidate) => candidate.id === baseId);
+      if (rollbackEntry) {
+        const localView = capturePluginViewState(entry.data);
+        const restoredData = structuredClone(rollbackEntry.data);
+        applyPluginViewState(restoredData, localView, true);
+        entry.data = restoredData;
+        entry.updatedAt = rollbackEntry.updatedAt;
+        entry.semanticRevision = rollbackEntry.semanticRevision;
+        entry.semanticHead = rollbackEntry.semanticHead;
+        entry.semanticHash = rollbackEntry.semanticHash;
+        entry.semanticLineage = [...rollbackEntry.semanticLineage];
+        if (this.store.activeBaseId === baseId) this.useActiveData(restoredData);
+      }
       throw new Error("Knowledge-base data is reloading after a synced change. This overlapping edit was not saved; try it again now.");
     }
     // Bind the save to the base that owns `this.data` at call time. A user can
     // switch bases while a previous adapter write is still pending; resolving
     // the active base later inside the queue could otherwise attach one base's
     // data object to another base.
-    const baseId = this.store.activeBaseId;
-    const entry = this.store.bases.find((candidate) => candidate.id === baseId);
-    if (!entry) throw new Error("The knowledge base being saved is unavailable.");
     entry.data = this.data;
+    const attemptedSemanticData = JSON.stringify(semanticPluginDataProjection(this.data));
+    // Organization/Undo transactions own a richer rollback boundary (including
+    // transient history). Direct/settings saves need the committed or bootstrap
+    // fallback here because no outer transaction will restore them.
+    const rollbackEntryBeforeAttempt = this.dataTransactionBusy
+      ? undefined
+      : (this.committedStoreSnapshot ?? this.rollbackStoreSnapshot)
+        ?.bases.find((candidate) => candidate.id === baseId);
     const previousUpdatedAt = entry.updatedAt;
-    this.bumpEntryUpdatedAt(entry);
+    const previousSemanticRevision = entry.semanticRevision;
+    const previousSemanticHead = entry.semanticHead;
+    const previousSemanticHash = entry.semanticHash;
+    const previousSemanticLineage = [...entry.semanticLineage];
+    const semanticChanged = this.bumpEntrySemanticRevision(entry);
+    if (!semanticChanged) {
+      this.persistDeviceLocalState();
+      return;
+    }
     const attemptedUpdatedAt = entry.updatedAt;
+    const attemptedSemanticRevision = entry.semanticRevision;
+    const attemptedSemanticHead = entry.semanticHead;
     try {
       await this.saveStoreSnapshot();
     } catch (error) {
@@ -604,20 +985,170 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // owns rollback. Do not leave a rejected save looking newer than the
       // committed base; a later overlapping call owns a different timestamp
       // and must not be clobbered here.
-      if (entry.updatedAt === attemptedUpdatedAt) entry.updatedAt = previousUpdatedAt;
+      const ownsLiveCausality = entry.updatedAt === attemptedUpdatedAt
+        && entry.semanticRevision === attemptedSemanticRevision
+        && entry.semanticHead === attemptedSemanticHead;
+      if (ownsLiveCausality) {
+        entry.updatedAt = previousUpdatedAt;
+        entry.semanticRevision = previousSemanticRevision;
+        entry.semanticHead = previousSemanticHead;
+        entry.semanticHash = previousSemanticHash;
+        entry.semanticLineage = previousSemanticLineage;
+      }
+      const liveEntry = this.store.bases.find((candidate) => candidate.id === baseId);
+      if (rollbackEntryBeforeAttempt
+        && liveEntry
+        && ownsLiveCausality
+        && JSON.stringify(semanticPluginDataProjection(liveEntry.data)) === attemptedSemanticData) {
+        const localView = capturePluginViewState(liveEntry.data);
+        const restoredData = structuredClone(rollbackEntryBeforeAttempt.data);
+        applyPluginViewState(restoredData, localView, true);
+        liveEntry.data = restoredData;
+        // The rejected queued attempt may have been based on an earlier
+        // attempted head that did reach the adapter. Restore the trusted
+        // committed causal endpoint before publishing the rollback, otherwise
+        // matching that rejected head would incorrectly make the rollback look
+        // already superseded while its semantic payload has changed.
+        liveEntry.updatedAt = rollbackEntryBeforeAttempt.updatedAt;
+        liveEntry.semanticRevision = rollbackEntryBeforeAttempt.semanticRevision;
+        liveEntry.semanticHead = rollbackEntryBeforeAttempt.semanticHead;
+        liveEntry.semanticHash = rollbackEntryBeforeAttempt.semanticHash;
+        liveEntry.semanticLineage = [...rollbackEntryBeforeAttempt.semanticLineage];
+        if (this.store.activeBaseId === baseId) this.useActiveData(restoredData);
+        this.advanceRejectedSemanticAttempts();
+        if (!this.externalReloadBusy) {
+          try {
+            await this.saveStoreSnapshot();
+          } catch (rollbackError) {
+            console.error("Knowledge Base Command Center could not persist a rejected direct-save rollback", rollbackError);
+            this.markPersistenceUncertain("A rejected knowledge-base edit may have reached Sync, and its compensating rollback could not be saved. Knowledge bases remain read-only until Obsidian is restarted after the plugin data.json is copied or a same-vault recovery is exported.");
+            throw new Error(`${error instanceof Error ? error.message : String(error)} The compensating rollback also failed; organization is now read-only.`);
+          }
+        }
+      }
       throw error;
     }
+  }
+
+  /** Publish an in-memory rollback after a rejected write as its causal child. */
+  async saveCompensatingRollback(): Promise<void> {
+    // savePluginDataOperation normally publishes its own causal compensation.
+    // Settings keeps this fallback for hosts that do not, but a second request
+    // from an old unloaded tab must be a proven no-op once no rejected head is
+    // left. Treating that redundant request as a failure would incorrectly
+    // poison the shared App barrier after compensation already succeeded.
+    if (this.rejectedSemanticAttemptsByBase.size === 0) return;
+    // The external worker owns rejected-attempt advancement and authoritative
+    // writeback while Sync is being reconciled. Waiting for that worker does
+    // not register another busy operation behind it, so both transactions can
+    // make progress. Any unexpected worker rejection still propagates to the
+    // settings safety fallback.
+    if (this.externalReloadBusy && this.externalReloadPromise) {
+      await this.externalReloadPromise;
+      return;
+    }
+    this.directSaveBusyCount += 1;
+    const operation = this.enqueueAppLogicalOperation(() => this.saveCompensatingRollbackOperation());
+    this.directSaveTransactionQueue = operation.then(() => undefined, () => undefined);
+    try {
+      await operation;
+    } finally {
+      this.directSaveBusyCount -= 1;
+      this.announceOperationsIdle();
+    }
+  }
+
+  private async saveCompensatingRollbackOperation(): Promise<void> {
+    if (this.rejectedSemanticAttemptsByBase.size === 0) return;
+    if (this.unloaded) throw new Error("This plugin instance was unloaded before its rollback could be saved.");
+    if (this.dataCompatibilityWarning) throw new Error(this.dataCompatibilityWarning);
+    const changed = this.advanceRejectedSemanticAttempts();
+    if (this.externalReloadBusy) return;
+    if (!changed) {
+      this.persistDeviceLocalState();
+      return;
+    }
+    try {
+      await this.saveStoreSnapshot();
+    } catch (error) {
+      this.markPersistenceUncertain("A rejected edit may have reached Sync, and its requested compensating rollback could not be saved. Knowledge bases remain read-only until Obsidian is restarted after the plugin data.json and a same-vault recovery are preserved.");
+      throw error;
+    }
+  }
+
+  /**
+   * Persist only the explicit per-device view-state whitelist. The capture is
+   * applied to the last committed semantic entry, never the live mutable data,
+   * so a selection or collapse save cannot smuggle an unsaved organization
+   * change into data.json or advance semantic conflict resolution.
+   */
+  async saveViewState(): Promise<void> {
+    if (this.unloaded) throw new Error("This plugin instance was unloaded before the view state could be saved.");
+    if (this.dataCompatibilityWarning) return;
+    const baseId = this.store.activeBaseId;
+    const sourceEntry = this.store.bases.find((entry) => entry.id === baseId && entry.archivedAt === null);
+    if (!sourceEntry) throw new Error("The knowledge base view being saved is unavailable.");
+    const captured: PluginViewState = capturePluginViewState(sourceEntry.data);
+    const externalGeneration = this.externalChangeGeneration;
+
+    while (this.baseOperationBusy || this.dataTransactionBusy || this.directSaveBusyCount > 0) {
+      await this.waitForOperationsIdle();
+      if (this.store.activeBaseId !== baseId) {
+        throw new Error("The active knowledge base changed before its view state could be saved.");
+      }
+    }
+    await this.saveQueue;
+    if (this.externalReloadBusy || externalGeneration !== this.externalChangeGeneration) {
+      throw new Error("Knowledge-base data is reloading after a synced change. This view state was not saved; try it again now.");
+    }
+    if (this.store.activeBaseId !== baseId) {
+      throw new Error("The active knowledge base changed before its view state could be saved.");
+    }
+
+    // A missing data.json intentionally has no committed semantic authority,
+    // but localStorage is precisely where harmless first-open route state may
+    // live without publishing an empty bootstrap envelope through Sync.
+    if (!this.committedStoreSnapshot) {
+      this.persistDeviceLocalState();
+      return;
+    }
+    const committedEntry = this.committedStoreSnapshot.bases.find((entry) => entry.id === baseId && entry.archivedAt === null);
+    const liveEntry = this.store.bases.find((entry) => entry.id === baseId && entry.archivedAt === null);
+    if (!committedEntry || !liveEntry) {
+      throw new Error("The committed knowledge base changed before its view state could be saved.");
+    }
+    const committedSemantic = JSON.stringify(semanticPluginDataProjection(committedEntry.data));
+    if (liveEntry.semanticRevision !== committedEntry.semanticRevision
+      || JSON.stringify(semanticPluginDataProjection(liveEntry.data)) !== committedSemantic) {
+      throw new Error("An unsaved organization change is still pending. Its view state was not saved separately.");
+    }
+    const verification = structuredClone(committedEntry.data);
+    applyPluginViewState(verification, captured, true);
+    if (JSON.stringify(semanticPluginDataProjection(verification)) !== committedSemantic) {
+      throw new Error("The safe view-state whitelist changed semantic organization. Nothing was saved.");
+    }
+    this.persistDeviceLocalState();
   }
 
   private async saveStoreSnapshot(
     allowDuringExternalReload = false,
     expectedExternalGeneration?: number,
   ): Promise<void> {
+    await this.saveExplicitStoreSnapshot(this.store, allowDuringExternalReload, expectedExternalGeneration);
+  }
+
+  private async saveExplicitStoreSnapshot(
+    sourceStore: PluginStore,
+    allowDuringExternalReload = false,
+    expectedExternalGeneration?: number,
+  ): Promise<void> {
+    this.adoptSharedPersistenceUncertainty();
+    if (this.persistenceUncertain) throw new Error(this.dataCompatibilityWarning);
     if (this.dataCompatibilityWarning) return;
     if (this.externalReloadBusy && !allowDuringExternalReload) {
       throw new Error("Knowledge-base data is reloading after a synced change. This overlapping edit was not saved; try it again now.");
     }
-    const snapshot = structuredClone(this.store);
+    const snapshot = this.neutralSyncedStore(sourceStore);
     const externalGeneration = expectedExternalGeneration ?? this.externalChangeGeneration;
     const guardExternalGeneration = !allowDuringExternalReload || expectedExternalGeneration !== undefined;
     const save = async (): Promise<void> => {
@@ -626,15 +1157,22 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       }
       try {
         await this.saveData(snapshot);
+      } catch (error) {
+        this.recordRejectedSemanticAttempts(snapshot);
+        throw error;
       } finally {
         // Count settled adapter writes even when the adapter reports failure:
         // a partially completed write can still have replaced data.json.
         this.adapterWriteGeneration += 1;
       }
       if (guardExternalGeneration && externalGeneration !== this.externalChangeGeneration) {
+        this.recordRejectedSemanticAttempts(snapshot);
         throw new ExternalSettingsSupersededError("Knowledge-base data changed through Sync while this edit was saving. The local edit was rolled back; try it again after the synced copy reloads.");
       }
       this.committedStoreSnapshot = structuredClone(snapshot);
+      this.rollbackStoreSnapshot = structuredClone(snapshot);
+      this.clearSupersededRejectedAttempts(snapshot);
+      this.persistDeviceLocalStateSafely();
     };
     const operation = this.saveQueue.then(
       () => this.enqueueAppAdapterWrite(save),
@@ -645,7 +1183,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private waitForOperationsIdle(): Promise<void> {
-    if (!this.baseOperationBusy && !this.dataTransactionBusy) return Promise.resolve();
+    if (!this.baseOperationBusy && !this.dataTransactionBusy && this.directSaveBusyCount === 0) return Promise.resolve();
     return new Promise((resolve) => this.operationIdleResolvers.push(resolve));
   }
 
@@ -664,14 +1202,58 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       && "generation" in existing
       && "tail" in existing
       ? existing as AppWriteBarrier
-      : { generation: 0, tail: Promise.resolve() };
+      : {
+        generation: 0,
+        tail: Promise.resolve(),
+        logicalTail: Promise.resolve(),
+        uncertainty: null,
+      };
+    const runtimeBarrier = barrier as unknown as Record<string, unknown>;
+    const logicalTail = runtimeBarrier.logicalTail;
+    const hasLogicalThen = (typeof logicalTail === "object" && logicalTail !== null)
+      || typeof logicalTail === "function"
+      ? "then" in logicalTail && typeof logicalTail.then === "function"
+      : false;
+    if (!hasLogicalThen) {
+      barrier.logicalTail = barrier.tail;
+    }
+    if (!("uncertainty" in runtimeBarrier)) barrier.uncertainty = null;
     const priorTail = barrier.tail;
+    const priorLogicalTail = barrier.logicalTail;
     barrier.generation += 1;
     host[APP_WRITE_BARRIER_KEY] = barrier;
     this.appWriteBarrier = barrier;
-    this.appReadBarrier = priorTail.then(() => undefined, () => undefined);
+    this.appReadBarrier = Promise.all([
+      priorTail.then(() => undefined, () => undefined),
+      priorLogicalTail.then(() => undefined, () => undefined),
+    ]).then(() => undefined);
     this.appWriteGeneration = barrier.generation;
     this.unloaded = false;
+  }
+
+  private enqueueAppLogicalOperation<T>(
+    operation: () => Promise<T>,
+    allowReadOnlyDrain = false,
+  ): Promise<T> {
+    if (this.unloaded) return Promise.reject(new Error("This plugin instance was unloaded before its operation could start."));
+    if (!this.appWriteBarrier) this.activateAppWriteBarrier();
+    const barrier = this.appWriteBarrier;
+    if (!barrier) return Promise.reject(new Error("The cross-instance logical-operation barrier is unavailable."));
+    const guardedOperation = async (): Promise<T> => {
+      if (barrier.uncertainty && !allowReadOnlyDrain) {
+        this.adoptSharedPersistenceUncertainty();
+        throw new Error(barrier.uncertainty.message);
+      }
+      this.activeLogicalOperationDepth += 1;
+      try {
+        return await operation();
+      } finally {
+        this.activeLogicalOperationDepth -= 1;
+      }
+    };
+    const queued = barrier.logicalTail.then(guardedOperation, guardedOperation);
+    barrier.logicalTail = queued.then(() => undefined, () => undefined);
+    return queued;
   }
 
   private enqueueAppAdapterWrite(write: () => Promise<void>): Promise<void> {
@@ -680,7 +1262,15 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (!barrier) throw new Error("The cross-instance adapter-write barrier is unavailable.");
     const generation = this.appWriteGeneration;
     const guardedWrite = async (): Promise<void> => {
-      if (this.unloaded || barrier.generation !== generation) {
+      if (barrier.uncertainty) {
+        this.adoptSharedPersistenceUncertainty();
+        throw new Error(barrier.uncertainty.message);
+      }
+      // A logical transaction registered before replacement owns its complete
+      // compensation. The replacement waits on logicalTail, so allowing that
+      // already-started transaction to finish is safer than fencing its second
+      // write after the first may have reached data.json.
+      if ((this.unloaded || barrier.generation !== generation) && this.activeLogicalOperationDepth === 0) {
         throw new Error("This plugin instance was replaced before its queued write could start.");
       }
       await write();
@@ -691,7 +1281,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private announceOperationsIdle(): void {
-    if (this.baseOperationBusy || this.dataTransactionBusy) return;
+    if (this.baseOperationBusy || this.dataTransactionBusy || this.directSaveBusyCount > 0) return;
     const resolvers = this.operationIdleResolvers.splice(0);
     for (const resolve of resolvers) resolve();
   }
@@ -743,8 +1333,57 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     await operation;
   }
 
+  /**
+   * Semantic payloads without proven causal ancestry are concurrent edits,
+   * regardless of scalar revision. Preserve every losing complete
+   * envelope before the deterministic winner can be adopted or written back.
+   */
+  private async mergeStoresWithSemanticRescue(
+    local: PluginStore,
+    incoming: PluginStore,
+    preferredActiveId: string,
+  ): Promise<StoreMergeResult> {
+    const merged = mergeKnowledgeBaseStores(local, incoming, preferredActiveId);
+    if (merged.semanticConflicts.length === 0) return merged;
+
+    const localLoses = merged.semanticConflicts.some((conflict) => conflict.winner === "incoming");
+    const incomingLoses = merged.semanticConflicts.some((conflict) => conflict.winner === "local");
+    if (localLoses) {
+      const path = await this.writeConflictRescueStore(
+        local,
+        "Concurrent semantic edits without proven causal ancestry were detected; this is the non-authoritative local envelope.",
+      );
+      if (!path) throw new SemanticConflictRescueError("The losing local semantic edit could not be rescued before conflict resolution.");
+    }
+    if (incomingLoses) {
+      const path = await this.writeConflictRescueStore(
+        incoming,
+        "Concurrent semantic edits without proven causal ancestry were detected; this is the non-authoritative incoming envelope.",
+      );
+      if (!path) throw new SemanticConflictRescueError("The losing incoming semantic edit could not be rescued before conflict resolution.");
+    }
+    new Notice(
+      `${merged.semanticConflicts.length} concurrent knowledge-base edit${merged.semanticConflicts.length === 1 ? " was" : "s were"} preserved in a private conflict rescue before deterministic merging.`,
+      12000,
+    );
+    return merged;
+  }
+
   async onExternalSettingsChange(): Promise<void> {
     if (this.unloaded) return;
+    this.adoptSharedPersistenceUncertainty();
+    if (this.persistenceUncertain) {
+      new Notice(this.dataCompatibilityWarning, 12000);
+      return;
+    }
+    if (this.semanticConflictRescueFailed) {
+      new Notice("Knowledge-base sync remains read-only because a prior concurrent edit could not be preserved. Restart only after exporting every base or copying the plugin data.json.", 12000);
+      return;
+    }
+    // Preserve this device's current route/collapse/history before any synced
+    // envelope is parsed. Captured data.json copies contain only compatibility
+    // defaults for those fields and must never become live local state.
+    this.captureLiveDeviceLocalState();
     // Sync services may update data.json while an adapter save or base switch is
     // still in flight. Capture the incoming file immediately: waiting for a
     // local write first could overwrite the only copy of that synced payload.
@@ -766,8 +1405,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         const initialCommittedStore = this.committedStoreSnapshot
           ? structuredClone(this.committedStoreSnapshot)
           : null;
-        const preferredActiveId = initialCommittedStore?.activeBaseId ?? this.store.activeBaseId;
+        const preferredActiveId = this.store.activeBaseId;
         let workingStore = structuredClone(initialCommittedStore ?? this.store);
+        this.applyDeviceLocalState(workingStore);
         let baselineTrust: "none" | "fresh" | "legacy-provisional" | "identified" = initialCommittedStore
           ? isFreshVaultId(initialCommittedStore.vaultId) ? "fresh" : "identified"
           : "none";
@@ -775,6 +1415,32 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           this.externalReloadPending = false;
           await this.waitForOperationsIdle();
           await this.saveQueue;
+          this.adoptSharedPersistenceUncertainty();
+          if (this.persistenceUncertain) {
+            const uncertainCaptures = await this.drainExternalPluginDataCaptures();
+            const retained = uncertainCaptures.find((capture) => "value" in capture.read);
+            if (retained && "value" in retained.read) {
+              this.retainedExternalSettingsPayload = structuredClone(retained.read.value);
+            }
+            new Notice(this.dataCompatibilityWarning, 15000);
+            return;
+          }
+          // A transaction that was active when the callback arrived may have
+          // committed or rolled back its local history while we waited.
+          this.captureLiveDeviceLocalState();
+          this.applyDeviceLocalState(workingStore);
+          // A local write can be rejected only after the adapter has already
+          // replaced data.json. Its transaction restores memory and records
+          // that attempted causal head. Make the restored state a descendant
+          // before comparing any captured Sync payload, so the failed action
+          // cannot win merely because its file callback arrived first.
+          this.advanceRejectedSemanticAttempts();
+          if (this.rejectedSemanticAttemptsByBase.size > 0) {
+            workingStore = structuredClone(this.store);
+            if (baselineTrust === "none") {
+              baselineTrust = isFreshVaultId(workingStore.vaultId) ? "fresh" : "identified";
+            }
+          }
           // Resolve the whole drained batch before any writeback. Otherwise a
           // write for capture A could replace data.json before capture B's
           // asynchronous loadData call has actually read it.
@@ -794,6 +1460,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
             latestNeedsWriteback = false;
             latestBlockingWarning = "";
             latestAccumulatedRescueStore = null;
+            if (this.semanticConflictRescueFailed) {
+              // Preserve the first unrescued capture in memory and ignore all
+              // later callbacks until restart. Auto-recovery could otherwise
+              // hide the only copy of a concurrent semantic edit.
+              latestBlockingWarning = this.dataCompatibilityWarning;
+              continue;
+            }
             // Roll back only this capture. Earlier captures in the same drained
             // batch may already have contributed valid remote changes to the
             // working envelope and must not be discarded by a later transient
@@ -865,7 +1538,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
                     const incomingBootstrapOnly = freshStoreHasOnlyBootstrapChanges(incomingStore);
                     const localWins = workingStore.vaultId.localeCompare(incomingStore.vaultId) <= 0;
                     if (workingStore.vaultId === incomingStore.vaultId) {
-                      const merged = mergeKnowledgeBaseStores(workingStore, incomingStore, preferredActiveId);
+                      const merged = await this.mergeStoresWithSemanticRescue(workingStore, incomingStore, preferredActiveId);
                       workingStore = merged.store;
                       latestNeedsWriteback = merged.incomingNeedsWriteback
                         || loaded.structuralRepairNeedsWriteback
@@ -955,7 +1628,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
                     || loaded.structuralRepairNeedsWriteback
                     || loaded.remediationNeedsWriteback;
                 } else {
-                  const merged = mergeKnowledgeBaseStores(workingStore, incomingStore, preferredActiveId);
+                  const merged = await this.mergeStoresWithSemanticRescue(workingStore, incomingStore, preferredActiveId);
                   workingStore = merged.store;
                   latestNeedsWriteback = merged.incomingNeedsWriteback
                     || loaded.structuralRepairNeedsWriteback
@@ -972,11 +1645,20 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
                 workingStore = fallbackStore;
                 this.store = workingStore;
                 this.useActiveData(this.requireActiveBase().data);
-                const rescuePath = await this.writeConflictRescueStore(
-                  fallbackStore,
-                  `Synced knowledge-base data could not be merged: ${error instanceof Error ? error.message : String(error)}`,
-                );
-                latestBlockingWarning = `Synced knowledge-base data could not be merged (${error instanceof Error ? error.message : String(error)}). Local bases remain read-only and the captured synced payload will be preserved.${rescuePath ? ` A private local rescue was saved at ${rescuePath}.` : " Automatic local rescue failed; export every base before restarting Obsidian."}`;
+                if ("value" in capture.read) {
+                  this.retainedExternalSettingsPayload = structuredClone(capture.read.value);
+                }
+                const semanticRescueFailed = error instanceof SemanticConflictRescueError;
+                this.semanticConflictRescueFailed ||= semanticRescueFailed;
+                const rescuePath = semanticRescueFailed
+                  ? ""
+                  : await this.writeConflictRescueStore(
+                    fallbackStore,
+                    `Synced knowledge-base data could not be merged: ${error instanceof Error ? error.message : String(error)}`,
+                  );
+                latestBlockingWarning = semanticRescueFailed
+                  ? "Concurrent knowledge-base edits could not be preserved before conflict resolution. Local bases remain read-only, the captured synced payload is retained in memory, and no conflict winner was adopted. Export every base or copy the plugin data.json before restarting Obsidian."
+                  : `Synced knowledge-base data could not be merged (${error instanceof Error ? error.message : String(error)}). Local bases remain read-only and the captured synced payload will be preserved.${rescuePath ? ` A private local rescue was saved at ${rescuePath}.` : " Automatic local rescue failed; export every base before restarting Obsidian."}`;
                 this.dataCompatibilityWarning = latestBlockingWarning;
                 new Notice(this.dataCompatibilityWarning, 12000);
               }
@@ -996,12 +1678,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
                 await this.saveStoreSnapshot(true, writebackGeneration);
               } catch (error) {
                 if (error instanceof ExternalSettingsSupersededError) continue;
-                this.dataCompatibilityWarning = `Synced knowledge bases were merged in memory, but the merged data could not be saved (${error instanceof Error ? error.message : String(error)}). Organization is read-only; export each base before restarting Obsidian.`;
-                new Notice(this.dataCompatibilityWarning, 12000);
+                this.markPersistenceUncertain(`Synced knowledge bases were merged in memory, but the merged data could not be saved (${error instanceof Error ? error.message : String(error)}). The attempted write may have reached data.json; organization remains read-only until Obsidian is restarted after every base and data.json are preserved.`);
               }
             } else {
               // The latest captured file already contains this payload.
-              this.committedStoreSnapshot = structuredClone(workingStore);
+              this.committedStoreSnapshot = this.neutralSyncedStore(workingStore);
+              this.rollbackStoreSnapshot = structuredClone(this.committedStoreSnapshot);
+              this.persistDeviceLocalStateSafely();
             }
           } else if (latestCapture && latestBlockingWarning) {
             if (latestAccumulatedRescueStore) {
@@ -1024,8 +1707,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
                 this.retainedExternalSettingsPayload = null;
               } catch (error) {
                 if (error instanceof ExternalSettingsSupersededError) continue;
-                this.dataCompatibilityWarning = `${latestBlockingWarning} The captured file is retained in memory, but restoring it to data.json failed (${error instanceof Error ? error.message : String(error)}). Do not restart Obsidian; copy the plugin data.json and contact support.`;
-                new Notice(this.dataCompatibilityWarning, 15000);
+                this.markPersistenceUncertain(`${latestBlockingWarning} The captured file is retained in memory, but restoring it to data.json failed (${error instanceof Error ? error.message : String(error)}). The file may now contain an uncertain partial write; do not restart Obsidian until data.json and every base are preserved.`);
               }
             }
           }
@@ -1043,7 +1725,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         }
       }
     };
-    operation = reload();
+    // The reload owns every merge, rescue, authoritative writeback, and
+    // fail-closed decision as one cross-instance logical transaction. A new
+    // plugin instance must not read a partially-written capture in the narrow
+    // gap between an adapter rejection and this worker's compensation or
+    // uncertainty marker.
+    operation = this.enqueueAppLogicalOperation(reload, true);
     this.externalReloadPromise = operation;
     return operation;
   }
@@ -1085,41 +1772,70 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     throw new Error("A new stable knowledge-base ID could not be allocated safely. Try again.");
   }
 
-  private async commitBaseStoreChange(change: () => void): Promise<void> {
+  private async commitBaseStoreChange(change: () => void, persistSyncedStore = true): Promise<void> {
     this.assertDataWritable();
     if (this.baseOperationBusy) throw new Error("Another knowledge-base change is still being saved.");
     if (this.dataTransactionBusy) throw new Error("Finish the current organization change before switching knowledge bases.");
     if (this.externalReloadBusy) throw new Error("Finish reloading synced knowledge-base data before switching bases.");
     this.baseOperationBusy = true;
     try {
-      // Let any earlier direct state save finish before changing activeBaseId.
-      // New transactional edits are rejected while baseOperationBusy is true.
-      await this.saveQueue;
-      const backup = structuredClone(this.store);
-      try {
-        change();
-        this.useActiveData(this.requireActiveBase().data);
-        this.invalidateRecordCache();
-        await this.saveStoreSnapshot();
-      } catch (error) {
-        this.store = backup;
-        this.useActiveData(this.requireActiveBase().data);
-        this.invalidateRecordCache();
+      // The whole logical transaction—not merely its first adapter write—is
+      // shared across replacement plugin instances. Direct/settings saves that
+      // were already requested finish before a base switch can rebind `data`.
+      await this.directSaveTransactionQueue;
+      if (this.externalReloadBusy) throw new Error("Finish reloading synced knowledge-base data before switching bases.");
+      await this.enqueueAppLogicalOperation(async () => {
+        await this.saveQueue;
+        const backup = structuredClone(this.store);
+        let attemptedStore: PluginStore | null = null;
+        try {
+          change();
+          this.useActiveData(this.requireActiveBase().data);
+          this.invalidateRecordCache();
+          if (persistSyncedStore) {
+            attemptedStore = structuredClone(this.store);
+            await this.saveStoreSnapshot();
+          } else {
+            this.persistDeviceLocalState();
+          }
+        } catch (error) {
+          if (attemptedStore) this.recordRejectedSemanticAttempts(this.neutralSyncedStore(attemptedStore));
+          this.store = backup;
+          this.useActiveData(this.requireActiveBase().data);
+          this.invalidateRecordCache();
+          const envelopeRollback = attemptedStore
+            ? this.prepareRejectedEnvelopeRollback(backup, attemptedStore)
+            : { changed: false, unsafeReason: "" };
+          if (envelopeRollback.unsafeReason) {
+            this.markPersistenceUncertain(`${envelopeRollback.unsafeReason} Knowledge bases remain read-only until Obsidian is restarted after the plugin data.json and a same-vault recovery are preserved.`);
+          } else {
+            const compensationNeeded = this.advanceRejectedSemanticAttempts() || envelopeRollback.changed;
+            if (compensationNeeded && !this.externalReloadBusy) {
+              try {
+                await this.saveStoreSnapshot();
+              } catch (rollbackError) {
+                console.error("Knowledge Base Command Center could not persist the failed base-change rollback", rollbackError);
+                this.markPersistenceUncertain("A rejected knowledge-base change may have reached Sync, and its compensating rollback could not be saved. Knowledge bases remain read-only until Obsidian is restarted after the plugin data.json and a same-vault recovery are preserved.");
+                throw new Error("The knowledge-base change failed and its rollback could not be saved. Organization is now read-only; preserve data.json and export a same-vault recovery before restarting Obsidian.");
+              }
+            }
+          }
+          try {
+            await this.refreshViews(false);
+          } catch (refreshError) {
+            console.error("Knowledge Base Command Center restored a failed base change but could not refresh its view", refreshError);
+          }
+          throw error;
+        }
+        // The store change is committed once saveData succeeds. A rendering
+        // failure must not roll memory back while leaving the new base on disk.
         try {
           await this.refreshViews(false);
-        } catch (refreshError) {
-          console.error("Knowledge Base Command Center restored a failed base change but could not refresh its view", refreshError);
+        } catch (error) {
+          console.error("Knowledge Base Command Center saved the base change but could not refresh its view", error);
+          new Notice("The knowledge-base change was saved, but the view could not refresh. Reopen the command center to update it.", 8000);
         }
-        throw error;
-      }
-      // The store change is committed once saveData succeeds. A rendering
-      // failure must not roll memory back while leaving the new base on disk.
-      try {
-        await this.refreshViews(false);
-      } catch (error) {
-        console.error("Knowledge Base Command Center saved the base change but could not refresh its view", error);
-        new Notice("The knowledge-base change was saved, but the view could not refresh. Reopen the command center to update it.", 8000);
-      }
+      });
     } finally {
       this.baseOperationBusy = false;
       this.announceOperationsIdle();
@@ -1130,7 +1846,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (id === this.store.activeBaseId) return;
     const target = this.store.bases.find((entry) => entry.id === id && entry.archivedAt === null);
     if (!target) throw new Error("That knowledge base is unavailable.");
-    await this.commitBaseStoreChange(() => { this.store.activeBaseId = target.id; });
+    await this.commitBaseStoreChange(() => { this.store.activeBaseId = target.id; }, false);
     new Notice(`Switched to “${target.data.settings.workspaceName}”.`);
   }
 
@@ -1170,7 +1886,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       const entry = this.store.bases.find((candidate) => candidate.id === id);
       if (!entry) throw new Error("That knowledge base is unavailable.");
       entry.data.settings.workspaceName = cleanName;
-      this.bumpEntryUpdatedAt(entry);
+      this.bumpEntrySemanticRevision(entry);
     });
   }
 
@@ -1204,7 +1920,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       const entry = this.store.bases.find((candidate) => candidate.id === id && candidate.archivedAt === null);
       if (!entry) throw new Error("That knowledge base is unavailable.");
       entry.archivedAt = Math.max(Date.now(), entry.updatedAt + 1);
-      entry.updatedAt = entry.archivedAt;
+      this.bumpEntrySemanticRevision(entry, entry.archivedAt);
       if (this.store.activeBaseId === id) {
         const fallback = this.store.bases.find((candidate) => candidate.id !== id && candidate.archivedAt === null);
         if (!fallback) throw new Error("No fallback knowledge base is available.");
@@ -1229,7 +1945,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         entry.data.settings.workspaceName = candidate;
       }
       entry.archivedAt = null;
-      this.bumpEntryUpdatedAt(entry);
+      this.bumpEntrySemanticRevision(entry);
     });
   }
 
@@ -1260,10 +1976,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   assertDataWritable(): void {
+    this.adoptSharedPersistenceUncertainty();
     if (this.dataCompatibilityWarning) throw new Error(this.dataCompatibilityWarning);
   }
 
-  isDataReadOnly(): boolean { return Boolean(this.dataCompatibilityWarning); }
+  isDataReadOnly(): boolean {
+    this.adoptSharedPersistenceUncertainty();
+    return Boolean(this.dataCompatibilityWarning);
+  }
   isClinicalMode(): boolean { return this.data.settings.workspaceMode === "ent-clinical"; }
   canVisuallyMoveAcrossGroups(): boolean { return !this.isClinicalMode() || this.data.settings.allowClinicalVisualGroupMoves; }
 
@@ -3342,7 +4062,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   async reconcileRecords(records: VaultRecord[]): Promise<boolean> {
     const valid = new Set(records.map((record) => record.path));
     const markdownPaths = new Set(this.app.vault.getMarkdownFiles().map((file) => file.path));
-    let changed = false;
+    let semanticChanged = false;
+    let selectionChanged = false;
     // Preserve bindings whose Markdown file is temporarily unavailable. Sync
     // may deliver plugin data before notes; retaining the vault-relative path
     // lets the subject resolve automatically when the note arrives and avoids
@@ -3353,38 +4074,43 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const excluded = unique(this.data.excludedIndexPaths).filter((path) => !manualSet.has(path));
     if (manual.length !== this.data.manualIndexPaths.length || manual.some((path, index) => path !== this.data.manualIndexPaths[index])) {
       this.data.manualIndexPaths = manual;
-      changed = true;
+      semanticChanged = true;
     }
     if (excluded.length !== this.data.excludedIndexPaths.length || excluded.some((path, index) => path !== this.data.excludedIndexPaths[index])) {
       this.data.excludedIndexPaths = excluded;
-      changed = true;
+      semanticChanged = true;
     }
     const groupOrder = [...new Set(this.data.indexGroupOrder.map((group) => group.trim()).filter(Boolean))];
     if (groupOrder.length !== this.data.indexGroupOrder.length || groupOrder.some((group, index) => group !== this.data.indexGroupOrder[index])) {
       this.data.indexGroupOrder = groupOrder;
-      changed = true;
+      semanticChanged = true;
     }
     for (const heading of this.data.collections) {
       const next = unique(heading.subjects);
-      if (next.length !== heading.subjects.length) { heading.subjects = next; changed = true; }
+      if (next.length !== heading.subjects.length) { heading.subjects = next; semanticChanged = true; }
       for (const subheading of heading.subheadings) {
         const subNext = unique(subheading.subjects);
-        if (subNext.length !== subheading.subjects.length) { subheading.subjects = subNext; changed = true; }
+        if (subNext.length !== subheading.subjects.length) { subheading.subjects = subNext; semanticChanged = true; }
       }
     }
     const pins = unique(this.data.pinnedPaths);
     const nextStudy = unique(this.data.nextStudyPaths);
-    if (pins.length !== this.data.pinnedPaths.length) { this.data.pinnedPaths = pins; changed = true; }
-    if (nextStudy.length !== this.data.nextStudyPaths.length) { this.data.nextStudyPaths = nextStudy; changed = true; }
+    if (pins.length !== this.data.pinnedPaths.length) { this.data.pinnedPaths = pins; semanticChanged = true; }
+    if (nextStudy.length !== this.data.nextStudyPaths.length) { this.data.nextStudyPaths = nextStudy; semanticChanged = true; }
     if (!valid.has(this.data.selectedPath) && (!this.data.selectedPath || !markdownPaths.has(this.data.selectedPath))) {
       const fallback = records[0]?.path || "";
       if (fallback !== this.data.selectedPath) {
         this.data.selectedPath = fallback;
-        changed = true;
+        selectionChanged = true;
       }
     }
-    if (changed) { this.invalidateRecordCache(); await this.savePluginData(); }
-    return changed;
+    if (semanticChanged) {
+      this.invalidateRecordCache();
+      await this.savePluginData();
+    } else if (selectionChanged) {
+      await this.saveViewState();
+    }
+    return semanticChanged || selectionChanged;
   }
 
   async mutate(
@@ -3402,10 +4128,18 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.assertDataWritable();
     if (this.baseOperationBusy) throw new Error("Finish switching knowledge bases before changing its organization.");
     if (this.dataTransactionBusy) throw new Error("Another organization change is still being saved.");
+    if (this.directSaveBusyCount > 0) throw new Error("Finish saving the current knowledge-base change before starting another organization transaction.");
     if (this.externalReloadBusy) throw new Error("Finish reloading synced knowledge-base data before changing its organization.");
     this.dataTransactionBusy = true;
     try {
-      const transactionUpdatedAt = this.requireActiveBase().updatedAt;
+      await this.enqueueAppLogicalOperation(async () => {
+      const transactionMetadata = {
+        updatedAt: this.requireActiveBase().updatedAt,
+        semanticRevision: this.requireActiveBase().semanticRevision,
+        semanticHead: this.requireActiveBase().semanticHead,
+        semanticHash: this.requireActiveBase().semanticHash,
+        semanticLineage: [...this.requireActiveBase().semanticLineage],
+      };
       const transactionBackup = options.requireUndo ? structuredClone(this.data) : null;
       const previousUndoStack = [...this.data.undoStack];
       const previousRedoStack = [...this.data.redoStack];
@@ -3434,10 +4168,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         // portable subjects, or record grouping. Central invalidation keeps
         // warm record-cache hits O(1) without relying on a proportional JSON key.
         this.invalidateRecordCache();
-        await this.savePluginData();
+        await this.savePluginDataOperation();
       } catch (error) {
         if (transactionBackup) {
-          this.replaceActiveData(transactionBackup, transactionUpdatedAt);
+          this.replaceActiveData(transactionBackup, transactionMetadata);
         } else {
           // The already-created personal snapshot is also the lightweight
           // rollback boundary for ordinary edits. Callers that change settings,
@@ -3450,7 +4184,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           this.data.collapsed = previousCollapsed;
           // Replace the restored object only on failure. This invalidates stale
           // dialogs without imposing a full-data clone on every small action.
-          this.replaceActiveData(structuredClone(this.data), transactionUpdatedAt);
+          this.replaceActiveData(structuredClone(this.data), transactionMetadata);
         }
         this.invalidateRecordCache();
         // If an external change interrupted the write, the incoming file was
@@ -3459,11 +4193,19 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         // restored in-memory store and persist the authoritative result.
         if (!this.externalReloadBusy) {
           try {
-            await this.savePluginData();
+            // A rejected adapter write may still have replaced data.json or
+            // reached Sync. Publish the rollback as a newer semantic revision
+            // so the rejected snapshot cannot reappear from another device.
+            await this.savePluginDataOperation();
           } catch (rollbackError) {
             console.error("Knowledge Base Command Center could not persist the organization rollback", rollbackError);
-            throw new Error("The organization change failed and its rollback could not be saved. Restart Obsidian, then restore a same-vault recovery backup.");
+            this.markPersistenceUncertain("A rejected organization change may have reached Sync, and its compensating rollback could not be saved. Knowledge bases remain read-only until Obsidian is restarted after the plugin data.json and a same-vault recovery are preserved.");
+            throw new Error("The organization change failed and its rollback could not be saved. Organization is now read-only; preserve data.json and export a same-vault recovery before restarting Obsidian.");
           }
+        } else {
+          // The reload worker will merge and persist this causal compensation
+          // after the transaction guard is released.
+          this.advanceRejectedSemanticAttempts();
         }
         try {
           await this.refreshViews(false);
@@ -3473,6 +4215,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         throw error;
       }
       await this.refreshViews(false);
+      });
     } finally {
       this.dataTransactionBusy = false;
       this.announceOperationsIdle();
@@ -3483,12 +4226,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.assertDataWritable();
     if (this.baseOperationBusy) throw new Error("Finish the current knowledge-base change before using history.");
     if (this.dataTransactionBusy) throw new Error("Another organization change is still being saved.");
+    if (this.directSaveBusyCount > 0) throw new Error("Finish saving the current knowledge-base change before using history.");
     if (this.externalReloadBusy) throw new Error("Finish reloading synced knowledge-base data before using history.");
     const source = direction === "undo" ? this.data.undoStack : this.data.redoStack;
     if (source.length === 0) return;
 
     this.dataTransactionBusy = true;
     try {
+      await this.enqueueAppLogicalOperation(async () => {
       // Clone after entering the guarded region so an allocation/serialization
       // failure cannot leave organization history permanently marked busy.
       const storeBackup = structuredClone(this.store);
@@ -3514,23 +4259,32 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         // persist a medication, syndrome, or procedure back into the Index.
         this.normalizeActiveDataAfterRestore();
         this.invalidateRecordCache();
-        await this.savePluginData();
+        await this.savePluginDataOperation();
       } catch (error) {
+        this.preserveNewerCausalMetadata(storeBackup);
         this.store = storeBackup;
         this.useActiveData(this.requireActiveBase().data);
         this.invalidateRecordCache();
         if (!this.externalReloadBusy) {
           try {
-            await this.saveStoreSnapshot();
+            // The rejected history payload may already be on disk. Advance
+            // from its causal head before publishing the restored organization
+            // and device-local history.
+            const compensationNeeded = this.advanceRejectedSemanticAttempts();
+            if (compensationNeeded) await this.saveStoreSnapshot();
+            else this.persistDeviceLocalState();
           } catch (rollbackError) {
             console.error(`Knowledge Base Command Center could not persist the failed ${direction} rollback`, rollbackError);
+            this.markPersistenceUncertain(`A rejected ${direction} may have reached Sync, and its compensating rollback could not be saved. Knowledge bases remain read-only until Obsidian is restarted after the plugin data.json and a same-vault recovery are preserved.`);
             try {
               await this.refreshViews(false);
             } catch (refreshError) {
               console.error(`Knowledge Base Command Center restored a failed ${direction} in memory but could not refresh its view`, refreshError);
             }
-            throw new Error(`The ${direction} failed and its rollback could not be saved. Restart Obsidian, then restore a same-vault recovery backup.`);
+            throw new Error(`The ${direction} failed and its rollback could not be saved. Organization is now read-only; preserve data.json and export a same-vault recovery before restarting Obsidian.`);
           }
+        } else {
+          this.advanceRejectedSemanticAttempts();
         }
         try {
           await this.refreshViews(false);
@@ -3546,6 +4300,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         new Notice(`The ${direction} was saved, but the view could not refresh. Reopen the command center to update it.`, 8000);
       }
       new Notice(`${direction === "undo" ? "Undid" : "Redid"}: ${snapshot.label}`);
+      });
     } finally {
       this.dataTransactionBusy = false;
       this.announceOperationsIdle();
@@ -3994,61 +4749,81 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private async handleRename(oldPath: string, newPath: string, folderRename = false): Promise<void> {
-    // A vault rename is an all-base transaction. A Sync callback can begin in
-    // either await window below, so merely sampling externalReloadPromise once
-    // is insufficient: the rewrite could otherwise be rejected and the old
-    // paths would remain after the Markdown file has already moved.
     for (;;) {
+      // Wait outside the shared logical-operation slot. A Sync callback that
+      // starts while a rename transaction is active is deliberately queued
+      // behind that transaction; awaiting it from inside the slot would make
+      // the two operations wait on each other.
       const pendingExternalReload = this.externalReloadPromise;
       if (pendingExternalReload) {
         await pendingExternalReload;
         continue;
       }
       await this.waitForOperationsIdle();
-      const reloadAfterIdle = this.externalReloadPromise;
-      if (reloadAfterIdle) {
-        await reloadAfterIdle;
-        continue;
-      }
-      // Another local operation can acquire the guard after the idle promise
-      // resolves but before this continuation runs. Retry rather than overlap.
-      if (this.baseOperationBusy || this.dataTransactionBusy || this.externalReloadBusy) continue;
+      const completed = await this.enqueueAppLogicalOperation(
+        () => this.handleRenameOperation(oldPath, newPath, folderRename),
+      );
+      if (completed) return;
+      const reload = this.externalReloadPromise;
+      if (reload) await reload;
+      else await Promise.resolve();
+    }
+  }
 
-      this.assertDataWritable();
-      const storeBackup = structuredClone(this.store);
-      const attemptExternalGeneration = this.externalChangeGeneration;
-      this.baseOperationBusy = true;
-      let retryAfterExternalReload = false;
-      let historyWasTrimmed = false;
-      try {
+  private async handleRenameOperation(oldPath: string, newPath: string, folderRename = false): Promise<boolean> {
+    // A vault rename is an all-base transaction. A Sync callback can begin in
+    // either await window below, so merely sampling externalReloadPromise once
+    // is insufficient: the rewrite could otherwise be rejected and the old
+    // paths would remain after the Markdown file has already moved.
+    // Another local operation or Sync reload can acquire its public guard
+    // after the outer idle check but before this queued continuation runs.
+    // Release the shared slot and retry rather than awaiting it here.
+    if (this.baseOperationBusy || this.dataTransactionBusy || this.directSaveBusyCount > 0
+      || this.externalReloadBusy || this.externalReloadPromise !== null) return false;
+
+    this.assertDataWritable();
+    const storeBackup = structuredClone(this.store);
+    const attemptExternalGeneration = this.externalChangeGeneration;
+    this.baseOperationBusy = true;
+    let retryAfterExternalReload = false;
+    let historyWasTrimmed = false;
+    try {
         const historyDepths = this.store.bases.map((entry) => [entry.data.layoutSnapshots.length, entry.data.undoStack.length, entry.data.redoStack.length]);
-        let changed = false;
+        let semanticChanged = false;
+        let localStateChanged = false;
         for (const entry of this.store.bases) {
+          const beforeSemanticHash = semanticEntryFingerprint(entry);
           const pathsChanged = rewritePluginDataPathPrefix(entry.data, oldPath, newPath);
           const folderStateChanged = folderRename && rewritePluginDataFolderRename(entry.data, oldPath, newPath);
           const templatePathChanged = !folderRename && rewritePluginDataTemplatePathRename(entry.data, oldPath, newPath);
           const entryChanged = pathsChanged || folderStateChanged || templatePathChanged;
           if (entryChanged) {
-            this.bumpEntryUpdatedAt(entry);
-            changed = true;
+            if (semanticEntryFingerprint(entry) !== beforeSemanticHash) {
+              this.bumpEntrySemanticRevision(entry);
+              semanticChanged = true;
+            } else {
+              localStateChanged = true;
+            }
           }
         }
         const boundedDepths = this.store.bases.map((entry) => [entry.data.layoutSnapshots.length, entry.data.undoStack.length, entry.data.redoStack.length]);
         historyWasTrimmed = boundedDepths.some((depths, baseIndex) => depths.some((depth, stackIndex) => depth < (historyDepths[baseIndex]?.[stackIndex] ?? 0)));
         this.invalidateRecordCache();
-        if (changed) await this.saveStoreSnapshot();
+        if (semanticChanged) await this.saveStoreSnapshot();
+        else if (localStateChanged) this.persistDeviceLocalState();
         // A callback can start after saveStoreSnapshot has committed but before
         // this continuation resumes. Let that reload merge the committed rename,
         // then run the idempotent rewrite once more against its final envelope.
         retryAfterExternalReload = attemptExternalGeneration !== this.externalChangeGeneration
           || this.externalReloadBusy;
-      } catch (error) {
+    } catch (error) {
         const interruptedByExternalReload = attemptExternalGeneration !== this.externalChangeGeneration
           || this.externalReloadBusy
           || this.externalReloadPromise !== null;
         this.store = storeBackup;
         this.useActiveData(this.requireActiveBase().data);
         this.invalidateRecordCache();
+        this.advanceRejectedSemanticAttempts();
         if (interruptedByExternalReload) {
           retryAfterExternalReload = true;
         } else {
@@ -4064,27 +4839,23 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
               retryAfterExternalReload = true;
             } else {
               console.error("Knowledge Base Command Center could not persist the failed vault-rename rollback", rollbackError);
-              throw new Error("The vault rename was detected, but its organization update and rollback could not be saved. Restart Obsidian, then restore a same-vault recovery backup.");
+              this.markPersistenceUncertain("A rejected vault-rename rewrite may have reached Sync, and its compensating rollback could not be saved. Knowledge bases remain read-only until Obsidian is restarted after the plugin data.json and a same-vault recovery are preserved.");
+              throw new Error("The vault rename was detected, but its organization update and rollback could not be saved. Organization is now read-only; preserve data.json and export a same-vault recovery before restarting Obsidian.");
             }
           }
           if (!retryAfterExternalReload) throw error;
         }
-      } finally {
-        this.baseOperationBusy = false;
-        this.announceOperationsIdle();
-      }
-
-      if (retryAfterExternalReload) {
-        const reload = this.externalReloadPromise;
-        if (reload) await reload;
-        continue;
-      }
-      if (historyWasTrimmed) {
-        new Notice("Some saved organization history no longer fit the plugin data budget after the rename and was removed. Current organization was preserved.", 8000);
-      }
-      this.scheduleRefresh();
-      return;
+    } finally {
+      this.baseOperationBusy = false;
+      this.announceOperationsIdle();
     }
+
+    if (retryAfterExternalReload) return false;
+    if (historyWasTrimmed) {
+      new Notice("Some saved organization history no longer fit the plugin data budget after the rename and was removed. Current organization was preserved.", 8000);
+    }
+    this.scheduleRefresh();
+    return true;
   }
 
   scheduleRefresh(invalidateRecords = true): void {

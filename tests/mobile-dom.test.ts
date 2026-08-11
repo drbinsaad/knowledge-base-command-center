@@ -172,6 +172,7 @@ function createView(window: FakeWindow, inputSources: SearchSource[] = []): EntV
     reconcileRecords: async () => false,
     isDataReadOnly: () => false,
     savePluginData: async () => undefined,
+    saveViewState: async () => undefined,
     getIndexRecords: () => sources[0].records,
     getIndexCandidateFiles: () => [],
     searchKnowledgeBases: async (query: string, options?: { limit?: number }) => prepareKnowledgeBaseSearchResults(

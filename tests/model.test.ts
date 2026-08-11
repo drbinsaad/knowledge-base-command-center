@@ -8,6 +8,7 @@ import {
   buildIndexDiagnostics,
   buildCanonicalMarkdown,
   buildProposalMarkdown,
+  canonicalInterimEnvelopeString,
   canonicalIdIsValid,
   canonicalHierarchyIssue,
   canonicalPath,
@@ -22,6 +23,7 @@ import {
   ensureSystemLibraries,
   configuredGroupFromPath,
   createDefaultStore,
+  createDeviceLocalPluginState,
   createKnowledgeBaseEntry,
   createPersonalBackup,
   createWorkspaceConfig,
@@ -44,6 +46,7 @@ import {
   MAX_CURRICULUM_DEPTH,
   MAX_DELETED_KNOWLEDGE_BASE_IDS,
   MAX_MIGRATION_BACKUP_BYTES,
+  MAX_DEVICE_LOCAL_STATE_BYTES,
   MAX_TRANSFER_LIST_ITEMS,
   MAX_TRANSFER_SNAPSHOTS,
   MAX_TRANSFER_TEXT_LENGTH,
@@ -60,10 +63,12 @@ import {
   normalizeSearchText,
   parseQuery,
   parsePersonalBackup,
+  parseDeviceLocalPluginState,
   parseWorkspaceConfig,
   pathIsInsideFolder,
   portablePlaceholderPath,
   provisionalMigratedVaultFingerprint,
+  semanticPluginDataProjection,
   resolveExpectedParentPath,
   replaceCurriculumVisualPath,
   replacePathMapKey,
@@ -859,6 +864,132 @@ test("a v11 multi-base envelope migrates to v12 without being mistaken for damag
   assert.equal(migrated.bases[0]?.data.version, DATA_VERSION);
 });
 
+test("v11 through v13 envelopes acquire semantic revision zero exactly once", () => {
+  for (const version of [11, 12, 13]) {
+    const source = createDefaultStore(migrateData(null), 100, `vault-v${version}`);
+    const raw = structuredClone(source) as unknown as Record<string, unknown>;
+    raw.version = version;
+    const rawBases = raw.bases as Array<Record<string, unknown>>;
+    delete rawBases[0]?.semanticRevision;
+
+    const first = migrateStore(raw, 200);
+    const second = migrateStore(first, 300);
+
+    assert.equal(first.version, STORE_VERSION);
+    assert.equal(first.bases[0]?.semanticRevision, 0);
+    assert.equal(second.bases[0]?.semanticRevision, 0);
+  }
+});
+
+test("current v14 envelopes require a valid semantic revision", () => {
+  const current = createDefaultStore(migrateData(null), 100, "vault-v14");
+  const missing = structuredClone(current) as unknown as { bases: Array<Record<string, unknown>> };
+  delete missing.bases[0]?.semanticRevision;
+  assert.throws(() => migrateStore(missing, 200), /invalid semantic revision/i);
+
+  const fractional = structuredClone(current) as unknown as { bases: Array<Record<string, unknown>> };
+  fractional.bases[0].semanticRevision = 1.5;
+  assert.throws(() => migrateStore(fractional, 200), /invalid semantic revision/i);
+});
+
+test("current v14 envelopes discard ancestry when the semantic head is missing, invalid, or self-referential", () => {
+  const current = createDefaultStore(migrateData(null), 100, "vault-v14-causal-repair");
+  const validAncestor = "1111111111111111";
+
+  for (const semanticHead of [undefined, "not-a-fingerprint"] as const) {
+    const malformed = structuredClone(current) as unknown as { bases: Array<Record<string, unknown>> };
+    malformed.bases[0].semanticRevision = 4;
+    malformed.bases[0].semanticLineage = [validAncestor];
+    if (semanticHead === undefined) delete malformed.bases[0].semanticHead;
+    else malformed.bases[0].semanticHead = semanticHead;
+
+    const repaired = migrateStore(malformed, 200).bases[0];
+    assert.ok(repaired);
+    assert.equal(repaired.semanticHead, repaired.semanticHash);
+    assert.deepEqual(repaired.semanticLineage, []);
+  }
+
+  const selfReferential = structuredClone(current);
+  selfReferential.bases[0].semanticRevision = 4;
+  selfReferential.bases[0].semanticLineage = [selfReferential.bases[0].semanticHead, validAncestor];
+  const repairedSelfReference = migrateStore(selfReferential, 200).bases[0];
+  assert.ok(repairedSelfReference);
+  assert.equal(repairedSelfReference.semanticHead, repairedSelfReference.semanticHash);
+  assert.deepEqual(repairedSelfReference.semanticLineage, []);
+
+  const impossibleRoot = structuredClone(current);
+  impossibleRoot.bases[0].semanticLineage = [validAncestor];
+  const repairedRoot = migrateStore(impossibleRoot, 200).bases[0];
+  assert.ok(repairedRoot);
+  assert.equal(repairedRoot.semanticHead, repairedRoot.semanticHash);
+  assert.deepEqual(repairedRoot.semanticLineage, []);
+});
+
+test("the shared semantic projection ignores only live view state and device history", () => {
+  const data = migrateData(null);
+  data.collections = [{
+    id: "heading-live",
+    title: "Live heading",
+    collapsed: true,
+    subjects: ["Knowledge/Topic.md"],
+    subheadings: [{ id: "subheading-live", title: "Live subheading", collapsed: true, subjects: [] }],
+  }];
+  data.portableIndex.libraryLayouts["library-live"] = structuredClone(data.collections);
+  data.selectedPath = "Knowledge/Topic.md";
+  data.activeTab = "collections";
+  data.settings.defaultTab = "collections";
+  data.savedViews = [{ id: "saved-semantic", name: "Saved semantic view", tab: "collections", query: "airway" }];
+  data.collapsed.curriculumDomains = ["ENT"];
+  data.undoStack = [snapshotPersonal(data, "Device undo")];
+  data.redoStack = [snapshotPersonal(data, "Device redo")];
+  data.layoutSnapshots = [snapshotPersonal(data, "Named layout")];
+
+  const projection = semanticPluginDataProjection(data);
+
+  assert.equal(projection.selectedPath, "");
+  assert.equal(projection.activeTab, "curriculum");
+  assert.deepEqual(projection.collapsed, migrateData(null).collapsed);
+  assert.equal(projection.collections[0]?.collapsed, false);
+  assert.equal(projection.collections[0]?.subheadings[0]?.collapsed, false);
+  assert.equal(projection.portableIndex.libraryLayouts["library-live"]?.[0]?.collapsed, false);
+  assert.deepEqual(projection.undoStack, []);
+  assert.deepEqual(projection.redoStack, []);
+  assert.equal(projection.layoutSnapshots[0]?.collections[0]?.collapsed, true, "named snapshots remain semantic");
+  assert.equal(projection.layoutSnapshots[0]?.collections[0]?.subheadings[0]?.collapsed, true);
+  assert.equal(projection.settings.defaultTab, "collections");
+  assert.equal(projection.savedViews[0]?.name, "Saved semantic view");
+  assert.deepEqual(projection.collections[0]?.subjects, ["Knowledge/Topic.md"]);
+});
+
+test("legacy and interim migration identities ignore live view state but retain named layouts", () => {
+  const flatA = migrateData(null);
+  flatA.settings.workspaceName = "ENT";
+  flatA.collections = [{ id: "heading", title: "Heading", collapsed: false, subjects: [], subheadings: [] }];
+  const flatB = structuredClone(flatA);
+  flatA.selectedPath = "Knowledge/A.md";
+  flatA.collections[0].collapsed = true;
+  flatA.undoStack = [snapshotPersonal(flatA, "Local history")];
+  flatB.selectedPath = "Knowledge/B.md";
+  const legacyA = migrateStore(flatA, 100);
+  const legacyB = migrateStore(flatB, 999);
+  assert.equal(
+    provisionalMigratedVaultFingerprint(legacyA.vaultId),
+    provisionalMigratedVaultFingerprint(legacyB.vaultId),
+  );
+
+  const interimA = createDefaultStore(migrateData(null), 100, "vault-interim-a");
+  interimA.bases[0].data.collections = structuredClone(flatB.collections);
+  const interimB = structuredClone(interimA);
+  interimA.bases[0].data.selectedPath = "Knowledge/A.md";
+  interimA.bases[0].data.collections[0].collapsed = true;
+  interimA.bases[0].data.undoStack = [snapshotPersonal(interimA.bases[0].data, "History")];
+  interimB.bases[0].data.selectedPath = "Knowledge/B.md";
+  assert.equal(canonicalInterimEnvelopeString(interimA), canonicalInterimEnvelopeString(interimB));
+
+  interimA.bases[0].data.layoutSnapshots = [snapshotPersonal(interimA.bases[0].data, "Named")];
+  assert.notEqual(canonicalInterimEnvelopeString(interimA), canonicalInterimEnvelopeString(interimB));
+});
+
 test("a valid v11 store migrates multiple bases as isolated workspace payloads", () => {
   const sharedPath = "Knowledge/Shared.md";
   const sharedPortable = {
@@ -1288,8 +1419,8 @@ test("multi-base store cleaning retains at most one bounded backup of each legac
     vaultId: "vault-existing",
     activeBaseId: "base-newer",
     bases: [
-      { id: "base-newer", createdAt: 200, updatedAt: 200, archivedAt: null, data: withBackups("Newer") },
-      { id: "base-older", createdAt: 100, updatedAt: 100, archivedAt: null, data: withBackups("Older") },
+      { id: "base-newer", createdAt: 200, updatedAt: 200, semanticRevision: 0, archivedAt: null, data: withBackups("Newer") },
+      { id: "base-older", createdAt: 100, updatedAt: 100, semanticRevision: 0, archivedAt: null, data: withBackups("Older") },
     ],
     deletedBaseIds: {},
   };
@@ -5910,4 +6041,35 @@ test("portable summaries count only selected catalogs while retaining selected o
   assert.equal(collectionOnly.medications, 1, "the selected collection still discloses its medication dependency");
   assert.equal(collectionOnly.indexSubjects, 0);
   assert.equal(collectionOnly.collections, 1);
+});
+
+test("device-local state round-trips active base, routes, collapse, and bounded history by stable ID", () => {
+  const data = migrateData(null);
+  data.selectedPath = "Knowledge/Topic.md";
+  data.activeTab = "collections";
+  data.collections = [{ id: "heading", title: "Heading", collapsed: true, subjects: [], subheadings: [] }];
+  data.undoStack = [snapshotPersonal(data, "Local undo")];
+  const store = createDefaultStore(data, 100, "vault-device-state");
+
+  const parsed = parseDeviceLocalPluginState(createDeviceLocalPluginState(store));
+
+  assert.equal(parsed.activeBaseId, "base-default");
+  assert.equal(parsed.bases[0]?.view.selectedPath, "Knowledge/Topic.md");
+  assert.equal(parsed.bases[0]?.view.activeTab, "collections");
+  assert.equal(parsed.bases[0]?.view.collections[0]?.collapsed, true);
+  assert.equal(parsed.bases[0]?.view.undoStack[0]?.label, "Local undo");
+});
+
+test("device-local state rejects malformed and oversized payloads without partial parsing", () => {
+  assert.throws(() => parseDeviceLocalPluginState({
+    version: 1,
+    activeBaseId: "base-default",
+    bases: [{ baseId: "base-default", view: { activeTab: "not-a-tab" } }],
+  }), /invalid active tab|malformed/i);
+  assert.throws(() => parseDeviceLocalPluginState({
+    version: 1,
+    activeBaseId: "base-default",
+    bases: [],
+    padding: "x".repeat(MAX_DEVICE_LOCAL_STATE_BYTES + 1),
+  }), /too large/i);
 });

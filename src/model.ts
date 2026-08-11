@@ -4,11 +4,16 @@ export const MEDICATION_ROOT = "06 Clinical Tools/Medications/";
 export const SYNDROME_ROOT = "06 Clinical Tools/Syndromes/";
 export const DEFAULT_PROPOSAL_FOLDER = "01 Inbox/ENT Topic Proposals";
 export const DATA_VERSION = 12;
-export const STORE_VERSION = 13;
+export const STORE_VERSION = 14;
 export const MIN_RECOGNIZED_STORE_VERSION = 11;
 export const STORE_KIND = "knowledge-base-command-center-store";
 export const MAX_KNOWLEDGE_BASES = 50;
 export const MAX_LIBRARIES = 50;
+/** Recent semantic heads retained to prove causal descent without unbounded store growth. */
+export const MAX_SEMANTIC_LINEAGE = 64;
+/** Device-local routes, disclosure state, and bounded history must fit comfortably in localStorage. */
+export const MAX_DEVICE_LOCAL_STATE_BYTES = 4 * 1024 * 1024;
+export const DEVICE_LOCAL_STATE_VERSION = 1;
 /** Permanent base-deletion tombstones are small, but remain bounded and are never silently evicted. */
 export const MAX_DELETED_KNOWLEDGE_BASE_IDS = 10_000;
 export const DEFAULT_KNOWLEDGE_BASE_ID = "base-default";
@@ -368,6 +373,17 @@ export interface KnowledgeBaseEntry {
   id: string;
   createdAt: number;
   updatedAt: number;
+  /** Monotonic per-base revision for semantic organization changes only. */
+  semanticRevision: number;
+  /** Stable identity of the semantic save event represented by this entry. */
+  semanticHead: string;
+  /** Fingerprint of the semantic payload represented by semanticHead. */
+  semanticHash: string;
+  /**
+   * Newest-first fingerprints of semantic ancestors. A larger scalar revision
+   * is never treated as causal proof without one of these fingerprints.
+   */
+  semanticLineage: string[];
   archivedAt: number | null;
   /** Existing v12 workspace payload, deliberately kept intact per base. */
   data: PluginData;
@@ -382,6 +398,18 @@ export interface PluginStore {
   bases: KnowledgeBaseEntry[];
   /** Stable IDs permanently removed from this vault. Tombstones prevent Sync from resurrecting them. */
   deletedBaseIds: Record<string, number>;
+}
+
+export interface DeviceLocalKnowledgeBaseState {
+  baseId: string;
+  view: PluginViewState;
+}
+
+/** Stored through App.saveLocalStorage, never through plugin data.json. */
+export interface DeviceLocalPluginState {
+  version: typeof DEVICE_LOCAL_STATE_VERSION;
+  activeBaseId: string;
+  bases: DeviceLocalKnowledgeBaseState[];
 }
 
 export const DEFAULT_SETTINGS: PluginSettings = {
@@ -469,17 +497,195 @@ export const DEFAULT_DATA: PluginData = {
   },
 };
 
+interface CollapsedLayoutItemState {
+  id: string;
+  collapsed: boolean;
+  subheadings: Array<{ id: string; collapsed: boolean }>;
+}
+
+interface CollapsedLibraryLayoutState {
+  libraryId: string;
+  headings: CollapsedLayoutItemState[];
+}
+
+/**
+ * Per-device state that may be persisted without advancing semantic conflict
+ * resolution. Keep this list explicit: adding a field here changes what the
+ * safe view-state save path is allowed to copy from live mutable data.
+ */
+export interface PluginViewState {
+  selectedPath: string;
+  activeTab: MainTab;
+  collapsed: ViewCollapseState;
+  collections: CollapsedLayoutItemState[];
+  libraryLayouts: CollapsedLibraryLayoutState[];
+  undoStack: PersonalSnapshot[];
+  redoStack: PersonalSnapshot[];
+}
+
+function captureCollapsedLayout(layout: readonly LayoutHeading[]): CollapsedLayoutItemState[] {
+  return layout.map((heading) => ({
+    id: heading.id,
+    collapsed: heading.collapsed,
+    subheadings: heading.subheadings.map((subheading) => ({
+      id: subheading.id,
+      collapsed: subheading.collapsed,
+    })),
+  }));
+}
+
+function applyCollapsedLayout(
+  layout: LayoutHeading[],
+  state: readonly CollapsedLayoutItemState[],
+): void {
+  const stateById = new Map(state.map((heading) => [heading.id, heading]));
+  for (const heading of layout) {
+    const prior = stateById.get(heading.id);
+    heading.collapsed = prior?.collapsed ?? false;
+    const subheadingStateById = new Map((prior?.subheadings ?? []).map((subheading) => [subheading.id, subheading]));
+    for (const subheading of heading.subheadings) {
+      subheading.collapsed = subheadingStateById.get(subheading.id)?.collapsed ?? false;
+    }
+  }
+}
+
+/** Capture exactly the device-local fields permitted by saveViewState(). */
+export function capturePluginViewState(data: PluginData): PluginViewState {
+  return {
+    selectedPath: data.selectedPath,
+    activeTab: data.activeTab,
+    collapsed: structuredClone(data.collapsed),
+    collections: captureCollapsedLayout(data.collections),
+    libraryLayouts: Object.entries(data.portableIndex.libraryLayouts ?? {})
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([libraryId, headings]) => ({ libraryId, headings: captureCollapsedLayout(headings) })),
+    undoStack: structuredClone(data.undoStack),
+    redoStack: structuredClone(data.redoStack),
+  };
+}
+
+/**
+ * Overlay local view state by stable layout IDs. Structure introduced by the
+ * semantic winner starts expanded instead of inheriting another device's UI.
+ */
+export function applyPluginViewState(
+  data: PluginData,
+  state: PluginViewState,
+  preserveHistory = true,
+): void {
+  data.selectedPath = state.selectedPath;
+  data.activeTab = state.activeTab;
+  data.collapsed = structuredClone(state.collapsed);
+  applyCollapsedLayout(data.collections, state.collections);
+  const libraryStateById = new Map(state.libraryLayouts.map((library) => [library.libraryId, library.headings]));
+  for (const [libraryId, layout] of Object.entries(data.portableIndex.libraryLayouts)) {
+    applyCollapsedLayout(layout, libraryStateById.get(libraryId) ?? []);
+  }
+  data.undoStack = preserveHistory ? structuredClone(state.undoStack) : [];
+  data.redoStack = preserveHistory ? structuredClone(state.redoStack) : [];
+}
+
+/** Give a base first opened on this device a neutral route and empty history. */
+export function resetPluginViewState(data: PluginData): void {
+  data.selectedPath = "";
+  data.activeTab = data.settings.defaultTab;
+  data.collapsed = structuredClone(DEFAULT_DATA.collapsed);
+  applyCollapsedLayout(data.collections, []);
+  for (const layout of Object.values(data.portableIndex.libraryLayouts ?? {})) applyCollapsedLayout(layout, []);
+  data.undoStack = [];
+  data.redoStack = [];
+}
+
+/**
+ * One canonical semantic projection shared by migration identity, merge
+ * ordering, conflict detection, and safe-save validation. Named snapshots are
+ * intentionally untouched: their collapse fields are user-authored content.
+ */
+export function semanticPluginDataProjection(data: PluginData): PluginData {
+  const projected = structuredClone(data);
+  projected.selectedPath = "";
+  projected.activeTab = "curriculum";
+  projected.collapsed = structuredClone(DEFAULT_DATA.collapsed);
+  projected.undoStack = [];
+  projected.redoStack = [];
+  applyCollapsedLayout(projected.collections, []);
+  for (const layout of Object.values(projected.portableIndex.libraryLayouts ?? {})) applyCollapsedLayout(layout, []);
+  return projected;
+}
+
+/** Stable compact identity for one base's semantic payload. */
+export function semanticEntryFingerprint(
+  entry: Pick<KnowledgeBaseEntry, "createdAt" | "archivedAt" | "data">,
+): string {
+  return fingerprintText(JSON.stringify(canonicalMigrationValue([
+    entry.createdAt,
+    entry.archivedAt,
+    semanticPluginDataProjection(entry.data),
+  ])));
+}
+
+/** Allocate a new causal event identity; semantic content alone may repeat after Undo. */
+export function nextSemanticHead(parentHead: string, semanticFingerprint: string): string {
+  return fingerprintText(`${parentHead}:${semanticFingerprint}:${randomMigrationNonce()}`);
+}
+
+/** Deterministic causal identity for a merge-time repair applied on every device. */
+export function deterministicSemanticHead(
+  parentHead: string,
+  semanticFingerprint: string,
+  reason: string,
+): string {
+  return fingerprintText(`deterministic:${reason}:${parentHead}:${semanticFingerprint}`);
+}
+
+function isSemanticFingerprint(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{16}$/i.test(value);
+}
+
+/**
+ * Preserve the newest occurrence of each ancestor and bound the causal proof.
+ * Dropped old ancestry can only produce a false conflict, never a false win.
+ */
+export function boundedSemanticLineage(
+  fingerprints: readonly string[],
+  currentFingerprint = "",
+): string[] {
+  const output: string[] = [];
+  const used = new Set<string>(currentFingerprint ? [currentFingerprint] : []);
+  for (const fingerprint of fingerprints) {
+    const normalized = fingerprint.toLowerCase();
+    if (!isSemanticFingerprint(normalized) || used.has(normalized)) continue;
+    used.add(normalized);
+    output.push(normalized);
+    if (output.length >= MAX_SEMANTIC_LINEAGE) break;
+  }
+  return output;
+}
+
 export function createDefaultStore(
   data: PluginData = structuredClone(DEFAULT_DATA),
   now = Date.now(),
   vaultId = makeId("vault"),
 ): PluginStore {
+  const entry: KnowledgeBaseEntry = {
+    id: DEFAULT_KNOWLEDGE_BASE_ID,
+    createdAt: now,
+    updatedAt: now,
+    semanticRevision: 0,
+    semanticHead: "0000000000000000",
+    semanticHash: "0000000000000000",
+    semanticLineage: [],
+    archivedAt: null,
+    data,
+  };
+  entry.semanticHash = semanticEntryFingerprint(entry);
+  entry.semanticHead = entry.semanticHash;
   return {
     kind: STORE_KIND,
     version: STORE_VERSION,
     vaultId: cleanKnowledgeBaseId(vaultId, "Vault"),
     activeBaseId: DEFAULT_KNOWLEDGE_BASE_ID,
-    bases: [{ id: DEFAULT_KNOWLEDGE_BASE_ID, createdAt: now, updatedAt: now, archivedAt: null, data }],
+    bases: [entry],
     deletedBaseIds: {},
   };
 }
@@ -523,7 +729,7 @@ function fingerprintText(text: string): string {
 }
 
 function migrationFingerprint(data: PluginData): string {
-  const comparable = structuredClone(data);
+  const comparable = semanticPluginDataProjection(data);
   const migrationBackup = asUnknownRecord(comparable.migrationBackup);
   const v2MigrationBackup = asUnknownRecord(comparable.v2MigrationBackup);
   if (migrationBackup.version === 1) migrationBackup.migratedAt = 0;
@@ -563,12 +769,9 @@ export function freshStoreHasOnlyBootstrapChanges(store: PluginStore): boolean {
     || Object.keys(store.deletedBaseIds).length !== 0) return false;
   const entry = store.bases[0];
   if (!entry || entry.id !== DEFAULT_KNOWLEDGE_BASE_ID || entry.archivedAt !== null) return false;
-  const comparable = structuredClone(entry.data);
-  comparable.selectedPath = DEFAULT_DATA.selectedPath;
-  comparable.activeTab = DEFAULT_DATA.activeTab;
-  comparable.collapsed = structuredClone(DEFAULT_DATA.collapsed);
+  const comparable = semanticPluginDataProjection(entry.data);
   return JSON.stringify(canonicalMigrationValue(comparable))
-    === JSON.stringify(canonicalMigrationValue(DEFAULT_DATA));
+    === JSON.stringify(canonicalMigrationValue(semanticPluginDataProjection(DEFAULT_DATA)));
 }
 
 function migratedVaultId(data: PluginData): string {
@@ -595,16 +798,26 @@ type InterimEnvelopeIdentitySource = Pick<PluginStore, "bases" | "deletedBaseIds
 
 /**
  * Stable serialization of the complete multi-base payload that existed when a
- * v11 envelope without `vaultId` was first loaded. `activeBaseId` is omitted
- * because it is device-local UI state; every base, tombstone, timestamp, and
- * nested payload remains part of the identity material.
+ * v11 envelope without `vaultId` was first loaded. Device-local state and the
+ * legacy `updatedAt` clock are omitted because older builds advanced that
+ * timestamp for view-only saves; semantic revisions, tombstones, and nested
+ * semantic payloads remain part of the identity material.
  */
 export function canonicalInterimEnvelopeString(store: InterimEnvelopeIdentitySource): string {
   const bases = [...store.bases].sort((left, right) => left.id.localeCompare(right.id));
   return JSON.stringify(canonicalMigrationValue({
     kind: STORE_KIND,
     version: STORE_VERSION,
-    bases,
+    bases: bases.map((entry) => ({
+      id: entry.id,
+      createdAt: entry.createdAt,
+      semanticRevision: entry.semanticRevision,
+      semanticHead: entry.semanticHead,
+      semanticHash: entry.semanticHash,
+      semanticLineage: entry.semanticLineage,
+      archivedAt: entry.archivedAt,
+      data: semanticPluginDataProjection(entry.data),
+    })),
     deletedBaseIds: store.deletedBaseIds,
   }));
 }
@@ -653,19 +866,61 @@ export function pristineProvisionalMigratedStoreFingerprint(store: PluginStore):
   return fingerprint;
 }
 
-function sameMigrationEnvelopeMetadata(before: PluginStore, after: PluginStore): boolean {
-  if (before.activeBaseId !== after.activeBaseId
-    || before.bases.length !== after.bases.length
-    || canonicalMigrationValue(before.deletedBaseIds) === undefined
-    || JSON.stringify(canonicalMigrationValue(before.deletedBaseIds))
+export interface DeterministicRepairRebaseContext {
+  /** The safely normalized envelope immediately before deterministic repair. */
+  parentStore: PluginStore;
+  /** The fixed reason used to derive a causal child for repaired entries. */
+  reason?: string;
+}
+
+function sameSemanticMetadata(left: KnowledgeBaseEntry, right: KnowledgeBaseEntry): boolean {
+  return left.semanticRevision === right.semanticRevision
+    && left.semanticHead === right.semanticHead
+    && left.semanticHash === right.semanticHash
+    && JSON.stringify(left.semanticLineage) === JSON.stringify(right.semanticLineage);
+}
+
+function isExactDeterministicRepairChild(
+  parent: KnowledgeBaseEntry,
+  repaired: KnowledgeBaseEntry,
+  reason: string,
+): boolean {
+  const semanticHash = semanticEntryFingerprint(repaired);
+  const semanticHead = deterministicSemanticHead(parent.semanticHead, semanticHash, reason);
+  const semanticLineage = boundedSemanticLineage(
+    [parent.semanticHead, ...parent.semanticLineage],
+    semanticHead,
+  );
+  return repaired.semanticRevision === Math.min(Number.MAX_SAFE_INTEGER, parent.semanticRevision + 1)
+    && repaired.semanticHash === semanticHash
+    && repaired.semanticHead === semanticHead
+    && JSON.stringify(repaired.semanticLineage) === JSON.stringify(semanticLineage);
+}
+
+function sameMigrationEnvelopeMetadata(
+  before: PluginStore,
+  after: PluginStore,
+  context?: DeterministicRepairRebaseContext,
+): boolean {
+  const parentStore = context?.parentStore ?? before;
+  const beforeIds = before.bases.map((entry) => entry.id).sort();
+  const parentIds = parentStore.bases.map((entry) => entry.id).sort();
+  const afterIds = after.bases.map((entry) => entry.id).sort();
+  if (parentStore.activeBaseId !== after.activeBaseId
+    || JSON.stringify(beforeIds) !== JSON.stringify(parentIds)
+    || JSON.stringify(beforeIds) !== JSON.stringify(afterIds)
+    || canonicalMigrationValue(parentStore.deletedBaseIds) === undefined
+    || JSON.stringify(canonicalMigrationValue(parentStore.deletedBaseIds))
       !== JSON.stringify(canonicalMigrationValue(after.deletedBaseIds))) return false;
-  return before.bases.every((entry, index) => {
-    const repaired = after.bases[index];
+  return parentStore.bases.every((parent) => {
+    const repaired = after.bases.find((entry) => entry.id === parent.id);
     return Boolean(repaired
-      && entry.id === repaired.id
-      && entry.createdAt === repaired.createdAt
-      && entry.updatedAt === repaired.updatedAt
-      && entry.archivedAt === repaired.archivedAt);
+      && parent.createdAt === repaired.createdAt
+      && parent.updatedAt === repaired.updatedAt
+      && parent.archivedAt === repaired.archivedAt
+      && (sameSemanticMetadata(parent, repaired)
+        || Boolean(context?.reason
+          && isExactDeterministicRepairChild(parent, repaired, context.reason))));
   });
 }
 
@@ -683,8 +938,9 @@ function sameMigrationEnvelopeMetadata(before: PluginStore, after: PluginStore):
 export function rebaseProvisionalVaultIdAfterDeterministicRepair(
   before: PluginStore,
   after: PluginStore,
+  context?: DeterministicRepairRebaseContext,
 ): boolean {
-  if (!sameMigrationEnvelopeMetadata(before, after)) return false;
+  if (!sameMigrationEnvelopeMetadata(before, after, context)) return false;
 
   // migrateStore rotates the supported legacy deterministic flat identity to
   // a nonce-bearing provisional ID before callers can apply later structural
@@ -2186,6 +2442,26 @@ function cleanTimestamp(input: unknown, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+function cleanSemanticRevision(input: unknown, fallback: number): number {
+  const value = Number(input);
+  return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
+}
+
+function cleanSemanticLineage(input: unknown): string[] {
+  if (input === undefined) return [];
+  if (!Array.isArray(input)) throw new Error("A knowledge-base semantic lineage is malformed.");
+  const output: string[] = [];
+  const used = new Set<string>();
+  for (const raw of input) {
+    if (!isSemanticFingerprint(raw)) throw new Error("A knowledge-base semantic lineage contains an invalid fingerprint.");
+    const fingerprint = raw.toLowerCase();
+    if (used.has(fingerprint)) continue;
+    used.add(fingerprint);
+    if (output.length < MAX_SEMANTIC_LINEAGE) output.push(fingerprint);
+  }
+  return output;
+}
+
 export function createKnowledgeBaseEntry(data: PluginData, id = makeId("base"), now = Date.now()): KnowledgeBaseEntry {
   // These raw legacy payloads exist only to recover the base that underwent
   // migration. Copying them into every duplicated base adds no recovery value
@@ -2195,13 +2471,20 @@ export function createKnowledgeBaseEntry(data: PluginData, id = makeId("base"), 
     delete entryData.migrationBackup;
     delete entryData.v2MigrationBackup;
   }
-  return {
+  const entry: KnowledgeBaseEntry = {
     id: cleanKnowledgeBaseId(id, "Knowledge base"),
     createdAt: now,
     updatedAt: now,
+    semanticRevision: 0,
+    semanticHead: "0000000000000000",
+    semanticHash: "0000000000000000",
+    semanticLineage: [],
     archivedAt: null,
     data: entryData,
   };
+  entry.semanticHash = semanticEntryFingerprint(entry);
+  entry.semanticHead = entry.semanticHash;
+  return entry;
 }
 
 /** Retain one bounded copy of each historical migration payload store-wide. */
@@ -2253,6 +2536,7 @@ export function migrateStore(input: unknown, now = Date.now()): PluginStore {
   }
 
   const value = input as Record<string, unknown>;
+  const sourceStoreVersion = Number(value.version);
   const rawBases = value.bases as unknown[];
   if (rawBases.length === 0 || rawBases.length > MAX_KNOWLEDGE_BASES) {
     throw new Error(`The knowledge-base store must contain between 1 and ${MAX_KNOWLEDGE_BASES} bases.`);
@@ -2275,11 +2559,44 @@ export function migrateStore(input: unknown, now = Date.now()): PluginStore {
     validateLoadedNumber(entry.archivedAt, `Knowledge base ${id} archivedAt`, true);
     const createdAt = cleanTimestamp(entry.createdAt, now);
     const updatedAt = cleanTimestamp(entry.updatedAt, createdAt);
+    const semanticRevision = sourceStoreVersion >= 14
+      ? cleanSemanticRevision(entry.semanticRevision, -1)
+      : 0;
+    if (semanticRevision < 0) throw new Error(`Knowledge base ${id} has an invalid semantic revision.`);
+    const migratedData = migrateDataWithBudget(entry.data, envelopeValidationBudget);
+    let semanticLineage = sourceStoreVersion >= 14
+      ? cleanSemanticLineage(entry.semanticLineage)
+      : [];
     const archivedValue = entry.archivedAt;
     const archivedAt = archivedValue === null || archivedValue === undefined
       ? null
       : cleanTimestamp(archivedValue, now);
-    return { id, createdAt, updatedAt, archivedAt, data: migrateDataWithBudget(entry.data, envelopeValidationBudget) };
+    const fingerprintSource = { createdAt, archivedAt, data: migratedData };
+    const semanticHash = semanticEntryFingerprint(fingerprintSource);
+    const rawSemanticHead = entry.semanticHead;
+    const advertisedSemanticHeadIsValid = sourceStoreVersion >= 14
+      && isSemanticFingerprint(rawSemanticHead);
+    let semanticHead = advertisedSemanticHeadIsValid
+      ? String(rawSemanticHead).toLowerCase()
+      : semanticHash;
+    // Early v14 development builds did not carry `semanticHash`, and a
+    // partially-written or hand-repaired envelope can contain stale causal
+    // metadata. Never trust ancestry unless its advertised payload hash
+    // matches the payload we just parsed. Resetting to a fresh root is
+    // deliberately conservative: later merges can produce a false conflict,
+    // never a false causal win.
+    const impossibleSemanticAncestry = semanticLineage.includes(semanticHead)
+      || (semanticRevision === 0 && semanticLineage.length > 0)
+      || (semanticHead === semanticHash && semanticLineage.length > 0);
+    if (sourceStoreVersion < 14
+      || !advertisedSemanticHeadIsValid
+      || !isSemanticFingerprint(entry.semanticHash)
+      || entry.semanticHash.toLowerCase() !== semanticHash
+      || impossibleSemanticAncestry) {
+      semanticHead = semanticHash;
+      semanticLineage = [];
+    }
+    return { id, createdAt, updatedAt, semanticRevision, semanticHead, semanticHash, semanticLineage, archivedAt, data: migratedData };
   });
   limitStoreMigrationBackups(bases);
   const rawDeletedBaseIds = value.deletedBaseIds;
@@ -3989,6 +4306,181 @@ export function parsePersonalBackup(input: unknown): PersonalBackup {
     layoutSnapshots: cleanSnapshots(value.layoutSnapshots, true, MAX_TRANSFER_SNAPSHOTS),
     portableIndex: cleanPortableIndex(value.portableIndex),
   };
+}
+
+function serializedUtf8Bytes(value: unknown): number {
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) throw new Error("Device-local state is not serializable.");
+  return new TextEncoder().encode(serialized).byteLength;
+}
+
+function strictLocalString(value: unknown, label: string, maxLength: number): string {
+  if (typeof value !== "string" || value.length > maxLength || /[\p{Cc}\p{Cf}]/u.test(value)) {
+    throw new Error(`${label} is malformed.`);
+  }
+  return value;
+}
+
+function strictLocalStringList(input: unknown, label: string, maxCount = MAX_TRANSFER_LIST_ITEMS): string[] {
+  if (!Array.isArray(input) || input.length > maxCount) throw new Error(`${label} is malformed or too large.`);
+  return input.map((value, index) => strictLocalString(value, `${label} entry ${index + 1}`, 4096));
+}
+
+function parseLocalCollapsedLayout(
+  input: unknown,
+  label: string,
+  budget: { structures: number },
+): CollapsedLayoutItemState[] {
+  if (!Array.isArray(input) || input.length > MAX_TRANSFER_COLLECTIONS) {
+    throw new Error(`${label} is malformed or too large.`);
+  }
+  const output: CollapsedLayoutItemState[] = [];
+  for (const [headingIndex, raw] of input.entries()) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${label} heading ${headingIndex + 1} is malformed.`);
+    const value = raw as Record<string, unknown>;
+    const id = cleanKnowledgeBaseId(value.id, `${label} heading ${headingIndex + 1}`);
+    if (typeof value.collapsed !== "boolean" || !Array.isArray(value.subheadings)) {
+      throw new Error(`${label} heading ${headingIndex + 1} is malformed.`);
+    }
+    budget.structures += 1 + value.subheadings.length;
+    if (budget.structures > MAX_TRANSFER_COLLECTIONS) throw new Error("Device-local collapse state is too large.");
+    const subheadings = value.subheadings.map((rawSubheading, subheadingIndex) => {
+      if (!rawSubheading || typeof rawSubheading !== "object" || Array.isArray(rawSubheading)) {
+        throw new Error(`${label} subheading ${subheadingIndex + 1} is malformed.`);
+      }
+      const subheading = rawSubheading as Record<string, unknown>;
+      if (typeof subheading.collapsed !== "boolean") throw new Error(`${label} subheading ${subheadingIndex + 1} is malformed.`);
+      return {
+        id: cleanKnowledgeBaseId(subheading.id, `${label} subheading ${subheadingIndex + 1}`),
+        collapsed: subheading.collapsed,
+      };
+    });
+    output.push({ id, collapsed: value.collapsed, subheadings });
+  }
+  return output;
+}
+
+function parseDeviceHistory(input: unknown, label: string): PersonalSnapshot[] {
+  if (!Array.isArray(input) || input.length > 20) throw new Error(`${label} is malformed or too large.`);
+  const budget: TransferValidationBudget = { references: 0, collectionStructures: 0, snapshots: 0 };
+  for (const [index, raw] of input.entries()) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${label} entry ${index + 1} is malformed.`);
+    const snapshot = raw as Record<string, unknown>;
+    if (typeof snapshot.label !== "string"
+      || !Number.isFinite(Number(snapshot.at))
+      || !Array.isArray(snapshot.collections)
+      || !Array.isArray(snapshot.pinnedPaths)
+      || !Array.isArray(snapshot.nextStudyPaths)
+      || !Array.isArray(snapshot.savedViews)
+      || !snapshot.curriculumVisual
+      || typeof snapshot.curriculumVisual !== "object") {
+      throw new Error(`${label} entry ${index + 1} is malformed.`);
+    }
+    validateRecoverySnapshot(snapshot, `${label} entry ${index + 1}`, budget, 2);
+  }
+  const cleaned = cleanSnapshots(input);
+  if (cleaned.length !== input.length) throw new Error(`${label} could not be parsed without dropping entries.`);
+  return cleaned;
+}
+
+/** Strictly parse one device's state; malformed input is discarded by the caller. */
+export function parseDeviceLocalPluginState(input: unknown): DeviceLocalPluginState {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Device-local state is malformed.");
+  if (serializedUtf8Bytes(input) > MAX_DEVICE_LOCAL_STATE_BYTES) throw new Error("Device-local state is too large.");
+  const value = input as Record<string, unknown>;
+  if (value.version !== DEVICE_LOCAL_STATE_VERSION || !Array.isArray(value.bases) || value.bases.length > MAX_KNOWLEDGE_BASES) {
+    throw new Error("Device-local state has an unsupported or malformed shape.");
+  }
+  const activeBaseId = cleanKnowledgeBaseId(value.activeBaseId, "Device-local active knowledge base");
+  const baseIds = new Set<string>();
+  const budget = { structures: 0 };
+  const bases: DeviceLocalKnowledgeBaseState[] = value.bases.map((raw, index) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`Device-local base ${index + 1} is malformed.`);
+    const base = raw as Record<string, unknown>;
+    const baseId = cleanKnowledgeBaseId(base.baseId, `Device-local base ${index + 1}`);
+    if (baseIds.has(baseId)) throw new Error(`Device-local base ${baseId} is duplicated.`);
+    baseIds.add(baseId);
+    if (!base.view || typeof base.view !== "object" || Array.isArray(base.view)) throw new Error(`Device-local base ${baseId} is malformed.`);
+    const view = base.view as Record<string, unknown>;
+    if (!isMainTab(view.activeTab)) throw new Error(`Device-local base ${baseId} has an invalid active tab.`);
+    const collapsed = view.collapsed as Record<string, unknown> | null;
+    if (!collapsed || typeof collapsed !== "object" || Array.isArray(collapsed)) {
+      throw new Error(`Device-local base ${baseId} has malformed collapse state.`);
+    }
+    if (!Array.isArray(view.libraryLayouts) || view.libraryLayouts.length > MAX_LIBRARIES) {
+      throw new Error(`Device-local base ${baseId} has malformed Library collapse state.`);
+    }
+    const libraryIds = new Set<string>();
+    const libraryLayouts: CollapsedLibraryLayoutState[] = view.libraryLayouts.map((rawLibrary, libraryIndex) => {
+      if (!rawLibrary || typeof rawLibrary !== "object" || Array.isArray(rawLibrary)) {
+        throw new Error(`Device-local base ${baseId} Library ${libraryIndex + 1} is malformed.`);
+      }
+      const library = rawLibrary as Record<string, unknown>;
+      if (!isValidLibraryId(library.libraryId) || libraryIds.has(library.libraryId)) {
+        throw new Error(`Device-local base ${baseId} has an invalid or duplicate Library ID.`);
+      }
+      libraryIds.add(library.libraryId);
+      return {
+        libraryId: library.libraryId,
+        headings: parseLocalCollapsedLayout(library.headings, `Device-local base ${baseId} Library ${library.libraryId}`, budget),
+      };
+    });
+    return {
+      baseId,
+      view: {
+        selectedPath: strictLocalString(view.selectedPath, `Device-local base ${baseId} selected path`, 4096),
+        activeTab: view.activeTab,
+        collapsed: {
+          curriculumDomains: strictLocalStringList(collapsed.curriculumDomains, `Device-local base ${baseId} collapsed domains`),
+          curriculumNodes: strictLocalStringList(collapsed.curriculumNodes, `Device-local base ${baseId} collapsed nodes`),
+          queues: strictLocalStringList(collapsed.queues, `Device-local base ${baseId} collapsed queues`, 1000),
+        },
+        collections: parseLocalCollapsedLayout(view.collections, `Device-local base ${baseId} collections`, budget),
+        libraryLayouts,
+        undoStack: parseDeviceHistory(view.undoStack, `Device-local base ${baseId} Undo history`),
+        redoStack: parseDeviceHistory(view.redoStack, `Device-local base ${baseId} Redo history`),
+      },
+    };
+  });
+  return { version: DEVICE_LOCAL_STATE_VERSION, activeBaseId, bases };
+}
+
+/** Build a bounded localStorage payload, preferring the active base under pressure. */
+export function createDeviceLocalPluginState(store: PluginStore): DeviceLocalPluginState {
+  const available = store.bases.filter((entry) => entry.archivedAt === null);
+  const activeBaseId = available.some((entry) => entry.id === store.activeBaseId)
+    ? store.activeBaseId
+    : available[0]?.id ?? store.bases[0]?.id ?? DEFAULT_KNOWLEDGE_BASE_ID;
+  const state: DeviceLocalPluginState = {
+    version: DEVICE_LOCAL_STATE_VERSION,
+    activeBaseId,
+    bases: store.bases.map((entry) => ({ baseId: entry.id, view: capturePluginViewState(entry.data) })),
+  };
+  if (serializedUtf8Bytes(state) <= MAX_DEVICE_LOCAL_STATE_BYTES) return state;
+
+  for (const base of state.bases) {
+    if (base.baseId === activeBaseId) continue;
+    base.view.undoStack = [];
+    base.view.redoStack = [];
+  }
+  if (serializedUtf8Bytes(state) <= MAX_DEVICE_LOCAL_STATE_BYTES) return state;
+  const active = state.bases.find((base) => base.baseId === activeBaseId);
+  if (active) {
+    active.view.undoStack = [];
+    active.view.redoStack = [];
+  }
+  if (serializedUtf8Bytes(state) <= MAX_DEVICE_LOCAL_STATE_BYTES) return state;
+
+  state.bases = active ? [active] : [];
+  if (serializedUtf8Bytes(state) <= MAX_DEVICE_LOCAL_STATE_BYTES) return state;
+  if (active) {
+    active.view.selectedPath = "";
+    active.view.collapsed = structuredClone(DEFAULT_DATA.collapsed);
+    active.view.collections = [];
+    active.view.libraryLayouts = [];
+  }
+  if (serializedUtf8Bytes(state) > MAX_DEVICE_LOCAL_STATE_BYTES) throw new Error("Device-local state could not be bounded safely.");
+  return state;
 }
 
 export interface PersonalBackupVaultCheck {
