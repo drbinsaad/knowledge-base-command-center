@@ -871,3 +871,39 @@ test("a decomposed source name is measured in the composed form the bundle actua
   );
   assert.doesNotThrow(() => parsePortfolioExport(JSON.parse(serializePortfolioExport(bundle)) as unknown));
 });
+
+test("a composition-only Library name difference is not previewed as a conflict", () => {
+  // Incoming names arrive NFC from the portable parser while a vault-stored
+  // name keeps whatever composition it was created with, so the two can differ
+  // in bytes while rendering identically. Previewing that as a conflict showed
+  // the reader the same name twice and invited them to cancel a safe import.
+  const source = entry("base-source", "Source");
+  addPortableFixtures(source.data, "compose");
+  source.data.portableIndex.libraries[0].name = "Caf\u00E9 refs";
+  const bundle = bundleFor([source], "vault-local");
+
+  const destination = entry("base-destination", "Destination");
+  destination.data.portableIndex = structuredClone(source.data.portableIndex);
+  destination.data.portableIndex.libraries[0].name = "Cafe\u0301 refs";
+  const mapping: PortfolioImportMapping = {
+    sourceBaseId: source.id,
+    destination: { kind: "existing", baseId: destination.id },
+    mode: "merge",
+    selection: selection({ index: true, libraryIds: ["library-compose"] }),
+  };
+
+  const composed = createPortfolioImportPlan(storeWith([destination], "vault-local"), bundle, [mapping], { now: 1_700_000_000_500 });
+  assert.deepEqual(
+    composed.diff.conflicts.filter((line) => line.includes("Library ID")),
+    [],
+    "a decomposed local name and its composed incoming twin are one name",
+  );
+
+  const renamed = storeWith([destination], "vault-local");
+  renamed.bases[0].data.portableIndex.libraries[0].name = "Archive refs";
+  const genuine = createPortfolioImportPlan(renamed, bundle, [mapping], { now: 1_700_000_000_501 });
+  assert.ok(
+    genuine.diff.conflicts.some((line) => line.includes("Library ID library-compose")),
+    "a real rename is still previewed as a conflict",
+  );
+});

@@ -750,7 +750,11 @@ function conflictPreview(
   const localLibraries = new Map(before.portableIndex.libraries.map((library) => [library.id, library]));
   for (const library of (index.libraries ?? []).filter((candidate) => selected.libraryIds.includes(candidate.id))) {
     const local = localLibraries.get(library.id);
-    if (local && (local.name !== library.name || local.sourceKind !== library.sourceKind)) {
+    // Incoming names arrive NFC from the portable parser while local names keep
+    // whatever composition the vault stored, so compare them the way the
+    // heading and subject checks above do. A composition-only difference is
+    // invisible to the reader and must not be previewed as a conflict.
+    if (local && (local.name.normalize("NFC") !== library.name.normalize("NFC") || local.sourceKind !== library.sourceKind)) {
       conflicts.push(`${destinationName}: Library ID ${library.id} is local “${local.name}” and incoming “${library.name}”.`);
     }
   }
@@ -836,7 +840,9 @@ function uniqueBaseName(store: PluginStore, requested: string, reserved: Set<str
   const root = safeName(requested, "Destination knowledge-base name");
   let candidate = root;
   let suffix = 2;
-  while (used.has(candidate.toLowerCase())) {
+  // Probe the set with the same key the set was built from rather than relying
+  // on safeName having already trimmed and composed the candidate.
+  while (used.has(normalizedNameKey(candidate))) {
     const tag = ` (${suffix})`;
     candidate = `${root.slice(0, Math.max(1, 100 - tag.length)).trim()}${tag}`;
     suffix += 1;
