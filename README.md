@@ -15,45 +15,23 @@ Point the plugin at a folder and it builds a searchable visual index of the note
 
 **Quick links:** [Getting started](docs/GETTING_STARTED.md) · [User guide](docs/USER_GUIDE.md) · [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Apple Shortcuts](docs/APPLE_SHORTCUT.md) · [Templates](templates/README.md) · [Support](SUPPORT.md)
 
-## Screenshots
+## How it works
 
-Two real, sanitized captures from version 0.10.0:
+![Diagram: an unchanged vault of Markdown notes on the left, an arrow labelled “reads paths and frontmatter only”, and the plugin’s own data on the right holding the index, nested collections, libraries and queues](docs/assets/how-it-works.svg)
+
+_Diagram, not a screenshot._ You point the plugin at a folder; it reads note paths and frontmatter and builds structure in **its own data**. Collections can nest up to five levels, notes can sit in several places at once, and none of it touches your Markdown. Uninstall and every file is exactly where you left it.
+
+### In the app
 
 ![Knowledge Base Command Center desktop view showing the Medications Library](docs/assets/workspace-desktop.png)
 
-_Real, sanitized desktop capture. It shows the optional ENT preset's Medications Library; “No note” rows are portable placeholders, not missing application data._
+_Real, sanitized desktop capture from 0.10.0. It shows the optional ENT preset's Medications Library; “No note” rows are portable placeholders, not missing application data._
 
 <p align="center">
   <img src="docs/assets/search-mobile.png" alt="Knowledge Base Command Center search results above the iPhone keyboard" width="380">
 </p>
 
 _Real iPhone portrait capture showing one search state with compact result rows above the software keyboard. It is not evidence that the complete physical-device matrix passed; see the [0.10.0 iPhone evidence note](docs/release-evidence/0.10.0-iphone.md)._
-
-### Gallery — not captured yet
-
-A fuller gallery is planned. Each image below is real-capture-only: it requires the plugin running in Obsidian and will not be substituted with a mockup. The markup is already in this file, commented out, so the page never shows a broken image. Capture instructions and the exact requirements for each shot are in [`docs/assets/README.md`](docs/assets/README.md#capture-guide-for-the-project-page).
-
-| Planned file | Shows |
-| --- | --- |
-| `command-center-desktop.png` | The main Command Center view on a wide desktop leaf, with a populated index |
-| `collections-nested.png` | The Collections tab with nested subheadings three levels deep |
-| `libraries.png` | A custom Library with headings and placed records |
-| `quick-entry.png` | The Quick entry hub |
-| `manage-index.png` | Index Manager membership and diagnostics tabs |
-| `sync-recovery.png` | The Sync & recovery center |
-| `mobile-iphone.png` | The compact layout on iPhone |
-| `create-note.png` | The Create note form with its destination path preview |
-
-<!-- Uncomment each line below only once its PNG exists in docs/assets/. See docs/assets/README.md.
-<img src="docs/assets/command-center-desktop.png" alt="The Command Center on a wide desktop leaf with a populated knowledge index">
-<img src="docs/assets/collections-nested.png" alt="The Collections tab showing subheadings nested three levels deep">
-<img src="docs/assets/libraries.png" alt="A custom Library with headings and placed records">
-<img src="docs/assets/quick-entry.png" alt="The Quick entry hub listing its focused capture actions">
-<img src="docs/assets/manage-index.png" alt="Index Manager showing indexed membership and its tab row">
-<img src="docs/assets/sync-recovery.png" alt="The Sync and recovery center showing device-local recovery facts">
-<img src="docs/assets/mobile-iphone.png" alt="The compact Command Center layout on iPhone">
-<img src="docs/assets/create-note.png" alt="The Create note form with template selection and destination path preview">
--->
 
 ## Install
 
