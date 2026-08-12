@@ -355,7 +355,8 @@ function cleanEntryText(value: string): string[] {
   while (lines.length > 0 && lines[0]?.trim() === "") lines.shift();
   while (lines.length > 0 && lines[lines.length - 1]?.trim() === "") lines.pop();
   if (lines.length === 0 || lines.every((line) => line.trim() === "")) fail("the follow-up text is empty.");
-  return lines.map((line) => line.trimEnd());
+  // String.prototype.trimEnd is ES2019; this build targets ES2018.
+  return lines.map((line) => line.replace(/\s+$/u, ""));
 }
 
 function renderEntry(

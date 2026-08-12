@@ -15,6 +15,7 @@ import {
   validateProposalFolderPath,
   validateWritableFolderPath,
   VaultRecord,
+  objectFromEntries,
 } from "./model";
 import {
   clearGuardedTimer,
@@ -821,7 +822,7 @@ export class IndexManagerModal extends Modal {
       };
       const importedProfileCount = Object.keys(importedSettings.libraryNoteProfiles).length;
       const destinationLibraryIds = new Set(this.plugin.getLibraries(true).map((library) => library.id));
-      importedSettings.libraryNoteProfiles = Object.fromEntries(
+      importedSettings.libraryNoteProfiles = objectFromEntries(
         Object.entries(importedSettings.libraryNoteProfiles)
           .filter(([libraryId]) => destinationLibraryIds.has(libraryId))
           .map(([libraryId, profile]) => [libraryId, { ...profile }]),

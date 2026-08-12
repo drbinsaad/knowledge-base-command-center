@@ -20,6 +20,7 @@ import {
   type OpenNoteBehavior,
   type KnowledgeBaseEntry,
   type PluginData,
+  objectFromEntries,
 } from "./model";
 import { createOpenedBaseGuard, StringPickerModal, TextPromptModal, VaultFilePickerModal } from "./modals";
 
@@ -381,7 +382,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
           (row) => {
             row.settingEl.addClass("ent-cc-base-setting");
             row.addDropdown((dropdown) => {
-              const options = Object.fromEntries(knowledgeBases.map((entry) => [entry.id, entry.data.settings.workspaceName]));
+              const options = objectFromEntries(knowledgeBases.map((entry) => [entry.id, entry.data.settings.workspaceName] as const));
               dropdown.selectEl.addClass("ent-cc-base-setting-select");
               dropdown
                 .addOptions(options)

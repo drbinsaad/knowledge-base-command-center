@@ -821,6 +821,17 @@ export function makeId(prefix: string): string {
  * form. Independent copies that used `{}` made the same store canonicalize two
  * different ways depending on which module asked.
  */
+/**
+ * Object.fromEntries is ES2019. This build targets ES2018 for older mobile web
+ * views, and esbuild downlevels syntax but never library methods, so the newer
+ * call would reach those devices unpolyfilled.
+ */
+export function objectFromEntries<T>(entries: Iterable<readonly [string, T]>): Record<string, T> {
+  const output: Record<string, T> = {};
+  for (const [key, value] of entries) output[key] = value;
+  return output;
+}
+
 export function canonicalJsonValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map((item) => canonicalJsonValue(item) ?? null);
   if (!value || typeof value !== "object") return value;
