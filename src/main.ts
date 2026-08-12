@@ -59,9 +59,12 @@ import {
   LibraryKind,
   libraryTabId,
   subjectLibraryId,
+  childSubheadings,
   LayoutHeading,
+  LayoutSubheading,
   limitSnapshotStack,
   makeId,
+  MAX_LAYOUT_DEPTH,
   MAX_DELETED_KNOWLEDGE_BASE_IDS,
   MAX_KNOWLEDGE_BASES,
   MAX_LIBRARIES,
@@ -262,8 +265,55 @@ export interface KnowledgeBaseSearchOptions {
 
 export interface CatalogPlacementTarget {
   headingId?: string;
+  /**
+   * Layout-global unique node id of a subheading at any depth under the
+   * heading. Deep targets keep the same flat shape: the owning top-level
+   * heading is resolved by recursive containment when headingId is absent.
+   */
   subheadingId?: string;
   headingTitle?: string;
+}
+
+/** Visit every layout node — headings and nested subheadings at all depths. */
+function forEachLayoutNode(
+  headings: readonly LayoutHeading[],
+  visit: (node: LayoutHeading | LayoutSubheading) => void,
+): void {
+  const visitNode = (node: LayoutHeading | LayoutSubheading): void => {
+    visit(node);
+    for (const child of childSubheadings(node)) visitNode(child);
+  };
+  for (const heading of headings) visitNode(heading);
+}
+
+/** Depth-first lookup of a nested subheading; node ids are layout-global unique. */
+function findSubheadingAtAnyDepth(nodes: readonly LayoutSubheading[], id: string): LayoutSubheading | undefined {
+  for (const node of nodes) {
+    if (node.id === id) return node;
+    const nested = findSubheadingAtAnyDepth(childSubheadings(node), id);
+    if (nested) return nested;
+  }
+  return undefined;
+}
+
+/**
+ * Ancestor chain (outermost first, target last) of a nested subheading, or
+ * null when the id is not present at any depth.
+ */
+function findSubheadingChain(nodes: readonly LayoutSubheading[], id: string): LayoutSubheading[] | null {
+  for (const node of nodes) {
+    if (node.id === id) return [node];
+    const nested = findSubheadingChain(childSubheadings(node), id);
+    if (nested) return [node, ...nested];
+  }
+  return null;
+}
+
+/** Whether any node at any depth of the layout carries the given id. */
+function layoutNodeIdExists(headings: readonly LayoutHeading[], id: string): boolean {
+  let exists = false;
+  forEachLayoutNode(headings, (node) => { exists ||= node.id === id; });
+  return exists;
 }
 
 export interface QuickEntryPlaceholderInput {
@@ -3589,12 +3639,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const cached = this.referencedPathsCacheByBase.get(baseId);
     if (cached) return cached;
     const paths = new Set([...data.manualIndexPaths, ...data.pinnedPaths, ...data.nextStudyPaths]);
-    for (const heading of data.collections) {
-      for (const path of heading.subjects) paths.add(path);
-      for (const subheading of heading.subheadings) {
-        for (const path of subheading.subjects) paths.add(path);
-      }
-    }
+    forEachLayoutNode(data.collections, (node) => {
+      for (const path of node.subjects) paths.add(path);
+    });
     for (const subject of data.portableIndex.subjects) {
       const path = data.portableIndex.resolvedPathBySubjectId[subject.id];
       // A resolved library identity must stay discoverable even though it is
@@ -3871,16 +3918,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const libraryHeadingKey = (libraryId: string, subjectId: string): string => `${libraryId}\0${subjectId}`;
     for (const library of libraries) {
       for (const heading of data.portableIndex.libraryLayouts?.[library.id] ?? []) {
-        for (const subjectId of heading.subjects) {
-          const key = libraryHeadingKey(library.id, subjectId);
-          if (!portableLibraryHeadingBySubject.has(key)) portableLibraryHeadingBySubject.set(key, heading.title);
-        }
-        for (const subheading of heading.subheadings) {
-          for (const subjectId of subheading.subjects) {
+        // Subjects nested at any depth still map to their OUTER heading title;
+        // records deliberately surface the top-level heading, not the leaf.
+        forEachLayoutNode([heading], (node) => {
+          for (const subjectId of node.subjects) {
             const key = libraryHeadingKey(library.id, subjectId);
             if (!portableLibraryHeadingBySubject.has(key)) portableLibraryHeadingBySubject.set(key, heading.title);
           }
-        }
+        });
       }
     }
     for (const [subjectId, path] of Object.entries(data.portableIndex.resolvedPathBySubjectId)) {
@@ -4114,12 +4159,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private removePortableSubjectsFromLibraryLayouts(subjectIds: ReadonlySet<string>): void {
     if (subjectIds.size === 0) return;
     for (const layout of Object.values(this.data.portableIndex.libraryLayouts ?? {})) {
-      for (const heading of layout) {
-        heading.subjects = heading.subjects.filter((candidate) => !subjectIds.has(candidate));
-        for (const subheading of heading.subheadings) {
-          subheading.subjects = subheading.subjects.filter((candidate) => !subjectIds.has(candidate));
-        }
-      }
+      forEachLayoutNode(layout, (node) => {
+        node.subjects = node.subjects.filter((candidate) => !subjectIds.has(candidate));
+      });
     }
   }
 
@@ -4131,35 +4173,34 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (oldSubjectId === subjectId) return;
     const subject = this.getPortableSubject(subjectId);
     const targetLibraryId = subject ? subjectLibraryId(subject) : null;
-    const targetAlreadyContainsSurvivor = targetLibraryId !== null
-      && (this.data.portableIndex.libraryLayouts?.[targetLibraryId] ?? []).some((heading) => (
-        heading.subjects.includes(subjectId)
-        || heading.subheadings.some((subheading) => subheading.subjects.includes(subjectId))
-      ));
+    let survivorAlreadyInTarget = false;
+    if (targetLibraryId !== null) {
+      forEachLayoutNode(this.data.portableIndex.libraryLayouts?.[targetLibraryId] ?? [], (node) => {
+        survivorAlreadyInTarget ||= node.subjects.includes(subjectId);
+      });
+    }
+    const targetAlreadyContainsSurvivor = survivorAlreadyInTarget;
     for (const [libraryId, layout] of Object.entries(this.data.portableIndex.libraryLayouts ?? {})) {
       let survivorPlaced = false;
-      for (const heading of layout) {
-        const replace = (subjects: string[]): string[] => {
-          const next: string[] = [];
-          for (const candidate of subjects) {
-            if (libraryId !== targetLibraryId) {
-              if (candidate !== oldSubjectId && candidate !== subjectId) next.push(candidate);
-              continue;
-            }
-            if (targetAlreadyContainsSurvivor && candidate === oldSubjectId) continue;
-            if (candidate !== oldSubjectId && candidate !== subjectId) {
-              next.push(candidate);
-              continue;
-            }
-            if (survivorPlaced) continue;
-            survivorPlaced = true;
-            next.push(subjectId);
+      const replace = (subjects: string[]): string[] => {
+        const next: string[] = [];
+        for (const candidate of subjects) {
+          if (libraryId !== targetLibraryId) {
+            if (candidate !== oldSubjectId && candidate !== subjectId) next.push(candidate);
+            continue;
           }
-          return next;
-        };
-        heading.subjects = replace(heading.subjects);
-        for (const subheading of heading.subheadings) subheading.subjects = replace(subheading.subjects);
-      }
+          if (targetAlreadyContainsSurvivor && candidate === oldSubjectId) continue;
+          if (candidate !== oldSubjectId && candidate !== subjectId) {
+            next.push(candidate);
+            continue;
+          }
+          if (survivorPlaced) continue;
+          survivorPlaced = true;
+          next.push(subjectId);
+        }
+        return next;
+      };
+      forEachLayoutNode(layout, (node) => { node.subjects = replace(node.subjects); });
     }
   }
 
@@ -4247,17 +4288,29 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return id;
   }
 
-  async createQuickEntryCollectionSubheading(headingId: string, title: string): Promise<string> {
+  /**
+   * Create a collection subheading under the heading itself or, when
+   * parentSubheadingId names a nested node at any depth, under that node.
+   * Creation respects MAX_LAYOUT_DEPTH counting the heading as level 1.
+   */
+  async createQuickEntryCollectionSubheading(headingId: string, title: string, parentSubheadingId?: string): Promise<string> {
     const cleanTitle = this.cleanQuickEntryLabel(title, "collection subheading");
     let id = makeId("subheading");
-    while (this.data.collections.some((heading) => heading.subheadings.some((subheading) => subheading.id === id))) {
-      id = makeId("subheading");
-    }
+    while (layoutNodeIdExists(this.data.collections, id)) id = makeId("subheading");
     await this.mutate(`Create collection subheading “${cleanTitle}”`, () => {
       const heading = this.data.collections.find((candidate) => candidate.id === headingId);
       if (!heading) throw new Error("That collection heading is no longer available.");
-      heading.subheadings.push({ id, title: cleanTitle, collapsed: false, subjects: [] });
+      const chain = parentSubheadingId ? findSubheadingChain(heading.subheadings, parentSubheadingId) : null;
+      if (parentSubheadingId && !chain) throw new Error("That parent subheading is no longer available.");
+      // The heading is level 1, so a parent chain of length n sits at depth n + 1.
+      if (chain && chain.length + 2 > MAX_LAYOUT_DEPTH) {
+        throw new Error(`That subheading is already at the maximum nesting depth (${MAX_LAYOUT_DEPTH} levels including the heading), so it cannot contain new subheadings.`);
+      }
+      const parent = chain?.[chain.length - 1];
+      if (parent) (parent.subheadings ??= []).push({ id, title: cleanTitle, collapsed: false, subjects: [] });
+      else heading.subheadings.push({ id, title: cleanTitle, collapsed: false, subjects: [] });
       heading.collapsed = false;
+      for (const ancestor of chain ?? []) ancestor.collapsed = false;
       this.data.activeTab = "collections";
     }, { includeActiveTab: true, requireUndo: true });
     return id;
@@ -4283,20 +4336,32 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return id;
   }
 
-  async createQuickEntryLibrarySubheading(libraryId: string, headingId: string, title: string): Promise<string> {
+  /**
+   * Create a library subheading under the heading itself or, when
+   * parentSubheadingId names a nested node at any depth, under that node.
+   * Creation respects MAX_LAYOUT_DEPTH counting the heading as level 1.
+   */
+  async createQuickEntryLibrarySubheading(libraryId: string, headingId: string, title: string, parentSubheadingId?: string): Promise<string> {
     const library = this.requireLibrary(libraryId, false);
     const cleanTitle = this.cleanQuickEntryLabel(title, "library subheading");
     const layout = this.data.portableIndex.libraryLayouts[libraryId] ??= [];
     let id = makeId(`library-${libraryId}-subheading`);
-    while (layout.some((heading) => heading.subheadings.some((subheading) => subheading.id === id))) {
-      id = makeId(`library-${libraryId}-subheading`);
-    }
+    while (layoutNodeIdExists(layout, id)) id = makeId(`library-${libraryId}-subheading`);
     await this.mutate(`Create ${library.singularName.toLocaleLowerCase()} subheading “${cleanTitle}”`, () => {
       this.requireLibrary(libraryId, false);
       const heading = (this.data.portableIndex.libraryLayouts[libraryId] ?? []).find((candidate) => candidate.id === headingId);
       if (!heading) throw new Error("That library heading is no longer available.");
-      heading.subheadings.push({ id, title: cleanTitle, collapsed: false, subjects: [] });
+      const chain = parentSubheadingId ? findSubheadingChain(heading.subheadings, parentSubheadingId) : null;
+      if (parentSubheadingId && !chain) throw new Error("That parent subheading is no longer available.");
+      // The heading is level 1, so a parent chain of length n sits at depth n + 1.
+      if (chain && chain.length + 2 > MAX_LAYOUT_DEPTH) {
+        throw new Error(`That subheading is already at the maximum nesting depth (${MAX_LAYOUT_DEPTH} levels including the heading), so it cannot contain new subheadings.`);
+      }
+      const parent = chain?.[chain.length - 1];
+      if (parent) (parent.subheadings ??= []).push({ id, title: cleanTitle, collapsed: false, subjects: [] });
+      else heading.subheadings.push({ id, title: cleanTitle, collapsed: false, subjects: [] });
       heading.collapsed = false;
+      for (const ancestor of chain ?? []) ancestor.collapsed = false;
       this.data.activeTab = libraryTabId(libraryId);
     }, { includePortableIndex: true, includeActiveTab: true, requireUndo: true });
     return id;
@@ -4346,7 +4411,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       : undefined;
     if (target.headingId && !heading) throw new Error("That library heading is no longer available.");
     if (!heading && target.subheadingId) {
-      heading = layout.find((candidate) => candidate.subheadings.some((subheading) => subheading.id === target.subheadingId));
+      // The owning top-level heading of a deep subheading target is resolved
+      // by recursive containment; node ids are layout-global unique.
+      heading = layout.find((candidate) => Boolean(findSubheadingAtAnyDepth(candidate.subheadings, target.subheadingId ?? "")));
       if (!heading) throw new Error("That library subheading is no longer available.");
     }
     const requestedTitle = target.headingTitle?.trim() || library.name;
@@ -4356,11 +4423,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
     if (!heading) {
       let id = makeId(`${libraryId}-heading`);
-      while (layout.some((candidate) => candidate.id === id)) id = makeId(`${libraryId}-heading`);
+      while (layoutNodeIdExists(layout, id)) id = makeId(`${libraryId}-heading`);
       heading = { id, title: requestedTitle, collapsed: false, subjects: [], subheadings: [] };
       layout.push(heading);
     }
-    if (target.subheadingId && !heading.subheadings.some((subheading) => subheading.id === target.subheadingId)) {
+    if (target.subheadingId && !findSubheadingAtAnyDepth(heading.subheadings, target.subheadingId)) {
       throw new Error("That library subheading does not belong to the selected heading.");
     }
     return heading;
@@ -4408,7 +4475,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.removePortableSubjectFromLibraryLayouts(subjectId);
     const heading = this.ensureLibraryHeading(libraryId, target);
     const subheading = target.subheadingId
-      ? heading.subheadings.find((candidate) => candidate.id === target.subheadingId)
+      ? findSubheadingAtAnyDepth(heading.subheadings, target.subheadingId)
       : undefined;
     if (target.subheadingId && !subheading) throw new Error("That library subheading is no longer available.");
     (subheading?.subjects ?? heading.subjects).push(subjectId);
@@ -4752,10 +4819,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   private dedupeActiveOrganizationPaths(): void {
     const unique = (paths: string[]): string[] => [...new Set(paths)];
-    for (const heading of this.data.collections) {
-      heading.subjects = unique(heading.subjects);
-      for (const subheading of heading.subheadings) subheading.subjects = unique(subheading.subjects);
-    }
+    forEachLayoutNode(this.data.collections, (node) => { node.subjects = unique(node.subjects); });
     this.data.pinnedPaths = unique(this.data.pinnedPaths);
     this.data.nextStudyPaths = unique(this.data.nextStudyPaths);
     this.data.manualIndexPaths = unique(this.data.manualIndexPaths);
@@ -5033,10 +5097,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.data.excludedIndexPaths = uniqueExisting(this.data.excludedIndexPaths).filter((path) => !manual.has(path));
       this.data.pinnedPaths = uniqueExisting(this.data.pinnedPaths);
       this.data.nextStudyPaths = uniqueExisting(this.data.nextStudyPaths);
-      for (const heading of this.data.collections) {
-        heading.subjects = uniqueExisting(heading.subjects);
-        for (const subheading of heading.subheadings) subheading.subjects = uniqueExisting(subheading.subjects);
-      }
+      forEachLayoutNode(this.data.collections, (node) => { node.subjects = uniqueExisting(node.subjects); });
       const excluded = new Set(this.data.excludedIndexPaths);
       for (const path of Object.keys(this.data.indexGroupByPath)) {
         if (!existing.has(path) || (!indexed.has(path) && !excluded.has(path))) delete this.data.indexGroupByPath[path];
@@ -5139,14 +5200,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.data.indexGroupOrder = groupOrder;
       semanticChanged = true;
     }
-    for (const heading of this.data.collections) {
-      const next = unique(heading.subjects);
-      if (next.length !== heading.subjects.length) { heading.subjects = next; semanticChanged = true; }
-      for (const subheading of heading.subheadings) {
-        const subNext = unique(subheading.subjects);
-        if (subNext.length !== subheading.subjects.length) { subheading.subjects = subNext; semanticChanged = true; }
-      }
-    }
+    forEachLayoutNode(this.data.collections, (node) => {
+      const next = unique(node.subjects);
+      if (next.length !== node.subjects.length) { node.subjects = next; semanticChanged = true; }
+    });
     const pins = unique(this.data.pinnedPaths);
     const nextStudy = unique(this.data.nextStudyPaths);
     if (pins.length !== this.data.pinnedPaths.length) { this.data.pinnedPaths = pins; semanticChanged = true; }
@@ -6134,9 +6191,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   countMemberships(path: string): number {
-    return this.data.collections.reduce((total, heading) => total
-      + Number(heading.subjects.includes(path))
-      + heading.subheadings.reduce((sum, subheading) => sum + Number(subheading.subjects.includes(path)), 0), 0);
+    let total = 0;
+    forEachLayoutNode(this.data.collections, (node) => { total += Number(node.subjects.includes(path)); });
+    return total;
   }
 
   private indexGroupSortKey(

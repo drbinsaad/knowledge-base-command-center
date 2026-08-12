@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  applyPluginViewState,
   applyTemplateTokens,
   applyCanonicalFrontmatter,
   asUnknownRecord,
@@ -14,7 +15,10 @@ import {
   canonicalHierarchyIssue,
   canonicalPath,
   canonicalPathInputsUnchanged,
+  capturePluginViewState,
+  childSubheadings,
   cloneCollections,
+  countHeading,
   cleanPortableIndex,
   BUILTIN_LIBRARY_DEFINITIONS,
   BUILTIN_LIBRARY_IDS,
@@ -52,7 +56,9 @@ import {
   MAX_DELETED_KNOWLEDGE_BASE_IDS,
   MAX_MIGRATION_BACKUP_BYTES,
   MAX_DEVICE_LOCAL_STATE_BYTES,
+  MAX_LAYOUT_DEPTH,
   MAX_LIBRARIES,
+  MAX_TRANSFER_COLLECTIONS,
   MAX_TRANSFER_LIST_ITEMS,
   MAX_TRANSFER_SNAPSHOTS,
   MAX_TRANSFER_TEXT_LENGTH,
@@ -104,6 +110,7 @@ import {
   visualPlacementPathSet,
   type LibraryDefinition,
   type LayoutHeading,
+  type LayoutSubheading,
   type VaultRecord,
 } from "../src/model.ts";
 import {
@@ -122,6 +129,7 @@ import {
   serializePortableExport,
   summarizePortableExport,
   synchronizePortableRegistry,
+  type PortableCollectionSubheadingV1,
   type PortableExportSelection,
   type PortableExportV1,
 } from "../src/portability.ts";
@@ -2087,8 +2095,8 @@ test("organization backup round-trips without clinical content", () => {
   }];
   const backup = createPersonalBackup(data, "2026-08-07T00:00:00.000Z", "vault-ent-main", "base-ent", "ENT");
   const parsed = parsePersonalBackup(JSON.parse(JSON.stringify(backup)) as unknown);
-  assert.equal(backup.version, 9);
-  assert.equal(parsed.version, 9);
+  assert.equal(backup.version, 10);
+  assert.equal(parsed.version, 10);
   assert.equal(parsed.sourceVaultId, "vault-ent-main");
   assert.equal(parsed.sourceBaseId, "base-ent");
   assert.equal(parsed.sourceBaseName, "ENT");
@@ -2108,7 +2116,7 @@ test("organization backup round-trips without clinical content", () => {
   const versionEight = structuredClone(backup) as unknown as { version: number };
   versionEight.version = 8;
   const migratedVersionEight = parsePersonalBackup(versionEight);
-  assert.equal(migratedVersionEight.version, 9);
+  assert.equal(migratedVersionEight.version, 10);
   assert.equal(migratedVersionEight.portableIndex.libraries.some((library) => library.id === "library-reading"), true);
   assert.deepEqual(migratedVersionEight.portableIndex.libraryLayouts["library-reading"], data.portableIndex.libraryLayouts["library-reading"]);
   assert.equal("settings" in parsed, false);
@@ -2126,7 +2134,7 @@ test("version 1 organization backups remain readable but carry no trusted vault 
     curriculumVisual: { parentByPath: {}, orderByContainer: {} },
     layoutSnapshots: [],
   });
-  assert.equal(parsed.version, 9);
+  assert.equal(parsed.version, 10);
   assert.equal(parsed.sourceVaultId, "");
   assert.equal(parsed.sourceBaseId, "");
   assert.equal(parsed.sourceWorkspaceMode, "");
@@ -5216,7 +5224,7 @@ test("unchanged canonical path inputs preserve a legacy filename after sanitizat
   assert.equal(canonicalPathInputsUnchanged(legacy, { ...unchanged, title: "VPI updated" }), false);
 });
 
-test("portable v4 declares every selected library while legacy v1 packages remain readable", () => {
+test("portable v5 declares every selected library while legacy v1 packages remain readable", () => {
   const source = migrateData(null);
   const medication = record({
     path: "Source/Medications/Salipax.md",
@@ -5233,8 +5241,8 @@ test("portable v4 declares every selected library while legacy v1 packages remai
     "2026-08-08T00:00:00.000Z",
   );
 
-  assert.equal(current.version, 4);
-  assert.equal(current.components.index?.version, 4);
+  assert.equal(current.version, 5);
+  assert.equal(current.components.index?.version, 5);
   assert.deepEqual(current.components.index?.includedSections, {
     index: false,
     libraryIds: ["medication"],
@@ -6576,4 +6584,1091 @@ test("device-local bounding retains deterministic newest history suffixes", () =
     const source = store.bases.find((entry) => entry.id === base.baseId)?.data.undoStack.map((snapshot) => snapshot.label) ?? [];
     assert.deepEqual(labels, source.slice(source.length - labels.length), `${base.baseId} retains only a newest suffix`);
   }
+});
+
+interface RawLayoutNode {
+  id?: string;
+  title: string;
+  collapsed?: boolean;
+  subjects?: string[];
+  subheadings?: RawLayoutNode[];
+}
+
+/** Build one linear heading chain: level 1 is the heading, deeper levels nest. */
+function nestedLayoutChain(
+  levels: number,
+  nodeAt: (level: number) => Partial<RawLayoutNode> = () => ({}),
+): RawLayoutNode {
+  let node: RawLayoutNode | null = null;
+  for (let level = levels; level >= 1; level -= 1) {
+    node = {
+      id: `chain-${level}`,
+      title: `Chain level ${level}`,
+      collapsed: false,
+      subjects: [],
+      ...(node ? { subheadings: [node] } : {}),
+      ...nodeAt(level),
+    };
+  }
+  return node!;
+}
+
+/** Walk the first-child spine; depth 1 is the heading itself. */
+function subheadingAt(heading: LayoutHeading, depth: number): LayoutHeading | LayoutSubheading {
+  let node: LayoutHeading | LayoutSubheading = heading;
+  for (let level = 1; level < depth; level += 1) {
+    const child: LayoutSubheading | undefined = childSubheadings(node)[0];
+    assert.ok(child, `expected a subheading at depth ${level + 1}`);
+    node = child;
+  }
+  return node;
+}
+
+function collectLayoutIds(nodes: readonly (LayoutHeading | LayoutSubheading)[]): string[] {
+  return nodes.flatMap((node) => [node.id, ...collectLayoutIds(childSubheadings(node))]);
+}
+
+test("cleanLayout round-trips five nested levels with stable IDs and a canonical leaf shape", () => {
+  const input = nestedLayoutChain(MAX_LAYOUT_DEPTH, (level) => ({
+    subjects: [`Knowledge/Level ${level}.md`],
+    collapsed: level % 2 === 1,
+  }));
+  const first = migrateData({ version: DATA_VERSION, collections: [input] });
+  const heading = first.collections[0];
+  assert.ok(heading);
+  for (let depth = 1; depth <= MAX_LAYOUT_DEPTH; depth += 1) {
+    const node = subheadingAt(heading, depth);
+    assert.equal(node.id, `chain-${depth}`);
+    assert.equal(node.title, `Chain level ${depth}`);
+    assert.deepEqual(node.subjects, [`Knowledge/Level ${depth}.md`]);
+    assert.equal(node.collapsed, depth % 2 === 1);
+  }
+  const leaf = subheadingAt(heading, MAX_LAYOUT_DEPTH);
+  assert.deepEqual(childSubheadings(leaf), []);
+  assert.equal("subheadings" in leaf, false, "leaf subheadings keep the flat byte shape");
+  assert.equal(countHeading(heading), MAX_LAYOUT_DEPTH, "every nested level contributes to the heading count");
+  const second = migrateData({ version: DATA_VERSION, collections: structuredClone(first.collections) });
+  assert.deepEqual(second.collections, first.collections, "cleaning nested layouts is idempotent");
+  const clone = cloneCollections(first.collections);
+  assert.deepEqual(clone, first.collections, "deep clones preserve the exact canonical shape");
+  (subheadingAt(clone[0], MAX_LAYOUT_DEPTH)).subjects.push("Knowledge/Mutated.md");
+  assert.deepEqual(subheadingAt(heading, MAX_LAYOUT_DEPTH).subjects, [`Knowledge/Level ${MAX_LAYOUT_DEPTH}.md`], "clones stay independent at depth");
+  assert.deepEqual(childSubheadings({}), [], "absent nested arrays read as empty");
+});
+
+test("subjects nested beyond MAX_LAYOUT_DEPTH merge deduped into the nearest allowed ancestor", () => {
+  const input = nestedLayoutChain(7, (level) => ({
+    subjects: level === 5 ? ["Knowledge/L5.md", "Knowledge/Shared.md"]
+      : level === 6 ? ["Knowledge/L6.md", "Knowledge/Shared.md"]
+        : level === 7 ? ["Knowledge/L7.md", "Knowledge/L6.md"]
+          : [],
+  }));
+  const data = migrateData({ version: DATA_VERSION, collections: [input] });
+  const level5 = subheadingAt(data.collections[0], 5);
+  assert.deepEqual(
+    level5.subjects,
+    ["Knowledge/L5.md", "Knowledge/Shared.md", "Knowledge/L6.md", "Knowledge/L7.md"],
+    "deeper subjects arrive in document order without duplicating the ancestor's entries",
+  );
+  assert.equal("subheadings" in level5, false, "the too-deep nodes themselves are dropped");
+});
+
+test("layout ID uniqueness spans every depth with deterministic collision fallbacks", () => {
+  const raw = {
+    version: DATA_VERSION,
+    collections: [
+      {
+        id: "shared",
+        title: "Top",
+        collapsed: false,
+        subjects: [],
+        subheadings: [{
+          id: "child",
+          title: "Mid",
+          collapsed: false,
+          subjects: [],
+          subheadings: [{
+            id: "shared",
+            title: "Deep duplicate",
+            collapsed: false,
+            subjects: [],
+            subheadings: [{ id: "__proto__", title: "Unsafe deep", collapsed: false, subjects: [] }],
+          }],
+        }],
+      },
+      { id: "shared-2", title: "Intact later heading", collapsed: false, subjects: [], subheadings: [] },
+    ],
+  };
+  const first = migrateData(structuredClone(raw));
+  const second = migrateData(structuredClone(raw));
+  const ids = collectLayoutIds(first.collections);
+  assert.equal(new Set(ids).size, ids.length, "IDs are globally unique across the whole layout");
+  assert.equal(ids.includes("__proto__"), false);
+  assert.equal(first.collections[0]?.id, "shared", "the first occurrence keeps its identity");
+  const deepDuplicate = subheadingAt(first.collections[0], 3);
+  assert.notEqual(deepDuplicate.id, "shared");
+  assert.notEqual(deepDuplicate.id, "shared-2", "reserved intact identities are never stolen by collision fallbacks");
+  assert.equal(first.collections[1]?.id, "shared-2");
+  assert.equal(subheadingAt(first.collections[0], 4).id.startsWith("subheading-recovered-"), true);
+  assert.deepEqual(second.collections, first.collections, "repair is deterministic across devices");
+});
+
+test("view-state collapse overlays restore nested subheadings by ID and default new structure expanded", () => {
+  const data = migrateData({
+    version: DATA_VERSION,
+    collections: [nestedLayoutChain(MAX_LAYOUT_DEPTH, (level) => ({ collapsed: level !== 2 && level !== 4 }))],
+  });
+  const state = capturePluginViewState(data);
+  const projected = semanticPluginDataProjection(data);
+  for (let depth = 1; depth <= MAX_LAYOUT_DEPTH; depth += 1) {
+    assert.equal(subheadingAt(projected.collections[0], depth).collapsed, false, "the semantic projection strips nested collapse state");
+  }
+  applyPluginViewState(projected, state);
+  for (let depth = 1; depth <= MAX_LAYOUT_DEPTH; depth += 1) {
+    assert.equal(subheadingAt(projected.collections[0], depth).collapsed, depth !== 2 && depth !== 4);
+  }
+
+  const renamed = semanticPluginDataProjection(data);
+  subheadingAt(renamed.collections[0], 3).id = "renamed-structure";
+  applyPluginViewState(renamed, state);
+  assert.equal(subheadingAt(renamed.collections[0], 2).collapsed, false);
+  assert.equal(subheadingAt(renamed.collections[0], 3).collapsed, false, "unmatched structure starts expanded");
+  assert.equal(subheadingAt(renamed.collections[0], 5).collapsed, false, "children of unmatched structure start expanded");
+});
+
+test("nested collapse flags never alter the semantic entry fingerprint", () => {
+  const data = migrateData({ version: DATA_VERSION, collections: [nestedLayoutChain(MAX_LAYOUT_DEPTH)] });
+  data.portableIndex = cleanPortableIndex({
+    version: 2,
+    groups: [{ id: "group", title: "Group", order: 0 }],
+    subjects: [{ id: "placed", title: "Placed", groupId: "group", parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "medication" }],
+    resolvedPathBySubjectId: {},
+    libraryLayouts: {
+      medication: [{
+        id: "m-1",
+        title: "Top",
+        collapsed: false,
+        subjects: [],
+        subheadings: [{
+          id: "m-2",
+          title: "Mid",
+          collapsed: false,
+          subjects: [],
+          subheadings: [{ id: "m-3", title: "Leaf", collapsed: false, subjects: ["placed"] }],
+        }],
+      }],
+    },
+  });
+  const variant = structuredClone(data);
+  subheadingAt(variant.collections[0], MAX_LAYOUT_DEPTH).collapsed = true;
+  subheadingAt(variant.portableIndex.libraryLayouts.medication[0], 3).collapsed = true;
+  const fingerprint = (candidate: typeof data): string => semanticEntryFingerprint({ createdAt: 5, archivedAt: null, data: candidate });
+  assert.equal(fingerprint(variant), fingerprint(data), "nested collapse is device view state, not semantic content");
+  const retitled = structuredClone(variant);
+  subheadingAt(retitled.collections[0], MAX_LAYOUT_DEPTH).title = "Retitled";
+  assert.notEqual(fingerprint(retitled), fingerprint(data), "real nested edits still advance the fingerprint");
+});
+
+test("device-local collapse state parses legacy flat and nested payloads and caps hostile depth", () => {
+  const data = migrateData({
+    version: DATA_VERSION,
+    collections: [nestedLayoutChain(MAX_LAYOUT_DEPTH, (level) => ({ collapsed: level === MAX_LAYOUT_DEPTH }))],
+  });
+  const store = createDefaultStore(data, 100, "vault-nested-collapse");
+  const parsed = parseDeviceLocalPluginState(createDeviceLocalPluginState(store));
+  let cursor = parsed.bases[0]?.view.collections[0];
+  for (let depth = 2; depth <= MAX_LAYOUT_DEPTH; depth += 1) cursor = cursor?.subheadings[0];
+  assert.equal(cursor?.collapsed, true, "nested collapse state round-trips through device-local storage");
+  assert.deepEqual(cursor?.subheadings, []);
+
+  const legacy = {
+    version: DEVICE_LOCAL_STATE_VERSION,
+    vaultId: "vault-nested-collapse",
+    activeBaseId: "base-default",
+    bases: [{
+      baseId: "base-default",
+      view: {
+        selectedPath: "",
+        activeTab: "curriculum",
+        collapsed: { curriculumDomains: [], curriculumNodes: [], queues: [] },
+        collections: [{ id: "heading", collapsed: true, subheadings: [{ id: "leaf", collapsed: false }] }],
+        libraryLayouts: [],
+        undoStack: [],
+        redoStack: [],
+      },
+    }],
+  };
+  const legacyParsed = parseDeviceLocalPluginState(structuredClone(legacy));
+  assert.equal(legacyParsed.bases[0]?.view.collections[0]?.collapsed, true);
+  assert.equal(legacyParsed.bases[0]?.view.collections[0]?.subheadings[0]?.id, "leaf");
+  assert.deepEqual(legacyParsed.bases[0]?.view.collections[0]?.subheadings[0]?.subheadings, [], "flat leaves normalize to the nested shape");
+
+  let deepNode: Record<string, unknown> = { id: "collapse-8", collapsed: true };
+  for (let level = 7; level >= 1; level -= 1) deepNode = { id: `collapse-${level}`, collapsed: true, subheadings: [deepNode] };
+  const tooDeep = structuredClone(legacy) as unknown as { bases: Array<{ view: { collections: unknown } }> };
+  tooDeep.bases[0].view.collections = [deepNode];
+  const cappedParsed = parseDeviceLocalPluginState(tooDeep);
+  let capped = cappedParsed.bases[0]?.view.collections[0];
+  for (let depth = 2; depth <= MAX_LAYOUT_DEPTH; depth += 1) capped = capped?.subheadings[0];
+  assert.equal(capped?.id, `collapse-${MAX_LAYOUT_DEPTH}`);
+  assert.deepEqual(capped?.subheadings, [], "collapse state beyond the depth cap is dropped, never fatal");
+});
+
+test("a realistic previous-build store migrates to the nested schema with conservative causality", () => {
+  const data = migrateData(null);
+  data.collections = [{
+    id: "airway",
+    title: "Airway",
+    collapsed: false,
+    subjects: ["Knowledge/Airway.md"],
+    subheadings: [{ id: "pediatric", title: "Pediatric", collapsed: true, subjects: ["Knowledge/Cleft.md"] }],
+  }];
+  const modern = createDefaultStore(data, 100, "vault-prev-build");
+  const raw = structuredClone(modern) as unknown as { version: number; bases: Array<Record<string, unknown>> };
+  raw.version = STORE_VERSION - 1;
+  const rawBase = raw.bases[0];
+  (rawBase.data as { version: number }).version = DATA_VERSION - 1;
+  rawBase.semanticRevision = 3;
+  rawBase.semanticHash = semanticEntryFingerprint({
+    createdAt: 100,
+    archivedAt: null,
+    data: rawBase.data,
+  } as Parameters<typeof semanticEntryFingerprint>[0]);
+  rawBase.semanticHead = rawBase.semanticHash;
+  rawBase.semanticLineage = ["2222222222222222"];
+
+  const migrated = migrateStore(structuredClone(raw), 200);
+  assert.equal(migrated.version, STORE_VERSION);
+  const entry = migrated.bases[0];
+  assert.equal(entry.data.version, DATA_VERSION);
+  assert.equal(entry.semanticRevision, 3, "the per-base revision survives schema migration");
+  assert.equal(entry.semanticHead, entry.semanticHash, "a payload-changing migration re-roots causality conservatively");
+  assert.deepEqual(entry.semanticLineage, []);
+  assert.equal(entry.data.collections[0]?.subheadings[0]?.id, "pediatric");
+  assert.equal("subheadings" in (entry.data.collections[0]?.subheadings[0] ?? {}), false, "flat v13 payloads stay byte-flat");
+  const other = migrateStore(structuredClone(raw), 999);
+  assert.equal(other.bases[0]?.semanticHead, entry.semanticHead, "independently migrated devices derive the same root");
+
+  const nestedRaw = structuredClone(raw);
+  (nestedRaw.bases[0].data as { collections: unknown }).collections = [nestedLayoutChain(6, (level) => ({ subjects: [`Knowledge/Level ${level}.md`] }))];
+  const nestedEntry = migrateStore(nestedRaw, 200).bases[0];
+  assert.equal(subheadingAt(nestedEntry.data.collections[0], MAX_LAYOUT_DEPTH).id, `chain-${MAX_LAYOUT_DEPTH}`);
+  assert.deepEqual(
+    subheadingAt(nestedEntry.data.collections[0], MAX_LAYOUT_DEPTH).subjects,
+    [`Knowledge/Level ${MAX_LAYOUT_DEPTH}.md`, "Knowledge/Level 6.md"],
+    "hand-authored nesting in an older payload becomes first-class with merge-up",
+  );
+
+  const future = structuredClone(raw);
+  (future.bases[0].data as { version: number }).version = DATA_VERSION + 1;
+  assert.throws(() => migrateStore(future, 200), new RegExp(`unsupported data version ${DATA_VERSION + 1}`, "i"));
+});
+
+test("transfer budgets count nested subheadings at every depth", () => {
+  const backup = createPersonalBackup(migrateData(null), "2026-08-08T00:00:00.000Z", "vault-ent-main", "base-ent", "ENT");
+  const width = 100;
+  const childrenPerNode = Math.ceil(MAX_TRANSFER_COLLECTIONS / width) + 1;
+  (backup as { collections: unknown }).collections = [{
+    id: "wide",
+    title: "Wide",
+    collapsed: false,
+    subjects: [],
+    subheadings: Array.from({ length: width }, (_, index) => ({
+      id: `mid-${index}`,
+      title: `Mid ${index}`,
+      collapsed: false,
+      subjects: [],
+      subheadings: Array.from({ length: childrenPerNode }, (__, childIndex) => ({
+        id: `leaf-${index}-${childIndex}`,
+        title: `Leaf ${index}-${childIndex}`,
+        collapsed: false,
+        subjects: [],
+      })),
+    })),
+  }];
+  assert.throws(() => parsePersonalBackup(backup), /too many collections and subheadings/i);
+});
+
+test("personal backups carry nested subheadings at v10 while flat v9 backups import unchanged", () => {
+  const data = migrateData({
+    version: DATA_VERSION,
+    collections: [nestedLayoutChain(6, (level) => ({ subjects: [`Knowledge/Level ${level}.md`] }))],
+  });
+  const backup = createPersonalBackup(data, "2026-08-08T00:00:00.000Z", "vault-ent-main", "base-ent", "ENT");
+  assert.equal(backup.version, 10);
+  const parsed = parsePersonalBackup(JSON.parse(JSON.stringify(backup)) as unknown);
+  assert.equal(parsed.version, 10);
+  assert.deepEqual(parsed.collections, data.collections, "nested organization survives an exact round-trip");
+  assert.deepEqual(
+    subheadingAt(parsed.collections[0], MAX_LAYOUT_DEPTH).subjects,
+    [`Knowledge/Level ${MAX_LAYOUT_DEPTH}.md`, "Knowledge/Level 6.md"],
+  );
+
+  const flatData = migrateData(null);
+  flatData.collections = [{
+    id: "airway",
+    title: "Airway",
+    collapsed: false,
+    subjects: ["Knowledge/Airway.md"],
+    subheadings: [{ id: "sub", title: "Sub", collapsed: false, subjects: [] }],
+  }];
+  const legacy = structuredClone(createPersonalBackup(flatData, "2026-08-08T00:00:00.000Z", "vault-ent-main", "base-ent", "ENT")) as unknown as { version: number };
+  legacy.version = 9;
+  const legacyParsed = parsePersonalBackup(legacy);
+  assert.equal(legacyParsed.version, 10, "flat v9 backups upgrade in place");
+  assert.equal(legacyParsed.collections[0]?.subheadings[0]?.id, "sub");
+});
+
+test("library layout cleaning threads catalog dedupe through every depth and merges too-deep placements", () => {
+  const state = cleanPortableIndex({
+    version: 2,
+    groups: [{ id: "group", title: "Group", order: 0 }],
+    subjects: ["med-top", "med-mid", "med-leaf", "med-deep"].map((id, order) => ({
+      id,
+      title: id,
+      groupId: "group",
+      parentId: null,
+      order,
+      indexed: false,
+      configuredId: "",
+      recordKind: "medication",
+    })),
+    resolvedPathBySubjectId: {},
+    libraryLayouts: {
+      medication: [{
+        id: "m-top",
+        title: "Top",
+        collapsed: false,
+        subjects: ["med-top"],
+        subheadings: [{
+          id: "m-2",
+          title: "L2",
+          collapsed: false,
+          subjects: ["med-mid"],
+          subheadings: [{
+            title: "L3 without ID",
+            collapsed: false,
+            subjects: [],
+            subheadings: [{
+              id: "m-4",
+              title: "L4",
+              collapsed: false,
+              subjects: [],
+              subheadings: [{
+                id: "m-5",
+                title: "L5",
+                collapsed: false,
+                subjects: ["med-leaf"],
+                subheadings: [{ id: "m-6", title: "L6", collapsed: true, subjects: ["med-deep", "med-mid", "unknown-subject"] }],
+              }],
+            }],
+          }],
+        }],
+      }],
+    },
+  });
+  const heading = state.libraryLayouts.medication[0];
+  assert.equal(subheadingAt(heading, 3).id, "m-2-subheading-1", "fallback IDs chain from the parent identity at depth");
+  const level5 = subheadingAt(heading, MAX_LAYOUT_DEPTH);
+  assert.deepEqual(level5.subjects, ["med-leaf", "med-deep"], "too-deep placements merge subject to the catalog and global dedupe");
+  assert.equal("subheadings" in level5, false);
+  const rePlaced = collectLayoutIds(state.libraryLayouts.medication);
+  assert.equal(new Set(rePlaced).size, rePlaced.length);
+  assert.deepEqual(cleanPortableIndex(state).libraryLayouts, state.libraryLayouts, "library cleaning is idempotent on nested layouts");
+});
+
+test("diagnostics and path rewrites reach nested subheading subjects", () => {
+  const data = migrateData({
+    version: DATA_VERSION,
+    collections: [{
+      id: "top",
+      title: "Top",
+      collapsed: false,
+      subjects: [],
+      subheadings: [{
+        id: "mid",
+        title: "Mid",
+        collapsed: false,
+        subjects: [],
+        subheadings: [{ id: "leaf", title: "Leaf", collapsed: false, subjects: ["Old/Note.md", "Old/Note.md"] }],
+      }],
+    }],
+  });
+  const diagnostics = buildIndexDiagnostics(data, [], new Set());
+  const duplicate = diagnostics.find((diagnostic) => diagnostic.kind === "duplicate-membership");
+  assert.ok(duplicate);
+  assert.match(duplicate.detail, /Top \/ Mid \/ Leaf/u, "nested owners are named through the full title path");
+  assert.equal(diagnostics.some((diagnostic) => diagnostic.kind === "missing-note" && diagnostic.path === "Old/Note.md"), true);
+
+  data.undoStack = [snapshotPersonal(data, "Before rename")];
+  assert.equal(rewritePluginDataPathPrefix(data, "Old/Note.md", "New/Note.md"), true);
+  assert.deepEqual(subheadingAt(data.collections[0], 3).subjects, ["New/Note.md", "New/Note.md"]);
+  assert.deepEqual(subheadingAt(data.undoStack[0].collections[0], 3).subjects, ["New/Note.md", "New/Note.md"], "historical snapshots rewrite nested subjects too");
+});
+
+function portableNoteSubjects(ids: string[], groupId: string): Array<Record<string, unknown>> {
+  return ids.map((id, order) => ({
+    id,
+    title: `Title ${id}`,
+    groupId,
+    parentId: null,
+    order,
+    indexed: false,
+    configuredId: "",
+    recordKind: "note",
+    libraryId: null,
+  }));
+}
+
+test("portable v5 collections round-trip five nested levels byte-stably in replace and merge modes", () => {
+  const chain = nestedLayoutChain(MAX_LAYOUT_DEPTH, (level) => ({
+    subjects: [portablePlaceholderPath(`subject-${level}`)],
+    collapsed: level === 3,
+  }));
+  const source = migrateData({ version: DATA_VERSION, collections: [chain] });
+  source.portableIndex.groups = [{ id: "group-deep", title: "Deep", order: 0 }];
+  source.portableIndex.subjects = portableNoteSubjects(
+    [1, 2, 3, 4, 5].map((level) => `subject-${level}`),
+    "group-deep",
+  ) as never;
+
+  const exported = createPortableExport(
+    source,
+    [],
+    portableSelection({ collections: true }),
+    "2026-08-12T00:00:00.000Z",
+  );
+  assert.equal(exported.version, 5);
+  const collection = exported.components.collections?.collections[0];
+  assert.ok(collection);
+  assert.equal(collection.id, "chain-1");
+  assert.deepEqual(collection.subjectIds, ["subject-1"]);
+  const nodes: PortableCollectionSubheadingV1[] = [];
+  let cursor: PortableCollectionSubheadingV1 | undefined = collection.subheadings[0];
+  while (cursor) {
+    nodes.push(cursor);
+    cursor = cursor.subheadings?.[0];
+  }
+  assert.equal(nodes.length, MAX_LAYOUT_DEPTH - 1, "every nested level is exported");
+  nodes.forEach((node, index) => {
+    assert.equal(node.id, `chain-${index + 2}`);
+    assert.deepEqual(node.subjectIds, [`subject-${index + 2}`]);
+  });
+  const leaf = nodes[nodes.length - 1];
+  assert.ok(leaf);
+  assert.equal("subheadings" in leaf, false, "the exported leaf keeps the flat byte shape");
+
+  const serialized = serializePortableExport(exported);
+  const parsed = parsePortableExport(JSON.parse(serialized) as unknown);
+  assert.equal(
+    JSON.stringify(parsed.components.collections),
+    JSON.stringify(exported.components.collections),
+    "parsing re-serializes the nested component byte-identically",
+  );
+
+  for (const mode of ["replace", "merge"] as const) {
+    const target = migrateData(null);
+    applyPortableExport(target, parsed, portableSelection({ collections: true }), mode);
+    assert.deepEqual(target.collections, source.collections, `${mode} rebuilds the exact five-level layout`);
+    assert.deepEqual(
+      migrateData(structuredClone(target)).collections,
+      source.collections,
+      `the ${mode} result survives an ordinary reload unchanged`,
+    );
+    applyPortableExport(target, parsed, portableSelection({ collections: true }), "merge");
+    assert.deepEqual(target.collections, source.collections, `a repeated merge after ${mode} changes nothing`);
+  }
+});
+
+test("portable v5 library layouts round-trip five nested levels by stable subject ID", () => {
+  const source = migrateData(null);
+  source.portableIndex.groups = [{ id: "medications", title: "Medications", order: 0 }];
+  source.portableIndex.subjects = [1, 2, 3, 4, 5].map((level) => ({
+    id: `medication-${level}`,
+    title: `Medication ${level}`,
+    groupId: "medications",
+    parentId: null,
+    order: level - 1,
+    indexed: false,
+    configuredId: "",
+    recordKind: "medication" as const,
+  }));
+  source.portableIndex.libraryLayouts.medication = [
+    nestedLayoutChain(MAX_LAYOUT_DEPTH, (level) => ({ subjects: [`medication-${level}`] })) as unknown as LayoutHeading,
+  ];
+
+  const exported = parsePortableExport(createPortableExport(
+    source,
+    [],
+    portableSelection({ medications: true }),
+    "2026-08-12T00:00:00.000Z",
+  ));
+  assert.deepEqual(
+    exported.components.index?.libraryLayouts?.medication,
+    source.portableIndex.libraryLayouts.medication,
+    "the exported layout preserves the exact nested structure",
+  );
+  const exportedHeading = exported.components.index?.libraryLayouts?.medication[0];
+  assert.ok(exportedHeading);
+  const exportedLeaf = subheadingAt(exportedHeading, MAX_LAYOUT_DEPTH);
+  assert.equal("subheadings" in exportedLeaf, false, "the exported layout leaf keeps the flat byte shape");
+
+  const target = migrateData(null);
+  applyPortableExport(target, exported, portableSelection({ medications: true }), "replace");
+  assert.deepEqual(
+    target.portableIndex.libraryLayouts.medication,
+    source.portableIndex.libraryLayouts.medication,
+    "replace rebuilds the nested library layout",
+  );
+  applyPortableExport(target, exported, portableSelection({ medications: true }), "merge");
+  assert.deepEqual(
+    target.portableIndex.libraryLayouts.medication,
+    source.portableIndex.libraryLayouts.medication,
+    "merging the same nested package again changes nothing",
+  );
+  assert.deepEqual(
+    migrateData(structuredClone(target)).portableIndex.libraryLayouts.medication,
+    source.portableIndex.libraryLayouts.medication,
+    "the imported nested layout survives an ordinary reload",
+  );
+});
+
+test("collection merges cross flat and nested layouts deterministically and idempotently", () => {
+  const packageFor = (collections: LayoutHeading[], subjectIds: string[]): PortableExportV1 => {
+    const packageSource = migrateData(null);
+    packageSource.portableIndex.groups = [{ id: "group-x", title: "X", order: 0 }];
+    packageSource.portableIndex.subjects = portableNoteSubjects(subjectIds, "group-x") as never;
+    packageSource.collections = cloneCollections(collections);
+    return parsePortableExport(createPortableExport(
+      packageSource,
+      [],
+      portableSelection({ collections: true }),
+      "2026-08-12T00:00:00.000Z",
+    ));
+  };
+  const nested = packageFor([{
+    id: "reading",
+    title: "Reading",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{
+      id: "cases",
+      title: "Cases",
+      collapsed: false,
+      subjects: [],
+      subheadings: [{ id: "airway", title: "Airway", collapsed: false, subjects: [portablePlaceholderPath("subject-deep")] }],
+    }],
+  }], ["subject-deep"]);
+  const flat = packageFor([{
+    id: "reading",
+    title: "Reading",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{ id: "cases", title: "Cases", collapsed: false, subjects: [portablePlaceholderPath("subject-flat")] }],
+  }], ["subject-flat"]);
+
+  const flatDestination = (): ReturnType<typeof migrateData> => {
+    const target = migrateData(null);
+    target.collections = [{
+      id: "reading",
+      title: "Reading",
+      collapsed: true,
+      subjects: ["Knowledge/Local.md"],
+      subheadings: [{ id: "cases", title: "Cases", collapsed: true, subjects: ["Knowledge/Case.md"] }],
+    }];
+    return target;
+  };
+  const first = flatDestination();
+  applyPortableExport(first, nested, portableSelection({ collections: true }), "merge");
+  const second = flatDestination();
+  applyPortableExport(second, nested, portableSelection({ collections: true }), "merge");
+  assert.deepEqual(second.collections, first.collections, "the nested-into-flat merge is deterministic");
+  assert.deepEqual(first.collections, [{
+    id: "reading",
+    title: "Reading",
+    collapsed: true,
+    subjects: ["Knowledge/Local.md"],
+    subheadings: [{
+      id: "cases",
+      title: "Cases",
+      collapsed: true,
+      subjects: ["Knowledge/Case.md"],
+      subheadings: [{ id: "airway", title: "Airway", collapsed: false, subjects: [portablePlaceholderPath("subject-deep")] }],
+    }],
+  }], "nested incoming levels graft under the matched flat destination nodes");
+  const afterNestedMerge = cloneCollections(first.collections);
+  applyPortableExport(first, nested, portableSelection({ collections: true }), "merge");
+  assert.deepEqual(first.collections, afterNestedMerge, "importing the same nested package twice changes nothing");
+
+  const nestedDestination = (): ReturnType<typeof migrateData> => {
+    const target = migrateData(null);
+    target.collections = [{
+      id: "reading",
+      title: "Reading",
+      collapsed: false,
+      subjects: [],
+      subheadings: [{
+        id: "cases",
+        title: "Cases",
+        collapsed: false,
+        subjects: ["Knowledge/Case.md"],
+        subheadings: [{ id: "airway", title: "Airway", collapsed: true, subjects: ["Knowledge/Airway.md"] }],
+      }],
+    }];
+    return target;
+  };
+  const third = nestedDestination();
+  applyPortableExport(third, flat, portableSelection({ collections: true }), "merge");
+  const fourth = nestedDestination();
+  applyPortableExport(fourth, flat, portableSelection({ collections: true }), "merge");
+  assert.deepEqual(fourth.collections, third.collections, "the flat-into-nested merge is deterministic");
+  assert.deepEqual(third.collections, [{
+    id: "reading",
+    title: "Reading",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{
+      id: "cases",
+      title: "Cases",
+      collapsed: false,
+      subjects: ["Knowledge/Case.md", portablePlaceholderPath("subject-flat")],
+      subheadings: [{ id: "airway", title: "Airway", collapsed: true, subjects: ["Knowledge/Airway.md"] }],
+    }],
+  }], "a flat package lands in the nested destination without disturbing deeper levels");
+  const afterFlatMerge = cloneCollections(third.collections);
+  applyPortableExport(third, flat, portableSelection({ collections: true }), "merge");
+  assert.deepEqual(third.collections, afterFlatMerge, "importing the same flat package twice changes nothing");
+});
+
+test("depth-six portable package content merges into the nearest allowed ancestor without loss", () => {
+  const chain = nestedLayoutChain(MAX_LAYOUT_DEPTH, (level) => ({
+    subjects: [portablePlaceholderPath(`subject-${level}`)],
+  }));
+  const source = migrateData({ version: DATA_VERSION, collections: [chain] });
+  source.portableIndex.groups = [{ id: "group-deep", title: "Deep", order: 0 }];
+  source.portableIndex.subjects = portableNoteSubjects(
+    [1, 2, 3, 4, 5].map((level) => `subject-${level}`),
+    "group-deep",
+  ) as never;
+  const exported = createPortableExport(
+    source,
+    [],
+    portableSelection({ collections: true }),
+    "2026-08-12T00:00:00.000Z",
+  );
+
+  const raw = structuredClone(exported) as unknown as {
+    components: {
+      index: { subjects: Array<Record<string, unknown>> };
+      collections: { collections: Array<{ subheadings: PortableCollectionSubheadingV1[] }> };
+    };
+  };
+  raw.components.index.subjects.push({
+    id: "subject-6",
+    title: "Title subject-6",
+    groupId: "group-deep",
+    parentId: null,
+    order: 5,
+    indexed: false,
+    configuredId: "",
+    recordKind: "note",
+    libraryId: null,
+  });
+  let rawLeaf = raw.components.collections.collections[0].subheadings[0];
+  while (rawLeaf.subheadings?.[0]) rawLeaf = rawLeaf.subheadings[0];
+  rawLeaf.subheadings = [{
+    id: "chain-6",
+    title: "Chain level 6",
+    collapsed: false,
+    subjectIds: ["subject-6", "subject-5"],
+  }];
+
+  const parsed = parsePortableExport(structuredClone(raw));
+  const parsedCollection = parsed.components.collections?.collections[0];
+  assert.ok(parsedCollection);
+  let parsedLeaf = parsedCollection.subheadings[0];
+  assert.ok(parsedLeaf);
+  while (parsedLeaf.subheadings?.[0]) parsedLeaf = parsedLeaf.subheadings[0];
+  assert.equal(parsedLeaf.id, `chain-${MAX_LAYOUT_DEPTH}`);
+  assert.deepEqual(
+    parsedLeaf.subjectIds,
+    [`subject-${MAX_LAYOUT_DEPTH}`, "subject-6"],
+    "too-deep subjects merge deduped, in document order, into the depth-five ancestor",
+  );
+  assert.equal("subheadings" in parsedLeaf, false, "the depth-six node itself never materializes");
+
+  const duplicate = structuredClone(raw);
+  let duplicateDeepestParent = duplicate.components.collections.collections[0].subheadings[0];
+  while (duplicateDeepestParent.subheadings?.[0]?.subheadings?.[0]) {
+    duplicateDeepestParent = duplicateDeepestParent.subheadings[0];
+  }
+  const injectedTooDeepNode = duplicateDeepestParent.subheadings?.[0];
+  assert.ok(injectedTooDeepNode);
+  assert.equal(injectedTooDeepNode.id, "chain-6");
+  injectedTooDeepNode.id = "chain-1";
+  assert.throws(
+    () => parsePortableExport(duplicate),
+    /duplicate collection or subheading ID: chain-1/i,
+    "identity checks span every depth, including merged-up nodes",
+  );
+
+  const hostile = structuredClone(raw);
+  let hostileLeaf = hostile.components.collections.collections[0].subheadings[0];
+  while (hostileLeaf.subheadings?.[0]) hostileLeaf = hostileLeaf.subheadings[0];
+  for (let level = 0; level < 70; level += 1) {
+    const child: PortableCollectionSubheadingV1 = {
+      id: `hostile-${level}`,
+      title: `Hostile ${level}`,
+      collapsed: false,
+      subjectIds: [],
+    };
+    hostileLeaf.subheadings = [child];
+    hostileLeaf = child;
+  }
+  assert.throws(
+    () => parsePortableExport(hostile),
+    /exceed 64 levels/i,
+    "hostile nesting depth refuses cleanly instead of exhausting the stack",
+  );
+});
+
+test("nested structures charge the portable collection and library-layout budgets", () => {
+  const width = 100;
+  const wideCollections = portableFixture();
+  wideCollections.components.collections = {
+    version: 1,
+    collections: [{
+      id: "budget-collection",
+      title: "Budget",
+      collapsed: false,
+      subjectIds: [],
+      subheadings: Array.from({ length: width }, (_, outer) => ({
+        id: `level2-${outer}`,
+        title: `Level two ${outer}`,
+        collapsed: false,
+        subjectIds: [],
+        subheadings: Array.from({ length: width }, (_, inner) => ({
+          id: `level3-${outer}-${inner}`,
+          title: "Leaf",
+          collapsed: false,
+          subjectIds: [],
+        })),
+      })),
+    }],
+  };
+  assert.ok(width + width * width > MAX_TRANSFER_COLLECTIONS);
+  assert.throws(() => parsePortableExport(wideCollections), /too many subheadings/i);
+
+  const librarySource = migrateData(null);
+  const libraryExport = createPortableExport(
+    librarySource,
+    [],
+    portableSelection({ medications: true }),
+    "2026-08-12T00:00:00.000Z",
+  );
+  const wideLibrary = structuredClone(libraryExport) as unknown as {
+    components: { index: { libraryLayouts: Record<string, unknown> } };
+  };
+  wideLibrary.components.index.libraryLayouts.medication = [{
+    id: "budget-heading",
+    title: "Budget",
+    collapsed: false,
+    subjects: [],
+    subheadings: Array.from({ length: width + 1 }, (_, outer) => ({
+      id: `level2-${outer}`,
+      title: `Level two ${outer}`,
+      collapsed: false,
+      subjects: [],
+      subheadings: Array.from({ length: width }, (_, inner) => ({
+        id: `level3-${outer}-${inner}`,
+        title: "Leaf",
+        collapsed: false,
+        subjects: [],
+      })),
+    })),
+  }];
+  assert.throws(() => parsePortableExport(wideLibrary), /too many headings and subheadings/i);
+});
+
+test("portable v4 flat packages import unchanged while unknown versions refuse cleanly", () => {
+  const source = migrateData(null);
+  source.portableIndex.groups = [{ id: "group-flat", title: "Flat", order: 0 }];
+  source.portableIndex.subjects = portableNoteSubjects(["subject-flat"], "group-flat") as never;
+  source.collections = [{
+    id: "reading",
+    title: "Reading",
+    collapsed: false,
+    subjects: [portablePlaceholderPath("subject-flat")],
+    subheadings: [{ id: "cases", title: "Cases", collapsed: false, subjects: [] }],
+  }];
+  const v5 = createPortableExport(
+    source,
+    [],
+    portableSelection({ collections: true }),
+    "2026-08-12T00:00:00.000Z",
+  );
+  assert.equal(v5.version, 5);
+
+  const downgraded = structuredClone(v5) as unknown as {
+    version: number;
+    components: { index: { version: number } };
+  };
+  downgraded.version = 4;
+  downgraded.components.index.version = 4;
+  const parsed = parsePortableExport(structuredClone(downgraded));
+  assert.equal(parsed.version, 4);
+  const target = migrateData(null);
+  applyPortableExport(target, parsed, portableSelection({ collections: true }), "replace");
+  assert.deepEqual(target.collections, source.collections, "a flat version-4 package imports byte-identically");
+
+  // The same envelope gate makes builds that predate a version refuse it with
+  // one clear message instead of silently flattening unknown organization.
+  const future = structuredClone(v5) as unknown as { version: number };
+  future.version = 6;
+  assert.throws(() => parsePortableExport(future), /Unsupported Command Center portable export\./);
+});
+
+test("beyond-depth collection merges stay linear across wide fans of empty deep siblings", () => {
+  const packageFor = (subjectIds: string[], leafSubjectIds: string[], deepSiblings: unknown[]): unknown => ({
+    kind: PORTABLE_EXPORT_KIND,
+    version: 5,
+    exportedAt: "2026-08-12T00:00:00.000Z",
+    sourceWorkspace: "Source KB",
+    components: {
+      index: {
+        version: 5,
+        groups: [{ id: "group-deep", title: "Deep", order: 0 }],
+        subjects: portableNoteSubjects(subjectIds, "group-deep"),
+        libraries: [],
+        libraryLayouts: {},
+        includedSections: { index: false, libraryIds: [] },
+        includeIndex: false,
+        indexGroupIds: [],
+      },
+      collections: {
+        version: 1,
+        collections: [{
+          id: "deep-collection",
+          title: "Deep collection",
+          collapsed: false,
+          subjectIds: [],
+          subheadings: [{
+            id: "level-2",
+            title: "Level two",
+            collapsed: false,
+            subjectIds: [],
+            subheadings: [{
+              id: "level-3",
+              title: "Level three",
+              collapsed: false,
+              subjectIds: [],
+              subheadings: [{
+                id: "level-4",
+                title: "Level four",
+                collapsed: false,
+                subjectIds: [],
+                subheadings: [{
+                  id: `level-${MAX_LAYOUT_DEPTH}`,
+                  title: "Level five",
+                  collapsed: false,
+                  subjectIds: leafSubjectIds,
+                  subheadings: deepSiblings,
+                }],
+              }],
+            }],
+          }],
+        }],
+      },
+    },
+  });
+  const emptySibling = (index: number): Record<string, unknown> => ({
+    id: `empty-${index}`,
+    title: `Empty ${index}`,
+    collapsed: false,
+    subjectIds: [],
+    subheadings: [],
+  });
+  const leafOf = (parsed: PortableExportV1): PortableCollectionSubheadingV1 => {
+    let leaf = parsed.components.collections?.collections[0]?.subheadings[0];
+    assert.ok(leaf);
+    while (leaf.subheadings?.[0]) leaf = leaf.subheadings[0];
+    return leaf;
+  };
+
+  // Correctness: empty siblings contribute nothing, and carriers merge
+  // deduped, in document order, including through nested too-deep levels.
+  const parsed = parsePortableExport(packageFor(
+    ["s-a", "s-b", "s-c", "s-d", "s-e"],
+    ["s-a", "s-b"],
+    [
+      ...Array.from({ length: 60 }, (_, index) => emptySibling(index)),
+      { id: "carry-1", title: "Carry one", collapsed: false, subjectIds: ["s-b", "s-c"] },
+      {
+        id: "carry-2",
+        title: "Carry two",
+        collapsed: false,
+        subjectIds: [],
+        subheadings: [{ id: "carry-2-child", title: "Deeper", collapsed: false, subjectIds: ["s-d"], subheadings: [] }],
+      },
+      { id: "carry-3", title: "Carry three", collapsed: false, subjectIds: ["s-c", "s-e"] },
+    ],
+  ));
+  const leaf = leafOf(parsed);
+  assert.equal(leaf.id, `level-${MAX_LAYOUT_DEPTH}`);
+  assert.deepEqual(
+    leaf.subjectIds,
+    ["s-a", "s-b", "s-c", "s-d", "s-e"],
+    "wide empty fans do not disturb the deduplicated document-order merge",
+  );
+  assert.equal("subheadings" in leaf, false, "too-deep siblings never materialize");
+
+  // Budget accounting is unchanged: too-deep siblings still charge the
+  // shared structure budget even though they merge upward.
+  const tooMany = packageFor(
+    ["s-a", "s-b"],
+    ["s-a", "s-b"],
+    Array.from({ length: MAX_TRANSFER_COLLECTIONS - 3 }, (_, index) => emptySibling(index)),
+  );
+  assert.throws(() => parsePortableExport(tooMany), /too many subheadings/i);
+
+  // Coarse linearity guard: thousands of empty deep siblings under a large
+  // merge target must not each rebuild the deduplication set.
+  const wideSubjectIds = Array.from({ length: 20_000 }, (_, index) => `subject-${index}`);
+  const wide = packageFor(
+    wideSubjectIds,
+    wideSubjectIds,
+    Array.from({ length: 6_000 }, (_, index) => emptySibling(index)),
+  );
+  const start = performance.now();
+  const wideParsed = parsePortableExport(wide);
+  const elapsed = performance.now() - start;
+  const wideLeaf = leafOf(wideParsed);
+  assert.equal(wideLeaf.subjectIds.length, wideSubjectIds.length, "every referenced subject survives the wide merge");
+  assert.ok(elapsed < 2_000, `merging 6,000 empty deep siblings should stay linear; took ${elapsed.toFixed(1)} ms`);
+});
+
+function customLibraryPackage(headings: LayoutHeading[], subjectIds: string[]): PortableExportV1 {
+  const source = migrateData(null);
+  source.portableIndex.groups.push({ id: "group-custom-library", title: "Custom library", order: 99 });
+  source.portableIndex.subjects.push(...subjectIds.map((id, order) => ({
+    id,
+    title: `Title ${id}`,
+    groupId: "group-custom-library",
+    parentId: null,
+    order,
+    indexed: false,
+    configuredId: "",
+    recordKind: "note" as const,
+    libraryId: "library-custom",
+  })));
+  source.portableIndex.libraries.push({
+    id: "library-custom",
+    name: "Custom",
+    singularName: "Item",
+    icon: "library",
+    order: 99,
+    sourceKind: null,
+    archivedAt: null,
+  });
+  source.portableIndex.libraryLayouts["library-custom"] = cloneCollections(headings);
+  return parsePortableExport(createPortableExport(
+    source,
+    [],
+    portableSelection({ libraryIds: ["library-custom"] }),
+    "2026-08-12T00:00:00.000Z",
+  ));
+}
+
+test("library layout merges reserve exact stable-ID matches before weak title matching", () => {
+  const pkg1 = customLibraryPackage([{
+    id: "heading-repeat",
+    title: "Repeated",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{ id: "child-stable", title: "T", collapsed: false, subjects: ["s-one"] }],
+  }], ["s-one"]);
+  const pkg2 = customLibraryPackage([
+    { id: "heading-new", title: "Repeated", collapsed: false, subjects: [], subheadings: [] },
+    {
+      id: "heading-repeat",
+      title: "Repeated",
+      collapsed: false,
+      subjects: [],
+      subheadings: [
+        { id: "child-new", title: "T", collapsed: false, subjects: ["s-two"] },
+        { id: "child-stable", title: "T", collapsed: false, subjects: ["s-one"] },
+      ],
+    },
+  ], ["s-one", "s-two"]);
+
+  const target = migrateData(null);
+  applyPortableExport(target, pkg1, portableSelection({ libraryIds: ["library-custom"] }), "merge");
+  applyPortableExport(target, pkg2, portableSelection({ libraryIds: ["library-custom"] }), "merge");
+  const afterFirst = structuredClone(target.portableIndex.libraryLayouts["library-custom"] ?? []);
+
+  assert.equal(afterFirst.length, 2, "same-title headings stay distinct without duplicate or husk nodes");
+  const stableHeading = afterFirst.find((heading) => heading.id === "heading-repeat");
+  assert.ok(afterFirst.find((heading) => heading.id === "heading-new"), "the new same-title heading keeps its own stable ID");
+  assert.ok(stableHeading, "an earlier same-title heading cannot consume a later exact ID match");
+  assert.equal(stableHeading.subheadings.length, 2, "same-title children stay distinct without duplicate or husk nodes");
+  assert.deepEqual(
+    stableHeading.subheadings.find((child) => child.id === "child-stable")?.subjects,
+    ["s-one"],
+    "the stable-ID sibling keeps its destination node",
+  );
+  assert.deepEqual(
+    stableHeading.subheadings.find((child) => child.id === "child-new")?.subjects,
+    ["s-two"],
+    "the new same-title sibling lands in its own node",
+  );
+
+  applyPortableExport(target, pkg2, portableSelection({ libraryIds: ["library-custom"] }), "merge");
+  assert.deepEqual(
+    target.portableIndex.libraryLayouts["library-custom"],
+    afterFirst,
+    "reimporting the identical package changes nothing",
+  );
+});
+
+test("a library node moved between parents remints one deterministic identity on every device", () => {
+  const pkg1 = customLibraryPackage([
+    {
+      id: "heading-a",
+      title: "Heading A",
+      collapsed: false,
+      subjects: [],
+      subheadings: [{ id: "child-moved", title: "Moved", collapsed: false, subjects: ["s-move"] }],
+    },
+    { id: "heading-b", title: "Heading B", collapsed: false, subjects: [], subheadings: [] },
+  ], ["s-move"]);
+  const pkg2 = customLibraryPackage([
+    { id: "heading-a", title: "Heading A", collapsed: false, subjects: [], subheadings: [] },
+    {
+      id: "heading-b",
+      title: "Heading B",
+      collapsed: false,
+      subjects: [],
+      subheadings: [{ id: "child-moved", title: "Moved", collapsed: false, subjects: ["s-move"] }],
+    },
+  ], ["s-move"]);
+  const importBoth = (): ReturnType<typeof migrateData> => {
+    const device = migrateData(null);
+    applyPortableExport(device, pkg1, portableSelection({ libraryIds: ["library-custom"] }), "merge");
+    applyPortableExport(device, pkg2, portableSelection({ libraryIds: ["library-custom"] }), "merge");
+    return device;
+  };
+
+  const deviceOne = importBoth();
+  const deviceTwo = importBoth();
+  assert.deepEqual(
+    deviceTwo.portableIndex.libraryLayouts["library-custom"],
+    deviceOne.portableIndex.libraryLayouts["library-custom"],
+    "identical imports allocate identical layout identities, IDs included",
+  );
+
+  const layout = deviceOne.portableIndex.libraryLayouts["library-custom"] ?? [];
+  const moved = layout.find((heading) => heading.id === "heading-b")?.subheadings[0];
+  assert.ok(moved, "the moved node lands under its new parent");
+  assert.match(moved.id, /^library-import-[0-9a-f]{16}$/, "a colliding node ID remints as a deterministic library fork");
+  assert.deepEqual(moved.subjects, ["s-move"], "the moved subject follows the incoming placement");
 });

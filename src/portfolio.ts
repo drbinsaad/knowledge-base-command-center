@@ -1,5 +1,6 @@
 import {
   boundedSemanticLineage,
+  childSubheadings,
   createKnowledgeBaseEntry,
   createPersonalBackup,
   DEFAULT_DATA,
@@ -19,6 +20,7 @@ import {
   validateWritableFolderPath,
   type KnowledgeBaseEntry,
   type LayoutHeading,
+  type LayoutSubheading,
   type PersonalBackup,
   type PluginData,
   type PluginStore,
@@ -32,10 +34,13 @@ import {
   EMPTY_PORTABLE_SELECTION,
   normalizePortableSelection,
   parsePortableExport,
+  PORTABLE_EXPORT_VERSION,
   portableSelectionHasAny,
   selectionAvailableForExport,
   serializePortableExport,
   synchronizePortableRegistry,
+  type PortableCollectionSubheadingV1,
+  type PortableCollectionV1,
   type PortableExportSelection,
   type PortableExportV1,
   type PortableImportMode,
@@ -311,19 +316,20 @@ function packageBudget(value: PortableExportV1): PackageBudget {
   const index = value.components.index;
   let structures = (index?.groups.length ?? 0) + (index?.libraries?.length ?? 0);
   let references = 0;
-  for (const layout of Object.values(index?.libraryLayouts ?? {})) {
-    structures += layout.length;
-    for (const heading of layout) {
-      references += heading.subjects.length;
-      structures += heading.subheadings.length;
-      heading.subheadings.forEach((subheading) => { references += subheading.subjects.length; });
+  const chargeLayoutNodes = (nodes: readonly (LayoutHeading | LayoutSubheading)[]): void => {
+    for (const node of nodes) {
+      structures += 1;
+      references += node.subjects.length;
+      chargeLayoutNodes(childSubheadings(node));
     }
-  }
-  for (const collection of value.components.collections?.collections ?? []) {
-    structures += 1 + collection.subheadings.length;
-    references += collection.subjectIds.length;
-    collection.subheadings.forEach((subheading) => { references += subheading.subjectIds.length; });
-  }
+  };
+  for (const layout of Object.values(index?.libraryLayouts ?? {})) chargeLayoutNodes(layout);
+  const chargeCollectionNode = (node: PortableCollectionV1 | PortableCollectionSubheadingV1): void => {
+    structures += 1;
+    references += node.subjectIds.length;
+    for (const child of node.subheadings ?? []) chargeCollectionNode(child);
+  };
+  for (const collection of value.components.collections?.collections ?? []) chargeCollectionNode(collection);
   references += value.components.study?.pinnedSubjectIds.length ?? 0;
   references += value.components.study?.nextSubjectIds.length ?? 0;
   structures += value.components.savedViews?.views.length ?? 0;
@@ -609,6 +615,17 @@ interface HeadingIdentity {
   label: string;
 }
 
+/**
+ * Structure keys identify a layout node by its full ancestor ID path. Local
+ * layout IDs are only isSafeObjectKey-constrained (the stricter safeId shape
+ * applies to imported packages, not persisted local data), so no joiner
+ * character can be assumed absent from an ID. JSON-encoding the path array
+ * keeps two distinct paths from ever colliding into one key.
+ */
+function libraryStructureKey(libraryId: string, idPath: readonly string[]): string {
+  return JSON.stringify(["library", libraryId, ...idPath]);
+}
+
 function headings(data: PluginData): Map<string, HeadingIdentity> {
   const result = new Map<string, HeadingIdentity>();
   for (const group of data.portableIndex.groups) {
@@ -617,20 +634,23 @@ function headings(data: PluginData): Map<string, HeadingIdentity> {
   const libraryById = new Map(data.portableIndex.libraries.map((library) => [library.id, library]));
   for (const [libraryId, layout] of Object.entries(data.portableIndex.libraryLayouts)) {
     const libraryName = libraryById.get(libraryId)?.name ?? libraryId;
-    for (const heading of layout) {
-      result.set(`library:${libraryId}:${heading.id}`, {
-        id: heading.id,
-        title: heading.title,
-        label: `${libraryName} heading “${heading.title}”`,
+    const visit = (
+      node: LayoutHeading | LayoutSubheading,
+      ancestorIds: readonly string[],
+      ancestorTitles: readonly string[],
+    ): void => {
+      const idPath = [...ancestorIds, node.id];
+      const titlePath = [...ancestorTitles, node.title];
+      result.set(libraryStructureKey(libraryId, idPath), {
+        id: node.id,
+        title: node.title,
+        label: idPath.length === 1
+          ? `${libraryName} heading “${node.title}”`
+          : `${libraryName} subheading “${titlePath.join(" / ")}”`,
       });
-      for (const subheading of heading.subheadings) {
-        result.set(`library:${libraryId}:${heading.id}:${subheading.id}`, {
-          id: subheading.id,
-          title: subheading.title,
-          label: `${libraryName} subheading “${heading.title} / ${subheading.title}”`,
-        });
-      }
-    }
+      for (const child of childSubheadings(node)) visit(child, idPath, titlePath);
+    };
+    for (const heading of layout) visit(heading, [], []);
   }
   return result;
 }
@@ -649,18 +669,20 @@ function subjectPlacements(data: PluginData): Map<string, SubjectPlacement> {
   const placed = new Map<string, { key: string; label: string }>();
   for (const [libraryId, layout] of Object.entries(data.portableIndex.libraryLayouts)) {
     const library = libraries.get(libraryId) ?? libraryId;
-    for (const heading of layout) {
-      for (const id of heading.subjects) placed.set(id, {
-        key: `library:${libraryId}:${heading.id}`,
-        label: `${library} / ${heading.title}`,
+    const visit = (
+      node: LayoutHeading | LayoutSubheading,
+      ancestorIds: readonly string[],
+      ancestorTitles: readonly string[],
+    ): void => {
+      const idPath = [...ancestorIds, node.id];
+      const titlePath = [...ancestorTitles, node.title];
+      for (const id of node.subjects) placed.set(id, {
+        key: libraryStructureKey(libraryId, idPath),
+        label: `${library} / ${titlePath.join(" / ")}`,
       });
-      for (const subheading of heading.subheadings) {
-        for (const id of subheading.subjects) placed.set(id, {
-          key: `library:${libraryId}:${heading.id}:${subheading.id}`,
-          label: `${library} / ${heading.title} / ${subheading.title}`,
-        });
-      }
-    }
+      for (const child of childSubheadings(node)) visit(child, idPath, titlePath);
+    };
+    for (const heading of layout) visit(heading, [], []);
   }
   for (const subject of subjects.values()) {
     if (subject.indexed) {
@@ -693,10 +715,11 @@ function conflictPreview(
   const selected = normalizePortableSelection(selection);
   const includedSubjectIds = new Set<string>();
   if (selected.collections) {
-    for (const collection of incoming.components.collections?.collections ?? []) {
-      collection.subjectIds.forEach((id) => includedSubjectIds.add(id));
-      collection.subheadings.forEach((subheading) => subheading.subjectIds.forEach((id) => includedSubjectIds.add(id)));
-    }
+    const collectIds = (node: PortableCollectionV1 | PortableCollectionSubheadingV1): void => {
+      node.subjectIds.forEach((id) => includedSubjectIds.add(id));
+      for (const child of node.subheadings ?? []) collectIds(child);
+    };
+    for (const collection of incoming.components.collections?.collections ?? []) collectIds(collection);
   }
   if (selected.study) {
     incoming.components.study?.pinnedSubjectIds.forEach((id) => includedSubjectIds.add(id));
@@ -942,7 +965,7 @@ function buildRecoveryPackage(
   );
   const portable: PortableExportV1 = {
     kind: "knowledge-base-command-center-portable-export",
-    version: 4,
+    version: PORTABLE_EXPORT_VERSION,
     exportedAt,
     sourceWorkspace: entry.data.settings.workspaceName,
     components: { recovery: backup },
@@ -1234,6 +1257,6 @@ export const PORTFOLIO_DIFF_CATEGORIES: ReadonlyArray<keyof PortfolioPlanDiff> =
 ];
 
 /** Keep the type dependency visible for callers that render nested heading counts. */
-export function portfolioLayoutStructureCount(layout: readonly LayoutHeading[]): number {
-  return layout.reduce((count, heading) => count + 1 + heading.subheadings.length, 0);
+export function portfolioLayoutStructureCount(layout: readonly (LayoutHeading | LayoutSubheading)[]): number {
+  return layout.reduce((count, node) => count + 1 + portfolioLayoutStructureCount(childSubheadings(node)), 0);
 }

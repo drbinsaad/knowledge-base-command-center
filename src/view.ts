@@ -11,8 +11,8 @@ import {
   assertPersonalBackupMatchesVault,
   buildCurriculumTree,
   canonicalPath,
+  childSubheadings,
   curriculumChildPaths,
-  countHeading,
   createPersonalBackup,
   curriculumDescendantPaths,
   CurriculumDomainTree,
@@ -32,6 +32,7 @@ import {
   limitSnapshotStack,
   MainTab,
   makeId,
+  MAX_LAYOUT_DEPTH,
   matchesParsedQuery,
   metadataHasGap,
   ParsedQuery,
@@ -131,6 +132,22 @@ interface CurriculumDrag {
   kind: "curriculum-record";
   path: string;
 }
+
+interface CollectionsLayoutContext {
+  kind: "collections";
+  heading: LayoutHeading;
+  mutable: boolean;
+}
+
+interface LibraryLayoutContext {
+  kind: "library";
+  heading: LayoutHeading;
+  library: LibraryDefinition;
+  bySubjectId: Map<string, VaultRecord>;
+}
+
+/** Per-heading context threaded through the shared Collections/library renderer. */
+type LayoutRenderContext = CollectionsLayoutContext | LibraryLayoutContext;
 
 interface QueueDefinition {
   id: string;
@@ -345,12 +362,90 @@ export function matchingKnowledgeBaseRecords(records: VaultRecord[], query: stri
   });
 }
 
+type LayoutNode = LayoutHeading | LayoutSubheading;
+
+/** All subject references in a node's subtree, in render order. */
+function layoutSubjects(node: LayoutNode): string[] {
+  const subjects = [...node.subjects];
+  for (const child of childSubheadings(node)) subjects.push(...layoutSubjects(child));
+  return subjects;
+}
+
+/** First subheading anywhere beneath a node that satisfies the predicate. */
+function findNestedSubheading(node: LayoutNode, predicate: (candidate: LayoutSubheading) => boolean): LayoutSubheading | null {
+  for (const child of childSubheadings(node)) {
+    if (predicate(child)) return child;
+    const nested = findNestedSubheading(child, predicate);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+/** Heading-to-node chain for a nested subheading id; null when the id is absent. */
+function subheadingChain(
+  heading: LayoutHeading,
+  subheadingId: string,
+): { chain: LayoutNode[]; node: LayoutSubheading } | null {
+  const walk = (trail: LayoutNode[], parent: LayoutNode): { chain: LayoutNode[]; node: LayoutSubheading } | null => {
+    const chain = [...trail, parent];
+    for (const child of childSubheadings(parent)) {
+      if (child.id === subheadingId) return { chain: [...chain, child], node: child };
+      const nested = walk(chain, child);
+      if (nested) return nested;
+    }
+    return null;
+  };
+  return walk([], heading);
+}
+
+/**
+ * Owning top-level heading for a layout-unique id. nested is the node itself
+ * when the id names a subheading at any depth, and null when it names the
+ * heading; the plugin quick-entry API takes the two ids separately.
+ */
+function findLayoutNode(headings: LayoutHeading[], id: string): { heading: LayoutHeading; nested: LayoutSubheading | null } | null {
+  for (const heading of headings) {
+    if (heading.id === id) return { heading, nested: null };
+    const nested = findNestedSubheading(heading, (node) => node.id === id);
+    if (nested) return { heading, nested };
+  }
+  return null;
+}
+
+/** Visit every node in these layouts depth-first with its depth (heading = 1) and title path. */
+function visitLayoutNodes(
+  headings: LayoutHeading[],
+  visit: (node: LayoutNode, depth: number, titles: string[]) => void,
+): void {
+  const walk = (node: LayoutNode, depth: number, titles: string[]): void => {
+    visit(node, depth, titles);
+    for (const child of childSubheadings(node)) walk(child, depth + 1, [...titles, child.title]);
+  };
+  for (const heading of headings) walk(heading, 1, [heading.title]);
+}
+
+/** Count subheadings nested anywhere beneath a node. */
+function countNestedSubheadings(node: LayoutNode): number {
+  return childSubheadings(node).reduce((sum, child) => sum + 1 + countNestedSubheadings(child), 0);
+}
+
+/**
+ * Mutable child list of a node, created on demand. Callers that can empty the
+ * list must restore the canonical leaf form via dropEmptyChildList afterwards.
+ */
+function ensureChildList(node: LayoutNode): LayoutSubheading[] {
+  if (!node.subheadings) node.subheadings = [];
+  return node.subheadings;
+}
+
+/** Canonical cleaned data keeps the nested key only while children exist. */
+function dropEmptyChildList(node: LayoutNode, isHeading: boolean): void {
+  if (!isHeading && node.subheadings && node.subheadings.length === 0) delete node.subheadings;
+}
+
 function collectionPaths(collections: LayoutHeading[]): string[] {
   const paths: string[] = [];
-  for (const heading of collections) {
-    paths.push(...heading.subjects);
-    for (const subheading of heading.subheadings) paths.push(...subheading.subjects);
-  }
+  for (const heading of collections) paths.push(...layoutSubjects(heading));
   return paths;
 }
 
@@ -943,7 +1038,7 @@ export class EntVaultCommandCenterView extends ItemView {
       ...(this.plugin.data.collections.length > 0 ? [{
         id: "collection",
         title: "Collection subheading",
-        description: "Choose a Collection heading, then create one nested subheading.",
+        description: "Choose a Collection heading or nested subheading, then create one subheading inside it.",
         icon: "folders",
       }] : []),
       ...this.plugin.getLibraries()
@@ -951,7 +1046,7 @@ export class EntVaultCommandCenterView extends ItemView {
         .map((library) => ({
           id: `library:${library.id}`,
           title: `${library.name} subheading`,
-          description: `Choose a heading inside ${library.name}.`,
+          description: `Choose a heading or nested subheading inside ${library.name}.`,
           icon: libraryIcon(library),
         })),
     ];
@@ -992,27 +1087,39 @@ export class EntVaultCommandCenterView extends ItemView {
     ).open();
   }
 
+  /** Every node below the depth cap can parent one more subheading level. */
+  private quickSubheadingParentActions(headings: LayoutHeading[]): Array<{ id: string; title: string; description: string; icon: string }> {
+    const parents: Array<{ id: string; title: string; description: string; icon: string }> = [];
+    visitLayoutNodes(headings, (node, depth, titles) => {
+      if (depth >= MAX_LAYOUT_DEPTH) return;
+      const nested = countNestedSubheadings(node);
+      parents.push({
+        id: node.id,
+        title: titles.join(" / "),
+        description: `${nested} nested subheading${nested === 1 ? "" : "s"}`,
+        icon: "folder",
+      });
+    });
+    return parents;
+  }
+
   private openQuickCollectionHeadingPicker(): void {
     const ownsBase = this.createOpenedBaseGuard();
-    new AddActionModal(this.app, this.plugin.data.collections.map((heading) => ({
-      id: heading.id,
-      title: heading.title,
-      description: `${heading.subheadings.length} nested subheading${heading.subheadings.length === 1 ? "" : "s"}`,
-      icon: "folder",
-    })), (action) => {
+    new AddActionModal(this.app, this.quickSubheadingParentActions(this.plugin.data.collections), (action) => {
       if (!ownsBase()) return;
-      const heading = this.plugin.data.collections.find((candidate) => candidate.id === action.id);
-      if (!heading) return;
+      const located = findLayoutNode(this.plugin.data.collections, action.id);
+      if (!located) return;
+      const parent = located.nested ?? located.heading;
       new TextPromptModal(this.app, {
-        title: `New subheading in ${heading.title}`,
+        title: `New subheading in ${parent.title}`,
         placeholder: "Subheading name",
         submitLabel: "Create subheading",
         onSubmit: async (title) => {
           if (!ownsBase()) return;
-          await this.plugin.createQuickEntryCollectionSubheading(heading.id, title);
+          await this.plugin.createQuickEntryCollectionSubheading(located.heading.id, title, located.nested?.id);
         },
       }).open();
-    }, "Choose Collection heading").open();
+    }, "Choose Collection heading or subheading").open();
   }
 
   private openQuickLibraryHeadingPicker(libraryId: string): void {
@@ -1024,25 +1131,21 @@ export class EntVaultCommandCenterView extends ItemView {
       return;
     }
     const ownsBase = this.createOpenedBaseGuard();
-    new AddActionModal(this.app, layout.map((heading) => ({
-      id: heading.id,
-      title: heading.title,
-      description: `${heading.subheadings.length} nested subheading${heading.subheadings.length === 1 ? "" : "s"}`,
-      icon: "folder",
-    })), (action) => {
+    new AddActionModal(this.app, this.quickSubheadingParentActions(layout), (action) => {
       if (!ownsBase()) return;
-      const heading = (this.plugin.data.portableIndex.libraryLayouts[libraryId] ?? []).find((candidate) => candidate.id === action.id);
-      if (!heading) return;
+      const located = findLayoutNode(this.plugin.data.portableIndex.libraryLayouts[libraryId] ?? [], action.id);
+      if (!located) return;
+      const parent = located.nested ?? located.heading;
       new TextPromptModal(this.app, {
-        title: `New subheading in ${heading.title}`,
+        title: `New subheading in ${parent.title}`,
         placeholder: "Subheading name",
         submitLabel: "Create subheading",
         onSubmit: async (title) => {
           if (!ownsBase()) return;
-          await this.plugin.createQuickEntryLibrarySubheading(libraryId, heading.id, title);
+          await this.plugin.createQuickEntryLibrarySubheading(libraryId, located.heading.id, title, located.nested?.id);
         },
       }).open();
-    }, `Choose heading in ${library.name}`).open();
+    }, `Choose heading or subheading in ${library.name}`).open();
   }
 
   public startQuickCreateNote(): void {
@@ -1333,10 +1436,12 @@ export class EntVaultCommandCenterView extends ItemView {
     const heading = target.headingId
       ? layout.find((candidate) => candidate.id === target.headingId)
       : target.subheadingId
-        ? layout.find((candidate) => candidate.subheadings.some((subheading) => subheading.id === target.subheadingId))
+        ? layout.find((candidate) => findNestedSubheading(candidate, (node) => node.id === target.subheadingId) !== null)
         : undefined;
-    const subheading = target.subheadingId
-      ? heading?.subheadings.find((candidate) => candidate.id === target.subheadingId)
+    // {{yaml:category}} resolves to the exact node the subject is placed in,
+    // however deep, falling back to the heading title.
+    const subheading = target.subheadingId && heading
+      ? findNestedSubheading(heading, (node) => node.id === target.subheadingId) ?? undefined
       : undefined;
     const subject = record?.portableId ? this.plugin.getPortableSubject(record.portableId) : null;
     const parent = subject?.parentId ? this.plugin.getPortableSubject(subject.parentId) : null;
@@ -1353,11 +1458,8 @@ export class EntVaultCommandCenterView extends ItemView {
     if (!subjectId) return {};
     for (const heading of this.plugin.data.portableIndex.libraryLayouts[libraryId] ?? []) {
       if (heading.subjects.includes(subjectId)) return { headingId: heading.id };
-      for (const subheading of heading.subheadings) {
-        if (subheading.subjects.includes(subjectId)) {
-          return { headingId: heading.id, subheadingId: subheading.id };
-        }
-      }
+      const subheading = findNestedSubheading(heading, (node) => node.subjects.includes(subjectId));
+      if (subheading) return { headingId: heading.id, subheadingId: subheading.id };
     }
     return {};
   }
@@ -2785,92 +2887,124 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private renderHeading(parent: HTMLElement, heading: LayoutHeading, mutable: boolean): number {
-    const matchingDirect = heading.subjects.filter((path) => this.matchesPath(path));
-    const matchingSubs = heading.subheadings.map((subheading) => ({
-      subheading,
-      paths: subheading.subjects.filter((path) => this.matchesPath(path)),
-    })).filter((item) => item.paths.length > 0 || !this.query);
-    const total = matchingDirect.length + matchingSubs.reduce((sum, item) => sum + item.paths.length, 0);
+    const context: LayoutRenderContext = { kind: "collections", heading, mutable };
+    const total = this.matchingLayoutRows(context, heading);
     if (this.query && total === 0) return 0;
-
-    const collapsed = heading.collapsed && !this.query;
-    const visibleRecordCount = collapsed
-      ? 0
-      : matchingDirect.length + matchingSubs.reduce((sum, item) => (
-        sum + (item.subheading.collapsed && !this.query ? 0 : item.paths.length)
-      ), 0);
-    const visibleStructureCount = collapsed ? 1 : 1 + matchingSubs.length;
-    if (!this.beginBrowseStructure(visibleRecordCount, visibleStructureCount)) return total;
-
-    const section = parent.createDiv({ cls: "ent-cc-heading" });
-    const row = section.createDiv({ cls: "ent-cc-row ent-cc-heading-row" });
-    const disclosure = disclosureButton(row, collapsed, heading.title);
-    disclosure.addEventListener("click", () => this.run(async () => {
-      heading.collapsed = !heading.collapsed;
-      if (mutable) await this.plugin.saveViewState();
-      this.renderTree();
-    }));
-    const leading = row.createSpan({ cls: "ent-cc-leading-icon" });
-    setIcon(leading, mutable ? "folders" : "library");
-    const title = row.createEl("button", { cls: "ent-cc-row-title", text: heading.title, attr: { dir: "auto" } });
-    title.addEventListener("click", () => this.run(async () => {
-      heading.collapsed = !heading.collapsed;
-      if (mutable) await this.plugin.saveViewState();
-      this.renderTree();
-    }));
-    const resolved = this.resolvableCount(heading);
-    row.createSpan({ text: String(resolved), cls: "ent-cc-row-count" });
-    const missing = countHeading(heading) - resolved;
-    if (missing > 0) {
-      row.createSpan({
-        text: `${missing} missing`,
-        cls: "ent-cc-row-missing",
-        attr: { title: `${missing} referenced ${missing === 1 ? "note no longer exists" : "notes no longer exist"}. Open Manage index → Diagnostics to review or repair.` },
-      });
-    }
-    if (mutable) iconButton(row, "ellipsis", `Actions for ${heading.title}`, "ent-cc-row-more").addEventListener("click", (event) => this.showHeadingMenu(event, heading));
-    if (mutable && this.editMode) this.applyDrop(row, { headingId: heading.id });
-
-    if (collapsed) return total;
-    const content = section.createDiv({ cls: "ent-cc-heading-body" });
-    if (mutable && this.editMode) this.applyDrop(content, { headingId: heading.id });
-    matchingDirect.forEach((path) => {
-      const record = this.recordByPath.get(path);
-      if (record) this.renderBrowseRecordRow(content, record, 1, mutable ? { headingId: heading.id } : undefined);
-    });
-    for (const item of matchingSubs) this.renderSubheading(content, heading, item.subheading, item.paths, mutable);
+    this.renderLayoutNode(parent, context, heading, 1);
     return total;
   }
 
-  private renderSubheading(parent: HTMLElement, heading: LayoutHeading, subheading: LayoutSubheading, paths: string[], mutable: boolean): void {
-    const collapsed = subheading.collapsed && !this.query;
-    if (!this.beginBrowseStructure(collapsed ? 0 : paths.length)) return;
-    const section = parent.createDiv({ cls: "ent-cc-subheading" });
-    const row = section.createDiv({ cls: "ent-cc-row ent-cc-subheading-row" });
-    const disclosure = disclosureButton(row, collapsed, subheading.title);
-    disclosure.addEventListener("click", () => this.run(async () => {
-      subheading.collapsed = !subheading.collapsed;
-      if (mutable) await this.plugin.saveViewState();
-      this.renderTree();
-    }));
-    const leading = row.createSpan({ cls: "ent-cc-leading-icon" });
-    setIcon(leading, "folder");
-    const title = row.createEl("button", { cls: "ent-cc-row-title", text: subheading.title, attr: { dir: "auto" } });
-    title.addEventListener("click", () => this.run(async () => {
-      subheading.collapsed = !subheading.collapsed;
-      if (mutable) await this.plugin.saveViewState();
-      this.renderTree();
-    }));
-    row.createSpan({ text: String(subheading.subjects.filter((path) => this.recordByPath.has(path)).length), cls: "ent-cc-row-count" });
-    if (mutable) iconButton(row, "ellipsis", `Actions for ${subheading.title}`, "ent-cc-row-more").addEventListener("click", (event) => this.showSubheadingMenu(event, heading, subheading));
-    if (mutable && this.editMode) this.applyDrop(row, { headingId: heading.id, subheadingId: subheading.id });
-    if (collapsed) return;
-    const content = section.createDiv({ cls: "ent-cc-subheading-body" });
-    if (mutable && this.editMode) this.applyDrop(content, { headingId: heading.id, subheadingId: subheading.id });
-    for (const path of paths) {
-      const record = this.recordByPath.get(path);
-      if (record) this.renderBrowseRecordRow(content, record, 2, mutable ? { headingId: heading.id, subheadingId: subheading.id } : undefined);
+  /** Query-matching records placed directly on one layout node, in stored order. */
+  private matchingLayoutRecords(context: LayoutRenderContext, node: LayoutNode): VaultRecord[] {
+    const records: VaultRecord[] = [];
+    for (const key of node.subjects) {
+      const record = context.kind === "collections" ? this.recordByPath.get(key) : context.bySubjectId.get(key);
+      if (!record) continue;
+      if (context.kind === "collections" && !matchesParsedQuery(record, this.parsedQuery)) continue;
+      records.push(record);
     }
+    return records;
+  }
+
+  /** Query-matching record rows anywhere in a node's subtree. */
+  private matchingLayoutRows(context: LayoutRenderContext, node: LayoutNode): number {
+    return this.matchingLayoutRecords(context, node).length
+      + childSubheadings(node).reduce((sum, child) => sum + this.matchingLayoutRows(context, child), 0);
+  }
+
+  /** Children that render at all: every child while browsing, matching subtrees while searching. */
+  private renderableLayoutChildren(context: LayoutRenderContext, node: LayoutNode): LayoutSubheading[] {
+    return childSubheadings(node).filter((child) => !this.query || this.matchingLayoutRows(context, child) > 0);
+  }
+
+  /** Record rows this node's subtree would put on screen given current collapse state. */
+  private visibleLayoutRows(context: LayoutRenderContext, node: LayoutNode): number {
+    if (node.collapsed && !this.query) return 0;
+    return this.matchingLayoutRecords(context, node).length
+      + this.renderableLayoutChildren(context, node).reduce((sum, child) => sum + this.visibleLayoutRows(context, child), 0);
+  }
+
+  /** Structure rows (this node plus its expanded descendants) for browse-budget accounting. */
+  private visibleLayoutStructures(context: LayoutRenderContext, node: LayoutNode): number {
+    if (node.collapsed && !this.query) return 1;
+    return 1 + this.renderableLayoutChildren(context, node).reduce((sum, child) => sum + this.visibleLayoutStructures(context, child), 0);
+  }
+
+  /** Subject references in the subtree that resolve to a known record. */
+  private resolvedLayoutCount(context: LayoutRenderContext, node: LayoutNode): number {
+    if (context.kind === "collections") {
+      return layoutSubjects(node).filter((path) => this.recordByPath.has(path)).length;
+    }
+    return layoutSubjects(node).filter((subjectId) => context.bySubjectId.has(subjectId)).length;
+  }
+
+  /**
+   * Shared recursive renderer behind the Collections and library tabs. The two
+   * tabs differ only in record lookup, menus, drag payloads, and empty states;
+   * structure, budgets, collapse handling, and depth styling stay identical.
+   */
+  private renderLayoutNode(parent: HTMLElement, context: LayoutRenderContext, node: LayoutNode, depth: number): void {
+    if (!this.beginBrowseStructure(this.visibleLayoutRows(context, node), this.visibleLayoutStructures(context, node))) return;
+    const isHeading = depth === 1;
+    const isLibrary = context.kind === "library";
+    const mutable = context.kind === "collections" ? context.mutable : true;
+    const collapsed = node.collapsed && !this.query;
+    const membership: Membership = isHeading
+      ? { headingId: context.heading.id }
+      : { headingId: context.heading.id, subheadingId: node.id };
+    const section = parent.createDiv({
+      cls: isHeading
+        ? `ent-cc-heading${isLibrary ? " ent-cc-library-group" : ""}`
+        : `ent-cc-subheading${isLibrary ? " ent-cc-library-subheading" : ""}`,
+    });
+    const row = section.createDiv({ cls: `ent-cc-row ${isHeading ? "ent-cc-heading-row" : "ent-cc-subheading-row"}` });
+    if (!isHeading) row.addClass(`ent-cc-depth-${Math.min(depth - 2, 12)}`);
+    const toggle = (): void => this.toggleLayoutNode(context, node.id);
+    disclosureButton(row, collapsed, node.title).addEventListener("click", toggle);
+    const leading = row.createSpan({ cls: "ent-cc-leading-icon" });
+    setIcon(leading, isHeading
+      ? (isLibrary ? libraryIcon(context.library) : mutable ? "folders" : "library")
+      : "folder");
+    const title = row.createEl("button", { cls: "ent-cc-row-title", text: node.title, attr: { dir: "auto" } });
+    title.addEventListener("click", toggle);
+    const resolved = this.resolvedLayoutCount(context, node);
+    row.createSpan({ text: String(resolved), cls: "ent-cc-row-count" });
+    if (isHeading) {
+      const missing = layoutSubjects(node).length - resolved;
+      if (missing > 0 && (context.kind === "collections" || !this.query)) {
+        row.createSpan({
+          text: `${missing} missing`,
+          cls: "ent-cc-row-missing",
+          attr: { title: `${missing} referenced ${missing === 1 ? "note no longer exists" : "notes no longer exist"}. Open Manage index → Diagnostics to review or repair.` },
+        });
+      }
+    }
+    if (mutable) {
+      iconButton(row, "ellipsis", `Actions for ${node.title}`, "ent-cc-row-more").addEventListener("click", (event) => {
+        if (context.kind === "library") {
+          if (isHeading) this.showLibraryHeadingMenu(event, context.library.id, context.heading);
+          else this.showLibrarySubheadingMenu(event, context.library.id, context.heading, node);
+        } else if (isHeading) this.showHeadingMenu(event, context.heading);
+        else this.showSubheadingMenu(event, context.heading, node);
+      });
+    }
+    const applyNodeDrop = (element: HTMLElement): void => {
+      if (context.kind === "library") this.applyLibraryDrop(element, { libraryId: context.library.id, ...membership });
+      else this.applyDrop(element, membership);
+    };
+    if (mutable && this.editMode) applyNodeDrop(row);
+    if (collapsed) return;
+    const content = section.createDiv({ cls: isHeading ? "ent-cc-heading-body" : "ent-cc-subheading-body" });
+    if (mutable && this.editMode) applyNodeDrop(content);
+    const level = Math.min(depth, MAX_LAYOUT_DEPTH);
+    for (const record of this.matchingLayoutRecords(context, node)) {
+      if (context.kind === "library") {
+        this.renderBrowseRecordRow(content, record, level, undefined, undefined, { libraryId: context.library.id, ...membership });
+      } else {
+        this.renderBrowseRecordRow(content, record, level, mutable ? membership : undefined);
+      }
+    }
+    for (const child of this.renderableLayoutChildren(context, node)) this.renderLayoutNode(content, context, child, depth + 1);
   }
 
   private renderQueue(parent: HTMLElement, queue: QueueDefinition): number {
@@ -2922,8 +3056,7 @@ export class EntVaultCommandCenterView extends ItemView {
     }
 
     for (const heading of layout) {
-      for (const subjectId of heading.subjects) placed.add(subjectId);
-      for (const subheading of heading.subheadings) for (const subjectId of subheading.subjects) placed.add(subjectId);
+      for (const subjectId of layoutSubjects(heading)) placed.add(subjectId);
       this.renderLibraryHeading(parent, library, heading, bySubjectId);
     }
 
@@ -2967,79 +3100,9 @@ export class EntVaultCommandCenterView extends ItemView {
     heading: LayoutHeading,
     bySubjectId: Map<string, VaultRecord>,
   ): void {
-    const recordsForSubjectIds = (subjectIds: string[]): Array<{ subjectId: string; record: VaultRecord }> => {
-      const resolved: Array<{ subjectId: string; record: VaultRecord }> = [];
-      for (const subjectId of subjectIds) {
-        const record = bySubjectId.get(subjectId);
-        if (record) resolved.push({ subjectId, record });
-      }
-      return resolved;
-    };
-    const direct = recordsForSubjectIds(heading.subjects);
-    const subheadings = heading.subheadings.map((subheading) => ({
-      subheading,
-      records: recordsForSubjectIds(subheading.subjects),
-    }));
-    const visibleCount = direct.length + subheadings.reduce((sum, item) => sum + item.records.length, 0);
-    const totalReferences = heading.subjects.length + heading.subheadings.reduce((sum, item) => sum + item.subjects.length, 0);
-    if (this.query && visibleCount === 0) return;
-
-    const collapsed = heading.collapsed && !this.query;
-    const visibleRecordCount = collapsed
-      ? 0
-      : direct.length + subheadings.reduce((sum, item) => (
-        sum + (item.subheading.collapsed && !this.query ? 0 : item.records.length)
-      ), 0);
-    const visibleStructureCount = collapsed ? 1 : 1 + subheadings.length;
-    if (!this.beginBrowseStructure(visibleRecordCount, visibleStructureCount)) return;
-    const section = parent.createDiv({ cls: "ent-cc-heading ent-cc-library-group" });
-    const row = section.createDiv({ cls: "ent-cc-row ent-cc-heading-row" });
-    disclosureButton(row, collapsed, heading.title).addEventListener("click", () => this.toggleLibraryHeading(heading));
-    const icon = row.createSpan({ cls: "ent-cc-leading-icon" });
-    setIcon(icon, libraryIcon(library));
-    const title = row.createEl("button", { cls: "ent-cc-row-title", text: heading.title, attr: { dir: "auto" } });
-    title.addEventListener("click", () => this.toggleLibraryHeading(heading));
-    row.createSpan({ cls: "ent-cc-row-count", text: String(visibleCount) });
-    const missing = totalReferences - visibleCount;
-    if (missing > 0 && !this.query) row.createSpan({ cls: "ent-cc-row-missing", text: `${missing} missing` });
-    iconButton(row, "ellipsis", `Actions for ${heading.title}`, "ent-cc-row-more").addEventListener("click", (event) => this.showLibraryHeadingMenu(event, library.id, heading));
-    if (this.editMode) this.applyLibraryDrop(row, { libraryId: library.id, headingId: heading.id });
-    if (collapsed) return;
-
-    const content = section.createDiv({ cls: "ent-cc-heading-body" });
-    if (this.editMode) this.applyLibraryDrop(content, { libraryId: library.id, headingId: heading.id });
-    for (const { record } of direct) {
-      this.renderBrowseRecordRow(content, record, 1, undefined, undefined, { libraryId: library.id, headingId: heading.id });
-    }
-    for (const item of subheadings) this.renderLibrarySubheading(content, library, heading, item.subheading, item.records);
-  }
-
-  private renderLibrarySubheading(
-    parent: HTMLElement,
-    library: LibraryDefinition,
-    heading: LayoutHeading,
-    subheading: LayoutSubheading,
-    records: Array<{ subjectId: string; record: VaultRecord }>,
-  ): void {
-    if (this.query && records.length === 0) return;
-    const collapsed = subheading.collapsed && !this.query;
-    if (!this.beginBrowseStructure(collapsed ? 0 : records.length)) return;
-    const section = parent.createDiv({ cls: "ent-cc-subheading ent-cc-library-subheading" });
-    const row = section.createDiv({ cls: "ent-cc-row ent-cc-subheading-row" });
-    disclosureButton(row, collapsed, subheading.title).addEventListener("click", () => this.toggleLibrarySubheading(heading, subheading));
-    const icon = row.createSpan({ cls: "ent-cc-leading-icon" });
-    setIcon(icon, "folder");
-    const title = row.createEl("button", { cls: "ent-cc-row-title", text: subheading.title, attr: { dir: "auto" } });
-    title.addEventListener("click", () => this.toggleLibrarySubheading(heading, subheading));
-    row.createSpan({ cls: "ent-cc-row-count", text: String(records.length) });
-    iconButton(row, "ellipsis", `Actions for ${subheading.title}`, "ent-cc-row-more").addEventListener("click", (event) => this.showLibrarySubheadingMenu(event, library.id, heading, subheading));
-    if (this.editMode) this.applyLibraryDrop(row, { libraryId: library.id, headingId: heading.id, subheadingId: subheading.id });
-    if (collapsed) return;
-    const content = section.createDiv({ cls: "ent-cc-subheading-body" });
-    if (this.editMode) this.applyLibraryDrop(content, { libraryId: library.id, headingId: heading.id, subheadingId: subheading.id });
-    for (const { record } of records) {
-      this.renderBrowseRecordRow(content, record, 2, undefined, undefined, { libraryId: library.id, headingId: heading.id, subheadingId: subheading.id });
-    }
+    const context: LayoutRenderContext = { kind: "library", heading, library, bySubjectId };
+    if (this.query && this.matchingLayoutRows(context, heading) === 0) return;
+    this.renderLayoutNode(parent, context, heading, 1);
   }
 
   private renderGlobalSearchResults(parent: HTMLElement): number {
@@ -3141,17 +3204,6 @@ export class EntVaultCommandCenterView extends ItemView {
       }
     }
     return results.total;
-  }
-
-  private resolvableCount(heading: LayoutHeading): number {
-    let total = heading.subjects.filter((path) => this.recordByPath.has(path)).length;
-    for (const subheading of heading.subheadings) total += subheading.subjects.filter((path) => this.recordByPath.has(path)).length;
-    return total;
-  }
-
-  private matchesPath(path: string): boolean {
-    const record = this.recordByPath.get(path);
-    return Boolean(record && matchesParsedQuery(record, this.parsedQuery));
   }
 
   private recordRoleName(record: VaultRecord, data = this.plugin.data): string {
@@ -3883,16 +3935,19 @@ export class EntVaultCommandCenterView extends ItemView {
     }).open();
   }
 
-  private promptNewSubheading(heading: LayoutHeading): void {
+  private promptNewSubheading(heading: LayoutHeading, parent: LayoutNode = heading): void {
     const ownsBase = this.createOpenedBaseGuard();
     new TextPromptModal(this.app, {
-      title: `New subheading in ${heading.title}`,
+      title: `New subheading in ${parent.title}`,
       placeholder: "Subheading name",
       submitLabel: "Create subheading",
       onSubmit: async (title) => {
         if (!ownsBase()) return;
         await this.plugin.mutate(`Create subheading “${title}”`, () => {
-          heading.subheadings.push({ id: makeId("subheading"), title, collapsed: false, subjects: [] });
+          // New nodes are canonical leaves: the nested key appears only once
+          // they gain children of their own.
+          ensureChildList(parent).push({ id: makeId("subheading"), title, collapsed: false, subjects: [] });
+          parent.collapsed = false;
           heading.collapsed = false;
         });
       },
@@ -3920,7 +3975,7 @@ export class EntVaultCommandCenterView extends ItemView {
     }).open();
   }
 
-  private promptNewLibrarySubheading(libraryId: string, heading: LayoutHeading): void {
+  private promptNewLibrarySubheading(libraryId: string, heading: LayoutHeading, parent: LayoutNode = heading): void {
     if (!this.guardLoadedBase()) return;
     const ownsBase = this.createOpenedBaseGuard();
     const openedLayout = this.libraryLayout(libraryId);
@@ -3929,8 +3984,16 @@ export class EntVaultCommandCenterView extends ItemView {
       new Notice("That library heading is no longer available. Reopen the action and try again.");
       return;
     }
+    const locateParent = (currentHeading: LayoutHeading): LayoutNode | null => parent.id === heading.id
+      ? currentHeading
+      : subheadingChain(currentHeading, parent.id)?.node ?? null;
+    const openedParent = locateParent(openedHeading);
+    if (!openedParent) {
+      new Notice("That library subheading is no longer available. Reopen the action and try again.");
+      return;
+    }
     new TextPromptModal(this.app, {
-      title: `New subheading in ${openedHeading.title}`,
+      title: `New subheading in ${openedParent.title}`,
       placeholder: "Subheading name",
       submitLabel: "Create subheading",
       onSubmit: async (title) => {
@@ -3938,51 +4001,46 @@ export class EntVaultCommandCenterView extends ItemView {
         if (this.libraryLayout(libraryId) !== openedLayout) throw new Error("The library organization changed. Reopen the action and try again.");
         const currentHeading = openedLayout.find((item) => item.id === openedHeading.id);
         if (!currentHeading) throw new Error("That library heading is no longer available. Reopen the action and try again.");
+        const currentParent = locateParent(currentHeading);
+        if (!currentParent) throw new Error("That library subheading is no longer available. Reopen the action and try again.");
         await this.plugin.mutate(`Create library subheading “${title}”`, () => {
-          currentHeading.subheadings.push({ id: makeId(`library-${libraryId}-subheading`), title, collapsed: false, subjects: [] });
+          // New nodes are canonical leaves: the nested key appears only once
+          // they gain children of their own.
+          ensureChildList(currentParent).push({ id: makeId(`library-${libraryId}-subheading`), title, collapsed: false, subjects: [] });
+          currentParent.collapsed = false;
           currentHeading.collapsed = false;
         }, { includePortableIndex: true, requireUndo: true });
       },
     }).open();
   }
 
-  private toggleLibraryHeading(heading: LayoutHeading): void {
+  /**
+   * Flip one node's collapse state by re-finding it in the current layout, so
+   * a stale render can never write into replaced organization. The write is
+   * optimistic: a failed save restores every collapse flag it touched.
+   */
+  private toggleLayoutNode(context: LayoutRenderContext, nodeId: string): void {
     const ownsBase = this.createOpenedBaseGuard();
     this.run(async () => {
       if (!ownsBase()) return;
-      const libraryId = libraryIdForTab(this.plugin.data.activeTab);
-      const currentHeading = libraryId ? this.libraryLayout(libraryId).find((item) => item.id === heading.id) : null;
-      if (!currentHeading) return;
-      const previous = currentHeading.collapsed;
-      currentHeading.collapsed = !previous;
-      try {
-        await this.plugin.saveViewState();
-      } catch (error) {
-        currentHeading.collapsed = previous;
-        throw error;
-      }
-      if (ownsBase()) this.renderTree();
-    });
-  }
-
-  private toggleLibrarySubheading(heading: LayoutHeading, subheading: LayoutSubheading): void {
-    const ownsBase = this.createOpenedBaseGuard();
-    this.run(async () => {
-      if (!ownsBase()) return;
-      const libraryId = libraryIdForTab(this.plugin.data.activeTab);
-      const currentHeading = libraryId ? this.libraryLayout(libraryId).find((item) => item.id === heading.id) : null;
-      const currentSubheading = currentHeading?.subheadings.find((item) => item.id === subheading.id);
-      if (!currentHeading || !currentSubheading) return;
-      const previousSubheading = currentSubheading.collapsed;
-      const previousHeading = currentHeading.collapsed;
-      currentSubheading.collapsed = !previousSubheading;
-      currentHeading.collapsed = false;
-      try {
-        await this.plugin.saveViewState();
-      } catch (error) {
-        currentSubheading.collapsed = previousSubheading;
-        currentHeading.collapsed = previousHeading;
-        throw error;
+      const layout = context.kind === "library" ? this.libraryLayout(context.library.id) : this.plugin.data.collections;
+      const heading = layout.find((item) => item.id === context.heading.id);
+      if (!heading) return;
+      const located = heading.id === nodeId
+        ? { chain: [heading as LayoutNode], node: heading as LayoutNode }
+        : subheadingChain(heading, nodeId);
+      if (!located) return;
+      const previous = located.chain.map((item) => item.collapsed);
+      located.node.collapsed = !located.node.collapsed;
+      // A toggled nested node must be reachable, so its ancestors stay open.
+      for (const ancestor of located.chain.slice(0, -1)) ancestor.collapsed = false;
+      if (context.kind === "library" || context.mutable) {
+        try {
+          await this.plugin.saveViewState();
+        } catch (error) {
+          located.chain.forEach((item, index) => { item.collapsed = previous[index] ?? item.collapsed; });
+          throw error;
+        }
       }
       if (ownsBase()) this.renderTree();
     });
@@ -3992,14 +4050,15 @@ export class EntVaultCommandCenterView extends ItemView {
     const heading = this.libraryLayout(membership.libraryId).find((item) => item.id === membership.headingId);
     if (!heading) return [];
     if (!membership.subheadingId) return heading.subjects;
-    return heading.subheadings.find((item) => item.id === membership.subheadingId)?.subjects ?? [];
+    return subheadingChain(heading, membership.subheadingId)?.node.subjects ?? [];
   }
 
   private removeLibraryMembership(subjectId: string, libraryId: string): void {
-    for (const heading of this.libraryLayout(libraryId)) {
-      heading.subjects = heading.subjects.filter((item) => item !== subjectId);
-      for (const subheading of heading.subheadings) subheading.subjects = subheading.subjects.filter((item) => item !== subjectId);
-    }
+    const strip = (node: LayoutNode): void => {
+      node.subjects = node.subjects.filter((item) => item !== subjectId);
+      for (const child of childSubheadings(node)) strip(child);
+    };
+    for (const heading of this.libraryLayout(libraryId)) strip(heading);
   }
 
   private async moveLibraryHeading(libraryId: string, from: number, to: number): Promise<void> {
@@ -4011,11 +4070,13 @@ export class EntVaultCommandCenterView extends ItemView {
     }, { includePortableIndex: true, requireUndo: true });
   }
 
-  private async moveLibrarySubheading(_libraryId: string, heading: LayoutHeading, from: number, to: number): Promise<void> {
-    if (from < 0 || to < 0 || from >= heading.subheadings.length || to >= heading.subheadings.length) return;
+  private async moveLibrarySubheading(_libraryId: string, parent: LayoutNode, from: number, to: number): Promise<void> {
+    const children = childSubheadings(parent);
+    if (from < 0 || to < 0 || from >= children.length || to >= children.length) return;
     await this.plugin.mutate("Reorder library subheading", () => {
-      const [subheading] = heading.subheadings.splice(from, 1);
-      if (subheading) heading.subheadings.splice(to, 0, subheading);
+      const list = ensureChildList(parent);
+      const [subheading] = list.splice(from, 1);
+      if (subheading) list.splice(to, 0, subheading);
     }, { includePortableIndex: true, requireUndo: true });
   }
 
@@ -4126,26 +4187,43 @@ export class EntVaultCommandCenterView extends ItemView {
     const ownsBase = this.createOpenedBaseGuard();
     const openedLayout = this.libraryLayout(libraryId);
     const layoutIsCurrent = (): boolean => openedLayout === this.libraryLayout(libraryId);
-    const index = heading.subheadings.findIndex((item) => item.id === subheading.id);
+    /** Re-find the node and its parent in the current layout; ids are layout-unique. */
+    const locateCurrent = (): { parent: LayoutNode; node: LayoutSubheading; siblings: LayoutSubheading[] } | null => {
+      const currentHeading = this.libraryLayout(libraryId).find((item) => item.id === heading.id);
+      const located = currentHeading ? subheadingChain(currentHeading, subheading.id) : null;
+      if (!currentHeading || !located) return null;
+      const parent = located.chain[located.chain.length - 2] ?? currentHeading;
+      return { parent, node: located.node, siblings: childSubheadings(parent) };
+    };
+    const opened = locateCurrent();
+    const depth = subheadingChain(heading, subheading.id)?.chain.length ?? 2;
+    const siblings = opened?.siblings ?? [];
+    const index = siblings.findIndex((item) => item.id === subheading.id);
+    const parentTitle = opened?.parent.title ?? heading.title;
     const menu = new Menu();
     menu.addItem((item) => item.setTitle("Move subheading up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => {
       if (!ownsBase() || !layoutIsCurrent()) return;
-      const currentHeading = this.libraryLayout(libraryId).find((item) => item.id === heading.id);
-      const currentIndex = currentHeading?.subheadings.findIndex((item) => item.id === subheading.id) ?? -1;
-      if (currentHeading && currentIndex > 0) this.run(() => this.moveLibrarySubheading(libraryId, currentHeading, currentIndex, currentIndex - 1));
+      const current = locateCurrent();
+      const currentIndex = current ? current.siblings.findIndex((item) => item.id === subheading.id) : -1;
+      if (current && currentIndex > 0) this.run(() => this.moveLibrarySubheading(libraryId, current.parent, currentIndex, currentIndex - 1));
     }));
-    menu.addItem((item) => item.setTitle("Move subheading down").setIcon("arrow-down").setDisabled(index < 0 || index >= heading.subheadings.length - 1).onClick(() => {
+    menu.addItem((item) => item.setTitle("Move subheading down").setIcon("arrow-down").setDisabled(index < 0 || index >= siblings.length - 1).onClick(() => {
       if (!ownsBase() || !layoutIsCurrent()) return;
-      const currentHeading = this.libraryLayout(libraryId).find((item) => item.id === heading.id);
-      const currentIndex = currentHeading?.subheadings.findIndex((item) => item.id === subheading.id) ?? -1;
-      if (currentHeading && currentIndex >= 0 && currentIndex < currentHeading.subheadings.length - 1) {
-        this.run(() => this.moveLibrarySubheading(libraryId, currentHeading, currentIndex, currentIndex + 1));
+      const current = locateCurrent();
+      const currentIndex = current ? current.siblings.findIndex((item) => item.id === subheading.id) : -1;
+      if (current && currentIndex >= 0 && currentIndex < current.siblings.length - 1) {
+        this.run(() => this.moveLibrarySubheading(libraryId, current.parent, currentIndex, currentIndex + 1));
       }
     }));
     menu.addSeparator();
     menu.addItem((item) => item.setTitle("Place record here…").setIcon("file-input").onClick(() => {
       if (ownsBase() && layoutIsCurrent()) this.openPlaceLibraryRecordPicker(libraryId, { headingId: heading.id, subheadingId: subheading.id });
     }));
+    if (depth < MAX_LAYOUT_DEPTH) {
+      menu.addItem((item) => item.setTitle("Add subheading").setIcon("folder-plus").onClick(() => {
+        if (ownsBase() && layoutIsCurrent()) this.promptNewLibrarySubheading(libraryId, heading, subheading);
+      }));
+    }
     menu.addItem((item) => item.setTitle("Rename subheading").setIcon("pencil").onClick(() => {
       if (!ownsBase() || !layoutIsCurrent()) return;
       new TextPromptModal(this.app, {
@@ -4153,8 +4231,7 @@ export class EntVaultCommandCenterView extends ItemView {
         onSubmit: async (title) => {
           if (!ownsBase()) return;
           if (!layoutIsCurrent()) throw new Error("The library organization changed. Reopen the action and try again.");
-          const currentHeading = this.libraryLayout(libraryId).find((item) => item.id === heading.id);
-          const currentSubheading = currentHeading?.subheadings.find((item) => item.id === subheading.id);
+          const currentSubheading = locateCurrent()?.node;
           if (!currentSubheading) throw new Error("That library subheading is no longer available. Reopen the action and try again.");
           await this.plugin.mutate(`Rename library subheading “${currentSubheading.title}”`, () => { currentSubheading.title = title; }, { includePortableIndex: true, requireUndo: true });
         },
@@ -4162,15 +4239,19 @@ export class EntVaultCommandCenterView extends ItemView {
     }));
     menu.addItem((item) => item.setTitle("Remove subheading").setIcon("trash-2").onClick(() => {
       if (!ownsBase() || !layoutIsCurrent()) return;
-      new ConfirmModal(this.app, "Remove library subheading?", `Its records will remain directly under “${heading.title}”. No Markdown note will be changed.`, "Remove subheading", async () => {
+      new ConfirmModal(this.app, "Remove library subheading?", `Its records and nested subheadings will move up under “${parentTitle}”. No Markdown note will be changed.`, "Remove subheading", async () => {
         if (!ownsBase()) return;
         if (!layoutIsCurrent()) throw new Error("The library organization changed. Reopen the action and try again.");
-        const currentHeading = this.libraryLayout(libraryId).find((item) => item.id === heading.id);
-        const currentSubheading = currentHeading?.subheadings.find((item) => item.id === subheading.id);
-        if (!currentHeading || !currentSubheading) throw new Error("That library subheading is no longer available. Reopen the action and try again.");
-        await this.plugin.mutate(`Remove library subheading “${currentSubheading.title}”`, () => {
-          currentHeading.subjects.push(...currentSubheading.subjects.filter((subjectId) => !currentHeading.subjects.includes(subjectId)));
-          currentHeading.subheadings = currentHeading.subheadings.filter((item) => item.id !== currentSubheading.id);
+        const current = locateCurrent();
+        if (!current) throw new Error("That library subheading is no longer available. Reopen the action and try again.");
+        await this.plugin.mutate(`Remove library subheading “${current.node.title}”`, () => {
+          const { parent, node } = current;
+          parent.subjects.push(...node.subjects.filter((subjectId) => !parent.subjects.includes(subjectId)));
+          const children = ensureChildList(parent);
+          const removeIndex = children.findIndex((item) => item.id === node.id);
+          // The removed node's own children take its place, keeping order.
+          children.splice(removeIndex < 0 ? children.length : removeIndex, removeIndex < 0 ? 0 : 1, ...childSubheadings(node));
+          dropEmptyChildList(parent, parent.id === heading.id);
         }, { includePortableIndex: true, requireUndo: true });
       }).open();
     }));
@@ -4201,10 +4282,11 @@ export class EntVaultCommandCenterView extends ItemView {
     if (!heading) return;
     let list = heading.subjects;
     if (target.subheadingId) {
-      const subheading = heading.subheadings.find((item) => item.id === target.subheadingId);
-      if (!subheading) return;
-      list = subheading.subjects;
-      subheading.collapsed = false;
+      // The target may sit at any depth under this heading; ids are unique.
+      const located = subheadingChain(heading, target.subheadingId);
+      if (!located) return;
+      list = located.node.subjects;
+      for (const node of located.chain) node.collapsed = false;
     }
     if (!list.includes(path)) list.push(path);
     heading.collapsed = false;
@@ -4215,7 +4297,7 @@ export class EntVaultCommandCenterView extends ItemView {
     if (!heading) return;
     if (!membership.subheadingId) heading.subjects = heading.subjects.filter((item) => item !== path);
     else {
-      const subheading = heading.subheadings.find((item) => item.id === membership.subheadingId);
+      const subheading = subheadingChain(heading, membership.subheadingId)?.node;
       if (subheading) subheading.subjects = subheading.subjects.filter((item) => item !== path);
     }
   }
@@ -4224,7 +4306,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const heading = this.plugin.data.collections.find((item) => item.id === membership.headingId);
     if (!heading) return [];
     if (!membership.subheadingId) return heading.subjects;
-    return heading.subheadings.find((item) => item.id === membership.subheadingId)?.subjects ?? [];
+    return subheadingChain(heading, membership.subheadingId)?.node.subjects ?? [];
   }
 
   private async moveCollection(from: number, to: number): Promise<void> {
@@ -4235,11 +4317,13 @@ export class EntVaultCommandCenterView extends ItemView {
     });
   }
 
-  private async moveSubheading(heading: LayoutHeading, from: number, to: number): Promise<void> {
-    if (from < 0 || to < 0 || from >= heading.subheadings.length || to >= heading.subheadings.length) return;
+  private async moveSubheading(parent: LayoutNode, from: number, to: number): Promise<void> {
+    const children = childSubheadings(parent);
+    if (from < 0 || to < 0 || from >= children.length || to >= children.length) return;
     await this.plugin.mutate("Reorder subheading", () => {
-      const [item] = heading.subheadings.splice(from, 1);
-      if (item) heading.subheadings.splice(to, 0, item);
+      const list = ensureChildList(parent);
+      const [item] = list.splice(from, 1);
+      if (item) list.splice(to, 0, item);
     });
   }
 
@@ -4310,14 +4394,31 @@ export class EntVaultCommandCenterView extends ItemView {
     if (!this.guardLoadedBase()) return;
     const ownsBase = this.createOpenedBaseGuard();
     const menu = new Menu();
-    const index = heading.subheadings.findIndex((item) => item.id === subheading.id);
+    /** Re-find the node and its parent in the current layout; ids are layout-unique. */
+    const locateCurrent = (): { parent: LayoutNode; node: LayoutSubheading } | null => {
+      const currentHeading = this.plugin.data.collections.find((item) => item.id === heading.id);
+      const currentChain = currentHeading ? subheadingChain(currentHeading, subheading.id) : null;
+      if (!currentHeading || !currentChain) return null;
+      return { parent: currentChain.chain[currentChain.chain.length - 2] ?? currentHeading, node: currentChain.node };
+    };
+    const located = subheadingChain(heading, subheading.id);
+    if (!located) return;
+    const depth = located.chain.length;
+    const parent = located.chain[located.chain.length - 2] ?? heading;
+    const siblings = childSubheadings(parent);
+    const index = siblings.findIndex((item) => item.id === subheading.id);
     menu.addItem((item) => item.setTitle("Move subheading up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => {
-      if (ownsBase()) this.run(() => this.moveSubheading(heading, index, index - 1));
+      if (ownsBase()) this.run(() => this.moveSubheading(parent, index, index - 1));
     }));
-    menu.addItem((item) => item.setTitle("Move subheading down").setIcon("arrow-down").setDisabled(index < 0 || index >= heading.subheadings.length - 1).onClick(() => {
-      if (ownsBase()) this.run(() => this.moveSubheading(heading, index, index + 1));
+    menu.addItem((item) => item.setTitle("Move subheading down").setIcon("arrow-down").setDisabled(index < 0 || index >= siblings.length - 1).onClick(() => {
+      if (ownsBase()) this.run(() => this.moveSubheading(parent, index, index + 1));
     }));
     menu.addSeparator();
+    if (depth < MAX_LAYOUT_DEPTH) {
+      menu.addItem((item) => item.setTitle("Add subheading").setIcon("folder-plus").onClick(() => {
+        if (ownsBase()) this.promptNewSubheading(heading, subheading);
+      }));
+    }
     menu.addItem((item) => item.setTitle("Rename subheading").setIcon("pencil").onClick(() => {
       if (!ownsBase()) return;
       new TextPromptModal(this.app, {
@@ -4330,11 +4431,18 @@ export class EntVaultCommandCenterView extends ItemView {
     }));
     menu.addItem((item) => item.setTitle("Remove subheading").setIcon("trash-2").onClick(() => {
       if (!ownsBase()) return;
-      new ConfirmModal(this.app, "Remove subheading?", `Its ${this.plugin.data.settings.itemSingular} memberships will remain directly under “${heading.title}”.`, "Remove subheading", async () => {
+      new ConfirmModal(this.app, "Remove subheading?", `Its ${this.plugin.data.settings.itemSingular} memberships and nested subheadings will move up under “${parent.title}”.`, "Remove subheading", async () => {
         if (!ownsBase()) return;
-        await this.plugin.mutate(`Remove subheading “${subheading.title}”`, () => {
-          heading.subjects.push(...subheading.subjects.filter((path) => !heading.subjects.includes(path)));
-          heading.subheadings = heading.subheadings.filter((item) => item.id !== subheading.id);
+        const current = locateCurrent();
+        if (!current) throw new Error("That subheading is no longer available. Reopen the action and try again.");
+        await this.plugin.mutate(`Remove subheading “${current.node.title}”`, () => {
+          const { parent: currentParent, node } = current;
+          currentParent.subjects.push(...node.subjects.filter((path) => !currentParent.subjects.includes(path)));
+          const children = ensureChildList(currentParent);
+          const removeIndex = children.findIndex((item) => item.id === node.id);
+          // The removed node's own children take its place, keeping order.
+          children.splice(removeIndex < 0 ? children.length : removeIndex, removeIndex < 0 ? 0 : 1, ...childSubheadings(node));
+          dropEmptyChildList(currentParent, currentParent.id === heading.id);
         });
       }).open();
     }));
@@ -4770,12 +4878,9 @@ export class EntVaultCommandCenterView extends ItemView {
         this.collapsedCurriculumDomains.clear();
         this.collapsedCurriculumNodes.clear();
       } else if (this.plugin.data.activeTab === "collections") {
-        this.plugin.data.collections.forEach((heading) => { heading.collapsed = false; heading.subheadings.forEach((sub) => { sub.collapsed = false; }); });
+        visitLayoutNodes(this.plugin.data.collections, (node) => { node.collapsed = false; });
       } else if (activeLibraryId) {
-        this.libraryLayout(activeLibraryId).forEach((heading) => {
-          heading.collapsed = false;
-          heading.subheadings.forEach((subheading) => { subheading.collapsed = false; });
-        });
+        visitLayoutNodes(this.libraryLayout(activeLibraryId), (node) => { node.collapsed = false; });
       }
       if (this.plugin.data.activeTab === "collections" || activeLibraryId) await this.plugin.saveViewState();
       else this.persistCollapseState();
@@ -4791,12 +4896,9 @@ export class EntVaultCommandCenterView extends ItemView {
         const visit = (node: CurriculumTreeNode): void => { if (node.children.length > 0) this.collapsedCurriculumNodes.add(node.record.path); node.children.forEach(visit); };
         this.curriculum.domains.forEach((domain) => domain.roots.forEach(visit));
       } else if (this.plugin.data.activeTab === "collections") {
-        this.plugin.data.collections.forEach((heading) => { heading.collapsed = true; heading.subheadings.forEach((sub) => { sub.collapsed = true; }); });
+        visitLayoutNodes(this.plugin.data.collections, (node) => { node.collapsed = true; });
       } else if (activeLibraryId) {
-        this.libraryLayout(activeLibraryId).forEach((heading) => {
-          heading.collapsed = true;
-          heading.subheadings.forEach((subheading) => { subheading.collapsed = true; });
-        });
+        visitLayoutNodes(this.libraryLayout(activeLibraryId), (node) => { node.collapsed = true; });
       }
       if (this.plugin.data.activeTab === "collections" || activeLibraryId) await this.plugin.saveViewState();
       else this.persistCollapseState();

@@ -51,9 +51,9 @@ If the subject was previously linked, check whether the note has not yet synced 
 
 ## Edit a Library on iPhone or iPad
 
-Use **… → Manage libraries** to edit the Library definition. Open that Library, choose **Arrange**, and use the heading, subheading, or record **…** menus.
+Use **… → Manage libraries** to edit the Library definition. Open that Library, choose **Arrange**, and use the heading, subheading, or record **…** menus. **Add subheading** appears on any heading or subheading below the five-level depth cap.
 
-Deleting a heading leaves its records under the explicit Unplaced section. It does not delete notes. Permanent deletion is available only after a custom Library is archived and requires choosing a destination for any remaining subjects.
+Deleting a heading leaves its records under the explicit Unplaced section. It does not delete notes. Removing a nested subheading instead moves its records and child subheadings up under its parent. Permanent deletion is available only after a custom Library is archived and requires choosing a destination for any remaining subjects.
 
 ## Visual movement on iPhone
 
@@ -73,6 +73,10 @@ Place the JSON file anywhere inside the vault, then open **Export / import cente
 
 The file must be 10 MB or smaller and pass bounded-list and aggregate-reference validation. Same-vault recovery starts unselected and needs a separate exact-path confirmation.
 
+## Nested subheadings do not appear on another device
+
+Update the plugin on that device. Nested Collection and Library subheadings need the current release everywhere; an older build cannot faithfully interpret the newer synced store, so it preserves the data read-only instead of guessing. After updating, let Sync settle and reopen the Command Center. See [Settings are read-only](#settings-are-read-only).
+
 ## Settings are read-only
 
 The plugin detected unrecognized, damaged, or newer plugin data and intentionally refused to overwrite it.
@@ -84,7 +88,7 @@ The plugin detected unrecognized, damaged, or newer plugin data and intentionall
 5. Update every device to the same current plugin version.
 6. Report the issue without attaching private plugin data publicly.
 
-An older device can describe the version-14 store with schema-13 knowledge-base data as a migration failure. That is expected downgrade protection. Update every synced device to the same current 0.12.x release before editing again.
+An older device can describe the version-15 store with schema-14 knowledge-base data as a migration failure. That is expected downgrade protection. Update every synced device to the same current release before editing again.
 
 ## Export/import center is in salvage mode
 

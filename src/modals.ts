@@ -1,12 +1,14 @@
 import { App, FuzzyMatch, FuzzySuggestModal, Modal, Notice, prepareFuzzySearch, Setting, TFile, setIcon } from "obsidian";
 import {
   canonicalPath,
+  childSubheadings,
   DOMAIN_DEFINITIONS,
   expectedParentCurriculumId,
   GenericNoteFormValue,
   genericNotePath,
   isExtensionCurriculumId,
   LayoutHeading,
+  LayoutSubheading,
   NewNoteMode,
   normalizeSearchText,
   pathIsInsideFolder,
@@ -146,6 +148,10 @@ export class ConfirmModal extends Modal {
 
 export interface CollectionTarget {
   headingId: string;
+  /**
+   * Layout-global unique node id of a subheading at any depth under the
+   * heading. Omitted when the target is the heading itself.
+   */
   subheadingId?: string;
   label: string;
 }
@@ -154,13 +160,11 @@ export function collectionTargets(collections: LayoutHeading[]): CollectionTarge
   const targets: CollectionTarget[] = [];
   for (const heading of collections) {
     targets.push({ headingId: heading.id, label: heading.title });
-    for (const subheading of heading.subheadings) {
-      targets.push({
-        headingId: heading.id,
-        subheadingId: subheading.id,
-        label: `${heading.title} / ${subheading.title}`,
-      });
-    }
+    const visit = (node: LayoutSubheading, label: string): void => {
+      targets.push({ headingId: heading.id, subheadingId: node.id, label });
+      for (const child of childSubheadings(node)) visit(child, `${label} / ${child.title}`);
+    };
+    for (const subheading of heading.subheadings) visit(subheading, `${heading.title} / ${subheading.title}`);
   }
   return targets;
 }

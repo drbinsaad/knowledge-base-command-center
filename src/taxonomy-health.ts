@@ -1,4 +1,5 @@
 import {
+  childSubheadings,
   isPortablePlaceholderPath,
   normalizeWikiLink,
   pathIsInsideFolder,
@@ -9,6 +10,7 @@ import {
   validateTemplateFilePath,
   validateWritableFolderPath,
   type LayoutHeading,
+  type LayoutSubheading,
   type PluginData,
   type VaultRecord,
 } from "./model";
@@ -128,15 +130,24 @@ function addNamedStructure(
   rootScope: string,
   rootDescription: string,
 ): void {
+  // Siblings share a scope (their parent container) so duplicate-name checks
+  // stay per-container at every depth. Node ids are layout-global unique, so
+  // the `{rootScope}:subheading:{id}` identity holds for nested nodes too.
+  const visit = (node: LayoutSubheading, parentScope: string, parentPath: string): void => {
+    output.push({
+      id: `${rootScope}:subheading:${node.id}`,
+      title: node.title,
+      scope: parentScope,
+      description: `${rootDescription} subheading under “${parentPath}”`,
+    });
+    for (const child of childSubheadings(node)) {
+      visit(child, `${rootScope}:subheading:${node.id}`, `${parentPath} / ${node.title}`);
+    }
+  };
   for (const heading of headings) {
     output.push({ id: `${rootScope}:heading:${heading.id}`, title: heading.title, scope: rootScope, description: `${rootDescription} heading` });
     for (const subheading of heading.subheadings) {
-      output.push({
-        id: `${rootScope}:subheading:${subheading.id}`,
-        title: subheading.title,
-        scope: `${rootScope}:heading:${heading.id}`,
-        description: `${rootDescription} subheading under “${heading.title}”`,
-      });
+      visit(subheading, `${rootScope}:heading:${heading.id}`, heading.title);
     }
   }
 }
@@ -369,38 +380,51 @@ function addStructureFinding(
   findings.push({ id: findingId(kind, scope, id), kind, severity: "info", title, detail, scope });
 }
 
+/**
+ * A node is empty only when its whole subtree carries no subjects: an empty
+ * node whose descendant has subjects is scaffolding in use, not empty. Flat
+ * layouts have no descendants, so this matches the historical semantics.
+ */
+function layoutSubtreeHasSubjects(node: LayoutHeading | LayoutSubheading): boolean {
+  return node.subjects.length > 0 || childSubheadings(node).some(layoutSubtreeHasSubjects);
+}
+
 function addStructureFindings(findings: TaxonomyHealthFinding[], data: PluginData, records: VaultRecord[]): void {
   const recordPaths = new Set(records.map((record) => record.path));
   for (const heading of data.collections) {
     const headingValid = heading.subjects.filter((path) => recordPaths.has(path)).length;
-    if (heading.subjects.length === 0 && heading.subheadings.every((subheading) => subheading.subjects.length === 0)) {
+    if (!layoutSubtreeHasSubjects(heading)) {
       addStructureFinding(findings, "empty-structure", "Empty collection heading", `“${heading.title}” has no direct or nested members. It may be intentional scaffolding, so removal is manual.`, "Collections", heading.id);
     } else if (heading.subjects.length > 0 && headingValid === 0) {
       addStructureFinding(findings, "unreachable-structure", "Unreachable collection heading", `Every direct member of “${heading.title}” is unavailable in the current record projection. Review the missing references before changing the heading.`, "Collections", heading.id);
     }
-    for (const subheading of heading.subheadings) {
-      const valid = subheading.subjects.filter((path) => recordPaths.has(path)).length;
-      if (subheading.subjects.length === 0) addStructureFinding(findings, "empty-structure", "Empty collection subheading", `“${heading.title} / ${subheading.title}” has no members. It may be intentional scaffolding.`, "Collections", subheading.id);
-      else if (valid === 0) addStructureFinding(findings, "unreachable-structure", "Unreachable collection subheading", `Every member of “${heading.title} / ${subheading.title}” is unavailable.`, "Collections", subheading.id);
-    }
+    const visit = (node: LayoutSubheading, label: string): void => {
+      const valid = node.subjects.filter((path) => recordPaths.has(path)).length;
+      if (!layoutSubtreeHasSubjects(node)) addStructureFinding(findings, "empty-structure", "Empty collection subheading", `“${label}” has no members. It may be intentional scaffolding.`, "Collections", node.id);
+      else if (node.subjects.length > 0 && valid === 0) addStructureFinding(findings, "unreachable-structure", "Unreachable collection subheading", `Every member of “${label}” is unavailable.`, "Collections", node.id);
+      for (const child of childSubheadings(node)) visit(child, `${label} / ${child.title}`);
+    };
+    for (const subheading of heading.subheadings) visit(subheading, `${heading.title} / ${subheading.title}`);
   }
   const subjectById = new Map(data.portableIndex.subjects.map((subject) => [subject.id, subject]));
   for (const library of data.portableIndex.libraries) {
     const layout = data.portableIndex.libraryLayouts[library.id] ?? [];
+    const validForLibrary = (id: string): boolean => {
+      const subject = subjectById.get(id);
+      return Boolean(subject && subjectLibraryId(subject) === library.id);
+    };
     for (const heading of layout) {
-      const validForLibrary = (id: string): boolean => {
-        const subject = subjectById.get(id);
-        return Boolean(subject && subjectLibraryId(subject) === library.id);
-      };
-      if (heading.subjects.length === 0 && heading.subheadings.every((subheading) => subheading.subjects.length === 0)) {
+      if (!layoutSubtreeHasSubjects(heading)) {
         addStructureFinding(findings, "empty-structure", "Empty Library heading", `“${library.name} / ${heading.title}” has no direct or nested records. It may be intentional scaffolding.`, library.name, heading.id);
       } else if (heading.subjects.length > 0 && heading.subjects.every((id) => !validForLibrary(id))) {
         addStructureFinding(findings, "unreachable-structure", "Unreachable Library heading", `Every direct identity in “${library.name} / ${heading.title}” is missing or belongs to another Library.`, library.name, heading.id);
       }
-      for (const subheading of heading.subheadings) {
-        if (subheading.subjects.length === 0) addStructureFinding(findings, "empty-structure", "Empty Library subheading", `“${library.name} / ${heading.title} / ${subheading.title}” has no records.`, library.name, subheading.id);
-        else if (subheading.subjects.every((id) => !validForLibrary(id))) addStructureFinding(findings, "unreachable-structure", "Unreachable Library subheading", `Every identity in “${library.name} / ${heading.title} / ${subheading.title}” is missing or belongs to another Library.`, library.name, subheading.id);
-      }
+      const visit = (node: LayoutSubheading, label: string): void => {
+        if (!layoutSubtreeHasSubjects(node)) addStructureFinding(findings, "empty-structure", "Empty Library subheading", `“${label}” has no records.`, library.name, node.id);
+        else if (node.subjects.length > 0 && node.subjects.every((id) => !validForLibrary(id))) addStructureFinding(findings, "unreachable-structure", "Unreachable Library subheading", `Every identity in “${label}” is missing or belongs to another Library.`, library.name, node.id);
+        for (const child of childSubheadings(node)) visit(child, `${label} / ${child.title}`);
+      };
+      for (const subheading of heading.subheadings) visit(subheading, `${library.name} / ${heading.title} / ${subheading.title}`);
     }
   }
   const populatedGroups = new Set(records

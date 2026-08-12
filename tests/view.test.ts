@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Menu, Notice, TFile } from "obsidian";
+import { Menu, Notice, Platform, TFile } from "obsidian";
 import { AddActionModal, calculateModalViewportLayout, ConfirmModal, IndexGroupModal, KnowledgeNoteModal, localDateStamp, RecordPickerModal, TextPromptModal, TopicEditorModal, VaultFilePickerModal } from "../src/modals.ts";
 import {
   canRelinkPortableRecord,
@@ -25,6 +25,7 @@ import {
 import {
   BUILTIN_LIBRARY_DEFINITIONS,
   buildCurriculumTree,
+  createDefaultStore,
   createPersonalBackup,
   createWorkspaceConfig,
   emptyCurriculumTree,
@@ -32,15 +33,18 @@ import {
   migrateData,
   parseQuery,
   snapshotPersonal,
+  type LayoutHeading,
+  type LayoutSubheading,
   type LibraryDefinition,
   type PluginData,
   type VaultRecord,
 } from "../src/model.ts";
+import EntVaultCommandCenterPlugin from "../src/main.ts";
 import { collectKnowledgeBaseSearchResults } from "../src/search.ts";
 import { EntCommandCenterSettingsTab } from "../src/settings.ts";
 import { LibraryEditorModal, ManageLibrariesModal } from "../src/library-modal.ts";
 import { LibraryNoteProfileEditorModal } from "../src/library-profile-modal.ts";
-import { createFakeDom } from "./support/fake-dom.ts";
+import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
 
 function record(path: string, title: string, kind: VaultRecord["kind"] = "topic"): VaultRecord {
   return {
@@ -4454,4 +4458,831 @@ test("organization snapshots cannot mutate memory or report success in compatibi
   assert.deepEqual(data.layoutSnapshots, snapshotsBefore);
   assert.equal(saveCalls, 0);
   assert.equal(Notice.messages.some((message) => /Saved organization snapshot/i.test(message)), false);
+});
+
+// ---------------------------------------------------------------------------
+// Nested subheadings (depth ≤ 5): shared recursive renderer and deep targets
+// ---------------------------------------------------------------------------
+
+interface LayoutMembershipTarget { headingId: string; subheadingId?: string }
+
+interface LayoutHarnessPlugin {
+  data: PluginData;
+  getActiveKnowledgeBaseId(): string;
+  getDataEpoch(): number;
+  isClinicalMode(): boolean;
+  isDataReadOnly(): boolean;
+  getLibrary(id: string): LibraryDefinition | null;
+  getLibraries(includeArchived?: boolean): LibraryDefinition[];
+  saveViewState(): Promise<void>;
+  savePluginData(): Promise<void>;
+  mutate(label: string, action: () => void, options?: { includePortableIndex?: boolean; requireUndo?: boolean }): Promise<void>;
+  assignRecordToLibrary(path: string, libraryId: string, target: LayoutMembershipTarget): Promise<void>;
+  createQuickEntryCollectionSubheading(headingId: string, title: string, parentSubheadingId?: string): Promise<void>;
+  createQuickEntryLibrarySubheading(libraryId: string, headingId: string, title: string, parentSubheadingId?: string): Promise<void>;
+}
+
+interface LayoutHarnessView {
+  app: object;
+  plugin: LayoutHarnessPlugin;
+  records: VaultRecord[];
+  recordByPath: Map<string, VaultRecord>;
+  query: string;
+  parsedQuery: ReturnType<typeof parseQuery>;
+  editMode: boolean;
+  browseRowLimit: number;
+  browseStructureLimit: number;
+  browseRowsRendered: number;
+  browseRowsOmitted: number;
+  browseStructuresRendered: number;
+  browseStructuresOmitted: number;
+  loadedBaseId: string;
+  loadedDataEpoch: number;
+  staleViewNoticeShown: boolean;
+  viewInstanceId: string;
+  libraryDragRenderToken: string;
+  activeLibraryDrag: unknown;
+  collapsedQueues: Set<string>;
+  renderTree(): void;
+  renderHeading(parent: HTMLElement, heading: LayoutHeading, mutable: boolean): number;
+  renderLibrary(parent: HTMLElement, records: VaultRecord[]): number;
+  showSubheadingMenu(event: MouseEvent, heading: LayoutHeading, subheading: LayoutSubheading): void;
+  showLibrarySubheadingMenu(event: MouseEvent, libraryId: string, heading: LayoutHeading, subheading: LayoutSubheading): void;
+  showGlobalMenu(event: MouseEvent): void;
+  openQuickCollectionHeadingPicker(): void;
+  openQuickLibraryHeadingPicker(libraryId: string): void;
+  libraryTemplateTokenContext(library: LibraryDefinition, target?: LayoutMembershipTarget): { category: string };
+  readDrag(event: DragEvent): unknown;
+  writeLibraryDrag(event: DragEvent, payload: {
+    kind: "library-membership";
+    libraryId: string;
+    subjectId: string;
+    headingId: string;
+    subheadingId?: string;
+  }): void;
+}
+
+function createLayoutRenderView(data: PluginData, records: VaultRecord[]): LayoutHarnessView {
+  const view = Object.create(EntVaultCommandCenterView.prototype) as LayoutHarnessView;
+  view.app = {};
+  view.plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    isClinicalMode: () => false,
+    isDataReadOnly: () => false,
+    getLibrary: (id) => data.portableIndex.libraries.find((library) => library.id === id) ?? null,
+    getLibraries: (includeArchived = false) => data.portableIndex.libraries
+      .filter((library) => includeArchived || library.archivedAt === null),
+    saveViewState: async () => undefined,
+    savePluginData: async () => undefined,
+    mutate: async (_label, action) => { action(); },
+    assignRecordToLibrary: async () => undefined,
+    createQuickEntryCollectionSubheading: async () => undefined,
+    createQuickEntryLibrarySubheading: async () => undefined,
+  };
+  view.records = records;
+  view.recordByPath = new Map(records.map((item) => [item.path, item]));
+  view.query = "";
+  view.parsedQuery = parseQuery("");
+  view.editMode = false;
+  view.browseRowLimit = 300;
+  view.browseStructureLimit = 300;
+  view.browseRowsRendered = 0;
+  view.browseRowsOmitted = 0;
+  view.browseStructuresRendered = 0;
+  view.browseStructuresOmitted = 0;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+  view.viewInstanceId = "layout-render-test";
+  view.libraryDragRenderToken = "layout-render-token";
+  view.activeLibraryDrag = null;
+  view.collapsedQueues = new Set();
+  view.renderTree = () => undefined;
+  return view;
+}
+
+function nestedCollectionHeading(): LayoutHeading {
+  return {
+    id: "col-h1",
+    title: "Board review",
+    collapsed: false,
+    subjects: ["Notes/Alpha.md", "Notes/Missing.md"],
+    subheadings: [{
+      id: "col-d2",
+      title: "Airway",
+      collapsed: false,
+      subjects: ["Notes/Beta.md"],
+      subheadings: [{
+        id: "col-d3",
+        title: "Intubation",
+        collapsed: false,
+        subjects: ["Notes/Gamma.md"],
+        subheadings: [{
+          id: "col-d4",
+          title: "Rapid sequence",
+          collapsed: false,
+          subjects: [],
+          subheadings: [{ id: "col-d5", title: "Medications", collapsed: false, subjects: [] }],
+        }],
+      }],
+    }],
+  };
+}
+
+function nestedLibraryLayout(): LayoutHeading[] {
+  return [{
+    id: "lib-h1",
+    title: "Guidelines",
+    collapsed: false,
+    subjects: ["subject-a", "subject-missing"],
+    subheadings: [{
+      id: "lib-d2",
+      title: "Level two",
+      collapsed: false,
+      subjects: [],
+      subheadings: [{ id: "lib-d3", title: "Level three", collapsed: false, subjects: ["subject-b", "subject-c"] }],
+    }],
+  }];
+}
+
+function nestedLibraryRecords(libraryId: string): VaultRecord[] {
+  return [
+    { ...record("Reference/A.md", "Alpha"), role: "library", portableId: "subject-a", libraryId },
+    { ...record("Reference/B.md", "Beta"), role: "library", portableId: "subject-b", libraryId },
+    { ...record("Reference/C.md", "Gamma"), role: "library", portableId: "subject-c", libraryId },
+  ];
+}
+
+interface CapturedMenuEntry { title: string; click?: () => void }
+
+function captureMenus(): { menus: CapturedMenuEntry[][]; restore(): void } {
+  const menus: CapturedMenuEntry[][] = [];
+  const byMenu = new WeakMap<object, CapturedMenuEntry[]>();
+  const descriptors = new Map(["addItem", "addSeparator", "showAtMouseEvent"].map((name) => [
+    name,
+    Object.getOwnPropertyDescriptor(Menu.prototype, name),
+  ]));
+  Object.defineProperty(Menu.prototype, "addItem", {
+    configurable: true,
+    value(this: object, configure: (item: unknown) => void): object {
+      const entries = byMenu.get(this) ?? [];
+      byMenu.set(this, entries);
+      const captured: CapturedMenuEntry = { title: "" };
+      const item = {
+        setTitle(title: string) { captured.title = title; return item; },
+        setIcon() { return item; },
+        setDisabled() { return item; },
+        onClick(callback: () => void) { captured.click = callback; return item; },
+      };
+      configure(item);
+      entries.push(captured);
+      return this;
+    },
+  });
+  Object.defineProperty(Menu.prototype, "addSeparator", {
+    configurable: true,
+    value(this: object): object { return this; },
+  });
+  Object.defineProperty(Menu.prototype, "showAtMouseEvent", {
+    configurable: true,
+    value(this: object): void { menus.push(byMenu.get(this) ?? []); },
+  });
+  return {
+    menus,
+    restore(): void {
+      for (const [name, descriptor] of descriptors) {
+        if (descriptor) Object.defineProperty(Menu.prototype, name, descriptor);
+        else Reflect.deleteProperty(Menu.prototype, name);
+      }
+    },
+  };
+}
+
+function captureConfirms(): { confirmations: Array<{ message: string; confirm: () => void | Promise<void> }>; restore(): void } {
+  const confirmations: Array<{ message: string; confirm: () => void | Promise<void> }> = [];
+  const descriptor = Object.getOwnPropertyDescriptor(ConfirmModal.prototype, "open");
+  Object.defineProperty(ConfirmModal.prototype, "open", {
+    configurable: true,
+    value(this: object): void {
+      const modal = this as unknown as { message: string; onConfirm: () => void | Promise<void> };
+      confirmations.push({ message: modal.message, confirm: modal.onConfirm });
+    },
+  });
+  return {
+    confirmations,
+    restore(): void {
+      if (descriptor) Object.defineProperty(ConfirmModal.prototype, "open", descriptor);
+      else Reflect.deleteProperty(ConfirmModal.prototype, "open");
+    },
+  };
+}
+
+const settleMicrotasks = async (): Promise<void> => {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+};
+
+test("the collections tab renders nested subheadings to depth five with depth classes and the repair tooltip", () => {
+  const dom = createFakeDom();
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const heading = nestedCollectionHeading();
+  data.collections = [heading];
+  const records = [
+    record("Notes/Alpha.md", "Alpha"),
+    record("Notes/Beta.md", "Beta"),
+    record("Notes/Gamma.md", "Gamma"),
+  ];
+  const view = createLayoutRenderView(data, records);
+  const parent = dom.document.body.createDiv();
+
+  const total = view.renderHeading(asHtmlElement(parent), heading, true);
+
+  assert.equal(total, 3, "matching totals count records at every depth");
+  const subheadingRows = parent.querySelectorAll(".ent-cc-subheading-row");
+  assert.equal(subheadingRows.length, 4, "each nested level renders one structure row");
+  assert.equal(subheadingRows[0]?.hasClass("ent-cc-depth-0"), true);
+  assert.equal(subheadingRows[1]?.hasClass("ent-cc-depth-1"), true);
+  assert.equal(subheadingRows[2]?.hasClass("ent-cc-depth-2"), true);
+  assert.equal(subheadingRows[3]?.hasClass("ent-cc-depth-3"), true);
+  assert.ok(parent.querySelector(".ent-cc-subject-row.ent-cc-level-3"), "a depth-three record row carries its indentation level");
+  assert.equal(parent.querySelector(".ent-cc-heading-row .ent-cc-row-count")?.textContent, "3", "the heading count resolves the whole subtree");
+  const missing = parent.querySelector(".ent-cc-row-missing");
+  assert.ok(missing, "unresolved references stay visible");
+  assert.match(missing.getAttribute("title") ?? "", /review or repair/i, "the collections missing count keeps its repair tooltip");
+  assert.equal(subheadingRows.every((row) => row.querySelector(".ent-cc-row-more") !== null), true, "every nested level keeps its menu control");
+});
+
+test("the library tab renders nested subheadings through the same recursive renderer, including the repair tooltip", () => {
+  const dom = createFakeDom();
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const library = installLibrary(data);
+  data.activeTab = libraryTabId(library.id);
+  data.portableIndex.libraryLayouts[library.id] = nestedLibraryLayout();
+  const records = nestedLibraryRecords(library.id);
+  const view = createLayoutRenderView(data, records);
+  const parent = dom.document.body.createDiv();
+
+  assert.equal(view.renderLibrary(asHtmlElement(parent), records), 3);
+
+  assert.equal(parent.querySelectorAll(".ent-cc-library-group").length, 1);
+  const subheadingRows = parent.querySelectorAll(".ent-cc-library-subheading .ent-cc-subheading-row");
+  assert.equal(subheadingRows.length, 2);
+  assert.equal(subheadingRows[0]?.hasClass("ent-cc-depth-0"), true);
+  assert.equal(subheadingRows[1]?.hasClass("ent-cc-depth-1"), true);
+  assert.equal(parent.querySelectorAll(".ent-cc-subject-row.ent-cc-level-3").length, 2, "records nested at depth three render with their level class");
+  const missing = parent.querySelector(".ent-cc-row-missing");
+  assert.ok(missing, "an unresolved subject reference is reported");
+  assert.match(missing.getAttribute("title") ?? "", /review or repair/i, "the library missing count regains the repair tooltip");
+  assert.equal(parent.querySelector(".ent-cc-heading-row .ent-cc-row-count")?.textContent, "3", "the heading count resolves the whole subtree");
+});
+
+test("collection menus add subheadings below the depth cap and removing a nested node promotes subjects and children in order", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const heading: LayoutHeading = {
+    id: "col-h1",
+    title: "Board review",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{
+      id: "col-d2",
+      title: "Airway",
+      collapsed: false,
+      subjects: [],
+      subheadings: [
+        { id: "col-d3a", title: "Before", collapsed: false, subjects: [] },
+        {
+          id: "col-d3b",
+          title: "Removed",
+          collapsed: false,
+          subjects: ["Notes/X.md"],
+          subheadings: [
+            { id: "col-d4a", title: "Promoted one", collapsed: false, subjects: [] },
+            {
+              id: "col-d4b",
+              title: "Promoted two",
+              collapsed: false,
+              subjects: [],
+              subheadings: [{ id: "col-d5", title: "Leaf", collapsed: false, subjects: [] }],
+            },
+          ],
+        },
+        { id: "col-d3c", title: "After", collapsed: false, subjects: [] },
+      ],
+    }],
+  };
+  data.collections = [heading];
+  const view = createLayoutRenderView(data, []);
+  const menuCapture = captureMenus();
+  const confirmCapture = captureConfirms();
+  try {
+    const parentNode = heading.subheadings[0];
+    const removed = parentNode?.subheadings?.[1];
+    const depthFour = removed?.subheadings?.[1];
+    const depthFive = depthFour?.subheadings?.[0];
+    assert.ok(parentNode && removed && depthFour && depthFive);
+
+    view.showSubheadingMenu({} as MouseEvent, heading, depthFour);
+    assert.equal((menuCapture.menus.at(-1) ?? []).some((item) => item.title === "Add subheading"), true, "a depth-four node can still gain children");
+    view.showSubheadingMenu({} as MouseEvent, heading, depthFive);
+    assert.equal((menuCapture.menus.at(-1) ?? []).some((item) => item.title === "Add subheading"), false, "a depth-five node is at the cap");
+
+    view.showSubheadingMenu({} as MouseEvent, heading, removed);
+    const removeItem = (menuCapture.menus.at(-1) ?? []).find((item) => item.title === "Remove subheading");
+    assert.ok(removeItem);
+    removeItem.click?.();
+    const confirmation = confirmCapture.confirmations.shift();
+    assert.ok(confirmation);
+    assert.match(confirmation.message, /move up under “Airway”/, "the confirm copy names the actual parent node");
+    await confirmation.confirm();
+
+    assert.deepEqual(parentNode.subjects, ["Notes/X.md"], "subjects move to the parent node, not the top heading");
+    assert.deepEqual(heading.subjects, [], "the top heading is untouched by a deep removal");
+    assert.deepEqual((parentNode.subheadings ?? []).map((item) => item.id), ["col-d3a", "col-d4a", "col-d4b", "col-d3c"], "children splice into the removed node's position");
+    assert.deepEqual(depthFour.subheadings?.map((item) => item.id), ["col-d5"], "grandchildren stay attached to their promoted parents");
+  } finally {
+    menuCapture.restore();
+    confirmCapture.restore();
+  }
+});
+
+test("library menus mirror deep add and remove semantics with portable-index mutations", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const library = installLibrary(data);
+  data.activeTab = libraryTabId(library.id);
+  data.portableIndex.libraryLayouts[library.id] = [{
+    id: "lib-h1",
+    title: "Guidelines",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{
+      id: "lib-d2",
+      title: "Level two",
+      collapsed: false,
+      subjects: [],
+      subheadings: [{
+        id: "lib-d3",
+        title: "Level three",
+        collapsed: false,
+        subjects: ["subject-x"],
+        subheadings: [{
+          id: "lib-d4",
+          title: "Level four",
+          collapsed: false,
+          subjects: [],
+          subheadings: [{ id: "lib-d5", title: "Level five", collapsed: false, subjects: [] }],
+        }],
+      }],
+    }],
+  }];
+  const view = createLayoutRenderView(data, []);
+  const mutationOptions: Array<{ includePortableIndex?: boolean; requireUndo?: boolean } | undefined> = [];
+  view.plugin.mutate = async (_label, action, options) => {
+    mutationOptions.push(options);
+    action();
+  };
+  const layout = data.portableIndex.libraryLayouts[library.id] ?? [];
+  const heading = layout[0];
+  const levelTwo = heading?.subheadings[0];
+  const levelThree = levelTwo?.subheadings?.[0];
+  const levelFour = levelThree?.subheadings?.[0];
+  const levelFive = levelFour?.subheadings?.[0];
+  assert.ok(heading && levelTwo && levelThree && levelFour && levelFive);
+  const menuCapture = captureMenus();
+  const confirmCapture = captureConfirms();
+  try {
+    view.showLibrarySubheadingMenu({} as MouseEvent, library.id, heading, levelFour);
+    assert.equal((menuCapture.menus.at(-1) ?? []).some((item) => item.title === "Add subheading"), true);
+    view.showLibrarySubheadingMenu({} as MouseEvent, library.id, heading, levelFive);
+    assert.equal((menuCapture.menus.at(-1) ?? []).some((item) => item.title === "Add subheading"), false, "the depth cap hides deeper creation");
+
+    view.showLibrarySubheadingMenu({} as MouseEvent, library.id, heading, levelThree);
+    const removeItem = (menuCapture.menus.at(-1) ?? []).find((item) => item.title === "Remove subheading");
+    assert.ok(removeItem);
+    removeItem.click?.();
+    const confirmation = confirmCapture.confirmations.shift();
+    assert.ok(confirmation);
+    assert.match(confirmation.message, /move up under “Level two”/);
+    assert.match(confirmation.message, /No Markdown note will be changed/);
+    await confirmation.confirm();
+
+    assert.deepEqual(levelTwo.subjects, ["subject-x"], "records move to the direct parent node");
+    assert.deepEqual(levelTwo.subheadings?.map((item) => item.id), ["lib-d4"], "the removed node's children take its place");
+    assert.deepEqual(mutationOptions, [{ includePortableIndex: true, requireUndo: true }]);
+  } finally {
+    menuCapture.restore();
+    confirmCapture.restore();
+  }
+});
+
+test("drops onto depth-three nodes add memberships there and row drops reorder within the deep parent", async () => {
+  const dom = createFakeDom();
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const library = installLibrary(data);
+  data.activeTab = libraryTabId(library.id);
+  data.portableIndex.libraryLayouts[library.id] = nestedLibraryLayout();
+  const records = nestedLibraryRecords(library.id);
+  const view = createLayoutRenderView(data, records);
+  view.editMode = true;
+  const assignments: Array<{ path: string; target: LayoutMembershipTarget }> = [];
+  view.plugin.assignRecordToLibrary = async (path, _libraryId, target) => { assignments.push({ path, target }); };
+  view.plugin.mutate = async (_label, action, options) => {
+    assert.deepEqual(options, { includePortableIndex: true, requireUndo: true });
+    action();
+  };
+  const parent = dom.document.body.createDiv();
+  const dataTransfer = { effectAllowed: "none", dropEffect: "none", setData: () => undefined, getData: () => "" };
+  const dragEvent = { dataTransfer } as unknown as DragEvent;
+
+  const mobilePlatform = Platform as unknown as { isMobile: boolean };
+  const previousMobile = mobilePlatform.isMobile;
+  mobilePlatform.isMobile = false;
+  try {
+    assert.equal(view.renderLibrary(asHtmlElement(parent), records), 3);
+    const subheadingRows = parent.querySelectorAll(".ent-cc-subheading-row");
+    const depthThreeRow = subheadingRows[1];
+    assert.ok(depthThreeRow);
+
+    view.writeLibraryDrag(dragEvent, { kind: "library-membership", libraryId: library.id, subjectId: "subject-a", headingId: "lib-h1" });
+    const dragover = depthThreeRow.dispatch("dragover");
+    assert.equal(dragover.defaultPrevented, true, "a deep node is a live drop target");
+    depthThreeRow.dispatch("drop");
+    await settleMicrotasks();
+    assert.deepEqual(assignments, [{
+      path: "Reference/A.md",
+      target: { libraryId: library.id, headingId: "lib-h1", subheadingId: "lib-d3" },
+    }], "the drop payload carries the deep node id");
+
+    view.writeLibraryDrag(dragEvent, { kind: "library-membership", libraryId: library.id, subjectId: "subject-b", headingId: "lib-h1", subheadingId: "lib-d3" });
+    const subjectRows = parent.querySelectorAll(".ent-cc-subject-row");
+    const targetRow = subjectRows[2];
+    assert.ok(targetRow);
+    targetRow.setBoundingClientRect({ top: 0, height: 44, bottom: 44 });
+    targetRow.dispatch("dragover", { clientY: 40 });
+    targetRow.dispatch("drop", { clientY: 40 });
+    await settleMicrotasks();
+    const deepNode = data.portableIndex.libraryLayouts[library.id]?.[0]?.subheadings[0]?.subheadings?.[0];
+    assert.deepEqual(deepNode?.subjects, ["subject-c", "subject-b"], "row drops reorder inside the depth-three parent");
+  } finally {
+    mobilePlatform.isMobile = previousMobile;
+  }
+});
+
+test("collection drops resolve deep membership targets and remove them from every level", async () => {
+  const dom = createFakeDom();
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const heading = nestedCollectionHeading();
+  data.collections = [heading];
+  const records = [
+    record("Notes/Alpha.md", "Alpha"),
+    record("Notes/Beta.md", "Beta"),
+    record("Notes/Gamma.md", "Gamma"),
+  ];
+  const view = createLayoutRenderView(data, records);
+  view.editMode = true;
+  const parent = dom.document.body.createDiv();
+
+  const mobilePlatform = Platform as unknown as { isMobile: boolean };
+  const previousMobile = mobilePlatform.isMobile;
+  mobilePlatform.isMobile = false;
+  try {
+    view.renderHeading(asHtmlElement(parent), heading, true);
+    const depthThreeRow = parent.querySelectorAll(".ent-cc-subheading-row")[1];
+    assert.ok(depthThreeRow);
+    (view as unknown as { readDrag(): unknown }).readDrag = () => ({
+      kind: "membership",
+      path: "Notes/Alpha.md",
+      headingId: "col-h1",
+    });
+    depthThreeRow.dispatch("drop");
+    await settleMicrotasks();
+    const depthThree = heading.subheadings[0]?.subheadings?.[0];
+    assert.equal(heading.subjects.includes("Notes/Alpha.md"), false, "the membership left its old level");
+    assert.deepEqual(depthThree?.subjects, ["Notes/Gamma.md", "Notes/Alpha.md"], "the drop landed on the depth-three node");
+
+    (view as unknown as { readDrag(): unknown }).readDrag = () => ({
+      kind: "membership",
+      path: "Notes/Alpha.md",
+      headingId: "col-h1",
+      subheadingId: "col-d3",
+    });
+    const subjectRows = parent.querySelectorAll(".ent-cc-subject-row");
+    const gammaRow = subjectRows.find((row) => row.textContent.includes("Gamma"));
+    assert.ok(gammaRow);
+    gammaRow.setBoundingClientRect({ top: 0, height: 44, bottom: 44 });
+    gammaRow.dispatch("dragover", { clientY: 4 });
+    gammaRow.dispatch("drop", { clientY: 4 });
+    await settleMicrotasks();
+    assert.deepEqual(depthThree?.subjects, ["Notes/Alpha.md", "Notes/Gamma.md"], "row drops reorder inside the deep parent list");
+  } finally {
+    mobilePlatform.isMobile = previousMobile;
+  }
+});
+
+test("collapse toggles at depth persist through saveViewState and roll back when the save fails", async () => {
+  Notice.messages.length = 0;
+  const dom = createFakeDom();
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const heading = nestedCollectionHeading();
+  data.collections = [heading];
+  const view = createLayoutRenderView(data, [
+    record("Notes/Alpha.md", "Alpha"),
+    record("Notes/Beta.md", "Beta"),
+    record("Notes/Gamma.md", "Gamma"),
+  ]);
+  let saves = 0;
+  let failSave = false;
+  view.plugin.saveViewState = async () => {
+    if (failSave) throw new Error("save failed for the toggle test");
+    saves += 1;
+  };
+  const parent = dom.document.body.createDiv();
+  view.renderHeading(asHtmlElement(parent), heading, true);
+  const depthThreeRow = parent.querySelectorAll(".ent-cc-subheading-row")[1];
+  const disclosure = depthThreeRow?.querySelector(".ent-cc-disclosure");
+  assert.ok(disclosure);
+  const depthThree = heading.subheadings[0]?.subheadings?.[0];
+  assert.ok(depthThree);
+
+  disclosure.dispatch("click");
+  await settleMicrotasks();
+  assert.equal(depthThree.collapsed, true, "the nested node's collapse state is written");
+  assert.equal(saves, 1, "the collapse state reaches the persisted view state");
+
+  failSave = true;
+  disclosure.dispatch("click");
+  await settleMicrotasks();
+  assert.equal(depthThree.collapsed, true, "a failed save rolls the optimistic toggle back");
+  assert.equal(Notice.messages.some((message) => /save failed for the toggle test/.test(message)), true);
+});
+
+test("expand all and collapse all reach nested subheadings on the collections and library tabs", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const library = installLibrary(data);
+  data.collections = [nestedCollectionHeading()];
+  data.portableIndex.libraryLayouts[library.id] = nestedLibraryLayout();
+  data.activeTab = "collections";
+  const view = createLayoutRenderView(data, []);
+  const menuCapture = captureMenus();
+  const choose = async (title: string): Promise<void> => {
+    const item = (menuCapture.menus.at(-1) ?? []).find((entry) => entry.title === title);
+    assert.ok(item, `missing menu item ${title}`);
+    item.click?.();
+    await settleMicrotasks();
+  };
+  try {
+    view.showGlobalMenu({} as MouseEvent);
+    await choose("Collapse all visible groups");
+    const depthFive = data.collections[0]?.subheadings[0]?.subheadings?.[0]?.subheadings?.[0]?.subheadings?.[0];
+    assert.equal(depthFive?.collapsed, true, "collapse all reaches depth five");
+
+    view.showGlobalMenu({} as MouseEvent);
+    await choose("Expand all visible groups");
+    assert.equal(depthFive?.collapsed, false, "expand all reaches depth five");
+
+    data.activeTab = libraryTabId(library.id);
+    view.showGlobalMenu({} as MouseEvent);
+    await choose("Collapse all visible groups");
+    const libraryDepthThree = data.portableIndex.libraryLayouts[library.id]?.[0]?.subheadings[0]?.subheadings?.[0];
+    assert.equal(libraryDepthThree?.collapsed, true, "library collapse all reaches nested nodes");
+
+    view.showGlobalMenu({} as MouseEvent);
+    await choose("Expand all visible groups");
+    assert.equal(libraryDepthThree?.collapsed, false);
+  } finally {
+    menuCapture.restore();
+  }
+});
+
+test("quick-create subheading pickers list deep parents with path labels and resolve the owning heading id plus the deep parent id", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const library = installLibrary(data);
+  data.collections = [nestedCollectionHeading()];
+  data.portableIndex.libraryLayouts[library.id] = nestedLibraryLayout();
+  const view = createLayoutRenderView(data, []);
+  const collectionCreates: Array<{ headingId: string; title: string; parentSubheadingId?: string }> = [];
+  const libraryCreates: Array<{ libraryId: string; headingId: string; title: string; parentSubheadingId?: string }> = [];
+  view.plugin.createQuickEntryCollectionSubheading = async (headingId, title, parentSubheadingId) => { collectionCreates.push({ headingId, title, parentSubheadingId }); };
+  view.plugin.createQuickEntryLibrarySubheading = async (libraryId, headingId, title, parentSubheadingId) => { libraryCreates.push({ libraryId, headingId, title, parentSubheadingId }); };
+
+  interface CapturedPicker {
+    getItems(): Array<{ id: string; title: string; description: string }>;
+    onChooseItem(item: { id: string; title: string; description: string; icon: string }): void;
+  }
+  const pickers: CapturedPicker[] = [];
+  const prompts: Array<(value: string) => void | Promise<void>> = [];
+  const pickerOpen = Object.getOwnPropertyDescriptor(AddActionModal.prototype, "open");
+  const promptOpen = Object.getOwnPropertyDescriptor(TextPromptModal.prototype, "open");
+  Object.defineProperty(AddActionModal.prototype, "open", {
+    configurable: true,
+    value(this: object): void { pickers.push(this as unknown as CapturedPicker); },
+  });
+  TextPromptModal.prototype.open = function capturePrompt(): void {
+    const modal = this as unknown as { options: { onSubmit(value: string): void | Promise<void> } };
+    prompts.push((value) => modal.options.onSubmit(value));
+  };
+  try {
+    view.openQuickCollectionHeadingPicker();
+    const collectionPicker = pickers.at(-1);
+    assert.ok(collectionPicker);
+    const labels = collectionPicker.getItems().map((item) => item.title);
+    assert.deepEqual(labels, [
+      "Board review",
+      "Board review / Airway",
+      "Board review / Airway / Intubation",
+      "Board review / Airway / Intubation / Rapid sequence",
+    ], "every node below the cap is offered with its full path; the depth-five node is not");
+    assert.equal(collectionPicker.getItems()[0]?.description, "4 nested subheadings", "descriptions count nested children recursively");
+    const topLevelParent = collectionPicker.getItems()[0];
+    assert.ok(topLevelParent);
+    collectionPicker.onChooseItem({ ...topLevelParent, icon: "folder" });
+    const submitTopLevel = prompts.shift();
+    assert.ok(submitTopLevel);
+    await submitTopLevel("Top leaf");
+    const deepParent = collectionPicker.getItems().at(-1);
+    assert.ok(deepParent);
+    collectionPicker.onChooseItem({ ...deepParent, icon: "folder" });
+    const submitCollection = prompts.shift();
+    assert.ok(submitCollection);
+    await submitCollection("Deep leaf");
+    assert.deepEqual(collectionCreates, [
+      { headingId: "col-h1", title: "Top leaf", parentSubheadingId: undefined },
+      { headingId: "col-h1", title: "Deep leaf", parentSubheadingId: "col-d4" },
+    ], "the plugin API takes the owning top-level heading id plus the deep parent's own id");
+
+    view.openQuickLibraryHeadingPicker(library.id);
+    const libraryPicker = pickers.at(-1);
+    assert.ok(libraryPicker);
+    assert.deepEqual(libraryPicker.getItems().map((item) => item.title), [
+      "Guidelines",
+      "Guidelines / Level two",
+      "Guidelines / Level two / Level three",
+    ]);
+    const deepLibraryParent = libraryPicker.getItems().at(-1);
+    assert.ok(deepLibraryParent);
+    libraryPicker.onChooseItem({ ...deepLibraryParent, icon: "folder" });
+    const submitLibrary = prompts.shift();
+    assert.ok(submitLibrary);
+    await submitLibrary("Deep library leaf");
+    assert.deepEqual(libraryCreates, [
+      { libraryId: library.id, headingId: "lib-h1", title: "Deep library leaf", parentSubheadingId: "lib-d3" },
+    ], "library creation also resolves the owning heading and passes the nested node separately");
+  } finally {
+    if (pickerOpen) Object.defineProperty(AddActionModal.prototype, "open", pickerOpen);
+    else Reflect.deleteProperty(AddActionModal.prototype, "open");
+    if (promptOpen) Object.defineProperty(TextPromptModal.prototype, "open", promptOpen);
+    else Reflect.deleteProperty(TextPromptModal.prototype, "open");
+  }
+});
+
+test("quick-create subheading pickers create nodes under depth-two parents through the real plugin", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.setupComplete = true;
+  const library = installLibrary(data);
+  data.collections = [nestedCollectionHeading()];
+  data.portableIndex.libraryLayouts[library.id] = nestedLibraryLayout();
+  const store = createDefaultStore(data, 1, "vault-quick-subheading-e2e");
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getMarkdownFiles: () => [],
+      getAbstractFileByPath: () => null,
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => ({ frontmatter: {} }), resolvedLinks: {} },
+    fileManager: {},
+    loadLocalStorage: () => null,
+    saveLocalStorage: () => undefined,
+  };
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & { loadedData: unknown };
+  plugin.loadedData = store;
+  await plugin.loadPluginData();
+
+  const view = Object.create(EntVaultCommandCenterView.prototype) as LayoutHarnessView;
+  view.app = app;
+  view.plugin = plugin as unknown as LayoutHarnessPlugin;
+  view.staleViewNoticeShown = false;
+  view.viewInstanceId = "quick-subheading-e2e";
+  view.renderTree = () => undefined;
+  const syncViewToPlugin = (): void => {
+    view.loadedBaseId = plugin.getActiveKnowledgeBaseId();
+    view.loadedDataEpoch = plugin.getDataEpoch();
+  };
+
+  interface CapturedPicker {
+    getItems(): Array<{ id: string; title: string; description: string }>;
+    onChooseItem(item: { id: string; title: string; description: string; icon: string }): void;
+  }
+  const pickers: CapturedPicker[] = [];
+  const prompts: Array<(value: string) => void | Promise<void>> = [];
+  const pickerOpen = Object.getOwnPropertyDescriptor(AddActionModal.prototype, "open");
+  const promptOpen = Object.getOwnPropertyDescriptor(TextPromptModal.prototype, "open");
+  Object.defineProperty(AddActionModal.prototype, "open", {
+    configurable: true,
+    value(this: object): void { pickers.push(this as unknown as CapturedPicker); },
+  });
+  TextPromptModal.prototype.open = function capturePrompt(): void {
+    const modal = this as unknown as { options: { onSubmit(value: string): void | Promise<void> } };
+    prompts.push((value) => modal.options.onSubmit(value));
+  };
+  try {
+    syncViewToPlugin();
+    view.openQuickCollectionHeadingPicker();
+    const collectionPicker = pickers.at(-1);
+    assert.ok(collectionPicker);
+    const depthTwoCollection = collectionPicker.getItems().find((item) => item.title === "Board review / Airway");
+    assert.ok(depthTwoCollection, "the depth-two collection parent is offered");
+    collectionPicker.onChooseItem({ ...depthTwoCollection, icon: "folder" });
+    const submitCollection = prompts.shift();
+    assert.ok(submitCollection);
+    await submitCollection("Deep quick leaf");
+    const airway = plugin.data.collections.find((heading) => heading.id === "col-h1")?.subheadings.find((node) => node.id === "col-d2");
+    assert.ok(airway);
+    assert.equal((airway.subheadings ?? []).some((node) => node.title === "Deep quick leaf"), true, "the new subheading lands under the depth-two collection parent");
+    assert.equal(plugin.data.collections.find((heading) => heading.id === "col-h1")?.subheadings.some((node) => node.title === "Deep quick leaf"), false, "the new node does not fall back to the heading level");
+
+    syncViewToPlugin();
+    view.openQuickLibraryHeadingPicker(library.id);
+    const libraryPicker = pickers.at(-1);
+    assert.ok(libraryPicker);
+    const depthTwoLibrary = libraryPicker.getItems().find((item) => item.title === "Guidelines / Level two");
+    assert.ok(depthTwoLibrary, "the depth-two library parent is offered");
+    libraryPicker.onChooseItem({ ...depthTwoLibrary, icon: "folder" });
+    const submitLibrary = prompts.shift();
+    assert.ok(submitLibrary);
+    await submitLibrary("Deep quick library leaf");
+    const levelTwo = (plugin.data.portableIndex.libraryLayouts[library.id] ?? [])
+      .find((heading) => heading.id === "lib-h1")?.subheadings.find((node) => node.id === "lib-d2");
+    assert.ok(levelTwo);
+    assert.equal((levelTwo.subheadings ?? []).some((node) => node.title === "Deep quick library leaf"), true, "the new subheading lands under the depth-two library parent");
+  } finally {
+    if (pickerOpen) Object.defineProperty(AddActionModal.prototype, "open", pickerOpen);
+    else Reflect.deleteProperty(AddActionModal.prototype, "open");
+    if (promptOpen) Object.defineProperty(TextPromptModal.prototype, "open", promptOpen);
+    else Reflect.deleteProperty(TextPromptModal.prototype, "open");
+  }
+});
+
+test("confirming a collection subheading removal after the node was already removed reports stale structure instead of duplicating its subtree", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const heading = nestedCollectionHeading();
+  data.collections = [heading];
+  const view = createLayoutRenderView(data, []);
+  let mutations = 0;
+  view.plugin.mutate = async (_label, action) => {
+    mutations += 1;
+    action();
+  };
+  const menuCapture = captureMenus();
+  const confirmCapture = captureConfirms();
+  try {
+    const airway = heading.subheadings[0];
+    const intubation = airway?.subheadings?.[0];
+    assert.ok(airway && intubation);
+
+    view.showSubheadingMenu({} as MouseEvent, heading, intubation);
+    const removeItem = (menuCapture.menus.at(-1) ?? []).find((item) => item.title === "Remove subheading");
+    assert.ok(removeItem);
+    removeItem.click?.();
+    const confirmation = confirmCapture.confirmations.shift();
+    assert.ok(confirmation);
+
+    // Another window (or Sync) already removed the node: subjects and children
+    // were promoted into its parent while this confirm dialog stayed open.
+    airway.subjects.push(...intubation.subjects.filter((path) => !airway.subjects.includes(path)));
+    airway.subheadings = [...(intubation.subheadings ?? [])];
+
+    await assert.rejects(Promise.resolve(confirmation.confirm()), /subheading is no longer available/i);
+    assert.deepEqual((airway.subheadings ?? []).map((item) => item.id), ["col-d4"], "the already-promoted subtree is not appended a second time");
+    assert.deepEqual(airway.subjects, ["Notes/Beta.md", "Notes/Gamma.md"], "already-promoted subjects are not re-merged");
+    assert.equal(mutations, 0, "a removed target must reject before starting a mutation");
+  } finally {
+    menuCapture.restore();
+    confirmCapture.restore();
+  }
+});
+
+test("the category template token resolves the deepest placed node title at any depth", () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const library = installLibrary(data);
+  data.portableIndex.libraryLayouts[library.id] = nestedLibraryLayout();
+  const view = createLayoutRenderView(data, []);
+
+  assert.equal(view.libraryTemplateTokenContext(library, { headingId: "lib-h1", subheadingId: "lib-d3" }).category, "Level three");
+  assert.equal(view.libraryTemplateTokenContext(library, { subheadingId: "lib-d3" }).category, "Level three", "a deep subheading id alone locates its heading recursively");
+  assert.equal(view.libraryTemplateTokenContext(library, { headingId: "lib-h1" }).category, "Guidelines", "heading placements fall back to the heading title");
 });

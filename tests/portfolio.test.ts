@@ -18,6 +18,7 @@ import {
   createPortfolioImportPlan,
   MAX_PORTFOLIO_BUNDLE_BYTES,
   parsePortfolioExport,
+  portfolioLayoutStructureCount,
   portfolioStoreGuard,
   serializePortfolioExport,
   type PortfolioExportV1,
@@ -623,4 +624,173 @@ test("portfolio mobile source declares stable focus keys, a sole scroll panel, a
   assert.doesNotMatch(styles, /\.ent-cc-portfolio-center\s*\{[^}]*overflow-y:\s*auto/s);
   assert.match(styles, /\.ent-cc-portfolio-footer \.ent-cc-button\s*\{[^}]*min-height:\s*44px/s);
   assert.match(styles, /--ent-cc-portfolio-visual-height/);
+});
+
+test("portfolio transfers nested organization with recursive budgets and full path labels", () => {
+  const source = entry("base-source-nested", "Nested Source");
+  source.data.portableIndex.groups = [{ id: "group-refs", title: "References", order: 0 }];
+  source.data.portableIndex.libraries = [{
+    id: "library-refs",
+    name: "References",
+    singularName: "Reference",
+    icon: "library",
+    order: 0,
+    sourceKind: null,
+    archivedAt: null,
+  }];
+  source.data.portableIndex.subjects = [{
+    id: "subject-deep",
+    title: "Deep reference",
+    groupId: "group-refs",
+    parentId: null,
+    order: 0,
+    indexed: false,
+    configuredId: "",
+    recordKind: "note",
+    libraryId: "library-refs",
+  }];
+  source.data.portableIndex.libraryLayouts = {
+    "library-refs": [{
+      id: "heading-alpha",
+      title: "Alpha",
+      collapsed: false,
+      subjects: [],
+      subheadings: [{
+        id: "sub-beta",
+        title: "Beta",
+        collapsed: false,
+        subjects: [],
+        subheadings: [{ id: "sub-gamma", title: "Gamma", collapsed: false, subjects: ["subject-deep"] }],
+      }],
+    }],
+  };
+  source.data.collections = [{
+    id: "collection-reading",
+    title: "Reading",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{
+      id: "collection-cases",
+      title: "Cases",
+      collapsed: false,
+      subjects: [],
+      subheadings: [{
+        id: "collection-airway",
+        title: "Airway",
+        collapsed: false,
+        subjects: [`${PORTABLE_PLACEHOLDER_PREFIX}subject-deep`],
+      }],
+    }],
+  }];
+
+  assert.equal(
+    portfolioLayoutStructureCount(source.data.portableIndex.libraryLayouts["library-refs"]),
+    3,
+    "structure counting recurses through every nested level",
+  );
+
+  const bundle = bundleFor([source], "vault-local");
+  const manifestEntry = bundle.manifest.entries[0];
+  const packageIndex = bundle.packages[0]?.package.components.index;
+  assert.ok(manifestEntry);
+  assert.deepEqual(
+    packageIndex?.libraryLayouts?.["library-refs"],
+    source.data.portableIndex.libraryLayouts["library-refs"],
+    "the portfolio package carries the exact nested library layout",
+  );
+  assert.equal(
+    manifestEntry.structures,
+    (packageIndex?.groups.length ?? 0) + (packageIndex?.libraries?.length ?? 0) + 3 + 3,
+    "budgets charge every nested library-layout and collection node",
+  );
+  assert.equal(manifestEntry.references, 2, "each nested placement counts as one reference");
+
+  const destination = entry("base-destination", "Destination", 10);
+  const store = storeWith([destination], "vault-local");
+  const plan = createPortfolioImportPlan(store, bundle, [{
+    sourceBaseId: source.id,
+    destination: { kind: "existing", baseId: destination.id },
+    mode: "merge",
+  }], { now: 1_700_000_000_700 });
+  assert.ok(
+    plan.diff.headingsAdd.some((item) => item.includes("References subheading “Alpha / Beta / Gamma”")),
+    "nested headings are labelled with their full title path",
+  );
+  assert.ok(
+    plan.diff.subjectsAdd.some((item) => item.includes("References / Alpha / Beta / Gamma")),
+    "nested placements are labelled with their full title path",
+  );
+
+  applyPortfolioImportPlan(store, plan);
+  const imported = store.bases.find((item) => item.id === destination.id)?.data;
+  assert.deepEqual(
+    imported?.portableIndex.libraryLayouts["library-refs"],
+    source.data.portableIndex.libraryLayouts["library-refs"],
+    "the nested library layout arrives intact",
+  );
+  assert.equal(
+    imported?.collections[0]?.subheadings[0]?.subheadings?.[0]?.title,
+    "Airway",
+    "the nested collection levels arrive intact",
+  );
+  assert.deepEqual(
+    imported?.collections[0]?.subheadings[0]?.subheadings?.[0]?.subjects,
+    [`${PORTABLE_PLACEHOLDER_PREFIX}subject-deep`],
+    "deeply nested collection subjects stay bound to the stable subject identity",
+  );
+});
+
+test("plan previews key layout structures collision-proof against crafted local IDs", () => {
+  const source = entry("base-source", "Source");
+  source.data.portableIndex.libraries = [{
+    id: "library-x",
+    name: "Crafted",
+    singularName: "Item",
+    icon: "library",
+    order: 0,
+    sourceKind: null,
+    archivedAt: null,
+  }];
+  source.data.portableIndex.libraryLayouts = {
+    "library-x": [{ id: "safe-heading", title: "Safe heading", collapsed: false, subjects: [], subheadings: [] }],
+  };
+  const bundle = bundleFor([source], "vault-local");
+
+  // Local layout IDs are only isSafeObjectKey-constrained, so a crafted
+  // data.json can smuggle any joiner character into an ID. The two pairs
+  // below describe four distinct nodes whose ancestor ID paths must never
+  // collapse into one preview key.
+  const NUL = String.fromCharCode(0);
+  const destination = entry("base-destination", "Destination", 10);
+  destination.data.portableIndex.libraries = structuredClone(source.data.portableIndex.libraries);
+  destination.data.portableIndex.libraryLayouts = {
+    "library-x": [
+      {
+        id: `a${NUL}b`,
+        title: "Heading One",
+        collapsed: false,
+        subjects: [],
+        subheadings: [{ id: "c", title: "Child of One", collapsed: false, subjects: [] }],
+      },
+      {
+        id: "a",
+        title: "Heading Two",
+        collapsed: false,
+        subjects: [],
+        subheadings: [{ id: `b${NUL}c`, title: "Child of Two", collapsed: false, subjects: [] }],
+      },
+    ],
+  };
+  const store = storeWith([destination], "vault-local");
+  const plan = createPortfolioImportPlan(store, bundle, [{
+    sourceBaseId: "base-source",
+    destination: { kind: "existing", baseId: "base-destination" },
+    mode: "replace",
+  }], { now: 1_700_000_000_800 });
+
+  const removed = plan.diff.headingsRemove;
+  assert.ok(removed.some((line) => line.includes("Child of One")), "the first crafted child keeps its own preview key");
+  assert.ok(removed.some((line) => line.includes("Child of Two")), "a crafted sibling cannot shadow another node's key");
+  assert.ok(removed.some((line) => line.includes("Heading One")), "both crafted headings stay distinct in the preview");
+  assert.ok(removed.some((line) => line.includes("Heading Two")), "both crafted headings stay distinct in the preview");
 });
