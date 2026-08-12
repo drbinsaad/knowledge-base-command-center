@@ -63,6 +63,10 @@
 - Made Quick append atomic and fail-closed: it checks <code>ai_lock</code> inside the write transaction, preserves all text outside the strict managed block, enforces bounded input and entry counts, and keeps only compact in-memory fingerprints for a five-minute exact undo. Note bodies and appended text are never stored in plugin data.
 - Shared one strict fail-closed <code>ai_lock</code> parser between Quick append and attachment writes. Duplicate, escaped, nested, merged, or malformed declarations are refused before a binary or Markdown write; only an absent key or one explicit false/null declaration is writable.
 
+### Verification
+
+Automated release checks passed on this candidate: 670 runtime tests, 10 release tests, TypeScript, ESLint, JSON validation, production build, Community static verification, and dependency audits with zero findings, plus an independent review that reproduced and confirmed the store version 14 Sync fixes against the previously published defects. The physical-iPhone checklist for 0.12.0 — including item 41 for the post-update What's new window — was explicitly waived by the maintainer for this release and was not executed on a physical device. This release does not claim that the manual device matrix passed; the full matrix is inherited by the next release that changes mobile behavior.
+
 ## 0.11.1 (unpublished; folded into 0.12.0)
 
 This candidate was never tagged or released. Its completed iPhone, stacked-pane, and configurable Bases work is included in 0.12.0.
