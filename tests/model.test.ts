@@ -1046,6 +1046,23 @@ test("legacy and interim migration identities ignore live view state but retain 
   assert.notEqual(canonicalInterimEnvelopeString(interimA), canonicalInterimEnvelopeString(interimB));
 });
 
+test("interim envelope identity material orders base IDs independently of the system locale", () => {
+  const store = createDefaultStore(migrateData(null), 100, "vault-collation");
+  store.bases = [
+    createKnowledgeBaseEntry(migrateData(null), "base-a", 100),
+    createKnowledgeBaseEntry(migrateData(null), "Base-b", 200),
+  ];
+  const ids = store.bases.map((entry) => entry.id);
+  assert.notDeepEqual(
+    [...ids].sort((left, right) => left.localeCompare(right)),
+    [...ids].sort(),
+    "these IDs straddle a collation boundary, so the two orderings disagree",
+  );
+
+  const canonical = JSON.parse(canonicalInterimEnvelopeString(store)) as { bases: Array<{ id: string }> };
+  assert.deepEqual(canonical.bases.map((entry) => entry.id), [...ids].sort(), "code-unit order, never localeCompare");
+});
+
 test("a valid v11 store migrates multiple bases as isolated workspace payloads", () => {
   const sharedPath = "Knowledge/Shared.md";
   const sharedPortable = {
@@ -4042,6 +4059,29 @@ test("index diagnostics distinguish missing, duplicate, parent, and orphaned gro
   assert.deepEqual(new Set(diagnostics.map((item) => item.kind)), new Set(["missing-note", "duplicate-membership", "broken-parent", "orphaned-group"]));
 });
 
+test("index diagnostics report the parents the curriculum tree itself cannot resolve", () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const parent = record({ path: "KB/Cafe.md", title: "Cafe", domain: "KB", curriculumId: "", role: "supporting" });
+  // The tree resolves parents by plain lowercasing, so accent and Unicode
+  // normalization differences really do flatten the hierarchy.
+  const child = record({ path: "KB/Latte.md", title: "Latte", domain: "KB", curriculumId: "", role: "supporting", parentTopic: "[[Café]]" });
+  const paths = new Set([parent.path, child.path]);
+
+  const tree = buildCurriculumTree([parent, child], data.curriculumVisual, false);
+  assert.equal(tree.parentByPath.get(child.path), null, "the accented parent does not resolve");
+  const diagnostics = buildIndexDiagnostics(data, [parent, child], paths);
+  assert.deepEqual(diagnostics.map((item) => item.kind), ["broken-parent"]);
+  assert.equal(diagnostics[0]?.path, child.path);
+
+  const resolvable = record({ path: "KB/Mocha.md", title: "Mocha", domain: "KB", curriculumId: "", role: "supporting", parentTopic: "[[Cafe]]" });
+  assert.deepEqual(
+    buildIndexDiagnostics(data, [parent, resolvable], new Set([parent.path, resolvable.path])),
+    [],
+    "a parent the tree does resolve reports nothing",
+  );
+});
+
 test("index diagnostics pre-index hidden paths instead of probing the array per visual override", () => {
   const data = migrateData(null);
   const hiddenPaths = ["Hidden.md"];
@@ -4388,6 +4428,45 @@ test("folder renames always preserve old group aliases and portable identity", (
   ), false, "replaying the same conservative migration is idempotent");
 });
 
+test("renaming a top-level folder outside the primary folder migrates its derived group", () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.primaryFolder = "Knowledge Base";
+  // configuredGroupFromPath derives "Recipes" for Recipes/Pasta.md, so the
+  // rename has to carry that group's alias, order, collapse, and visual order.
+  assert.equal(configuredGroupFromPath("Recipes/Pasta.md", data.settings.primaryFolder), "Recipes");
+  data.indexGroupAliases = { Recipes: "Cooking notes" };
+  data.indexGroupOrder = ["Cooking notes", "Other"];
+  data.collapsed.curriculumDomains = ["Recipes"];
+  data.curriculumVisual.orderByContainer = {
+    [curriculumContainerKey("Recipes", null)]: ["Recipes/Pasta.md"],
+  };
+
+  assert.equal(rewritePluginDataFolderRename(data, "Recipes", "Cooking"), true);
+
+  assert.deepEqual(data.indexGroupAliases, { Recipes: "Cooking notes", Cooking: "Cooking notes" });
+  assert.deepEqual(data.indexGroupOrder, ["Cooking notes", "Other"]);
+  assert.deepEqual(data.collapsed.curriculumDomains, ["Recipes", "Cooking notes"]);
+  assert.deepEqual(data.curriculumVisual.orderByContainer[curriculumContainerKey("Cooking notes", null)], [
+    "Recipes/Pasta.md",
+  ]);
+  assert.deepEqual(data.curriculumVisual.orderByContainer[curriculumContainerKey("Recipes", null)], [
+    "Recipes/Pasta.md",
+  ], "the old logical taxonomy is never dropped");
+});
+
+test("renaming an unaliased outside folder still carries its group order and collapse", () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.primaryFolder = "Knowledge Base";
+  data.indexGroupOrder = ["Recipes", "Other"];
+  data.collapsed.curriculumDomains = ["Recipes"];
+
+  assert.equal(rewritePluginDataFolderRename(data, "Recipes", "Cooking"), true);
+  assert.deepEqual(data.indexGroupOrder, ["Recipes", "Cooking", "Other"]);
+  assert.deepEqual(data.collapsed.curriculumDomains, ["Recipes", "Cooking"]);
+});
+
 test("file renames update the configured template path through nested history only", () => {
   const data = migrateData(null);
   data.settings.primaryFolder = "Templates/Old topic.md";
@@ -4452,6 +4531,14 @@ test("search, templates, filenames, and protected folders handle international a
   assert.equal(matchesQuery(record({ title: "Café airway", aliases: ["مجرى الهواء", "喉頭裂"] }), "مجرى"), true);
   assert.equal(matchesQuery(record({ title: "Café airway", aliases: ["مجرى الهواء", "喉頭裂"] }), "喉頭"), true);
   assert.equal(applyTemplateTokens("# {{title}}", "$& $` $' $$", "2026-01-01", "12:00"), "# $& $` $' $$");
+  assert.equal(
+    applyTemplateTokens("title: {{yaml:title}}", "Sinus $& Nose", "2026-01-01", "12:00"),
+    'title: "Sinus $& Nose"',
+  );
+  assert.equal(
+    applyTemplateTokens("id: {{yaml:id}}\nrest", "t", "2026-01-01", "12:00", { id: "X$'Y $` $$ $&" }),
+    'id: "X$\'Y $` $$ $&"\nrest',
+  );
   assert.equal(sanitizeFileName("safe\u202E\u200B\u0000:name"), "safe-name");
   for (const path of [".OBSIDIAN/plugins", ".obsidian /plugins", ".trash", ".TRASH/archive"]) {
     assert.notEqual(validateWritableFolderPath(path, ".obsidian"), null, path);
@@ -4879,6 +4966,17 @@ test("reserved Windows device names never become bare note filenames", () => {
   assert.equal(sanitizeFileName("COM10"), "COM10");
 });
 
+test("reserved Windows device names stay reserved with an extension", () => {
+  // Windows reserves the segment before the first dot, so these files cannot be
+  // created there and a vault carrying one cannot sync to a Windows device.
+  assert.equal(sanitizeFileName("con.jpg"), "con-note.jpg");
+  assert.equal(sanitizeFileName("AUX.pdf"), "AUX-note.pdf");
+  assert.equal(sanitizeFileName("nul.tar.gz"), "nul-note.tar.gz");
+  assert.equal(sanitizeFileName("console.jpg"), "console.jpg");
+  assert.equal(sanitizeFileName("com10.txt"), "com10.txt");
+  assert.equal(genericNotePath("KB", "NUL.txt"), "KB/NUL-note.txt.md");
+});
+
 test("a parsed query matches identically to the string form but is reusable", () => {
   const target = record({ title: "Café airway", aliases: ["مجرى الهواء"] });
   for (const query of ["cafe", "مجرى", "priority:P1", "priority:P3", "domain:pediatric cafe", ""]) {
@@ -4948,6 +5046,19 @@ test("the curriculum tree exposes cached child and descendant lookups", () => {
   assert.deepEqual([...curriculumDescendantPaths(tree, "KB/child-b.md")], []);
   assert.deepEqual(curriculumSiblingPaths(tree, records[3]), ["KB/grandchild.md"]);
   assert.equal(tree.nodeByPath.get("KB/root.md")?.record.title, "Root");
+});
+
+test("case-variant group names share one sibling container", () => {
+  const records = [
+    record({ path: "KB/first.md", title: "First", domain: "Recipes", curriculumId: "", role: "supporting", parentTopic: "" }),
+    record({ path: "KB/second.md", title: "Second", domain: "recipes", curriculumId: "", role: "supporting", parentTopic: "" }),
+  ];
+  const tree = buildCurriculumTree(records, { parentByPath: {}, orderByContainer: {} });
+  assert.equal(tree.domains.length, 1, "the tree merges the case variants into one domain");
+  // A case-variant record must see the shared roots; empty siblings would make
+  // a visual move rewrite the shared container order with a single path.
+  assert.deepEqual(curriculumSiblingPaths(tree, records[1]).sort(), ["KB/first.md", "KB/second.md"]);
+  assert.deepEqual(curriculumSiblingPaths(tree, records[0]).sort(), ["KB/first.md", "KB/second.md"]);
 });
 
 test("descendant lookup terminates on a cyclic override instead of hanging", () => {
@@ -6394,6 +6505,29 @@ test("device-local state round-trips active base, routes, collapse, and bounded 
   assert.equal(parsed.bases[0]?.view.selectedPath, "Knowledge/Topic.md");
   assert.equal(parsed.bases[0]?.view.activeTab, "collections");
   assert.equal(parsed.bases[0]?.view.collections[0]?.collapsed, true);
+  assert.equal(parsed.bases[0]?.view.undoStack[0]?.label, "Local undo");
+});
+
+test("device-local state keeps imported and hand-authored layout IDs instead of wiping every base", () => {
+  const arabicId = "مجرى-الهواء";
+  const data = migrateData({
+    version: DATA_VERSION,
+    collections: [
+      { id: "_favourites", title: "Favourites", collapsed: true, subjects: [], subheadings: [{ id: arabicId, title: "مجرى الهواء", collapsed: true, subjects: [] }] },
+    ],
+  });
+  assert.deepEqual(data.collections.map((heading) => heading.id), ["_favourites"], "cleanLayout keeps these IDs");
+  assert.equal(data.collections[0]?.subheadings[0]?.id, arabicId);
+  data.portableIndex.libraryLayouts = { reading: structuredClone(data.collections) };
+  data.undoStack = [snapshotPersonal(data, "Local undo")];
+  const store = createDefaultStore(data, 100, "vault-device-layout-ids");
+
+  const parsed = parseDeviceLocalPluginState(createDeviceLocalPluginState(store));
+
+  assert.equal(parsed.bases[0]?.view.collections[0]?.id, "_favourites");
+  assert.equal(parsed.bases[0]?.view.collections[0]?.collapsed, true);
+  assert.equal(parsed.bases[0]?.view.collections[0]?.subheadings[0]?.id, arabicId);
+  assert.equal(parsed.bases[0]?.view.libraryLayouts[0]?.headings[0]?.id, "_favourites");
   assert.equal(parsed.bases[0]?.view.undoStack[0]?.label, "Local undo");
 });
 

@@ -500,6 +500,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
             onValid(clean);
             this.scheduleTextSave();
           });
+        text.inputEl.dir = "auto";
         this.bindBufferedTextCommit(text.inputEl);
       });
       row.addButton((button) => button.setButtonText("Browse…").setDisabled(readOnly).onClick(() => {
@@ -546,6 +547,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
             onChange(value.trim());
             this.scheduleTextSave();
           });
+        text.inputEl.dir = "auto";
         this.bindBufferedTextCommit(text.inputEl);
       });
       row.addButton((button) => button.setButtonText("Choose…").setDisabled(readOnly).onClick(() => {
@@ -582,7 +584,10 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
               .setDisabled(true));
           }, ["generic", "ENT", "clinical", "preset"]),
           renderSetting("Command center name", "Displayed in the view title, header, and settings. The ribbon and hover source retain the stable plugin name.", (row) => {
-            row.addText((text) => text.setValue(settings.workspaceName).setDisabled(true));
+            row.addText((text) => {
+              text.setValue(settings.workspaceName).setDisabled(true);
+              text.inputEl.dir = "auto";
+            });
             row.addButton((button) => button
               .setButtonText("Rename…")
               .setDisabled(readOnly)
@@ -608,6 +613,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
                 settings.workspaceSubtitle = value.trim();
                 this.scheduleTextSave();
               });
+              text.inputEl.dir = "auto";
               this.bindBufferedTextCommit(text.inputEl);
             });
           }, ["subtitle"]),
@@ -620,6 +626,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
                 settings.indexLabel = clean;
                 this.scheduleTextSave();
               });
+              text.inputEl.dir = "auto";
               this.bindBufferedTextCommit(text.inputEl);
             });
           }, ["curriculum", "library"]),
@@ -631,6 +638,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
                 settings.itemSingular = value.trim();
                 this.scheduleTextSave();
               });
+              text.inputEl.dir = "auto";
               this.bindBufferedTextCommit(text.inputEl);
             });
           }, ["item name", "terminology"]),
@@ -642,6 +650,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
                 settings.itemPlural = value.trim();
                 this.scheduleTextSave();
               });
+              text.inputEl.dir = "auto";
               this.bindBufferedTextCommit(text.inputEl);
             });
           }, ["item names", "terminology"]),
@@ -653,6 +662,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
                 settings.groupLabel = value.trim();
                 this.scheduleTextSave();
               });
+              text.inputEl.dir = "auto";
               this.bindBufferedTextCommit(text.inputEl);
             });
           }, ["category", "domain", "area", "course"]),
@@ -664,7 +674,10 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
         items: [
           settings.workspaceMode === "ent-clinical"
             ? renderSetting("Indexed notes folder", "Protected ENT scope. Canonical creation and index discovery both follow this folder; its path updates automatically when the folder is renamed in the vault.", (row) => {
-                row.addText((text) => text.setValue(settings.primaryFolder).setDisabled(true));
+                row.addText((text) => {
+                  text.setValue(settings.primaryFolder).setDisabled(true);
+                  text.inputEl.dir = "auto";
+                });
               }, ["folder", "path", "clinical scope"])
             : folderSetting("Indexed notes folder", "Every Markdown note in this folder and its subfolders appears in the main index.", settings.primaryFolder, (value) => { settings.primaryFolder = value; }, false),
           folderSetting("Default new-note folder", "Initial destination in Create note. It can still be changed for each note.", settings.defaultNoteFolder, (value) => { settings.defaultNoteFolder = value; }),
@@ -737,6 +750,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
                   settings.attachmentFolder = clean;
                   this.scheduleTextSave(false);
                 });
+              text.inputEl.dir = "auto";
               this.bindBufferedTextCommit(text.inputEl);
             });
             row.addButton((button) => button.setButtonText("Browse…").setDisabled(disabled).onClick(() => {
@@ -778,6 +792,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
                   settings.attachmentMarker = value.trim();
                   this.scheduleTextSave(false);
                 });
+              text.inputEl.dir = "auto";
               this.bindBufferedTextCommit(text.inputEl);
             });
           }, ["attachment marker"]),
@@ -791,6 +806,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
                   settings.attachmentHeading = value.trim().replace(/^#{1,6}\s+/u, "").replace(/\s+#+\s*$/u, "");
                   this.scheduleTextSave(false);
                 });
+              text.inputEl.dir = "auto";
               this.bindBufferedTextCommit(text.inputEl);
             });
           }, ["attachment heading"]),
@@ -809,6 +825,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
                 settings.proposalFolder = clean;
                 this.scheduleTextSave();
               });
+              text.inputEl.dir = "auto";
               this.bindBufferedTextCommit(text.inputEl);
             });
             row.addButton((button) => button.setButtonText("Browse…").setDisabled(readOnly).onClick(() => {
@@ -834,6 +851,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
                 settings.inboxLabel = value.trim();
                 this.scheduleTextSave();
               });
+              text.inputEl.dir = "auto";
               this.bindBufferedTextCommit(text.inputEl);
             });
           }, ["proposal inbox"]),
@@ -866,11 +884,17 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
             }));
           }, ["tab", "start page"]),
           renderSetting("Recent changes limit", "Maximum entries in the Recently changed smart queue (5–100).", (row) => {
-            row.addSlider((slider) => slider.setLimits(5, 100, 5).setValue(settings.recentLimit).setDisabled(readOnly).onChange(async (value) => {
-              if (!ownsConfiguredBase()) return;
-              settings.recentLimit = value;
-              await this.save();
-            }));
+            row.addSlider((slider) => {
+              // A drag reports every intermediate step; instant updates plus a
+              // direct save would clone the store and queue a data.json write on
+              // each one. setInstant exists since Obsidian 1.6.6.
+              if (typeof slider.setInstant === "function") slider.setInstant(false);
+              slider.setLimits(5, 100, 5).setValue(settings.recentLimit).setDisabled(readOnly).onChange((value) => {
+                if (!ownsConfiguredBase()) return;
+                settings.recentLimit = value;
+                this.scheduleTextSave();
+              });
+            });
           }, ["recent queue", "history"]),
           renderSetting("Hover previews", "Use Obsidian Page Preview when hovering a record title.", (row) => {
             row.addToggle((toggle) => toggle.setValue(settings.enableHoverPreview).setDisabled(readOnly).onChange(async (value) => {

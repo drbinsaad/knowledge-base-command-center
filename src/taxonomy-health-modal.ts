@@ -125,12 +125,16 @@ export class TaxonomyHealthModal extends Modal {
     });
     search.value = this.query;
     search.addEventListener("input", () => {
+      // Re-rendering replaces the input, so the real caret has to be carried
+      // over; restoring it to the end would break every mid-string edit.
+      const selectionStart = search.selectionStart ?? search.value.length;
+      const selectionEnd = search.selectionEnd ?? selectionStart;
       this.query = search.value;
       this.visibleLimit = PAGE_SIZE;
       this.render();
       const next = this.contentEl.querySelector<HTMLInputElement>('.ent-cc-taxonomy-toolbar input[type="search"]');
       next?.focus();
-      next?.setSelectionRange(this.query.length, this.query.length);
+      next?.setSelectionRange(selectionStart, selectionEnd);
     });
     const refresh = toolbar.createEl("button", { cls: "ent-cc-button", type: "button" });
     setIcon(refresh.createSpan(), "refresh-cw");

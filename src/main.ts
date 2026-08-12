@@ -119,12 +119,19 @@ import {
   VaultRecord,
   WorkspaceMode,
 } from "./model";
-import { MAX_PORTABLE_PACKAGE_BYTES, portableSubjectPath, registerPortableGroup, type PortableExportSelection } from "./portability";
+import {
+  MAX_PORTABLE_PACKAGE_BYTES,
+  portableSubjectPath,
+  registerPortableGroup,
+  synchronizePortableRegistry,
+  type PortableExportSelection,
+} from "./portability";
 import {
   applyPortfolioImportPlan,
   createPortfolioExport,
   createPortfolioImportPlan,
   MAX_PORTFOLIO_BUNDLE_BYTES,
+  selectionUsesSubjects,
   type PortfolioExportV1,
   type PortfolioImportMapping,
   type PortfolioImportPlan,
@@ -333,6 +340,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private dataEpoch = 0;
   private operationIdleResolvers: Array<() => void> = [];
   private refreshTimer: number | null = null;
+  /** Window that created the pending refresh timer; timer IDs are per-window. */
+  private refreshTimerWindow: Window | null = null;
   private searchGeneration = 0;
   private knowledgeBaseSearchVaultSnapshot: KnowledgeBaseSearchVaultSnapshot | null = null;
   private recordsCacheByBase = new Map<string, VaultRecord[]>();
@@ -597,7 +606,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (hadActiveUpdateAnnouncement && this.appWriteBarrier) {
       this.appWriteBarrier.activeUpdateAnnouncementVersion = null;
     }
-    if (this.refreshTimer !== null) window.activeWindow.clearTimeout(this.refreshTimer);
+    if (this.refreshTimer !== null) this.refreshTimerWindow?.clearTimeout(this.refreshTimer);
+    this.refreshTimer = null;
+    this.refreshTimerWindow = null;
     for (const commandId of this.libraryCommandNames.keys()) this.removeCommand(commandId);
     this.libraryCommandNames.clear();
   }
@@ -1251,18 +1262,31 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.adoptSharedPersistenceUncertainty();
     }
     let loaded: unknown = null;
+    let restoredFromBackup = false;
     if (!this.persistenceUncertain) this.dataCompatibilityWarning = "";
     try {
       if (capturedRead && "error" in capturedRead) throw capturedRead.error;
       loaded = capturedRead ? capturedRead.value : await this.loadData() as unknown;
     } catch (error) {
-      // A syntactically invalid data.json must not stop the plugin from loading.
-      // Start from defaults and refuse to save so the original file survives.
-      this.useActiveData(structuredClone(DEFAULT_DATA));
-      this.store = createDefaultStore(this.data);
-      this.dataCompatibilityWarning = `Plugin data could not be parsed (${error instanceof Error ? error.message : String(error)}). Personal organization is read-only so the existing data.json is not overwritten; repair or remove that file to continue.`;
-      new Notice(this.dataCompatibilityWarning, 10000);
-      return { recognizedStore: false, hasVaultId: false, identityNeedsWriteback: false, structuralRepairNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing: false, sourceVersion: 0, compatible: false };
+      // Every store save writes a parseable twin first, so a data.json torn by
+      // a crash mid-write can be recovered without losing any base. External
+      // captures never adopt this device's backup; only the startup read does.
+      const recovered = capturedRead === undefined ? await this.readStoreBackup() : null;
+      if (recovered === null) {
+        // A syntactically invalid data.json must not stop the plugin from loading.
+        // Start from defaults and refuse to save so the original file survives.
+        this.useActiveData(structuredClone(DEFAULT_DATA));
+        this.store = createDefaultStore(this.data);
+        this.dataCompatibilityWarning = `Plugin data could not be parsed (${error instanceof Error ? error.message : String(error)}). Personal organization is read-only so the existing data.json is not overwritten; repair or remove that file to continue.`;
+        new Notice(this.dataCompatibilityWarning, 10000);
+        return { recognizedStore: false, hasVaultId: false, identityNeedsWriteback: false, structuralRepairNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing: false, sourceVersion: 0, compatible: false };
+      }
+      // The recovery writeback below replaces data.json; keep the unreadable
+      // original as a forensic copy first so manual repair stays possible.
+      await this.preserveCorruptStoreFile();
+      loaded = recovered;
+      restoredFromBackup = true;
+      new Notice("Plugin data could not be parsed, so the automatic same-device backup was restored. The unreadable file was kept beside it. Verify your knowledge bases and recent changes.", 12000);
     }
     const sourceWasMissing = loaded === null
       || loaded === undefined
@@ -1414,19 +1438,27 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // the earliest pre-repair envelope to the final deterministically
       // repaired payload, retaining the random nonce. The helper rejects
       // normal identities and any provisional store edited after migration.
-      rebaseProvisionalVaultIdAfterDeterministicRepair(
-        preMigrationStore ?? preRemediationStore,
-        this.store,
-        {
-          parentStore: preRemediationStore,
-          reason: remediationNeedsWriteback ? "clinical-index-remediation" : undefined,
-        },
-      );
+      try {
+        rebaseProvisionalVaultIdAfterDeterministicRepair(
+          preMigrationStore ?? preRemediationStore,
+          this.store,
+          {
+            parentStore: preRemediationStore,
+            reason: remediationNeedsWriteback ? "clinical-index-remediation" : undefined,
+          },
+        );
+      } catch (error) {
+        // preMigrationStore is the raw pre-validation payload; a hand-repaired
+        // envelope that satisfied migrateStore can still crash the fingerprint
+        // helpers. A skipped rebase merely keeps the provisional identity — a
+        // designed-for state — while a thrown one would abort onload entirely.
+        console.error("Knowledge Base Command Center skipped rebasing a provisional vault identity after deterministic repair", error);
+      }
     }
     try {
       if (persistMigration && !sourceWasMissing
         && (!recognizedStore || !hadFinalVaultId || sourceVersion !== STORE_VERSION
-          || structuralRepairNeedsWriteback || remediationNeedsWriteback)) {
+          || structuralRepairNeedsWriteback || remediationNeedsWriteback || restoredFromBackup)) {
         // Migration and every-base clinical remediation share one atomic store
         // write. A large vault therefore never receives one save per base.
         await this.saveStoreSnapshot();
@@ -1648,7 +1680,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
    * so a selection or collapse save cannot smuggle an unsaved organization
    * change into data.json or advance semantic conflict resolution.
    */
-  async saveViewState(): Promise<void> {
+  async saveViewState(withinOperation = false): Promise<void> {
     if (this.unloaded) throw new Error("This plugin instance was unloaded before the view state could be saved.");
     if (this.dataCompatibilityWarning) return;
     const baseId = this.store.activeBaseId;
@@ -1657,7 +1689,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const captured: PluginViewState = capturePluginViewState(sourceEntry.data);
     const externalGeneration = this.externalChangeGeneration;
 
-    while (this.baseOperationBusy || this.dataTransactionBusy || this.directSaveBusyCount > 0) {
+    // A refresh that runs inside a base/organization operation already holds
+    // the exclusivity these flags advertise; waiting for the caller's own
+    // flags to clear would deadlock the operation barrier.
+    while (!withinOperation && (this.baseOperationBusy || this.dataTransactionBusy || this.directSaveBusyCount > 0)) {
       await this.waitForOperationsIdle();
       if (this.store.activeBaseId !== baseId) {
         throw new Error("The active knowledge base changed before its view state could be saved.");
@@ -1703,6 +1738,57 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     await this.saveExplicitStoreSnapshot(this.store, allowDuringExternalReload, expectedExternalGeneration);
   }
 
+  private storeBackupPath(): string | null {
+    const dir = this.manifest.dir;
+    return dir ? normalizePath(`${dir}/data.json.bak`) : null;
+  }
+
+  /**
+   * Obsidian's adapter rewrites data.json in place (no temp-file rename), so a
+   * crash mid-write would otherwise truncate the only durable copy of every
+   * knowledge base. Writing the same payload to a twin first guarantees that
+   * at least one of the two files parses at any instant.
+   */
+  private async writeStoreBackup(snapshot: unknown): Promise<void> {
+    const path = this.storeBackupPath();
+    if (!path) return;
+    try {
+      await this.app.vault.adapter.write(path, JSON.stringify(snapshot));
+    } catch (error) {
+      // Best-effort insurance: never turn a failed backup into a failed save.
+      console.error("Knowledge Base Command Center could not refresh the data.json backup", error);
+    }
+  }
+
+  /** Best-effort copy of an unparseable data.json before recovery replaces it. */
+  private async preserveCorruptStoreFile(): Promise<void> {
+    const dir = this.manifest.dir;
+    if (!dir) return;
+    try {
+      const adapter = this.app.vault.adapter;
+      const source = normalizePath(`${dir}/data.json`);
+      if (!(await adapter.exists(source))) return;
+      const raw = await adapter.read(source);
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      await adapter.write(normalizePath(`${dir}/data.json.corrupt-${stamp}`), raw);
+    } catch (error) {
+      console.error("Knowledge Base Command Center could not preserve the unreadable data.json", error);
+    }
+  }
+
+  private async readStoreBackup(): Promise<unknown> {
+    const path = this.storeBackupPath();
+    if (!path) return null;
+    try {
+      const adapter = this.app.vault.adapter;
+      if (!(await adapter.exists(path))) return null;
+      const parsed = JSON.parse(await adapter.read(path)) as unknown;
+      return isRecognizedPluginStore(parsed) || isRecognizedPluginData(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
   private async saveExplicitStoreSnapshot(
     sourceStore: PluginStore,
     allowDuringExternalReload = false,
@@ -1721,6 +1807,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (guardExternalGeneration && externalGeneration !== this.externalChangeGeneration) {
         throw new ExternalSettingsSupersededError("Knowledge-base data changed through Sync before this edit could be saved. The synced copy is being reloaded; try the local edit again afterward.");
       }
+      await this.writeStoreBackup(snapshot);
       try {
         await this.saveData(snapshot);
       } catch (error) {
@@ -1891,6 +1978,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (expectedExternalGeneration !== this.externalChangeGeneration) {
         throw new ExternalSettingsSupersededError("A newer synced settings file arrived before the captured file could be restored.");
       }
+      await this.writeStoreBackup(snapshot);
       try {
         await this.saveData(snapshot);
       } finally {
@@ -2090,6 +2178,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
               this.store = workingStore;
               this.useActiveData(this.requireActiveBase().data);
               latestBlockingWarning = "Synced plugin data was written by an older build without a vault identity. Update Knowledge Base Command Center on the other device before editing; local bases remain read-only so neither copy is overwritten.";
+              // Earlier captures in this batch may already be merged into the
+              // fallback; the identity-less file stays authoritative on disk, so
+              // that merge survives only through the rescue path.
+              if (baselineTrust !== "none") latestAccumulatedRescueStore = structuredClone(fallbackStore);
               this.dataCompatibilityWarning = latestBlockingWarning;
               new Notice(this.dataCompatibilityWarning, 12000);
             } else {
@@ -2369,7 +2461,48 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         completeLibrarySet: request.completeLibrarySet,
       };
     });
+    // The exporter's per-base clone would otherwise mint fresh stable subject
+    // IDs on every run, so re-importing two portfolios of the same state would
+    // duplicate every linked subject. Allocate the IDs on the live registry
+    // first and persist them, mirroring the single-base export flow. Read-only
+    // and busy states keep the clone-local allocation so exports still work,
+    // merely without persisted IDs.
+    if (!this.isDataReadOnly()
+      && !this.baseOperationBusy && !this.dataTransactionBusy && this.directSaveBusyCount === 0) {
+      const changedBaseIds: string[] = [];
+      for (const request of selected) {
+        if (!selectionUsesSubjects(request.selection)) continue;
+        if (synchronizePortableRegistry(request.entry.data, request.records)) changedBaseIds.push(request.entry.id);
+      }
+      if (changedBaseIds.length > 0) this.persistPortfolioRegistryAllocation(changedBaseIds);
+    }
     return createPortfolioExport(selected, exportedAt, this.store.vaultId);
+  }
+
+  /**
+   * Persist stable subject IDs that a portfolio export just allocated on live
+   * knowledge bases. The export itself is synchronous, so the save is queued
+   * as a direct-save transaction. On rejection the allocation stays in memory
+   * and the save machinery records the rejected head, so the next successful
+   * save publishes the allocation as a causal child instead of a stale sibling.
+   */
+  private persistPortfolioRegistryAllocation(changedBaseIds: readonly string[]): void {
+    for (const baseId of changedBaseIds) {
+      const entry = this.store.bases.find((candidate) => candidate.id === baseId);
+      if (entry) this.bumpEntrySemanticRevision(entry);
+    }
+    this.invalidateRecordCache();
+    this.directSaveBusyCount += 1;
+    const operation = this.enqueueAppLogicalOperation(() => this.saveStoreSnapshot());
+    this.directSaveTransactionQueue = operation.then(() => undefined, () => undefined);
+    void operation
+      .catch((error: unknown) => {
+        console.error("Knowledge Base Command Center could not persist stable subject IDs allocated by a portfolio export", error);
+      })
+      .finally(() => {
+        this.directSaveBusyCount -= 1;
+        this.announceOperationsIdle();
+      });
   }
 
   /** Prepare the sole exact mutation plan used by both portfolio preview and apply. */
@@ -2661,7 +2794,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
             }
           }
           try {
-            await this.refreshViews(false);
+            await this.refreshViews(false, true);
           } catch (refreshError) {
             console.error("Knowledge Base Command Center restored a failed base change but could not refresh its view", refreshError);
           }
@@ -2670,7 +2803,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         // The store change is committed once saveData succeeds. A rendering
         // failure must not roll memory back while leaving the new base on disk.
         try {
-          await this.refreshViews(false);
+          await this.refreshViews(false, true);
         } catch (error) {
           console.error("Knowledge Base Command Center saved the base change but could not refresh its view", error);
           new Notice("The knowledge-base change was saved, but the view could not refresh. Reopen the command center to update it.", 8000);
@@ -3055,7 +3188,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       return { kind, indexEligible: kind === "topic" };
     }
     const frontmatter = asUnknownRecord(this.app.metadataCache.getFileCache(file)?.frontmatter);
-    const proposalFolder = normalizePath(data.settings.proposalFolder);
+    const proposalFolder = normalizePath(data.settings.proposalFolder).replace(/^\/+|\/+$/gu, "");
     const detected = this.identityForFile(
       file,
       frontmatter,
@@ -3094,7 +3227,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       return { kind, indexEligible: kind === "topic" };
     }
     const normalized = normalizePath(path);
-    const proposalFolder = normalizePath(data.settings.proposalFolder);
+    // normalizePath("") is "/" in real Obsidian, and pathIsInsideFolder(x, "/")
+    // matches every path; re-strip so an empty folder never classifies notes.
+    const proposalFolder = normalizePath(data.settings.proposalFolder).replace(/^\/+|\/+$/gu, "");
     let kind: RecordKind;
     if (proposalFolder && pathIsInsideFolder(normalized, proposalFolder)) kind = "proposal";
     else if (pathIsInsideFolder(normalized, data.settings.primaryFolder)) kind = "topic";
@@ -3712,7 +3847,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const clinicalMode = data.settings.workspaceMode === "ent-clinical";
     const canMoveAcrossGroups = !clinicalMode || data.settings.allowClinicalVisualGroupMoves;
     const referenced = new Set([...this.referencedPaths(data, entry.id)].map((path) => this.projectPendingRenamePath(path)));
-    const proposalFolder = normalizePath(this.projectPendingRenamePath(data.settings.proposalFolder));
+    const proposalFolder = normalizePath(this.projectPendingRenamePath(data.settings.proposalFolder)).replace(/^\/+|\/+$/gu, "");
     const proposalRoot = proposalFolder ? `${proposalFolder}/` : "";
     const settings = data.settings;
     const primaryFolder = this.projectPendingRenamePath(settings.primaryFolder);
@@ -4936,7 +5071,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   private isRelevantToBase(path: string, data: PluginData, baseId: string): boolean {
     if (!data.settings.primaryFolder) return !pathIsInsideFolder(path, this.app.vault.configDir);
-    const proposalFolder = normalizePath(data.settings.proposalFolder);
+    const proposalFolder = normalizePath(data.settings.proposalFolder).replace(/^\/+|\/+$/gu, "");
     const proposalRoot = proposalFolder ? `${proposalFolder}/` : "";
     const configuredRoots = [data.settings.primaryFolder, data.settings.proposalFolder]
       .filter(Boolean)
@@ -4978,7 +5113,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return relevant;
   }
 
-  async reconcileRecords(records: VaultRecord[]): Promise<boolean> {
+  async reconcileRecords(records: VaultRecord[], withinOperation = false): Promise<boolean> {
     const valid = new Set(records.map((record) => record.path));
     const markdownPaths = new Set(this.app.vault.getMarkdownFiles().map((file) => file.path));
     let semanticChanged = false;
@@ -5025,9 +5160,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
     if (semanticChanged) {
       this.invalidateRecordCache();
-      await this.savePluginData();
+      // Inside a base switch or organization transaction the logical barrier
+      // is already held by the caller; queueing a public save behind it would
+      // wait on the very operation this refresh belongs to. Run the save
+      // inline instead, exactly as mutate() persists its own transaction.
+      if (withinOperation) await this.savePluginDataOperation();
+      else await this.savePluginData();
     } else if (selectionChanged) {
-      await this.saveViewState();
+      await this.saveViewState(withinOperation);
     }
     return semanticChanged || selectionChanged;
   }
@@ -5127,13 +5267,20 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           this.advanceRejectedSemanticAttempts();
         }
         try {
-          await this.refreshViews(false);
+          await this.refreshViews(false, true);
         } catch (refreshError) {
           console.error("Knowledge Base Command Center restored a failed organization change but could not refresh its view", refreshError);
         }
         throw error;
       }
-      await this.refreshViews(false);
+      // The transaction is committed; a refresh (or its in-operation reconcile
+      // save) failing afterwards must not make the saved change look rejected.
+      try {
+        await this.refreshViews(false, true);
+      } catch (error) {
+        console.error("Knowledge Base Command Center saved the organization change but could not refresh its view", error);
+        new Notice("The change was saved, but the view could not refresh. Reopen the command center to update it.", 8000);
+      }
       });
     } finally {
       this.dataTransactionBusy = false;
@@ -5196,7 +5343,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
             console.error(`Knowledge Base Command Center could not persist the failed ${direction} rollback`, rollbackError);
             this.markPersistenceUncertain(`A rejected ${direction} may have reached Sync, and its compensating rollback could not be saved. Knowledge bases remain read-only until Obsidian is restarted after the plugin data.json and a same-vault recovery are preserved.`);
             try {
-              await this.refreshViews(false);
+              await this.refreshViews(false, true);
             } catch (refreshError) {
               console.error(`Knowledge Base Command Center restored a failed ${direction} in memory but could not refresh its view`, refreshError);
             }
@@ -5206,14 +5353,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           this.advanceRejectedSemanticAttempts();
         }
         try {
-          await this.refreshViews(false);
+          await this.refreshViews(false, true);
         } catch (refreshError) {
           console.error(`Knowledge Base Command Center restored a failed ${direction} but could not refresh its view`, refreshError);
         }
         throw error;
       }
       try {
-        await this.refreshViews(false);
+        await this.refreshViews(false, true);
       } catch (error) {
         console.error(`Knowledge Base Command Center saved ${direction} but could not refresh its view`, error);
         new Notice(`The ${direction} was saved, but the view could not refresh. Reopen the command center to update it.`, 8000);
@@ -5963,20 +6110,26 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   scheduleRefresh(invalidateRecords = true): void {
     this.refreshShouldInvalidateRecords ||= invalidateRecords;
-    if (this.refreshTimer !== null) window.activeWindow.clearTimeout(this.refreshTimer);
-    this.refreshTimer = window.activeWindow.setTimeout(() => {
+    // A timer ID only cancels on the window that created it, and focus can move
+    // to a popout between scheduling and cancellation. Remember the creator.
+    if (this.refreshTimer !== null) this.refreshTimerWindow?.clearTimeout(this.refreshTimer);
+    const timerWindow = window.activeWindow ?? window;
+    this.refreshTimerWindow = timerWindow;
+    this.refreshTimer = timerWindow.setTimeout(() => {
       this.refreshTimer = null;
+      this.refreshTimerWindow = null;
+      if (this.unloaded) return;
       const shouldInvalidate = this.refreshShouldInvalidateRecords;
       this.refreshShouldInvalidateRecords = false;
       this.run(() => this.refreshViews(shouldInvalidate));
     }, 250);
   }
 
-  async refreshViews(invalidateRecords = true): Promise<void> {
+  async refreshViews(invalidateRecords = true, withinOperation = false): Promise<void> {
     this.syncLibraryCommands();
     if (invalidateRecords) this.invalidateRecordCache();
     for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
-      if (leaf.view instanceof EntVaultCommandCenterView) await leaf.view.reload();
+      if (leaf.view instanceof EntVaultCommandCenterView) await leaf.view.reload(withinOperation);
     }
   }
 

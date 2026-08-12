@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Menu, Notice, TFile } from "obsidian";
-import { AddActionModal, calculateModalViewportLayout, ConfirmModal, IndexGroupModal, KnowledgeNoteModal, RecordPickerModal, TextPromptModal, TopicEditorModal, VaultFilePickerModal } from "../src/modals.ts";
+import { AddActionModal, calculateModalViewportLayout, ConfirmModal, IndexGroupModal, KnowledgeNoteModal, localDateStamp, RecordPickerModal, TextPromptModal, TopicEditorModal, VaultFilePickerModal } from "../src/modals.ts";
 import {
   canRelinkPortableRecord,
   calculateSearchViewportLayout,
@@ -24,6 +24,7 @@ import {
 } from "../src/portability.ts";
 import {
   BUILTIN_LIBRARY_DEFINITIONS,
+  buildCurriculumTree,
   createPersonalBackup,
   createWorkspaceConfig,
   emptyCurriculumTree,
@@ -897,6 +898,135 @@ test("Index Manager group restore routes through the guarded atomic restore API"
     label: "Restore 1 index note",
     group: "Rhinology",
   }]);
+});
+
+test("a case-variant typed group move keeps the merged domain's root order and expands its stored label", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const first = { ...record("KB/Sinusitis.md", "Sinusitis"), domain: "Rhinology", folderOrder: "Rhinology" };
+  const second = { ...record("KB/Polyps.md", "Polyps"), domain: "Rhinology", folderOrder: "Rhinology" };
+  const moved = { ...record("KB/Airway.md", "Airway"), domain: "Laryngology", folderOrder: "Laryngology" };
+  const records = [first, second, moved];
+  data.curriculumVisual.orderByContainer["root:rhinology"] = [second.path, first.path];
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    canVisuallyMoveAcrossGroups: () => true,
+    getIndexGroups: () => ["Rhinology"],
+    saveViewState: async (): Promise<void> => undefined,
+    mutate: async (_label: string, action: () => void): Promise<void> => { action(); },
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: object;
+    plugin: typeof plugin;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    records: VaultRecord[];
+    recordByPath: Map<string, VaultRecord>;
+    curriculum: ReturnType<typeof buildCurriculumTree>;
+    collapsedCurriculumDomains: Set<string>;
+    collapsedCurriculumNodes: Set<string>;
+    collapsedQueues: Set<string>;
+    openIndexGroupPicker(record: VaultRecord): void;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+  view.records = records;
+  view.recordByPath = new Map(records.map((item) => [item.path, item]));
+  view.curriculum = buildCurriculumTree(records, data.curriculumVisual, false);
+  view.collapsedCurriculumDomains = new Set(["Rhinology"]);
+  view.collapsedCurriculumNodes = new Set();
+  view.collapsedQueues = new Set();
+
+  let submitted: Promise<void> = Promise.resolve();
+  const open = Object.getOwnPropertyDescriptor(IndexGroupModal.prototype, "open");
+  IndexGroupModal.prototype.open = function submitGroup(): void {
+    const options = (this as unknown as { options: { onSubmit(group: string): void | Promise<void> } }).options;
+    submitted = Promise.resolve(options.onSubmit("rhinology"));
+  };
+  try {
+    view.openIndexGroupPicker(moved);
+    await submitted;
+  } finally {
+    if (open) Object.defineProperty(IndexGroupModal.prototype, "open", open);
+    else Reflect.deleteProperty(IndexGroupModal.prototype, "open");
+  }
+
+  assert.deepEqual(
+    data.curriculumVisual.orderByContainer["root:rhinology"],
+    [second.path, first.path, moved.path],
+    "the destination group's saved order must survive a case-variant typed name",
+  );
+  assert.equal(view.collapsedCurriculumDomains.has("Rhinology"), false, "the stored collapse label expands even when the typed case differs");
+});
+
+test("make top-level resolves a case-variant record domain against the merged curriculum group", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const first = { ...record("KB/Sinusitis.md", "Sinusitis"), domain: "Rhinology", folderOrder: "Rhinology" };
+  const variant = { ...record("KB/Rhinoplasty.md", "Rhinoplasty"), domain: "RHINOLOGY", folderOrder: "Rhinology" };
+  const records = [first, variant];
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    canVisuallyMoveAcrossGroups: () => false,
+    mutate: async (_label: string, action: () => void): Promise<void> => { action(); },
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    plugin: typeof plugin;
+    recordByPath: Map<string, VaultRecord>;
+    curriculum: ReturnType<typeof buildCurriculumTree>;
+    makeCurriculumTopLevel(record: VaultRecord): void;
+  };
+  view.plugin = plugin;
+  view.recordByPath = new Map(records.map((item) => [item.path, item]));
+  view.curriculum = buildCurriculumTree(records, data.curriculumVisual, false);
+  const mergedRoots = view.curriculum.domains.find((domain) => domain.domain === "Rhinology")?.roots.map((node) => node.record.path) ?? [];
+  assert.ok(mergedRoots.includes(variant.path), "case-variant spellings merge into one visual group");
+
+  view.makeCurriculumTopLevel(variant);
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.deepEqual(
+    data.curriculumVisual.orderByContainer["root:rhinology"],
+    [...mergedRoots.filter((path) => path !== variant.path), variant.path],
+    "the merged group's real roots must survive a case-variant record domain",
+  );
+});
+
+test("placement conflict detection normalizes stored parent curriculum ID case", () => {
+  const parent = { ...record("KB/Parent.md", "Head And Neck Overview"), role: "canonical" as const, curriculumId: "ent-hn-01", domain: "Head & Neck" };
+  const child = { ...record("KB/Child.md", "Neck Mass"), role: "canonical" as const, curriculumId: "ENT-HN-01.1", domain: "Head & Neck", parentTopic: "[[Head And Neck Overview]]" };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    plugin: {
+      isClinicalMode(): boolean;
+      resolveLink(link: string, fromPath: string, byPath: Map<string, VaultRecord>): VaultRecord | null;
+    };
+    recordByPath: Map<string, VaultRecord>;
+    hasPlacementConflict(record: VaultRecord): boolean;
+  };
+  view.recordByPath = new Map([[parent.path, parent], [child.path, child]]);
+
+  view.plugin = { isClinicalMode: () => true, resolveLink: () => parent };
+  assert.equal(view.hasPlacementConflict(child), false, "a lowercase stored parent ID is the same curriculum ID");
+
+  view.plugin = { isClinicalMode: () => true, resolveLink: () => ({ ...parent, curriculumId: "ENT-HN-02" }) };
+  assert.equal(view.hasPlacementConflict(child), true, "a genuinely wrong parent still conflicts");
+});
+
+test("backup filenames stamp the local calendar day", () => {
+  assert.equal(localDateStamp(new Date(2026, 0, 5, 12, 0)), "2026-01-05");
+  // Either edge would cross into a different UTC day in some timezone; the
+  // stamp must always follow the local clock.
+  assert.equal(localDateStamp(new Date(2026, 5, 15, 0, 10)), "2026-06-15");
+  assert.equal(localDateStamp(new Date(2026, 5, 15, 23, 50)), "2026-06-15");
 });
 
 test("link controls are limited to notes explicitly completed from portable placeholders", () => {

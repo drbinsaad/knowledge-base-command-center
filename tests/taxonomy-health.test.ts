@@ -1,17 +1,22 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { Notice } from "obsidian";
 import { migrateData, portablePlaceholderPath, type VaultRecord } from "../src/model.ts";
 import EntVaultCommandCenterPlugin from "../src/main.ts";
-import { TaxonomyRepairPreviewModal } from "../src/taxonomy-health-modal.ts";
+import { IndexManagerModal } from "../src/index-manager.ts";
+import { ManageKnowledgeBasesModal } from "../src/knowledge-base-modal.ts";
+import { TextPromptModal } from "../src/modals.ts";
+import { TaxonomyHealthModal, TaxonomyRepairPreviewModal } from "../src/taxonomy-health-modal.ts";
 import {
   applyTaxonomyRepairToData,
   buildTaxonomyHealthFindings,
   localeInvariantTaxonomyKey,
   taxonomyConfusableSkeleton,
   taxonomyVariantKey,
+  type TaxonomyHealthFinding,
 } from "../src/taxonomy-health.ts";
-import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
+import { asHtmlElement, createFakeDom, FakeElement } from "./support/fake-dom.ts";
 
 function record(path: string, title: string, overrides: Partial<VaultRecord> = {}): VaultRecord {
   return {
@@ -294,4 +299,201 @@ test("taxonomy repair preview leaves initial focus on modal context instead of A
   assert.equal(modal.titleEl.textContent, "Review taxonomy repair");
   assert.match(modal.contentEl.querySelector(".ent-cc-taxonomy-preview-body")?.textContent ?? "", /Undo/u);
   assert.equal(modal.contentEl.querySelector(".ent-cc-taxonomy-preview-actions .mod-cta")?.textContent, "Apply repair");
+});
+
+/**
+ * Fake elements have no text-selection API. Installing one for the duration of a
+ * test lets the filter inputs of the manager modals restore a caret like the
+ * real DOM does, and records what they asked for.
+ */
+function withCaretSupport<T>(run: (restores: Array<[number, number]>) => T): T {
+  const restores: Array<[number, number]> = [];
+  const prototype = FakeElement.prototype as unknown as Record<string, unknown>;
+  prototype.setSelectionRange = function setSelectionRange(start: number, end: number): void {
+    restores.push([start, end]);
+  };
+  try {
+    return run(restores);
+  } finally {
+    Reflect.deleteProperty(prototype, "setSelectionRange");
+  }
+}
+
+test("the taxonomy filter keeps the caret where the user is typing", () => {
+  const findings: TaxonomyHealthFinding[] = [
+    { id: "one", kind: "duplicate-name", severity: "warning", title: "Duplicate note names", detail: "Two notes share a name.", scope: "Index" },
+    { id: "two", kind: "empty-structure", severity: "info", title: "Empty collection", detail: "A collection has no subjects.", scope: "Collections" },
+  ];
+  const plugin = {
+    app: {},
+    getActiveKnowledgeBaseId: () => "base",
+    getDataEpoch: () => 1,
+    getTaxonomyHealthFindings: () => findings,
+    isDataReadOnly: () => false,
+  };
+  const dom = createFakeDom();
+  const modal = new TaxonomyHealthModal(plugin as never) as TaxonomyHealthModal & {
+    modalEl: HTMLElement;
+    contentEl: HTMLElement;
+    titleEl: HTMLElement;
+  };
+  modal.modalEl = asHtmlElement(dom.document.body.createDiv());
+  modal.contentEl = asHtmlElement(dom.document.body.createDiv());
+  modal.titleEl = asHtmlElement(dom.document.body.createEl("h2"));
+
+  const restores = withCaretSupport((captured) => {
+    modal.onOpen();
+    const search = modal.contentEl.querySelector('.ent-cc-taxonomy-toolbar input[type="search"]') as unknown as {
+      value: string;
+      selectionStart: number | null;
+      selectionEnd: number | null;
+      dispatch(type: string): void;
+    } | null;
+    assert.ok(search);
+    // "duplcate" with the missing "i" typed back in leaves the caret mid-string.
+    search.value = "duplicate";
+    search.selectionStart = 5;
+    search.selectionEnd = 5;
+    search.dispatch("input");
+    return captured;
+  });
+
+  assert.deepEqual(restores, [[5, 5]], "the caret must not jump to the end of the filter");
+});
+
+test("knowledge-base manager actions refuse to act on rows a synced replacement invalidated", () => {
+  Notice.messages.length = 0;
+  let dataEpoch = 1;
+  const entry = {
+    id: "base-b",
+    updatedAt: 1,
+    archivedAt: null,
+    data: {
+      settings: { workspaceName: "Research", workspaceMode: "generic", primaryFolder: "Knowledge Base" },
+      portableIndex: { subjects: [] },
+      collections: [],
+    },
+  };
+  const plugin = {
+    app: {},
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => dataEpoch,
+    getIndexRecords: () => [],
+    renameKnowledgeBase: async () => undefined,
+  };
+  const dom = createFakeDom();
+  const modal = Object.create(ManageKnowledgeBasesModal.prototype) as {
+    app: unknown;
+    plugin: typeof plugin;
+    openedBaseId: string;
+    openedDataEpoch: number;
+    close(): void;
+    render(): void;
+    renderEntry(parent: HTMLElement, entry: unknown, archived: boolean, availableCount: number): void;
+  };
+  modal.app = plugin.app;
+  modal.plugin = plugin;
+  modal.openedBaseId = "base-a";
+  modal.openedDataEpoch = dataEpoch;
+  modal.render = () => undefined;
+  let closes = 0;
+  modal.close = () => { closes += 1; };
+
+  const list = dom.document.body.createDiv();
+  modal.renderEntry(asHtmlElement(list), entry, false, 2);
+  const rename = list.querySelectorAll("button").find((button) => button.getAttribute("aria-label") === "Rename");
+  assert.ok(rename);
+
+  const prompts: unknown[] = [];
+  const promptOpen = Object.getOwnPropertyDescriptor(TextPromptModal.prototype, "open");
+  TextPromptModal.prototype.open = function capturePrompt(): void { prompts.push(this); };
+  try {
+    rename.click();
+    assert.equal(prompts.length, 1, "a current row still opens its rename prompt");
+
+    dataEpoch = 2;
+    rename.click();
+  } finally {
+    if (promptOpen) Object.defineProperty(TextPromptModal.prototype, "open", promptOpen);
+    else Reflect.deleteProperty(TextPromptModal.prototype, "open");
+  }
+
+  assert.equal(prompts.length, 1, "a stale row must not act on replaced knowledge-base data");
+  assert.equal(closes, 1);
+  assert.match(Notice.messages.at(-1) ?? "", /Knowledge-base data changed/u);
+});
+
+test("index manager bulk selection matches the notes the filter shows", () => {
+  const notes = [
+    { path: "A.md", title: "Alpha", meta: "A.md" },
+    { path: "B.md", title: "Beta", meta: "B.md" },
+  ];
+  const plugin = {
+    data: {
+      settings: { groupLabel: "Group", indexLabel: "Index", itemSingular: "note", itemPlural: "notes" },
+      manualIndexPaths: [],
+      excludedIndexPaths: [],
+    },
+    isClinicalMode: () => false,
+    canVisuallyMoveAcrossGroups: () => true,
+  };
+  const dom = createFakeDom();
+  const manager = Object.create(IndexManagerModal.prototype) as {
+    app: unknown;
+    plugin: typeof plugin;
+    contentEl: HTMLElement;
+    tab: string;
+    query: string;
+    selected: Set<string>;
+    managerOpen: boolean;
+    searchTimer: number | null;
+    pendingTimers: Set<number>;
+    selectionButtons: unknown[];
+    guardOpenedBase(): boolean;
+    ownsOpenedBase(): boolean;
+    render(): void;
+    renderNoteManager(notes: Array<{ path: string; title: string; meta: string }>, availableCount: number): void;
+  };
+  manager.app = { vault: { getAbstractFileByPath: () => null } };
+  manager.plugin = plugin;
+  manager.contentEl = asHtmlElement(dom.document.body.createDiv());
+  manager.tab = "indexed";
+  // A selection made before the current filter was typed: only "Beta" matches.
+  manager.query = "beta";
+  manager.selected = new Set(["A.md"]);
+  manager.managerOpen = true;
+  manager.searchTimer = null;
+  manager.pendingTimers = new Set();
+  manager.selectionButtons = [];
+  manager.guardOpenedBase = () => true;
+  manager.ownsOpenedBase = () => true;
+  manager.render = () => undefined;
+
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { activeWindow: { setTimeout: (callback: () => void) => { callback(); return 1; }, clearTimeout: () => undefined } },
+  });
+  try {
+    withCaretSupport(() => {
+      manager.renderNoteManager(notes, 0);
+      const toggle = manager.contentEl.querySelector(".ent-cc-manager-toolbar button");
+      assert.ok(toggle);
+      assert.match(toggle.textContent, /Select matches/u, "a selection holding hidden notes is not a full selection");
+      toggle.click();
+      assert.deepEqual([...manager.selected].sort(), ["A.md", "B.md"]);
+
+      const search = manager.contentEl.querySelector('.ent-cc-manager-toolbar input[type="search"]') as unknown as {
+        value: string;
+        dispatch(type: string): void;
+      } | null;
+      assert.ok(search);
+      search.value = "alpha";
+      search.dispatch("input");
+      assert.equal(manager.selected.size, 0, "a new query drops notes the filter no longer shows");
+    });
+  } finally {
+    if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
 });

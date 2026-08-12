@@ -13,7 +13,7 @@ import {
   type PortableIndexLocalState,
   type VaultRecord,
 } from "./model";
-import { VaultFilePickerModal } from "./modals";
+import { localDateStamp, VaultFilePickerModal } from "./modals";
 import {
   applyPortableExport,
   assertPortableImportDestinationCompatible,
@@ -920,7 +920,7 @@ export class ExportImportCenterModal extends Modal {
       const url = viewWindow.URL.createObjectURL(new Blob([prepared.serialized], { type: "application/json" }));
       const link = createEl("a");
       link.href = url;
-      link.download = `knowledge-base-command-center-portable-${now.toISOString().slice(0, 10)}.json`;
+      link.download = `knowledge-base-command-center-portable-${localDateStamp(now)}.json`;
       link.click();
       if (selection.recovery) this.plugin.recordRecoveryExport(now.getTime());
       viewWindow.setTimeout(() => viewWindow.URL.revokeObjectURL(url), 1000);

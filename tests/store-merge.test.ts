@@ -7,6 +7,7 @@ import {
   MAX_KNOWLEDGE_BASES,
   MAX_SEMANTIC_LINEAGE,
   migrateData,
+  legacyLocaleInterimEnvelopeFingerprint,
   migrateStore,
   provisionalInterimEnvelopeVaultFingerprint,
   provisionalMigratedVaultFingerprint,
@@ -70,6 +71,18 @@ function interimEnvelopeWithoutVaultId(
   const value = store([
     entry("base-a", "ENT", 100),
     entry("base-b", secondName, 200),
+  ], activeBaseId);
+  value.deletedBaseIds = { "base-removed": 75 };
+  const raw = structuredClone(value) as unknown as Record<string, unknown>;
+  delete raw.vaultId;
+  return raw;
+}
+
+/** Base IDs whose code-unit order differs from every locale's collation order. */
+function collationSensitiveEnvelopeWithoutVaultId(activeBaseId = "base-a"): Record<string, unknown> {
+  const value = store([
+    entry("base-a", "ENT", 100),
+    entry("Base-b", "Research", 200),
   ], activeBaseId);
   value.deletedBaseIds = { "base-removed": 75 };
   const raw = structuredClone(value) as unknown as Record<string, unknown>;
@@ -266,6 +279,46 @@ test("identical interim multi-base envelopes without vault IDs converge symmetri
   assert.equal(rightFirst.incomingNeedsWriteback, rightFirst.store.vaultId !== left.vaultId);
 });
 
+test("already-shipped interim identities minted under locale-sensitive ordering stay accepted", () => {
+  // 0.12.0 sorted base IDs with localeCompare before fingerprinting, so devices
+  // in the field carry identities that a code-unit recomputation cannot
+  // reproduce. Those identities must never be treated as a foreign vault.
+  const left = migrateStore(collationSensitiveEnvelopeWithoutVaultId("base-a"), 1_000);
+  const right = migrateStore(collationSensitiveEnvelopeWithoutVaultId("Base-b"), 1_000);
+  const legacyFingerprint = legacyLocaleInterimEnvelopeFingerprint(left);
+  assert.notEqual(
+    legacyFingerprint,
+    provisionalInterimEnvelopeVaultFingerprint(left.vaultId),
+    "these base IDs straddle a collation boundary, so the legacy fingerprint really differs",
+  );
+  const shippedLeftId = `vault-envelope-migrated-${legacyFingerprint}-aaaaaaaaaaaa`;
+  const shippedRightId = `vault-envelope-migrated-${legacyFingerprint}-bbbbbbbbbbbb`;
+  left.vaultId = shippedLeftId;
+  right.vaultId = shippedRightId;
+
+  const merged = mergeKnowledgeBaseStores(left, right, "base-a");
+  assert.equal(merged.store.vaultId, [shippedLeftId, shippedRightId].sort()[0]);
+  assert.deepEqual(
+    mergeKnowledgeBaseStores(right, left, "base-a").store.vaultId,
+    merged.store.vaultId,
+    "convergence stays symmetric",
+  );
+});
+
+test("a shipped legacy identity converges with a freshly migrated one for the same envelope", () => {
+  const shipped = migrateStore(collationSensitiveEnvelopeWithoutVaultId("base-a"), 1_000);
+  const upgraded = migrateStore(collationSensitiveEnvelopeWithoutVaultId("Base-b"), 1_000);
+  shipped.vaultId = `vault-envelope-migrated-${legacyLocaleInterimEnvelopeFingerprint(shipped)}-cccccccccccc`;
+  assert.notEqual(
+    provisionalInterimEnvelopeVaultFingerprint(shipped.vaultId),
+    provisionalInterimEnvelopeVaultFingerprint(upgraded.vaultId),
+  );
+
+  const merged = mergeKnowledgeBaseStores(shipped, upgraded, "base-a");
+  assert.equal(merged.store.vaultId, [shipped.vaultId, upgraded.vaultId].sort()[0]);
+  assert.deepEqual(mergeKnowledgeBaseStores(upgraded, shipped, "base-a").store, merged.store);
+});
+
 test("a late third device with the same pristine interim envelope joins the converged identity", () => {
   const devices = [
     migrateStore(interimEnvelopeWithoutVaultId("base-a"), 1_000),
@@ -365,6 +418,40 @@ test("permanent-deletion tombstones suppress stale bases while preserving unrela
   assert.equal(merged.deletedBaseIds[archivedResearch.id], 300);
   assert.deepEqual(merged.bases.find((candidate) => candidate.id === ent.id)?.data.pinnedPaths, ["ENT/Airway.md"]);
   assert.deepEqual(merged, reversed, "tombstone merges must converge regardless of device order");
+});
+
+test("a tombstoned base edited after the deletion surfaces a losing conflict for rescue", () => {
+  const ent = entry("base-ent", "ENT", 100);
+  const research = entry("base-research", "Research", 200);
+  const deletingDevice = store([structuredClone(ent)], "base-ent");
+  deletingDevice.deletedBaseIds[research.id] = 300;
+  const editedResearch = structuredClone(research);
+  editedResearch.updatedAt = 500; // restored and edited after the deletion
+  editedResearch.data.pinnedPaths = ["Research/Must survive.md"];
+  const editingDevice = store([structuredClone(ent), editedResearch], "base-ent");
+
+  // Deletion arrives at the editing device: its local copy loses, so the
+  // merge worker must rescue the local envelope before adopting the drop.
+  const localLoses = mergeKnowledgeBaseStores(editingDevice, deletingDevice, "base-ent");
+  assert.equal(localLoses.store.bases.some((item) => item.id === research.id), false, "the tombstone still wins");
+  assert.deepEqual(
+    localLoses.semanticConflicts.map((conflict) => ({ baseId: conflict.baseId, winner: conflict.winner })),
+    [{ baseId: research.id, winner: "incoming" }],
+  );
+
+  // The edited copy arrives at the deleting device: the incoming copy loses.
+  const incomingLoses = mergeKnowledgeBaseStores(deletingDevice, editingDevice, "base-ent");
+  assert.equal(incomingLoses.store.bases.some((item) => item.id === research.id), false);
+  assert.deepEqual(
+    incomingLoses.semanticConflicts.map((conflict) => ({ baseId: conflict.baseId, winner: conflict.winner })),
+    [{ baseId: research.id, winner: "local" }],
+  );
+
+  // Deleting an unedited copy stays a silent, rescue-free drop.
+  const staleResearch = structuredClone(research);
+  staleResearch.updatedAt = 250;
+  const staleDevice = store([structuredClone(ent), staleResearch], "base-ent");
+  assert.deepEqual(mergeKnowledgeBaseStores(staleDevice, deletingDevice, "base-ent").semanticConflicts, []);
 });
 
 test("concurrent permanent deletions that would remove every available base are rejected without mutation", () => {

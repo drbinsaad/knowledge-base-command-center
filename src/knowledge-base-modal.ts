@@ -287,6 +287,9 @@ class DeleteArchivedKnowledgeBaseModal extends Modal {
 }
 
 export class ManageKnowledgeBasesModal extends Modal {
+  private openedBaseId = "";
+  private openedDataEpoch = 0;
+
   constructor(private readonly plugin: EntVaultCommandCenterPlugin) {
     super(plugin.app);
   }
@@ -297,7 +300,23 @@ export class ManageKnowledgeBasesModal extends Modal {
     this.render();
   }
 
+  private ownsRenderedData(): boolean {
+    return this.plugin.getActiveKnowledgeBaseId() === this.openedBaseId
+      && this.plugin.getDataEpoch() === this.openedDataEpoch;
+  }
+
+  private guardRenderedData(): boolean {
+    if (this.ownsRenderedData()) return true;
+    this.close();
+    new Notice("Knowledge-base data changed while this manager was open. Nothing was changed; reopen the knowledge-base manager.", 8000);
+    return false;
+  }
+
   private render(): void {
+    // Every row is a snapshot of the base list. Record the data identity it was
+    // built from so a synced replacement cannot be acted on by a stale row.
+    this.openedBaseId = this.plugin.getActiveKnowledgeBaseId();
+    this.openedDataEpoch = this.plugin.getDataEpoch();
     this.contentEl.empty();
     this.titleEl.setText("Manage knowledge bases");
     this.contentEl.createEl("p", {
@@ -373,6 +392,7 @@ export class ManageKnowledgeBasesModal extends Modal {
         placeholder: "Knowledge-base name",
         initialValue: entry.data.settings.workspaceName,
         onSubmit: async (name) => {
+          if (!this.guardRenderedData()) return;
           await this.plugin.renameKnowledgeBase(entry.id, name);
           this.render();
         },
@@ -385,6 +405,7 @@ export class ManageKnowledgeBasesModal extends Modal {
         initialValue: `${entry.data.settings.workspaceName} copy`,
         submitLabel: "Duplicate and switch",
         onSubmit: async (name) => {
+          if (!this.guardRenderedData()) return;
           const duplicate = await this.plugin.duplicateKnowledgeBase(entry.id, name);
           this.close();
           new Notice(`Created and opened “${duplicate.data.settings.workspaceName}”.`);
@@ -405,6 +426,7 @@ export class ManageKnowledgeBasesModal extends Modal {
         `“${entry.data.settings.workspaceName}” will leave the switcher but remain fully restorable.${fallback ? ` The Command Center will switch to “${fallback}”.` : ""} Its ${subjects} ${countLabel}, collections, pins, views, and history stay in plugin data. No Markdown note will be deleted, moved, or changed.`,
         "Archive base",
         async () => {
+          if (!this.guardRenderedData()) return;
           await this.plugin.archiveKnowledgeBase(entry.id);
           if (active) this.close(); else this.render();
         },
@@ -422,7 +444,9 @@ export class ManageKnowledgeBasesModal extends Modal {
     setIcon(button.createSpan(), icon);
     button.createSpan({ text: label });
     button.disabled = disabled;
-    button.addEventListener("click", action);
+    button.addEventListener("click", () => {
+      if (this.guardRenderedData()) action();
+    });
     return button;
   }
 

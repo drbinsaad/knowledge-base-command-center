@@ -16,7 +16,7 @@ import {
   runQuickEntryFocusedProtocolAction,
 } from "../src/quick-entry.ts";
 import { createQuickEntryButton, EntVaultCommandCenterView } from "../src/view.ts";
-import { AddActionModal, CollectionPickerModal, TextPromptModal, VaultFilePickerModal } from "../src/modals.ts";
+import { AddActionModal, CollectionPickerModal, localDateStamp, TextPromptModal, VaultFilePickerModal } from "../src/modals.ts";
 import { migrateData, portablePlaceholderPath, type LibraryDefinition, type VaultRecord } from "../src/model.ts";
 import { createFakeDom, asHtmlElement } from "./support/fake-dom.ts";
 
@@ -706,4 +706,30 @@ test("Quick Entry header control is labelled, keyboard-native, and compact-mobil
   assert.match(css, /\.ent-cc-quick-entry-button\s*\{[^}]*min-width:\s*44px/s);
   assert.match(css, /@media \(max-width: 600px\)[\s\S]*?\.ent-cc-quick-entry-button\s*\{[^}]*width:\s*44px/s);
   assert.match(css, /\.ent-cc-header-actions\s*\{[^}]*overflow-x:\s*auto/s);
+});
+
+test("export filenames stamp the local calendar day instead of the UTC day", () => {
+  // A UTC stamp names the file after the previous or next day for most of the
+  // world; these local times must all resolve to their own calendar day.
+  assert.equal(localDateStamp(new Date(2026, 0, 1, 0, 30)), "2026-01-01");
+  assert.equal(localDateStamp(new Date(2026, 0, 1, 23, 30)), "2026-01-01");
+  assert.equal(localDateStamp(new Date(2026, 8, 5, 12, 0)), "2026-09-05");
+
+  for (const file of ["../src/index-manager.ts", "../src/portfolio-modal.ts", "../src/portability-modal.ts"]) {
+    const source = readFileSync(new URL(file, import.meta.url), "utf8");
+    assert.match(source, /link\.download = `[^`]*\$\{localDateStamp\(now\)\}\.json`/u, file);
+    assert.doesNotMatch(source, /toISOString\(\)\.slice\(0, 10\)/u, file);
+  }
+});
+
+test("settings text inputs stay RTL-safe and the recent-changes slider defers its save", () => {
+  const source = readFileSync(new URL("../src/settings.ts", import.meta.url), "utf8");
+  const textInputs = source.match(/row\.addText\(/gu)?.length ?? 0;
+  const directionalInputs = source.match(/text\.inputEl\.dir = "auto";/gu)?.length ?? 0;
+  assert.ok(textInputs > 0);
+  assert.equal(directionalInputs, textInputs, "every settings text input must render user content with dir=auto");
+
+  assert.match(source, /if \(typeof slider\.setInstant === "function"\) slider\.setInstant\(false\);/u);
+  assert.match(source, /settings\.recentLimit = value;\n\s*this\.scheduleTextSave\(\);/u);
+  assert.doesNotMatch(source, /settings\.recentLimit = value;\n\s*await this\.save\(\);/u);
 });

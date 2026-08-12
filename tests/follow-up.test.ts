@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Modal, Notice } from "obsidian";
+import { FollowUpCategoryManagerModal } from "../src/follow-up-modal.ts";
 import {
   appendFollowUpEntry,
   allocateFollowUpCategoryId,
@@ -12,6 +14,7 @@ import {
   MAX_FOLLOW_UP_CONTENT_BYTES,
   MAX_FOLLOW_UP_ENTRIES,
   reverseFollowUpAppend,
+  type FollowUpCategoryDefinition,
   type FollowUpCategoryInput,
 } from "../src/follow-up.ts";
 
@@ -367,4 +370,63 @@ test("reverse metadata is compact and refuses stale or tampered note content", (
   invalidUndo.postFingerprint = result.undo.postFingerprint;
   invalidUndo.reverseEdits[0].start = -1;
   assert.throws(() => reverseFollowUpAppend(result.content, invalidUndo), /metadata is invalid/u);
+});
+
+test("a rejected duplicate category name keeps the editor open with its typed draft", () => {
+  Notice.messages.length = 0;
+  const manager = new FollowUpCategoryManagerModal({} as never, [
+    { id: "questions", label: "Questions", style: "checkbox", includeDate: false, archived: false },
+    { id: "sources", label: "Sources", style: "bullet", includeDate: false, archived: false },
+  ], () => undefined) as FollowUpCategoryManagerModal & {
+    categories: FollowUpCategoryDefinition[];
+    openEditor(initial?: FollowUpCategoryDefinition): void;
+    render(): void;
+  };
+  let renders = 0;
+  manager.render = () => { renders += 1; };
+
+  interface EditorDraft {
+    label: string;
+    style: FollowUpCategoryDefinition["style"];
+    includeDate: boolean;
+    close(): void;
+    submit(): void;
+  }
+  const editors: EditorDraft[] = [];
+  const open = Object.getOwnPropertyDescriptor(Modal.prototype, "open");
+  Modal.prototype.open = function captureEditor(): void { editors.push(this as unknown as EditorDraft); };
+  let closes = 0;
+  try {
+    manager.openEditor();
+    const editor = editors[0];
+    assert.ok(editor);
+    editor.close = () => { closes += 1; };
+    editor.label = "  sources  ";
+    editor.style = "checkbox";
+    editor.includeDate = true;
+    editor.submit();
+
+    assert.equal(closes, 0, "a rejected duplicate label must keep the editor open");
+    assert.equal(renders, 0);
+    assert.equal(manager.categories.length, 2);
+    assert.equal(Notice.messages.at(-1), "Use a unique quick append category name.");
+    assert.equal(editor.style, "checkbox", "the typed draft survives the rejection");
+    assert.equal(editor.includeDate, true);
+
+    editor.label = "Reading";
+    editor.submit();
+  } finally {
+    if (open) Object.defineProperty(Modal.prototype, "open", open);
+    else Reflect.deleteProperty(Modal.prototype, "open");
+  }
+
+  assert.equal(closes, 1);
+  assert.equal(renders, 1);
+  assert.deepEqual(manager.categories.at(-1), {
+    id: "reading",
+    label: "Reading",
+    style: "checkbox",
+    includeDate: true,
+    archived: false,
+  });
 });

@@ -240,7 +240,7 @@ function byteLength(value: string): number {
   return utf8Encoder.encode(value).byteLength;
 }
 
-function selectionUsesSubjects(selection: PortableExportSelection): boolean {
+export function selectionUsesSubjects(selection: PortableExportSelection): boolean {
   const normalized = normalizePortableSelection(selection);
   return normalized.index
     || (normalized.libraryIds?.length ?? 0) > 0

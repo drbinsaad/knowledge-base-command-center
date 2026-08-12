@@ -25,6 +25,7 @@ import {
   migrateStore,
   nextSemanticHead,
   isFreshVaultId,
+  parseQuery,
   portablePlaceholderPath,
   provisionalInterimEnvelopeVaultFingerprint,
   provisionalMigratedVaultFingerprint,
@@ -52,7 +53,8 @@ import { EntCommandCenterSettingsTab } from "../src/settings.ts";
 import { QuickAppendModal } from "../src/follow-up-modal.ts";
 import { Notice, Plugin, TFile, TFolder, type TAbstractFile } from "obsidian";
 import { mergeKnowledgeBaseStores } from "../src/store-merge.ts";
-import { createPortfolioExport } from "../src/portfolio.ts";
+import { createPortfolioExport, type PortfolioExportV1 } from "../src/portfolio.ts";
+import { EntVaultCommandCenterView, VIEW_TYPE } from "../src/view.ts";
 
 interface TestPluginBase {
   loadedData: unknown;
@@ -264,6 +266,70 @@ test("active Library commands are stable, refreshed after rename/archive, and re
   host.syncLibraryCommands();
   assert.equal(registered.size, 0);
   assert.deepEqual(removed, ["open-library-library-alpha", "open-library-library-alpha"]);
+});
+
+test("a pending refresh is cancelled on its creator window and never runs on the unloaded instance", async () => {
+  const data = migrateData(null);
+  data.portableIndex.libraries = [
+    { id: "library-alpha", name: "Alpha", singularName: "Alpha item", icon: "library", order: 0, sourceKind: null, archivedAt: null },
+  ];
+  const plugin = pluginWith(createDefaultStore(data, 100, "vault-refresh-timer-window"));
+  await plugin.loadPluginData();
+
+  const registered = new Set<string>();
+  const host = plugin as unknown as {
+    addCommand(command: { id: string }): { id: string };
+    removeCommand(commandId: string): void;
+  };
+  host.addCommand = (command) => {
+    registered.add(command.id);
+    return command;
+  };
+  host.removeCommand = (commandId) => { registered.delete(commandId); };
+
+  const creatorCleared: number[] = [];
+  const popoutCleared: number[] = [];
+  const callbacks = new Map<number, () => void>();
+  let nextTimer = 0;
+  const creatorWindow = {
+    setTimeout: (callback: () => void): number => {
+      nextTimer += 1;
+      callbacks.set(nextTimer, callback);
+      return nextTimer;
+    },
+    clearTimeout: (id: number): void => {
+      creatorCleared.push(id);
+      callbacks.delete(id);
+    },
+  };
+  const popoutWindow = {
+    setTimeout: (): number => 999,
+    clearTimeout: (id: number): void => { popoutCleared.push(id); },
+  };
+  const originalWindow = globalThis.window;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { activeWindow: creatorWindow },
+  });
+  try {
+    plugin.scheduleRefresh();
+    assert.equal(callbacks.size, 1);
+    const leaked = callbacks.get(1);
+    assert.ok(leaked);
+    // Focus moves to a popout window before the plugin unloads. Timer IDs are
+    // per-window, so cancelling through the popout would leak the callback.
+    (globalThis.window as unknown as { activeWindow: unknown }).activeWindow = popoutWindow;
+    plugin.onunload();
+    assert.deepEqual(creatorCleared, [1], "onunload cancels the timer on the window that created it");
+    assert.deepEqual(popoutCleared, [], "the popout window holds no such timer");
+    // A callback the browser already dispatched must still not act on the
+    // unloaded instance, e.g. by re-registering the removed library commands.
+    leaked();
+    await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0));
+    assert.equal(registered.size, 0, "an unloaded instance re-registers no library commands");
+  } finally {
+    Object.defineProperty(globalThis, "window", { configurable: true, value: originalWindow });
+  }
 });
 
 function pluginWithFiles(
@@ -786,6 +852,72 @@ test("an interim deterministic migrated vault ID rotates once and is persisted",
   assert.notEqual(plugin.getVaultId(), "vault-migrated-0123456789abcdef");
   assert.equal(plugin.savedData.length, 1, "rotation must survive restart and recovery export");
   assert.equal((plugin.savedData[0] as { vaultId?: string }).vaultId, plugin.getVaultId());
+});
+
+test("a hand-pruned migratable envelope loads instead of crashing the provisional identity rebase", async () => {
+  // Minimal repaired data.json: recognized store envelope, older versions, and
+  // a provisional migrated vault ID, but a payload the fingerprint helpers
+  // cannot walk. The rebase must be skipped, never allowed to abort onload.
+  const envelope = {
+    kind: STORE_KIND,
+    version: 13,
+    vaultId: "vault-migrated-0123456789abcdef-abcdefghijkl",
+    activeBaseId: "base-default",
+    bases: [{
+      id: "base-default",
+      createdAt: 100,
+      updatedAt: 100,
+      archivedAt: null,
+      semanticRevision: 0,
+      data: { version: 12, settings: {} },
+    }],
+    deletedBaseIds: {},
+  };
+  const plugin = pluginWith(envelope);
+
+  const loaded = await plugin.loadPluginData();
+
+  assert.equal(loaded.compatible, true);
+  assert.equal(plugin.getVaultId(), "vault-migrated-0123456789abcdef-abcdefghijkl", "the provisional identity survives unrebased");
+  assert.ok(plugin.getActiveKnowledgeBase(), "the migrated store is usable");
+  assert.equal(plugin.savedData.length, 1, "the migrated envelope is persisted normally");
+});
+
+test("an empty proposal folder never reclassifies notes during clinical repair", async () => {
+  // Real Obsidian's normalizePath("") returns "/", and "is inside /" matches
+  // every path; synced or imported settings can legitimately carry "".
+  const topic = new TFile("03 Clinical Topics/Laryngology/Vocal fold palsy.md");
+  const plain = new TFile("03 Clinical Topics/Reading notes.md");
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  data.settings.primaryFolder = "03 Clinical Topics";
+  data.settings.proposalFolder = "";
+  data.portableIndex.groups = [{ id: "index", title: "Index", order: 0 }];
+  data.portableIndex.subjects = [{
+    id: "topic-subject",
+    title: "Vocal fold palsy",
+    groupId: "index",
+    parentId: null,
+    order: 0,
+    indexed: true,
+    configuredId: "",
+    recordKind: "topic",
+    libraryId: null,
+  }];
+  data.portableIndex.resolvedPathBySubjectId = { "topic-subject": topic.path };
+  data.manualIndexPaths = [topic.path, plain.path];
+  const store = createDefaultStore(data, 100, "vault-empty-proposal-folder");
+  const { plugin } = pluginWithFiles(store, [topic, plain], {
+    [topic.path]: { title: "Vocal fold palsy" },
+    [plain.path]: { title: "Reading notes" },
+  });
+
+  await plugin.loadPluginData();
+
+  assert.deepEqual(plugin.data.manualIndexPaths, [topic.path, plain.path]);
+  const subject = plugin.data.portableIndex.subjects.find((entry) => entry.id === "topic-subject");
+  assert.equal(subject?.indexed, true);
+  assert.equal(subject?.recordKind, "topic");
 });
 
 test("startup atomically rehomes invalid ENT Index data across every base and writes the store once", async () => {
@@ -4141,6 +4273,55 @@ test("a synced legacy single-base payload cannot overwrite a multi-base store", 
   assert.equal(plugin.savedData.length, 0);
 });
 
+test("an identity-less legacy capture rescues the accumulated store before read-only mode", async () => {
+  Notice.messages.length = 0;
+  const ent = migrateData(null);
+  ent.settings.workspaceName = "ENT";
+  const research = migrateData(null);
+  research.settings.workspaceName = "Research";
+  const store = createDefaultStore(ent, 100, "vault-sync-test");
+  store.bases.push(createKnowledgeBaseEntry(research, "base-research", 200));
+  const plugin = pluginWith(store);
+  await plugin.loadPluginData();
+  let rescueContent = "";
+  const app = plugin.app as unknown as {
+    vault: {
+      configDir: string;
+      getMarkdownFiles(): TFile[];
+      getAbstractFileByPath(path: string): TAbstractFile | null;
+      createFolder(path: string): Promise<void>;
+      create(path: string, content: string): Promise<TFile>;
+    };
+  };
+  app.vault = {
+    configDir: ".obsidian",
+    getMarkdownFiles: () => [],
+    getAbstractFileByPath: () => null,
+    createFolder: async () => {},
+    create: async (path, content) => {
+      rescueContent = content;
+      return new TFile(path);
+    },
+  };
+  plugin.savedData.length = 0;
+  plugin.loadedData = migrateData(null);
+
+  await plugin.onExternalSettingsChange();
+
+  // The identity-less file stays authoritative on disk, so the multi-base
+  // store survives a restart only through the rescue export.
+  assert.notEqual(rescueContent, "");
+  const rescue = JSON.parse(rescueContent) as { kind: string; store: PluginStore };
+  assert.equal(rescue.kind, "knowledge-base-command-center-conflict-rescue");
+  assert.equal(rescue.store.vaultId, "vault-sync-test");
+  assert.deepEqual(
+    rescue.store.bases.map((entry) => entry.data.settings.workspaceName),
+    ["ENT", "Research"],
+  );
+  assert.match(plugin.dataCompatibilityWarning, /preserved in a private rescue at/i);
+  assert.equal(plugin.savedData.length, 0);
+});
+
 test("switching knowledge bases is rejected while a mutate transaction is saving", async () => {
   const first = migrateData(null);
   first.settings.workspaceName = "First KB";
@@ -5315,6 +5496,64 @@ test("portfolio Replace writes strict recovery first and rolls every base back w
   assert.deepEqual(plugin.getKnowledgeBases(true).map((entry) => entry.data), before.map((entry) => entry.data));
   assert.equal(saveAttempts, 2, "the existing base transaction persists one compensating rollback");
   assert.equal(plugin.data.indexGroupOrder.includes("Imported empty heading"), false);
+});
+
+test("two consecutive portfolio exports mint identical stable subject IDs and persist them", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceName = "Portfolio stable IDs";
+  data.pinnedPaths = ["Notes/Pinned topic.md"];
+  const plugin = pluginWith(createDefaultStore(data, 100, "vault-portfolio-stable-subject-ids"));
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+
+  const selection = { ...EMPTY_PORTABLE_SELECTION, study: true };
+  const baseId = plugin.getActiveKnowledgeBaseId();
+  const first = plugin.createPortfolioExport([{ baseId, selection }], "2026-08-12T00:00:00.000Z");
+  const second = plugin.createPortfolioExport([{ baseId, selection }], "2026-08-12T00:00:00.000Z");
+
+  const pinnedIds = (bundle: PortfolioExportV1): readonly string[] => (
+    bundle.packages[0]?.package.components.study?.pinnedSubjectIds ?? []
+  );
+  assert.equal(pinnedIds(first).length, 1);
+  assert.deepEqual(pinnedIds(first), pinnedIds(second), "re-exporting identical state reuses the same stable subject IDs");
+  const allocatedId = pinnedIds(first)[0] ?? "";
+  assert.ok(
+    plugin.data.portableIndex.subjects.some((subject) => subject.id === allocatedId),
+    "the exported subject ID was allocated on the live registry",
+  );
+
+  await bounded(
+    (plugin as unknown as { directSaveTransactionQueue: Promise<void> }).directSaveTransactionQueue,
+    "portfolio registry allocation save",
+  );
+  assert.equal(plugin.savedData.length, 1, "both exports share one allocation save");
+  const saved = plugin.savedData[0] as PluginStore;
+  assert.ok(
+    saved.bases[0]?.data.portableIndex.subjects.some((subject) => subject.id === allocatedId),
+    "the allocated subject ID reaches data.json",
+  );
+});
+
+test("a read-only portfolio export still succeeds without persisting subject IDs", async () => {
+  const data = migrateData(null);
+  data.pinnedPaths = ["Notes/Pinned topic.md"];
+  const store = createDefaultStore(data, 100, "vault-portfolio-read-only-export");
+  store.version = STORE_VERSION + 1;
+  const plugin = pluginWith(store);
+  await plugin.loadPluginData();
+  assert.equal(plugin.isDataReadOnly(), true);
+  plugin.savedData.length = 0;
+  const registryBefore = structuredClone(plugin.data.portableIndex);
+
+  const selection = { ...EMPTY_PORTABLE_SELECTION, study: true };
+  const bundle = plugin.createPortfolioExport(
+    [{ baseId: plugin.getActiveKnowledgeBaseId(), selection }],
+    "2026-08-12T00:00:00.000Z",
+  );
+
+  assert.equal(bundle.packages[0]?.package.components.study?.pinnedSubjectIds.length, 1);
+  assert.deepEqual(plugin.data.portableIndex, registryBefore, "read-only mode keeps the clone-local allocation");
+  assert.equal(plugin.savedData.length, 0, "read-only mode never writes data.json");
 });
 
 test("workspace-only portability import includes dependency Library descriptors in Undo", async () => {
@@ -9395,4 +9634,209 @@ test("Quick Append existing-note picker refuses a base or data-epoch change befo
     if (appendOpen) Object.defineProperty(QuickAppendModal.prototype, "open", appendOpen);
     else Reflect.deleteProperty(QuickAppendModal.prototype, "open");
   }
+});
+
+// --- Operation-barrier re-entrancy: a refresh inside a base switch or mutate
+// --- transaction must never queue or wait behind the operation that owns it.
+
+interface DeadlockViewHarness {
+  plugin: EntVaultCommandCenterPlugin & TestPluginBase;
+  attachView: () => void;
+}
+
+function pluginWithLiveView(files: TFile[], store: PluginStore): DeadlockViewHarness {
+  let deviceState: unknown = null;
+  const leaves: Array<{ view: unknown }> = [];
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getMarkdownFiles: () => files,
+      getAbstractFileByPath: (path: string) => files.find((file) => file.path === path) ?? null,
+    },
+    workspace: { getLeavesOfType: (type: string) => (type === VIEW_TYPE ? leaves : []) },
+    metadataCache: { getFileCache: () => ({ frontmatter: {} }), resolvedLinks: {} },
+    fileManager: {},
+    loadLocalStorage: () => structuredClone(deviceState),
+    saveLocalStorage: (_key: string, value: unknown) => { deviceState = structuredClone(value); },
+  };
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = store;
+  plugin.savedData = [];
+  plugin.deviceLocalWrites = [];
+  const savedData = plugin.savedData;
+  plugin.saveData = async (value: unknown) => { savedData.push(structuredClone(value)); };
+  const attachView = (): void => {
+    // A real prototype (passes the instanceof check inside refreshViews) whose
+    // real reload() method runs against the real plugin, with rendering inert.
+    const view = Object.create(EntVaultCommandCenterView.prototype) as Record<string, unknown>;
+    view.plugin = plugin;
+    view.loadedBaseId = plugin.getActiveKnowledgeBaseId();
+    view.loadedDataEpoch = plugin.getDataEpoch();
+    view.staleViewNoticeShown = false;
+    view.viewClosed = false;
+    view.query = "";
+    view.parsedQuery = parseQuery("");
+    view.searchDebounce = null;
+    view.selectionSaveTimer = null;
+    view.setupTimer = null;
+    view.selectionSavePromise = null;
+    view.globalSearchResult = null;
+    view.globalSearchResultKey = "";
+    view.globalSearchResultScopeKey = "";
+    view.globalSearchPendingKey = "";
+    view.globalSearchErrorKey = "";
+    view.globalSearchErrorMessage = "";
+    view.globalSearchRequestGeneration = 0;
+    view.timerWindow = { clearTimeout: () => {}, setTimeout: () => 0, requestAnimationFrame: () => 0 };
+    view.render = () => {};
+    view.renderTree = () => {};
+    view.refreshChromeCounts = () => {};
+    leaves.push({ view });
+  };
+  return { plugin, attachView };
+}
+
+test("switching to a base whose selection needs reconciling completes with an open view", async () => {
+  const files = [new TFile("Knowledge Base/Topic.md")];
+  const dataA = migrateData(null);
+  dataA.settings.setupComplete = true;
+  const store = createDefaultStore(dataA, 100, "vault-deadlock-switch");
+  const dataB = migrateData(null);
+  dataB.settings.setupComplete = true;
+  dataB.settings.workspaceName = "Base B";
+  // selectedPath is intentionally the fresh-base default: empty, so the
+  // in-operation refresh must reconcile a selection fallback.
+  store.bases.push(createKnowledgeBaseEntry(dataB, "base-b", 200));
+  const { plugin, attachView } = pluginWithLiveView(files, store);
+  await plugin.loadPluginData();
+  attachView();
+
+  await bounded(plugin.switchKnowledgeBase("base-b"), "switch with open view", 3000);
+
+  assert.equal(plugin.getActiveKnowledgeBaseId(), "base-b");
+  assert.equal(plugin.data.selectedPath, "Knowledge Base/Topic.md");
+  // The barrier must be free afterwards: a follow-up operation also completes.
+  await bounded(plugin.switchKnowledgeBase("base-default"), "switch back", 3000);
+});
+
+test("a mutate whose action leaves duplicate pins completes with an open view", async () => {
+  const files = [new TFile("Knowledge Base/Topic.md")];
+  const dataA = migrateData(null);
+  dataA.settings.setupComplete = true;
+  dataA.selectedPath = "Knowledge Base/Topic.md";
+  const store = createDefaultStore(dataA, 100, "vault-deadlock-mutate");
+  const { plugin, attachView } = pluginWithLiveView(files, store);
+  await plugin.loadPluginData();
+  attachView();
+
+  await bounded(plugin.mutate("Pin twice", () => {
+    plugin.data.pinnedPaths.push("Knowledge Base/Topic.md", "Knowledge Base/Topic.md");
+  }), "mutate with open view", 3000);
+
+  // The in-operation reconcile deduplicated AND persisted the normalization.
+  assert.deepEqual(plugin.data.pinnedPaths, ["Knowledge Base/Topic.md"]);
+  const lastSaved = plugin.savedData.at(-1) as PluginStore;
+  assert.deepEqual(
+    lastSaved.bases.find((entry) => entry.id === plugin.getActiveKnowledgeBaseId())?.data.pinnedPaths,
+    ["Knowledge Base/Topic.md"],
+    "the deduplicated pins must reach data.json, not only memory",
+  );
+  await bounded(plugin.mutate("Pin again", () => {
+    plugin.data.pinnedPaths.push("Knowledge Base/Topic.md");
+  }), "follow-up mutate", 3000);
+});
+
+// --- data.json backup safety net: every store save writes a parseable twin
+// --- first, and a torn data.json is recovered from it at startup.
+
+test("a store save writes the data.json backup twin before the primary write", async () => {
+  const events: string[] = [];
+  const adapterWrites: Array<{ path: string; content: string }> = [];
+  const legacy = migrateData(null);
+  legacy.settings.workspaceName = "Backup ordering";
+  const app = {
+    vault: {
+      ...emptyWritableTestVault(),
+      adapter: {
+        exists: async () => false,
+        read: async () => { throw new Error("missing"); },
+        write: async (path: string, content: string) => {
+          events.push("backup");
+          adapterWrites.push({ path, content });
+        },
+      },
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null },
+    fileManager: {},
+    loadLocalStorage: () => null,
+    saveLocalStorage: () => {},
+  };
+  const plugin = new EntVaultCommandCenterPlugin(
+    app as never,
+    { dir: ".obsidian/plugins/knowledge-base-command-center" } as never,
+  ) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = legacy;
+  const savedData: unknown[] = [];
+  plugin.saveData = async (value: unknown) => {
+    events.push("save");
+    savedData.push(structuredClone(value));
+  };
+
+  await plugin.loadPluginData();
+
+  assert.equal(savedData.length, 1, "legacy data triggers one migration writeback");
+  assert.deepEqual(events, ["backup", "save"], "the twin must be durable before data.json is replaced");
+  assert.equal(adapterWrites[0]?.path, ".obsidian/plugins/knowledge-base-command-center/data.json.bak");
+  assert.deepEqual(JSON.parse(adapterWrites[0]?.content ?? "null"), JSON.parse(JSON.stringify(savedData[0])));
+});
+
+test("a torn data.json is recovered from the backup twin instead of read-only mode", async () => {
+  const backupData = migrateData(null);
+  backupData.settings.workspaceName = "Recovered organization";
+  const backupStore = createDefaultStore(backupData, 100, "vault-backup-restore");
+  const adapterWrites: Array<{ path: string; content: string }> = [];
+  const app = {
+    vault: {
+      ...emptyWritableTestVault(),
+      adapter: {
+        exists: async (path: string) => path.endsWith("data.json.bak"),
+        read: async (path: string) => {
+          if (!path.endsWith("data.json.bak")) throw new Error("missing");
+          return JSON.stringify(backupStore);
+        },
+        write: async (path: string, content: string) => { adapterWrites.push({ path, content }); },
+      },
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null },
+    fileManager: {},
+    loadLocalStorage: () => null,
+    saveLocalStorage: () => {},
+  };
+  const plugin = new EntVaultCommandCenterPlugin(
+    app as never,
+    { dir: ".obsidian/plugins/knowledge-base-command-center" } as never,
+  ) as EntVaultCommandCenterPlugin & TestPluginBase;
+  const savedData: unknown[] = [];
+  plugin.saveData = async (value: unknown) => { savedData.push(structuredClone(value)); };
+  plugin.loadData = async () => { throw new Error("Unexpected end of JSON input"); };
+
+  const result = await plugin.loadPluginData();
+
+  assert.equal(result.compatible, true, "recovery must not fall into read-only mode");
+  assert.equal(plugin.dataCompatibilityWarning, "");
+  assert.equal(plugin.data.settings.workspaceName, "Recovered organization");
+  assert.equal(savedData.length, 1, "the recovered store is written back so data.json is valid again");
+  assert.deepEqual((savedData[0] as PluginStore).vaultId, "vault-backup-restore");
+});
+
+test("a corrupt data.json with no usable backup still enters read-only protection", async () => {
+  const plugin = pluginWith(null);
+  plugin.loadData = async () => { throw new Error("Unexpected end of JSON input"); };
+
+  const result = await plugin.loadPluginData();
+
+  assert.equal(result.compatible, false);
+  assert.match(plugin.dataCompatibilityWarning, /could not be parsed/i);
 });

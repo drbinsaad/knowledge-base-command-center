@@ -1,5 +1,9 @@
 export function normalizePath(path: string): string {
-  return path.replace(/\\/g, "/").replace(/\/{2,}/g, "/").replace(/^\/+|\/+$/g, "");
+  // Mirrors real Obsidian: non-breaking spaces become plain spaces, runs of
+  // slashes collapse, edges strip, and an empty result becomes "/" before NFC
+  // normalization (verified against the 1.13.7 binary).
+  const clean = path.replace(/\u00A0|\u202F/gu, " ").replace(/[\\/]+/g, "/").replace(/^\/+|\/+$/g, "");
+  return (clean === "" ? "/" : clean).normalize("NFC");
 }
 
 export class TAbstractFile {
