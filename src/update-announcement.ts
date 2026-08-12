@@ -48,9 +48,24 @@ export const UPDATE_ANNOUNCEMENT_0_12_1: UpdateAnnouncement = {
   releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.12.1",
 };
 
+export const UPDATE_ANNOUNCEMENT_0_13_0: UpdateAnnouncement = {
+  version: "0.13.0",
+  title: "What’s new in Knowledge Base Command Center 0.13.0",
+  intro: "Subheadings can now hold subheadings, and large vaults feel considerably faster. Your notes stay exactly where they are.",
+  highlights: [
+    "Nest subheadings up to five levels deep in Collections and Libraries; removing one moves its notes and nested subheadings up to the parent.",
+    "Editing a note no longer re-reads every file in the vault, and searching in Manage index no longer re-scans it on each keystroke.",
+    "Destination pickers and Quick Entry now show the full path of each heading, so deep structures stay unambiguous.",
+    "Portable packages and recovery files carry nested layouts; older packages still import, and older plugin versions keep your data read-only instead of flattening it.",
+    "A starter template pack and an Apple Shortcuts guide are now included with the project documentation.",
+  ],
+  releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.13.0",
+};
+
 const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_12_0.version, UPDATE_ANNOUNCEMENT_0_12_0],
   [UPDATE_ANNOUNCEMENT_0_12_1.version, UPDATE_ANNOUNCEMENT_0_12_1],
+  [UPDATE_ANNOUNCEMENT_0_13_0.version, UPDATE_ANNOUNCEMENT_0_13_0],
 ]);
 
 function parseSemanticVersion(value: string): ParsedSemanticVersion | null {

@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.13.0
+
+### Added
+
+- Subheadings can now contain further subheadings, up to five levels including the heading, in both Collections and Libraries. **Add subheading** appears on any heading or subheading below that depth, pickers and Quick Entry label every destination by its full path (`Board review / Airway / Emergencies`), and removing a nested subheading promotes both its notes and its child subheadings to the parent rather than discarding them.
+- Added a starter template pack under `templates/` covering study topics, source notes, projects, meeting or case logs, and a question inbox, each using the creation-time YAML-safe tokens, plus a guide explaining which token resolves where.
+- Added a dedicated Apple Shortcuts guide documenting all ten fixed action-only URLs, why every query parameter is rejected, and how to build a Shortcut for the Home Screen, share sheet, or Back Tap.
+
+### Changed
+
+- Editing an indexed note no longer re-enumerates the vault. A vault or metadata event now rebuilds only the affected note's record and splices it into the cached ordering, instead of discarding the whole projection and re-scanning every Markdown file. Renames continue to take the full path deliberately, because a rename reprojects every stored path.
+- Searching in **Manage index** builds only the active tab's list and reuses it between keystrokes, so typing no longer enumerates the vault once per character, and hidden tabs never pay for a list they do not display.
+- Bulk **Remove from index**, **Restore to index**, and Library adoption resolve records and portable subjects through per-base maps instead of scanning every record for every selected note.
+- Startup deep-copies the knowledge-base store once instead of three times before the plugin finishes loading.
+- Collections and Libraries now render through one recursive structure renderer instead of two parallel implementations that had drifted apart; the Libraries tab regains the repair guidance its missing-count indicator had lost.
+- Advanced knowledge-base data to version 14 and the multi-base store to version 15 so that nested layouts cannot be silently flattened by an older build; older versions display existing data read-only instead of writing a truncated copy back through Sync.
+- Advanced portable packages to format version 5 and same-vault recovery packages to version 10. Older packages still import unchanged, and layouts nested deeper than five levels keep their notes by merging them into the nearest allowed level rather than dropping them.
+- The external-Sync reload handler was restructured behind a typed per-capture outcome record. Behaviour is unchanged and verified as such; the goal is that a future branch cannot forget to record a rescue payload without failing to compile.
+
+### Fixed
+
+- Made canonicalization agree across the plugin. Sync winner selection, migration equality, and portfolio guard tokens previously used three separate implementations that disagreed about a literal `__proto__` key, so the same store could be canonicalized differently depending on which one asked.
+- Made Unicode validation agree between Quick append and portable export. Text ending in an unpaired surrogate was accepted when written and rejected later during transfer validation; it is now rejected at entry.
+- Enforced the ten-megabyte import ceiling on the two remaining desktop import paths, workspace configuration import and organization backup import, which read and parsed a chosen file without checking its size.
+- Stopped the Taxonomy Health Center from repeating its stale-knowledge-base notice, and made every manager dialog share one staleness guard rather than six variants with different checks.
+- Made guarded dialog timers resolve the window that created them, so a dialog in a pop-out window is no longer cancelled through the focused window.
+- Removed unused exported functions and redirected tests that exercised wrappers the plugin never calls onto the code paths it actually runs.
+
 ## 0.12.1
 
 ### Fixed
