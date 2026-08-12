@@ -710,6 +710,8 @@ test("desktop library drag and drop moves records across headings and reorders r
     loadedBaseId: string;
     loadedDataEpoch: number;
     staleViewNoticeShown: boolean;
+    libraryDragRenderToken: string;
+    activeLibraryDrag: { renderToken: string } | null;
     plugin: {
       data: PluginData;
       mutate(label: string, action: () => void, options?: { includePortableIndex?: boolean; requireUndo?: boolean }): Promise<void>;
@@ -774,16 +776,28 @@ test("desktop library drag and drop moves records across headings and reorders r
     headingId: "heading-a",
   };
   const transferValues = new Map<string, string>();
+  // Mirrors the browser drag-data store: writable during dragstart, readable
+  // during drop, and protected (getData returns "") in every other phase,
+  // including dragover.
   const dataTransfer = {
     effectAllowed: "none",
     dropEffect: "none",
-    setData(type: string, value: string) { transferValues.set(type, value); },
-    getData(type: string) { return transferValues.get(type) ?? ""; },
+    mode: "read/write" as "read/write" | "read-only" | "protected",
+    setData(type: string, value: string) { if (this.mode === "read/write") transferValues.set(type, value); },
+    getData(type: string) { return this.mode === "read-only" ? transferValues.get(type) ?? "" : ""; },
   };
   const dragEvent = { dataTransfer } as unknown as DragEvent;
-  view.writeLibraryDrag(dragEvent, payload);
+  const startDrag = () => {
+    dataTransfer.mode = "read/write";
+    view.writeLibraryDrag(dragEvent, payload);
+    dataTransfer.mode = "protected";
+  };
+  startDrag();
   assert.equal(dataTransfer.effectAllowed, "move");
+  assert.equal(view.readLibraryDrag(dragEvent), null, "the drag-data store stays unreadable outside the drop phase");
+  dataTransfer.mode = "read-only";
   const guardedPayload = view.readLibraryDrag(dragEvent);
+  dataTransfer.mode = "protected";
   assert.ok(guardedPayload);
   assert.deepEqual({
     kind: guardedPayload.kind,
@@ -806,19 +820,25 @@ test("desktop library drag and drop moves records across headings and reorders r
 
     const headingRows = parent.querySelectorAll(".ent-cc-heading-row");
     assert.equal(headingRows.length, 2);
-    view.readLibraryDrag = () => ({ ...guardedPayload, renderToken: "stale-render-token" });
+    const currentToken = view.libraryDragRenderToken;
+    view.libraryDragRenderToken = "replaced-render-token";
+    const staleDragover = headingRows[1]?.dispatch("dragover");
+    assert.equal(staleDragover?.defaultPrevented, false, "a drag created by an older render must not highlight the current layout");
     headingRows[1]?.dispatch("drop");
     await Promise.resolve();
     assert.deepEqual(assignments, [], "a drag created by an older render must not mutate the current layout");
+    view.libraryDragRenderToken = currentToken;
 
-    view.readLibraryDrag = () => guardedPayload;
+    startDrag();
     const headingDrop = headingRows[1]?.dispatch("dragover");
-    assert.equal(headingDrop?.defaultPrevented, true);
+    assert.equal(headingDrop?.defaultPrevented, true, "dragover validates from the tracked in-flight payload, not the unreadable dataTransfer");
     headingRows[1]?.dispatch("drop");
     await Promise.resolve();
     await Promise.resolve();
     assert.deepEqual(assignments, [{ path: first.path, headingId: "heading-b" }]);
+    assert.equal(view.activeLibraryDrag, null, "drop consumes the tracked payload");
 
+    startDrag();
     const recordRows = parent.querySelectorAll(".ent-cc-subject-row");
     assert.equal(recordRows.length, 2);
     recordRows[1]?.setBoundingClientRect({ top: 0, height: 44, bottom: 44 });
@@ -829,6 +849,12 @@ test("desktop library drag and drop moves records across headings and reorders r
     await Promise.resolve();
     await Promise.resolve();
     assert.deepEqual(view.plugin.data.portableIndex.libraryLayouts[library.id]?.[0]?.subjects, ["subject-b", "subject-a"]);
+
+    startDrag();
+    parent.querySelectorAll(".ent-cc-drag-handle")[0]?.dispatch("dragend");
+    assert.equal(view.activeLibraryDrag, null, "dragend releases the tracked payload");
+    const endedDragover = headingRows[1]?.dispatch("dragover");
+    assert.equal(endedDragover?.defaultPrevented, false, "no in-flight drag leaves no drop target");
   } finally {
     mobilePlatform.isMobile = previousMobile;
   }
@@ -1029,6 +1055,32 @@ test("same-base reloads preserve the focused search and its query across ordinar
   assert.equal(dom.document.activeElement, replacement, "focus is restored after rebuilding the same base");
   assert.equal(replacement.value, "laryn");
   assert.equal(view.query, "laryn");
+});
+
+test("the wide-layout keyboard-preserving reload also refreshes the inspector for a deleted record", async () => {
+  const dom = createFakeDom();
+  const selected = record("KB/Airway.md", "Airway");
+  const source = searchSource("base-wide", "Wide base", [selected]);
+  source.data.settings.setupComplete = true;
+  source.data.selectedPath = selected.path;
+  const view = createView(dom.window, [source]) as unknown as MobileViewHarness;
+  const content = dom.document.body.createDiv({ cls: "view-content" });
+  content.setBoundingClientRect({ width: 1200 });
+  view.contentEl = asHtmlElement(content);
+  await view.reload();
+  assert.equal(content.hasClass("is-pane-wide"), true);
+  assert.match(content.querySelector(".ent-cc-inspector")?.textContent ?? "", /Airway/);
+
+  const input = content.querySelector('input[type="search"]');
+  assert.ok(input);
+  input.focus({ preventScroll: true });
+  source.records.splice(0);
+  await view.reload();
+
+  assert.equal(content.querySelector('input[type="search"]'), input, "the fast path keeps the focused input node alive");
+  const inspector = content.querySelector(".ent-cc-inspector");
+  assert.match(inspector?.textContent ?? "", /Select a record to inspect it/);
+  assert.doesNotMatch(inspector?.textContent ?? "", /Airway/, "the inspector must not keep actions for a note that no longer exists");
 });
 
 test("the production copy action writes to the clipboard only after its button is clicked", async () => {

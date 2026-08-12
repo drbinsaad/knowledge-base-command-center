@@ -7,6 +7,7 @@ import {
   MAX_KNOWLEDGE_BASES,
   MAX_SEMANTIC_LINEAGE,
   migrateData,
+  legacyLocaleInterimEnvelopeFingerprint,
   migrateStore,
   provisionalInterimEnvelopeVaultFingerprint,
   provisionalMigratedVaultFingerprint,
@@ -70,6 +71,18 @@ function interimEnvelopeWithoutVaultId(
   const value = store([
     entry("base-a", "ENT", 100),
     entry("base-b", secondName, 200),
+  ], activeBaseId);
+  value.deletedBaseIds = { "base-removed": 75 };
+  const raw = structuredClone(value) as unknown as Record<string, unknown>;
+  delete raw.vaultId;
+  return raw;
+}
+
+/** Base IDs whose code-unit order differs from every locale's collation order. */
+function collationSensitiveEnvelopeWithoutVaultId(activeBaseId = "base-a"): Record<string, unknown> {
+  const value = store([
+    entry("base-a", "ENT", 100),
+    entry("Base-b", "Research", 200),
   ], activeBaseId);
   value.deletedBaseIds = { "base-removed": 75 };
   const raw = structuredClone(value) as unknown as Record<string, unknown>;
@@ -264,6 +277,46 @@ test("identical interim multi-base envelopes without vault IDs converge symmetri
   assert.equal(leftFirst.store.activeBaseId, "base-a");
   assert.equal(leftFirst.incomingNeedsWriteback, leftFirst.store.vaultId !== right.vaultId);
   assert.equal(rightFirst.incomingNeedsWriteback, rightFirst.store.vaultId !== left.vaultId);
+});
+
+test("already-shipped interim identities minted under locale-sensitive ordering stay accepted", () => {
+  // 0.12.0 sorted base IDs with localeCompare before fingerprinting, so devices
+  // in the field carry identities that a code-unit recomputation cannot
+  // reproduce. Those identities must never be treated as a foreign vault.
+  const left = migrateStore(collationSensitiveEnvelopeWithoutVaultId("base-a"), 1_000);
+  const right = migrateStore(collationSensitiveEnvelopeWithoutVaultId("Base-b"), 1_000);
+  const legacyFingerprint = legacyLocaleInterimEnvelopeFingerprint(left);
+  assert.notEqual(
+    legacyFingerprint,
+    provisionalInterimEnvelopeVaultFingerprint(left.vaultId),
+    "these base IDs straddle a collation boundary, so the legacy fingerprint really differs",
+  );
+  const shippedLeftId = `vault-envelope-migrated-${legacyFingerprint}-aaaaaaaaaaaa`;
+  const shippedRightId = `vault-envelope-migrated-${legacyFingerprint}-bbbbbbbbbbbb`;
+  left.vaultId = shippedLeftId;
+  right.vaultId = shippedRightId;
+
+  const merged = mergeKnowledgeBaseStores(left, right, "base-a");
+  assert.equal(merged.store.vaultId, [shippedLeftId, shippedRightId].sort()[0]);
+  assert.deepEqual(
+    mergeKnowledgeBaseStores(right, left, "base-a").store.vaultId,
+    merged.store.vaultId,
+    "convergence stays symmetric",
+  );
+});
+
+test("a shipped legacy identity converges with a freshly migrated one for the same envelope", () => {
+  const shipped = migrateStore(collationSensitiveEnvelopeWithoutVaultId("base-a"), 1_000);
+  const upgraded = migrateStore(collationSensitiveEnvelopeWithoutVaultId("Base-b"), 1_000);
+  shipped.vaultId = `vault-envelope-migrated-${legacyLocaleInterimEnvelopeFingerprint(shipped)}-cccccccccccc`;
+  assert.notEqual(
+    provisionalInterimEnvelopeVaultFingerprint(shipped.vaultId),
+    provisionalInterimEnvelopeVaultFingerprint(upgraded.vaultId),
+  );
+
+  const merged = mergeKnowledgeBaseStores(shipped, upgraded, "base-a");
+  assert.equal(merged.store.vaultId, [shipped.vaultId, upgraded.vaultId].sort()[0]);
+  assert.deepEqual(mergeKnowledgeBaseStores(upgraded, shipped, "base-a").store, merged.store);
 });
 
 test("a late third device with the same pristine interim envelope joins the converged identity", () => {

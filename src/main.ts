@@ -119,12 +119,19 @@ import {
   VaultRecord,
   WorkspaceMode,
 } from "./model";
-import { MAX_PORTABLE_PACKAGE_BYTES, portableSubjectPath, registerPortableGroup, type PortableExportSelection } from "./portability";
+import {
+  MAX_PORTABLE_PACKAGE_BYTES,
+  portableSubjectPath,
+  registerPortableGroup,
+  synchronizePortableRegistry,
+  type PortableExportSelection,
+} from "./portability";
 import {
   applyPortfolioImportPlan,
   createPortfolioExport,
   createPortfolioImportPlan,
   MAX_PORTFOLIO_BUNDLE_BYTES,
+  selectionUsesSubjects,
   type PortfolioExportV1,
   type PortfolioImportMapping,
   type PortfolioImportPlan,
@@ -333,6 +340,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private dataEpoch = 0;
   private operationIdleResolvers: Array<() => void> = [];
   private refreshTimer: number | null = null;
+  /** Window that created the pending refresh timer; timer IDs are per-window. */
+  private refreshTimerWindow: Window | null = null;
   private searchGeneration = 0;
   private knowledgeBaseSearchVaultSnapshot: KnowledgeBaseSearchVaultSnapshot | null = null;
   private recordsCacheByBase = new Map<string, VaultRecord[]>();
@@ -597,7 +606,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (hadActiveUpdateAnnouncement && this.appWriteBarrier) {
       this.appWriteBarrier.activeUpdateAnnouncementVersion = null;
     }
-    if (this.refreshTimer !== null) window.activeWindow.clearTimeout(this.refreshTimer);
+    if (this.refreshTimer !== null) this.refreshTimerWindow?.clearTimeout(this.refreshTimer);
+    this.refreshTimer = null;
+    this.refreshTimerWindow = null;
     for (const commandId of this.libraryCommandNames.keys()) this.removeCommand(commandId);
     this.libraryCommandNames.clear();
   }
@@ -1427,14 +1438,22 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // the earliest pre-repair envelope to the final deterministically
       // repaired payload, retaining the random nonce. The helper rejects
       // normal identities and any provisional store edited after migration.
-      rebaseProvisionalVaultIdAfterDeterministicRepair(
-        preMigrationStore ?? preRemediationStore,
-        this.store,
-        {
-          parentStore: preRemediationStore,
-          reason: remediationNeedsWriteback ? "clinical-index-remediation" : undefined,
-        },
-      );
+      try {
+        rebaseProvisionalVaultIdAfterDeterministicRepair(
+          preMigrationStore ?? preRemediationStore,
+          this.store,
+          {
+            parentStore: preRemediationStore,
+            reason: remediationNeedsWriteback ? "clinical-index-remediation" : undefined,
+          },
+        );
+      } catch (error) {
+        // preMigrationStore is the raw pre-validation payload; a hand-repaired
+        // envelope that satisfied migrateStore can still crash the fingerprint
+        // helpers. A skipped rebase merely keeps the provisional identity — a
+        // designed-for state — while a thrown one would abort onload entirely.
+        console.error("Knowledge Base Command Center skipped rebasing a provisional vault identity after deterministic repair", error);
+      }
     }
     try {
       if (persistMigration && !sourceWasMissing
@@ -2442,7 +2461,48 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         completeLibrarySet: request.completeLibrarySet,
       };
     });
+    // The exporter's per-base clone would otherwise mint fresh stable subject
+    // IDs on every run, so re-importing two portfolios of the same state would
+    // duplicate every linked subject. Allocate the IDs on the live registry
+    // first and persist them, mirroring the single-base export flow. Read-only
+    // and busy states keep the clone-local allocation so exports still work,
+    // merely without persisted IDs.
+    if (!this.isDataReadOnly()
+      && !this.baseOperationBusy && !this.dataTransactionBusy && this.directSaveBusyCount === 0) {
+      const changedBaseIds: string[] = [];
+      for (const request of selected) {
+        if (!selectionUsesSubjects(request.selection)) continue;
+        if (synchronizePortableRegistry(request.entry.data, request.records)) changedBaseIds.push(request.entry.id);
+      }
+      if (changedBaseIds.length > 0) this.persistPortfolioRegistryAllocation(changedBaseIds);
+    }
     return createPortfolioExport(selected, exportedAt, this.store.vaultId);
+  }
+
+  /**
+   * Persist stable subject IDs that a portfolio export just allocated on live
+   * knowledge bases. The export itself is synchronous, so the save is queued
+   * as a direct-save transaction. On rejection the allocation stays in memory
+   * and the save machinery records the rejected head, so the next successful
+   * save publishes the allocation as a causal child instead of a stale sibling.
+   */
+  private persistPortfolioRegistryAllocation(changedBaseIds: readonly string[]): void {
+    for (const baseId of changedBaseIds) {
+      const entry = this.store.bases.find((candidate) => candidate.id === baseId);
+      if (entry) this.bumpEntrySemanticRevision(entry);
+    }
+    this.invalidateRecordCache();
+    this.directSaveBusyCount += 1;
+    const operation = this.enqueueAppLogicalOperation(() => this.saveStoreSnapshot());
+    this.directSaveTransactionQueue = operation.then(() => undefined, () => undefined);
+    void operation
+      .catch((error: unknown) => {
+        console.error("Knowledge Base Command Center could not persist stable subject IDs allocated by a portfolio export", error);
+      })
+      .finally(() => {
+        this.directSaveBusyCount -= 1;
+        this.announceOperationsIdle();
+      });
   }
 
   /** Prepare the sole exact mutation plan used by both portfolio preview and apply. */
@@ -6050,9 +6110,15 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   scheduleRefresh(invalidateRecords = true): void {
     this.refreshShouldInvalidateRecords ||= invalidateRecords;
-    if (this.refreshTimer !== null) window.activeWindow.clearTimeout(this.refreshTimer);
-    this.refreshTimer = window.activeWindow.setTimeout(() => {
+    // A timer ID only cancels on the window that created it, and focus can move
+    // to a popout between scheduling and cancellation. Remember the creator.
+    if (this.refreshTimer !== null) this.refreshTimerWindow?.clearTimeout(this.refreshTimer);
+    const timerWindow = window.activeWindow ?? window;
+    this.refreshTimerWindow = timerWindow;
+    this.refreshTimer = timerWindow.setTimeout(() => {
       this.refreshTimer = null;
+      this.refreshTimerWindow = null;
+      if (this.unloaded) return;
       const shouldInvalidate = this.refreshShouldInvalidateRecords;
       this.refreshShouldInvalidateRecords = false;
       this.run(() => this.refreshViews(shouldInvalidate));

@@ -858,15 +858,11 @@ export function isLegacyDeterministicMigratedVaultId(vaultId: string): boolean {
 
 type InterimEnvelopeIdentitySource = Pick<PluginStore, "bases" | "deletedBaseIds">;
 
-/**
- * Stable serialization of the complete multi-base payload that existed when a
- * v11 envelope without `vaultId` was first loaded. Device-local state and the
- * legacy `updatedAt` clock are omitted because older builds advanced that
- * timestamp for view-only saves; semantic revisions, tombstones, and nested
- * semantic payloads remain part of the identity material.
- */
-export function canonicalInterimEnvelopeString(store: InterimEnvelopeIdentitySource): string {
-  const bases = [...store.bases].sort((left, right) => left.id.localeCompare(right.id));
+function interimEnvelopeStringSortedBy(
+  store: InterimEnvelopeIdentitySource,
+  compareIds: (left: string, right: string) => number,
+): string {
+  const bases = [...store.bases].sort((left, right) => compareIds(left.id, right.id));
   return JSON.stringify(canonicalMigrationValue({
     kind: STORE_KIND,
     version: STORE_VERSION,
@@ -884,8 +880,37 @@ export function canonicalInterimEnvelopeString(store: InterimEnvelopeIdentitySou
   }));
 }
 
+/**
+ * Stable serialization of the complete multi-base payload that existed when a
+ * v11 envelope without `vaultId` was first loaded. Device-local state and the
+ * legacy `updatedAt` clock are omitted because older builds advanced that
+ * timestamp for view-only saves; semantic revisions, tombstones, and nested
+ * semantic payloads remain part of the identity material. Base IDs sort in
+ * code-unit order so devices with different system locales derive the same
+ * identity material for the same envelope.
+ */
+export function canonicalInterimEnvelopeString(store: InterimEnvelopeIdentitySource): string {
+  return interimEnvelopeStringSortedBy(store, (left, right) => (left < right ? -1 : left > right ? 1 : 0));
+}
+
+/**
+ * Builds up to 0.12.0 sorted base IDs with locale-sensitive localeCompare, so
+ * an already-shipped vault ID embeds a fingerprint of that ordering under the
+ * minting device's own locale. Recomputing it locally reproduces that
+ * device's legacy fingerprint, which keeps established identities accepted.
+ */
+export function legacyLocaleInterimEnvelopeFingerprint(store: InterimEnvelopeIdentitySource): string {
+  return fingerprintText(interimEnvelopeStringSortedBy(store, (left, right) => left.localeCompare(right)));
+}
+
 function interimEnvelopeFingerprint(store: InterimEnvelopeIdentitySource): string {
   return fingerprintText(canonicalInterimEnvelopeString(store));
+}
+
+/** Accept an embedded fingerprint minted under either base-ID ordering. */
+function interimEnvelopeFingerprintMatches(store: InterimEnvelopeIdentitySource, fingerprint: string): boolean {
+  return interimEnvelopeFingerprint(store) === fingerprint
+    || legacyLocaleInterimEnvelopeFingerprint(store) === fingerprint;
 }
 
 function migratedVaultIdFromInterimEnvelope(store: InterimEnvelopeIdentitySource): string {
@@ -904,7 +929,7 @@ export function provisionalInterimEnvelopeVaultFingerprint(vaultId: string): str
  */
 export function pristineProvisionalInterimEnvelopeStoreFingerprint(store: PluginStore): string | null {
   const fingerprint = provisionalInterimEnvelopeVaultFingerprint(store.vaultId);
-  if (!fingerprint || interimEnvelopeFingerprint(store) !== fingerprint) return null;
+  if (!fingerprint || !interimEnvelopeFingerprintMatches(store, fingerprint)) return null;
   return fingerprint;
 }
 
@@ -1051,6 +1076,9 @@ export function rebaseProvisionalVaultIdAfterDeterministicRepair(
 
   const envelopeMatch = /^vault-envelope-migrated-([0-9a-f]{16})-([a-z0-9]{12,64})$/i.exec(before.vaultId.trim());
   if (envelopeMatch && pristineProvisionalInterimEnvelopeStoreFingerprint(before)) {
+    // A shipped identity may embed either base-ID ordering, so an identity that
+    // still describes the repaired envelope is kept instead of being rotated.
+    if (interimEnvelopeFingerprintMatches(after, envelopeMatch[1]?.toLowerCase() ?? "")) return false;
     const nextVaultId = `vault-envelope-migrated-${interimEnvelopeFingerprint(after)}-${envelopeMatch[2]}`;
     if (nextVaultId === after.vaultId) return false;
     after.vaultId = nextVaultId;
@@ -1674,9 +1702,16 @@ function folderDerivedGroupFromPath(
   path: string,
 ): string {
   const folderName = directChildFolderName(settings.primaryFolder, path);
-  return settings.workspaceMode === "ent-clinical"
-    ? folderName.replace(/^\d+\s+/, "").trim()
-    : folderName;
+  if (settings.workspaceMode === "ent-clinical") return folderName.replace(/^\d+\s+/, "").trim();
+  if (folderName) return folderName;
+  // configuredGroupFromPath also derives generic-mode groups from the
+  // top-level folder of notes living outside the primary folder, so renaming
+  // such a folder must migrate group state too. Folders nested inside the
+  // primary folder keep deriving no group of their own.
+  const root = cleanVaultPath(settings.primaryFolder);
+  const candidate = cleanVaultPath(path);
+  if (!candidate || candidate === root || (root && candidate.startsWith(`${root}/`))) return "";
+  return candidate.split("/")[0] ?? "";
 }
 
 function folderDerivedGroupRename(
@@ -3168,7 +3203,10 @@ export function curriculumChildPaths(tree: CurriculumTreeResult, path: string): 
 export function curriculumSiblingPaths(tree: CurriculumTreeResult, record: VaultRecord): string[] {
   const parentPath = tree.parentByPath.get(record.path) ?? null;
   if (parentPath) return curriculumChildPaths(tree, parentPath);
-  return tree.domains.find((domain) => domain.domain === record.domain)?.roots.map((node) => node.record.path) ?? [];
+  // buildCurriculumTree merges domains case-insensitively, so a case-variant
+  // record must still find the shared container it was placed in.
+  const domainKey = record.domain.toLowerCase();
+  return tree.domains.find((domain) => domain.domain.toLowerCase() === domainKey)?.roots.map((node) => node.record.path) ?? [];
 }
 
 export function curriculumDescendantPaths(tree: CurriculumTreeResult, path: string): Set<string> {
@@ -3440,7 +3478,12 @@ export function sanitizeFileName(value: string): string {
     .replace(/\s+/g, " ")
     .replace(/[. ]+$/g, "")
     .trim();
-  return RESERVED_BASENAMES.test(clean) ? `${clean}-note` : clean;
+  // Windows reserves the segment before the first dot, so "con.jpg" is as
+  // unwritable as bare "con".
+  const dotIndex = clean.indexOf(".");
+  const basename = dotIndex < 0 ? clean : clean.slice(0, dotIndex);
+  if (!RESERVED_BASENAMES.test(basename)) return clean;
+  return dotIndex < 0 ? `${clean}-note` : `${basename}-note${clean.slice(dotIndex)}`;
 }
 
 export function canonicalIdIsValid(curriculumId: string, domain: string): boolean {
@@ -3899,24 +3942,15 @@ export function buildIndexDiagnostics(data: PluginData, records: VaultRecord[], 
   const topicsOnly = data.settings.workspaceMode === "ent-clinical";
   const topics = records.filter((record) => recordBelongsToIndex(record, topicsOnly));
   const topicByPath = new Map(topics.map((record) => [record.path, record]));
-  const linksByDomain = new Map<string, Map<string, Set<string>>>();
-  for (const topic of topics) {
-    const domain = normalizeSearchText(topic.domain);
-    const lookup = linksByDomain.get(domain) ?? new Map<string, Set<string>>();
-    const basename = topic.path.split("/").pop()?.replace(/\.md$/i, "") ?? "";
-    for (const value of [topic.title, basename, ...topic.aliases]) {
-      const key = normalizeSearchText(normalizeWikiLink(value));
-      if (!key) continue;
-      const paths = lookup.get(key) ?? new Set<string>();
-      paths.add(topic.path);
-      lookup.set(key, paths);
-    }
-    linksByDomain.set(domain, lookup);
-  }
+  // Resolve configured parents with exactly the lookup buildCurriculumTree
+  // uses (exact domain key, plain lowercased link, first entry wins). A looser
+  // derivation here would call parents healthy that the tree cannot resolve.
+  const lookup = buildCurriculumLookup(topics);
   for (const record of topics) {
-    const parentKey = normalizeSearchText(normalizeWikiLink(record.parentTopic));
-    const matches = linksByDomain.get(normalizeSearchText(record.domain))?.get(parentKey);
-    if (record.parentTopic && (!matches || [...matches].every((path) => path === record.path))) {
+    if (!record.parentTopic) continue;
+    const normalized = normalizeWikiLink(record.parentTopic).toLowerCase();
+    const match = normalized ? lookup.byDomainAndLink.get(`${record.domain}\u0000${normalized}`) : undefined;
+    if (!match || match.path === record.path) {
       diagnostics.push({ id: `parent:${record.path}`, kind: "broken-parent", title: "Unresolved configured parent", detail: `The configured parent “${record.parentTopic}” does not resolve inside ${record.domain}.`, path: record.path });
     }
   }
@@ -4687,6 +4721,20 @@ function strictLocalStringList(input: unknown, label: string, maxCount = MAX_TRA
   return input.map((value, index) => strictLocalString(value, `${label} entry ${index + 1}`, 4096));
 }
 
+/**
+ * Layout structure IDs are not knowledge-base IDs: cleanLayout keeps any safe
+ * object key and the portable importer accepts letters from any script, so
+ * `_favourites` and Arabic IDs are both legitimately persisted. Rejecting one
+ * of them here would discard this device's whole route/history payload.
+ */
+function localLayoutStructureId(input: unknown, label: string): string {
+  const id = asText(input);
+  if (!id || id.length > 4096 || /[\p{Cc}\p{Cf}]/u.test(id) || !isSafeObjectKey(id)) {
+    throw new Error(`${label} has an invalid stable ID.`);
+  }
+  return id;
+}
+
 function parseLocalCollapsedLayout(
   input: unknown,
   label: string,
@@ -4699,7 +4747,7 @@ function parseLocalCollapsedLayout(
   for (const [headingIndex, raw] of input.entries()) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${label} heading ${headingIndex + 1} is malformed.`);
     const value = raw as Record<string, unknown>;
-    const id = cleanKnowledgeBaseId(value.id, `${label} heading ${headingIndex + 1}`);
+    const id = localLayoutStructureId(value.id, `${label} heading ${headingIndex + 1}`);
     if (typeof value.collapsed !== "boolean" || !Array.isArray(value.subheadings)) {
       throw new Error(`${label} heading ${headingIndex + 1} is malformed.`);
     }
@@ -4712,7 +4760,7 @@ function parseLocalCollapsedLayout(
       const subheading = rawSubheading as Record<string, unknown>;
       if (typeof subheading.collapsed !== "boolean") throw new Error(`${label} subheading ${subheadingIndex + 1} is malformed.`);
       return {
-        id: cleanKnowledgeBaseId(subheading.id, `${label} subheading ${subheadingIndex + 1}`),
+        id: localLayoutStructureId(subheading.id, `${label} subheading ${subheadingIndex + 1}`),
         collapsed: subheading.collapsed,
       };
     });

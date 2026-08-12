@@ -72,6 +72,7 @@ import {
   ConfirmModal,
   IndexGroupModal,
   KnowledgeNoteModal,
+  localDateStamp,
   RecordPickerModal,
   TextPromptModal,
   TopicEditorModal,
@@ -410,6 +411,8 @@ export class EntVaultCommandCenterView extends ItemView {
   private readonly viewInstanceId = makeId("view");
   /** Invalidates an in-flight desktop drag whenever its rendered tree is replaced. */
   private libraryDragRenderToken = makeId("library-drag-render");
+  /** In-flight drag payload; browsers keep dataTransfer unreadable during dragover. */
+  private activeLibraryDrag: LibraryDragMembership | null = null;
   private setupPromptShown = false;
   private loadedBaseId = "";
   private loadedDataEpoch = 0;
@@ -639,6 +642,10 @@ export class EntVaultCommandCenterView extends ItemView {
     if (searchWasFocused && !baseChanged && !dataChanged && this.treeEl) {
       this.refreshChromeCounts();
       this.renderTree();
+      // The wide-layout inspector pane must not keep showing a record this
+      // vault change deleted or renamed. Compact layouts render the inspector
+      // as its own route and have no pane element here.
+      if (!this.isCompactInspectorLayout() && this.inspectorEl) this.renderInspector();
       return;
     }
     this.render();
@@ -3198,7 +3205,10 @@ export class EntVaultCommandCenterView extends ItemView {
         ...libraryMembership,
       }));
       handle.addEventListener("dragstart", () => row.addClass("is-dragging"));
-      handle.addEventListener("dragend", () => row.removeClass("is-dragging", "is-drop-before", "is-drop-after"));
+      handle.addEventListener("dragend", () => {
+        this.activeLibraryDrag = null;
+        row.removeClass("is-dragging", "is-drop-before", "is-drop-after");
+      });
       this.applyLibraryRowDrop(row, libraryMembership, record.portableId);
     } else if (membership && this.editMode && !Platform.isMobile) {
       const handle = iconButton(row, "grip-vertical", `Drag ${record.title}`, "ent-cc-drag-handle");
@@ -3810,7 +3820,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const resolvedParent = record.parentTopic ? this.plugin.resolveLink(record.parentTopic, record.path, this.recordByPath) : null;
     if (isExtensionCurriculumId(record.curriculumId)) return Boolean(record.parentTopic) && (!resolvedParent || resolvedParent.domain !== record.domain);
     if (!expectedId) return Boolean(resolvedParent);
-    return !resolvedParent || resolvedParent.domain !== record.domain || resolvedParent.curriculumId !== expectedId;
+    return !resolvedParent || resolvedParent.domain !== record.domain || resolvedParent.curriculumId.trim().toUpperCase() !== expectedId;
   }
 
   private matchingRecordsForCurrentView(): VaultRecord[] {
@@ -4396,8 +4406,14 @@ export class EntVaultCommandCenterView extends ItemView {
     this.run(() => this.moveCurriculumRecord(record, grandParentPath, parentSiblings, index, `Outdent “${record.title}”`));
   }
 
+  /** buildCurriculumTree merges group spellings case-insensitively; resolve labels the same way. */
+  private curriculumDomainNode(domain: string): CurriculumDomainTree | undefined {
+    const key = domain.trim().toLowerCase();
+    return this.curriculum.domains.find((candidate) => candidate.domain.toLowerCase() === key);
+  }
+
   private makeCurriculumTopLevel(record: VaultRecord): void {
-    const roots = this.curriculum.domains.find((domain) => domain.domain === record.domain)?.roots.map((node) => node.record.path).filter((path) => path !== record.path) ?? [];
+    const roots = this.curriculumDomainNode(record.domain)?.roots.map((node) => node.record.path).filter((path) => path !== record.path) ?? [];
     this.run(() => this.moveCurriculumRecord(record, null, roots, roots.length, `Make “${record.title}” top-level`));
   }
 
@@ -4422,7 +4438,7 @@ export class EntVaultCommandCenterView extends ItemView {
       submitLabel: "Move visually",
       onSubmit: async (group) => {
         if (!ownsBase()) return;
-        const roots = this.curriculum.domains.find((domain) => domain.domain === group)?.roots.map((node) => node.record.path).filter((path) => path !== record.path) ?? [];
+        const roots = this.curriculumDomainNode(group)?.roots.map((node) => node.record.path).filter((path) => path !== record.path) ?? [];
         await this.moveIndexRecordToGroup(record, group, null, roots, roots.length, `Move “${record.title}” to ${group}`);
       },
     }).open();
@@ -4447,12 +4463,16 @@ export class EntVaultCommandCenterView extends ItemView {
       new Notice(`Choose a parent inside ${cleanGroup}.`);
       return;
     }
+    // The collapse set stores the rendered tree's label, which can differ in
+    // case from the typed group name; capture it before the tree is replaced.
+    const destinationLabel = this.curriculumDomainNode(cleanGroup)?.domain ?? cleanGroup;
     await this.plugin.mutate(label, () => {
       if (!this.plugin.data.indexGroupOrder.includes(cleanGroup)) this.plugin.data.indexGroupOrder.push(cleanGroup);
       for (const path of [record.path, ...descendants]) this.plugin.data.indexGroupByPath[path] = cleanGroup;
       moveCurriculumVisual(this.plugin.data.curriculumVisual, { ...record, domain: cleanGroup, folderOrder: cleanGroup }, parentPath, siblingPaths, index);
     });
     this.collapsedCurriculumDomains.delete(cleanGroup);
+    this.collapsedCurriculumDomains.delete(destinationLabel);
     if (parentPath) this.collapsedCurriculumNodes.delete(parentPath);
     this.persistCollapseState();
     new Notice(`Moved visually to ${cleanGroup}. Note paths and metadata were not changed.`);
@@ -4924,7 +4944,7 @@ export class EntVaultCommandCenterView extends ItemView {
       const link = createEl("a");
       link.href = url;
       const slug = workspaceName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "knowledge-command-center";
-      link.download = `${slug}-backup-${now.toISOString().slice(0, 10)}.json`;
+      link.download = `${slug}-backup-${localDateStamp(now)}.json`;
       link.click();
       this.plugin.recordRecoveryExport(now.getTime());
       viewWindow.setTimeout(() => viewWindow.URL.revokeObjectURL(url), 1000);
@@ -5230,6 +5250,7 @@ export class EntVaultCommandCenterView extends ItemView {
       dataEpoch: this.currentDataEpoch(),
     };
     event.dataTransfer.setData("application/x-ent-command-center-library-membership", JSON.stringify(guardedPayload));
+    this.activeLibraryDrag = guardedPayload;
   }
 
   private readLibraryDrag(event: DragEvent): LibraryDragMembership | null {
@@ -5261,7 +5282,9 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private applyLibraryDrop(element: HTMLElement, target: LibraryMembership): void {
     element.addEventListener("dragover", (event) => {
-      const payload = this.readLibraryDrag(event);
+      // dataTransfer data is unreadable during dragover, so validate from the
+      // tracked in-flight payload instead of readLibraryDrag(event).
+      const payload = this.activeLibraryDrag;
       if (!payload || payload.libraryId !== target.libraryId || !this.libraryDragIsCurrent(payload)) return;
       event.preventDefault();
       event.stopPropagation();
@@ -5275,7 +5298,8 @@ export class EntVaultCommandCenterView extends ItemView {
       event.preventDefault();
       event.stopPropagation();
       element.removeClass("is-drop-target");
-      const payload = this.readLibraryDrag(event);
+      const payload = this.readLibraryDrag(event) ?? this.activeLibraryDrag;
+      this.activeLibraryDrag = null;
       if (!payload || payload.libraryId !== target.libraryId || !this.libraryDragIsCurrent(payload)) return;
       const record = this.records.find((candidate) => candidate.portableId === payload.subjectId);
       if (!record) return;
@@ -5285,7 +5309,7 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private applyLibraryRowDrop(row: HTMLElement, target: LibraryMembership, targetSubjectId: string): void {
     row.addEventListener("dragover", (event) => {
-      const payload = this.readLibraryDrag(event);
+      const payload = this.activeLibraryDrag;
       if (!payload || payload.libraryId !== target.libraryId || payload.subjectId === targetSubjectId || !this.libraryDragIsCurrent(payload)) return;
       event.preventDefault();
       event.stopPropagation();
@@ -5303,7 +5327,8 @@ export class EntVaultCommandCenterView extends ItemView {
       event.stopPropagation();
       const after = row.hasClass("is-drop-after");
       row.removeClass("is-drop-before", "is-drop-after");
-      const payload = this.readLibraryDrag(event);
+      const payload = this.readLibraryDrag(event) ?? this.activeLibraryDrag;
+      this.activeLibraryDrag = null;
       if (!payload || payload.libraryId !== target.libraryId || payload.subjectId === targetSubjectId || !this.libraryDragIsCurrent(payload)) return;
       this.run(() => this.plugin.mutate("Place record in library order", () => {
         this.removeLibraryMembership(payload.subjectId, target.libraryId);

@@ -41,6 +41,48 @@ test("missing heading and end targets append without rewriting frontmatter", () 
   );
 });
 
+test("inserting into a mixed-EOL note rewrites no existing line ending", () => {
+  const source = "# Topic\n\n## Attachments\r\n\r\n![[one.png]]\n\n## Notes\n- Keep\n";
+  const output = insertAttachmentReference(source, "![[two.png]]", "heading", "", "Attachments");
+
+  assert.equal(output, "# Topic\n\n## Attachments\r\n\r\n![[one.png]]\n![[two.png]]\n\n## Notes\n- Keep\n");
+  assert.equal(output.replace("![[two.png]]\n", ""), source, "every original byte outside the inserted line is preserved");
+
+  const marker = insertAttachmentReference(
+    "# Topic\r\n\r\n<!-- kbcc:attachments -->\n![[one.png]]\n\n## Notes\n",
+    "![[three.png]]",
+    "marker",
+    "<!-- kbcc:attachments -->",
+    "",
+  );
+  assert.equal(marker, "# Topic\r\n\r\n<!-- kbcc:attachments -->\n![[one.png]]\n![[three.png]]\n\n## Notes\n");
+});
+
+test("an indented code block quoting a fence stays content instead of opening a fence", () => {
+  const source = [
+    "# Topic",
+    "",
+    "Example of the fence syntax:",
+    "",
+    "    ```",
+    "",
+    "## Attachments",
+    "![[one.png]]",
+    "",
+    "## Notes",
+    "",
+  ].join("\n");
+  const output = insertAttachmentReference(source, "![[two.png]]", "heading", "", "Attachments");
+  assert.match(output, /## Attachments\n!\[\[one\.png\]\]\n!\[\[two\.png\]\]\n\n## Notes/u);
+  assert.equal(output.replace("![[two.png]]\n", ""), source);
+
+  assert.throws(
+    () => insertAttachmentReference("# Topic\n\n```\n## Attachments\n", "![[unsafe.png]]", "heading", "", "Attachments"),
+    /unclosed fenced code block/i,
+    "a genuinely unclosed top-level fence still fails closed",
+  );
+});
+
 test("attachment paths are normalized, sanitized, and collision-ready", () => {
   assert.equal(attachmentFileName("unsafe:/scan?.png"), "unsafe--scan-.png");
   assert.equal(attachmentFileName(".env"), "env");

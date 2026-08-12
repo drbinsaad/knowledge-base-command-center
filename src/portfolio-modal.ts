@@ -1,6 +1,6 @@
 import { Modal, Notice, Platform, Setting } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
-import { calculateModalViewportLayout, VaultFilePickerModal } from "./modals";
+import { calculateModalViewportLayout, localDateStamp, VaultFilePickerModal } from "./modals";
 import {
   EMPTY_PORTABLE_SELECTION,
   normalizePortableSelection,
@@ -400,7 +400,7 @@ export class PortfolioTransferModal extends Modal {
     const url = viewWindow.URL.createObjectURL(new Blob([serialized], { type: "application/json" }));
     const link = createEl("a");
     link.href = url;
-    link.download = `knowledge-base-command-center-portfolio-${now.toISOString().slice(0, 10)}.json`;
+    link.download = `knowledge-base-command-center-portfolio-${localDateStamp(now)}.json`;
     link.click();
     viewWindow.setTimeout(() => viewWindow.URL.revokeObjectURL(url), 1000);
     new Notice(`Exported ${bundle.manifest.baseCount} independent portable packages. Note bodies and attachments were not included.`);

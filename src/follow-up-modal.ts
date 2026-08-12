@@ -192,7 +192,8 @@ export class QuickAppendModal extends FollowUpResponsiveModal {
 interface CategoryEditorOptions {
   existingIds: ReadonlySet<string>;
   initial?: FollowUpCategoryDefinition;
-  onSubmit: (category: FollowUpCategoryDefinition) => void;
+  /** Returns false when the category was rejected, keeping the draft editable. */
+  onSubmit: (category: FollowUpCategoryDefinition) => boolean;
 }
 
 class FollowUpCategoryEditorModal extends FollowUpResponsiveModal {
@@ -243,8 +244,8 @@ class FollowUpCategoryEditorModal extends FollowUpResponsiveModal {
       return;
     }
     const id = this.options.initial?.id ?? allocateFollowUpCategoryId(label, this.options.existingIds);
-    this.options.onSubmit({ id, label, style: this.style, includeDate: this.includeDate, archived: this.options.initial?.archived ?? false });
-    this.close();
+    const accepted = this.options.onSubmit({ id, label, style: this.style, includeDate: this.includeDate, archived: this.options.initial?.archived ?? false });
+    if (accepted) this.close();
   }
 }
 
@@ -333,12 +334,13 @@ export class FollowUpCategoryManagerModal extends Modal {
           && followUpCategoryLabelKey(item.label) === followUpCategoryLabelKey(category.label));
         if (duplicate) {
           new Notice("Use a unique quick append category name.");
-          return;
+          return false;
         }
         const index = this.categories.findIndex((item) => item.id === category.id);
         if (index >= 0) this.categories[index] = category;
         else this.categories.push(category);
         this.render();
+        return true;
       },
     }).open();
   }

@@ -45,6 +45,18 @@ abstract class NormalizedFuzzySuggestModal<T> extends FuzzySuggestModal<T> {
   }
 }
 
+/**
+ * Local calendar day for export filenames. A UTC stamp names the file after the
+ * wrong day for most of the world, so exports follow the same local convention
+ * as every other date this plugin writes.
+ */
+export function localDateStamp(date = new Date()): string {
+  const year = String(date.getFullYear());
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function reportAsyncError(error: unknown): void {
   console.error("ENT Command Center action failed", error);
   new Notice(error instanceof Error ? error.message : String(error));

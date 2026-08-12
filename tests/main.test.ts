@@ -53,7 +53,7 @@ import { EntCommandCenterSettingsTab } from "../src/settings.ts";
 import { QuickAppendModal } from "../src/follow-up-modal.ts";
 import { Notice, Plugin, TFile, TFolder, type TAbstractFile } from "obsidian";
 import { mergeKnowledgeBaseStores } from "../src/store-merge.ts";
-import { createPortfolioExport } from "../src/portfolio.ts";
+import { createPortfolioExport, type PortfolioExportV1 } from "../src/portfolio.ts";
 import { EntVaultCommandCenterView, VIEW_TYPE } from "../src/view.ts";
 
 interface TestPluginBase {
@@ -266,6 +266,70 @@ test("active Library commands are stable, refreshed after rename/archive, and re
   host.syncLibraryCommands();
   assert.equal(registered.size, 0);
   assert.deepEqual(removed, ["open-library-library-alpha", "open-library-library-alpha"]);
+});
+
+test("a pending refresh is cancelled on its creator window and never runs on the unloaded instance", async () => {
+  const data = migrateData(null);
+  data.portableIndex.libraries = [
+    { id: "library-alpha", name: "Alpha", singularName: "Alpha item", icon: "library", order: 0, sourceKind: null, archivedAt: null },
+  ];
+  const plugin = pluginWith(createDefaultStore(data, 100, "vault-refresh-timer-window"));
+  await plugin.loadPluginData();
+
+  const registered = new Set<string>();
+  const host = plugin as unknown as {
+    addCommand(command: { id: string }): { id: string };
+    removeCommand(commandId: string): void;
+  };
+  host.addCommand = (command) => {
+    registered.add(command.id);
+    return command;
+  };
+  host.removeCommand = (commandId) => { registered.delete(commandId); };
+
+  const creatorCleared: number[] = [];
+  const popoutCleared: number[] = [];
+  const callbacks = new Map<number, () => void>();
+  let nextTimer = 0;
+  const creatorWindow = {
+    setTimeout: (callback: () => void): number => {
+      nextTimer += 1;
+      callbacks.set(nextTimer, callback);
+      return nextTimer;
+    },
+    clearTimeout: (id: number): void => {
+      creatorCleared.push(id);
+      callbacks.delete(id);
+    },
+  };
+  const popoutWindow = {
+    setTimeout: (): number => 999,
+    clearTimeout: (id: number): void => { popoutCleared.push(id); },
+  };
+  const originalWindow = globalThis.window;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { activeWindow: creatorWindow },
+  });
+  try {
+    plugin.scheduleRefresh();
+    assert.equal(callbacks.size, 1);
+    const leaked = callbacks.get(1);
+    assert.ok(leaked);
+    // Focus moves to a popout window before the plugin unloads. Timer IDs are
+    // per-window, so cancelling through the popout would leak the callback.
+    (globalThis.window as unknown as { activeWindow: unknown }).activeWindow = popoutWindow;
+    plugin.onunload();
+    assert.deepEqual(creatorCleared, [1], "onunload cancels the timer on the window that created it");
+    assert.deepEqual(popoutCleared, [], "the popout window holds no such timer");
+    // A callback the browser already dispatched must still not act on the
+    // unloaded instance, e.g. by re-registering the removed library commands.
+    leaked();
+    await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0));
+    assert.equal(registered.size, 0, "an unloaded instance re-registers no library commands");
+  } finally {
+    Object.defineProperty(globalThis, "window", { configurable: true, value: originalWindow });
+  }
 });
 
 function pluginWithFiles(
@@ -788,6 +852,35 @@ test("an interim deterministic migrated vault ID rotates once and is persisted",
   assert.notEqual(plugin.getVaultId(), "vault-migrated-0123456789abcdef");
   assert.equal(plugin.savedData.length, 1, "rotation must survive restart and recovery export");
   assert.equal((plugin.savedData[0] as { vaultId?: string }).vaultId, plugin.getVaultId());
+});
+
+test("a hand-pruned migratable envelope loads instead of crashing the provisional identity rebase", async () => {
+  // Minimal repaired data.json: recognized store envelope, older versions, and
+  // a provisional migrated vault ID, but a payload the fingerprint helpers
+  // cannot walk. The rebase must be skipped, never allowed to abort onload.
+  const envelope = {
+    kind: STORE_KIND,
+    version: 13,
+    vaultId: "vault-migrated-0123456789abcdef-abcdefghijkl",
+    activeBaseId: "base-default",
+    bases: [{
+      id: "base-default",
+      createdAt: 100,
+      updatedAt: 100,
+      archivedAt: null,
+      semanticRevision: 0,
+      data: { version: 12, settings: {} },
+    }],
+    deletedBaseIds: {},
+  };
+  const plugin = pluginWith(envelope);
+
+  const loaded = await plugin.loadPluginData();
+
+  assert.equal(loaded.compatible, true);
+  assert.equal(plugin.getVaultId(), "vault-migrated-0123456789abcdef-abcdefghijkl", "the provisional identity survives unrebased");
+  assert.ok(plugin.getActiveKnowledgeBase(), "the migrated store is usable");
+  assert.equal(plugin.savedData.length, 1, "the migrated envelope is persisted normally");
 });
 
 test("an empty proposal folder never reclassifies notes during clinical repair", async () => {
@@ -5403,6 +5496,64 @@ test("portfolio Replace writes strict recovery first and rolls every base back w
   assert.deepEqual(plugin.getKnowledgeBases(true).map((entry) => entry.data), before.map((entry) => entry.data));
   assert.equal(saveAttempts, 2, "the existing base transaction persists one compensating rollback");
   assert.equal(plugin.data.indexGroupOrder.includes("Imported empty heading"), false);
+});
+
+test("two consecutive portfolio exports mint identical stable subject IDs and persist them", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceName = "Portfolio stable IDs";
+  data.pinnedPaths = ["Notes/Pinned topic.md"];
+  const plugin = pluginWith(createDefaultStore(data, 100, "vault-portfolio-stable-subject-ids"));
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+
+  const selection = { ...EMPTY_PORTABLE_SELECTION, study: true };
+  const baseId = plugin.getActiveKnowledgeBaseId();
+  const first = plugin.createPortfolioExport([{ baseId, selection }], "2026-08-12T00:00:00.000Z");
+  const second = plugin.createPortfolioExport([{ baseId, selection }], "2026-08-12T00:00:00.000Z");
+
+  const pinnedIds = (bundle: PortfolioExportV1): readonly string[] => (
+    bundle.packages[0]?.package.components.study?.pinnedSubjectIds ?? []
+  );
+  assert.equal(pinnedIds(first).length, 1);
+  assert.deepEqual(pinnedIds(first), pinnedIds(second), "re-exporting identical state reuses the same stable subject IDs");
+  const allocatedId = pinnedIds(first)[0] ?? "";
+  assert.ok(
+    plugin.data.portableIndex.subjects.some((subject) => subject.id === allocatedId),
+    "the exported subject ID was allocated on the live registry",
+  );
+
+  await bounded(
+    (plugin as unknown as { directSaveTransactionQueue: Promise<void> }).directSaveTransactionQueue,
+    "portfolio registry allocation save",
+  );
+  assert.equal(plugin.savedData.length, 1, "both exports share one allocation save");
+  const saved = plugin.savedData[0] as PluginStore;
+  assert.ok(
+    saved.bases[0]?.data.portableIndex.subjects.some((subject) => subject.id === allocatedId),
+    "the allocated subject ID reaches data.json",
+  );
+});
+
+test("a read-only portfolio export still succeeds without persisting subject IDs", async () => {
+  const data = migrateData(null);
+  data.pinnedPaths = ["Notes/Pinned topic.md"];
+  const store = createDefaultStore(data, 100, "vault-portfolio-read-only-export");
+  store.version = STORE_VERSION + 1;
+  const plugin = pluginWith(store);
+  await plugin.loadPluginData();
+  assert.equal(plugin.isDataReadOnly(), true);
+  plugin.savedData.length = 0;
+  const registryBefore = structuredClone(plugin.data.portableIndex);
+
+  const selection = { ...EMPTY_PORTABLE_SELECTION, study: true };
+  const bundle = plugin.createPortfolioExport(
+    [{ baseId: plugin.getActiveKnowledgeBaseId(), selection }],
+    "2026-08-12T00:00:00.000Z",
+  );
+
+  assert.equal(bundle.packages[0]?.package.components.study?.pinnedSubjectIds.length, 1);
+  assert.deepEqual(plugin.data.portableIndex, registryBefore, "read-only mode keeps the clone-local allocation");
+  assert.equal(plugin.savedData.length, 0, "read-only mode never writes data.json");
 });
 
 test("workspace-only portability import includes dependency Library descriptors in Undo", async () => {

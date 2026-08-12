@@ -275,9 +275,11 @@ export function mergeKnowledgeBaseStores(
       const localEnvelopeFingerprint = pristineProvisionalInterimEnvelopeStoreFingerprint(local);
       const incomingEnvelopeFingerprint = pristineProvisionalInterimEnvelopeStoreFingerprint(incoming);
       const exactEnvelopeMatch = canonicalInterimEnvelopeString(local) === canonicalInterimEnvelopeString(incoming);
-      if (!localEnvelopeFingerprint
-        || localEnvelopeFingerprint !== incomingEnvelopeFingerprint
-        || !exactEnvelopeMatch) {
+      // Devices that migrated before base IDs were ordered locale-independently
+      // embed a fingerprint of the old ordering, so two pristine copies of one
+      // envelope can carry different fingerprints. Two pristine provisional
+      // identities over a byte-equal canonical envelope still prove one origin.
+      if (!localEnvelopeFingerprint || !incomingEnvelopeFingerprint || !exactEnvelopeMatch) {
         throw new Error("Synced plugin data belongs to a different Obsidian vault.");
       }
       // Two devices can load the same already-multi-base v11 envelope before

@@ -16,7 +16,7 @@ import {
   validateWritableFolderPath,
   VaultRecord,
 } from "./model";
-import { ConfirmModal, IndexGroupModal, StringPickerModal, TextPromptModal, VaultFilePickerModal } from "./modals";
+import { ConfirmModal, IndexGroupModal, localDateStamp, StringPickerModal, TextPromptModal, VaultFilePickerModal } from "./modals";
 import { registerPortableGroup, removePortableGroup, renameOrMergePortableGroup } from "./portability";
 import { ExportImportCenterModal } from "./portability-modal";
 import { TaxonomyHealthModal } from "./taxonomy-health-modal";
@@ -217,6 +217,12 @@ export class IndexManagerModal extends Modal {
     search.value = this.query;
     search.addEventListener("input", () => {
       const cursor = search.selectionStart ?? search.value.length;
+      if (search.value !== this.query) {
+        // A new query shows a different set of rows; keeping hidden notes
+        // selected would let a bulk action reach notes the user cannot see.
+        this.selected.clear();
+        this.refreshSelectionState();
+      }
       this.query = search.value;
       if (this.searchTimer !== null) this.clearTimer(this.searchTimer);
       this.searchTimer = this.setGuardedTimer(() => {
@@ -230,8 +236,13 @@ export class IndexManagerModal extends Modal {
       }, 150);
     });
     const filtered = this.filterNotes(notes);
-    this.actionButton(toolbar, "list-checks", this.selected.size === filtered.length && filtered.length > 0 ? "Clear selection" : "Select matches", () => {
-      if (this.selected.size === filtered.length && filtered.every((note) => this.selected.has(note.path))) this.selected.clear();
+    // One predicate owns both the label and the action: a selection that also
+    // holds notes hidden by the filter must never be labelled "Clear selection".
+    const selectionCoversMatches = filtered.length > 0
+      && this.selected.size === filtered.length
+      && filtered.every((note) => this.selected.has(note.path));
+    this.actionButton(toolbar, "list-checks", selectionCoversMatches ? "Clear selection" : "Select matches", () => {
+      if (selectionCoversMatches) this.selected.clear();
       else filtered.forEach((note) => this.selected.add(note.path));
       this.render();
     }, filtered.length === 0);
@@ -730,7 +741,7 @@ export class IndexManagerModal extends Modal {
     const url = viewWindow.URL.createObjectURL(new Blob([JSON.stringify(config, null, 2)], { type: "application/json" }));
     const link = createEl("a");
     link.href = url;
-    link.download = `knowledge-command-center-workspace-${now.toISOString().slice(0, 10)}.json`;
+    link.download = `knowledge-command-center-workspace-${localDateStamp(now)}.json`;
     link.click();
     viewWindow.setTimeout(() => viewWindow.URL.revokeObjectURL(url), 1000);
     new Notice("Workspace configuration exported without note contents or note-specific memberships.");
