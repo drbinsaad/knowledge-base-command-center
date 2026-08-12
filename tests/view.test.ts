@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Menu, Notice, Platform, Setting, TFile } from "obsidian";
-import { AddActionModal, calculateModalViewportLayout, ConfirmModal, IndexGroupModal, KnowledgeNoteModal, localDateStamp, RecordPickerModal, TextPromptModal, TopicEditorModal, VaultFilePickerModal } from "../src/modals.ts";
+import { AddActionModal, calculateModalViewportLayout, CollectionPickerModal, type CollectionTarget, ConfirmModal, IndexGroupModal, KnowledgeNoteModal, localDateStamp, RecordPickerModal, TextPromptModal, TopicEditorModal, VaultFilePickerModal } from "../src/modals.ts";
 import {
   canRelinkPortableRecord,
   calculateSearchViewportLayout,
@@ -4633,7 +4633,7 @@ function nestedLibraryRecords(libraryId: string): VaultRecord[] {
   ];
 }
 
-interface CapturedMenuEntry { title: string; click?: () => void }
+interface CapturedMenuEntry { title: string; disabled?: boolean; click?: () => void }
 
 function captureMenus(): { menus: CapturedMenuEntry[][]; restore(): void } {
   const menus: CapturedMenuEntry[][] = [];
@@ -4647,11 +4647,11 @@ function captureMenus(): { menus: CapturedMenuEntry[][]; restore(): void } {
     value(this: object, configure: (item: unknown) => void): object {
       const entries = byMenu.get(this) ?? [];
       byMenu.set(this, entries);
-      const captured: CapturedMenuEntry = { title: "" };
+      const captured: CapturedMenuEntry = { title: "", disabled: false };
       const item = {
         setTitle(title: string) { captured.title = title; return item; },
         setIcon() { return item; },
-        setDisabled() { return item; },
+        setDisabled(disabled: boolean) { captured.disabled = disabled; return item; },
         onClick(callback: () => void) { captured.click = callback; return item; },
       };
       configure(item);
@@ -4896,6 +4896,449 @@ test("library menus mirror deep add and remove semantics with portable-index mut
   } finally {
     menuCapture.restore();
     confirmCapture.restore();
+  }
+});
+
+interface CapturedPicker {
+  labels: string[];
+  choose(label: string): void;
+}
+
+function capturePickers(): { pickers: CapturedPicker[]; restore(): void } {
+  const pickers: CapturedPicker[] = [];
+  const descriptor = Object.getOwnPropertyDescriptor(CollectionPickerModal.prototype, "open");
+  Object.defineProperty(CollectionPickerModal.prototype, "open", {
+    configurable: true,
+    value(this: object): void {
+      const modal = this as unknown as {
+        targets: CollectionTarget[];
+        onChoose(target: CollectionTarget): void | Promise<void>;
+      };
+      pickers.push({
+        labels: modal.targets.map((target) => target.label),
+        choose(label: string): void {
+          const target = modal.targets.find((candidate) => candidate.label === label);
+          assert.ok(target, `missing picker target ${label}`);
+          void modal.onChoose(target);
+        },
+      });
+    },
+  });
+  return {
+    pickers,
+    restore(): void {
+      if (descriptor) Object.defineProperty(CollectionPickerModal.prototype, "open", descriptor);
+      else Reflect.deleteProperty(CollectionPickerModal.prototype, "open");
+    },
+  };
+}
+
+/**
+ * Board review
+ *   Airway            (depth 2, subtree height 3)
+ *     Intubation      (depth 3)
+ *       Rapid sequence(depth 4)
+ *   Emergencies       (depth 2)
+ *     Established     (depth 3)
+ */
+function reparentCollectionHeading(): LayoutHeading {
+  return {
+    id: "col-h1",
+    title: "Board review",
+    collapsed: false,
+    subjects: [],
+    subheadings: [
+      {
+        id: "col-airway",
+        title: "Airway",
+        collapsed: false,
+        subjects: ["Notes/Alpha.md"],
+        subheadings: [{
+          id: "col-intubation",
+          title: "Intubation",
+          collapsed: false,
+          subjects: ["Notes/Beta.md"],
+          subheadings: [{ id: "col-rsi", title: "Rapid sequence", collapsed: false, subjects: ["Notes/Gamma.md"] }],
+        }],
+      },
+      {
+        id: "col-emergencies",
+        title: "Emergencies",
+        collapsed: true,
+        subjects: [],
+        subheadings: [{ id: "col-established", title: "Established", collapsed: false, subjects: [] }],
+      },
+    ],
+  };
+}
+
+function chooseMenuItem(menus: CapturedMenuEntry[][], title: string): CapturedMenuEntry {
+  const item = (menus.at(-1) ?? []).find((candidate) => candidate.title === title);
+  assert.ok(item, `missing menu item ${title}`);
+  return item;
+}
+
+test("a collection subheading moves under a sibling with its whole subtree, in order and with stable ids", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const heading = reparentCollectionHeading();
+  data.collections = [heading];
+  const view = createLayoutRenderView(data, []);
+  const labels: string[] = [];
+  view.plugin.mutate = async (label, action) => { labels.push(label); action(); };
+  const menuCapture = captureMenus();
+  const pickerCapture = capturePickers();
+  try {
+    const airway = heading.subheadings[0];
+    const emergencies = heading.subheadings[1];
+    assert.ok(airway && emergencies);
+
+    view.showSubheadingMenu({} as MouseEvent, heading, airway);
+    chooseMenuItem(menuCapture.menus, "Move under…").click?.();
+    const picker = pickerCapture.pickers.shift();
+    assert.ok(picker, "the reparent action opens a destination picker");
+    assert.deepEqual(picker.labels, [
+      "Board review (top level)",
+      "Board review / Emergencies",
+    ], "destinations are labelled by full path, with the heading offered as the explicit top level");
+
+    picker.choose("Board review / Emergencies");
+    await settleMicrotasks();
+
+    assert.deepEqual(heading.subheadings.map((item) => item.id), ["col-emergencies"], "the moved node leaves its old parent");
+    assert.deepEqual(
+      emergencies.subheadings?.map((item) => item.id),
+      ["col-established", "col-airway"],
+      "the destination keeps its existing children in order and appends the moved node",
+    );
+    assert.deepEqual(airway.subheadings?.map((item) => item.id), ["col-intubation"], "the moved subtree travels intact");
+    assert.deepEqual(airway.subheadings?.[0]?.subheadings?.map((item) => item.id), ["col-rsi"], "grandchildren travel too");
+    assert.deepEqual(airway.subjects, ["Notes/Alpha.md"], "memberships ride along with the node");
+    assert.equal(emergencies.collapsed, false, "the destination opens so the moved node stays reachable");
+    assert.deepEqual(labels, ["Move subheading “Airway” under “Emergencies”"], "the move runs through one undo-protected mutation");
+  } finally {
+    pickerCapture.restore();
+    menuCapture.restore();
+  }
+});
+
+test("the subheading destination picker excludes the node, its descendants, and anything that would breach the depth cap", () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const heading = reparentCollectionHeading();
+  data.collections = [heading];
+  const view = createLayoutRenderView(data, []);
+  const menuCapture = captureMenus();
+  const pickerCapture = capturePickers();
+  try {
+    const airway = heading.subheadings[0];
+    const intubation = airway?.subheadings?.[0];
+    const emergencies = heading.subheadings[1];
+    assert.ok(airway && intubation && emergencies);
+
+    // Intubation's own subtree is two levels tall, so a depth-four destination
+    // would land Rapid sequence at level six.
+    view.showSubheadingMenu({} as MouseEvent, heading, intubation);
+    chooseMenuItem(menuCapture.menus, "Move under…").click?.();
+    const tallPicker = pickerCapture.pickers.shift();
+    assert.ok(tallPicker);
+    assert.deepEqual(tallPicker.labels, [
+      "Board review (top level)",
+      "Board review / Airway",
+      "Board review / Emergencies",
+      "Board review / Emergencies / Established",
+    ], "self and descendants disappear, and only destinations with room for the two-level subtree remain");
+
+    // The same destinations, offered to a leaf, prove the cap follows the moved
+    // subtree's height rather than the destination depth alone.
+    const leaf = intubation.subheadings?.[0];
+    assert.ok(leaf);
+    view.showSubheadingMenu({} as MouseEvent, heading, leaf);
+    chooseMenuItem(menuCapture.menus, "Move under…").click?.();
+    const leafPicker = pickerCapture.pickers.shift();
+    assert.ok(leafPicker);
+    assert.equal(
+      leafPicker.labels.includes("Board review / Airway / Intubation"),
+      true,
+      "a one-level node still fits under the depth-three node that rejected the taller subtree",
+    );
+    assert.equal(
+      leafPicker.labels.some((label) => label.includes("Rapid sequence")),
+      false,
+      "a node is never offered itself",
+    );
+  } finally {
+    pickerCapture.restore();
+    menuCapture.restore();
+  }
+});
+
+test("moving a collection subheading to the top level leaves both parents in canonical form", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const heading = reparentCollectionHeading();
+  data.collections = [heading];
+  const view = createLayoutRenderView(data, []);
+  const menuCapture = captureMenus();
+  const pickerCapture = capturePickers();
+  try {
+    const airway = heading.subheadings[0];
+    const intubation = airway?.subheadings?.[0];
+    assert.ok(airway && intubation);
+
+    view.showSubheadingMenu({} as MouseEvent, heading, intubation);
+    chooseMenuItem(menuCapture.menus, "Move under…").click?.();
+    const picker = pickerCapture.pickers.shift();
+    assert.ok(picker);
+    picker.choose("Board review (top level)");
+    await settleMicrotasks();
+
+    assert.deepEqual(
+      heading.subheadings.map((item) => item.id),
+      ["col-airway", "col-emergencies", "col-intubation"],
+      "the top-level option appends under the heading itself",
+    );
+    assert.equal(Object.hasOwn(airway, "subheadings"), false, "an emptied parent drops the nested key entirely");
+    assert.deepEqual(intubation.subheadings?.map((item) => item.id), ["col-rsi"], "the moved node keeps a well-formed child array");
+
+    // A second move re-creates the array on a node that had become a leaf.
+    const emergencies = heading.subheadings[1];
+    assert.ok(emergencies);
+    view.showSubheadingMenu({} as MouseEvent, heading, intubation);
+    chooseMenuItem(menuCapture.menus, "Move under…").click?.();
+    const second = pickerCapture.pickers.shift();
+    assert.ok(second);
+    second.choose("Board review / Airway");
+    await settleMicrotasks();
+
+    assert.deepEqual(airway.subheadings?.map((item) => item.id), ["col-intubation"], "the new parent gains a well-formed array");
+    assert.deepEqual(heading.subheadings.map((item) => item.id), ["col-airway", "col-emergencies"]);
+  } finally {
+    pickerCapture.restore();
+    menuCapture.restore();
+  }
+});
+
+test("outdent one level lifts a collection subheading beside its parent and is disabled directly under the heading", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const heading = reparentCollectionHeading();
+  data.collections = [heading];
+  const view = createLayoutRenderView(data, []);
+  const labels: string[] = [];
+  view.plugin.mutate = async (label, action) => { labels.push(label); action(); };
+  const menuCapture = captureMenus();
+  try {
+    const airway = heading.subheadings[0];
+    const intubation = airway?.subheadings?.[0];
+    assert.ok(airway && intubation);
+
+    view.showSubheadingMenu({} as MouseEvent, heading, airway);
+    assert.equal(chooseMenuItem(menuCapture.menus, "Outdent one level").disabled, true, "a depth-two node has no level to lose");
+
+    view.showSubheadingMenu({} as MouseEvent, heading, intubation);
+    const outdent = chooseMenuItem(menuCapture.menus, "Outdent one level");
+    assert.equal(outdent.disabled, false, "a depth-three node can be promoted without the picker");
+    outdent.click?.();
+    await settleMicrotasks();
+
+    assert.deepEqual(
+      heading.subheadings.map((item) => item.id),
+      ["col-airway", "col-emergencies", "col-intubation"],
+      "the node becomes a sibling of its former parent",
+    );
+    assert.equal(Object.hasOwn(airway, "subheadings"), false, "the emptied former parent returns to canonical leaf form");
+    assert.deepEqual(intubation.subheadings?.map((item) => item.id), ["col-rsi"], "the subtree follows the promotion");
+    assert.deepEqual(labels, ["Move subheading “Intubation” under “Board review”"]);
+
+    view.showSubheadingMenu({} as MouseEvent, heading, intubation);
+    assert.equal(chooseMenuItem(menuCapture.menus, "Outdent one level").disabled, true, "once at depth two the action turns off");
+  } finally {
+    menuCapture.restore();
+  }
+});
+
+test("library subheading menus reparent whole subtrees and outdent through portable-index mutations", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const library = installLibrary(data);
+  data.activeTab = libraryTabId(library.id);
+  const heading: LayoutHeading = {
+    id: "lib-h1",
+    title: "Guidelines",
+    collapsed: false,
+    subjects: [],
+    subheadings: [
+      {
+        id: "lib-airway",
+        title: "Airway",
+        collapsed: false,
+        subjects: [],
+        subheadings: [{
+          id: "lib-intubation",
+          title: "Intubation",
+          collapsed: false,
+          subjects: ["subject-b"],
+          subheadings: [{ id: "lib-rsi", title: "Rapid sequence", collapsed: false, subjects: [] }],
+        }],
+      },
+      { id: "lib-emergencies", title: "Emergencies", collapsed: false, subjects: [] },
+    ],
+  };
+  data.portableIndex.libraryLayouts[library.id] = [heading];
+  const view = createLayoutRenderView(data, []);
+  const mutations: Array<{ label: string; options?: { includePortableIndex?: boolean; requireUndo?: boolean } }> = [];
+  view.plugin.mutate = async (label, action, options) => {
+    mutations.push({ label, options });
+    action();
+  };
+  const menuCapture = captureMenus();
+  const pickerCapture = capturePickers();
+  try {
+    const airway = heading.subheadings[0];
+    const intubation = airway?.subheadings?.[0];
+    const emergencies = heading.subheadings[1];
+    assert.ok(airway && intubation && emergencies);
+
+    view.showLibrarySubheadingMenu({} as MouseEvent, library.id, heading, intubation);
+    chooseMenuItem(menuCapture.menus, "Move under…").click?.();
+    const picker = pickerCapture.pickers.shift();
+    assert.ok(picker);
+    assert.deepEqual(picker.labels, [
+      "Guidelines (top level)",
+      "Guidelines / Airway",
+      "Guidelines / Emergencies",
+    ], "library destinations use the same full-path labels and exclude the node's own subtree");
+
+    picker.choose("Guidelines / Emergencies");
+    await settleMicrotasks();
+
+    assert.deepEqual(emergencies.subheadings?.map((item) => item.id), ["lib-intubation"], "the destination gains a well-formed array");
+    assert.deepEqual(intubation.subheadings?.map((item) => item.id), ["lib-rsi"], "the library subtree travels intact");
+    assert.deepEqual(intubation.subjects, ["subject-b"], "library memberships ride along");
+    assert.equal(Object.hasOwn(airway, "subheadings"), false, "the emptied library parent drops the nested key");
+
+    view.showLibrarySubheadingMenu({} as MouseEvent, library.id, heading, intubation);
+    const outdent = chooseMenuItem(menuCapture.menus, "Outdent one level");
+    assert.equal(outdent.disabled, false);
+    outdent.click?.();
+    await settleMicrotasks();
+
+    assert.deepEqual(
+      heading.subheadings.map((item) => item.id),
+      ["lib-airway", "lib-emergencies", "lib-intubation"],
+      "outdenting promotes the library node beside its former parent",
+    );
+    assert.equal(Object.hasOwn(emergencies, "subheadings"), false, "the emptied destination returns to canonical leaf form");
+    assert.deepEqual(mutations, [
+      { label: "Move library subheading “Intubation” under “Emergencies”", options: { includePortableIndex: true, requireUndo: true } },
+      { label: "Move library subheading “Intubation” under “Guidelines”", options: { includePortableIndex: true, requireUndo: true } },
+    ], "both reparents save the portable index and stay undoable");
+  } finally {
+    pickerCapture.restore();
+    menuCapture.restore();
+  }
+});
+
+test("a collection reparent refuses when the destination became the node's own descendant while the picker was open", async () => {
+  Notice.messages.length = 0;
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const heading = reparentCollectionHeading();
+  data.collections = [heading];
+  const view = createLayoutRenderView(data, []);
+  const labels: string[] = [];
+  view.plugin.mutate = async (label, action) => { labels.push(label); action(); };
+  const menuCapture = captureMenus();
+  const pickerCapture = capturePickers();
+  try {
+    const airway = heading.subheadings[0];
+    const intubation = airway?.subheadings?.[0];
+    assert.ok(airway && intubation);
+
+    view.showSubheadingMenu({} as MouseEvent, heading, intubation);
+    chooseMenuItem(menuCapture.menus, "Move under…").click?.();
+    const picker = pickerCapture.pickers.shift();
+    assert.ok(picker);
+    assert.equal(picker.labels.includes("Board review / Emergencies"), true);
+
+    // Sync rearranges the layout while the picker waits: the chosen node is now
+    // inside the subtree that is about to move.
+    const emergencies = heading.subheadings.splice(1, 1)[0];
+    assert.ok(emergencies);
+    intubation.subheadings?.push(emergencies);
+
+    picker.choose("Board review / Emergencies");
+    await settleMicrotasks();
+
+    assert.deepEqual(labels, [], "a refused move never reaches the mutation machinery");
+    assert.deepEqual(heading.subheadings.map((item) => item.id), ["col-airway"], "the layout is left exactly as Sync left it");
+    assert.deepEqual(intubation.subheadings?.map((item) => item.id), ["col-rsi", "col-emergencies"]);
+    assert.equal(
+      Notice.messages.some((message) => /can no longer move there/.test(message)),
+      true,
+      "the refusal is reported instead of silently detaching the subtree",
+    );
+  } finally {
+    pickerCapture.restore();
+    menuCapture.restore();
+  }
+});
+
+test("a library reparent refuses when Sync replaced the layout while the picker was open", async () => {
+  Notice.messages.length = 0;
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const library = installLibrary(data);
+  data.activeTab = libraryTabId(library.id);
+  const heading: LayoutHeading = {
+    id: "lib-h1",
+    title: "Guidelines",
+    collapsed: false,
+    subjects: [],
+    subheadings: [
+      {
+        id: "lib-airway",
+        title: "Airway",
+        collapsed: false,
+        subjects: [],
+        subheadings: [{ id: "lib-intubation", title: "Intubation", collapsed: false, subjects: [] }],
+      },
+      { id: "lib-emergencies", title: "Emergencies", collapsed: false, subjects: [] },
+    ],
+  };
+  data.portableIndex.libraryLayouts[library.id] = [heading];
+  const view = createLayoutRenderView(data, []);
+  const labels: string[] = [];
+  view.plugin.mutate = async (label, action) => { labels.push(label); action(); };
+  const menuCapture = captureMenus();
+  const pickerCapture = capturePickers();
+  try {
+    const airway = heading.subheadings[0];
+    const intubation = airway?.subheadings?.[0];
+    assert.ok(airway && intubation);
+
+    view.showLibrarySubheadingMenu({} as MouseEvent, library.id, heading, intubation);
+    chooseMenuItem(menuCapture.menus, "Move under…").click?.();
+    const picker = pickerCapture.pickers.shift();
+    assert.ok(picker);
+
+    const replacement = structuredClone(heading);
+    data.portableIndex.libraryLayouts[library.id] = [replacement];
+
+    picker.choose("Guidelines / Emergencies");
+    await settleMicrotasks();
+
+    assert.deepEqual(labels, [], "the replaced layout is never written through a stale picker");
+    assert.deepEqual(airway.subheadings?.map((item) => item.id), ["lib-intubation"], "the detached copy is untouched");
+    assert.equal(replacement.subheadings[1]?.subheadings, undefined, "the live layout is untouched");
+    assert.equal(
+      Notice.messages.some((message) => /library organization changed/i.test(message)),
+      true,
+    );
+  } finally {
+    pickerCapture.restore();
+    menuCapture.restore();
   }
 });
 

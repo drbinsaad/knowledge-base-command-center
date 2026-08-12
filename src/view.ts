@@ -70,6 +70,7 @@ import {
 import {
   AddActionModal,
   CollectionPickerModal,
+  type CollectionTarget,
   collectionTargets,
   ConfirmModal,
   createOpenedBaseGuard,
@@ -431,6 +432,40 @@ function ensureChildList(node: LayoutNode): LayoutSubheading[] {
 /** Canonical cleaned data keeps the nested key only while children exist. */
 function dropEmptyChildList(node: LayoutNode, isHeading: boolean): void {
   if (!isHeading && node.subheadings && node.subheadings.length === 0) delete node.subheadings;
+}
+
+/** Levels occupied by a node's own subtree, counting the node itself as one. */
+function layoutSubtreeHeight(node: LayoutNode): number {
+  return 1 + childSubheadings(node).reduce((deepest, child) => Math.max(deepest, layoutSubtreeHeight(child)), 0);
+}
+
+/**
+ * Every node under one heading that may become a subheading's new parent.
+ *
+ * A node can never move under itself or under one of its own descendants: the
+ * subtree would detach from the layout, so both are skipped outright. The
+ * remaining nodes must also leave room for the whole moved subtree, whose own
+ * height can be more than one level — a destination at depth D receives a
+ * subtree of height H and ends at level D + H, which MAX_LAYOUT_DEPTH caps.
+ * The heading itself is offered as the explicit top-level destination.
+ */
+function subheadingReparentTargets(heading: LayoutHeading, subheadingId: string): CollectionTarget[] {
+  const located = subheadingChain(heading, subheadingId);
+  if (!located) return [];
+  const height = layoutSubtreeHeight(located.node);
+  const targets: CollectionTarget[] = [];
+  const visit = (node: LayoutNode, depth: number, path: string): void => {
+    // Returning here also skips the whole subtree below the moved node.
+    if (node.id === subheadingId) return;
+    if (depth + height <= MAX_LAYOUT_DEPTH) {
+      targets.push(node.id === heading.id
+        ? { headingId: heading.id, label: `${heading.title} (top level)` }
+        : { headingId: heading.id, subheadingId: node.id, label: path });
+    }
+    for (const child of childSubheadings(node)) visit(child, depth + 1, `${path} / ${child.title}`);
+  };
+  visit(heading, 1, heading.title);
+  return targets;
 }
 
 function collectionPaths(collections: LayoutHeading[]): string[] {
@@ -4199,6 +4234,12 @@ export class EntVaultCommandCenterView extends ItemView {
         this.run(() => this.moveLibrarySubheading(libraryId, current.parent, currentIndex, currentIndex + 1));
       }
     }));
+    menu.addItem((item) => item.setTitle("Move under…").setIcon("corner-down-right").onClick(() => {
+      if (ownsBase() && layoutIsCurrent()) this.openSubheadingParentPicker(libraryId, heading.id, subheading.id);
+    }));
+    menu.addItem((item) => item.setTitle("Outdent one level").setIcon("indent-decrease").setDisabled(depth <= 2).onClick(() => {
+      if (ownsBase() && layoutIsCurrent()) this.outdentSubheading(libraryId, heading.id, subheading.id);
+    }));
     menu.addSeparator();
     menu.addItem((item) => item.setTitle("Place record here…").setIcon("file-input").onClick(() => {
       if (ownsBase() && layoutIsCurrent()) this.openPlaceLibraryRecordPicker(libraryId, { headingId: heading.id, subheadingId: subheading.id });
@@ -4240,6 +4281,104 @@ export class EntVaultCommandCenterView extends ItemView {
       }).open();
     }));
     menu.showAtMouseEvent(event);
+  }
+
+  /**
+   * Re-find a subheading and its parent in the layout that is live right now.
+   * Menus and pickers stay open across a Sync replacement, so every reparent
+   * step resolves ids instead of trusting the nodes the menu captured.
+   */
+  private locateSubheading(libraryId: string | null, headingId: string, subheadingId: string): {
+    heading: LayoutHeading;
+    node: LayoutSubheading;
+    parent: LayoutNode;
+    chain: LayoutNode[];
+  } | null {
+    const layout = libraryId ? this.libraryLayout(libraryId) : this.plugin.data.collections;
+    const heading = layout.find((item) => item.id === headingId);
+    const located = heading ? subheadingChain(heading, subheadingId) : null;
+    if (!heading || !located) return null;
+    return { heading, node: located.node, parent: located.chain[located.chain.length - 2] ?? heading, chain: located.chain };
+  }
+
+  private subheadingNoun(libraryId: string | null): string {
+    return libraryId ? "library subheading" : "subheading";
+  }
+
+  /**
+   * Touch parity for the desktop drag: pick a subheading's new parent from a
+   * list of full paths. Desktop keeps the item too, because the menus are the
+   * accessible path and a precise move beats a fiddly drag.
+   */
+  private openSubheadingParentPicker(libraryId: string | null, headingId: string, subheadingId: string): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const openedLayout = libraryId ? this.libraryLayout(libraryId) : null;
+    const layoutIsCurrent = (): boolean => !libraryId || this.libraryLayout(libraryId) === openedLayout;
+    const located = this.locateSubheading(libraryId, headingId, subheadingId);
+    if (!located) {
+      new Notice(`That ${this.subheadingNoun(libraryId)} is no longer available. Reopen the action and try again.`);
+      return;
+    }
+    const targets = subheadingReparentTargets(located.heading, subheadingId);
+    if (targets.length === 0) {
+      new Notice(`“${located.node.title}” has nowhere else to go: every other place sits inside it or would pass the ${MAX_LAYOUT_DEPTH}-level nesting limit.`);
+      return;
+    }
+    new CollectionPickerModal(this.app, targets, "Move", (target) => {
+      if (!ownsBase()) return;
+      this.run(async () => {
+        if (!layoutIsCurrent()) throw new Error("The library organization changed. Reopen the action and try again.");
+        await this.reparentSubheading(libraryId, headingId, subheadingId, target.subheadingId ?? target.headingId);
+      });
+    }, "heading or subheading").open();
+  }
+
+  /**
+   * Move one subheading's whole subtree under another node in the same
+   * heading, keeping every node id. The destination is validated again here
+   * rather than only when the picker opened, so organization that changed
+   * behind an open dialog refuses instead of detaching a subtree, creating a
+   * cycle, or breaching the depth cap.
+   */
+  private async reparentSubheading(libraryId: string | null, headingId: string, subheadingId: string, destinationId: string): Promise<void> {
+    const noun = this.subheadingNoun(libraryId);
+    const located = this.locateSubheading(libraryId, headingId, subheadingId);
+    if (!located) throw new Error(`That ${noun} is no longer available. Reopen the action and try again.`);
+    const { heading, node, parent } = located;
+    const destination = destinationId === heading.id ? heading : subheadingChain(heading, destinationId)?.node ?? null;
+    const allowed = subheadingReparentTargets(heading, subheadingId)
+      .some((target) => (target.subheadingId ?? target.headingId) === destinationId);
+    if (!destination || !allowed) throw new Error(`“${node.title}” can no longer move there. Reopen the action and try again.`);
+    await this.plugin.mutate(`Move ${noun} “${node.title}” under “${destination.title}”`, () => {
+      const siblings = ensureChildList(parent);
+      const index = siblings.findIndex((item) => item.id === subheadingId);
+      if (index >= 0) siblings.splice(index, 1);
+      // An emptied parent returns to the canonical leaf shape.
+      dropEmptyChildList(parent, parent.id === heading.id);
+      // Appended last, so the destination's existing children keep their order.
+      ensureChildList(destination).push(node);
+      // The moved node stays reachable wherever it landed.
+      for (const ancestor of subheadingChain(heading, subheadingId)?.chain ?? []) ancestor.collapsed = false;
+    }, libraryId ? { includePortableIndex: true, requireUndo: true } : undefined);
+  }
+
+  /**
+   * Promote a subheading to sit beside its current parent. This is the most
+   * common reparent by far, so it skips the picker; the menu disables it once
+   * the node already sits directly under its heading.
+   */
+  private outdentSubheading(libraryId: string | null, headingId: string, subheadingId: string): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    this.run(async () => {
+      if (!ownsBase()) return;
+      const located = this.locateSubheading(libraryId, headingId, subheadingId);
+      if (!located) throw new Error(`That ${this.subheadingNoun(libraryId)} is no longer available. Reopen the action and try again.`);
+      const grandparent = located.chain[located.chain.length - 3];
+      if (!grandparent) throw new Error(`“${located.node.title}” already sits directly under “${located.heading.title}”.`);
+      await this.reparentSubheading(libraryId, headingId, subheadingId, grandparent.id);
+    });
   }
 
   private openCollectionPicker(path: string, source?: Membership, move = false): void {
@@ -4396,6 +4535,12 @@ export class EntVaultCommandCenterView extends ItemView {
     }));
     menu.addItem((item) => item.setTitle("Move subheading down").setIcon("arrow-down").setDisabled(index < 0 || index >= siblings.length - 1).onClick(() => {
       if (ownsBase()) this.run(() => this.moveSubheading(parent, index, index + 1));
+    }));
+    menu.addItem((item) => item.setTitle("Move under…").setIcon("corner-down-right").onClick(() => {
+      if (ownsBase()) this.openSubheadingParentPicker(null, heading.id, subheading.id);
+    }));
+    menu.addItem((item) => item.setTitle("Outdent one level").setIcon("indent-decrease").setDisabled(depth <= 2).onClick(() => {
+      if (ownsBase()) this.outdentSubheading(null, heading.id, subheading.id);
     }));
     menu.addSeparator();
     if (depth < MAX_LAYOUT_DEPTH) {
