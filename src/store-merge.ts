@@ -300,9 +300,39 @@ export function mergeKnowledgeBaseStores(
   }
   const byId = new Map<string, KnowledgeBaseEntry>();
   const semanticConflicts: SemanticStoreConflict[] = [];
-  for (const entry of local.bases) if (!Object.prototype.hasOwnProperty.call(deletedBaseIds, entry.id)) byId.set(entry.id, entry);
+  // A tombstone still deletes deterministically, but a copy of the base that
+  // was edited AFTER the deletion carries work the deleting device never saw.
+  // Classify that copy as a losing conflict so the merge worker rescues its
+  // whole envelope before the deletion is adopted; a plain drop would be the
+  // only merge outcome with no durable copy of the losing payload.
+  const tombstonedEditConflict = (
+    entry: KnowledgeBaseEntry,
+    winner: "local" | "incoming",
+  ): SemanticStoreConflict | null => {
+    const deletedAt = deletedTimestamps.get(entry.id);
+    if (deletedAt === undefined || entry.updatedAt <= deletedAt) return null;
+    return {
+      baseId: entry.id,
+      revision: entry.semanticRevision,
+      winner,
+      localFingerprint: winner === "incoming" ? entryFingerprint(entry) : "deleted",
+      incomingFingerprint: winner === "incoming" ? "deleted" : entryFingerprint(entry),
+    };
+  };
+  for (const entry of local.bases) {
+    if (!Object.prototype.hasOwnProperty.call(deletedBaseIds, entry.id)) {
+      byId.set(entry.id, entry);
+      continue;
+    }
+    const conflict = tombstonedEditConflict(entry, "incoming");
+    if (conflict) semanticConflicts.push(conflict);
+  }
   for (const entry of incoming.bases) {
-    if (Object.prototype.hasOwnProperty.call(deletedBaseIds, entry.id)) continue;
+    if (Object.prototype.hasOwnProperty.call(deletedBaseIds, entry.id)) {
+      const conflict = tombstonedEditConflict(entry, "local");
+      if (conflict) semanticConflicts.push(conflict);
+      continue;
+    }
     const current = byId.get(entry.id);
     if (current) {
       const merged = mergeMatchingEntry(current, entry);

@@ -3573,7 +3573,7 @@ export function applyTemplateTokens(
     .replace(/{{\s*date\s*}}/gi, () => date)
     .replace(/{{\s*time\s*}}/gi, () => time);
   protectedTokens.forEach((value, index) => {
-    rendered = rendered.replace(`${placeholderPrefix}${index}\u0000`, value);
+    rendered = rendered.replace(`${placeholderPrefix}${index}\u0000`, () => value);
   });
   return rendered;
 }

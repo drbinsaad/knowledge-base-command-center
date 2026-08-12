@@ -4452,6 +4452,14 @@ test("search, templates, filenames, and protected folders handle international a
   assert.equal(matchesQuery(record({ title: "Café airway", aliases: ["مجرى الهواء", "喉頭裂"] }), "مجرى"), true);
   assert.equal(matchesQuery(record({ title: "Café airway", aliases: ["مجرى الهواء", "喉頭裂"] }), "喉頭"), true);
   assert.equal(applyTemplateTokens("# {{title}}", "$& $` $' $$", "2026-01-01", "12:00"), "# $& $` $' $$");
+  assert.equal(
+    applyTemplateTokens("title: {{yaml:title}}", "Sinus $& Nose", "2026-01-01", "12:00"),
+    'title: "Sinus $& Nose"',
+  );
+  assert.equal(
+    applyTemplateTokens("id: {{yaml:id}}\nrest", "t", "2026-01-01", "12:00", { id: "X$'Y $` $$ $&" }),
+    'id: "X$\'Y $` $$ $&"\nrest',
+  );
   assert.equal(sanitizeFileName("safe\u202E\u200B\u0000:name"), "safe-name");
   for (const path of [".OBSIDIAN/plugins", ".obsidian /plugins", ".trash", ".TRASH/archive"]) {
     assert.notEqual(validateWritableFolderPath(path, ".obsidian"), null, path);

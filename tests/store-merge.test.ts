@@ -367,6 +367,40 @@ test("permanent-deletion tombstones suppress stale bases while preserving unrela
   assert.deepEqual(merged, reversed, "tombstone merges must converge regardless of device order");
 });
 
+test("a tombstoned base edited after the deletion surfaces a losing conflict for rescue", () => {
+  const ent = entry("base-ent", "ENT", 100);
+  const research = entry("base-research", "Research", 200);
+  const deletingDevice = store([structuredClone(ent)], "base-ent");
+  deletingDevice.deletedBaseIds[research.id] = 300;
+  const editedResearch = structuredClone(research);
+  editedResearch.updatedAt = 500; // restored and edited after the deletion
+  editedResearch.data.pinnedPaths = ["Research/Must survive.md"];
+  const editingDevice = store([structuredClone(ent), editedResearch], "base-ent");
+
+  // Deletion arrives at the editing device: its local copy loses, so the
+  // merge worker must rescue the local envelope before adopting the drop.
+  const localLoses = mergeKnowledgeBaseStores(editingDevice, deletingDevice, "base-ent");
+  assert.equal(localLoses.store.bases.some((item) => item.id === research.id), false, "the tombstone still wins");
+  assert.deepEqual(
+    localLoses.semanticConflicts.map((conflict) => ({ baseId: conflict.baseId, winner: conflict.winner })),
+    [{ baseId: research.id, winner: "incoming" }],
+  );
+
+  // The edited copy arrives at the deleting device: the incoming copy loses.
+  const incomingLoses = mergeKnowledgeBaseStores(deletingDevice, editingDevice, "base-ent");
+  assert.equal(incomingLoses.store.bases.some((item) => item.id === research.id), false);
+  assert.deepEqual(
+    incomingLoses.semanticConflicts.map((conflict) => ({ baseId: conflict.baseId, winner: conflict.winner })),
+    [{ baseId: research.id, winner: "local" }],
+  );
+
+  // Deleting an unedited copy stays a silent, rescue-free drop.
+  const staleResearch = structuredClone(research);
+  staleResearch.updatedAt = 250;
+  const staleDevice = store([structuredClone(ent), staleResearch], "base-ent");
+  assert.deepEqual(mergeKnowledgeBaseStores(staleDevice, deletingDevice, "base-ent").semanticConflicts, []);
+});
+
 test("concurrent permanent deletions that would remove every available base are rejected without mutation", () => {
   const baseA = entry("base-a", "ENT", 100);
   const baseB = entry("base-b", "Research", 100);

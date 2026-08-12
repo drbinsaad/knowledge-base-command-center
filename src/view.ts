@@ -572,7 +572,7 @@ export class EntVaultCommandCenterView extends ItemView {
     }, delay);
   }
 
-  async reload(): Promise<void> {
+  async reload(withinOperation = false): Promise<void> {
     this.measureAndApplyPaneLayout(false);
     const activeBaseId = this.plugin.getActiveKnowledgeBaseId();
     const dataEpoch = this.currentDataEpoch();
@@ -618,7 +618,7 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     this.records = this.plugin.getRecords();
     this.recordByPath = new Map(this.records.map((record) => [record.path, record]));
-    if (await this.plugin.reconcileRecords(this.records)) {
+    if (await this.plugin.reconcileRecords(this.records, withinOperation)) {
       this.records = this.plugin.getRecords();
       this.recordByPath = new Map(this.records.map((record) => [record.path, record]));
     }
@@ -626,7 +626,7 @@ export class EntVaultCommandCenterView extends ItemView {
       .some((tab) => tab.id === this.plugin.data.activeTab)
       && !this.plugin.isDataReadOnly()) {
       this.plugin.data.activeTab = "curriculum";
-      await this.plugin.saveViewState();
+      await this.plugin.saveViewState(withinOperation);
       if (!this.guardLoadedBase()) return;
     }
     this.curriculum = buildCurriculumTree(
