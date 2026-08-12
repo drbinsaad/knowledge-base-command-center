@@ -3599,7 +3599,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (proposalFolder && pathIsInsideFolder(normalized, proposalFolder)) kind = "proposal";
     else if (pathIsInsideFolder(normalized, data.settings.primaryFolder)) kind = "topic";
     else {
-      const basename = normalized.split("/").at(-1)?.replace(/\.md$/i, "") ?? "";
+      // Array.prototype.at is ES2022; this build targets ES2018 for older
+      // mobile web views, and esbuild does not polyfill runtime methods.
+      const basename = (normalized.split("/").pop() ?? "").replace(/\.md$/i, "");
       kind = CLINICAL_LIBRARY_SOURCES.find((source) => pathIsInsideFolder(normalized, source.root)
         && basename.startsWith(source.prefix))?.kind ?? "note";
     }
