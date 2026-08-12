@@ -271,6 +271,41 @@ interface ExternalPluginDataCapture {
   adapterWriteGeneration: number;
 }
 
+/** Confidence in the envelope an external reload has accumulated so far. */
+type ExternalReloadBaselineTrust = "none" | "fresh" | "legacy-provisional" | "identified";
+
+/**
+ * The complete result of resolving one drained capture.
+ *
+ * Every field is required and every branch of `resolveExternalCaptureOutcome`
+ * returns a whole record, so a new branch cannot silently leave one unset. The
+ * two shipped data-loss bugs on this path were both a branch that forgot to
+ * assign one of these when they were mutable variables scoped outside the loop.
+ */
+interface ExternalCaptureOutcome {
+  /** Always the resolved capture, whichever branch ran. */
+  capture: ExternalPluginDataCapture;
+  /** Accumulates across the batch; the object `this.store` now aliases. */
+  workingStore: PluginStore;
+  /** Accumulates across the batch. */
+  baselineTrust: ExternalReloadBaselineTrust;
+  /** Never true at the same time as a non-empty `blockingWarning`. */
+  compatible: boolean;
+  needsWriteback: boolean;
+  blockingWarning: string;
+  /** Last compatible accumulated state still owed a rescue write, else null. */
+  rescueStore: PluginStore | null;
+  /** "continue" skips this capture's record-cache invalidation. */
+  control: "continue" | "proceed";
+}
+
+/** Which envelope survived a capture that parsed cleanly, and at what trust. */
+interface ExternalStoreAdoption {
+  workingStore: PluginStore;
+  baselineTrust: ExternalReloadBaselineTrust;
+  needsWriteback: boolean;
+}
+
 interface RejectedSemanticAttempt {
   revision: number;
   head: string;
@@ -2161,6 +2196,458 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return merged;
   }
 
+  /**
+   * Reconcile an incoming envelope against a local baseline that is still a
+   * pre-Sync fresh identity. Two fresh devices must converge symmetrically, and
+   * any losing envelope must reach disk before it is discarded.
+   *
+   * Throws when a losing envelope could not be rescued; the caller's catch owns
+   * the rollback.
+   */
+  private async adoptExternalStoreAgainstFreshBaseline(
+    loaded: PluginDataLoadResult,
+    incomingStore: PluginStore,
+    workingStore: PluginStore,
+    preferredActiveId: string,
+    recoverableLegacyCapture: boolean,
+  ): Promise<ExternalStoreAdoption> {
+    const localBootstrapOnly = freshStoreHasOnlyBootstrapChanges(workingStore);
+    if (!isFreshVaultId(incomingStore.vaultId)) {
+      // A fresh identity means this device started before Sync supplied the
+      // vault's established store. The identified envelope is authoritative.
+      // Preserve any real local work first; view-only bootstrap state can be
+      // discarded.
+      if (!localBootstrapOnly) {
+        const rescuePath = await this.writeConflictRescueStore(
+          workingStore,
+          "This device was edited before the established synced knowledge-base store arrived.",
+        );
+        if (!rescuePath) throw new Error("Fresh-device changes could not be preserved before adopting synced data.");
+        new Notice(`Fresh-device changes were preserved at ${rescuePath} before the established synced store was adopted.`, 12000);
+      }
+      return {
+        workingStore: structuredClone(incomingStore),
+        baselineTrust: recoverableLegacyCapture || loaded.identityNeedsWriteback
+          ? "legacy-provisional"
+          : "identified",
+        needsWriteback: recoverableLegacyCapture
+          || loaded.sourceVersion !== STORE_VERSION
+          || loaded.identityNeedsWriteback
+          || loaded.structuralRepairNeedsWriteback
+          || loaded.remediationNeedsWriteback,
+      };
+    }
+    const incomingBootstrapOnly = freshStoreHasOnlyBootstrapChanges(incomingStore);
+    // Sampled before any envelope is replaced so both devices compute the same
+    // tiebreak from the same two identities.
+    const localWins = workingStore.vaultId.localeCompare(incomingStore.vaultId) <= 0;
+    if (workingStore.vaultId === incomingStore.vaultId) {
+      const merged = await this.mergeStoresWithSemanticRescue(workingStore, incomingStore, preferredActiveId);
+      // The schema-upgrade term is deliberately absent here; the caller applies
+      // it to every arm.
+      return {
+        workingStore: merged.store,
+        baselineTrust: "fresh",
+        needsWriteback: merged.incomingNeedsWriteback
+          || loaded.structuralRepairNeedsWriteback
+          || loaded.remediationNeedsWriteback,
+      };
+    }
+    if (localBootstrapOnly && !incomingBootstrapOnly) {
+      return { workingStore: structuredClone(incomingStore), baselineTrust: "fresh", needsWriteback: false };
+    }
+    if (!localBootstrapOnly && incomingBootstrapOnly) {
+      // Local work is the only meaningful fresh-device payload. Keep it and
+      // overwrite the empty incoming bootstrap.
+      return { workingStore, baselineTrust: "fresh", needsWriteback: true };
+    }
+    if (localBootstrapOnly && incomingBootstrapOnly) {
+      // Two empty devices converge symmetrically on one provisional identity;
+      // their view-only differences are deliberately disposable.
+      const converged = structuredClone(localWins ? workingStore : incomingStore);
+      return {
+        workingStore: converged,
+        baselineTrust: "fresh",
+        needsWriteback: converged.vaultId !== incomingStore.vaultId,
+      };
+    }
+    if (localWins) {
+      const rescuePath = await this.writeConflictRescueStore(
+        incomingStore,
+        "Two fresh devices contained independent changes before Sync converged; this is the non-authoritative incoming copy.",
+      );
+      if (!rescuePath) throw new Error("Independent fresh-device changes could not be preserved before convergence.");
+      new Notice(`Independent changes from another fresh device were preserved at ${rescuePath}. The local fresh copy remains active.`, 12000);
+      return { workingStore, baselineTrust: "fresh", needsWriteback: true };
+    }
+    const rescuePath = await this.writeConflictRescueStore(
+      workingStore,
+      "Two fresh devices contained independent changes before Sync converged; this is the non-authoritative local copy.",
+    );
+    if (!rescuePath) throw new Error("Independent fresh-device changes could not be preserved before convergence.");
+    const adopted = structuredClone(incomingStore);
+    new Notice(`Independent local changes were preserved at ${rescuePath} before the other fresh device became active.`, 12000);
+    return { workingStore: adopted, baselineTrust: "fresh", needsWriteback: false };
+  }
+
+  /**
+   * Decide which envelope survives a capture that parsed cleanly and is free of
+   * compatibility warnings, and whether the winner must be forced back to disk.
+   *
+   * Throws when a losing envelope could not be rescued first; the caller's catch
+   * owns the rollback of both the store and the baseline trust.
+   */
+  private async adoptCompatibleExternalStore(
+    loaded: PluginDataLoadResult,
+    incomingStore: PluginStore,
+    workingStore: PluginStore,
+    baselineTrust: ExternalReloadBaselineTrust,
+    preferredActiveId: string,
+    recoverableLegacyCapture: boolean,
+  ): Promise<ExternalStoreAdoption> {
+    if (baselineTrust === "none") {
+      // Startup can observe a transient partial data.json. Once a complete
+      // identified store or substantial recognized legacy payload arrives,
+      // adopt its migrated store directly instead of comparing it with the
+      // random fallback identity.
+      return {
+        workingStore: structuredClone(incomingStore),
+        baselineTrust: isFreshVaultId(incomingStore.vaultId)
+          ? "fresh"
+          : recoverableLegacyCapture || loaded.identityNeedsWriteback
+            ? "legacy-provisional"
+            : "identified",
+        needsWriteback: recoverableLegacyCapture
+          || loaded.sourceVersion !== STORE_VERSION
+          || loaded.identityNeedsWriteback
+          || loaded.structuralRepairNeedsWriteback
+          || loaded.remediationNeedsWriteback,
+      };
+    }
+    if (baselineTrust === "fresh") {
+      return this.adoptExternalStoreAgainstFreshBaseline(
+        loaded,
+        incomingStore,
+        workingStore,
+        preferredActiveId,
+        recoverableLegacyCapture,
+      );
+    }
+    // Only "identified" and "legacy-provisional" remain.
+    if (isFreshVaultId(incomingStore.vaultId)) {
+      // This is the mirror of fresh-local adoption above. A device that already
+      // has identified (or recovered legacy) vault organization remains
+      // authoritative when another device briefly publishes its pre-Sync fresh
+      // identity. Empty bootstrap state is disposable; meaningful offline work
+      // is rescued before the authoritative envelope is written back. A
+      // provisional baseline deliberately stays provisional.
+      if (!freshStoreHasOnlyBootstrapChanges(incomingStore)) {
+        const rescuePath = await this.writeConflictRescueStore(
+          incomingStore,
+          "A fresh device contained offline changes before it received this vault's established knowledge-base identity.",
+        );
+        if (!rescuePath) throw new Error("Incoming fresh-device changes could not be preserved before restoring established synced data.");
+        new Notice(`Incoming fresh-device changes were preserved at ${rescuePath}. The established synced store remains active.`, 12000);
+      }
+      return { workingStore, baselineTrust, needsWriteback: true };
+    }
+    if (baselineTrust === "legacy-provisional"
+      && loaded.recognizedStore
+      && loaded.hasVaultId
+      && !loaded.identityNeedsWriteback) {
+      // A migrated flat payload is only provisional recovery state. If Sync
+      // subsequently supplies a complete envelope, it is the first
+      // authoritative baseline and must supersede the provisional copy rather
+      // than fail a cross-vault merge.
+      return {
+        workingStore: structuredClone(incomingStore),
+        baselineTrust: "identified",
+        needsWriteback: loaded.sourceVersion !== STORE_VERSION
+          || loaded.identityNeedsWriteback
+          || loaded.structuralRepairNeedsWriteback
+          || loaded.remediationNeedsWriteback,
+      };
+    }
+    const merged = await this.mergeStoresWithSemanticRescue(workingStore, incomingStore, preferredActiveId);
+    return {
+      workingStore: merged.store,
+      baselineTrust,
+      needsWriteback: merged.incomingNeedsWriteback
+        || loaded.sourceVersion !== STORE_VERSION
+        || loaded.structuralRepairNeedsWriteback
+        || loaded.remediationNeedsWriteback
+        || recoverableLegacyCapture,
+    };
+  }
+
+  /**
+   * Resolve one drained capture into a complete outcome record.
+   *
+   * `workingStore` and `baselineTrust` are threaded through the return value
+   * because they accumulate across the whole batch; the remaining fields
+   * describe only this capture, and the caller keeps the last one. Every exit
+   * builds the whole record, which is what makes "a branch forgot to set one
+   * flag" a compile error rather than a data-loss bug.
+   */
+  private async resolveExternalCaptureOutcome(
+    capture: ExternalPluginDataCapture,
+    workingStore: PluginStore,
+    baselineTrust: ExternalReloadBaselineTrust,
+    preferredActiveId: string,
+  ): Promise<ExternalCaptureOutcome> {
+    if (this.semanticConflictRescueFailed) {
+      // Preserve the first unrescued capture in memory and ignore all later
+      // callbacks until restart. Auto-recovery could otherwise hide the only
+      // copy of a concurrent semantic edit. This loads, merges, adopts,
+      // rescues, publishes, and invalidates nothing; the caller still keeps the
+      // capture so a clobbered data.json can be restored after the loop.
+      return {
+        capture,
+        workingStore,
+        baselineTrust,
+        compatible: false,
+        needsWriteback: false,
+        blockingWarning: this.dataCompatibilityWarning,
+        rescueStore: null,
+        control: "continue",
+      };
+    }
+    // The pre-extraction body invalidated the record and search caches in
+    // the same synchronous turn that published this.store, so no observer
+    // could see the merged envelope behind a stale projection. Every
+    // publishing exit routes through here to keep that turn intact.
+    const publishOutcome = (outcome: ExternalCaptureOutcome): ExternalCaptureOutcome => {
+      this.invalidateRecordCache();
+      return outcome;
+    };
+    // Roll back only this capture. Earlier captures in the same drained batch
+    // may already have contributed valid remote changes to the working envelope
+    // and must not be discarded by a later transient missing, incompatible, or
+    // conflicting payload. All three snapshots must be taken before the load,
+    // which replaces this.store, this.data and this.dataCompatibilityWarning.
+    const fallbackStore = structuredClone(workingStore);
+    const fallbackBaselineTrust: ExternalReloadBaselineTrust = baselineTrust;
+    const localWarning = this.dataCompatibilityWarning;
+    const loaded = await this.loadPluginData(false, capture.read);
+    const incomingWarning = this.dataCompatibilityWarning;
+    const recoverableLegacyCapture: boolean = baselineTrust !== "identified"
+      && !loaded.recognizedStore
+      && "value" in capture.read
+      && Object.keys(asUnknownRecord(capture.read.value)).length > 0
+      && isRecognizedPluginData(capture.read.value);
+    if (loaded.sourceWasMissing) {
+      // Sync and filesystem adapters can briefly report a missing data.json
+      // while replacing it. With no trusted baseline, wait for a later complete
+      // capture and never publish an empty store. With a committed baseline,
+      // restore that known-good envelope so a transient deletion cannot become
+      // the next restart state.
+      this.store = fallbackStore;
+      this.useActiveData(this.requireActiveBase().data);
+      // Deliberately restores the pre-load warning rather than clearing it.
+      this.dataCompatibilityWarning = localWarning;
+      const trustedBaseline = baselineTrust !== "none";
+      return publishOutcome({
+        capture,
+        workingStore: fallbackStore,
+        baselineTrust,
+        compatible: trustedBaseline,
+        needsWriteback: trustedBaseline,
+        blockingWarning: "",
+        rescueStore: null,
+        control: "proceed",
+      });
+    }
+    if (!loaded.compatible || incomingWarning) {
+      this.store = fallbackStore;
+      this.useActiveData(this.requireActiveBase().data);
+      const blockingWarning = incomingWarning || localWarning;
+      // The last compatible committed/accumulated envelope may not be part of
+      // the incompatible file that must remain authoritative for a newer build.
+      // Preserve it before this instance settles into read-only mode. The
+      // rescue helper deduplicates identical stores.
+      const rescueStore = baselineTrust !== "none" ? structuredClone(fallbackStore) : null;
+      this.dataCompatibilityWarning = blockingWarning;
+      return publishOutcome({
+        capture,
+        workingStore: fallbackStore,
+        baselineTrust,
+        compatible: false,
+        needsWriteback: false,
+        blockingWarning,
+        rescueStore,
+        control: "proceed",
+      });
+    }
+    if ((!loaded.recognizedStore || !loaded.hasVaultId) && !recoverableLegacyCapture) {
+      this.store = fallbackStore;
+      this.useActiveData(this.requireActiveBase().data);
+      const blockingWarning = "Synced plugin data was written by an older build without a vault identity. Update Knowledge Base Command Center on the other device before editing; local bases remain read-only so neither copy is overwritten.";
+      // Earlier captures in this batch may already be merged into the fallback;
+      // the identity-less file stays authoritative on disk, so that merge
+      // survives only through the rescue path.
+      const rescueStore = baselineTrust !== "none" ? structuredClone(fallbackStore) : null;
+      this.dataCompatibilityWarning = blockingWarning;
+      new Notice(this.dataCompatibilityWarning, 12000);
+      return publishOutcome({
+        capture,
+        workingStore: fallbackStore,
+        baselineTrust,
+        compatible: false,
+        needsWriteback: false,
+        blockingWarning,
+        rescueStore,
+        control: "proceed",
+      });
+    }
+    // An alias of the live store loadPluginData just installed, not a clone:
+    // this.store and this.data expose the incoming, unmerged envelope to every
+    // concurrent reader until the publication below.
+    const incomingStore = this.store;
+    try {
+      const adopted = await this.adoptCompatibleExternalStore(
+        loaded,
+        incomingStore,
+        workingStore,
+        baselineTrust,
+        preferredActiveId,
+        recoverableLegacyCapture,
+      );
+      // Every compatible legacy envelope must be rewritten after its in-memory
+      // schema upgrade, even when merge semantics are otherwise equal and
+      // neither side requests conflict writeback. This applies to every arm
+      // above, including the ones that omit the term from their own expression.
+      const needsWriteback = adopted.needsWriteback || loaded.sourceVersion !== STORE_VERSION;
+      if (loaded.legacyDeviceState?.vaultId === adopted.workingStore.vaultId) {
+        // Only now is the external identity accepted. Apply the migrated
+        // route/history to the final semantic winner and durably bind it before
+        // the v14 write can neutralize the legacy fields in data.json.
+        this.applyDeviceLocalState(adopted.workingStore, loaded.legacyDeviceState);
+        this.storeDeviceLocalState(createDeviceLocalPluginState(adopted.workingStore), true);
+        this.noticeLegacyDeviceStateTruncation(
+          loaded.legacyDeviceStateHistoryTruncated === true,
+          loaded.legacyDeviceStateViewTruncated === true,
+        );
+      }
+      this.store = adopted.workingStore;
+      this.useActiveData(this.requireActiveBase().data);
+      this.dataCompatibilityWarning = "";
+      this.retainedExternalSettingsPayload = null;
+      return publishOutcome({
+        capture,
+        workingStore: adopted.workingStore,
+        baselineTrust: adopted.baselineTrust,
+        compatible: true,
+        needsWriteback,
+        blockingWarning: "",
+        rescueStore: null,
+        control: "proceed",
+      });
+    } catch (error) {
+      // The rollback must be complete before this.store is republished, and the
+      // sticky flag must be set before the warning text is chosen: it selects
+      // between two messages and suppresses the rescue attempt.
+      this.store = fallbackStore;
+      this.useActiveData(this.requireActiveBase().data);
+      if ("value" in capture.read) {
+        this.retainedExternalSettingsPayload = structuredClone(capture.read.value);
+      }
+      const semanticRescueFailed = error instanceof SemanticConflictRescueError;
+      this.semanticConflictRescueFailed ||= semanticRescueFailed;
+      const rescuePath = semanticRescueFailed
+        ? ""
+        : await this.writeConflictRescueStore(
+          fallbackStore,
+          `Synced knowledge-base data could not be merged: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      const blockingWarning = semanticRescueFailed
+        ? "Concurrent knowledge-base edits could not be preserved before conflict resolution. Local bases remain read-only, the captured synced payload is retained in memory, and no conflict winner was adopted. Export every base or copy the plugin data.json before restarting Obsidian."
+        : `Synced knowledge-base data could not be merged (${error instanceof Error ? error.message : String(error)}). Local bases remain read-only and the captured synced payload will be preserved.${rescuePath ? ` A private local rescue was saved at ${rescuePath}.` : " Automatic local rescue failed; export every base before restarting Obsidian."}`;
+      this.dataCompatibilityWarning = blockingWarning;
+      new Notice(this.dataCompatibilityWarning, 12000);
+      // `rescueStore` stays null on purpose: this arm has already written its
+      // own rescue of the fallback inline, so the post-loop rescue must not
+      // write the same envelope a second time under a different reason.
+      return publishOutcome({
+        capture,
+        workingStore: fallbackStore,
+        baselineTrust: fallbackBaselineTrust,
+        compatible: false,
+        needsWriteback: false,
+        blockingWarning,
+        rescueStore: null,
+        control: "proceed",
+      });
+    }
+  }
+
+  /**
+   * Persist the merged envelope of a compatible batch: force it back to disk
+   * when the merge changed it or a local write may have replaced the captured
+   * file, otherwise establish the commit point without an adapter write.
+   *
+   * "superseded" means a newer callback fenced the write, so the caller must
+   * re-enter the drain loop without recording an outcome or refreshing views.
+   */
+  private async persistMergedExternalStore(
+    outcome: ExternalCaptureOutcome,
+    workingStore: PluginStore,
+  ): Promise<"superseded" | "settled"> {
+    const capturedFileMayHaveBeenOverwritten = this.adapterWriteGeneration !== outcome.capture.adapterWriteGeneration;
+    if (!outcome.needsWriteback && !capturedFileMayHaveBeenOverwritten) {
+      // The latest captured file already contains this payload.
+      this.committedStoreSnapshot = this.neutralSyncedStore(workingStore);
+      this.rollbackStoreSnapshot = structuredClone(this.committedStoreSnapshot);
+      this.persistDeviceLocalStateSafely();
+      return "settled";
+    }
+    const writebackGeneration = this.externalChangeGeneration;
+    try {
+      await this.saveStoreSnapshot(true, writebackGeneration);
+    } catch (error) {
+      if (error instanceof ExternalSettingsSupersededError) return "superseded";
+      this.markPersistenceUncertain(`Synced knowledge bases were merged in memory, but the merged data could not be saved (${error instanceof Error ? error.message : String(error)}). The attempted write may have reached data.json; organization remains read-only until Obsidian is restarted after every base and data.json are preserved.`);
+    }
+    return "settled";
+  }
+
+  /**
+   * Fail closed for a blocked batch: rescue the last compatible accumulated
+   * state, then put the captured file back when our own adapter may have
+   * overwritten it. The rescue must reach disk before the restore, so the
+   * in-memory state that is about to be discarded is preserved first.
+   *
+   * "superseded" means a newer callback fenced the restore, so the caller must
+   * re-enter the drain loop without recording an outcome or refreshing views.
+   */
+  private async preserveBlockedExternalCapture(outcome: ExternalCaptureOutcome): Promise<"superseded" | "settled"> {
+    if (outcome.rescueStore) {
+      const rescuePath = await this.writeConflictRescueStore(
+        outcome.rescueStore,
+        "A valid synced update was followed by an incompatible or unreadable plugin-data capture; this is the last compatible accumulated state.",
+      );
+      // Augmented on the record so the batch's blocking warning stays the exact
+      // text the user was shown.
+      outcome.blockingWarning = rescuePath
+        ? `${outcome.blockingWarning} The prior valid synced state was preserved in a private rescue at ${rescuePath}.`
+        : `${outcome.blockingWarning} Automatic rescue of the prior valid synced state failed; do not restart Obsidian until you export every base or copy the plugin data.json.`;
+      this.dataCompatibilityWarning = outcome.blockingWarning;
+      new Notice(outcome.blockingWarning, 15000);
+    }
+    const capturedFileMayHaveBeenOverwritten = this.adapterWriteGeneration !== outcome.capture.adapterWriteGeneration;
+    const capturedRead = outcome.capture.read;
+    if (!capturedFileMayHaveBeenOverwritten || !("value" in capturedRead)) return "settled";
+    this.retainedExternalSettingsPayload = structuredClone(capturedRead.value);
+    const restoreGeneration = this.externalChangeGeneration;
+    try {
+      await this.restoreCapturedPluginData(outcome.capture, restoreGeneration);
+      this.retainedExternalSettingsPayload = null;
+    } catch (error) {
+      if (error instanceof ExternalSettingsSupersededError) return "superseded";
+      this.markPersistenceUncertain(`${outcome.blockingWarning} The captured file is retained in memory, but restoring it to data.json failed (${error instanceof Error ? error.message : String(error)}). The file may now contain an uncertain partial write; do not restart Obsidian until data.json and every base are preserved.`);
+    }
+    return "settled";
+  }
+
   async onExternalSettingsChange(): Promise<void> {
     if (this.unloaded) return;
     this.adoptSharedPersistenceUncertainty();
@@ -2183,6 +2670,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     // local write first could overwrite the only copy of that synced payload.
     // Every capture records the adapter-write generation so a later local write
     // forces the merged envelope back to disk even when it matches the capture.
+    // No await may be introduced above the coalescing return below.
     this.externalChangeGeneration += 1;
     this.externalReloadBusy = true;
     this.externalReloadCaptures.push(this.captureExternalPluginData(this.adapterWriteGeneration));
@@ -2200,10 +2688,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         const initialCommittedStore = this.committedStoreSnapshot
           ? structuredClone(this.committedStoreSnapshot)
           : null;
+        // Sampled once for the whole worker: re-sampling per capture would let a
+        // Sync-driven active-base change feed back into subsequent merges.
         const preferredActiveId = this.store.activeBaseId;
         let workingStore = structuredClone(initialCommittedStore ?? this.store);
         this.applyDeviceLocalState(workingStore);
-        let baselineTrust: "none" | "fresh" | "legacy-provisional" | "identified" = initialCommittedStore
+        let baselineTrust: ExternalReloadBaselineTrust = initialCommittedStore
           ? isFreshVaultId(initialCommittedStore.vaultId) ? "fresh" : "identified"
           : "none";
         do {
@@ -2244,291 +2734,38 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           // drained array, including callbacks that arrived while a read was
           // resolving. Only a later callback should defer this batch's write.
           this.externalReloadPending = false;
-          let latestCapture: ExternalPluginDataCapture | null = null;
-          let latestCaptureCompatible = false;
-          let latestNeedsWriteback = false;
-          let latestBlockingWarning = "";
-          let latestAccumulatedRescueStore: PluginStore | null = null;
+          // One record per capture replaces five mutable accumulators. It is
+          // rebuilt from scratch for every capture, so the batch decision below
+          // describes exactly the last drained capture, while workingStore and
+          // baselineTrust accumulate across the whole batch.
+          let latestOutcome: ExternalCaptureOutcome | null = null;
           for (const capture of captures) {
-            latestCapture = capture;
-            latestCaptureCompatible = false;
-            latestNeedsWriteback = false;
-            latestBlockingWarning = "";
-            latestAccumulatedRescueStore = null;
-            if (this.semanticConflictRescueFailed) {
-              // Preserve the first unrescued capture in memory and ignore all
-              // later callbacks until restart. Auto-recovery could otherwise
-              // hide the only copy of a concurrent semantic edit.
-              latestBlockingWarning = this.dataCompatibilityWarning;
-              continue;
-            }
-            // Roll back only this capture. Earlier captures in the same drained
-            // batch may already have contributed valid remote changes to the
-            // working envelope and must not be discarded by a later transient
-            // missing, incompatible, or conflicting payload.
-            const fallbackStore = structuredClone(workingStore);
-            const fallbackBaselineTrust: "none" | "fresh" | "legacy-provisional" | "identified" = baselineTrust;
-            const localWarning = this.dataCompatibilityWarning;
-            const loaded = await this.loadPluginData(false, capture.read);
-            const incomingWarning = this.dataCompatibilityWarning;
-            const recoverableLegacyCapture: boolean = baselineTrust !== "identified"
-              && !loaded.recognizedStore
-              && "value" in capture.read
-              && Object.keys(asUnknownRecord(capture.read.value)).length > 0
-              && isRecognizedPluginData(capture.read.value);
-            if (loaded.sourceWasMissing) {
-              // Sync and filesystem adapters can briefly report a missing
-              // data.json while replacing it. With no trusted baseline, wait
-              // for a later complete capture and never publish an empty store.
-              // With a committed baseline, restore that known-good envelope so
-              // a transient deletion cannot become the next restart state.
-              workingStore = fallbackStore;
-              this.store = workingStore;
-              this.useActiveData(this.requireActiveBase().data);
-              this.dataCompatibilityWarning = localWarning;
-              if (baselineTrust !== "none") {
-                latestCaptureCompatible = true;
-                latestNeedsWriteback = true;
-              }
-            } else if (!loaded.compatible || incomingWarning) {
-              workingStore = fallbackStore;
-              this.store = workingStore;
-              this.useActiveData(this.requireActiveBase().data);
-              latestBlockingWarning = incomingWarning || localWarning;
-              // The last compatible committed/accumulated envelope may not be
-              // part of the incompatible file that must remain authoritative for
-              // a newer build. Preserve it before this instance settles into
-              // read-only mode. The rescue helper deduplicates identical stores.
-              if (baselineTrust !== "none") latestAccumulatedRescueStore = structuredClone(fallbackStore);
-              this.dataCompatibilityWarning = latestBlockingWarning;
-            } else if ((!loaded.recognizedStore || !loaded.hasVaultId) && !recoverableLegacyCapture) {
-              workingStore = fallbackStore;
-              this.store = workingStore;
-              this.useActiveData(this.requireActiveBase().data);
-              latestBlockingWarning = "Synced plugin data was written by an older build without a vault identity. Update Knowledge Base Command Center on the other device before editing; local bases remain read-only so neither copy is overwritten.";
-              // Earlier captures in this batch may already be merged into the
-              // fallback; the identity-less file stays authoritative on disk, so
-              // that merge survives only through the rescue path.
-              if (baselineTrust !== "none") latestAccumulatedRescueStore = structuredClone(fallbackStore);
-              this.dataCompatibilityWarning = latestBlockingWarning;
-              new Notice(this.dataCompatibilityWarning, 12000);
-            } else {
-              const incomingStore = this.store;
-              try {
-                if (baselineTrust === "none") {
-                  // Startup can observe a transient partial data.json. Once a
-                  // complete identified store or substantial recognized
-                  // legacy payload arrives, adopt its migrated store directly
-                  // instead of comparing it with the random fallback identity.
-                  workingStore = structuredClone(incomingStore);
-                  baselineTrust = isFreshVaultId(incomingStore.vaultId)
-                    ? "fresh"
-                    : recoverableLegacyCapture || loaded.identityNeedsWriteback
-                      ? "legacy-provisional"
-                      : "identified";
-                  latestNeedsWriteback = recoverableLegacyCapture
-                    || loaded.sourceVersion !== STORE_VERSION
-                    || loaded.identityNeedsWriteback
-                    || loaded.structuralRepairNeedsWriteback
-                    || loaded.remediationNeedsWriteback;
-                } else if (baselineTrust === "fresh") {
-                  const localBootstrapOnly = freshStoreHasOnlyBootstrapChanges(workingStore);
-                  if (isFreshVaultId(incomingStore.vaultId)) {
-                    const incomingBootstrapOnly = freshStoreHasOnlyBootstrapChanges(incomingStore);
-                    const localWins = workingStore.vaultId.localeCompare(incomingStore.vaultId) <= 0;
-                    if (workingStore.vaultId === incomingStore.vaultId) {
-                      const merged = await this.mergeStoresWithSemanticRescue(workingStore, incomingStore, preferredActiveId);
-                      workingStore = merged.store;
-                      latestNeedsWriteback = merged.incomingNeedsWriteback
-                        || loaded.structuralRepairNeedsWriteback
-                        || loaded.remediationNeedsWriteback;
-                    } else if (localBootstrapOnly && !incomingBootstrapOnly) {
-                      workingStore = structuredClone(incomingStore);
-                    } else if (!localBootstrapOnly && incomingBootstrapOnly) {
-                      // Local work is the only meaningful fresh-device payload.
-                      // Keep it and overwrite the empty incoming bootstrap.
-                      latestNeedsWriteback = true;
-                    } else if (localBootstrapOnly && incomingBootstrapOnly) {
-                      // Two empty devices converge symmetrically on one
-                      // provisional identity; their view-only differences are
-                      // deliberately disposable.
-                      workingStore = structuredClone(localWins ? workingStore : incomingStore);
-                      latestNeedsWriteback = workingStore.vaultId !== incomingStore.vaultId;
-                    } else if (localWins) {
-                      const rescuePath = await this.writeConflictRescueStore(
-                        incomingStore,
-                        "Two fresh devices contained independent changes before Sync converged; this is the non-authoritative incoming copy.",
-                      );
-                      if (!rescuePath) throw new Error("Independent fresh-device changes could not be preserved before convergence.");
-                      latestNeedsWriteback = true;
-                      new Notice(`Independent changes from another fresh device were preserved at ${rescuePath}. The local fresh copy remains active.`, 12000);
-                    } else {
-                      const rescuePath = await this.writeConflictRescueStore(
-                        workingStore,
-                        "Two fresh devices contained independent changes before Sync converged; this is the non-authoritative local copy.",
-                      );
-                      if (!rescuePath) throw new Error("Independent fresh-device changes could not be preserved before convergence.");
-                      workingStore = structuredClone(incomingStore);
-                      new Notice(`Independent local changes were preserved at ${rescuePath} before the other fresh device became active.`, 12000);
-                    }
-                    baselineTrust = "fresh";
-                  } else {
-                    // A fresh identity means this device started before Sync
-                    // supplied the vault's established store. The identified
-                    // envelope is authoritative. Preserve any real local work
-                    // first; view-only bootstrap state can be discarded.
-                    if (!localBootstrapOnly) {
-                      const rescuePath = await this.writeConflictRescueStore(
-                        workingStore,
-                        "This device was edited before the established synced knowledge-base store arrived.",
-                      );
-                      if (!rescuePath) throw new Error("Fresh-device changes could not be preserved before adopting synced data.");
-                      new Notice(`Fresh-device changes were preserved at ${rescuePath} before the established synced store was adopted.`, 12000);
-                    }
-                    workingStore = structuredClone(incomingStore);
-                    baselineTrust = recoverableLegacyCapture || loaded.identityNeedsWriteback
-                      ? "legacy-provisional"
-                      : "identified";
-                    latestNeedsWriteback = recoverableLegacyCapture
-                      || loaded.sourceVersion !== STORE_VERSION
-                      || loaded.identityNeedsWriteback
-                      || loaded.structuralRepairNeedsWriteback
-                      || loaded.remediationNeedsWriteback;
-                  }
-                } else if ((baselineTrust === "identified" || baselineTrust === "legacy-provisional")
-                  && isFreshVaultId(incomingStore.vaultId)) {
-                  // This is the mirror of fresh-local adoption above. A device
-                  // that already has identified (or recovered legacy) vault
-                  // organization remains authoritative when another device
-                  // briefly publishes its pre-Sync fresh identity. Empty
-                  // bootstrap state is disposable; meaningful offline work is
-                  // rescued before the authoritative envelope is written back.
-                  if (!freshStoreHasOnlyBootstrapChanges(incomingStore)) {
-                    const rescuePath = await this.writeConflictRescueStore(
-                      incomingStore,
-                      "A fresh device contained offline changes before it received this vault's established knowledge-base identity.",
-                    );
-                    if (!rescuePath) throw new Error("Incoming fresh-device changes could not be preserved before restoring established synced data.");
-                    new Notice(`Incoming fresh-device changes were preserved at ${rescuePath}. The established synced store remains active.`, 12000);
-                  }
-                  latestNeedsWriteback = true;
-                } else if (baselineTrust === "legacy-provisional"
-                  && loaded.recognizedStore
-                  && loaded.hasVaultId
-                  && !loaded.identityNeedsWriteback) {
-                  // A migrated flat payload is only provisional recovery state.
-                  // If Sync subsequently supplies a complete envelope, it is
-                  // the first authoritative baseline and must supersede the
-                  // provisional copy rather than fail a cross-vault merge.
-                  workingStore = structuredClone(incomingStore);
-                  baselineTrust = "identified";
-                  latestNeedsWriteback = loaded.sourceVersion !== STORE_VERSION
-                    || loaded.identityNeedsWriteback
-                    || loaded.structuralRepairNeedsWriteback
-                    || loaded.remediationNeedsWriteback;
-                } else {
-                  const merged = await this.mergeStoresWithSemanticRescue(workingStore, incomingStore, preferredActiveId);
-                  workingStore = merged.store;
-                  latestNeedsWriteback = merged.incomingNeedsWriteback
-                    || loaded.sourceVersion !== STORE_VERSION
-                    || loaded.structuralRepairNeedsWriteback
-                    || loaded.remediationNeedsWriteback
-                    || recoverableLegacyCapture;
-                }
-                // Every compatible legacy envelope must be rewritten after its
-                // in-memory schema upgrade, even when merge semantics are
-                // otherwise equal and neither side requests conflict writeback.
-                latestNeedsWriteback ||= loaded.sourceVersion !== STORE_VERSION;
-                if (loaded.legacyDeviceState?.vaultId === workingStore.vaultId) {
-                  // Only now is the external identity accepted. Apply the
-                  // migrated route/history to the final semantic winner and
-                  // durably bind it before the v14 write can neutralize the
-                  // legacy fields in data.json.
-                  this.applyDeviceLocalState(workingStore, loaded.legacyDeviceState);
-                  this.storeDeviceLocalState(createDeviceLocalPluginState(workingStore), true);
-                  this.noticeLegacyDeviceStateTruncation(
-                    loaded.legacyDeviceStateHistoryTruncated === true,
-                    loaded.legacyDeviceStateViewTruncated === true,
-                  );
-                }
-                this.store = workingStore;
-                this.useActiveData(this.requireActiveBase().data);
-                this.dataCompatibilityWarning = "";
-                latestCaptureCompatible = true;
-                this.retainedExternalSettingsPayload = null;
-              } catch (error) {
-                baselineTrust = fallbackBaselineTrust;
-                workingStore = fallbackStore;
-                this.store = workingStore;
-                this.useActiveData(this.requireActiveBase().data);
-                if ("value" in capture.read) {
-                  this.retainedExternalSettingsPayload = structuredClone(capture.read.value);
-                }
-                const semanticRescueFailed = error instanceof SemanticConflictRescueError;
-                this.semanticConflictRescueFailed ||= semanticRescueFailed;
-                const rescuePath = semanticRescueFailed
-                  ? ""
-                  : await this.writeConflictRescueStore(
-                    fallbackStore,
-                    `Synced knowledge-base data could not be merged: ${error instanceof Error ? error.message : String(error)}`,
-                  );
-                latestBlockingWarning = semanticRescueFailed
-                  ? "Concurrent knowledge-base edits could not be preserved before conflict resolution. Local bases remain read-only, the captured synced payload is retained in memory, and no conflict winner was adopted. Export every base or copy the plugin data.json before restarting Obsidian."
-                  : `Synced knowledge-base data could not be merged (${error instanceof Error ? error.message : String(error)}). Local bases remain read-only and the captured synced payload will be preserved.${rescuePath ? ` A private local rescue was saved at ${rescuePath}.` : " Automatic local rescue failed; export every base before restarting Obsidian."}`;
-                this.dataCompatibilityWarning = latestBlockingWarning;
-                new Notice(this.dataCompatibilityWarning, 12000);
-              }
-            }
-            this.invalidateRecordCache();
+            const outcome = await this.resolveExternalCaptureOutcome(
+              capture,
+              workingStore,
+              baselineTrust,
+              preferredActiveId,
+            );
+            latestOutcome = outcome;
+            workingStore = outcome.workingStore;
+            baselineTrust = outcome.baselineTrust;
+            // Cache invalidation happens inside the resolver, in the same turn
+            // as the store publication it belongs to.
           }
 
           // A newer callback already owns data.json. Drain it before attempting
           // any write for the batch we just processed.
           if (this.externalReloadPending || this.externalReloadCaptures.length > 0) continue;
 
-          if (latestCapture && latestCaptureCompatible) {
-            const capturedFileMayHaveBeenOverwritten = this.adapterWriteGeneration !== latestCapture.adapterWriteGeneration;
-            if (latestNeedsWriteback || capturedFileMayHaveBeenOverwritten) {
-              const writebackGeneration = this.externalChangeGeneration;
-              try {
-                await this.saveStoreSnapshot(true, writebackGeneration);
-              } catch (error) {
-                if (error instanceof ExternalSettingsSupersededError) continue;
-                this.markPersistenceUncertain(`Synced knowledge bases were merged in memory, but the merged data could not be saved (${error instanceof Error ? error.message : String(error)}). The attempted write may have reached data.json; organization remains read-only until Obsidian is restarted after every base and data.json are preserved.`);
-              }
-            } else {
-              // The latest captured file already contains this payload.
-              this.committedStoreSnapshot = this.neutralSyncedStore(workingStore);
-              this.rollbackStoreSnapshot = structuredClone(this.committedStoreSnapshot);
-              this.persistDeviceLocalStateSafely();
-            }
-          } else if (latestCapture && latestBlockingWarning) {
-            if (latestAccumulatedRescueStore) {
-              const rescuePath = await this.writeConflictRescueStore(
-                latestAccumulatedRescueStore,
-                "A valid synced update was followed by an incompatible or unreadable plugin-data capture; this is the last compatible accumulated state.",
-              );
-              latestBlockingWarning = rescuePath
-                ? `${latestBlockingWarning} The prior valid synced state was preserved in a private rescue at ${rescuePath}.`
-                : `${latestBlockingWarning} Automatic rescue of the prior valid synced state failed; do not restart Obsidian until you export every base or copy the plugin data.json.`;
-              this.dataCompatibilityWarning = latestBlockingWarning;
-              new Notice(latestBlockingWarning, 15000);
-            }
-            const capturedFileMayHaveBeenOverwritten = this.adapterWriteGeneration !== latestCapture.adapterWriteGeneration;
-            if (capturedFileMayHaveBeenOverwritten && "value" in latestCapture.read) {
-              this.retainedExternalSettingsPayload = structuredClone(latestCapture.read.value);
-              const restoreGeneration = this.externalChangeGeneration;
-              try {
-                await this.restoreCapturedPluginData(latestCapture, restoreGeneration);
-                this.retainedExternalSettingsPayload = null;
-              } catch (error) {
-                if (error instanceof ExternalSettingsSupersededError) continue;
-                this.markPersistenceUncertain(`${latestBlockingWarning} The captured file is retained in memory, but restoring it to data.json failed (${error instanceof Error ? error.message : String(error)}). The file may now contain an uncertain partial write; do not restart Obsidian until data.json and every base are preserved.`);
-              }
-            }
+          if (latestOutcome?.compatible) {
+            if (await this.persistMergedExternalStore(latestOutcome, workingStore) === "superseded") continue;
+          } else if (latestOutcome?.blockingWarning) {
+            if (await this.preserveBlockedExternalCapture(latestOutcome) === "superseded") continue;
           }
-          if (latestCapture) {
-            reloadOutcome = latestCaptureCompatible && !latestBlockingWarning && !this.persistenceUncertain
+          if (latestOutcome) {
+            // Computed after the write attempts so a markPersistenceUncertain
+            // raised by either of them downgrades the recorded outcome.
+            reloadOutcome = latestOutcome.compatible && !latestOutcome.blockingWarning && !this.persistenceUncertain
               ? "applied"
               : "blocked";
           }

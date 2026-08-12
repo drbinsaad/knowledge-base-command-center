@@ -10405,3 +10405,779 @@ test("scoped events reclassify a clinical proposal in place and still match a fu
   assert.equal(liveInternal.invalidateRecordCachesForPath(adhoc.path, { file: null }), true);
   settle("after the proposal file is deleted");
 });
+
+// ---------------------------------------------------------------------------
+// Characterization tests for onExternalSettingsChange batch/accumulator
+// semantics. Every assertion below is about an OBSERVABLE outcome (data.json
+// writes, rescue files, notices, warnings, read-only state, retained payload,
+// event ordering) so a restructuring of the drain loop that preserves behavior
+// stays green while any behavior change fails.
+// ---------------------------------------------------------------------------
+
+interface RescueWriteLog {
+  paths: string[];
+  contents: string[];
+  events: string[];
+}
+
+/**
+ * Replace the plugin's vault with one that records every conflict-rescue file
+ * written to the vault, optionally running a hook while the write is in flight.
+ */
+function recordRescueWrites(
+  plugin: EntVaultCommandCenterPlugin,
+  onCreate?: (path: string, content: string) => void,
+): RescueWriteLog {
+  const log: RescueWriteLog = { paths: [], contents: [], events: [] };
+  const app = plugin.app as unknown as { vault: unknown };
+  app.vault = {
+    configDir: ".obsidian",
+    getMarkdownFiles: (): TFile[] => [],
+    getAbstractFileByPath: (): TAbstractFile | null => null,
+    createFolder: async (): Promise<void> => {},
+    create: async (path: string, content: string): Promise<TFile> => {
+      log.paths.push(path);
+      log.contents.push(content);
+      log.events.push("rescue");
+      onCreate?.(path, content);
+      return new TFile(path);
+    },
+  };
+  return log;
+}
+
+function rescuedStores(log: RescueWriteLog): PluginStore[] {
+  return log.contents.map((content) => (JSON.parse(content) as { store: PluginStore }).store);
+}
+
+function literalPattern(value: string): RegExp {
+  return new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+}
+
+/** Queue one payload per capture so a batch of callbacks reads distinct files. */
+function queuedCaptures(plugin: EntVaultCommandCenterPlugin, payloads: readonly unknown[]): void {
+  const queue = payloads.map((payload) => structuredClone(payload));
+  plugin.loadData = async (): Promise<unknown> => (
+    queue.length > 1 ? structuredClone(queue.shift()) : structuredClone(queue[0])
+  );
+}
+
+test("a batch ending in an already-current capture drops the restore its first capture demanded", async () => {
+  const committedData = migrateData(null);
+  committedData.settings.workspaceName = "Committed knowledge base";
+  const committed = createDefaultStore(committedData, 100, "vault-batch-missing-then-current");
+  const plugin = pluginWith(structuredClone(committed));
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+  // A lone missing capture restores the committed envelope with exactly one
+  // write; the same capture followed by an already-current file writes nothing,
+  // because only the last capture's outcome survives into the post-loop
+  // decision.
+  queuedCaptures(plugin, [null, structuredClone(committed)]);
+
+  await Promise.all([plugin.onExternalSettingsChange(), plugin.onExternalSettingsChange()]);
+
+  assert.equal(plugin.dataCompatibilityWarning, "");
+  assert.equal(plugin.data.settings.workspaceName, "Committed knowledge base");
+  assert.equal(plugin.savedData.length, 0, "the earlier missing capture's restore is not written for the batch");
+  assert.equal(plugin.getSyncRecoveryCenterSnapshot().lastExternalReloadOutcome, "applied");
+});
+
+test("a batch ending in a missing capture still restores even though its first capture was current", async () => {
+  const committedData = migrateData(null);
+  committedData.settings.workspaceName = "Committed knowledge base";
+  committedData.pinnedPaths = ["Knowledge Base/Keep.md"];
+  const committed = createDefaultStore(committedData, 100, "vault-batch-current-then-missing");
+  const plugin = pluginWith(structuredClone(committed));
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+  queuedCaptures(plugin, [structuredClone(committed), null]);
+
+  await Promise.all([plugin.onExternalSettingsChange(), plugin.onExternalSettingsChange()]);
+
+  assert.equal(plugin.dataCompatibilityWarning, "");
+  assert.deepEqual(plugin.data.pinnedPaths, ["Knowledge Base/Keep.md"]);
+  assert.equal(plugin.savedData.length, 1, "the last capture's restore drives the batch write");
+  assert.deepEqual(plugin.savedData[0], migrateStore(committed));
+});
+
+test("an incompatible last capture rescues the state accumulated by an earlier valid capture in the same batch", async () => {
+  const initial = createDefaultStore(migrateData(null), 100, "vault-batch-valid-then-incompatible");
+  const plugin = pluginWith(structuredClone(initial));
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+  const rescues = recordRescueWrites(plugin);
+
+  const valid = structuredClone(initial);
+  const validBase = valid.bases[0];
+  assert.ok(validBase);
+  advanceStoreEntry(validBase, () => { validBase.data.nextStudyPaths = ["Remote-valid.md"]; }, 200);
+  const incompatible = structuredClone(initial);
+  incompatible.version = STORE_VERSION + 1;
+  queuedCaptures(plugin, [valid, incompatible]);
+
+  await Promise.all([plugin.onExternalSettingsChange(), plugin.onExternalSettingsChange()]);
+
+  assert.deepEqual(plugin.data.nextStudyPaths, ["Remote-valid.md"], "the earlier valid capture is not discarded from memory");
+  assert.match(plugin.dataCompatibilityWarning, /newer than this build/i);
+  assert.equal(plugin.isDataReadOnly(), true);
+  assert.equal(plugin.savedData.length, 0, "the future-version capture stays authoritative on disk");
+  assert.equal(rescues.paths.length, 1, "the accumulated valid state is rescued exactly once");
+  assert.deepEqual(
+    rescuedStores(rescues)[0]?.bases[0]?.data.nextStudyPaths,
+    ["Remote-valid.md"],
+    "the earlier capture survives a restart only through the rescue",
+  );
+  assert.match(plugin.dataCompatibilityWarning, literalPattern(rescues.paths[0] ?? "unreachable"));
+  assert.equal(plugin.getSyncRecoveryCenterSnapshot().lastExternalReloadOutcome, "blocked");
+});
+
+test("a compatible last capture erases the blocking warning and rescue an earlier incompatible capture asked for", async () => {
+  const initial = createDefaultStore(migrateData(null), 100, "vault-batch-incompatible-then-valid");
+  const plugin = pluginWith(structuredClone(initial));
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+  const rescues = recordRescueWrites(plugin);
+
+  const incompatible = structuredClone(initial);
+  incompatible.version = STORE_VERSION + 1;
+  const valid = structuredClone(initial);
+  const validBase = valid.bases[0];
+  assert.ok(validBase);
+  advanceStoreEntry(validBase, () => { validBase.data.nextStudyPaths = ["Remote-after-future.md"]; }, 200);
+  queuedCaptures(plugin, [incompatible, valid]);
+
+  await Promise.all([plugin.onExternalSettingsChange(), plugin.onExternalSettingsChange()]);
+
+  assert.equal(plugin.dataCompatibilityWarning, "", "a blocking warning does not survive a later compatible capture");
+  assert.equal(plugin.isDataReadOnly(), false);
+  assert.deepEqual(plugin.data.nextStudyPaths, ["Remote-after-future.md"]);
+  assert.equal(rescues.paths.length, 0, "no rescue is written for a blocking capture a later capture supersedes");
+  assert.equal(plugin.getSyncRecoveryCenterSnapshot().lastExternalReloadOutcome, "applied");
+});
+
+test("an identity-less legacy last capture rescues the state accumulated by an earlier valid capture", async () => {
+  const initial = createDefaultStore(migrateData(null), 100, "vault-batch-valid-then-identityless");
+  const plugin = pluginWith(structuredClone(initial));
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+  const rescues = recordRescueWrites(plugin);
+
+  const valid = structuredClone(initial);
+  const validBase = valid.bases[0];
+  assert.ok(validBase);
+  advanceStoreEntry(validBase, () => { validBase.data.nextStudyPaths = ["Remote-before-identityless.md"]; }, 200);
+  queuedCaptures(plugin, [valid, migrateData(null)]);
+
+  await Promise.all([plugin.onExternalSettingsChange(), plugin.onExternalSettingsChange()]);
+
+  assert.match(plugin.dataCompatibilityWarning, /older build without a vault identity/i);
+  assert.equal(plugin.isDataReadOnly(), true);
+  assert.equal(plugin.savedData.length, 0, "the identity-less file stays authoritative on disk");
+  assert.equal(rescues.paths.length, 1);
+  assert.deepEqual(
+    rescuedStores(rescues)[0]?.bases[0]?.data.nextStudyPaths,
+    ["Remote-before-identityless.md"],
+    "the merge contributed by the earlier capture is preserved before read-only mode",
+  );
+  assert.match(plugin.dataCompatibilityWarning, /preserved in a private rescue at/i);
+});
+
+test("an incompatible capture with no trusted baseline writes neither a rescue nor data.json", async () => {
+  const plugin = pluginWith(null);
+  plugin.loadData = async (): Promise<unknown> => { throw new SyntaxError("transient partial JSON"); };
+  await plugin.loadPluginData(false);
+  assert.match(plugin.dataCompatibilityWarning, /could not be parsed/i);
+  const rescues = recordRescueWrites(plugin);
+
+  const future = createDefaultStore(migrateData(null), 500, "vault-no-baseline-future");
+  future.version = STORE_VERSION + 1;
+  queuedCaptures(plugin, [future]);
+
+  await plugin.onExternalSettingsChange();
+
+  assert.match(plugin.dataCompatibilityWarning, /newer than this build/i);
+  assert.equal(rescues.paths.length, 0, "there is no trusted accumulated state to rescue without a baseline");
+  assert.doesNotMatch(plugin.dataCompatibilityWarning, /private rescue|Automatic rescue/i);
+  assert.equal(plugin.savedData.length, 0, "the future-version file remains untouched on disk");
+});
+
+test("one no-baseline batch walks fresh bootstrap to identified authority without rescue or writeback", async () => {
+  const establishedData = migrateData(null);
+  establishedData.settings.workspaceName = "Established authority";
+  establishedData.pinnedPaths = ["Established.md"];
+  const established = createDefaultStore(establishedData, 900, "vault-batch-none-fresh-identified");
+  const plugin = pluginWith(null);
+  plugin.loadData = async (): Promise<unknown> => { throw new SyntaxError("transient partial JSON"); };
+  await plugin.loadPluginData(false);
+  const rescues = recordRescueWrites(plugin);
+  queuedCaptures(plugin, [migrateStore(null), structuredClone(established)]);
+
+  await Promise.all([plugin.onExternalSettingsChange(), plugin.onExternalSettingsChange()]);
+
+  assert.equal(plugin.dataCompatibilityWarning, "");
+  assert.equal(plugin.getVaultId(), "vault-batch-none-fresh-identified");
+  assert.deepEqual(plugin.data.pinnedPaths, ["Established.md"]);
+  assert.equal(rescues.paths.length, 0, "a bootstrap-only fresh capture is disposable and needs no rescue");
+  assert.equal(plugin.savedData.length, 0, "the established capture is already authoritative on disk");
+});
+
+test("one no-baseline batch that migrates flat legacy data drops its writeback when an identified envelope follows", async () => {
+  const legacy = migrateData(null);
+  legacy.version = 10;
+  legacy.settings.workspaceName = "Provisional legacy";
+  legacy.pinnedPaths = ["Provisional.md"];
+  const authoritativeData = migrateData(null);
+  authoritativeData.settings.workspaceName = "Authoritative current store";
+  authoritativeData.pinnedPaths = ["Authoritative.md"];
+  const authoritative = createDefaultStore(authoritativeData, 500, "vault-batch-legacy-then-identified");
+  const plugin = pluginWith(null);
+  plugin.loadData = async (): Promise<unknown> => { throw new SyntaxError("transient partial JSON"); };
+  await plugin.loadPluginData(false);
+  queuedCaptures(plugin, [legacy, structuredClone(authoritative)]);
+
+  await Promise.all([plugin.onExternalSettingsChange(), plugin.onExternalSettingsChange()]);
+
+  assert.equal(plugin.dataCompatibilityWarning, "");
+  assert.equal(plugin.getVaultId(), "vault-batch-legacy-then-identified");
+  assert.deepEqual(plugin.data.pinnedPaths, ["Authoritative.md"]);
+  assert.equal(
+    plugin.savedData.length,
+    0,
+    "the legacy migration writeback is discarded with the rest of the earlier capture's outcome",
+  );
+});
+
+test("a failed conflict rescue short-circuits every later capture in the same drained batch", async () => {
+  const localData = migrateData(null);
+  localData.settings.workspaceName = "Local organization";
+  const local = createDefaultStore(localData, 100, "vault-batch-rescue-failure");
+  local.bases[0].semanticRevision = 3;
+  const conflicting = structuredClone(local);
+  conflicting.bases[0].data.settings.workspaceName = "Incoming organization";
+  const laterValid = structuredClone(local);
+  const laterBase = laterValid.bases[0];
+  assert.ok(laterBase);
+  advanceStoreEntry(laterBase, () => { laterBase.data.nextStudyPaths = ["Later-remote.md"]; }, 5_000);
+
+  const plugin = pluginWith(structuredClone(local));
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+  const app = plugin.app as unknown as { vault: unknown };
+  app.vault = {
+    configDir: ".obsidian",
+    getMarkdownFiles: (): TFile[] => [],
+    getAbstractFileByPath: (): TAbstractFile | null => null,
+    createFolder: async (): Promise<void> => {},
+    create: async (): Promise<TFile> => { throw new Error("simulated rescue disk failure"); },
+  };
+  queuedCaptures(plugin, [conflicting, laterValid]);
+
+  await Promise.all([plugin.onExternalSettingsChange(), plugin.onExternalSettingsChange()]);
+
+  assert.equal(plugin.data.settings.workspaceName, "Local organization");
+  assert.deepEqual(plugin.data.nextStudyPaths, [], "the later capture in the same batch is ignored once rescue failed");
+  assert.match(plugin.dataCompatibilityWarning, /could not be preserved.*read-only/i);
+  assert.equal(plugin.savedData.length, 0);
+  assert.deepEqual(
+    (plugin as unknown as { retainedExternalSettingsPayload: unknown }).retainedExternalSettingsPayload,
+    conflicting,
+    "the unrescued capture stays retained; the ignored later capture never replaces it",
+  );
+  const snapshot = plugin.getSyncRecoveryCenterSnapshot();
+  assert.equal(snapshot.stickyUntilRestart, true);
+  assert.equal(snapshot.lastExternalReloadOutcome, "blocked");
+});
+
+test("a callback arriving while a batch writes its conflict rescue defers that batch's writeback", async () => {
+  const establishedData = migrateData(null);
+  establishedData.settings.workspaceName = "Established authority";
+  const established = createDefaultStore(establishedData, 100, "vault-batch-deferred-writeback");
+  const plugin = pluginWith(structuredClone(established));
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+
+  const later = structuredClone(established);
+  const laterBase = later.bases[0];
+  assert.ok(laterBase);
+  advanceStoreEntry(laterBase, () => { laterBase.data.nextStudyPaths = ["Later-remote.md"]; }, 900);
+
+  const incomingFresh = migrateStore(null);
+  const incomingFreshBase = incomingFresh.bases[0];
+  assert.ok(incomingFreshBase);
+  incomingFreshBase.data.settings.workspaceName = "Fresh offline work";
+  incomingFreshBase.data.nextStudyPaths = ["Fresh-device.md"];
+
+  let disk: unknown = incomingFresh;
+  let secondCallbackFired = false;
+  const rescues = recordRescueWrites(plugin, () => {
+    if (secondCallbackFired) return;
+    secondCallbackFired = true;
+    disk = later;
+    void plugin.onExternalSettingsChange();
+  });
+  plugin.loadData = async (): Promise<unknown> => structuredClone(disk);
+  const writes: PluginStore[] = [];
+  plugin.saveData = async (value: unknown): Promise<void> => {
+    rescues.events.push("write");
+    writes.push(structuredClone(value) as PluginStore);
+  };
+
+  await plugin.onExternalSettingsChange();
+
+  assert.equal(secondCallbackFired, true, "the fixture must interleave a callback with the rescue write");
+  // Without the deferral this batch would write its established envelope back
+  // (the incoming-fresh rescue branch always requests a writeback); the later
+  // callback cancels that write entirely, and its own round needs none.
+  assert.deepEqual(rescues.events, ["rescue"], "no write is made for the batch the later callback superseded");
+  assert.equal(writes.length, 0);
+  assert.equal(rescues.paths.length, 1);
+  assert.deepEqual(rescuedStores(rescues)[0]?.bases[0]?.data.nextStudyPaths, ["Fresh-device.md"]);
+  assert.equal(plugin.dataCompatibilityWarning, "");
+  assert.deepEqual(plugin.data.nextStudyPaths, ["Later-remote.md"]);
+});
+
+test("a callback arriving during a captured-file restore is swallowed and drained without uncertainty", async () => {
+  const app = {
+    vault: emptyWritableTestVault(),
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null },
+    fileManager: {},
+  };
+  // The local edit and the synced captures touch different bases so the
+  // rejected write's compensating rollback cannot add a semantic conflict of
+  // its own to the observed event sequence.
+  const initial = createDefaultStore(migrateData(null), 100, "vault-restore-superseded");
+  initial.bases.push(createKnowledgeBaseEntry(migrateData(null), "base-secondary", 100));
+  let disk: PluginStore = structuredClone(initial);
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never);
+  plugin.loadData = async (): Promise<unknown> => structuredClone(disk);
+
+  const recovered = structuredClone(initial);
+  const recoveredBase = recovered.bases.find((entry) => entry.id === "base-secondary");
+  assert.ok(recoveredBase);
+  advanceStoreEntry(recoveredBase, () => { recoveredBase.data.nextStudyPaths = ["Recovered.md"]; }, 10_000);
+
+  const events: string[] = [];
+  const localSaveStarted = deferred();
+  const releaseLocalSave = deferred();
+  let saveCalls = 0;
+  plugin.saveData = async (value: unknown): Promise<void> => {
+    saveCalls += 1;
+    events.push(`write-${saveCalls}`);
+    if (saveCalls === 1) {
+      localSaveStarted.resolve();
+      await releaseLocalSave.promise;
+    }
+    disk = structuredClone(value) as PluginStore;
+    if (saveCalls === 2) {
+      // The captured future-version file has just been restored to data.json.
+      // A newer synced file lands before the restore can confirm its write.
+      disk = structuredClone(recovered);
+      void plugin.onExternalSettingsChange();
+    }
+  };
+  const originalCreate = app.vault.create;
+  app.vault.create = async (path: string): Promise<TFile> => {
+    events.push("rescue");
+    return originalCreate(path);
+  };
+  await plugin.loadPluginData(false);
+
+  const pendingMutation = plugin.mutate("Interrupted local edit", () => {
+    plugin.data.pinnedPaths = ["Local.md"];
+  });
+  await localSaveStarted.promise;
+  const future = structuredClone(initial);
+  future.version = STORE_VERSION + 1;
+  const futureBase = future.bases.find((entry) => entry.id === "base-secondary");
+  assert.ok(futureBase);
+  futureBase.data.nextStudyPaths = ["FUTURE.md"];
+  futureBase.updatedAt = 20_000;
+  disk = future;
+
+  const pendingReload = plugin.onExternalSettingsChange();
+  releaseLocalSave.resolve();
+  await assert.rejects(pendingMutation, /Sync while this edit was saving/i);
+  await pendingReload;
+
+  assert.deepEqual(
+    events,
+    ["write-1", "rescue", "write-2", "write-3"],
+    "the accumulated rescue precedes the restore, and the superseded restore is followed by one more drain round",
+  );
+  assert.equal(plugin.isDataReadOnly(), false, "a superseded restore must not mark persistence uncertain");
+  assert.equal(plugin.dataCompatibilityWarning, "");
+  assert.equal(
+    (plugin as unknown as { retainedExternalSettingsPayload: unknown }).retainedExternalSettingsPayload,
+    null,
+  );
+  assert.equal(disk.version, STORE_VERSION);
+  assert.deepEqual(
+    disk.bases.find((entry) => entry.id === "base-secondary")?.data.nextStudyPaths,
+    ["Recovered.md"],
+  );
+  assert.deepEqual(
+    plugin.getKnowledgeBases(true).find((entry) => entry.id === "base-secondary")?.data.nextStudyPaths,
+    ["Recovered.md"],
+  );
+  assert.deepEqual(plugin.data.pinnedPaths, [], "the rejected local edit stays rolled back");
+});
+
+test("a batch whose overwritten last capture is incompatible rescues the accumulated state before restoring the file", async () => {
+  const app = {
+    vault: emptyWritableTestVault(),
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null },
+    fileManager: {},
+  };
+  const initial = createDefaultStore(migrateData(null), 100, "vault-batch-overwritten-incompatible");
+  initial.bases.push(createKnowledgeBaseEntry(migrateData(null), "base-secondary", 100));
+  let disk: PluginStore = structuredClone(initial);
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never);
+  plugin.loadData = async (): Promise<unknown> => structuredClone(disk);
+  const events: string[] = [];
+  const rescueContents: string[] = [];
+  const originalCreate = app.vault.create;
+  app.vault.create = async (path: string, content: string): Promise<TFile> => {
+    events.push("rescue");
+    rescueContents.push(content);
+    return originalCreate(path);
+  };
+  const localSaveStarted = deferred();
+  const releaseLocalSave = deferred();
+  let saveCalls = 0;
+  plugin.saveData = async (value: unknown): Promise<void> => {
+    saveCalls += 1;
+    events.push("write");
+    if (saveCalls === 1) {
+      localSaveStarted.resolve();
+      await releaseLocalSave.promise;
+    }
+    disk = structuredClone(value) as PluginStore;
+  };
+  await plugin.loadPluginData(false);
+
+  const pendingMutation = plugin.mutate("Interrupted local edit", () => {
+    plugin.data.pinnedPaths = ["Local.md"];
+  });
+  await localSaveStarted.promise;
+
+  const valid = structuredClone(initial);
+  const validBase = valid.bases.find((entry) => entry.id === "base-secondary");
+  assert.ok(validBase);
+  advanceStoreEntry(validBase, () => { validBase.data.nextStudyPaths = ["Remote-valid.md"]; }, 20_000);
+  const future = structuredClone(valid);
+  future.version = STORE_VERSION + 1;
+  const futureBase = future.bases.find((entry) => entry.id === "base-secondary");
+  assert.ok(futureBase);
+  futureBase.data.nextStudyPaths = ["FUTURE-ONLY.md"];
+  const queue: PluginStore[] = [valid, future];
+  plugin.loadData = async (): Promise<unknown> => structuredClone(queue.shift() ?? future);
+
+  const firstReload = plugin.onExternalSettingsChange();
+  const secondReload = plugin.onExternalSettingsChange();
+  releaseLocalSave.resolve();
+  await assert.rejects(pendingMutation, /Sync while this edit was saving/i);
+  await Promise.all([firstReload, secondReload]);
+
+  assert.deepEqual(events, ["write", "rescue", "write"], "the accumulated rescue is durable before the capture is restored");
+  const rescued = (JSON.parse(rescueContents[0] ?? "{}") as { store?: PluginStore }).store;
+  assert.deepEqual(
+    rescued?.bases.find((entry) => entry.id === "base-secondary")?.data.nextStudyPaths,
+    ["Remote-valid.md"],
+    "the valid capture merged earlier in the batch is preserved before read-only mode",
+  );
+  assert.equal(disk.version, STORE_VERSION + 1, "the captured future file is restored over the interrupted local write");
+  assert.deepEqual(
+    disk.bases.find((entry) => entry.id === "base-secondary")?.data.nextStudyPaths,
+    ["FUTURE-ONLY.md"],
+  );
+  assert.match(plugin.dataCompatibilityWarning, /newer than this build/i);
+  assert.equal(plugin.isDataReadOnly(), true);
+  assert.doesNotMatch(plugin.dataCompatibilityWarning, /restoring it to data\.json failed/i);
+});
+
+test("a fresh-device batch adopting a later fresh capture does not inherit the earlier capture's writeback", async () => {
+  // Local bootstrap-only fresh store: the last capture takes the fresh/fresh
+  // adoption path, which is the one compatible outcome that never states a
+  // writeback of its own. Any writeback the earlier missing capture requested
+  // must not survive into the batch decision.
+  const localFresh = migrateStore(null);
+  const plugin = pluginWith(structuredClone(localFresh));
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+  const rescues = recordRescueWrites(plugin);
+
+  const incomingFresh = migrateStore(null);
+  const incomingFreshBase = incomingFresh.bases[0];
+  assert.ok(incomingFreshBase);
+  incomingFreshBase.data.settings.workspaceName = "Other fresh device";
+  incomingFreshBase.data.nextStudyPaths = ["Other-fresh-device.md"];
+  assert.notEqual(incomingFresh.vaultId, localFresh.vaultId);
+  queuedCaptures(plugin, [null, incomingFresh]);
+
+  await Promise.all([plugin.onExternalSettingsChange(), plugin.onExternalSettingsChange()]);
+
+  assert.equal(plugin.dataCompatibilityWarning, "");
+  assert.equal(plugin.getVaultId(), incomingFresh.vaultId);
+  assert.deepEqual(plugin.data.nextStudyPaths, ["Other-fresh-device.md"]);
+  assert.equal(rescues.paths.length, 0, "a bootstrap-only local fresh store is disposable");
+  assert.equal(
+    plugin.savedData.length,
+    0,
+    "the restore the earlier missing capture requested is not carried into the adopted fresh capture",
+  );
+});
+
+test("a blocking last capture that accumulates no rescue does not inherit an earlier capture's rescue store", async () => {
+  const localData = migrateData(null);
+  localData.settings.workspaceName = "Local organization";
+  const local = createDefaultStore(localData, 100, "vault-batch-rescue-store-reset");
+  local.bases[0].semanticRevision = 3;
+  const plugin = pluginWith(structuredClone(local));
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+  const app = plugin.app as unknown as { vault: unknown };
+  app.vault = {
+    configDir: ".obsidian",
+    getMarkdownFiles: (): TFile[] => [],
+    getAbstractFileByPath: (): TAbstractFile | null => null,
+    createFolder: async (): Promise<void> => {},
+    create: async (): Promise<TFile> => { throw new Error("simulated rescue disk failure"); },
+  };
+
+  // The first capture is incompatible and does accumulate a rescue store; the
+  // last capture fails its semantic rescue, which reports a blocking warning
+  // but never accumulates a rescue store of its own.
+  const incompatible = structuredClone(local);
+  incompatible.version = STORE_VERSION + 1;
+  const conflicting = structuredClone(local);
+  conflicting.bases[0].data.settings.workspaceName = "Incoming organization";
+  queuedCaptures(plugin, [incompatible, conflicting]);
+
+  await Promise.all([plugin.onExternalSettingsChange(), plugin.onExternalSettingsChange()]);
+
+  assert.match(plugin.dataCompatibilityWarning, /could not be preserved.*read-only/i);
+  assert.doesNotMatch(
+    plugin.dataCompatibilityWarning,
+    /prior valid synced state/i,
+    "the earlier incompatible capture's rescue store is not carried into the last capture's outcome",
+  );
+  assert.equal(plugin.data.settings.workspaceName, "Local organization");
+  assert.equal(plugin.savedData.length, 0);
+  assert.equal(plugin.getSyncRecoveryCenterSnapshot().stickyUntilRestart, true);
+});
+
+test("a batch promotes legacy-provisional trust to identified so a third capture merges instead of replacing", async () => {
+  const legacy = migrateData(null);
+  legacy.version = 10;
+  legacy.settings.workspaceName = "Provisional legacy";
+  const authoritative = createDefaultStore(migrateData(null), 500, "vault-batch-provisional-promotion");
+  authoritative.bases.push(createKnowledgeBaseEntry(migrateData(null), "base-secondary", 500));
+
+  // The capture that supersedes the provisional recovery contributes a change
+  // the third capture does not carry. It survives only if the third capture is
+  // merged against identified trust rather than adopted wholesale.
+  const supersedes = structuredClone(authoritative);
+  const supersedesSecondary = supersedes.bases.find((entry) => entry.id === "base-secondary");
+  assert.ok(supersedesSecondary);
+  advanceStoreEntry(supersedesSecondary, () => { supersedesSecondary.data.nextStudyPaths = ["From-A.md"]; }, 600);
+  const third = structuredClone(authoritative);
+  const thirdPrimary = third.bases.find((entry) => entry.id === "base-default");
+  assert.ok(thirdPrimary);
+  advanceStoreEntry(thirdPrimary, () => { thirdPrimary.data.nextStudyPaths = ["From-B.md"]; }, 700);
+
+  const plugin = pluginWith(null);
+  plugin.loadData = async (): Promise<unknown> => { throw new SyntaxError("transient partial JSON"); };
+  await plugin.loadPluginData(false);
+  queuedCaptures(plugin, [legacy, supersedes, third]);
+
+  await Promise.all([
+    plugin.onExternalSettingsChange(),
+    plugin.onExternalSettingsChange(),
+    plugin.onExternalSettingsChange(),
+  ]);
+
+  assert.equal(plugin.dataCompatibilityWarning, "");
+  assert.equal(plugin.getVaultId(), "vault-batch-provisional-promotion");
+  assert.deepEqual(
+    plugin.getKnowledgeBases(true).find((entry) => entry.id === "base-secondary")?.data.nextStudyPaths,
+    ["From-A.md"],
+    "the superseding capture's change is merged, not replaced by the third capture",
+  );
+  assert.deepEqual(
+    plugin.getKnowledgeBases(true).find((entry) => entry.id === "base-default")?.data.nextStudyPaths,
+    ["From-B.md"],
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Vault-identity state machine of the external-Sync reload. Each test below
+// guards one decision that a silent regression would turn into permanent
+// read-only mode, an unidentified payload becoming authoritative, or two
+// devices that never converge. Only observable outcomes are asserted.
+// ---------------------------------------------------------------------------
+
+test("a same-fresh-vault capture from an older schema is rewritten at the current store version", async () => {
+  // The same-vaultId merge arm states no schema-upgrade writeback of its own;
+  // the caller adds that term for every arm. Without it the in-memory upgrade
+  // is never durable and is redone from the stale file on every restart.
+  const localFresh = migrateStore(null);
+  assert.equal(isFreshVaultId(localFresh.vaultId), true);
+  const plugin = pluginWith(structuredClone(localFresh));
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+  const rescues = recordRescueWrites(plugin);
+
+  // The other device published the very same still-fresh identity, but an
+  // older build wrote the envelope.
+  const olderSchema = structuredClone(localFresh);
+  olderSchema.version = STORE_VERSION - 1;
+  queuedCaptures(plugin, [olderSchema]);
+
+  await plugin.onExternalSettingsChange();
+
+  assert.equal(plugin.dataCompatibilityWarning, "");
+  assert.equal(plugin.getVaultId(), localFresh.vaultId, "the same fresh identity is merged, not replaced");
+  assert.equal(rescues.paths.length, 0, "an equal same-vault merge discards nothing");
+  assert.equal(plugin.savedData.length, 1, "the schema upgrade of a same-vault fresh merge reaches disk exactly once");
+  assert.equal(
+    (plugin.savedData[0] as PluginStore).version,
+    STORE_VERSION,
+    "the rewritten data.json carries the current store version, so the upgrade survives a restart",
+  );
+  assert.equal(plugin.getSyncRecoveryCenterSnapshot().lastExternalReloadOutcome, "applied");
+});
+
+test("a recoverable legacy capture on a fresh device stays legacy-provisional so the established envelope supersedes it", async () => {
+  // A migrated flat payload is recovery state, never proven vault identity. If
+  // it were trusted as identified, the vault's real envelope would fail a
+  // cross-vault merge and strand this device read-only on the flat payload.
+  const localFresh = migrateStore(null);
+  const plugin = pluginWith(structuredClone(localFresh));
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+
+  const legacy = migrateData(null);
+  legacy.version = 10;
+  legacy.settings.workspaceName = "Provisional legacy";
+  legacy.pinnedPaths = ["Provisional.md"];
+  const establishedData = migrateData(null);
+  establishedData.settings.workspaceName = "Established authority";
+  establishedData.pinnedPaths = ["Established.md"];
+  const established = createDefaultStore(establishedData, 500, "vault-established-after-fresh-legacy");
+  queuedCaptures(plugin, [legacy, structuredClone(established)]);
+
+  await Promise.all([plugin.onExternalSettingsChange(), plugin.onExternalSettingsChange()]);
+
+  assert.equal(plugin.dataCompatibilityWarning, "");
+  assert.equal(plugin.isDataReadOnly(), false, "a superseded provisional recovery must not leave the device read-only");
+  assert.equal(plugin.getVaultId(), "vault-established-after-fresh-legacy");
+  assert.equal(plugin.data.settings.workspaceName, "Established authority");
+  assert.deepEqual(plugin.data.pinnedPaths, ["Established.md"]);
+  assert.equal(plugin.getSyncRecoveryCenterSnapshot().lastExternalReloadOutcome, "applied");
+});
+
+test("another device's fresh capture leaves legacy-provisional trust provisional so the established envelope still supersedes", async () => {
+  // The identified/legacy-provisional arm that repels an incoming fresh
+  // envelope must return the baseline trust unchanged. Promoting it there
+  // would silently disqualify the vault's real envelope from superseding the
+  // provisional recovery.
+  const legacy = migrateData(null);
+  legacy.version = 10;
+  legacy.settings.workspaceName = "Provisional legacy";
+  legacy.pinnedPaths = ["Provisional.md"];
+  const otherDeviceFresh = migrateStore(null);
+  const establishedData = migrateData(null);
+  establishedData.settings.workspaceName = "Established authority";
+  establishedData.pinnedPaths = ["Established.md"];
+  const established = createDefaultStore(establishedData, 500, "vault-established-after-fresh-interruption");
+
+  const plugin = pluginWith(null);
+  plugin.loadData = async (): Promise<unknown> => { throw new SyntaxError("transient partial JSON"); };
+  await plugin.loadPluginData(false);
+  queuedCaptures(plugin, [legacy, otherDeviceFresh, structuredClone(established)]);
+
+  await Promise.all([
+    plugin.onExternalSettingsChange(),
+    plugin.onExternalSettingsChange(),
+    plugin.onExternalSettingsChange(),
+  ]);
+
+  assert.equal(plugin.dataCompatibilityWarning, "");
+  assert.equal(plugin.isDataReadOnly(), false);
+  assert.equal(
+    plugin.getVaultId(),
+    "vault-established-after-fresh-interruption",
+    "the bootstrap-only fresh capture between the two does not disqualify the established envelope",
+  );
+  assert.equal(plugin.data.settings.workspaceName, "Established authority");
+  assert.deepEqual(plugin.data.pinnedPaths, ["Established.md"]);
+  assert.equal(plugin.getSyncRecoveryCenterSnapshot().lastExternalReloadOutcome, "applied");
+});
+
+test("an identity-less capture never supersedes legacy-provisional recovery and fails closed instead", async () => {
+  // Superseding is reserved for an envelope whose vault identity is settled on
+  // disk. A recognized but identity-less payload must fail the merge closed
+  // rather than become authoritative with no proven identity.
+  const legacy = migrateData(null);
+  legacy.version = 10;
+  legacy.settings.workspaceName = "Provisional legacy";
+  legacy.pinnedPaths = ["Provisional.md"];
+  const identityLessData = migrateData(null);
+  identityLessData.settings.workspaceName = "Identity-less payload";
+  identityLessData.pinnedPaths = ["Identity-less.md"];
+  const identityLessSource = createDefaultStore(identityLessData, 400, "temporary-vault-id");
+  identityLessSource.version = 11;
+  const identityLess = structuredClone(identityLessSource) as unknown as Record<string, unknown>;
+  delete identityLess.vaultId;
+
+  const plugin = pluginWith(null);
+  plugin.loadData = async (): Promise<unknown> => { throw new SyntaxError("transient partial JSON"); };
+  await plugin.loadPluginData(false);
+  plugin.savedData.length = 0;
+  const rescues = recordRescueWrites(plugin);
+  queuedCaptures(plugin, [legacy, identityLess]);
+
+  await Promise.all([plugin.onExternalSettingsChange(), plugin.onExternalSettingsChange()]);
+
+  assert.match(plugin.dataCompatibilityWarning, /different Obsidian vault/i);
+  assert.equal(plugin.isDataReadOnly(), true, "an unproven identity blocks the batch instead of taking over");
+  assert.equal(plugin.data.settings.workspaceName, "Provisional legacy");
+  assert.deepEqual(plugin.data.pinnedPaths, ["Provisional.md"]);
+  assert.equal(plugin.savedData.length, 0, "no writeback makes the identity-less payload authoritative");
+  assert.equal(rescues.paths.length, 1, "the provisional recovery is preserved before read-only mode");
+  assert.deepEqual(rescuedStores(rescues)[0]?.bases[0]?.data.pinnedPaths, ["Provisional.md"]);
+  assert.equal(plugin.getSyncRecoveryCenterSnapshot().lastExternalReloadOutcome, "blocked");
+});
+
+test("two pristine bootstrap devices publish the winning identity so the losing device can converge", async () => {
+  // The tiebreak is deterministic on both devices, so the winner must write its
+  // identity back. Without that write data.json keeps the losing identity and
+  // every later callback re-runs the same tiebreak forever.
+  const localFresh = migrateStore(null);
+  localFresh.vaultId = "vault-fresh-aaaaaaaaaaaa";
+  const incomingFresh = migrateStore(null);
+  incomingFresh.vaultId = "vault-fresh-zzzzzzzzzzzz";
+  assert.equal(isFreshVaultId(localFresh.vaultId) && isFreshVaultId(incomingFresh.vaultId), true);
+  assert.ok(localFresh.vaultId.localeCompare(incomingFresh.vaultId) <= 0, "the local identity must win the tiebreak");
+
+  const plugin = pluginWith(structuredClone(localFresh));
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+  const rescues = recordRescueWrites(plugin);
+  queuedCaptures(plugin, [structuredClone(incomingFresh)]);
+
+  await plugin.onExternalSettingsChange();
+
+  assert.equal(plugin.dataCompatibilityWarning, "");
+  assert.equal(plugin.getVaultId(), "vault-fresh-aaaaaaaaaaaa");
+  assert.equal(rescues.paths.length, 0, "two pristine bootstrap stores hold no work to rescue");
+  assert.equal(plugin.savedData.length, 1, "the convergence winner is published exactly once");
+  assert.equal(
+    (plugin.savedData[0] as PluginStore).vaultId,
+    "vault-fresh-aaaaaaaaaaaa",
+    "data.json carries the winning identity so the other device stops re-running the tiebreak",
+  );
+});
