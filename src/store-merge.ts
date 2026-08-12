@@ -19,6 +19,7 @@ import {
   STORE_VERSION,
   type KnowledgeBaseEntry,
   type PluginStore,
+  objectFromEntries,
 } from "./model";
 
 export interface StoreMergeResult {
@@ -279,7 +280,7 @@ export function mergeKnowledgeBaseStores(
   for (const [id, deletedAt] of Object.entries(incoming.deletedBaseIds)) {
     deletedTimestamps.set(id, Math.max(deletedTimestamps.get(id) ?? 0, deletedAt));
   }
-  const deletedBaseIds = Object.fromEntries([...deletedTimestamps.entries()].sort(([left], [right]) => left.localeCompare(right)));
+  const deletedBaseIds = objectFromEntries([...deletedTimestamps.entries()].sort(([left], [right]) => left.localeCompare(right)));
   if (Object.keys(deletedBaseIds).length > MAX_DELETED_KNOWLEDGE_BASE_IDS) {
     throw new Error(`Synced knowledge-base changes contain more than ${MAX_DELETED_KNOWLEDGE_BASE_IDS.toLocaleString()} permanent-deletion tombstones. No tombstone was discarded.`);
   }

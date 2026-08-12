@@ -4,6 +4,7 @@
     "inlineSourceMap": true,
     "inlineSources": true,
     "lib": ["DOM", "ES2018"],
+    "types": [],
     "module": "ESNext",
     "moduleResolution": "Node",
     "strict": true,
