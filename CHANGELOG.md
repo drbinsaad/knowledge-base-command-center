@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.13.1
+
+### Fixed
+
+- Restored compatibility with older mobile web views. The plugin declares a 2018 JavaScript baseline, but the bundler rewrites newer *syntax* only and never newer *library methods*, so four newer methods were reaching devices unpolyfilled. The most serious, `Array.prototype.at`, is used while classifying note paths and requires iOS Safari 15.4 or Chrome 92; below that it raised a type error instead of loading the knowledge base. The remaining three (`Object.fromEntries` twice in settings and sync merging, and `String.prototype.trimEnd` in Quick append parsing) require iOS 12.2 or Chrome 73. All five call sites now use equivalents inside the declared baseline, with identical behaviour for every input.
+- Made the declared JavaScript baseline enforceable. The compiler configuration named no explicit type packages, so an installed dependency silently raised the effective language level and even declared one of those newer methods without providing it at run time. The baseline is now pinned, and a build fails if any newer method is reintroduced.
+
+### Changed
+
+- Updated build and development tooling: the bundler, the Obsidian API type definitions, the test runner, Node type definitions, and TypeScript. None of these change plugin behaviour; the compiler upgrade also retired two deprecated configuration options.
+
 ## 0.13.0
 
 ### Added

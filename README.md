@@ -64,7 +64,7 @@ Reload Obsidian and enable the plugin. Never mix files from different releases.
 
 Let vault and configuration Sync finish before updating, and avoid editing the same knowledge base on another device while the update runs. Update through Community Plugins or BRAT on the device, or replace all three manual assets together on desktop and wait for the hidden `.obsidian` folder to sync. Then confirm the plugin is enabled before opening the Command Center.
 
-After an existing installation first opens version 0.12.0, 0.12.1, or 0.13.0, a one-time **What’s new** window summarizes that release. **Read complete release notes** is an ordinary external link to that exact GitHub release and opens only when you choose it — the plugin does not contact GitHub, check the network, or send telemetry. The window is not shown for a truly fresh install and is remembered only in this device's App-local record. Run **Open what’s new** from the Command palette to reopen it deliberately.
+After an existing installation first opens version 0.12.0, 0.12.1, 0.13.0, or 0.13.1, a one-time **What’s new** window summarizes that release. **Read complete release notes** is an ordinary external link to that exact GitHub release and opens only when you choose it — the plugin does not contact GitHub, check the network, or send telemetry. The window is not shown for a truly fresh install and is remembered only in this device's App-local record. Run **Open what’s new** from the Command palette to reopen it deliberately.
 
 First-device Sync precautions and the exact per-route update steps are in [Getting started](docs/GETTING_STARTED.md#updating-on-iphone-and-ipad).
 
