@@ -1,158 +1,227 @@
 # Knowledge Base Command Center
 
-Turn an Obsidian vault into a navigable knowledge system. Visual organization stays in plugin data; an optional explicit Quick append action can add categorized follow-up items to a selected Markdown note.
-
-![Abstract illustration of interconnected knowledge cards](docs/assets/hero.png)
-
-_Abstract concept artwork, not a product screenshot. Real, sanitized captures of version 0.10.0 appear below; see [asset provenance](docs/assets/README.md)._
+**Give any Obsidian vault a real structure — an index, libraries, collections, and queues — without moving, renaming, or rewriting a single note.**
 
 [![CI](https://github.com/drbinsaad/knowledge-base-command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/drbinsaad/knowledge-base-command-center/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/drbinsaad/knowledge-base-command-center)](https://github.com/drbinsaad/knowledge-base-command-center/releases/latest)
 [![MIT License](https://img.shields.io/github/license/drbinsaad/knowledge-base-command-center)](LICENSE)
 [![Obsidian 1.13+](https://img.shields.io/badge/Obsidian-1.13%2B-7c3aed)](https://obsidian.md/)
 
-## Install from Obsidian Community Plugins
+![Abstract illustration of interconnected knowledge cards](docs/assets/hero.png)
 
-Knowledge Base Command Center is available in the [Obsidian Community Plugins directory](https://community.obsidian.md/plugins/ent-vault-command-center).
+_Abstract AI-generated concept artwork, not a product screenshot. Real, sanitized captures appear below; see [asset provenance](docs/assets/README.md)._
+
+Point the plugin at a folder and it builds a searchable visual index of the notes inside it. From there you arrange, group, nest, pin, and classify those notes into Libraries and Collections — and all of that organization lives in the plugin's own data, not in your Markdown. Your files stay exactly where you put them, with the frontmatter you wrote. One installation can hold several independent knowledge bases, so research, study, and project work never bleed into each other. Everything is local: the plugin makes no network request, has no account, and sends no telemetry.
+
+**Quick links:** [Getting started](docs/GETTING_STARTED.md) · [User guide](docs/USER_GUIDE.md) · [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Apple Shortcuts](docs/APPLE_SHORTCUT.md) · [Templates](templates/README.md) · [Support](SUPPORT.md)
+
+## Screenshots
+
+Two real, sanitized captures from version 0.10.0:
+
+![Knowledge Base Command Center desktop view showing the Medications Library](docs/assets/workspace-desktop.png)
+
+_Real, sanitized desktop capture. It shows the optional ENT preset's Medications Library; “No note” rows are portable placeholders, not missing application data._
+
+<p align="center">
+  <img src="docs/assets/search-mobile.png" alt="Knowledge Base Command Center search results above the iPhone keyboard" width="380">
+</p>
+
+_Real iPhone portrait capture showing one search state with compact result rows above the software keyboard. It is not evidence that the complete physical-device matrix passed; see the [0.10.0 iPhone evidence note](docs/release-evidence/0.10.0-iphone.md)._
+
+### Gallery — not captured yet
+
+A fuller gallery is planned. Each image below is real-capture-only: it requires the plugin running in Obsidian and will not be substituted with a mockup. The markup is already in this file, commented out, so the page never shows a broken image. Capture instructions and the exact requirements for each shot are in [`docs/assets/README.md`](docs/assets/README.md#capture-guide-for-the-project-page).
+
+| Planned file | Shows |
+| --- | --- |
+| `command-center-desktop.png` | The main Command Center view on a wide desktop leaf, with a populated index |
+| `collections-nested.png` | The Collections tab with nested subheadings three levels deep |
+| `libraries.png` | A custom Library with headings and placed records |
+| `quick-entry.png` | The Quick entry hub |
+| `manage-index.png` | Index Manager membership and diagnostics tabs |
+| `sync-recovery.png` | The Sync & recovery center |
+| `mobile-iphone.png` | The compact layout on iPhone |
+| `create-note.png` | The Create note form with its destination path preview |
+
+<!-- Uncomment each line below only once its PNG exists in docs/assets/. See docs/assets/README.md.
+<img src="docs/assets/command-center-desktop.png" alt="The Command Center on a wide desktop leaf with a populated knowledge index">
+<img src="docs/assets/collections-nested.png" alt="The Collections tab showing subheadings nested three levels deep">
+<img src="docs/assets/libraries.png" alt="A custom Library with headings and placed records">
+<img src="docs/assets/quick-entry.png" alt="The Quick entry hub listing its focused capture actions">
+<img src="docs/assets/manage-index.png" alt="Index Manager showing indexed membership and its tab row">
+<img src="docs/assets/sync-recovery.png" alt="The Sync and recovery center showing device-local recovery facts">
+<img src="docs/assets/mobile-iphone.png" alt="The compact Command Center layout on iPhone">
+<img src="docs/assets/create-note.png" alt="The Create note form with template selection and destination path preview">
+-->
+
+## Install
+
+### From the Obsidian community store
+
+Knowledge Base Command Center is published in the [Obsidian Community Plugins directory](https://community.obsidian.md/plugins/ent-vault-command-center). This is the recommended route — it handles updates for you.
 
 1. Open **Settings → Community plugins → Browse**.
 2. Search for **Knowledge Base Command Center**.
 3. Choose **Install**, then **Enable**.
 4. Open the Command Center from the desktop ribbon or Command palette and complete the setup wizard. On mobile, use Obsidian's **Open** menu.
 
-Requires Obsidian 1.13.0 or newer. The stable internal ID `ent-vault-command-center` is intentionally retained so upgrades preserve existing plugin data.
+Requires Obsidian 1.13.0 or newer, on desktop or mobile. The stable internal ID `ent-vault-command-center` is intentionally retained so upgrades preserve existing plugin data.
 
-**Quick links:** [Getting started](docs/GETTING_STARTED.md) · [User guide](docs/USER_GUIDE.md) · [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Support](SUPPORT.md)
+### BRAT
 
-## See it in Obsidian
+Install [BRAT](https://github.com/TfTHacker/obsidian42-brat), run **BRAT: Add a beta plugin for testing**, and enter this repository URL. There is also a [direct BRAT install link](obsidian://brat?plugin=https://github.com/drbinsaad/knowledge-base-command-center).
 
-![Knowledge Base Command Center desktop view showing the Medications Library](docs/assets/workspace-desktop.png)
+### Manual
 
-_Real, sanitized desktop capture from version 0.10.0. It shows the optional ENT preset's Medications Library; “No note” rows are portable placeholders, not missing application data._
+Download matching `main.js`, `manifest.json`, and `styles.css` files from one [GitHub release](https://github.com/drbinsaad/knowledge-base-command-center/releases) and place all three directly inside:
 
-<p align="center">
-  <img src="docs/assets/search-mobile.png" alt="Knowledge Base Command Center search results above the iPhone keyboard" width="380">
-</p>
+~~~text
+<your-vault>/.obsidian/plugins/ent-vault-command-center/
+~~~
 
-_Real iPhone portrait capture from version 0.10.0 showing one search state with compact result rows above the software keyboard. It is not evidence that the complete physical-device matrix passed; see the [0.10.0 iPhone evidence note](docs/release-evidence/0.10.0-iphone.md)._
+Reload Obsidian and enable the plugin. Never mix files from different releases.
 
-## What it helps you do
+### Updating on iPhone and iPad
 
-- **See the structure you already have.** Build a searchable visual index over a folder, then add eligible notes from elsewhere in the vault.
-- **Separate contexts cleanly.** Keep research, study, projects, or another subject area in independent knowledge bases within one installation.
-- **Organize without file churn.** Nest, reorder, group, classify, pin, and collect records in plugin data without moving or rewriting ordinary Markdown notes.
-- **Create consistently.** Start empty notes or copy a chosen template into a safely previewed destination, with optional per-Library creation defaults.
-- **Attach deliberately.** Copy one user-selected file into the vault and insert its Markdown link using a per-base policy, without intercepting ordinary paste or drag-and-drop.
-- **Capture from anywhere.** Open Quick entry from the desktop ribbon, the mobile **Open** menu, the Command Center header, a user-assigned hotkey, the mobile toolbar, or an action-only Obsidian URL.
-- **Transfer organization deliberately.** Export one path-free portable set, bundle up to 50 bases as independently parsed portfolio packages, or create a private same-vault recovery package.
-- **Inspect local recovery facts.** Review this device's last successful save, external plugin-data reload, semantic head, conflict rescues, recovery age, and read-only protection without probing Sync or reading note bodies.
-- **Work on desktop and mobile.** Use drag-and-drop on desktop and labelled action menus on touch devices.
+Let vault and configuration Sync finish before updating, and avoid editing the same knowledge base on another device while the update runs. Update through Community Plugins or BRAT on the device, or replace all three manual assets together on desktop and wait for the hidden `.obsidian` folder to sync. Then confirm the plugin is enabled before opening the Command Center.
 
-Typical uses include a research library with Methods and Papers, a project index with reusable review queues, a study system with cross-topic collections, or the optional protected ENT clinical preset.
+After an existing installation first opens version 0.12.0 or 0.12.1, a one-time **What’s new** window summarizes that release. **Read complete release notes** is an ordinary external link to that exact GitHub release and opens only when you choose it — the plugin does not contact GitHub, check the network, or send telemetry. The window is not shown for a truly fresh install and is remembered only in this device's App-local record. Run **Open what’s new** from the Command palette to reopen it deliberately.
+
+First-device Sync precautions and the exact per-route update steps are in [Getting started](docs/GETTING_STARTED.md#updating-on-iphone-and-ipad).
+
+### Uninstall
+
+Export your current organization first. Then run **Knowledge Base Command Center: Clear device-local data…** and confirm, before disabling and removing the plugin through Community Plugins (or deleting its manual plugin folder).
+
+The plugin folder contains `data.json` with synced knowledge bases, settings, Libraries, Collections, pins, hierarchy, and named snapshots. Device-only routes, collapsed sections, Undo/Redo history, local Sync/Recovery facts, and the highest plugin version observed for one-time update announcements are stored through Obsidian's App-local storage outside that folder, so deleting only the folder does not reliably remove them. The clear command removes both plugin-owned local values without changing `data.json`, Markdown notes, attachments, or recovery export files, and local tracking stays suppressed until Obsidian restarts — disable or uninstall in that same session. If you already removed the plugin without clearing them, reinstall and enable the same or a newer release, run the clear command, then remove it again.
+
+## Quick start
+
+1. **Create a knowledge base.** Choose **Generic knowledge base** and select the folder holding the notes you want to index. (The ENT clinical preset is optional and is described below.)
+2. **Review the Index.** Every Markdown note below that folder appears automatically. Use **Add → Add existing note to Index** to pull in an eligible note from elsewhere in the vault.
+3. **Shape the view.** Choose **Arrange**, then group, nest, and reorder records. Drag on desktop; use each row's **…** menu on touch devices. Nothing on disk changes.
+4. **Add Libraries and Collections.** Libraries are primary categories such as Papers or Projects. Collections are reusable lists that cut across them — a note can belong to many Collections at once.
+5. **Export a recovery package.** Create a same-vault recovery export for each knowledge base and keep it private. This is what restores your organization if plugin data is ever lost.
+
+Then read the [Getting started guide](docs/GETTING_STARTED.md).
 
 ## The three organizing levels
 
 | Concept | What it is | Membership |
 | --- | --- | --- |
-| **Knowledge base** | An independent Command Center index profile with its own folder scope, labels, Libraries, collections, queues, templates, history, and settings. It is not an Obsidian <code>.base</code> file or saved Workspace layout. | The same Markdown note can be organized independently in more than one knowledge base. |
+| **Knowledge base** | An independent Command Center index profile with its own folder scope, labels, Libraries, collections, queues, templates, history, and settings. It is not an Obsidian `.base` file or a saved Workspace layout. | The same Markdown note can be organized independently in more than one knowledge base. |
 | **Library** | A top-level category inside one knowledge base, with its own icon, headings, subheadings, order, and unplaced section. The Knowledge Index is the base's default primary section. | A subject has one primary Index/Library section per knowledge base. |
-| **Collection** | A reusable personal list that can span the Index and Libraries, with optional headings and subheadings. | A subject can belong to several Collections without being duplicated, moved, or reclassified. |
+| **Collection** | A reusable personal list that can span the Index and Libraries, with optional headings and nested subheadings. | A subject can belong to several Collections without being duplicated, moved, or reclassified. |
 
-## Quick start
-
-1. **Create a knowledge base.** For most users, choose **Generic knowledge base** and select the folder containing the notes to index. The ENT clinical preset is optional.
-2. **Review the Index.** Notes below the configured folder appear automatically. Use **Add → Add existing note to Index** for an eligible note elsewhere in the vault.
-3. **Shape the view.** Choose **Arrange** to group, nest, and reorder records visually. These changes remain in plugin data.
-4. **Add Libraries and Collections.** Use Libraries for primary categories such as Papers or Projects; use Collections for reusable lists that cross categories.
-5. **Create safely.** Use **Quick entry** to choose a knowledge base, Index/Library destination, visual group, and either an empty note or local template.
-6. **Back up organization.** Export a current same-vault recovery for each knowledge base and keep it private.
-
-The [Getting started guide](docs/GETTING_STARTED.md) covers installation, first-device Sync precautions, updates, and uninstall behavior.
-
-## Feature overview
+## Feature tour
 
 ### Visual index and Index Manager
 
-The index starts from a configured folder and optional ID, group, and parent properties. Visual arrangement changes only plugin-owned organization. **Manage Index…** provides Indexed, Available, Hidden, Groups, and Diagnostics views for bulk membership and safe integrity repair. Its Taxonomy Health Center reports duplicate/confusable names, hierarchy defects, empty or unreachable structure, unavailable configured paths, duplicate bindings, and possible placeholder matches. Ambiguous issues remain report-only; deterministic repairs require an exact preview and are Undo-protected.
+The index starts from a configured folder plus optional ID, group, and parent properties. Choose **Arrange** to build a separate visual hierarchy — group, nest, reorder, indent, pin — that changes only plugin-owned organization.
 
-### Custom Libraries and Collections
+**Manage Index…** provides Indexed, Available, Hidden, Groups, and Diagnostics views for bulk membership work and safe integrity repair. Removing or hiding membership never deletes the Markdown file; it can be restored from the Hidden tab.
 
-Create, name, icon, reorder, archive, and restore custom Libraries. Inside a Library, add headings and nested subheadings, place existing records, and use an explicit Unplaced section when structure changes. Collections support cross-category, multi-membership lists.
+### Collections with nested subheadings
 
-Under **Settings → Libraries → Library creation profiles**, each active or archived Library can inherit the knowledge base's note folder, empty/template mode, and template, or override any of those fields. This is intentionally a two-level model—knowledge-base defaults, then an optional Library override. The Create note form still exposes the resolved values for one-note changes. Renaming a Library keeps its profile because the profile uses the stable Library ID; deleting a custom Library removes its profile, while archiving retains it.
+Collections are reusable personal lists spanning the Index and Libraries. A record can appear in several Collection headings without being duplicated, moved, or reclassified.
 
-The ENT preset supplies protected Procedures, Medications, and Syndromes Libraries. Custom Libraries remain visual containers and do not rewrite clinical files or frontmatter.
+> **New — not yet in a published release.** Subheadings can now contain further subheadings, in both the Collections and Libraries tabs, up to **five levels deep counting the top heading as level 1**. **Add subheading** appears on any node below that cap. Removing a nested node promotes its records and child subheadings to its parent rather than discarding them. Move, rename, drag-and-drop, collapse/expand, and Quick entry all work at any depth, and pickers label each node with its full path such as *Heading / Sub / Sub-sub*. Portable exports carry the nested layout; older plugin builds that receive it show read-only protection instead of silently flattening it. This work is on the development branch and ships in the next release — version 0.12.1 is the current published version.
 
-### Multiple knowledge bases and search
+### Custom Libraries
 
-A non-empty search covers every available, non-archived knowledge base. Results are grouped by knowledge base and Library, with the active base first. Selecting a result from another base switches the plugin-wide active base before opening or selecting it.
+Create, name, icon, reorder, archive, and restore custom Libraries. Inside a Library, add headings and nested subheadings, place existing records, and use the explicit Unplaced section when structure changes.
 
-Search is Unicode-aware and normalizes common diacritic, apostrophe, Arabic, and Persian keyboard variants. Advanced filters include <code>domain:</code>, <code>priority:</code>, <code>kind:</code>, <code>type:</code>, <code>status:</code>, <code>review:</code>, <code>source:</code>, <code>safety:</code>, <code>dose:</code>, and <code>image:</code>. Broad searches report the full count and state **Showing the first 300 of _N_ results.** Browse views expose **Show more** instead of building an unbounded mobile DOM.
+Under **Settings → Libraries → Library creation profiles**, each Library can inherit the knowledge base's note folder, empty/template mode, and template — or override any of those fields. It is deliberately a two-level model: knowledge-base defaults, then one optional Library override. The Create note form still exposes the resolved values for a one-note exception. Profiles are keyed by the stable Library ID, so renaming keeps the profile; archiving retains it, and permanent deletion removes it.
 
-### Obsidian Bases integration
+### Smart queues
 
-Obsidian `.base` files can select the plugin's **Knowledge hierarchy** view without becoming a Knowledge Base Command Center knowledge base. The stable view type remains <code>ent-hierarchy</code>. Its native Bases options choose title, ID, fallback group, status, and priority properties, a 25–300-row page size, and whether group counts appear.
+Depending on profile and current organization, smart queues surface your Inbox, a manually curated Next list, pinned records, ungrouped records, and recently changed records. Queues are views over records and plugin state — they never create duplicate notes.
 
-The view reads note, file, and formula values through Obsidian's Bases API. A `.base` file's filters, limit, sort, and **Group by** order remain authoritative. When no native Group by is configured, the fallback group property defaults to <code>note.domain</code>, then to the note's immediate folder. Large results are prepared in bounded slices, and **Previous** and **Next** replace one configured page at a time so offscreen rows do not accumulate. Narrow panes stack row metadata and retain 44-pixel row and pager targets. Opening a row opens the Markdown file and does not change frontmatter or plugin organization.
+### Search across every knowledge base
 
-### Quick entry, hotkeys, and mobile toolbar
+A non-empty search covers every available, non-archived knowledge base, grouping results by base and Library with the active base first. Selecting a result from another base switches the active base before opening it.
 
-Quick entry is available from the lightning-bolt desktop ribbon action and the Command Center header. On mobile, Obsidian exposes ribbon actions in its **Open** menu. Its focused commands can create a No note subject, heading, subheading, or note, add the current or an existing note, and open Quick append for the current or a chosen note. Library capture asks for the exact heading or subheading before it creates or classifies a note. The hub can switch the active knowledge base before opening an entry form.
+Search is Unicode-aware and folds diacritics, straight and curly apostrophes, Arabic tatweel and presentation forms, common Arabic/Persian ya and kaf variants, and Arabic/Persian digits. Advanced filters include `domain:`, `priority:`, `kind:`, `type:`, `status:`, `review:`, `source:`, `safety:`, `dose:`, and `image:`; an unknown `word:` filter fails closed rather than becoming an unexpectedly broad text search. Broad searches report the full count and state **Showing the first 300 of _N_ results.** Browse views expose **Show more** instead of building an unbounded mobile DOM.
 
-Every active Library also exposes its own **Open Library: …** global command. Assign it a hotkey, add it to the mobile toolbar, or use it as Obsidian's mobile Quick Action. The command uses the Library's stable internal ID and refuses to open an archived or unavailable Library.
+### Quick entry, hotkeys, and Apple Shortcut URLs
 
-The plugin assigns no default key combinations. Choose your own under **Settings → Hotkeys**. On iPhone or iPad, open **Settings → Mobile → Manage toolbar options**, scroll to the bottom, choose **Add global command**, then search for and select **Quick entry…** or another focused command.
+Quick entry opens from the lightning-bolt desktop ribbon action, the Command Center header, a hotkey you assign, the mobile toolbar, or a fixed Obsidian URL. Its focused commands create a **No note** subject, a heading, a subheading, or a note; add the current or an existing note; and open Quick append. Library capture always asks for the exact heading or subheading first.
 
-Apple Shortcuts can use **Open URLs** with one exact action-only URL:
+Every active Library also gets its own **Open Library: …** global command, usable as a hotkey, a mobile toolbar button, or Obsidian's mobile Quick Action.
 
-- <code>obsidian://kbcc-quick-entry</code> — open the hub;
-- <code>obsidian://kbcc-create-subject</code> — create a No note subject;
-- <code>obsidian://kbcc-create-heading</code> — create a heading;
-- <code>obsidian://kbcc-create-subheading</code> — create a subheading;
-- <code>obsidian://kbcc-create-note</code> — open blank note creation;
-- <code>obsidian://kbcc-add-current-note</code> — classify the locally active note;
-- <code>obsidian://kbcc-add-existing-note</code> — open the local note picker;
-- <code>obsidian://kbcc-quick-append-current</code> — append to the locally active note;
-- <code>obsidian://kbcc-quick-append-existing</code> — choose a note for Quick append; or
-- <code>obsidian://kbcc-attach-current</code> — open Attach file for the locally active eligible Markdown note.
+The plugin installs no default key combinations — choose your own under **Settings → Hotkeys**. On iPhone or iPad, open **Settings → Mobile → Manage toolbar options**, scroll to the bottom, choose **Add global command**, then search for and select **Quick entry…**, another focused command, or an **Open Library: …** command.
 
-These routes invoke the same guarded blank flows as their commands. Current-note actions resolve only Obsidian's local active note; no note path is carried in the URL. A URL containing <code>?title=</code>, <code>?path=</code>, <code>?content=</code>, or any other parameter fails closed before a form or picker opens.
+Ten fixed action-only URLs are available for Apple Shortcuts: `obsidian://kbcc-quick-entry`, `kbcc-create-subject`, `kbcc-create-heading`, `kbcc-create-subheading`, `kbcc-create-note`, `kbcc-add-current-note`, `kbcc-add-existing-note`, `kbcc-quick-append-current`, `kbcc-quick-append-existing`, and `kbcc-attach-current`. They carry no data and reject every query parameter — see [Apple Shortcuts](#apple-shortcuts) below.
 
 ### Quick append follow-up notes
 
-Quick append adds one item to a strict plugin-owned block at the end of a chosen Markdown note. The default categories are Questions, Lectures to watch, Sources, Thoughts, To read, and Other. Reusing a category appends below its existing heading instead of creating another heading. Categories are configurable per knowledge base: rename, reorder, add, archive, restore, and choose bullet or checkbox style with an optional date.
+Quick append adds one item to a strict plugin-owned block at the end of a chosen Markdown note. The default categories are Questions, Lectures to watch, Sources, Thoughts, To read, and Other; reusing a category appends beneath its existing heading instead of creating a second one. Categories are configurable per knowledge base — rename, reorder, add, archive, restore, and choose bullet or checkbox style with an optional date.
 
-The operation uses Obsidian's atomic note-processing API, refuses <code>ai_lock: true</code>, preserves text outside the managed block byte-for-byte, and offers a short exact undo that refuses to run after the note changes. Note bodies and appended text are never copied into plugin data. Quick append writes Markdown text only; normal paste, drag, and attachment placement continue to follow Obsidian's Files and Links settings.
+The operation uses Obsidian's atomic note-processing API, refuses `ai_lock: true`, preserves every byte outside the managed block, and offers a short exact undo that refuses to run once the note has changed. Note bodies and appended text are never copied into plugin data.
 
-### Note creation and placeholders
+### Note creation from templates
 
-Create an empty note or copy a local Markdown template using <code>{{title}}</code>, <code>{{date}}</code>, and <code>{{time}}</code>. The destination is previewed, missing folders are created safely, and an existing file is never overwritten.
+Create an empty note, or copy a local Markdown template using `{{title}}`, `{{date}}`, and `{{time}}`. The destination path is previewed before creation, missing folders are created safely, and an existing file is never overwritten.
 
-Library templates may also use explicit YAML-scalar tokens: <code>{{yaml:title}}</code>, <code>{{yaml:id}}</code>, <code>{{yaml:category}}</code>, <code>{{yaml:parent}}</code>, <code>{{yaml:library}}</code>, and <code>{{yaml:type}}</code>. Each expands at explicit creation time to a quoted YAML-safe scalar; unavailable context becomes <code>""</code>. Use the <code>yaml:</code> prefix exactly—plain <code>{{id}}</code> and other template-plugin syntax are copied unchanged. Legacy title/date/time replacement is unchanged.
+Templates used with Library context may also use quoted-scalar tokens — `{{yaml:title}}`, `{{yaml:id}}`, `{{yaml:category}}`, `{{yaml:parent}}`, `{{yaml:library}}`, and `{{yaml:type}}` — each expanding at creation time to a YAML-safe quoted scalar, with `""` when a value is unavailable. The `yaml:` prefix is exact: plain `{{id}}` and other plugins' template syntax are copied through unchanged.
 
-Portable imports never create notes automatically. A path-free imported subject can remain a **No note** placeholder, link to an existing note, or—where the profile permits—create an empty or template-based note.
-
-Profiles and tokens affect newly created notes only. They never rewrite existing notes or frontmatter, infer Library placement from properties, move attachments, or introduce a content-type-by-Library rules matrix.
+Five ready-made templates ship in [`templates/`](templates/README.md). Tokens resolve only during explicit creation; they never rewrite an existing note or its frontmatter.
 
 ### Explicit attachments
 
-Use **Attach file to current note…** only after opening the destination Markdown note. Each knowledge base can follow Obsidian's attachment setting, use a fixed vault folder, create a folder beside the note, or ask for a vault-relative folder on every upload. The generated link can go at the current editor cursor, under a configured marker or heading, or at the end of the note.
+Use **Attach file to current note…** after opening the destination Markdown note. Each knowledge base can follow Obsidian's own attachment setting, use a fixed vault folder, create a folder beside the note, or ask for a vault-relative folder every time. The generated link goes at the editor cursor, under a configured marker or heading, or at the end of the note.
 
-This command copies one explicitly selected file, up to 100 megabytes, into the vault. It never moves the external original, never moves existing vault attachments, and never intercepts ordinary paste or drag-and-drop. It refuses immutable source-book notes, replaced note identities, malformed YAML, and <code>ai_lock: true</code>. If copying succeeds but link insertion fails, the new vault file is retained and its path is reported so the user can link it manually. Portable exports and same-vault recovery continue to exclude binary contents.
+The command copies one explicitly selected file, up to 100 MB, into the vault. It never moves the external original, never relocates existing vault attachments, and never intercepts ordinary paste or drag-and-drop. It refuses immutable source notes, replaced note identities, malformed YAML, and `ai_lock: true`. If the copy succeeds but link insertion fails, the new vault file is kept and its path is reported so you can link it by hand.
 
-### Undo, snapshots, export, and recovery
+### Portable export, import, and multi-base portfolios
 
-Personal organization supports Undo/Redo and named snapshots. Portable exports can carry workspace settings, a path-free Index blueprint, selected Libraries, Collections, study state, and saved views. Same-vault recovery is a separate private restoration format containing exact vault-relative paths.
+Personal organization supports Undo/Redo and named snapshots. Portable exports carry workspace settings, a path-free Index blueprint, selected Libraries, Collections, study state, and saved views — never note bodies or attachment binaries.
 
-**Multi-base portfolio transfer** bundles independent ordinary portable packages behind one bounded manifest. Map each source to a new or existing compatible base, choose Merge or Replace per existing destination, select components per source, and inspect the exact immutable change plan before applying it. Replace requires the displayed typed phrase and writes a same-vault recovery for every affected destination before the atomic store mutation. The preview reports base, heading, subject, Library, conflict, folder/template fallback, and explicit will-not-change categories. It never includes or changes note bodies or attachments.
+**Multi-base portfolio transfer** bundles up to 50 independent portable packages behind one bounded manifest. Map each source to a new or existing compatible base, choose Merge or Replace per destination, select components per source, and inspect an exact immutable change plan before applying it. Replace requires a displayed typed phrase and writes a same-vault recovery for every affected destination before the atomic mutation. The preview reports base, heading, subject, Library, conflict, folder/template fallback, and explicit will-not-change categories.
 
-Portable packages created by version 0.10.0 use format version 4. Current v9 files include dynamic Library definitions and layouts and are locked to their source vault, base, and preset by default. Read [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md) before importing, replacing, or restoring data.
+Portable packages created by version 0.12.1 use format version 4. Packages created by the current build use format version 5, which adds the nested subheading layout. Older packages still import — the current build reads versions 1 through 4 — while an older plugin build refuses a newer package rather than guessing destructively, so update every syncing device before applying a new export.
 
-### Sync and recovery diagnostics
+Read [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md) before importing, replacing, or restoring.
 
-Run **Open sync & recovery center** from the Command palette, or open **Manage index → Diagnostics → Sync & recovery center**. The center uses only plugin-owned in-memory state, vault-scoped local storage, Obsidian's public platform/configuration facts, and file metadata for direct children of the documented export folder. It never opens recovery/conflict JSON or Markdown files.
+### Sync recovery and conflict rescue
 
-The center is historical local evidence, not a live Sync monitor. “External reload” means the plugin observed a local <code>data.json</code> change; it does not prove that a provider is online, caught up, or safe to switch devices. Names that resemble full paths, stable vault/base identifiers, custom configuration-folder names, and full semantic fingerprints are hidden.
+Run **Open sync & recovery center** from the Command palette, or open **Manage index → Diagnostics → Sync & recovery center**. It reports this device's last successful save, the last observed external plugin-data reload, semantic revision and shortened head, bounded conflict-rescue counts and ages, confirmed recovery age, and read-only protection reason.
+
+It uses only plugin-owned in-memory state, vault-scoped local storage, Obsidian's public platform facts, and file metadata for direct children of the documented export folder. It never opens recovery or conflict JSON, never reads note bodies, and never makes a network request. **It is historical local evidence, not a live Sync monitor** — the absence of a warning does not prove that a provider is caught up or that a device handoff is safe.
+
+Underneath, divergent edits to the same base are written to a private in-vault conflict rescue **before** adoption, and the plugin fails closed rather than picking a winner when that rescue cannot be created. Every save also refreshes a parseable twin of `data.json`, and startup restores from it when the primary file cannot be parsed.
+
+### Taxonomy health
+
+The Taxonomy Health Center reports duplicate and visually confusable names, case and hyphen variants, parent or cycle problems, empty or unreachable structure, unavailable configured folders and templates, duplicate note bindings, and unresolved placeholders that may match local notes. Ambiguous findings stay report-only. The two deterministic parent-edge repairs require an exact preview and are saved as a single Undo-protected transaction.
+
+### Obsidian Bases view
+
+Obsidian `.base` files can select the plugin's **Knowledge hierarchy** view (stable view type `ent-hierarchy`) without becoming a Command Center knowledge base. Native Bases options choose the title, ID, fallback group, status, and priority properties, a 25–300-row page size, and whether group counts appear.
+
+A `.base` file's own filters, limit, sort, and **Group by** remain authoritative; the fallback group applies only when no native Group by is configured. Large results are prepared in bounded slices, and **Previous**/**Next** replace one page at a time so offscreen rows never accumulate. Opening a row opens the Markdown file — it does not change frontmatter or plugin organization.
+
+### Mobile and iPhone
+
+The manifest is mobile-compatible and the plugin ships mobile layouts throughout. Compact mode keys off the actual Obsidian leaf width — below 1050 px, including stacked tabs, side-by-side splits, and pop-out windows — and switches to a focused record-detail route with **Back to main page**, scroll-safe header actions, and 44-point touch targets. Creation and Library forms reconcile Obsidian's native keyboard inset with the visual viewport so the action footer stays reachable while the iPhone keyboard is open. Touch devices use labelled row action menus in place of drag-and-drop.
+
+Physical-device claims are kept separate from automated coverage: see the [0.10.0 iPhone evidence note](docs/release-evidence/0.10.0-iphone.md) and the [manual iPhone release checklist](docs/manual-iphone-release-checklist.md) rather than assuming any release checklist passed.
+
+### Right-to-left and bidirectional text
+
+The plugin is built to work with right-to-left content and interface languages:
+
+- Dynamic record, Library, and heading names are rendered with `dir="auto"`, so Arabic and Latin text each display in their own readable direction.
+- Stylesheets use logical start/end spacing and `text-align: start` across the interface, so those rules mirror under a right-to-left interface language. This is not yet a complete conversion — some physical left/right rules remain.
+- Search normalizes Arabic and Persian keyboard variants, including tatweel, presentation forms, ya and kaf variants, and Arabic/Persian digits.
+- Portable imports reject text carrying bidirectional control characters, which could otherwise make one record visually impersonate another.
+
+A VoiceOver-with-Arabic pass across Quick entry, Quick append, taxonomy repair, portfolio transfer, and sync recovery is an explicit item on the [manual iPhone release checklist](docs/manual-iphone-release-checklist.md). Treat right-to-left support as designed-for and partly verified, not as a completed device-tested claim.
+
+### Local-first by construction
+
+No network requests, no analytics, no telemetry, no accounts, no advertising, no payments. A static verification step in CI asserts that neither the source nor the built bundle references `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `sendBeacon`, or Obsidian's `requestUrl` — and that the bundle contains exactly one clipboard writer and no clipboard reader.
 
 ## Generic and ENT profiles
 
@@ -162,9 +231,91 @@ The center is historical local evidence, not a live Sync monitor. “External re
 | Index scope | Configurable | Canonical clinical scope is protected |
 | Libraries | User-defined | User-defined plus protected Procedures, Medications, and Syndromes |
 | File-changing workflows | Explicit note creation only | Note creation plus two separately disclosed, confirmation-gated canonical workflows |
-| Clinical approval | Not applicable | The plugin never grants clinical review approval and respects <code>ai_lock: true</code> |
+| Clinical approval | Not applicable | The plugin never grants clinical review approval and respects `ai_lock: true` |
 
-The ENT preset is an organization workflow, not medical advice, a medical record, or autonomous clinical decision support.
+The ENT preset is an organization workflow. It is not medical advice, a medical record, or autonomous clinical decision support.
+
+## Starter templates
+
+The [`templates/`](templates/README.md) folder contains five ready-to-use Obsidian note templates built around this plugin's creation-time tokens:
+
+| Template | For |
+| --- | --- |
+| [`Study topic.md`](templates/Study%20topic.md) | A concept, subject, or lecture topic you are learning |
+| [`Source note.md`](templates/Source%20note.md) | A paper, book, article, or video you are reading |
+| [`Project.md`](templates/Project.md) | Work with an outcome, next actions, and a decision log |
+| [`Meeting or case log.md`](templates/Meeting%20or%20case%20log.md) | A dated meeting, session, or case entry |
+| [`Question inbox.md`](templates/Question%20inbox.md) | An open question to capture now and resolve later |
+
+Copy the ones you want into your vault, set **Templates folder** in settings, then select a **Default template** per knowledge base or override it per Library under **Library creation profiles**. Full install steps and a token reference are in [`templates/README.md`](templates/README.md).
+
+## Apple Shortcuts
+
+The plugin exposes ten fixed Obsidian URL actions. An Apple Shortcut with a single **Open URLs** action can put any of them on your Home Screen, in the share sheet, or on Back Tap.
+
+| URL | Opens |
+| --- | --- |
+| `obsidian://kbcc-quick-entry` | The Quick entry hub |
+| `obsidian://kbcc-create-subject` | Create a **No note** subject |
+| `obsidian://kbcc-create-heading` | Create a heading |
+| `obsidian://kbcc-create-subheading` | Create a subheading |
+| `obsidian://kbcc-create-note` | The blank Create note form |
+| `obsidian://kbcc-add-current-note` | Classify the currently active note |
+| `obsidian://kbcc-add-existing-note` | The note picker, to add an existing note |
+| `obsidian://kbcc-quick-append-current` | Quick append for the currently active note |
+| `obsidian://kbcc-quick-append-existing` | Choose a note, then Quick append |
+| `obsidian://kbcc-attach-current` | Attach file to the active note, when eligible |
+
+**Every route rejects every query parameter.** `?title=`, `?path=`, `?content=`, or any other key — known or unknown — causes the route to fail closed before a hub, picker, or form opens. That is a deliberate privacy boundary: no note title, path, body text, or category can travel through a URL, and nobody can craft a link that silently writes into your vault. Current-note routes resolve the note only from Obsidian's own active workspace, and the URLs cannot select a vault.
+
+Step-by-step Shortcuts instructions, placement options, and troubleshooting are in the [Apple Shortcuts guide](docs/APPLE_SHORTCUT.md).
+
+<!-- Placeholder: if the maintainer publishes a prebuilt Shortcut, add its iCloud link here.
+     Until then, the guide deliberately does not link to any shortcut file. -->
+
+## Privacy and permissions
+
+The plugin is local-first by design and makes no network request of any kind.
+
+**What it reads**
+
+- The plugin enumerates whole-vault Markdown file paths and cached Markdown metadata to build and reconcile indexes, offer note and template choices, and diagnose stale references.
+- It enumerates all loaded vault entries before retaining folder paths for settings pickers, and enumerates all vault file paths before retaining JSON packages for the in-vault picker. Path enumeration alone does not read note bodies.
+- Content reads are targeted: an explicitly chosen template or JSON import, the note explicitly selected for Quick append inside Obsidian's atomic process operation, an explicit attachment destination note, and the disclosed ENT proposal-promotion and canonical-placement workflows. An attachment action also reads the one external file you select in the operating-system picker and copies its bytes into the vault.
+- Copy buttons write only the plugin-generated command, wikilink, or path you selected; the plugin never reads clipboard contents.
+
+**What it writes**
+
+- Settings and organization live in Obsidian's plugin `data.json`. Sync reconciliation, schema migration, and vault renames can update that file automatically.
+- Ordinary indexing, arrangement, membership, Library classification, and Collection actions never move, rename, delete, or rewrite source notes. Removing or hiding membership does not delete the Markdown file.
+- Quick append is a deliberate generic exception to the ordinary no-file-change rule: it atomically writes one item inside a strictly marked follow-up block in the note you chose, refuses `ai_lock: true`, and keeps note bodies out of plugin data.
+- Two additional ENT-only workflows can change selected files — proposal promotion moves the selected proposal and updates its frontmatter and top-level heading; advanced canonical placement may move the selected canonical note and updates the same structural fields. Both refuse `ai_lock: true`, require explicit action, preview the destination, and attempt rollback if an operation fails.
+
+**What leaves the vault, and what cannot enter it**
+
+- Quick entry, Quick append, and Attach file Obsidian protocols accept only their fixed intrinsic actions. Any query parameter is rejected before a hub, picker, or form opens; titles, paths, content, and files cannot be supplied by URL. Current-note actions use only the locally active eligible note.
+- The plugin never writes outside the vault and never enumerates external files. The explicit Attach file command reads only the one external file you select in the operating-system picker. Desktop JSON export and import also use operating-system download and file-picker surfaces, so those files go where you choose.
+
+**Automatic protection**
+
+- Every save refreshes a parseable twin of `data.json` first; startup restores from it when the primary file cannot be parsed, keeping the unreadable file beside it for inspection.
+- Divergent concurrent edits are written to a private in-vault conflict rescue before adoption, and the plugin fails closed if that rescue cannot be created.
+- Newer or unrecognized plugin data opens read-only rather than being overwritten by an older build.
+
+**Exports**
+
+- No export contains Markdown note bodies or attachment binaries. Workspace settings can contain configured vault-relative folders, and saved searches preserve literal query text.
+- Same-vault recovery packages and automatic conflict rescues contain exact vault-relative paths. **Keep them private.**
+
+See [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md) for the exact export boundary and [Security](SECURITY.md) for the trust model.
+
+## Backup and recovery
+
+Same-vault recovery protects plugin-owned organization for one knowledge base; it is not a backup of Markdown notes or attachments. Back up the complete vault, including `.obsidian`, and export one current private recovery per available base. Archived bases must be restored temporarily before export.
+
+Recovery is a standalone replacement, never a merge with portable sections. Current v10 files carry the nested Collection and Library subheading layout, dynamic Library definitions, and locks to their source vault, base, and preset, all of which are verified before mutation. Older identity-less formats require additional overrides and conservative path checks.
+
+Follow the complete [backup and restore procedure](docs/PORTABILITY_AND_RECOVERY.md#backup-and-restore) before restoring anything.
 
 ## Compatibility
 
@@ -176,90 +327,36 @@ The ENT preset is an organization workflow, not medical advice, a medical record
 | Android | The manifest is mobile-compatible, but this repository does not currently document a complete physical-Android test pass |
 | Network | No plugin network requests, analytics, telemetry, accounts, advertising, or payments |
 
-## Privacy and permissions
-
-- The plugin enumerates whole-vault Markdown file paths and cached Markdown metadata to build and reconcile indexes, offer note/template choices, and diagnose stale references.
-- It enumerates all loaded vault entries before retaining folder paths for settings pickers, and enumerates all vault file paths before retaining JSON packages for the in-vault picker. Path enumeration alone does not read note bodies.
-- Content reads are targeted to an explicitly chosen template or JSON import, to the note explicitly selected for Quick append inside Obsidian's atomic process operation, to an explicit attachment destination note, and to the disclosed ENT proposal-promotion and canonical-placement workflows. An attachment action also reads the one external file selected in the operating-system picker and copies its binary bytes into the vault.
-- Copy buttons write only the plugin-generated command, wikilink, or path you selected; the plugin never reads clipboard contents.
-- Settings and organization are stored in Obsidian's plugin <code>data.json</code>. Sync reconciliation, schema migration, and vault renames can update that file automatically.
-- Quick entry, Quick append, and Attach file Obsidian protocols accept only their fixed intrinsic actions. Any query parameter is rejected before a hub, picker, or form opens; titles, paths, content, and files cannot be supplied by URL. Current-note actions use only the locally active eligible note.
-- No export contains Markdown note bodies or attachment binaries. Workspace settings can contain configured vault-relative folders, and saved searches preserve literal query text.
-- Same-vault recovery and automatic conflict rescues contain exact vault-relative paths. Keep them private.
-- The plugin never writes outside the vault and never enumerates external files. The explicit Attach file command reads only the one external file the user selects in the operating-system picker. Desktop JSON export/import also uses operating-system download/file-picker surfaces, so files go where the user chooses.
-
-See [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md) for the exact export boundary and [Security](SECURITY.md) for the trust model.
-
-## Data safety
-
-- Ordinary indexing, visual arrangement, membership, Library classification, and Collection actions never move, rename, delete, or rewrite source notes.
-- Removing or hiding membership does not delete the Markdown file.
-- Merge and Replace imports change selected plugin-owned organization only.
-- Newer or unrecognized plugin data opens read-only rather than being overwritten by an older build.
-- Quick append is a deliberate generic exception to the ordinary no-file-change rule. It atomically writes one item inside a strictly marked follow-up block in the selected note, refuses <code>ai_lock: true</code>, and keeps note bodies out of plugin data.
-- Two additional ENT-only workflows can change selected files: proposal promotion moves the selected proposal and updates its frontmatter and top-level heading; advanced canonical placement may move the selected canonical note and updates the same structural fields. Both refuse <code>ai_lock: true</code>, require explicit action, preview the destination, and attempt rollback if an operation fails.
-
-## Backup and recovery
-
-Same-vault recovery protects plugin-owned organization for one knowledge base; it is not a backup of Markdown notes or attachments. Back up the complete vault, including <code>.obsidian</code>, and export one current private recovery per available base. Archived bases must be restored temporarily before export.
-
-Recovery is a standalone replacement, never a merge with portable sections. Current recovery verifies source vault, base, and preset before mutation. Older identity-less formats require additional overrides and conservative path checks. Follow the complete [backup and restore procedure](docs/PORTABILITY_AND_RECOVERY.md#backup-and-restore).
-
 ## Known limitations
 
-- At most 50 available and archived knowledge bases and 50 active and archived Libraries per knowledge base are retained.
+- At most 50 available and archived knowledge bases, and 50 active and archived Libraries per knowledge base, are retained.
+- Collection and Library structure nests to five levels counting the top heading as level 1.
 - The active knowledge base is plugin-wide; every open Command Center view switches together.
 - Single-base portable export/import, snapshots, and Undo history are base-local. Multi-base portfolio transfer bundles independent per-base packages without combining their identities.
-- Portable exports include selected active Libraries; confirmed private recovery preserves archived Library state.
-- Concurrent or offline edits to the same established base use whole-base deterministic conflict resolution after private rescue, not field-level merging. Avoid editing the same base on two devices at once, let Sync settle before switching devices, and keep current recovery exports.
-- The Sync and recovery center cannot report network, provider queue, remote-device, or Obsidian Sync status. Its absence of a warning is not proof that remote work has settled.
+- Concurrent or offline edits to the same established base use whole-base deterministic conflict resolution after a private rescue, not field-level merging. Avoid editing one base on two devices at once, let Sync settle before switching devices, and keep current recovery exports.
+- The Sync and recovery center cannot report network, provider queue, remote-device, or Obsidian Sync status.
 - Search retains at most the strongest 300 visible matches while reporting the full count. Browse rows and structural sections page in groups of 300.
 - Desktop offers drag-and-drop; touch devices use labelled row action menus.
-- Same-vault recovery is intentionally not portable.
-- Real-iPhone keyboard, safe-area, Dynamic Type, landscape, import/export, and destructive recovery behavior needs explicit physical-device evidence. Automated DOM checks are not a substitute.
-- Version 0.12.0 expands automated compact-layout and privacy coverage across Quick entry, Quick append, attachments, profiles, portfolio transfer, and recovery diagnostics, but its complete physical-iPhone matrix still requires manual release evidence.
-
-## Other installation methods
-
-### BRAT
-
-Install [BRAT](https://github.com/TfTHacker/obsidian42-brat), run **BRAT: Add a beta plugin for testing**, and enter this repository URL. You can also use the [direct BRAT install link](obsidian://brat?plugin=https://github.com/drbinsaad/knowledge-base-command-center).
-
-### Manual installation
-
-Download matching <code>main.js</code>, <code>manifest.json</code>, and <code>styles.css</code> files from one [GitHub release](https://github.com/drbinsaad/knowledge-base-command-center/releases). Place all three directly inside:
-
-~~~text
-<your-vault>/.obsidian/plugins/ent-vault-command-center/
-~~~
-
-Reload Obsidian and enable the plugin. Never mix files from different releases.
-
-### Updating on iPhone and iPad
-
-Let vault and configuration Sync finish before updating and avoid editing the same knowledge base on another device. Update through Community Plugins or BRAT on the device, or replace all three manual assets together on desktop and wait for the hidden <code>.obsidian</code> folder to sync. Then confirm the plugin is enabled before opening the Command Center.
-
-After an existing installation first opens version 0.12.0, a one-time **What’s new** window summarizes the release. **Read complete release notes** is an ordinary external link to that exact GitHub release and opens only when you choose it—the plugin does not contact GitHub, check the network, or send telemetry. The window is not shown for a truly fresh install and is remembered only in this device's existing App-local Sync/Recovery record. Run **Open what’s new** from the Command Palette to reopen it deliberately.
-
-### Uninstall
-
-Export current organization first. Then run **Knowledge Base Command Center: Clear device-local data…** and confirm before disabling and removing the plugin through Community Plugins (or deleting its manual plugin folder).
-
-The plugin folder contains <code>data.json</code> with synced knowledge bases, settings, Libraries, Collections, pins, hierarchy, and named snapshots. Device-only routes, collapsed sections, Undo/Redo history, local Sync/Recovery facts, and the highest plugin version observed for one-time update announcements are stored through Obsidian's App local storage outside that folder, so deleting only the folder does not reliably remove them. The clear command removes both plugin-owned local values without changing <code>data.json</code>, Markdown notes, attachments, or recovery export files, and local tracking stays suppressed until Obsidian restarts. Disable or uninstall in that same session. If you already removed the plugin without clearing them, reinstall and enable the same or a newer release, run the clear command, then remove it again.
+- Same-vault recovery is intentionally not portable between vaults.
+- Real-iPhone keyboard, safe-area, Dynamic Type, landscape, import/export, and destructive recovery behavior needs explicit physical-device evidence. Automated DOM checks are not a substitute, and the 0.12.0 physical-iPhone matrix was explicitly waived by the maintainer rather than executed.
 
 ## Troubleshooting
 
 - **Visual movement on iPhone:** choose **Arrange**, open a row's **…** menu, then use Move under, Indent, Outdent, Move up/down, or Make top-level.
 - **Missing note or unexpected Library:** check the active knowledge base, Index Manager membership, hidden records, and the record's primary Index/Library section.
-- **Read-only settings or salvage mode:** preserve <code>data.json</code> and do not force a downgrade. See [Troubleshooting](docs/TROUBLESHOOTING.md).
+- **Read-only settings or salvage mode:** preserve `data.json` and do not force a downgrade.
+
+Every other symptom, including import refusals and Sync protection reasons, is covered in [Troubleshooting](docs/TROUBLESHOOTING.md).
 
 ## Documentation
 
-- [Getting started](docs/GETTING_STARTED.md)
-- [User guide](docs/USER_GUIDE.md)
-- [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md)
+- [Getting started](docs/GETTING_STARTED.md) — install, first-run setup, upgrades, uninstall
+- [User guide](docs/USER_GUIDE.md) — every surface, setting, and command
+- [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md) — export boundary, formats, backup and restore
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
-- [0.10.0 iPhone evidence](docs/release-evidence/0.10.0-iphone.md)
+- [Apple Shortcuts guide](docs/APPLE_SHORTCUT.md)
+- [Starter templates](templates/README.md)
+- [0.10.0 iPhone evidence](docs/release-evidence/0.10.0-iphone.md) · [0.12.0 iPhone evidence](docs/release-evidence/0.12.0-iphone.md)
 - [Manual real-iPhone release checklist](docs/manual-iphone-release-checklist.md)
 - [Changelog](CHANGELOG.md)
 
@@ -272,12 +369,26 @@ npm ci
 npm run review
 ~~~
 
-The review task runs strict typechecking, zero-warning lint, unit and rendered-DOM tests, a production build, Community-oriented static checks, and release verification. See [Contributing](CONTRIBUTING.md) before opening a pull request.
+The review task runs strict typechecking, zero-warning lint, unit and rendered-DOM tests, a production build, Community-oriented static checks, and release verification. The production assets are `main.js`, `manifest.json`, and `styles.css`; a local ZIP and SHA-256 checksum can be built with `npm run release:bundle`.
 
-The production assets are <code>main.js</code>, <code>manifest.json</code>, and <code>styles.css</code>. A local ZIP and SHA-256 checksum can be built with <code>npm run release:bundle</code>.
+Read [Contributing](CONTRIBUTING.md) before opening a pull request.
 
-## Support, security, and license
+## Support, security, and conduct
 
-Use [Support](SUPPORT.md) for questions, sanitized bug reports, and feature requests. Do not put vulnerabilities or private vault information in a public issue; read the current [Security policy](SECURITY.md) for the available disclosure route.
+- [Support](SUPPORT.md) — questions, sanitized bug reports, and feature requests
+- [Security policy](SECURITY.md) — the trust model and the private disclosure route. Never put a vulnerability or private vault information in a public issue
+- [Contributing](CONTRIBUTING.md)
+- [Code of conduct](CODE_OF_CONDUCT.md)
 
-Knowledge Base Command Center is released under the [MIT License](LICENSE).
+## Author
+
+Built by **Dr. Ali Alshahrani**.
+
+- GitHub: [@drbinsaad](https://github.com/drbinsaad)
+- X: [@_dali](https://x.com/_dali)
+
+## License
+
+Released under the [MIT License](LICENSE).
+
+Obsidian names, interface elements, and trademarks visible in product captures remain the property of their respective owners. This project is not endorsed by Obsidian.

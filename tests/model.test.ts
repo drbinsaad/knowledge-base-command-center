@@ -12,6 +12,7 @@ import {
   boundedSemanticLineage,
   canonicalInterimEnvelopeString,
   canonicalIdIsValid,
+  canonicalJsonString,
   canonicalHierarchyIssue,
   canonicalPath,
   canonicalPathInputsUnchanged,
@@ -39,6 +40,7 @@ import {
   deterministicSemanticHead,
   curriculumContainerKey,
   expectedParentCurriculumId,
+  fingerprintText,
   genericNotePath,
   groupRecordsByGroup,
   isPortablePlaceholderPath,
@@ -50,7 +52,6 @@ import {
   libraryIdFromTab,
   libraryTabId,
   limitSnapshotStack,
-  matchesQuery,
   matchesParsedQuery,
   MAX_CURRICULUM_DEPTH,
   MAX_DELETED_KNOWLEDGE_BASE_IDS,
@@ -72,8 +73,10 @@ import {
   curriculumChildPaths,
   curriculumDescendantPaths,
   curriculumSiblingPaths,
+  normalizedNameKey,
   normalizeSearchText,
   parseQuery,
+  PERSONAL_ORGANIZATION_FIELDS,
   parsePersonalBackup,
   parseDeviceLocalPluginState,
   parseWorkspaceConfig,
@@ -86,7 +89,6 @@ import {
   resolveExpectedParentPath,
   resolveLibraryNoteProfile,
   replaceCurriculumVisualPath,
-  replacePathMapKey,
   reconcileCurriculumVisual,
   rewritePluginDataPathPrefix,
   rewritePluginDataFolderRename,
@@ -111,6 +113,7 @@ import {
   type LibraryDefinition,
   type LayoutHeading,
   type LayoutSubheading,
+  type PluginData,
   type VaultRecord,
 } from "../src/model.ts";
 import {
@@ -121,7 +124,7 @@ import {
   parseAnyCommandCenterExport,
   parsePortableExport,
   PORTABLE_EXPORT_KIND,
-  portableSubjectIdForPath,
+  portableSubjectPath,
   registerPortableGroup,
   removePortableGroup,
   renameOrMergePortableGroup,
@@ -133,6 +136,20 @@ import {
   type PortableExportSelection,
   type PortableExportV1,
 } from "../src/portability.ts";
+
+/**
+ * Production never matches against a raw query string: every caller parses once
+ * and reuses the parsed query. These helpers pair the two production functions
+ * the same way instead of relying on a wrapper that only tests called.
+ */
+function matchesQuery(target: VaultRecord, query: string): boolean {
+  return matchesParsedQuery(target, parseQuery(query));
+}
+
+/** Reverse a resolved subject binding the way the plugin does, via portableSubjectPath. */
+function subjectIdForPath(data: PluginData, path: string): string {
+  return data.portableIndex.subjects.find((subject) => portableSubjectPath(data, subject.id) === path)?.id ?? "";
+}
 
 function record(overrides: Partial<VaultRecord> = {}): VaultRecord {
   return {
@@ -4127,10 +4144,17 @@ test("visual curriculum paths follow note renames", () => {
 });
 
 test("visual group override keys follow note renames", () => {
-  const groups = { "old.md": "Research" };
-  assert.equal(replacePathMapKey(groups, "old.md", "new.md"), true);
-  assert.deepEqual(groups, { "new.md": "Research" });
-  assert.equal(replacePathMapKey(groups, "missing.md", "other.md"), false);
+  const data = migrateData(null);
+  data.indexGroupByPath = { "old.md": "Research" };
+  data.displayNameByPath = { "old.md": "Old label" };
+  assert.equal(rewritePluginDataPathPrefix(data, "old.md", "new.md"), true);
+  assert.deepEqual(data.indexGroupByPath, { "new.md": "Research" });
+  assert.deepEqual(data.displayNameByPath, { "new.md": "Old label" });
+
+  const untouched = migrateData(null);
+  untouched.indexGroupByPath = { "old.md": "Research" };
+  assert.equal(rewritePluginDataPathPrefix(untouched, "missing.md", "other.md"), false);
+  assert.deepEqual(untouched.indexGroupByPath, { "old.md": "Research" });
 });
 
 test("reset restores canonical parent and sibling ordering", () => {
@@ -4985,13 +5009,20 @@ test("reserved Windows device names stay reserved with an extension", () => {
   assert.equal(genericNotePath("KB", "NUL.txt"), "KB/NUL-note.txt.md");
 });
 
-test("a parsed query matches identically to the string form but is reusable", () => {
+test("one parsed query stays stateless across records and repeated use", () => {
   const target = record({ title: "Café airway", aliases: ["مجرى الهواء"] });
+  const other = record({ path: "03 Clinical Topics/02 Otology/ENT-OTO-001.md", title: "Otology basics", aliases: [], domain: "Otology" });
   for (const query of ["cafe", "مجرى", "priority:P1", "priority:P3", "domain:pediatric cafe", ""]) {
     const parsed = parseQuery(query);
-    assert.equal(matchesParsedQuery(target, parsed), matchesQuery(target, query), query);
-    // Reusing one parsed query across many records must be stateless.
-    assert.equal(matchesParsedQuery(target, parsed), matchesQuery(target, query), `${query} (second use)`);
+    // A parsed query is reused across every rendered record, so applying it
+    // must never differ from parsing the same text again for that record.
+    for (const candidate of [target, other, target, other]) {
+      assert.equal(
+        matchesParsedQuery(candidate, parsed),
+        matchesParsedQuery(candidate, parseQuery(query)),
+        `${query} / ${candidate.title}`,
+      );
+    }
   }
 });
 
@@ -6231,8 +6262,8 @@ test("portable v4 round-trips same-name custom libraries by stable ID without pa
     libraryId: "library-beta",
   });
   synchronizePortableRegistry(source, [alpha, beta]);
-  const alphaId = portableSubjectIdForPath(source, alpha.path);
-  const betaId = portableSubjectIdForPath(source, beta.path);
+  const alphaId = subjectIdForPath(source, alpha.path);
+  const betaId = subjectIdForPath(source, beta.path);
   source.portableIndex.libraryLayouts["library-alpha"] = [{
     id: "alpha-heading",
     title: "Alpha heading",
@@ -7671,4 +7702,110 @@ test("a library node moved between parents remints one deterministic identity on
   assert.ok(moved, "the moved node lands under its new parent");
   assert.match(moved.id, /^library-import-[0-9a-f]{16}$/, "a colliding node ID remints as a deterministic library fork");
   assert.deepEqual(moved.subjects, ["s-move"], "the moved subject follows the incoming placement");
+});
+
+test("canonical JSON keeps an own __proto__ key so every module canonicalizes one store the same way", () => {
+  // JSON.parse is the only way a persisted store can carry this key, and it
+  // makes it an own property. A canonicalizer that accumulates into a plain
+  // object routes the assignment through Object.prototype's __proto__ setter,
+  // which creates no own property and silently drops the key.
+  const parsed: unknown = JSON.parse('{"__proto__":{"group":"Research"},"beta":2}');
+  assert.equal(canonicalJsonString(parsed), '{"__proto__":{"group":"Research"},"beta":2}');
+
+  const other: unknown = JSON.parse('{"__proto__":{"group":"Teaching"},"beta":2}');
+  assert.notEqual(canonicalJsonString(parsed), canonicalJsonString(other));
+
+  // Sorting, undefined-stripping, and array hole normalization are unchanged.
+  assert.equal(canonicalJsonString({ b: 1, a: undefined, c: [undefined, 2] }), '{"b":1,"c":[null,2]}');
+
+  // The store-level consumers must inherit exactly this behaviour.
+  const withProto = migrateData(null);
+  withProto.indexGroupByPath = JSON.parse('{"__proto__":"Research"}') as Record<string, string>;
+  const withOtherProto = migrateData(null);
+  withOtherProto.indexGroupByPath = JSON.parse('{"__proto__":"Teaching"}') as Record<string, string>;
+  assert.notEqual(
+    semanticEntryFingerprint({ createdAt: 1, archivedAt: null, data: withProto }),
+    semanticEntryFingerprint({ createdAt: 1, archivedAt: null, data: withOtherProto }),
+    "a base identified only by a __proto__ key is not confused with a different one",
+  );
+});
+
+test("the shared double-FNV-1a fingerprint stays byte-identical to the IDs already in users' vaults", () => {
+  // These outputs are baked into imported collection and library IDs, portfolio
+  // destination base IDs, plan-guard tokens, and recovered legacy IDs that are
+  // already persisted. Changing the mixing or the seeds is a data-loss bug, not
+  // an improvement, so the expected values are frozen literals.
+  assert.equal(fingerprintText(""), "811c9dc59e3779b9");
+  assert.equal(fingerprintText("a"), "e40c292ce954cf08");
+  assert.equal(fingerprintText("Knowledge base"), "74aef83ce2465a18");
+  assert.equal(fingerprintText("café"), "3308be7c708b4298");
+  assert.equal(fingerprintText("\u{1F3A7}"), "522e8bd4025e8768", "hashing walks UTF-16 code units, not code points");
+  assert.equal(
+    fingerprintText("deterministic:repair:0000000000000000:811c9dc59e3779b9"),
+    "fc61d5a75772ec93",
+  );
+  for (const sample of ["", "a", "Knowledge base", "café"]) {
+    assert.match(fingerprintText(sample), /^[0-9a-f]{16}$/, sample);
+  }
+
+  // Every persisted-identity producer routes through the same function.
+  assert.equal(
+    deterministicSemanticHead("0000000000000000", "811c9dc59e3779b9", "repair"),
+    fingerprintText("deterministic:repair:0000000000000000:811c9dc59e3779b9"),
+  );
+});
+
+test("undo snapshots, snapshot restores, and recovery backups all carry the same personal-organization fields", () => {
+  const source = migrateData(null);
+  source.collections = [{ id: "c", title: "C", collapsed: false, subjects: ["KB/One.md"], subheadings: [] }];
+  source.pinnedPaths = ["KB/One.md"];
+  source.nextStudyPaths = ["KB/Two.md"];
+  source.savedViews = [{ id: "v", name: "V", tab: "curriculum", query: "cafe" }];
+  source.curriculumVisual = { parentByPath: { "KB/Two.md": "KB/One.md" }, orderByContainer: { "parent:KB/One.md": ["KB/Two.md"] } };
+  source.manualIndexPaths = ["KB/Two.md"];
+  source.excludedIndexPaths = ["KB/Three.md"];
+  source.indexGroupByPath = { "KB/One.md": "Research" };
+  source.displayNameByPath = { "KB/One.md": "One" };
+  source.indexGroupAliases = { Research: "R&D" };
+  source.indexGroupOrder = ["Research"];
+
+  const snapshot = snapshotPersonal(source, "Before");
+  const backup = createPersonalBackup(source, "2026-01-01T00:00:00.000Z", "vault-1", "base-1", "Base one");
+
+  // One list drives all three producers, so a field can never reach undo while
+  // being dropped from backups (or the reverse).
+  for (const field of PERSONAL_ORGANIZATION_FIELDS) {
+    assert.ok(Object.prototype.hasOwnProperty.call(snapshot, field), `snapshotPersonal captures ${field}`);
+    assert.ok(Object.prototype.hasOwnProperty.call(backup, field), `createPersonalBackup captures ${field}`);
+    assert.deepEqual(snapshot[field], source[field], `snapshotPersonal copies ${field} faithfully`);
+    assert.deepEqual(backup[field], source[field], `createPersonalBackup copies ${field} faithfully`);
+  }
+  assert.deepEqual(
+    PERSONAL_ORGANIZATION_FIELDS.map((field) => JSON.stringify(snapshot[field])),
+    PERSONAL_ORGANIZATION_FIELDS.map((field) => JSON.stringify(backup[field])),
+    "the snapshot and the backup agree field for field",
+  );
+
+  // Restore is the third copy of the list; every captured field must come back.
+  const target = migrateData(null);
+  restoreSnapshot(target, snapshot);
+  for (const field of PERSONAL_ORGANIZATION_FIELDS) {
+    assert.deepEqual(target[field], source[field], `restoreSnapshot returns ${field}`);
+  }
+
+  // Deep-copied, never aliased: mutating the restored state cannot reach back.
+  target.pinnedPaths.push("KB/Four.md");
+  target.indexGroupByPath["KB/One.md"] = "Teaching";
+  assert.deepEqual(source.pinnedPaths, ["KB/One.md"]);
+  assert.equal(source.indexGroupByPath["KB/One.md"], "Research");
+  assert.deepEqual(snapshot.pinnedPaths, ["KB/One.md"]);
+});
+
+test("one name key decides base, group, and heading uniqueness everywhere", () => {
+  assert.equal(normalizedNameKey("  Airway  "), "airway");
+  // NFD "e" + combining acute must fold onto the precomposed form, or two
+  // visually identical names claim the same slot in one module and not another.
+  assert.equal(normalizedNameKey("Café"), normalizedNameKey("Café"));
+  assert.equal(normalizedNameKey("CAFÉ"), "café");
+  assert.equal(normalizedNameKey(""), "");
 });

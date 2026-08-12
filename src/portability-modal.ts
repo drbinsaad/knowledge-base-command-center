@@ -13,7 +13,14 @@ import {
   type PortableIndexLocalState,
   type VaultRecord,
 } from "./model";
-import { localDateStamp, VaultFilePickerModal } from "./modals";
+import {
+  createOpenedBaseGuard,
+  deliverJsonExport,
+  type OpenedBaseGuard,
+  modalOwnerWindow,
+  requestJsonImport,
+  setGuardedTimer,
+} from "./modals";
 import {
   applyPortableExport,
   assertPortableImportDestinationCompatible,
@@ -182,7 +189,7 @@ export class ExportImportCenterModal extends Modal {
   private panelEl: HTMLElement | null = null;
   private openedBaseId = "";
   private openedDataEpoch = -1;
-  private staleBaseNoticeShown = false;
+  private ownsBase: OpenedBaseGuard | null = null;
   private pendingTimers = new Set<number>();
 
   private readonly blockCloseWhileBusy = (event: KeyboardEvent): void => {
@@ -204,7 +211,7 @@ export class ExportImportCenterModal extends Modal {
   onOpen(): void {
     this.openedBaseId = this.plugin.getActiveKnowledgeBaseId();
     this.openedDataEpoch = this.plugin.getDataEpoch();
-    this.staleBaseNoticeShown = false;
+    this.ownsBase = this.createBaseGuard();
     this.centerOpen = true;
     this.modalEl.addClass("ent-cc-portability-modal");
     this.contentEl.addClass("ent-cc-modal", "ent-cc-portability-center");
@@ -214,10 +221,8 @@ export class ExportImportCenterModal extends Modal {
 
   onClose(): void {
     this.centerOpen = false;
-    for (const timer of this.pendingTimers) {
-      const viewWindow = this.contentEl.ownerDocument.defaultView ?? window;
-      viewWindow.clearTimeout(timer);
-    }
+    const viewWindow = modalOwnerWindow(this.contentEl);
+    for (const timer of this.pendingTimers) viewWindow.clearTimeout(timer);
     this.pendingTimers.clear();
     this.modalEl.removeEventListener("keydown", this.blockCloseWhileBusy, true);
     if (this.completionNotified) return;
@@ -906,31 +911,26 @@ export class ExportImportCenterModal extends Modal {
         this.dataChanged = true;
         if (!this.guardOpenedBase()) return;
       }
-      if (Platform.isMobile) {
-        const file = await this.plugin.writePortableJson("portable", prepared.value);
+      if (!this.guardOpenedBase()) return;
+      const delivery = await deliverJsonExport(
+        this.plugin,
+        "portable",
+        "knowledge-base-command-center-portable",
+        prepared.value,
+        { contentEl: this.contentEl, serialized: prepared.serialized, date: now },
+      );
+      if (delivery.medium === "vault") {
         if (!this.guardOpenedBase()) return;
         if (selection.recovery) this.plugin.recordRecoveryExport(now.getTime());
-        new Notice(`Saved ${selectionCount(selection)} selected sections inside the vault at ${file.path}. Note contents were not included.`, 8000);
+        new Notice(`Saved ${selectionCount(selection)} selected sections inside the vault at ${delivery.file.path}. Note contents were not included.`, 8000);
         this.close();
         return;
       }
-
-      const viewWindow = this.contentEl.ownerDocument.defaultView ?? window;
-      if (!this.guardOpenedBase()) return;
-      const url = viewWindow.URL.createObjectURL(new Blob([prepared.serialized], { type: "application/json" }));
-      const link = createEl("a");
-      link.href = url;
-      link.download = `knowledge-base-command-center-portable-${localDateStamp(now)}.json`;
-      link.click();
       if (selection.recovery) this.plugin.recordRecoveryExport(now.getTime());
-      viewWindow.setTimeout(() => viewWindow.URL.revokeObjectURL(url), 1000);
       new Notice(`Exported ${selectionCount(selection)} selected sections. Note contents and attachments were not included.`);
       this.close();
     } catch (error) {
-      if (!this.ownsOpenedBase()) {
-        this.guardOpenedBase();
-        return;
-      }
+      if (!this.guardOpenedBase()) return;
       if (commitStarted) {
         if (this.plugin.data !== exportData) {
           throw new Error(`The export failed (${errorMessage(error)}), but its registry rollback was skipped because the active knowledge-base data reloaded. Reopen the export/import center before retrying.`);
@@ -951,41 +951,18 @@ export class ExportImportCenterModal extends Modal {
   }
 
   private chooseImportFile(): void {
-    if (this.busyAction || !this.guardOpenedBase()) return;
-    if (Platform.isMobile) {
-      const files = this.plugin.getPortableJsonFiles();
-      if (files.length === 0) {
-        new Notice("No JSON files were found in the vault. Copy an export JSON into the vault, then try again.");
-        return;
-      }
-      new VaultFilePickerModal(this.app, files, "Choose a Command Center export JSON", (file) => {
-        if (!this.guardOpenedBase()) return;
-        this.run("file", () => this.loadImportValue(this.plugin.readPortableJson(file), file.path));
-      }).open();
-      return;
-    }
-
-    const input = createEl("input");
-    input.type = "file";
-    input.accept = "application/json,.json";
-    input.addEventListener("change", () => {
-      if (!this.guardOpenedBase()) return;
-      const file = input.files?.[0];
-      if (!file) return;
-      this.run("file", async () => {
-        if (file.size > MAX_PORTABLE_PACKAGE_BYTES) throw new Error("The selected JSON is larger than the 10 MB import limit.");
-        const parsed = JSON.parse(await file.text()) as unknown;
-        if (!this.guardOpenedBase()) return;
-        this.setImportValue(parseAnyCommandCenterExport(parsed), file.name);
-      });
+    if (this.busyAction) return;
+    requestJsonImport(this.app, this.plugin, {
+      title: "Choose a Command Center export JSON",
+      maxBytes: MAX_PORTABLE_PACKAGE_BYTES,
+      oversizeMessage: "The selected JSON is larger than the 10 MB import limit.",
+      emptyVaultMessage: "No JSON files were found in the vault. Copy an export JSON into the vault, then try again.",
+      guard: () => this.guardOpenedBase(),
+      run: (task) => this.run("file", task),
+      onValue: (value, sourceLabel) => {
+        this.setImportValue(parseAnyCommandCenterExport(value), sourceLabel);
+      },
     });
-    input.click();
-  }
-
-  private async loadImportValue(value: Promise<unknown>, sourceLabel: string): Promise<void> {
-    const parsed = parseAnyCommandCenterExport(await value);
-    if (!this.guardOpenedBase()) return;
-    this.setImportValue(parsed, sourceLabel);
   }
 
   private setImportValue(value: PortableExportV1, sourceLabel: string): void {
@@ -1232,40 +1209,32 @@ export class ExportImportCenterModal extends Modal {
     this.close();
   }
 
-  private ownsOpenedBase(): boolean {
-    // Prototype-only unit-test fixtures do not run onOpen(); real modal
-    // instances always capture a non-empty ID and non-negative epoch before
-    // their first render.
-    const ownsBase = !this.openedBaseId || this.plugin.getActiveKnowledgeBaseId() === this.openedBaseId;
-    const ownsEpoch = typeof this.openedDataEpoch !== "number"
-      || this.openedDataEpoch < 0
-      || this.plugin.getDataEpoch() === this.openedDataEpoch;
-    return ownsBase && ownsEpoch;
+  private createBaseGuard(): OpenedBaseGuard {
+    return createOpenedBaseGuard(this.plugin, {
+      message: "The active knowledge base changed or its data was reloaded. Reopen the export/import center before continuing.",
+      openedBaseId: this.openedBaseId,
+      // A negative sentinel means "never captured", which only prototype-only
+      // unit-test fixtures can still be holding.
+      openedDataEpoch: this.openedDataEpoch >= 0 ? this.openedDataEpoch : undefined,
+      onStale: () => { if (this.centerOpen) this.close(); },
+    });
   }
 
   private guardOpenedBase(): boolean {
-    if (this.ownsOpenedBase()) return true;
-    const showNotice = !this.staleBaseNoticeShown;
-    this.staleBaseNoticeShown = true;
-    if (this.centerOpen) this.close();
-    if (showNotice) {
-      new Notice("The active knowledge base changed or its data was reloaded. Reopen the export/import center before continuing.", 8000);
-    }
-    return false;
+    // Prototype-only unit-test fixtures do not run onOpen(); with no captured
+    // base id there is nothing they could have gone stale against.
+    if (!this.openedBaseId) return true;
+    return (this.ownsBase ??= this.createBaseGuard())();
   }
 
   private setGuardedTimer(action: () => void, delay: number): number {
-    const viewWindow = this.contentEl.ownerDocument.defaultView ?? window;
-    let timer = 0;
-    let firedSynchronously = false;
-    timer = viewWindow.setTimeout(() => {
-      firedSynchronously = true;
-      this.pendingTimers?.delete(timer);
-      if (!this.centerOpen || !this.guardOpenedBase()) return;
-      action();
-    }, delay);
-    if (!firedSynchronously) (this.pendingTimers ??= new Set<number>()).add(timer);
-    return timer;
+    return setGuardedTimer({
+      contentEl: this.contentEl,
+      timers: (this.pendingTimers ??= new Set<number>()),
+      proceed: () => this.centerOpen && this.guardOpenedBase(),
+      action,
+      delay,
+    });
   }
 
   private run(kind: BusyAction, action: () => Promise<void>): void {
@@ -1274,10 +1243,7 @@ export class ExportImportCenterModal extends Modal {
     this.render();
     void action()
       .catch((error) => {
-        if (!this.ownsOpenedBase()) {
-          this.guardOpenedBase();
-          return;
-        }
+        if (!this.guardOpenedBase()) return;
         console.error("Knowledge Base Command Center portability action failed", error);
         new Notice(errorMessage(error), 8000);
       })
@@ -1290,12 +1256,3 @@ export class ExportImportCenterModal extends Modal {
   }
 }
 
-export function openExportImportCenter(
-  plugin: EntVaultCommandCenterPlugin,
-  initialMode: CenterMode = "export",
-  onComplete?: (dataChanged: boolean) => void,
-): ExportImportCenterModal {
-  const modal = new ExportImportCenterModal(plugin, initialMode, onComplete);
-  modal.open();
-  return modal;
-}

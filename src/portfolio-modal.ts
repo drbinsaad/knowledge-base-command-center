@@ -1,6 +1,6 @@
-import { Modal, Notice, Platform, Setting } from "obsidian";
+import { Modal, Notice, Setting } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
-import { calculateModalViewportLayout, localDateStamp, VaultFilePickerModal } from "./modals";
+import { calculateModalViewportLayout, deliverJsonExport, requestJsonImport } from "./modals";
 import {
   EMPTY_PORTABLE_SELECTION,
   normalizePortableSelection,
@@ -390,19 +390,18 @@ export class PortfolioTransferModal extends Modal {
     const now = new Date();
     const bundle = this.plugin.createPortfolioExport(requests, now.toISOString());
     const serialized = serializePortfolioExport(bundle);
-    if (Platform.isMobile) {
-      const file = await this.plugin.writePortableJson("portfolio", bundle);
-      new Notice(`Saved the ${bundle.manifest.baseCount}-base portfolio at ${file.path}. Note bodies and attachments were not included.`, 9000);
+    const delivery = await deliverJsonExport(
+      this.plugin,
+      "portfolio",
+      "knowledge-base-command-center-portfolio",
+      bundle,
+      { contentEl: this.contentEl, serialized, date: now },
+    );
+    if (delivery.medium === "vault") {
+      new Notice(`Saved the ${bundle.manifest.baseCount}-base portfolio at ${delivery.file.path}. Note bodies and attachments were not included.`, 9000);
       this.close();
       return;
     }
-    const viewWindow = this.contentEl.ownerDocument.defaultView ?? window;
-    const url = viewWindow.URL.createObjectURL(new Blob([serialized], { type: "application/json" }));
-    const link = createEl("a");
-    link.href = url;
-    link.download = `knowledge-base-command-center-portfolio-${localDateStamp(now)}.json`;
-    link.click();
-    viewWindow.setTimeout(() => viewWindow.URL.revokeObjectURL(url), 1000);
     new Notice(`Exported ${bundle.manifest.baseCount} independent portable packages. Note bodies and attachments were not included.`);
     this.close();
   }
@@ -675,29 +674,19 @@ export class PortfolioTransferModal extends Modal {
 
   private chooseFile(): void {
     if (this.busy) return;
-    if (Platform.isMobile) {
-      const files = this.plugin.getPortableJsonFiles();
-      if (files.length === 0) {
-        new Notice("No JSON files were found in the vault. Copy a portfolio JSON into the vault, then try again.");
-        return;
-      }
-      new VaultFilePickerModal(this.app, files, "Choose a Command Center portfolio JSON", (file) => {
-        this.run("file", async () => this.setBundle(parsePortfolioExport(await this.plugin.readPortfolioJson(file)), file.path));
-      }).open();
-      return;
-    }
-    const input = createEl("input");
-    input.type = "file";
-    input.accept = "application/json,.json";
-    input.addEventListener("change", () => {
-      const file = input.files?.[0];
-      if (!file) return;
-      this.run("file", async () => {
-        if (file.size > MAX_PORTFOLIO_BUNDLE_BYTES) throw new Error("The selected portfolio is larger than the 32 MB import limit.");
-        this.setBundle(parsePortfolioExport(JSON.parse(await file.text()) as unknown), file.name);
-      });
+    requestJsonImport(this.app, this.plugin, {
+      title: "Choose a Command Center portfolio JSON",
+      maxBytes: MAX_PORTFOLIO_BUNDLE_BYTES,
+      oversizeMessage: "The selected portfolio is larger than the 32 MB import limit.",
+      emptyVaultMessage: "No JSON files were found in the vault. Copy a portfolio JSON into the vault, then try again.",
+      // Portfolios use their own reader: it enforces the 32 MB bundle cap that
+      // the shared 10 MB single-package reader would reject far too early.
+      readVaultJson: (file) => this.plugin.readPortfolioJson(file),
+      run: (task) => this.run("file", task),
+      onValue: (value, sourceLabel) => {
+        this.setBundle(parsePortfolioExport(value), sourceLabel);
+      },
     });
-    input.click();
   }
 
   private setBundle(bundle: PortfolioExportV1, label: string): void {

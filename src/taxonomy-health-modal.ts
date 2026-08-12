@@ -1,12 +1,12 @@
 import { Modal, Notice, TFile, setIcon } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
+import { createOpenedBaseGuard } from "./modals";
 import type { TaxonomyHealthFinding } from "./taxonomy-health";
 
 const PAGE_SIZE = 200;
 
 export class TaxonomyRepairPreviewModal extends Modal {
-  private openedBaseId = "";
-  private openedDataEpoch = 0;
+  private ownsBase: (() => boolean) | null = null;
 
   constructor(
     private readonly plugin: EntVaultCommandCenterPlugin,
@@ -22,8 +22,10 @@ export class TaxonomyRepairPreviewModal extends Modal {
       this.close();
       return;
     }
-    this.openedBaseId = this.plugin.getActiveKnowledgeBaseId();
-    this.openedDataEpoch = this.plugin.getDataEpoch();
+    this.ownsBase = createOpenedBaseGuard(this.plugin, {
+      message: "The knowledge base changed after this preview. Recheck taxonomy health before applying a repair.",
+      onStale: () => this.close(),
+    });
     this.modalEl.addClass("ent-cc-taxonomy-preview-modal");
     this.contentEl.addClass("ent-cc-modal", "ent-cc-taxonomy-preview");
     this.titleEl.setText("Review taxonomy repair");
@@ -42,12 +44,7 @@ export class TaxonomyRepairPreviewModal extends Modal {
     cancel.addEventListener("click", () => this.close());
     const apply = actions.createEl("button", { cls: "ent-cc-button mod-cta", type: "button", text: "Apply repair" });
     apply.addEventListener("click", () => {
-      if (this.plugin.getActiveKnowledgeBaseId() !== this.openedBaseId
-        || this.plugin.getDataEpoch() !== this.openedDataEpoch) {
-        this.close();
-        new Notice("The knowledge base changed after this preview. Recheck taxonomy health before applying a repair.", 8000);
-        return;
-      }
+      if (this.ownsBase && !this.ownsBase()) return;
       apply.disabled = true;
       cancel.disabled = true;
       void this.plugin.applyTaxonomyHealthRepair(this.finding.id, repair).then(() => {
@@ -66,8 +63,7 @@ export class TaxonomyRepairPreviewModal extends Modal {
 export class TaxonomyHealthModal extends Modal {
   private query = "";
   private visibleLimit = PAGE_SIZE;
-  private openedBaseId = "";
-  private openedDataEpoch = 0;
+  private ownsBase: (() => boolean) | null = null;
   private findings: TaxonomyHealthFinding[] = [];
 
   constructor(private readonly plugin: EntVaultCommandCenterPlugin) {
@@ -75,24 +71,28 @@ export class TaxonomyHealthModal extends Modal {
   }
 
   onOpen(): void {
-    this.openedBaseId = this.plugin.getActiveKnowledgeBaseId();
-    this.openedDataEpoch = this.plugin.getDataEpoch();
+    this.rebaseGuard();
     this.modalEl.addClass("ent-cc-taxonomy-health-modal");
     this.contentEl.addClass("ent-cc-modal", "ent-cc-taxonomy-health");
     this.titleEl.setText("Taxonomy health center");
     this.refreshFindings();
   }
 
-  private ownsOpenedBase(): boolean {
-    return this.plugin.getActiveKnowledgeBaseId() === this.openedBaseId
-      && this.plugin.getDataEpoch() === this.openedDataEpoch;
+  /** Re-baseline after an applied repair legitimately advanced the epoch. */
+  private rebaseGuard(): void {
+    this.ownsBase = createOpenedBaseGuard(this.plugin, {
+      message: "The active knowledge base changed. Reopen taxonomy health before reviewing or applying repairs.",
+      onStale: () => this.close(),
+    });
   }
 
   private guardOpenedBase(): boolean {
-    if (this.ownsOpenedBase()) return true;
-    this.close();
-    new Notice("The active knowledge base changed. Reopen taxonomy health before reviewing or applying repairs.", 8000);
-    return false;
+    // Prototype-only unit-test fixtures do not run onOpen().
+    this.ownsBase ??= createOpenedBaseGuard(this.plugin, {
+      message: "The active knowledge base changed. Reopen taxonomy health before reviewing or applying repairs.",
+      onStale: () => this.close(),
+    });
+    return this.ownsBase();
   }
 
   private refreshFindings(): void {
@@ -191,7 +191,7 @@ export class TaxonomyHealthModal extends Modal {
       review.addEventListener("click", () => {
         if (!this.guardOpenedBase()) return;
         new TaxonomyRepairPreviewModal(this.plugin, finding, () => {
-          this.openedDataEpoch = this.plugin.getDataEpoch();
+          this.rebaseGuard();
           this.refreshFindings();
         }).open();
       });

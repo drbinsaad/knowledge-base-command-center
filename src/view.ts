@@ -4,6 +4,7 @@ import type { CatalogPlacementTarget } from "./main";
 import { IndexManagerModal, type ManagerTab } from "./index-manager";
 import { ExportImportCenterModal } from "./portability-modal";
 import { PortfolioTransferModal } from "./portfolio-modal";
+import { MAX_PORTABLE_PACKAGE_BYTES } from "./portability";
 import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge-base-modal";
 import { LibraryEditorModal, ManageLibrariesModal } from "./library-modal";
 import { resolveLibraryIconId } from "./library-icons";
@@ -12,6 +13,7 @@ import {
   buildCurriculumTree,
   canonicalPath,
   childSubheadings,
+  clonePersonalOrganization,
   curriculumChildPaths,
   createPersonalBackup,
   curriculumDescendantPaths,
@@ -58,7 +60,6 @@ import {
   visualPlacementPathSet,
 } from "./model";
 import {
-  collectKnowledgeBaseSearchResults,
   DEFAULT_CROSS_BASE_SEARCH_LIMIT,
   knowledgeBaseSearchRank,
   type KnowledgeBaseSearchGroup as BoundedKnowledgeBaseSearchGroup,
@@ -71,9 +72,11 @@ import {
   CollectionPickerModal,
   collectionTargets,
   ConfirmModal,
+  createOpenedBaseGuard,
+  deliverJsonExport,
   IndexGroupModal,
   KnowledgeNoteModal,
-  localDateStamp,
+  requestJsonImport,
   RecordPickerModal,
   TextPromptModal,
   TopicEditorModal,
@@ -87,19 +90,6 @@ export const MAX_RENDERED_BROWSE_RECORDS = 300;
 export const MAX_RENDERED_BROWSE_STRUCTURES = 300;
 export type KnowledgeBaseSearchGroup = BoundedKnowledgeBaseSearchGroup<KnowledgeBaseSearchSourceIdentity>;
 export type KnowledgeBaseSearchResultSet = BoundedKnowledgeBaseSearchResultSet<KnowledgeBaseSearchSourceIdentity>;
-
-/** Match every available base, preserving the plugin's active-first base order. */
-export function prepareKnowledgeBaseSearchResults<TSource extends KnowledgeBaseSearchSourceIdentity>(
-  sources: Array<TSource & { records: VaultRecord[] }>,
-  query: string,
-  limit = MAX_RENDERED_SEARCH_RESULTS,
-): BoundedKnowledgeBaseSearchResultSet<TSource> {
-  return collectKnowledgeBaseSearchResults(
-    sources.map((source) => ({ source, records: source.records })),
-    parseQuery(query),
-    limit,
-  );
-}
 
 interface Membership {
   headingId: string;
@@ -768,17 +758,11 @@ export class EntVaultCommandCenterView extends ItemView {
     // Capture the owner of the rendered DOM, not merely whichever base the
     // plugin has already switched to. During the async switch window old rows
     // can still receive a click while plugin.data points at the new base.
-    const openedBaseId = this.loadedBaseId || this.plugin.getActiveKnowledgeBaseId();
-    const openedDataEpoch = this.loadedBaseId ? this.loadedDataEpoch : this.currentDataEpoch();
-    let noticeShown = false;
-    return (): boolean => {
-      if (this.plugin.getActiveKnowledgeBaseId() === openedBaseId && this.currentDataEpoch() === openedDataEpoch) return true;
-      if (!noticeShown) {
-        noticeShown = true;
-        new Notice("The active knowledge base changed. Close and reopen this action before continuing.", 8000);
-      }
-      return false;
-    };
+    return createOpenedBaseGuard(this.plugin, {
+      message: "The active knowledge base changed. Close and reopen this action before continuing.",
+      openedBaseId: this.loadedBaseId || this.plugin.getActiveKnowledgeBaseId(),
+      openedDataEpoch: this.loadedBaseId ? this.loadedDataEpoch : this.currentDataEpoch(),
+    });
   }
 
   private currentDataEpoch(): number {
@@ -5034,22 +5018,18 @@ export class EntVaultCommandCenterView extends ItemView {
         this.plugin.data.settings.workspaceName,
       );
       const workspaceName = this.plugin.data.settings.workspaceName;
-      if (Platform.isMobile) {
-        await this.plugin.writePortableJson("backup", backup);
+      const slug = workspaceName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "knowledge-command-center";
+      const delivery = await deliverJsonExport(this.plugin, "backup", `${slug}-backup`, backup, {
+        contentEl: this.contentEl,
+        date: now,
+      });
+      if (delivery.medium === "vault") {
         if (!ownsBase()) return;
         this.plugin.recordRecoveryExport(now.getTime());
         new Notice("Backup saved in the export folder inside the vault. Source notes were not included.");
         return;
       }
-      const viewWindow = this.contentEl.ownerDocument.defaultView ?? window;
-      const url = viewWindow.URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" }));
-      const link = createEl("a");
-      link.href = url;
-      const slug = workspaceName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "knowledge-command-center";
-      link.download = `${slug}-backup-${localDateStamp(now)}.json`;
-      link.click();
       this.plugin.recordRecoveryExport(now.getTime());
-      viewWindow.setTimeout(() => viewWindow.URL.revokeObjectURL(url), 1000);
       new Notice("Organization backup exported. Source notes were not included.");
     } catch (error) {
       if (ownsBase()) new Notice(error instanceof Error ? error.message : String(error));
@@ -5058,42 +5038,24 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private importOrganizationBackup(): void {
     const ownsBase = this.createOpenedBaseGuard();
-    if (Platform.isMobile) {
-      const files = this.plugin.getPortableJsonFiles();
-      if (files.length === 0) {
-        new Notice("No JSON files were found in the vault. Copy a backup JSON into the vault, then try again.");
-        return;
-      }
-      new VaultFilePickerModal(this.app, files, "Choose an organization backup JSON", async (file) => {
-        if (!ownsBase()) return;
-        try {
-          this.confirmOrganizationImport(this.plugin.readPortableJson(file), ownsBase);
-        } catch (error) {
+    requestJsonImport(this.app, this.plugin, {
+      title: "Choose an organization backup JSON",
+      maxBytes: MAX_PORTABLE_PACKAGE_BYTES,
+      oversizeMessage: "The selected JSON is larger than the 10 MB import limit.",
+      emptyVaultMessage: "No JSON files were found in the vault. Copy a backup JSON into the vault, then try again.",
+      guard: ownsBase,
+      run: (task) => {
+        void task().catch((error: unknown) => {
           if (ownsBase()) new Notice(error instanceof Error ? error.message : String(error));
-        }
-      }).open();
-      return;
-    }
-    const input = createEl("input");
-    input.type = "file";
-    input.accept = "application/json,.json";
-    input.addEventListener("change", () => {
-      if (!ownsBase()) return;
-      const file = input.files?.[0];
-      if (!file) return;
-      void file.text().then((raw) => {
-        if (!ownsBase()) return;
-        this.confirmOrganizationImport(Promise.resolve(JSON.parse(raw) as unknown), ownsBase);
-      }).catch((error) => {
-        if (ownsBase()) new Notice(error instanceof Error ? error.message : String(error));
-      });
+        });
+      },
+      onValue: (value) => { this.confirmOrganizationImport(value, ownsBase); },
     });
-    input.click();
   }
 
-  private confirmOrganizationImport(input: Promise<unknown>, ownsBase = this.createOpenedBaseGuard()): void {
+  private confirmOrganizationImport(input: unknown, ownsBase = this.createOpenedBaseGuard()): void {
     if (!ownsBase()) return;
-    void input.then((value) => {
+    void Promise.resolve(input).then((value) => {
       if (!ownsBase()) return;
       const backup = parsePersonalBackup(value);
       const recoveryCheck = assertPersonalBackupMatchesVault(
@@ -5136,17 +5098,9 @@ export class EntVaultCommandCenterView extends ItemView {
               allowBaseOverride,
             );
             await this.plugin.mutate("Import organization backup", () => {
-              this.plugin.data.collections = backup.collections;
-              this.plugin.data.pinnedPaths = backup.pinnedPaths;
-              this.plugin.data.nextStudyPaths = backup.nextStudyPaths;
-              this.plugin.data.savedViews = backup.savedViews;
-              this.plugin.data.curriculumVisual = backup.curriculumVisual;
-              this.plugin.data.manualIndexPaths = backup.manualIndexPaths;
-              this.plugin.data.excludedIndexPaths = backup.excludedIndexPaths;
-              this.plugin.data.indexGroupByPath = backup.indexGroupByPath;
-              this.plugin.data.displayNameByPath = backup.displayNameByPath;
-              this.plugin.data.indexGroupAliases = backup.indexGroupAliases;
-              this.plugin.data.indexGroupOrder = backup.indexGroupOrder;
+              // The shared field list keeps this import in step with the
+              // snapshot, restore, and backup paths.
+              Object.assign(this.plugin.data, clonePersonalOrganization(backup));
               this.plugin.data.layoutSnapshots = limitSnapshotStack(backup.layoutSnapshots, 10);
               this.plugin.data.portableIndex = backup.portableIndex;
             }, {

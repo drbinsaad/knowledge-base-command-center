@@ -50,7 +50,11 @@ assert.doesNotMatch(main, /id:\s*["'][^"']*(?:ent-vault-command-center|command)[
 assert.doesNotMatch(main, /name:\s*["'][^"']*command[^"']*["']/i, "command names must not include the redundant word command");
 assert.match(runtime, /Platform\.isMobile/);
 assert.match(runtime, /writePortableJson\("backup"/);
-assert.match(runtime, /writePortableJson\("workspace"/);
+// Every JSON export reaches the vault through one audited helper: the mobile
+// branch writes through writePortableJson(kind, …) and the desktop branch only
+// hands a blob to the user. Assert both the helper and the workspace caller.
+assert.match(runtime, /await plugin\.writePortableJson\(kind, value\)/);
+assert.match(runtime, /deliverJsonExport\(this\.plugin, "workspace"/);
 
 const enumerationCalls = runtime.match(/\.get(?:MarkdownFiles|Files|AllLoadedFiles)\s*\(/g) ?? [];
 const bulkReads = runtime.match(/\.(?:read|cachedRead)\s*\(/g) ?? [];

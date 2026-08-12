@@ -715,9 +715,22 @@ test("export filenames stamp the local calendar day instead of the UTC day", () 
   assert.equal(localDateStamp(new Date(2026, 0, 1, 23, 30)), "2026-01-01");
   assert.equal(localDateStamp(new Date(2026, 8, 5, 12, 0)), "2026-09-05");
 
-  for (const file of ["../src/index-manager.ts", "../src/portfolio-modal.ts", "../src/portability-modal.ts"]) {
+  // One shared helper owns the anchor download, so the local stamp is applied
+  // in exactly one place and every export site routes through it.
+  const modals = readFileSync(new URL("../src/modals.ts", import.meta.url), "utf8");
+  assert.match(modals, /const filename = `\$\{stem\}-\$\{localDateStamp\(options\.date \?\? new Date\(\)\)\}\.json`/u);
+  assert.match(modals, /link\.download = filename;/u);
+
+  for (const file of [
+    "../src/index-manager.ts",
+    "../src/portfolio-modal.ts",
+    "../src/portability-modal.ts",
+    "../src/view.ts",
+  ]) {
     const source = readFileSync(new URL(file, import.meta.url), "utf8");
-    assert.match(source, /link\.download = `[^`]*\$\{localDateStamp\(now\)\}\.json`/u, file);
+    assert.match(source, /deliverJsonExport\(/u, file);
+    assert.doesNotMatch(source, /link\.download/u, file);
+    assert.doesNotMatch(source, /createObjectURL/u, file);
     assert.doesNotMatch(source, /toISOString\(\)\.slice\(0, 10\)/u, file);
   }
 });

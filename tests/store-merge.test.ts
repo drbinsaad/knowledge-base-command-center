@@ -796,3 +796,35 @@ test("bounded lineage proves recent descendants and fails closed after an ancest
     semanticPluginDataProjection(reverse.store.bases[0].data),
   );
 });
+
+test("merge canonicalization sees a __proto__ key, matching the model and portfolio serializers", () => {
+  // A store whose only divergence lives under an own "__proto__" key used to
+  // canonicalize to the same text here — the local copy accumulated into a
+  // plain object, where that assignment creates no own property — while
+  // model.ts saw a real difference. Two modules then disagreed about whether
+  // the same pair of bases had diverged at all.
+  const local = entry("base-proto", "Base", 5);
+  const incoming = structuredClone(local);
+  local.data.indexGroupByPath = JSON.parse('{"__proto__":"Research"}') as Record<string, string>;
+  incoming.data.indexGroupByPath = JSON.parse('{"__proto__":"Teaching"}') as Record<string, string>;
+  for (const value of [local, incoming]) {
+    value.semanticHash = semanticEntryFingerprint(value);
+    value.semanticHead = value.semanticHash;
+  }
+
+  // model.ts already distinguished these payloads; store-merge must agree.
+  assert.notEqual(local.semanticHash, incoming.semanticHash);
+  const merged = mergeKnowledgeBaseStores(store([local]), store([incoming]));
+  assert.equal(merged.semanticConflicts.length, 1, "divergence under a __proto__ key is a real conflict");
+  const conflict = merged.semanticConflicts[0];
+  assert.ok(conflict);
+  assert.notEqual(
+    conflict.localFingerprint,
+    conflict.incomingFingerprint,
+    "the reported fingerprints must differ, not collapse to one canonical text",
+  );
+
+  // Identical __proto__ payloads still merge cleanly, with no invented conflict.
+  const same = structuredClone(local);
+  assert.equal(mergeKnowledgeBaseStores(store([local]), store([same])).semanticConflicts.length, 0);
+});

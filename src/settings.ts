@@ -21,7 +21,7 @@ import {
   type KnowledgeBaseEntry,
   type PluginData,
 } from "./model";
-import { StringPickerModal, TextPromptModal, VaultFilePickerModal } from "./modals";
+import { createOpenedBaseGuard, StringPickerModal, TextPromptModal, VaultFilePickerModal } from "./modals";
 
 interface SettingsHost extends Plugin {
   data: PluginData;
@@ -333,21 +333,10 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
   }
 
   private createOpenedBaseGuard(openedBaseId = this.host.getActiveKnowledgeBaseId()): () => boolean {
-    const openedDataEpoch = this.host.getDataEpoch?.() ?? 0;
-    const openedExternalGeneration = this.host.getExternalChangeGeneration?.() ?? 0;
-    const openedData = this.host.data;
-    let noticeShown = false;
-    return (): boolean => {
-      if (this.host.data === openedData
-        && this.host.getActiveKnowledgeBaseId() === openedBaseId
-        && (this.host.getDataEpoch?.() ?? 0) === openedDataEpoch
-        && (this.host.getExternalChangeGeneration?.() ?? 0) === openedExternalGeneration) return true;
-      if (!noticeShown) {
-        noticeShown = true;
-        new Notice("The active knowledge base changed or synced data was replaced. Reopen this setting before continuing.", 8000);
-      }
-      return false;
-    };
+    return createOpenedBaseGuard(this.host, {
+      openedBaseId,
+      message: "The active knowledge base changed or synced data was replaced. Reopen this setting before continuing.",
+    });
   }
 
   getSettingDefinitions(): SettingDefinitionItem[] {

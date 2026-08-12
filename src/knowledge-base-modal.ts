@@ -1,7 +1,7 @@
 import { Modal, Notice, Setting, setIcon } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
 import { sanitizeFileName, type KnowledgeBaseEntry, type WorkspaceMode } from "./model";
-import { ConfirmModal, TextPromptModal } from "./modals";
+import { ConfirmModal, createOpenedBaseGuard, TextPromptModal, type OpenedBaseGuard } from "./modals";
 
 function reportError(error: unknown): void {
   console.error("Knowledge Base Command Center base action failed", error);
@@ -191,8 +191,7 @@ class DeleteArchivedKnowledgeBaseModal extends Modal {
   private readonly entryId: string;
   private readonly entryName: string;
   private readonly expectedUpdatedAt: number;
-  private readonly openedBaseId: string;
-  private readonly openedDataEpoch: number;
+  private readonly ownsBase: OpenedBaseGuard;
   private confirmation = "";
   private busy = false;
   private confirmButtonEl: HTMLButtonElement | null = null;
@@ -207,8 +206,10 @@ class DeleteArchivedKnowledgeBaseModal extends Modal {
     this.entryId = entry.id;
     this.entryName = entry.data.settings.workspaceName;
     this.expectedUpdatedAt = entry.updatedAt;
-    this.openedBaseId = plugin.getActiveKnowledgeBaseId();
-    this.openedDataEpoch = plugin.getDataEpoch();
+    this.ownsBase = createOpenedBaseGuard(plugin, {
+      message: "Knowledge-base data changed while this confirmation was open. Nothing was deleted; review the archived base again.",
+      onStale: () => this.close(),
+    });
   }
 
   onOpen(): void {
@@ -260,11 +261,7 @@ class DeleteArchivedKnowledgeBaseModal extends Modal {
 
   private async submit(): Promise<void> {
     if (this.busy || this.confirmation.normalize("NFC") !== this.entryName.normalize("NFC")) return;
-    if (this.plugin.getActiveKnowledgeBaseId() !== this.openedBaseId || this.plugin.getDataEpoch() !== this.openedDataEpoch) {
-      new Notice("Knowledge-base data changed while this confirmation was open. Nothing was deleted; review the archived base again.", 8000);
-      this.close();
-      return;
-    }
+    if (!this.ownsBase()) return;
     this.busy = true;
     this.errorEl?.setText("");
     this.updateConfirmationState();
@@ -287,8 +284,7 @@ class DeleteArchivedKnowledgeBaseModal extends Modal {
 }
 
 export class ManageKnowledgeBasesModal extends Modal {
-  private openedBaseId = "";
-  private openedDataEpoch = 0;
+  private ownsRendered: OpenedBaseGuard | null = null;
 
   constructor(private readonly plugin: EntVaultCommandCenterPlugin) {
     super(plugin.app);
@@ -300,23 +296,23 @@ export class ManageKnowledgeBasesModal extends Modal {
     this.render();
   }
 
-  private ownsRenderedData(): boolean {
-    return this.plugin.getActiveKnowledgeBaseId() === this.openedBaseId
-      && this.plugin.getDataEpoch() === this.openedDataEpoch;
+  private guardRenderedData(): boolean {
+    // Prototype-only unit-test fixtures do not run render() first.
+    this.ownsRendered ??= this.createRenderedDataGuard();
+    return this.ownsRendered();
   }
 
-  private guardRenderedData(): boolean {
-    if (this.ownsRenderedData()) return true;
-    this.close();
-    new Notice("Knowledge-base data changed while this manager was open. Nothing was changed; reopen the knowledge-base manager.", 8000);
-    return false;
+  private createRenderedDataGuard(): OpenedBaseGuard {
+    return createOpenedBaseGuard(this.plugin, {
+      message: "Knowledge-base data changed while this manager was open. Nothing was changed; reopen the knowledge-base manager.",
+      onStale: () => this.close(),
+    });
   }
 
   private render(): void {
     // Every row is a snapshot of the base list. Record the data identity it was
     // built from so a synced replacement cannot be acted on by a stale row.
-    this.openedBaseId = this.plugin.getActiveKnowledgeBaseId();
-    this.openedDataEpoch = this.plugin.getDataEpoch();
+    this.ownsRendered = this.createRenderedDataGuard();
     this.contentEl.empty();
     this.titleEl.setText("Manage knowledge bases");
     this.contentEl.createEl("p", {

@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Menu, Notice, Platform, TFile } from "obsidian";
+import { Menu, Notice, Platform, Setting, TFile } from "obsidian";
 import { AddActionModal, calculateModalViewportLayout, ConfirmModal, IndexGroupModal, KnowledgeNoteModal, localDateStamp, RecordPickerModal, TextPromptModal, TopicEditorModal, VaultFilePickerModal } from "../src/modals.ts";
 import {
   canRelinkPortableRecord,
   calculateSearchViewportLayout,
   EntVaultCommandCenterView,
   matchingKnowledgeBaseRecords,
-  prepareKnowledgeBaseSearchResults,
+  MAX_RENDERED_SEARCH_RESULTS,
   tabDefinitions,
 } from "../src/view.ts";
 import { IndexManagerModal } from "../src/index-manager.ts";
@@ -44,7 +44,8 @@ import { collectKnowledgeBaseSearchResults } from "../src/search.ts";
 import { EntCommandCenterSettingsTab } from "../src/settings.ts";
 import { LibraryEditorModal, ManageLibrariesModal } from "../src/library-modal.ts";
 import { LibraryNoteProfileEditorModal } from "../src/library-profile-modal.ts";
-import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
+import { createOpenedBaseGuard, modalOwnerWindow, setGuardedTimer } from "../src/modals.ts";
+import { asHtmlElement, createFakeDom, FakeElement, type FakeDocument } from "./support/fake-dom.ts";
 
 function record(path: string, title: string, kind: VaultRecord["kind"] = "topic"): VaultRecord {
   return {
@@ -71,6 +72,23 @@ function record(path: string, title: string, kind: VaultRecord["kind"] = "topic"
     mtime: 0,
     aiLock: false,
   };
+}
+
+/**
+ * Drive the production collector the way the plugin's own
+ * `searchKnowledgeBases` does, so these expectations cover the code that ships
+ * rather than a view-side convenience wrapper.
+ */
+function crossBaseSearch(
+  sources: Array<{ baseId: string; baseName: string; records: VaultRecord[] }>,
+  query: string,
+  limit = MAX_RENDERED_SEARCH_RESULTS,
+): ReturnType<typeof collectKnowledgeBaseSearchResults<{ baseId: string; baseName: string }>> {
+  return collectKnowledgeBaseSearchResults(
+    sources.map(({ baseId, baseName, records }) => ({ source: { baseId, baseName }, records })),
+    parseQuery(query),
+    limit,
+  );
 }
 
 const CUSTOM_LIBRARY_ID = "reference-sets";
@@ -1989,7 +2007,7 @@ test("the global result cap keeps a better inactive-base match visible", () => {
   ));
   const exactInactiveMatch = record("Inactive/Laryn.md", "laryn");
 
-  const results = prepareKnowledgeBaseSearchResults([
+  const results = crossBaseSearch([
     { baseId: "active", baseName: "Active base", records: activeRecords },
     { baseId: "inactive", baseName: "Inactive base", records: [exactInactiveMatch] },
   ], "laryn", 300);
@@ -2007,7 +2025,7 @@ test("cross-base deduplication keeps the first matching copy when an earlier sam
   const missed = record("Shared/Topic.md", "Unrelated title");
   const matched = record("Shared/Topic.md", "Laryngomalacia");
 
-  const results = prepareKnowledgeBaseSearchResults([
+  const results = crossBaseSearch([
     { baseId: "active", baseName: "Active base", records: [missed, matched] },
   ], "laryn");
 
@@ -5285,4 +5303,332 @@ test("the category template token resolves the deepest placed node title at any 
   assert.equal(view.libraryTemplateTokenContext(library, { headingId: "lib-h1", subheadingId: "lib-d3" }).category, "Level three");
   assert.equal(view.libraryTemplateTokenContext(library, { subheadingId: "lib-d3" }).category, "Level three", "a deep subheading id alone locates its heading recursively");
   assert.equal(view.libraryTemplateTokenContext(library, { headingId: "lib-h1" }).category, "Guidelines", "heading placements fall back to the heading title");
+});
+
+// --- Wave 3: shared UI helpers (vault-snapshot caching, JSON transfer size
+// --- guards, and the one promoted stale-base guard).
+
+/**
+ * The obsidian test double ships an empty `Setting`; the index manager footer
+ * needs a chainable one before a full `render()` can be exercised.
+ */
+function withSettingStub<T>(run: () => T): T {
+  const prototype = Setting.prototype as unknown as Record<string, unknown>;
+  const button = {
+    setButtonText: (): typeof button => button,
+    onClick: (): typeof button => button,
+    setCta: (): typeof button => button,
+    setDisabled: (): typeof button => button,
+  };
+  prototype.addButton = function addButton(this: unknown, callback: (value: typeof button) => void): unknown {
+    callback(button);
+    return this;
+  };
+  prototype.settingEl = { addClass: (): void => undefined };
+  try {
+    return run();
+  } finally {
+    Reflect.deleteProperty(prototype, "addButton");
+    Reflect.deleteProperty(prototype, "settingEl");
+  }
+}
+
+/** Fake elements have no text-selection API; the caret restore needs one. */
+function withCaretSupport<T>(run: () => T): T {
+  const prototype = FakeElement.prototype as unknown as Record<string, unknown>;
+  prototype.setSelectionRange = (): void => undefined;
+  try {
+    return run();
+  } finally {
+    Reflect.deleteProperty(prototype, "setSelectionRange");
+  }
+}
+
+/** Production builds the download anchor and file picker with the global createEl. */
+function withCreateEl<T>(document: FakeDocument, run: (created: FakeElement[]) => T): T {
+  const created: FakeElement[] = [];
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "createEl");
+  Object.defineProperty(globalThis, "createEl", {
+    configurable: true,
+    value: (tag: string, options?: Record<string, unknown>) => {
+      const element = document.createElement(tag, options ?? {});
+      created.push(element);
+      return element;
+    },
+  });
+  try {
+    return run(created);
+  } finally {
+    if (previous) Object.defineProperty(globalThis, "createEl", previous);
+    else Reflect.deleteProperty(globalThis, "createEl");
+  }
+}
+
+function indexManagerHarness(dom: ReturnType<typeof createFakeDom>, initialTab: string): {
+  manager: {
+    app: unknown;
+    plugin: unknown;
+    contentEl: HTMLElement;
+    titleEl: HTMLElement;
+    tab: string;
+    query: string;
+    selected: Set<string>;
+    managerOpen: boolean;
+    openedBaseId: string;
+    openedDataEpoch: number;
+    searchTimer: number | null;
+    pendingTimers: Set<number>;
+    selectionButtons: unknown[];
+    noteListCache: Map<string, unknown>;
+    render(): void;
+  };
+  scans: () => number;
+} {
+  let vaultScans = 0;
+  const vaultFiles = [new TFile("Knowledge Base/Alpha.md"), new TFile("Knowledge Base/Beta.md")];
+  const plugin = {
+    data: {
+      settings: { indexLabel: "Knowledge Index", groupLabel: "Group", itemSingular: "note", itemPlural: "notes" },
+      manualIndexPaths: [],
+      excludedIndexPaths: [],
+      displayNameByPath: {},
+    },
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 3,
+    getIndexRecords: () => [],
+    getRecords: () => [],
+    getIndexGroups: () => [],
+    getIndexDiagnostics: () => [],
+    // Stands in for getVaultNoteFiles(): the full vault.getMarkdownFiles()
+    // scan, two filters, and the locale sort that must not run per keystroke.
+    getIndexCandidateFiles: () => { vaultScans += 1; return vaultFiles; },
+    isClinicalMode: () => false,
+    isDataReadOnly: () => false,
+    canVisuallyMoveAcrossGroups: () => true,
+  };
+  const manager = Object.create(IndexManagerModal.prototype) as ReturnType<typeof indexManagerHarness>["manager"];
+  manager.app = { vault: { getAbstractFileByPath: () => null } };
+  manager.plugin = plugin;
+  manager.contentEl = asHtmlElement(dom.document.body.createDiv());
+  manager.titleEl = asHtmlElement(dom.document.body.createEl("h2"));
+  manager.tab = initialTab;
+  manager.query = "";
+  manager.selected = new Set();
+  manager.managerOpen = true;
+  manager.openedBaseId = "base-a";
+  manager.openedDataEpoch = 3;
+  manager.searchTimer = null;
+  manager.pendingTimers = new Set();
+  manager.selectionButtons = [];
+  manager.noteListCache = new Map();
+  return { manager, scans: () => vaultScans };
+}
+
+test("index manager keystrokes filter one cached vault snapshot instead of rescanning", () => {
+  const dom = createFakeDom();
+  const { manager, scans } = indexManagerHarness(dom, "available");
+
+  // A global window exists in Obsidian; installing one keeps this test about
+  // the number of vault scans rather than about timer window resolution.
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { activeWindow: { setTimeout: (callback: () => void) => { callback(); return 1; }, clearTimeout: () => undefined } },
+  });
+  try {
+  withSettingStub(() => withCaretSupport(() => {
+    manager.render();
+    assert.equal(scans(), 1, "the first paint reads the vault once");
+    assert.equal(manager.contentEl.querySelectorAll(".ent-cc-manager-note").length, 2);
+
+    for (const value of ["a", "al", "alp"]) {
+      const search = manager.contentEl.querySelector('.ent-cc-manager-toolbar input[type="search"]') as unknown as {
+        value: string;
+        dispatch(type: string): void;
+      } | null;
+      assert.ok(search);
+      search.value = value;
+      search.dispatch("input");
+    }
+
+    assert.equal(scans(), 1, "every keystroke reuses the snapshot it is filtering");
+    assert.equal(manager.query, "alp");
+    assert.equal(manager.contentEl.querySelectorAll(".ent-cc-manager-note").length, 1, "the filter still narrowed the list");
+
+    // A deliberate refresh must still re-read: vault files can appear or
+    // disappear without any plugin data epoch change.
+    const hidden = manager.contentEl.querySelector('[data-manager-tab="hidden"]');
+    assert.ok(hidden);
+    hidden.click();
+    assert.equal(scans(), 2, "switching tabs re-reads the vault");
+  }));
+  } finally {
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("oversized JSON is refused before it is read at both the workspace and backup import sites", async () => {
+  const dom = createFakeDom();
+  const oversized = { size: 10 * 1024 * 1024 + 1, text: async (): Promise<string> => "{}" };
+
+  Notice.messages.length = 0;
+  let workspaceValues = 0;
+  const manager = Object.create(IndexManagerModal.prototype) as {
+    app: unknown;
+    plugin: unknown;
+    openedBaseId: string;
+    managerOpen: boolean;
+    close(): void;
+    importWorkspace(): void;
+    confirmWorkspaceImport(value: unknown): void;
+  };
+  manager.app = {};
+  manager.plugin = { getActiveKnowledgeBaseId: () => "base-a", getDataEpoch: () => 1 };
+  manager.openedBaseId = "";
+  manager.managerOpen = true;
+  manager.close = () => undefined;
+  manager.confirmWorkspaceImport = () => { workspaceValues += 1; };
+
+  await withCreateEl(dom.document, async (created) => {
+    manager.importWorkspace();
+    const input = created.find((element) => element.tagName === "input");
+    assert.ok(input);
+    (input as unknown as { files: unknown[] }).files = [oversized];
+    input.dispatch("change");
+    await settleMicrotasks();
+  });
+
+  assert.equal(workspaceValues, 0, "the workspace import never parsed the oversized file");
+  assert.equal(Notice.messages.filter((message) => message.includes("larger than the 10 MB import limit")).length, 1);
+
+  Notice.messages.length = 0;
+  let backupValues = 0;
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: unknown;
+    plugin: unknown;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    importOrganizationBackup(): void;
+    confirmOrganizationImport(value: unknown, ownsBase?: () => boolean): void;
+  };
+  view.app = {};
+  view.plugin = { getActiveKnowledgeBaseId: () => "base-a", getDataEpoch: () => 1 };
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 1;
+  view.confirmOrganizationImport = () => { backupValues += 1; };
+
+  await withCreateEl(dom.document, async (created) => {
+    view.importOrganizationBackup();
+    const input = created.find((element) => element.tagName === "input");
+    assert.ok(input);
+    (input as unknown as { files: unknown[] }).files = [oversized];
+    input.dispatch("change");
+    await settleMicrotasks();
+  });
+
+  assert.equal(backupValues, 0, "the backup import never parsed the oversized file");
+  assert.equal(Notice.messages.filter((message) => message.includes("larger than the 10 MB import limit")).length, 1);
+
+  // A file inside the cap still reaches the parser, so the guard is a cap and
+  // not a blanket refusal.
+  Notice.messages.length = 0;
+  await withCreateEl(dom.document, async (created) => {
+    view.importOrganizationBackup();
+    const input = created.find((element) => element.tagName === "input");
+    assert.ok(input);
+    (input as unknown as { files: unknown[] }).files = [{ size: 12, text: async (): Promise<string> => '{"kind":"x"}' }];
+    input.dispatch("change");
+    await settleMicrotasks();
+  });
+  assert.equal(backupValues, 1);
+  assert.deepEqual(Notice.messages, []);
+});
+
+test("the shared stale-base guard blocks every later action and notices exactly once", () => {
+  Notice.messages.length = 0;
+  const opened = { id: "opened" };
+  const replaced = { id: "replaced" };
+  let liveData: object = opened;
+  let baseId = "base-a";
+  let epoch = 4;
+  let generation = 2;
+  let stales = 0;
+  const host = {
+    get data(): object { return liveData; },
+    getActiveKnowledgeBaseId: () => baseId,
+    getDataEpoch: () => epoch,
+    getExternalChangeGeneration: () => generation,
+  };
+  const guard = createOpenedBaseGuard(host, { message: "Stale base.", onStale: () => { stales += 1; } });
+
+  assert.equal(guard(), true);
+  assert.equal(guard.owns(), true);
+
+  // Same id and epoch, but Sync handed the plugin a replacement data object.
+  liveData = replaced;
+  assert.equal(guard(), false);
+  assert.equal(guard(), false);
+  assert.equal(guard.owns(), false, "the silent variant agrees without a side effect");
+  assert.equal(stales, 2, "every blocked action still closes its surface");
+  assert.equal(Notice.messages.filter((message) => message === "Stale base.").length, 1);
+
+  // Each of the four captured facts invalidates on its own.
+  for (const drift of [
+    (): void => { liveData = opened; baseId = "base-b"; },
+    (): void => { baseId = "base-a"; epoch = 5; },
+    (): void => { epoch = 4; generation = 3; },
+  ]) {
+    Notice.messages.length = 0;
+    liveData = opened;
+    baseId = "base-a";
+    epoch = 4;
+    generation = 2;
+    const scoped = createOpenedBaseGuard(host, { message: "Stale base." });
+    assert.equal(scoped(), true);
+    drift();
+    assert.equal(scoped(), false);
+    assert.equal(Notice.messages.length, 1);
+  }
+});
+
+test("guarded timers schedule on the window that owns the modal, not the focused one", () => {
+  const owner = createFakeDom();
+  const focused = createFakeDom();
+  let ownerTimers = 0;
+  let focusedTimers = 0;
+  const ownerSetTimeout = owner.window.setTimeout.bind(owner.window);
+  owner.window.setTimeout = (callback, delay) => { ownerTimers += 1; return ownerSetTimeout(callback, delay); };
+  focused.window.setTimeout = () => { focusedTimers += 1; return 1; };
+
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: focused.window });
+  try {
+    const contentEl = owner.document.body.createDiv();
+    assert.equal(modalOwnerWindow(contentEl as unknown as HTMLElement), owner.window as unknown as Window);
+    let ran = 0;
+    setGuardedTimer({
+      contentEl: contentEl as unknown as HTMLElement,
+      timers: new Set<number>(),
+      proceed: () => true,
+      action: () => { ran += 1; },
+      delay: 0,
+    });
+    assert.equal(ran, 1);
+    assert.equal(ownerTimers, 1);
+    assert.equal(focusedTimers, 0, "a pop-out modal must not queue work on the focused window");
+
+    let blocked = 0;
+    setGuardedTimer({
+      contentEl: contentEl as unknown as HTMLElement,
+      timers: new Set<number>(),
+      proceed: () => false,
+      action: () => { blocked += 1; },
+      delay: 0,
+    });
+    assert.equal(blocked, 0, "a stale or closed surface drops its callback");
+  } finally {
+    if (previous) Object.defineProperty(globalThis, "window", previous);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
 });
