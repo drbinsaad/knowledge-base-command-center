@@ -10,8 +10,8 @@ export const PROCEDURE_ROOT = "04 Procedures/";
 export const MEDICATION_ROOT = "06 Clinical Tools/Medications/";
 export const SYNDROME_ROOT = "06 Clinical Tools/Syndromes/";
 export const DEFAULT_PROPOSAL_FOLDER = "01 Inbox/ENT Topic Proposals";
-export const DATA_VERSION = 13;
-export const STORE_VERSION = 14;
+export const DATA_VERSION = 14;
+export const STORE_VERSION = 15;
 export const MIN_RECOGNIZED_STORE_VERSION = 11;
 export const STORE_KIND = "knowledge-base-command-center-store";
 export const MAX_KNOWLEDGE_BASES = 50;
@@ -254,11 +254,26 @@ export interface CanonicalTopicData extends Omit<TopicFormValue, "parentPath" | 
   parentTopic: string;
 }
 
+/**
+ * Total layout levels including the top-level heading, so a heading may carry
+ * up to four nested subheading levels. This is a schema boundary, not a
+ * rendering hint: cleaners merge deeper subjects into their nearest allowed
+ * ancestor instead of dropping content.
+ */
+export const MAX_LAYOUT_DEPTH = 5;
+
 export interface LayoutSubheading {
   id: string;
   title: string;
   collapsed: boolean;
   subjects: string[];
+  /**
+   * Optional so pre-nesting object literals keep compiling. Canonical cleaned
+   * data carries this key exactly when children exist: leaf subheadings omit
+   * it so flat layouts stay byte-identical across clean/export round-trips.
+   * Read through childSubheadings() instead of touching the field directly.
+   */
+  subheadings?: LayoutSubheading[];
 }
 
 export interface LayoutHeading {
@@ -267,6 +282,11 @@ export interface LayoutHeading {
   collapsed: boolean;
   subjects: string[];
   subheadings: LayoutSubheading[];
+}
+
+/** Nested children of any layout node; absent arrays read as empty. */
+export function childSubheadings(node: Pick<LayoutSubheading, "subheadings">): LayoutSubheading[] {
+  return node.subheadings ?? [];
 }
 
 /** A visual-only curriculum overlay. It never changes note paths or frontmatter. */
@@ -562,7 +582,7 @@ export const DEFAULT_DATA: PluginData = {
 interface CollapsedLayoutItemState {
   id: string;
   collapsed: boolean;
-  subheadings: Array<{ id: string; collapsed: boolean }>;
+  subheadings: CollapsedLayoutItemState[];
 }
 
 interface CollapsedLibraryLayoutState {
@@ -585,30 +605,39 @@ export interface PluginViewState {
   redoStack: PersonalSnapshot[];
 }
 
+function captureCollapsedLayoutNode(node: LayoutHeading | LayoutSubheading): CollapsedLayoutItemState {
+  return {
+    id: node.id,
+    collapsed: node.collapsed,
+    subheadings: childSubheadings(node).map(captureCollapsedLayoutNode),
+  };
+}
+
 function captureCollapsedLayout(layout: readonly LayoutHeading[]): CollapsedLayoutItemState[] {
-  return layout.map((heading) => ({
-    id: heading.id,
-    collapsed: heading.collapsed,
-    subheadings: heading.subheadings.map((subheading) => ({
-      id: subheading.id,
-      collapsed: subheading.collapsed,
-    })),
-  }));
+  return layout.map(captureCollapsedLayoutNode);
+}
+
+/**
+ * Overlay collapse state by stable ID per level. Nodes without a stored match
+ * (including any structure introduced by the semantic winner) start expanded.
+ */
+function applyCollapsedLayoutNodes(
+  nodes: readonly (LayoutHeading | LayoutSubheading)[],
+  state: readonly CollapsedLayoutItemState[],
+): void {
+  const stateById = new Map(state.map((item) => [item.id, item]));
+  for (const node of nodes) {
+    const prior = stateById.get(node.id);
+    node.collapsed = prior?.collapsed ?? false;
+    applyCollapsedLayoutNodes(childSubheadings(node), prior?.subheadings ?? []);
+  }
 }
 
 function applyCollapsedLayout(
   layout: LayoutHeading[],
   state: readonly CollapsedLayoutItemState[],
 ): void {
-  const stateById = new Map(state.map((heading) => [heading.id, heading]));
-  for (const heading of layout) {
-    const prior = stateById.get(heading.id);
-    heading.collapsed = prior?.collapsed ?? false;
-    const subheadingStateById = new Map((prior?.subheadings ?? []).map((subheading) => [subheading.id, subheading]));
-    for (const subheading of heading.subheadings) {
-      subheading.collapsed = subheadingStateById.get(subheading.id)?.collapsed ?? false;
-    }
-  }
+  applyCollapsedLayoutNodes(layout, state);
 }
 
 /** Capture exactly the device-local fields permitted by saveViewState(). */
@@ -1125,15 +1154,28 @@ export function compareRecords(a: VaultRecord, b: VaultRecord): number {
     || a.title.localeCompare(b.title);
 }
 
+function countLayoutNode(node: LayoutHeading | LayoutSubheading): number {
+  return node.subjects.length
+    + childSubheadings(node).reduce((sum, item) => sum + countLayoutNode(item), 0);
+}
+
 export function countHeading(heading: LayoutHeading): number {
-  return heading.subjects.length + heading.subheadings.reduce((sum, item) => sum + item.subjects.length, 0);
+  return countLayoutNode(heading);
+}
+
+function cloneLayoutSubheading(subheading: LayoutSubheading): LayoutSubheading {
+  // Preserve the exact presence/absence of the nested key so clones remain
+  // byte-identical to their canonical source across serialization.
+  const clone: LayoutSubheading = { ...subheading, subjects: [...subheading.subjects] };
+  if (subheading.subheadings) clone.subheadings = subheading.subheadings.map(cloneLayoutSubheading);
+  return clone;
 }
 
 export function cloneCollections(collections: LayoutHeading[]): LayoutHeading[] {
   return collections.map((heading) => ({
     ...heading,
     subjects: [...heading.subjects],
-    subheadings: heading.subheadings.map((subheading) => ({ ...subheading, subjects: [...subheading.subjects] })),
+    subheadings: heading.subheadings.map(cloneLayoutSubheading),
   }));
 }
 
@@ -1330,6 +1372,55 @@ function deriveFlatLibraryLayout(
     }));
 }
 
+function cleanLibraryLayoutSubheadings(
+  input: unknown,
+  depth: number,
+  parentId: string,
+  structureIds: Set<string>,
+  reservedIds: ReadonlySet<string>,
+  takeSubjects: (rawSubjects: unknown) => string[],
+  parentSubjects: string[],
+): LayoutSubheading[] {
+  if (!Array.isArray(input)) return [];
+  if (depth > MAX_LAYOUT_DEPTH) {
+    // takeSubjects already dedupes globally against the allowed catalog.
+    mergeTooDeepLayoutSubjects(input, parentSubjects, takeSubjects);
+    return [];
+  }
+  const subheadings: LayoutSubheading[] = [];
+  for (const [index, raw] of input.entries()) {
+    const value = asUnknownRecord(raw);
+    const title = asText(value.title);
+    if (!title) continue;
+    const preferredId = asText(value.id);
+    const hasSafeId = Boolean(preferredId && isSafeObjectKey(preferredId));
+    const id = deterministicLayoutId(
+      hasSafeId ? preferredId : `${parentId}-subheading-${index + 1}`,
+      structureIds,
+      reservedIds,
+      hasSafeId,
+    );
+    const subjects = takeSubjects(value.subjects);
+    const nested = cleanLibraryLayoutSubheadings(
+      value.subheadings,
+      depth + 1,
+      id,
+      structureIds,
+      reservedIds,
+      takeSubjects,
+      subjects,
+    );
+    subheadings.push({
+      id,
+      title,
+      collapsed: value.collapsed === true,
+      subjects,
+      ...(nested.length > 0 ? { subheadings: nested } : {}),
+    });
+  }
+  return subheadings;
+}
+
 function cleanLibraryLayout(
   input: unknown,
   libraryId: string,
@@ -1337,26 +1428,17 @@ function cleanLibraryLayout(
 ): LayoutHeading[] {
   const allowed = new Set(librarySubjectsById(subjects, libraryId).map((subject) => subject.id));
   const placed = new Set<string>();
-  // Reserve every intact identity before generating replacements. Without
-  // this first pass, an earlier missing/unsafe node can take the fallback ID
-  // of a later intact heading or subheading, forcing that intact node to be
-  // renamed merely because of array order.
   const reservedIds = new Set<string>();
-  if (Array.isArray(input)) {
-    for (const rawHeading of input) {
-      const heading = asUnknownRecord(rawHeading);
-      if (!asText(heading.title)) continue;
-      const headingId = asText(heading.id);
-      if (headingId && isSafeObjectKey(headingId)) reservedIds.add(headingId);
-      if (!Array.isArray(heading.subheadings)) continue;
-      for (const rawSubheading of heading.subheadings) {
-        const subheading = asUnknownRecord(rawSubheading);
-        if (!asText(subheading.title)) continue;
-        const subheadingId = asText(subheading.id);
-        if (subheadingId && isSafeObjectKey(subheadingId)) reservedIds.add(subheadingId);
-      }
+  reserveLayoutStructureIds(input, reservedIds);
+  const takeSubjects = (rawSubjects: unknown): string[] => {
+    const output: string[] = [];
+    for (const subjectId of asStringList(rawSubjects)) {
+      if (!allowed.has(subjectId) || placed.has(subjectId)) continue;
+      placed.add(subjectId);
+      output.push(subjectId);
     }
-  }
+    return output;
+  };
   const structureIds = new Set<string>();
   const headings: LayoutHeading[] = [];
   if (Array.isArray(input)) {
@@ -1374,39 +1456,16 @@ function cleanLibraryLayout(
         reservedIds,
         hasSafeHeadingId,
       );
-      const takeSubjects = (rawSubjects: unknown): string[] => {
-        const output: string[] = [];
-        for (const subjectId of asStringList(rawSubjects)) {
-          if (!allowed.has(subjectId) || placed.has(subjectId)) continue;
-          placed.add(subjectId);
-          output.push(subjectId);
-        }
-        return output;
-      };
       const directSubjects = takeSubjects(heading.subjects);
-      const subheadings: LayoutSubheading[] = [];
-      if (Array.isArray(heading.subheadings)) {
-        for (const [subheadingIndex, rawSubheading] of heading.subheadings.entries()) {
-          const subheading = asUnknownRecord(rawSubheading);
-          const subheadingTitle = asText(subheading.title);
-          if (!subheadingTitle) continue;
-          const preferredSubheadingId = asText(subheading.id);
-          const hasSafeSubheadingId = Boolean(preferredSubheadingId && isSafeObjectKey(preferredSubheadingId));
-          subheadings.push({
-            id: deterministicLayoutId(
-              hasSafeSubheadingId
-                ? preferredSubheadingId
-                : `${headingId}-subheading-${subheadingIndex + 1}`,
-              structureIds,
-              reservedIds,
-              hasSafeSubheadingId,
-            ),
-            title: subheadingTitle,
-            collapsed: subheading.collapsed === true,
-            subjects: takeSubjects(subheading.subjects),
-          });
-        }
-      }
+      const subheadings = cleanLibraryLayoutSubheadings(
+        heading.subheadings,
+        2,
+        headingId,
+        structureIds,
+        reservedIds,
+        takeSubjects,
+        directSubjects,
+      );
       headings.push({
         id: headingId,
         title,
@@ -1930,13 +1989,18 @@ export function rewritePluginDataTemplatePathRename(data: PluginData, oldPath: s
   return changed;
 }
 
+function rewriteLayoutNodeSubjects(node: LayoutHeading | LayoutSubheading, oldPath: string, newPath: string): boolean {
+  let changed = rewritePathList(node.subjects, oldPath, newPath);
+  for (const subheading of childSubheadings(node)) {
+    if (rewriteLayoutNodeSubjects(subheading, oldPath, newPath)) changed = true;
+  }
+  return changed;
+}
+
 function rewriteSnapshotPrefixes(snapshot: PersonalSnapshot, oldPath: string, newPath: string): boolean {
   let changed = false;
   for (const heading of snapshot.collections) {
-    if (rewritePathList(heading.subjects, oldPath, newPath)) changed = true;
-    for (const subheading of heading.subheadings) {
-      if (rewritePathList(subheading.subjects, oldPath, newPath)) changed = true;
-    }
+    if (rewriteLayoutNodeSubjects(heading, oldPath, newPath)) changed = true;
   }
   for (const paths of [
     snapshot.pinnedPaths,
@@ -1972,10 +2036,7 @@ export function rewriteActivePluginDataPathPrefix(data: PluginData, oldPath: str
   if (!oldPath || !newPath || oldPath === newPath) return false;
   let changed = false;
   for (const heading of data.collections) {
-    if (rewritePathList(heading.subjects, oldPath, newPath)) changed = true;
-    for (const subheading of heading.subheadings) {
-      if (rewritePathList(subheading.subjects, oldPath, newPath)) changed = true;
-    }
+    if (rewriteLayoutNodeSubjects(heading, oldPath, newPath)) changed = true;
   }
   for (const paths of [data.pinnedPaths, data.nextStudyPaths, data.manualIndexPaths, data.excludedIndexPaths]) {
     if (rewritePathList(paths, oldPath, newPath)) changed = true;
@@ -2067,22 +2128,109 @@ function recoveredLegacyId(prefix: string, parts: unknown[]): string {
   return `${prefix}-recovered-${fingerprintText(JSON.stringify(canonicalMigrationValue(parts)))}`;
 }
 
-function cleanLayout(input: unknown): LayoutHeading[] {
-  if (!Array.isArray(input)) return [];
-  const reservedIds = new Set<string>();
+/**
+ * Reserve every intact identity at every allowed depth before generating
+ * replacements. Without this first pass, an earlier missing/unsafe node can
+ * take the fallback ID of a later intact node, forcing that intact node to be
+ * renamed merely because of array order. Nodes beyond MAX_LAYOUT_DEPTH never
+ * materialize, so their IDs are deliberately not reserved.
+ */
+function reserveLayoutStructureIds(input: unknown, reservedIds: Set<string>, depth = 1): void {
+  if (!Array.isArray(input) || depth > MAX_LAYOUT_DEPTH) return;
   for (const raw of input as unknown[]) {
     const value = asUnknownRecord(raw);
     if (!asText(value.title)) continue;
-    const headingId = asText(value.id);
-    if (headingId && isSafeObjectKey(headingId)) reservedIds.add(headingId);
+    const id = asText(value.id);
+    if (id && isSafeObjectKey(id)) reservedIds.add(id);
+    reserveLayoutStructureIds(value.subheadings, reservedIds, depth + 1);
+  }
+}
+
+/**
+ * Depth-capped content is merged upward instead of lost: every titled node
+ * nested beyond MAX_LAYOUT_DEPTH contributes its subjects, in document order,
+ * to the nearest allowed ancestor. The walk is iterative so hostile nesting
+ * depth never maps onto stack depth.
+ */
+function mergeTooDeepLayoutSubjects(
+  input: unknown,
+  parentSubjects: string[],
+  takeSubjects: (rawSubjects: unknown) => string[],
+): void {
+  if (!Array.isArray(input)) return;
+  const stack: unknown[] = [...(input as unknown[])].reverse();
+  while (stack.length > 0) {
+    const value = asUnknownRecord(stack.pop());
+    if (!asText(value.title)) continue;
+    parentSubjects.push(...takeSubjects(value.subjects));
     if (!Array.isArray(value.subheadings)) continue;
-    for (const rawSub of value.subheadings as unknown[]) {
-      const subheading = asUnknownRecord(rawSub);
-      if (!asText(subheading.title)) continue;
-      const subheadingId = asText(subheading.id);
-      if (subheadingId && isSafeObjectKey(subheadingId)) reservedIds.add(subheadingId);
+    for (let index = value.subheadings.length - 1; index >= 0; index -= 1) {
+      stack.push(value.subheadings[index]);
     }
   }
+}
+
+function cleanLayoutSubheadings(
+  input: unknown,
+  depth: number,
+  indexPath: readonly number[],
+  structureIds: Set<string>,
+  reservedIds: ReadonlySet<string>,
+  parentSubjects: string[],
+): LayoutSubheading[] {
+  if (!Array.isArray(input)) return [];
+  if (depth > MAX_LAYOUT_DEPTH) {
+    const seen = new Set(parentSubjects);
+    mergeTooDeepLayoutSubjects(input, parentSubjects, (rawSubjects) => {
+      const merged: string[] = [];
+      for (const subjectId of asStringList(rawSubjects)) {
+        if (seen.has(subjectId)) continue;
+        seen.add(subjectId);
+        merged.push(subjectId);
+      }
+      return merged;
+    });
+    return [];
+  }
+  const subheadings: LayoutSubheading[] = [];
+  for (const [index, raw] of (input as unknown[]).entries()) {
+    const value = asUnknownRecord(raw);
+    const title = asText(value.title);
+    if (!title) continue;
+    const preferredId = asText(value.id);
+    const hasSafeId = Boolean(preferredId && isSafeObjectKey(preferredId));
+    const id = deterministicLayoutId(
+      hasSafeId
+        ? preferredId
+        : recoveredLegacyId("subheading", [...indexPath, index, title]),
+      structureIds,
+      reservedIds,
+      hasSafeId,
+    );
+    const subjects = asStringList(value.subjects);
+    const nested = cleanLayoutSubheadings(
+      value.subheadings,
+      depth + 1,
+      [...indexPath, index],
+      structureIds,
+      reservedIds,
+      subjects,
+    );
+    subheadings.push({
+      id,
+      title,
+      collapsed: value.collapsed === true,
+      subjects,
+      ...(nested.length > 0 ? { subheadings: nested } : {}),
+    });
+  }
+  return subheadings;
+}
+
+function cleanLayout(input: unknown): LayoutHeading[] {
+  if (!Array.isArray(input)) return [];
+  const reservedIds = new Set<string>();
+  reserveLayoutStructureIds(input, reservedIds);
   const headings: LayoutHeading[] = [];
   const structureIds = new Set<string>();
   for (const [headingIndex, raw] of (input as unknown[]).entries()) {
@@ -2099,34 +2247,20 @@ function cleanLayout(input: unknown): LayoutHeading[] {
       reservedIds,
       hasSafeHeadingId,
     );
-    const subheadings: LayoutSubheading[] = [];
-    if (Array.isArray(value.subheadings)) {
-      for (const [subheadingIndex, rawSub] of (value.subheadings as unknown[]).entries()) {
-        const sub = asUnknownRecord(rawSub);
-        const subTitle = asText(sub.title);
-        if (!subTitle) continue;
-        const preferredSubheadingId = asText(sub.id);
-        const hasSafeSubheadingId = Boolean(preferredSubheadingId && isSafeObjectKey(preferredSubheadingId));
-        subheadings.push({
-          id: deterministicLayoutId(
-            hasSafeSubheadingId
-              ? preferredSubheadingId
-              : recoveredLegacyId("subheading", [headingIndex, subheadingIndex, subTitle]),
-            structureIds,
-            reservedIds,
-            hasSafeSubheadingId,
-          ),
-          title: subTitle,
-          collapsed: sub.collapsed === true,
-          subjects: asStringList(sub.subjects),
-        });
-      }
-    }
+    const subjects = asStringList(value.subjects);
+    const subheadings = cleanLayoutSubheadings(
+      value.subheadings,
+      2,
+      [headingIndex],
+      structureIds,
+      reservedIds,
+      subjects,
+    );
     headings.push({
       id: headingId,
       title,
       collapsed: value.collapsed === true,
-      subjects: asStringList(value.subjects),
+      subjects,
       subheadings,
     });
   }
@@ -3926,18 +4060,21 @@ export function buildIndexDiagnostics(data: PluginData, records: VaultRecord[], 
   for (const path of data.excludedIndexPaths) addMissing(path, "Hidden index membership");
   for (const path of data.pinnedPaths) addMissing(path, "Pins");
   for (const path of data.nextStudyPaths) addMissing(path, "Next list");
-  for (const heading of data.collections) {
-    const inspect = (paths: string[], owner: string): void => {
-      paths.forEach((path) => addMissing(path, owner));
-      const counts = new Map<string, number>();
-      for (const path of paths) counts.set(path, (counts.get(path) ?? 0) + 1);
-      for (const [path, count] of counts) {
-        if (count > 1) diagnostics.push({ id: `duplicate:${owner}:${path}`, kind: "duplicate-membership", title: "Duplicate collection membership", detail: `${owner} contains the same note ${count} times.`, path });
-      }
-    };
-    inspect(heading.subjects, `Collection “${heading.title}”`);
-    for (const subheading of heading.subheadings) inspect(subheading.subjects, `Collection “${heading.title} / ${subheading.title}”`);
-  }
+  const inspect = (paths: string[], owner: string): void => {
+    paths.forEach((path) => addMissing(path, owner));
+    const counts = new Map<string, number>();
+    for (const path of paths) counts.set(path, (counts.get(path) ?? 0) + 1);
+    for (const [path, count] of counts) {
+      if (count > 1) diagnostics.push({ id: `duplicate:${owner}:${path}`, kind: "duplicate-membership", title: "Duplicate collection membership", detail: `${owner} contains the same note ${count} times.`, path });
+    }
+  };
+  const inspectLayoutNode = (node: LayoutHeading | LayoutSubheading, titlePath: string): void => {
+    inspect(node.subjects, `Collection “${titlePath}”`);
+    for (const subheading of childSubheadings(node)) {
+      inspectLayoutNode(subheading, `${titlePath} / ${subheading.title}`);
+    }
+  };
+  for (const heading of data.collections) inspectLayoutNode(heading, heading.title);
 
   const topicsOnly = data.settings.workspaceMode === "ent-clinical";
   const topics = records.filter((record) => recordBelongsToIndex(record, topicsOnly));
@@ -4066,7 +4203,8 @@ export function parseWorkspaceConfig(input: unknown): WorkspaceConfig {
 
 export interface PersonalBackup {
   kind: "ent-vault-command-center-personal-backup";
-  version: 9;
+  /** v10 introduced nested collection/library subheadings; v9 layouts stay flat. */
+  version: 10;
   exportedAt: string;
   /** Stable identity of the vault that created this exact-path recovery. */
   sourceVaultId: string;
@@ -4120,7 +4258,7 @@ export function createPersonalBackup(
   if (!cleanSourceBaseName) throw new Error("A knowledge-base name is required to create same-base recovery data.");
   return {
     kind: "ent-vault-command-center-personal-backup",
-    version: 9,
+    version: 10,
     exportedAt,
     sourceVaultId: cleanSourceVaultId,
     sourceBaseId: cleanSourceBaseId,
@@ -4258,30 +4396,58 @@ function validateRecoveryVisual(input: unknown, label: string, budget: TransferV
   }
 }
 
-function validateRecoveryCollections(input: unknown, label: string, budget: TransferValidationBudget): void {
-  const collectionCount = transferArrayLength(input, label, MAX_TRANSFER_COLLECTIONS);
-  if (budget.collectionStructures > MAX_TRANSFER_COLLECTIONS - collectionCount) {
+function addCollectionStructureCount(budget: TransferValidationBudget, count: number): void {
+  if (budget.collectionStructures > MAX_TRANSFER_COLLECTIONS - count) {
     throw new Error(`The recovery backup contains too many collections and subheadings.`);
   }
-  budget.collectionStructures += collectionCount;
+  budget.collectionStructures += count;
+}
+
+/**
+ * Layout content nested beyond MAX_LAYOUT_DEPTH is merged upward by the
+ * cleaners instead of persisting as structure, so it still consumes the shared
+ * transfer budget. The walk is iterative so hostile nesting depth never maps
+ * onto stack depth.
+ */
+function validateTooDeepRecoveryLayout(input: unknown, label: string, budget: TransferValidationBudget): void {
+  const stack: unknown[] = [input];
+  while (stack.length > 0) {
+    const list = stack.pop();
+    addCollectionStructureCount(budget, transferArrayLength(list, label, MAX_TRANSFER_COLLECTIONS));
+    if (!Array.isArray(list)) continue;
+    for (const raw of list) {
+      const node = requiredPlainRecord(raw, label);
+      validateRecoveryReferenceList(node.subjects, `${label} subjects`, budget);
+      if (node.subheadings !== undefined) stack.push(node.subheadings);
+    }
+  }
+}
+
+function validateRecoveryCollections(
+  input: unknown,
+  label: string,
+  budget: TransferValidationBudget,
+  depth = 1,
+  listLabel = label,
+): void {
+  addCollectionStructureCount(budget, transferArrayLength(input, listLabel, MAX_TRANSFER_COLLECTIONS));
   if (!Array.isArray(input)) return;
-  for (const [collectionIndex, raw] of input.entries()) {
-    const collection = requiredPlainRecord(raw, `${label} ${collectionIndex + 1}`);
-    validateRecoveryReferenceList(collection.subjects, `${label} ${collectionIndex + 1} subjects`, budget);
-    const subheadingCount = transferArrayLength(collection.subheadings, `${label} ${collectionIndex + 1} subheadings`, MAX_TRANSFER_COLLECTIONS);
-    if (budget.collectionStructures > MAX_TRANSFER_COLLECTIONS - subheadingCount) {
-      throw new Error(`The recovery backup contains too many collections and subheadings.`);
+  for (const [index, raw] of input.entries()) {
+    const nodeLabel = `${label} ${index + 1}`;
+    const node = requiredPlainRecord(raw, nodeLabel);
+    validateRecoveryReferenceList(node.subjects, `${nodeLabel} subjects`, budget);
+    if (node.subheadings === undefined) continue;
+    if (depth >= MAX_LAYOUT_DEPTH) {
+      validateTooDeepRecoveryLayout(node.subheadings, `${nodeLabel} nested subheadings`, budget);
+      continue;
     }
-    budget.collectionStructures += subheadingCount;
-    if (!Array.isArray(collection.subheadings)) continue;
-    for (const [subheadingIndex, rawSubheading] of collection.subheadings.entries()) {
-      const subheading = requiredPlainRecord(rawSubheading, `${label} ${collectionIndex + 1} subheading ${subheadingIndex + 1}`);
-      validateRecoveryReferenceList(
-        subheading.subjects,
-        `${label} ${collectionIndex + 1} subheading ${subheadingIndex + 1} subjects`,
-        budget,
-      );
-    }
+    validateRecoveryCollections(
+      node.subheadings,
+      `${nodeLabel} subheading`,
+      budget,
+      depth + 1,
+      `${nodeLabel} subheadings`,
+    );
   }
 }
 
@@ -4422,30 +4588,58 @@ function validateLoadedTextMap(
   }
 }
 
-function validateLoadedLayoutText(input: unknown, label: string, budget: LoadTextValidationBudget): void {
+function validateLoadedLayoutNodeText(
+  node: Record<string, unknown>,
+  nodeLabel: string,
+  budget: LoadTextValidationBudget,
+): void {
+  validateLoadedText(node.id, `${nodeLabel} ID`, budget);
+  validateLoadedText(node.title, `${nodeLabel} title`, budget);
+  validateLoadedTextList(node.subjects, `${nodeLabel} subjects`, budget);
+  if (node.collapsed !== undefined && typeof node.collapsed !== "boolean") {
+    throw new Error(`${nodeLabel} collapsed state must be true or false.`);
+  }
+}
+
+/**
+ * Text nested beyond MAX_LAYOUT_DEPTH still enters the store through the
+ * cleaners' merge-up, so it is charged against the shared text budget with an
+ * iterative walk. Structural bounding happened in the transfer validator.
+ */
+function validateTooDeepLayoutText(input: unknown, label: string, budget: LoadTextValidationBudget): void {
+  const stack: unknown[] = [input];
+  while (stack.length > 0) {
+    const list = stack.pop();
+    if (!Array.isArray(list)) throw new Error(`${label} must be a list.`);
+    for (const raw of list) {
+      const node = requiredPlainRecord(raw, label);
+      validateLoadedLayoutNodeText(node, label, budget);
+      if (node.subheadings === undefined) continue;
+      if (!Array.isArray(node.subheadings)) throw new Error(`${label} subheadings must be a list.`);
+      stack.push(node.subheadings);
+    }
+  }
+}
+
+function validateLoadedLayoutText(
+  input: unknown,
+  label: string,
+  budget: LoadTextValidationBudget,
+  depth = 1,
+): void {
   if (input === undefined) return;
   if (!Array.isArray(input)) throw new Error(`${label} must be a list.`);
-  input.forEach((rawHeading, headingIndex) => {
-    const headingLabel = `${label} ${headingIndex + 1}`;
-    const heading = requiredPlainRecord(rawHeading, headingLabel);
-    validateLoadedText(heading.id, `${headingLabel} ID`, budget);
-    validateLoadedText(heading.title, `${headingLabel} title`, budget);
-    validateLoadedTextList(heading.subjects, `${headingLabel} subjects`, budget);
-    if (heading.collapsed !== undefined && typeof heading.collapsed !== "boolean") {
-      throw new Error(`${headingLabel} collapsed state must be true or false.`);
+  input.forEach((rawNode, index) => {
+    const nodeLabel = `${label} ${index + 1}`;
+    const node = requiredPlainRecord(rawNode, nodeLabel);
+    validateLoadedLayoutNodeText(node, nodeLabel, budget);
+    if (node.subheadings === undefined) return;
+    if (!Array.isArray(node.subheadings)) throw new Error(`${nodeLabel} subheadings must be a list.`);
+    if (depth >= MAX_LAYOUT_DEPTH) {
+      validateTooDeepLayoutText(node.subheadings, `${nodeLabel} nested subheadings`, budget);
+      return;
     }
-    if (heading.subheadings === undefined) return;
-    if (!Array.isArray(heading.subheadings)) throw new Error(`${headingLabel} subheadings must be a list.`);
-    heading.subheadings.forEach((rawSubheading, subheadingIndex) => {
-      const subheadingLabel = `${headingLabel} subheading ${subheadingIndex + 1}`;
-      const subheading = requiredPlainRecord(rawSubheading, subheadingLabel);
-      validateLoadedText(subheading.id, `${subheadingLabel} ID`, budget);
-      validateLoadedText(subheading.title, `${subheadingLabel} title`, budget);
-      validateLoadedTextList(subheading.subjects, `${subheadingLabel} subjects`, budget);
-      if (subheading.collapsed !== undefined && typeof subheading.collapsed !== "boolean") {
-        throw new Error(`${subheadingLabel} collapsed state must be true or false.`);
-      }
-    });
+    validateLoadedLayoutText(node.subheadings, `${nodeLabel} subheading`, budget, depth + 1);
   });
 }
 
@@ -4663,7 +4857,9 @@ export function parsePersonalBackup(input: unknown): PersonalBackup {
   if (!input || typeof input !== "object") throw new Error("The selected file is not a Command Center backup.");
   const value = input as Record<string, unknown>;
   const sourceVersion = Number(value.version);
-  if (value.kind !== "ent-vault-command-center-personal-backup" || ![1, 2, 3, 4, 5, 6, 7, 8, 9].includes(sourceVersion)) {
+  // Older backups (v1-v9 flat layouts) import fine; newer formats than this
+  // build refuse cleanly so nested organization is never silently flattened.
+  if (value.kind !== "ent-vault-command-center-personal-backup" || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(sourceVersion)) {
     throw new Error("Unsupported Command Center backup format.");
   }
   const sourceVaultId = cleanRecoveryVaultId(value.sourceVaultId);
@@ -4681,7 +4877,7 @@ export function parsePersonalBackup(input: unknown): PersonalBackup {
   validatePersonalBackupTransferShape(value);
   return {
     kind: "ent-vault-command-center-personal-backup",
-    version: 9,
+    version: 10,
     exportedAt: asText(value.exportedAt),
     sourceVaultId,
     sourceBaseId,
@@ -4735,38 +4931,45 @@ function localLayoutStructureId(input: unknown, label: string): string {
   return id;
 }
 
-function parseLocalCollapsedLayout(
+function parseLocalCollapsedLayoutNodes(
   input: unknown,
   label: string,
   budget: { structures: number },
+  depth: number,
 ): CollapsedLayoutItemState[] {
   if (!Array.isArray(input) || input.length > MAX_TRANSFER_COLLECTIONS) {
     throw new Error(`${label} is malformed or too large.`);
   }
   const output: CollapsedLayoutItemState[] = [];
-  for (const [headingIndex, raw] of input.entries()) {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${label} heading ${headingIndex + 1} is malformed.`);
+  for (const [index, raw] of input.entries()) {
+    const nodeName = depth === 1 ? `heading ${index + 1}` : `subheading ${index + 1}`;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${label} ${nodeName} is malformed.`);
     const value = raw as Record<string, unknown>;
-    const id = localLayoutStructureId(value.id, `${label} heading ${headingIndex + 1}`);
-    if (typeof value.collapsed !== "boolean" || !Array.isArray(value.subheadings)) {
-      throw new Error(`${label} heading ${headingIndex + 1} is malformed.`);
+    const id = localLayoutStructureId(value.id, `${label} ${nodeName}`);
+    if (typeof value.collapsed !== "boolean") throw new Error(`${label} ${nodeName} is malformed.`);
+    // Pre-nesting device payloads always wrote a subheadings list on headings
+    // but omitted it on subheading leaves; both shapes remain accepted.
+    if (value.subheadings === undefined ? depth === 1 : !Array.isArray(value.subheadings)) {
+      throw new Error(`${label} ${nodeName} is malformed.`);
     }
-    budget.structures += 1 + value.subheadings.length;
+    budget.structures += 1;
     if (budget.structures > MAX_TRANSFER_COLLECTIONS) throw new Error("Device-local collapse state is too large.");
-    const subheadings = value.subheadings.map((rawSubheading, subheadingIndex) => {
-      if (!rawSubheading || typeof rawSubheading !== "object" || Array.isArray(rawSubheading)) {
-        throw new Error(`${label} subheading ${subheadingIndex + 1} is malformed.`);
-      }
-      const subheading = rawSubheading as Record<string, unknown>;
-      if (typeof subheading.collapsed !== "boolean") throw new Error(`${label} subheading ${subheadingIndex + 1} is malformed.`);
-      return {
-        id: localLayoutStructureId(subheading.id, `${label} subheading ${subheadingIndex + 1}`),
-        collapsed: subheading.collapsed,
-      };
-    });
+    // Collapse state nested beyond the layout depth cap cannot correspond to
+    // any cleaned layout node; it is dropped instead of failing the payload.
+    const subheadings = Array.isArray(value.subheadings) && depth < MAX_LAYOUT_DEPTH
+      ? parseLocalCollapsedLayoutNodes(value.subheadings, label, budget, depth + 1)
+      : [];
     output.push({ id, collapsed: value.collapsed, subheadings });
   }
   return output;
+}
+
+function parseLocalCollapsedLayout(
+  input: unknown,
+  label: string,
+  budget: { structures: number },
+): CollapsedLayoutItemState[] {
+  return parseLocalCollapsedLayoutNodes(input, label, budget, 1);
 }
 
 function parseDeviceHistory(input: unknown, label: string): PersonalSnapshot[] {
@@ -4981,10 +5184,11 @@ function collectPersonalBackupPaths(backup: PersonalBackup): string[] {
   };
   const seenSnapshots = new Set<PersonalSnapshot>();
   const addState = (state: Pick<PersonalBackup, "collections" | "pinnedPaths" | "nextStudyPaths" | "curriculumVisual" | "manualIndexPaths" | "excludedIndexPaths" | "indexGroupByPath" | "displayNameByPath" | "layoutSnapshots" | "portableIndex">): void => {
-    for (const collection of state.collections) {
-      collection.subjects.forEach(add);
-      for (const subheading of collection.subheadings) subheading.subjects.forEach(add);
-    }
+    const addLayoutNode = (node: LayoutHeading | LayoutSubheading): void => {
+      node.subjects.forEach(add);
+      for (const subheading of childSubheadings(node)) addLayoutNode(subheading);
+    };
+    for (const collection of state.collections) addLayoutNode(collection);
     for (const list of [state.pinnedPaths, state.nextStudyPaths, state.manualIndexPaths, state.excludedIndexPaths]) list.forEach(add);
     Object.keys(state.indexGroupByPath).forEach(add);
     Object.keys(state.displayNameByPath).forEach(add);

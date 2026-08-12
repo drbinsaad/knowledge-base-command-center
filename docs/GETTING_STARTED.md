@@ -65,7 +65,7 @@ The profile is fixed after a knowledge base is created. Create or duplicate anot
 
 - A **knowledge base** is an independent Command Center profile with its own scope, Libraries, labels, collections, templates, queues, history, and settings.
 - The **Knowledge Index** is its default primary section.
-- A **Library** is another primary category inside that base, with headings and subheadings.
+- A **Library** is another primary category inside that base, with headings and nested subheadings. One branch can hold up to five levels, counting the heading as level 1.
 - A **Collection** is a reusable personal list that can contain records from the Index or any Library.
 
 A single Markdown note can be organized in several knowledge bases. Within one knowledge base, a subject has one primary Index/Library classification but can belong to several Collections.
@@ -104,7 +104,7 @@ Quick entry opens one focused hub for the active knowledge base. It can switch b
   - `obsidian://kbcc-quick-append-existing` — choose a note for Quick append; or
   - `obsidian://kbcc-attach-current` — attach a file to the locally active eligible Markdown note.
 
-When a Library is the destination, Quick Entry asks for its heading or subheading before continuing. If that Library has no headings yet, it asks you to create the first heading and then continues with the selected action.
+When a Library is the destination, Quick Entry asks for its heading or subheading before continuing, showing each nested subheading with its full path, such as **Heading / Sub / Sub-sub**. If that Library has no headings yet, it asks you to create the first heading and then continues with the selected action.
 
 Every URL is action-only. Do not add query fields. A URL with `?title=`, `?path=`, `?content=`, or any other parameter is rejected and does not open a hub, picker, or form. Current-note actions get the active note only from Obsidian's local workspace, and every flow still requires local, visible user input before it changes anything.
 
@@ -135,7 +135,7 @@ When upgrading a synced vault on several devices:
 
 Identical pristine upgrades can converge through Sync. If exactly one same-origin copy was edited before convergence, that edited copy wins because the other has no unique work. Two independently edited copies are not guessed together; the plugin preserves data and enters a protected read-only state.
 
-An older device that encounters the version-14 store and schema-13 knowledge-base data preserves it read-only. It may describe the event as a migration failure because it cannot faithfully save the newer settings and causal Sync metadata. That is downgrade protection, not proof of corruption. Update every synced device before editing; do not keep working with an older build.
+An older device that encounters the version-15 store and schema-14 knowledge-base data preserves it read-only. It may describe the event as a migration failure because it cannot faithfully save the newer settings and causal Sync metadata. That is downgrade protection, not proof of corruption. Update every synced device before editing; do not keep working with an older build.
 
 Recovery exported before first-upgrade identity convergence may carry the losing provisional identity and is intentionally rejected afterward. Export it again once Sync has settled.
 

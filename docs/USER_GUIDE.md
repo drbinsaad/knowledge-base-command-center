@@ -88,7 +88,9 @@ Open the Library and choose **New heading** or **Arrange**. Library structure ca
 - placed records; and
 - an explicit Unplaced section.
 
-Deleting a heading does not delete its records or notes. The records remain Unplaced until deliberately moved. Desktop supports drag-and-drop; touch devices use labelled heading, subheading, and row menus.
+Any heading or subheading below the depth cap offers **Add subheading**. One branch can hold up to five levels, counting the top heading as level 1. Pickers show a nested destination with its full path, such as **Heading / Sub / Sub-sub**.
+
+Deleting a heading does not delete its records or notes. The records remain Unplaced until deliberately moved. Removing a nested subheading moves its records and child subheadings up under its parent. Desktop supports drag-and-drop; touch devices use labelled heading, subheading, and row menus.
 
 ### Classify records
 
@@ -125,7 +127,7 @@ In the ENT preset, custom Libraries use these creation profiles. Protected sourc
 
 Collections are personal reusable lists across the Index and Libraries. A record can belong to several Collection headings or subheadings without duplication or file movement.
 
-Use a record's menu or inspector to add it to a Collection. In Arrange mode, Collection headings and subheadings can be created, renamed, reordered, or removed. Removing Collection membership does not change the record's primary Index/Library classification.
+Use a record's menu or inspector to add it to a Collection. In Arrange mode, Collection headings and subheadings can be created, renamed, reordered, or removed, and any heading or subheading below the five-level cap offers **Add subheading**. Removing a nested subheading moves its memberships and child subheadings up under its parent. Removing Collection membership does not change the record's primary Index/Library classification.
 
 ## Smart queues
 
@@ -157,7 +159,7 @@ When creation has an explicit Library context, templates may also use these quot
 | --- | --- |
 | <code>{{yaml:title}}</code> | The note title as one quoted YAML scalar. Prefer this over plain <code>{{title}}</code> inside frontmatter. |
 | <code>{{yaml:id}}</code> | Stable/configured subject ID when the placeholder already has one; otherwise <code>""</code>. |
-| <code>{{yaml:category}}</code> | Selected Library subheading or heading, then the record group/Library fallback. |
+| <code>{{yaml:category}}</code> | Title of the deepest selected Library subheading or heading, then the record group/Library fallback. |
 | <code>{{yaml:parent}}</code> | Existing portable/configured parent title when known; otherwise <code>""</code>. |
 | <code>{{yaml:library}}</code> | Current Library name. |
 | <code>{{yaml:type}}</code> | Current Library's singular item label. |
@@ -173,7 +175,7 @@ Open Quick entry from the lightning-bolt desktop ribbon action or the Command Ce
 - switch knowledge base;
 - create a portable **No note** subject;
 - create an Index group, Collection heading, or Library heading;
-- create a nested Index subject, Collection subheading, or Library subheading;
+- create a nested Index subject, or a Collection or Library subheading under any heading or subheading below the five-level cap;
 - create a note after choosing its Index/Library destination, visual group, destination folder, and empty or template content;
 - add the note that was active when Quick entry opened; and
 - choose and add another existing Markdown note;
@@ -182,7 +184,7 @@ Open Quick entry from the lightning-bolt desktop ribbon action or the Command Ce
 
 Placeholder and visual-structure changes are transactional, stay in plugin data, and participate in Undo. Creating a note remains the only ordinary Quick entry action that writes a Markdown file. The ENT preset continues to route topic creation through the unverified proposal workflow and does not expose manual protected-Library classification.
 
-Creating or adding a note to a Library always asks for a heading or subheading first. If the Library is empty, Quick Entry asks you to create its first heading before the note form or file picker opens.
+Creating or adding a note to a Library always asks for a heading or subheading first, and the picker shows each nested subheading with its full path, such as **Heading / Sub / Sub-sub**. If the Library is empty, Quick Entry asks you to create its first heading before the note form or file picker opens.
 
 ### Assign keyboard shortcuts
 

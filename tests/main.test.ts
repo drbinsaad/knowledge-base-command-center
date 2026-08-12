@@ -9840,3 +9840,117 @@ test("a corrupt data.json with no usable backup still enters read-only protectio
   assert.equal(result.compatible, false);
   assert.match(plugin.dataCompatibilityWarning, /could not be parsed/i);
 });
+
+// --- Nested subheadings: recursion over every layout depth (max 5 levels
+// --- including the heading; node ids are layout-global unique).
+
+test("reconciliation dedupes duplicate collection subjects at every nesting depth", async () => {
+  const plugin = pluginWith(migrateData(null));
+  await plugin.loadPluginData();
+  plugin.data.collections = [{
+    id: "heading-deep",
+    title: "Deep",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{
+      id: "sub-level-2",
+      title: "Level two",
+      collapsed: false,
+      subjects: [],
+      subheadings: [{
+        id: "sub-level-3",
+        title: "Level three",
+        collapsed: false,
+        subjects: ["Knowledge/Dup.md", "Knowledge/Dup.md", "Knowledge/Other.md"],
+      }],
+    }],
+  }];
+  plugin.savedData.length = 0;
+
+  const changed = await plugin.reconcileRecords(plugin.getRecords());
+
+  assert.equal(changed, true, "the nested duplicate is a semantic change");
+  assert.deepEqual(
+    plugin.data.collections[0]?.subheadings[0]?.subheadings?.[0]?.subjects,
+    ["Knowledge/Dup.md", "Knowledge/Other.md"],
+    "reconcile must deduplicate subjects inside a depth-3 node",
+  );
+});
+
+test("countMemberships and referencedPaths see subjects nested three levels deep", async () => {
+  const plugin = pluginWith(migrateData(null));
+  await plugin.loadPluginData();
+  plugin.data.collections = [{
+    id: "heading-deep",
+    title: "Deep",
+    collapsed: false,
+    subjects: ["Knowledge/Everywhere.md"],
+    subheadings: [{
+      id: "sub-level-2",
+      title: "Level two",
+      collapsed: false,
+      subjects: ["Knowledge/Everywhere.md"],
+      subheadings: [{
+        id: "sub-level-3",
+        title: "Level three",
+        collapsed: false,
+        subjects: ["Knowledge/Everywhere.md", "Knowledge/Deep only.md"],
+      }],
+    }],
+  }];
+  plugin.invalidateRecordCache();
+
+  assert.equal(plugin.countMemberships("Knowledge/Everywhere.md"), 3, "one membership per depth");
+  assert.equal(plugin.countMemberships("Knowledge/Deep only.md"), 1);
+  const internal = plugin as unknown as { referencedPaths(): Set<string> };
+  assert.ok(internal.referencedPaths().has("Knowledge/Deep only.md"), "a depth-3 collection subject stays referenced");
+});
+
+test("library placement targets resolve a subheading at any depth under its owning heading", async () => {
+  const file = new TFile("Reference/Deep paper.md");
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.portableIndex.libraries = [{
+    id: "reading", name: "Reading", singularName: "Reading item", icon: "book-open",
+    order: 0, sourceKind: null, archivedAt: null,
+  }];
+  data.portableIndex.libraryLayouts = {
+    reading: [
+      { id: "other-heading", title: "Elsewhere", collapsed: false, subjects: [], subheadings: [] },
+      {
+        id: "outer-heading",
+        title: "Airway",
+        collapsed: false,
+        subjects: [],
+        subheadings: [{
+          id: "reading-level-2",
+          title: "Pediatric",
+          collapsed: false,
+          subjects: [],
+          subheadings: [{ id: "reading-level-3", title: "Neonatal", collapsed: false, subjects: [] }],
+        }],
+      },
+    ],
+  };
+  const { plugin, sourceMutationCount } = pluginWithFiles(data, [file], { [file.path]: { title: "Deep paper" } });
+  await plugin.loadPluginData();
+
+  await assert.rejects(
+    plugin.assignRecordToLibrary(file.path, "reading", { headingId: "other-heading", subheadingId: "reading-level-3" }),
+    /does not belong to the selected heading/u,
+    "a deep node under another heading is rejected by recursive containment",
+  );
+
+  await plugin.assignRecordToLibrary(file.path, "reading", { subheadingId: "reading-level-3" });
+
+  const layout = plugin.data.portableIndex.libraryLayouts.reading ?? [];
+  const outer = layout.find((heading) => heading.id === "outer-heading");
+  const deep = outer?.subheadings[0]?.subheadings?.[0];
+  assert.equal(deep?.id, "reading-level-3");
+  assert.equal(deep?.subjects.length, 1, "the subject lands inside the depth-3 node");
+  const subjectId = deep?.subjects[0] ?? "";
+  assert.equal(plugin.data.portableIndex.resolvedPathBySubjectId[subjectId], file.path);
+  assert.equal(outer?.subjects.length, 0, "the outer heading gains no direct copy");
+  assert.equal(plugin.getPortableSubject(subjectId)?.libraryId, "reading");
+  assert.equal(sourceMutationCount(), 0);
+});

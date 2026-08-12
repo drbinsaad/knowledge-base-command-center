@@ -16,7 +16,7 @@ import {
   runQuickEntryFocusedProtocolAction,
 } from "../src/quick-entry.ts";
 import { createQuickEntryButton, EntVaultCommandCenterView } from "../src/view.ts";
-import { AddActionModal, CollectionPickerModal, localDateStamp, TextPromptModal, VaultFilePickerModal } from "../src/modals.ts";
+import { AddActionModal, CollectionPickerModal, collectionTargets, localDateStamp, TextPromptModal, VaultFilePickerModal } from "../src/modals.ts";
 import { migrateData, portablePlaceholderPath, type LibraryDefinition, type VaultRecord } from "../src/model.ts";
 import { createFakeDom, asHtmlElement } from "./support/fake-dom.ts";
 
@@ -732,4 +732,128 @@ test("settings text inputs stay RTL-safe and the recent-changes slider defers it
   assert.match(source, /if \(typeof slider\.setInstant === "function"\) slider\.setInstant\(false\);/u);
   assert.match(source, /settings\.recentLimit = value;\n\s*this\.scheduleTextSave\(\);/u);
   assert.doesNotMatch(source, /settings\.recentLimit = value;\n\s*await this\.save\(\);/u);
+});
+
+// --- Nested subheadings: deep creation targets, depth cap, and layout-global
+// --- unique minted ids (max 5 levels including the heading).
+
+test("collection targets list every nested subheading with its full path label", () => {
+  const targets = collectionTargets([{
+    id: "heading-a",
+    title: "Board review",
+    collapsed: false,
+    subjects: [],
+    subheadings: [
+      {
+        id: "sub-airway",
+        title: "Airway",
+        collapsed: false,
+        subjects: [],
+        subheadings: [{
+          id: "sub-pediatric",
+          title: "Pediatric",
+          collapsed: false,
+          subjects: [],
+          subheadings: [{ id: "sub-neonatal", title: "Neonatal", collapsed: false, subjects: [] }],
+        }],
+      },
+      { id: "sub-otology", title: "Otology", collapsed: false, subjects: [] },
+    ],
+  }]);
+
+  assert.deepEqual(targets, [
+    { headingId: "heading-a", label: "Board review" },
+    { headingId: "heading-a", subheadingId: "sub-airway", label: "Board review / Airway" },
+    { headingId: "heading-a", subheadingId: "sub-pediatric", label: "Board review / Airway / Pediatric" },
+    { headingId: "heading-a", subheadingId: "sub-neonatal", label: "Board review / Airway / Pediatric / Neonatal" },
+    { headingId: "heading-a", subheadingId: "sub-otology", label: "Board review / Otology" },
+  ]);
+});
+
+test("Quick Entry nests new subheadings under a chosen parent and refuses past the depth cap", async () => {
+  const { plugin, sourceMutationCount } = quickEntryPlugin();
+  await plugin.loadPluginData();
+
+  const headingId = await plugin.createQuickEntryCollectionHeading("Board review");
+  const level2 = await plugin.createQuickEntryCollectionSubheading(headingId, "Airway");
+  const level3 = await plugin.createQuickEntryCollectionSubheading(headingId, "Pediatric", level2);
+  const level4 = await plugin.createQuickEntryCollectionSubheading(headingId, "Neonatal", level3);
+  const level5 = await plugin.createQuickEntryCollectionSubheading(headingId, "First week", level4);
+
+  const heading = plugin.data.collections[0];
+  const nodeLevel2 = heading?.subheadings[0];
+  const nodeLevel3 = nodeLevel2?.subheadings?.[0];
+  const nodeLevel4 = nodeLevel3?.subheadings?.[0];
+  const nodeLevel5 = nodeLevel4?.subheadings?.[0];
+  assert.equal(nodeLevel2?.id, level2);
+  assert.equal(nodeLevel3?.id, level3);
+  assert.equal(nodeLevel4?.id, level4);
+  assert.equal(nodeLevel5?.id, level5);
+  assert.equal(nodeLevel5?.subheadings, undefined, "a new leaf omits the nested key");
+
+  await assert.rejects(
+    plugin.createQuickEntryCollectionSubheading(headingId, "Too deep", level5),
+    /maximum nesting depth/u,
+    "a depth-5 node cannot contain another subheading",
+  );
+  await assert.rejects(
+    plugin.createQuickEntryCollectionSubheading(headingId, "Orphan", "missing-parent"),
+    /parent subheading is no longer available/u,
+  );
+
+  const libraryId = await plugin.createLibrary({ name: "Reading lists", singularName: "Reading list", icon: "book-open" });
+  const libraryHeadingId = await plugin.createQuickEntryLibraryHeading(libraryId, "Current papers");
+  const libraryLevel2 = await plugin.createQuickEntryLibrarySubheading(libraryId, libraryHeadingId, "To discuss");
+  const libraryLevel3 = await plugin.createQuickEntryLibrarySubheading(libraryId, libraryHeadingId, "Journal club", libraryLevel2);
+  const libraryHeading = plugin.data.portableIndex.libraryLayouts[libraryId]?.[0];
+  assert.equal(libraryHeading?.subheadings[0]?.subheadings?.[0]?.id, libraryLevel3);
+  const libraryLevel4 = await plugin.createQuickEntryLibrarySubheading(libraryId, libraryHeadingId, "This month", libraryLevel3);
+  const libraryLevel5 = await plugin.createQuickEntryLibrarySubheading(libraryId, libraryHeadingId, "This week", libraryLevel4);
+  await assert.rejects(
+    plugin.createQuickEntryLibrarySubheading(libraryId, libraryHeadingId, "Too deep", libraryLevel5),
+    /maximum nesting depth/u,
+  );
+
+  assert.equal(sourceMutationCount(), 0);
+});
+
+test("minted subheading ids are checked against nodes at every depth", async () => {
+  const { plugin } = quickEntryPlugin();
+  await plugin.loadPluginData();
+
+  const fixedNow = 1_700_000_000_000;
+  const randomSequence = [0.123456789, 0.987654321, 0.246813579];
+  const collidingId = `subheading-${fixedNow.toString(36)}-${randomSequence[0]?.toString(36).slice(2, 8)}`;
+  plugin.data.collections = [{
+    id: "heading-deep",
+    title: "Deep",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{
+      id: "sub-level-2",
+      title: "Level two",
+      collapsed: false,
+      subjects: [],
+      subheadings: [{ id: collidingId, title: "Level three", collapsed: false, subjects: [] }],
+    }],
+  }];
+
+  const originalNow = Date.now;
+  const originalRandom = Math.random;
+  let randomCalls = 0;
+  Date.now = () => fixedNow;
+  Math.random = () => randomSequence[Math.min(randomCalls++, randomSequence.length - 1)] ?? 0.5;
+  let minted = "";
+  try {
+    minted = await plugin.createQuickEntryCollectionSubheading("heading-deep", "Fresh");
+  } finally {
+    Date.now = originalNow;
+    Math.random = originalRandom;
+  }
+
+  assert.notEqual(minted, collidingId, "the uniqueness scan must see the depth-3 node id");
+  const heading = plugin.data.collections[0];
+  const directIds = (heading?.subheadings ?? []).map((node) => node.id);
+  assert.ok(directIds.includes(minted));
+  assert.equal(directIds.filter((id) => id === collidingId).length, 0, "the colliding id stays unique to the deep node");
 });

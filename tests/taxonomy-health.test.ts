@@ -497,3 +497,61 @@ test("index manager bulk selection matches the notes the filter shows", () => {
     else Reflect.deleteProperty(globalThis, "window");
   }
 });
+
+test("health center flags an empty depth-3 node without flagging its subject-bearing ancestor chain", () => {
+  const data = migrateData(null);
+  const memberPath = "Knowledge Base/member.md";
+  data.collections = [{
+    id: "heading-deep",
+    title: "Board review",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{
+      id: "sub-airway",
+      title: "Airway",
+      collapsed: false,
+      subjects: [],
+      subheadings: [
+        { id: "sub-pediatric", title: "Pediatric", collapsed: false, subjects: [memberPath] },
+        { id: "sub-neonatal", title: "Neonatal", collapsed: false, subjects: [] },
+      ],
+    }],
+  }];
+  data.portableIndex.libraries = [{
+    id: "library-reading", name: "Reading", singularName: "Paper", icon: "book-open",
+    order: 0, sourceKind: null, archivedAt: null,
+  }];
+  data.portableIndex.groups = [{ id: "group-reading", title: "Reading", order: 0 }];
+  data.portableIndex.subjects = [{
+    id: "subject-paper", title: "Kept paper", groupId: "group-reading", parentId: null,
+    order: 0, indexed: false, configuredId: "", recordKind: "note", libraryId: "library-reading",
+  }];
+  data.portableIndex.libraryLayouts = {
+    "library-reading": [{
+      id: "reading-heading",
+      title: "Current",
+      collapsed: false,
+      subjects: [],
+      subheadings: [{
+        id: "reading-level-2",
+        title: "To discuss",
+        collapsed: false,
+        subjects: ["subject-paper"],
+        subheadings: [{ id: "reading-level-3", title: "Journal club", collapsed: false, subjects: [] }],
+      }],
+    }],
+  };
+
+  const findings = analyze(data, [record(memberPath, "Member")]);
+  const empty = findings.filter((item) => item.kind === "empty-structure");
+  const emptyIds = empty.map((item) => item.id);
+
+  assert.ok(emptyIds.some((id) => id.endsWith(":sub-neonatal")), "the empty depth-3 collection node is flagged");
+  assert.equal(empty.find((item) => item.id.endsWith(":sub-neonatal"))?.detail.includes("Board review / Airway / Neonatal"), true, "the finding names the full path");
+  assert.ok(emptyIds.some((id) => id.endsWith(":reading-level-3")), "the empty depth-3 library node is flagged");
+  assert.equal(empty.find((item) => item.id.endsWith(":reading-level-3"))?.detail.includes("Reading / Current / To discuss / Journal club"), true);
+  for (const ancestorId of ["heading-deep", "sub-airway", "sub-pediatric", "reading-heading", "reading-level-2"]) {
+    assert.equal(emptyIds.some((id) => id.endsWith(`:${ancestorId}`)), false, `${ancestorId} has a subject-bearing subtree and is not empty`);
+  }
+  assert.equal(findings.some((item) => item.kind === "unreachable-structure"), false);
+});

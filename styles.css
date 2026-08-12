@@ -855,7 +855,9 @@
 
 .ent-cc-subheading-row {
   min-height: 38px;
-  padding-left: 42px;
+  /* Nested subheadings reuse the curriculum depth variable; a first-level
+     subheading (depth 0) keeps its original 42px indent. */
+  padding-left: calc(42px + (var(--ent-cc-depth, 0) * 22px));
   color: var(--text-muted);
   font-size: 11px;
   font-weight: 650;
@@ -940,6 +942,18 @@
 
 .ent-cc-level-2 {
   padding-left: 76px;
+}
+
+.ent-cc-level-3 {
+  padding-left: 102px;
+}
+
+.ent-cc-level-4 {
+  padding-left: 128px;
+}
+
+.ent-cc-level-5 {
+  padding-left: 154px;
 }
 
 .ent-cc-heading-body,
@@ -1989,6 +2003,22 @@
 
   .ent-cc-level-2 {
     padding-left: 43px;
+  }
+
+  .ent-cc-level-3 {
+    padding-left: 59px;
+  }
+
+  .ent-cc-level-4 {
+    padding-left: 75px;
+  }
+
+  .ent-cc-level-5 {
+    padding-left: 91px;
+  }
+
+  .ent-cc-subheading-row {
+    padding-left: calc(4px + (var(--ent-cc-depth, 0) * 14px));
   }
 
   .ent-cc-queue-description {
@@ -4455,6 +4485,26 @@
 .ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-level-2 {
   padding-inline: 0;
   padding-inline-start: 43px;
+}
+
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-level-3 {
+  padding-inline: 0;
+  padding-inline-start: 59px;
+}
+
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-level-4 {
+  padding-inline: 0;
+  padding-inline-start: 75px;
+}
+
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-level-5 {
+  padding-inline: 0;
+  padding-inline-start: 91px;
+}
+
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-subheading-row {
+  padding-inline: 0;
+  padding-inline-start: calc(4px + (var(--ent-cc-depth, 0) * 14px));
 }
 
 .ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-queue-description {

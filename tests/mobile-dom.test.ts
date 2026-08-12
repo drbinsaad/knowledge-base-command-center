@@ -1111,3 +1111,64 @@ test("the production copy action writes to the clipboard only after its button i
   assert.deepEqual(writes, ["Knowledge Base/Topic.md"]);
   assert.equal(Notice.messages.includes("Copy path copied."), true);
 });
+
+test("a depth-three nested subheading keeps 44px menu-driven controls on mobile", () => {
+  const dom = createFakeDom();
+  const view = createView(dom.window) as unknown as MobileViewHarness & {
+    records: VaultRecord[];
+    recordByPath: Map<string, VaultRecord>;
+    parsedQuery: ReturnType<typeof parseQuery>;
+    editMode: boolean;
+    plugin: { data: PluginData };
+  };
+  const library = installCustomLibrary(view.plugin.data);
+  const reference: VaultRecord = {
+    ...record("Knowledge Base/Deep guideline.md", "Deep guideline"),
+    role: "library",
+    portableId: "subject-deep",
+    libraryId: library.id,
+  };
+  view.records = [reference];
+  view.recordByPath = new Map([[reference.path, reference]]);
+  view.parsedQuery = parseQuery("");
+  view.plugin.data.activeTab = libraryTabId(library.id);
+  view.plugin.data.portableIndex.libraryLayouts[library.id] = [{
+    id: "heading-deep",
+    title: "Airway",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{
+      id: "subheading-level-two",
+      title: "Intubation",
+      collapsed: false,
+      subjects: [],
+      subheadings: [{ id: "subheading-level-three", title: "Rapid sequence", collapsed: false, subjects: ["subject-deep"] }],
+    }],
+  }];
+  view.editMode = true;
+  const parent = dom.document.body.createDiv();
+
+  const mobilePlatform = Platform as unknown as { isMobile: boolean };
+  const previousMobile = mobilePlatform.isMobile;
+  mobilePlatform.isMobile = true;
+  try {
+    assert.equal(view.renderLibrary(asHtmlElement(parent), [reference]), 1);
+    const subheadingRows = parent.querySelectorAll(".ent-cc-library-subheading .ent-cc-subheading-row");
+    assert.equal(subheadingRows.length, 2, "nested levels render one structure row each");
+    const depthThreeRow = subheadingRows[1];
+    assert.ok(depthThreeRow);
+    assert.equal(depthThreeRow.hasClass("ent-cc-depth-1"), true, "depth styling rides the shared depth variable classes");
+    assert.ok(depthThreeRow.querySelector("button.ent-cc-row-title"), "the depth-three title stays a 44px-height button target");
+    assert.ok(depthThreeRow.querySelector(".ent-cc-row-more"), "the depth-three row keeps its 44px ellipsis menu");
+    assert.ok(parent.querySelector(".ent-cc-subject-row.ent-cc-level-3 .ent-cc-row-more"), "the depth-three record row keeps its 44px ellipsis menu");
+    assert.equal(parent.querySelectorAll(".ent-cc-drag-handle").length, 0, "touch input never swaps the menus for desktop drag handles");
+  } finally {
+    mobilePlatform.isMobile = previousMobile;
+  }
+
+  const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+  assert.match(styles, /\.ent-cc-view \.ent-cc-heading-row button\.ent-cc-row-title,\s*\.ent-cc-view \.ent-cc-subheading-row button\.ent-cc-row-title\s*\{\s*min-height:\s*44px;/, "the 44px rule still covers every subheading row, nested or not");
+  assert.match(styles, /\.ent-cc-subheading-row\s*\{[^{}]*padding-left:\s*calc\(42px \+ \(var\(--ent-cc-depth, 0\) \* 22px\)\);/s, "nested subheading rows indent through the shared depth variable");
+  assert.match(styles, /\.ent-cc-level-3\s*\{\s*padding-left:\s*102px;/, "record rows gain indentation levels beyond two");
+  assert.match(styles, /\.ent-cc-level-5\s*\{\s*padding-left:\s*154px;/, "record indentation reaches the depth cap");
+});
