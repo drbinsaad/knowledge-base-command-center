@@ -1,9 +1,144 @@
 # Changelog
 
-## Unreleased
+## 0.13.0
 
 ### Added
 
+- Subheadings can now contain further subheadings, up to five levels including the heading, in both Collections and Libraries. **Add subheading** appears on any heading or subheading below that depth, pickers and Quick Entry label every destination by its full path (`Board review / Airway / Emergencies`), and removing a nested subheading promotes both its notes and its child subheadings to the parent rather than discarding them.
+- Added a starter template pack under `templates/` covering study topics, source notes, projects, meeting or case logs, and a question inbox, each using the creation-time YAML-safe tokens, plus a guide explaining which token resolves where.
+- Added a dedicated Apple Shortcuts guide documenting all ten fixed action-only URLs, why every query parameter is rejected, and how to build a Shortcut for the Home Screen, share sheet, or Back Tap.
+
+### Changed
+
+- Editing an indexed note no longer re-enumerates the vault. A vault or metadata event now rebuilds only the affected note's record and splices it into the cached ordering, instead of discarding the whole projection and re-scanning every Markdown file. Renames continue to take the full path deliberately, because a rename reprojects every stored path.
+- Searching in **Manage index** builds only the active tab's list and reuses it between keystrokes, so typing no longer enumerates the vault once per character, and hidden tabs never pay for a list they do not display.
+- Bulk **Remove from index**, **Restore to index**, and Library adoption resolve records and portable subjects through per-base maps instead of scanning every record for every selected note.
+- Startup deep-copies the knowledge-base store once instead of three times before the plugin finishes loading.
+- Collections and Libraries now render through one recursive structure renderer instead of two parallel implementations that had drifted apart; the Libraries tab regains the repair guidance its missing-count indicator had lost.
+- Advanced knowledge-base data to version 14 and the multi-base store to version 15 so that nested layouts cannot be silently flattened by an older build; older versions display existing data read-only instead of writing a truncated copy back through Sync.
+- Advanced portable packages to format version 5 and same-vault recovery packages to version 10. Older packages still import unchanged, and layouts nested deeper than five levels keep their notes by merging them into the nearest allowed level rather than dropping them.
+- The external-Sync reload handler was restructured behind a typed per-capture outcome record. Behaviour is unchanged and verified as such; the goal is that a future branch cannot forget to record a rescue payload without failing to compile.
+
+### Fixed
+
+- Made canonicalization agree across the plugin. Sync winner selection, migration equality, and portfolio guard tokens previously used three separate implementations that disagreed about a literal `__proto__` key, so the same store could be canonicalized differently depending on which one asked.
+- Made Unicode validation agree between Quick append and portable export. Text ending in an unpaired surrogate was accepted when written and rejected later during transfer validation; it is now rejected at entry.
+- Enforced the ten-megabyte import ceiling on the two remaining desktop import paths, workspace configuration import and organization backup import, which read and parsed a chosen file without checking its size.
+- Stopped the Taxonomy Health Center from repeating its stale-knowledge-base notice, and made every manager dialog share one staleness guard rather than six variants with different checks.
+- Made guarded dialog timers resolve the window that created them, so a dialog in a pop-out window is no longer cancelled through the focused window.
+- Removed unused exported functions and redirected tests that exercised wrappers the plugin never calls onto the code paths it actually runs.
+
+## 0.12.1
+
+### Fixed
+
+- Prevented a permanent freeze when switching or creating a knowledge base while the Command Center was open. A view refresh could wait on the very transaction that started it, and because the stalled operation held an App-wide barrier, disabling and re-enabling the plugin did not recover it. Refreshes that run inside a base or organization transaction now save through that transaction instead of queueing behind it.
+- Stopped Sync from silently discarding work when a knowledge base deleted on one device had been restored and edited on another. A base whose edits are newer than the deletion is now preserved in a private conflict rescue before the deletion is adopted; unedited copies still disappear quietly.
+- Added an automatic same-device backup of plugin data. Obsidian rewrites `data.json` in place, so an interrupted write could leave no readable copy of any knowledge base. Every save now refreshes a parseable twin first, startup restores from it when `data.json` cannot be parsed, and the unreadable file is kept beside it for inspection.
+- Preserved an already-merged synced update that was followed by an identity-less payload from an older build. That combination entered protected read-only mode without keeping the merged organization, which was then lost at the next restart.
+- Stopped note titles containing `$&`, `` $` ``, `$'`, or `$$` from corrupting generated frontmatter through the YAML-safe creation-time template tokens. A title could previously inject a premature `---` line and break the note's properties.
+- Stopped an empty configured topic-proposal folder from reclassifying every resolved note as a proposal during startup repair, which dropped manual index entries and rehomed subjects. An empty setting once again means the proposal folder is simply unset.
+- Restored drag-and-drop arranging in Library tabs on desktop. Drop targets read their payload during `dragover`, where browsers deliberately withhold it, so drops were never accepted.
+- Kept saved manual ordering intact when a group name is entered or stored with different capitalization. The move could previously replace an entire group's arrangement with the single moved record and leave the destination collapsed.
+- Stopped a parent topic whose `curriculum_id` is stored in lower or mixed case from being reported as a permanent placement conflict in **Needs my decision**.
+- Refreshed the record inspector after a vault or Sync change that arrives while the search box is focused, instead of leaving a deleted or renamed note's details on screen.
+- Kept device-local Undo/Redo history, routes, and collapse state when a portable package legitimately contains collection headings whose stable IDs use an underscore or non-Latin characters.
+- Made Index health resolve parent links exactly as the hierarchy does, so an accent, tatweel, or Unicode-normalization difference is reported instead of silently flattening the tree while the report claims there is nothing to fix.
+- Migrated group aliases, ordering, collapse state, and manual arrangements when a folder outside the primary folder is renamed.
+- Neutralized Windows-reserved device names that carry an extension, such as `con.jpg`, when attaching files. Such an attachment could not be created on Windows and made a vault carrying it unsyncable to Windows devices.
+- Made the one-time envelope identity fingerprint independent of the device's language collation. Two devices with different system languages could otherwise compute different fingerprints for identical data and permanently reject a legitimate same-vault Sync; fingerprints written by earlier builds are still accepted.
+- Allowed a manually repaired `data.json` to load into protected read-only mode instead of preventing the plugin from being enabled at all, which had blocked even read-only export of the surviving data.
+- Cancelled the pending refresh timer on the window that created it, so unloading the plugin while a pop-out window has focus no longer leaves orphaned **Open Library** commands in the palette.
+- Allocated portable subject identities once and saved them before a portfolio export, so re-importing a portfolio matches existing subjects instead of duplicating every linked subject.
+- Stopped **Attach file** from rewriting every line ending in a note that mixes line-ending styles, and from refusing notes that quote a fenced code block inside an indented block.
+- Kept the Quick append category editor open, with the typed draft intact, when a duplicate category name is rejected.
+- Preserved the caret position while typing in the Taxonomy Health Center filter.
+- Added the same stale-data guard the other manager dialogs use to **Manage knowledge bases**, so a rename or archive cannot act on a list that Sync replaced while the dialog was open.
+- Made the bulk selection button in **Manage index** do what its label says, and cleared a stale selection when the search query changes.
+- Stamped export and backup filenames with the local date instead of the UTC date.
+- Set automatic text direction on every Settings text field so right-to-left names, including Arabic, are typed and displayed correctly.
+- Buffered the **Recent changes limit** slider so dragging it saves once at rest instead of rewriting the entire plugin store on every step.
+- Removed `versions.json` entries for versions 0.1.0 through 0.7.0, which have no published release. Obsidian 1.5 to 1.9 installations resolved those entries and failed with an opaque download error instead of a clear compatibility message.
+
+## 0.12.0
+
+### Added
+
+- Added a one-time, device-local **What’s new** window after an existing installation upgrades to 0.12.0. It summarizes the release with an explicit, safe link to the exact GitHub release page; the plugin makes no request to GitHub, never shows the window on a truly fresh install, and also provides **Open what’s new** for deliberate reopening.
+- Expanded the stable **Knowledge hierarchy** view for Obsidian `.base` files into a configurable Generic view. Title, ID, fallback group, status, priority, page size, and group counts can be set through native Bases view options; native Base grouping, formulas, limits, and user sort remain authoritative.
+- Added bounded multi-base portfolio export/import for up to 50 available knowledge bases. Each bundle contains a strict manifest and independent existing-format portable packages per base, with source-to-destination mapping, per-base Merge/Replace, and per-source component and Library selection.
+- Added an exact dry-run portfolio plan used verbatim by apply, with categorized base, heading, subject, Library, conflict, folder/template fallback, and explicit will-not-change previews. Replace requires typed confirmation and writes a same-vault recovery for every affected destination before mutation.
+- Added a path-safe **Sync & recovery center** command and an entry under **Manage index → Diagnostics**. It reports the active base, semantic revision and shortened head, local save/reload history, bounded conflict-rescue counts and ages, confirmed recovery age, protection reason, device-local profile context, and active-base concurrent-edit evidence using local public APIs only.
+- Added Quick append for the active or a chosen Markdown note. Users can file repeated follow-up items beneath configurable Questions, Lectures to watch, Sources, Thoughts, To read, Other, or custom category headings without duplicating the managed section.
+- Added base-specific category management with stable marker IDs, rename/reorder/archive/restore, bullet or checkbox style, and optional dates, plus focused commands and fixed action-only Apple Shortcut URLs for current-note and note-picker entry.
+- Added six fixed action-only Apple Shortcut URLs for the focused Quick Entry flows and <code>obsidian://kbcc-attach-current</code> for the locally active eligible Markdown note. All use the same guarded blank handlers as their commands and reject every query parameter before opening a hub, picker, or form.
+- Added optional note-creation profiles for active and archived Libraries. Each profile inherits the knowledge base defaults field by field or overrides its destination folder, Empty/Template mode, and template; the resolved Create note form remains editable per note.
+- Added explicit creation-time YAML-safe template tokens for Library context: `{{yaml:title}}`, `{{yaml:id}}`, `{{yaml:category}}`, `{{yaml:parent}}`, `{{yaml:library}}`, and `{{yaml:type}}`. Missing values become a quoted empty scalar, while legacy `{{title}}`, `{{date}}`, and `{{time}}` behavior remains unchanged.
+- Added an explicit **Attach file to current note…** command with per-knowledge-base storage policies: follow Obsidian, fixed vault folder, note-local folder, or ask each time. Generated links can be inserted at the editor cursor, a configured marker or heading, or the end of the note.
+- Added guarded binary import through Obsidian's vault APIs, including a 100-megabyte per-file ceiling, collision-safe filenames, immutable-source and <code>ai_lock</code> protection, replaced-note detection, and clear partial-success reporting when the file was copied but its link could not be inserted.
+- Added a Taxonomy Health Center for duplicate and visually confusable names, case/hyphen variants, parent or cycle problems, empty or unreachable structure, unavailable configured folders/templates, duplicate note bindings, and unresolved placeholders that may match local notes. Findings are read-only by default; the two deterministic parent-edge repairs require an explicit preview and are saved as one Undo-protected plugin-state transaction.
+- Added one stable **Open Library** command per active Library for user-assigned hotkeys, the mobile toolbar, and Obsidian Quick Action. Commands are refreshed after Library or base changes and revalidate the active base before opening.
+
+### Changed
+
+- Advanced the multi-base store to version 14 and separated semantic organization revisions from device-local view state. Selection, active tabs, live collapse state, and Undo/Redo history no longer advance Sync conflict ordering, while existing version 11–13 stores migrate with a zero semantic baseline and newer stores remain read-only in older builds.
+- Bound device-local state to the exact vault identity and moved legacy version 11–13 routes, collapse state, and the newest Undo/Redo history into a four-megabyte App-local profile before neutralizing synced data. Legacy unbound profiles are discarded; a valid profile for another identity is retained but never applied unless that exact established vault arrives after a temporarily missing store.
+- Advanced standalone Workspace settings exports to version 2 so older builds reject settings they do not understand instead of silently dropping Quick append, attachment, or Library-profile configuration; version 1 remains importable.
+
+### Fixed
+
+- Made the Command Center respond to its actual Obsidian leaf width, including stacked tabs and pop-out windows. Compact mode now begins below 1050 px of leaf width (not window width); compact and narrow leaves use a focused record-details route, scroll-safe header actions, and bounded tabs/search instead of retaining the wide two-column dashboard from the surrounding window.
+- Kept Create Note and library-specific creation forms inside the visible iPhone viewport while the software keyboard is open. The modal now reconciles Obsidian's native keyboard inset with the browser visual viewport, keeps the action footer visible, and makes the form body the only scrolling region.
+- Resynchronized focused fields throughout the iOS keyboard animation and scrolled the active control into view without retaining listeners or timers after the modal closes.
+- Kept custom Bases headings, row metadata, and pagination inside narrow panes, with 44-pixel row and pager targets at compact widths and visible keyboard focus.
+- Made the multi-base portfolio modal a labelled keyboard-operable tab interface with a persistent Cancel action, logical focus restoration after source/destination/acknowledgement/preview paging changes, and owner-window iOS keyboard geometry that keeps typed confirmation reachable.
+- Gave taxonomy repair previews a single bounded scrolling body with fixed, wrapping 44-point actions; made Quick Entry descriptions scale and wrap with bidirectional text; and gave text prompts persistent visible and programmatic labels.
+- Kept initial Sync & Recovery focus on the modal context, then announced each explicit local recheck and restored focus to its action.
+- Added a confirmed **Clear device-local data** command and Sync & Recovery action that removes this plugin's route, collapse, Undo/Redo, Quick append Undo, local recovery facts, and update-announcement history without changing Markdown, attachments, exports, or synced organization. Pending view saves and recovery recorders remain suppressed until restart so an uninstall-session reset cannot recreate either local value.
+- Kept portfolio preview announcements concise instead of making the full rich preview a live region, kept taxonomy repair preview focus on its title and context, and revalidated an exact taxonomy repair again at the queued mutation boundary.
+- Rewrote every compatible older same-vault envelope to the current outer and inner store versions after external Sync delivery, including equal-semantics and incoming-winning merges.
+- Buffered attachment folder, marker, and heading text settings before persistence, avoiding a full plugin-data rewrite and Sync revision on every keystroke.
+- Required Quick append Undo to target the exact original note object, so a deleted-and-recreated same-path note cannot receive an older note's rollback.
+- Rejected workspace imports that would leave Quick append with no active category, and validated imported fixed attachment folders before applying settings.
+- Extended Taxonomy Health checks to fixed attachment folders and effective per-Library creation folders and templates.
+- Preserved empty Libraries and headings, portable placeholders, and intentionally unplaced subjects across portfolio transfer; added stale base/store/Sync guards, cross-vault Replace acknowledgement, bounded mobile previews, and atomic rollback through the existing store transaction path.
+- Preserved Library creation profiles through settings exports, portable workspace dependency descriptors, settings-bearing named snapshots and Undo/Redo entries, Library renames/archives, and vault folder/template renames; permanent Library deletion removes its profile atomically.
+- Made workspace imports reset unavailable, restricted, or out-of-folder Library templates to Empty inside the same Undo-protected transaction while still rejecting invalid destination folders; legacy standalone workspace imports report and omit profiles without a matching destination Library ID.
+- Kept the Library-profile editor inside the iPhone visual viewport during keyboard animation, with 44-point controls, safe-area padding, explicit effective-value summaries, and stale Sync/base guards.
+- Repair duplicate, missing, or unsafe collection, subheading, and saved-view IDs deterministically during ordinary plugin-data loading, so damaged synced data cannot make edits target the wrong item or remove multiple saved views at once.
+- Keep collection and Library heading identities globally unique across hierarchy levels during import and recovery, preserving existing local identities and making repeated Merge imports stable across reloads.
+- Replaced the four-base cross-base-search cache with a scan-resistant 50,000-record working set, retained unaffected projections across path-scoped vault changes, and restricted each uncached projection to its configured folders plus explicit references. Large multi-base vaults no longer rescan every Markdown path for every inactive base on each keystroke.
+- Prevented a newer selection-only or collapse-only save from replacing structural work made on another device. Sync now compares monotonic per-base semantic revisions, overlays this device's view state by stable heading/subheading IDs, and clears stale local history only when remote semantic organization replaces it.
+- Detected equal-revision divergent semantic edits explicitly, wrote every possible losing complete envelope to a private in-vault conflict rescue before adoption, and failed closed without selecting a winner when that rescue could not be created.
+- Added a fenced view-state save path that waits for base, transaction, Sync, and adapter queues and copies only the explicit device-local whitelist onto the last committed semantic snapshot, preventing navigation saves from carrying unsaved organization changes.
+
+### Performance
+
+- Replaced the custom Bases view's synchronous whole-result metadata projection and sort with generation-safe 250-entry grouping slices and bounded 25–300-row pages. A 10,000-entry result keeps only the configured page in the DOM while **Previous** and **Next** replace that page.
+
+### Security
+
+- Kept portfolios free of note bodies, attachments, exact note bindings, and private recovery; rejected malicious IDs, paths, mismatched manifests, oversized packages, and aggregate budget overruns through the existing strict portable parser.
+- Kept Sync and Recovery diagnostics device-local and telemetry-free. The center does not probe Obsidian Sync or the network, read export JSON or Markdown bodies, or display vault/base identifiers, custom configuration names, export filenames, or full paths; artifact inspection is capped at 2,000 direct export-folder entries.
+- Made Quick append atomic and fail-closed: it checks <code>ai_lock</code> inside the write transaction, preserves all text outside the strict managed block, enforces bounded input and entry counts, and keeps only compact in-memory fingerprints for a five-minute exact undo. Note bodies and appended text are never stored in plugin data.
+- Shared one strict fail-closed <code>ai_lock</code> parser between Quick append and attachment writes. Duplicate, escaped, nested, merged, or malformed declarations are refused before a binary or Markdown write; only an absent key or one explicit false/null declaration is writable.
+
+### Verification
+
+Automated release checks passed on this candidate: 670 runtime tests, 10 release tests, TypeScript, ESLint, JSON validation, production build, Community static verification, and dependency audits with zero findings, plus an independent review that reproduced and confirmed the store version 14 Sync fixes against the previously published defects. The physical-iPhone checklist for 0.12.0 — including item 41 for the post-update What's new window — was explicitly waived by the maintainer for this release and was not executed on a physical device. This release does not claim that the manual device matrix passed; the full matrix is inherited by the next release that changes mobile behavior.
+
+## 0.11.1 (unpublished; folded into 0.12.0)
+
+This candidate was never tagged or released. Its completed iPhone, stacked-pane, and configurable Bases work is included in 0.12.0.
+
+## 0.11.0
+
+### Added
+
+- Added Quick entry from a dedicated desktop ribbon action (shown in Obsidian's **Open** menu on mobile) and the Command Center header, plus seven icon-bearing commands that users can assign under Hotkeys or add to Obsidian's mobile toolbar. No default key combinations are installed.
+- Added focused Quick entry flows to switch knowledge bases, create transactional No note subjects, create Index/Collection/Library headings and subheadings, choose note groups and templates, and add the current or an existing Markdown note. Library capture now requires an explicit heading or subheading and can create the first heading when the Library is empty.
+- Bound every delayed Quick Entry menu and picker to the knowledge-base ID and data epoch that opened it, while preserving the base picker as an explicit guarded switch.
+- Added the action-only <code>obsidian://kbcc-quick-entry</code> route for Apple Shortcuts. It opens only the hub; any query parameter fails closed and cannot prefill or submit a title, path, content value, or other data.
 - Added project artwork, real desktop and iPhone screenshots, focused getting
   started, user, portability/recovery, and troubleshooting guides, and an
   explicit 0.10.0 physical-iPhone evidence record.

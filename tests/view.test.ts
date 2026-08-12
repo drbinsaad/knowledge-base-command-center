@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Menu, Notice, TFile } from "obsidian";
-import { AddActionModal, calculateModalViewportLayout, ConfirmModal, IndexGroupModal, KnowledgeNoteModal, RecordPickerModal, TextPromptModal, TopicEditorModal, VaultFilePickerModal } from "../src/modals.ts";
+import { Menu, Notice, Platform, Setting, TFile } from "obsidian";
+import { AddActionModal, calculateModalViewportLayout, ConfirmModal, IndexGroupModal, KnowledgeNoteModal, localDateStamp, RecordPickerModal, TextPromptModal, TopicEditorModal, VaultFilePickerModal } from "../src/modals.ts";
 import {
   canRelinkPortableRecord,
   calculateSearchViewportLayout,
   EntVaultCommandCenterView,
   matchingKnowledgeBaseRecords,
-  prepareKnowledgeBaseSearchResults,
+  MAX_RENDERED_SEARCH_RESULTS,
   tabDefinitions,
 } from "../src/view.ts";
 import { IndexManagerModal } from "../src/index-manager.ts";
@@ -16,23 +16,36 @@ import {
   portabilityLibraryUnavailableText,
   preparePortableExport,
 } from "../src/portability-modal.ts";
-import { createPortableExport, EMPTY_PORTABLE_SELECTION } from "../src/portability.ts";
+import {
+  applyPortableExport,
+  createPortableExport,
+  EMPTY_PORTABLE_SELECTION,
+  parsePortableExport,
+} from "../src/portability.ts";
 import {
   BUILTIN_LIBRARY_DEFINITIONS,
+  buildCurriculumTree,
+  createDefaultStore,
   createPersonalBackup,
+  createWorkspaceConfig,
   emptyCurriculumTree,
   libraryTabId,
   migrateData,
   parseQuery,
   snapshotPersonal,
+  type LayoutHeading,
+  type LayoutSubheading,
   type LibraryDefinition,
   type PluginData,
   type VaultRecord,
 } from "../src/model.ts";
+import EntVaultCommandCenterPlugin from "../src/main.ts";
 import { collectKnowledgeBaseSearchResults } from "../src/search.ts";
 import { EntCommandCenterSettingsTab } from "../src/settings.ts";
 import { LibraryEditorModal, ManageLibrariesModal } from "../src/library-modal.ts";
-import { createFakeDom } from "./support/fake-dom.ts";
+import { LibraryNoteProfileEditorModal } from "../src/library-profile-modal.ts";
+import { createOpenedBaseGuard, modalOwnerWindow, setGuardedTimer } from "../src/modals.ts";
+import { asHtmlElement, createFakeDom, FakeElement, type FakeDocument } from "./support/fake-dom.ts";
 
 function record(path: string, title: string, kind: VaultRecord["kind"] = "topic"): VaultRecord {
   return {
@@ -59,6 +72,23 @@ function record(path: string, title: string, kind: VaultRecord["kind"] = "topic"
     mtime: 0,
     aiLock: false,
   };
+}
+
+/**
+ * Drive the production collector the way the plugin's own
+ * `searchKnowledgeBases` does, so these expectations cover the code that ships
+ * rather than a view-side convenience wrapper.
+ */
+function crossBaseSearch(
+  sources: Array<{ baseId: string; baseName: string; records: VaultRecord[] }>,
+  query: string,
+  limit = MAX_RENDERED_SEARCH_RESULTS,
+): ReturnType<typeof collectKnowledgeBaseSearchResults<{ baseId: string; baseName: string }>> {
+  return collectKnowledgeBaseSearchResults(
+    sources.map(({ baseId, baseName, records }) => ({ source: { baseId, baseName }, records })),
+    parseQuery(query),
+    limit,
+  );
 }
 
 const CUSTOM_LIBRARY_ID = "reference-sets";
@@ -166,6 +196,130 @@ test("a stale library editor cannot overwrite a changed, reordered, archived, or
     assert.equal(updates, 0, `${scenario.name} library must reject the stale editor`);
   }
   assert.equal(Notice.messages.filter((message) => /after the editor opened/i.test(message)).length, scenarios.length);
+});
+
+test("a same-base Sync replacement invalidates an open Library creation-profile editor", async () => {
+  Notice.messages.length = 0;
+  const data = migrateData(null);
+  const library = installLibrary(data);
+  let dataEpoch = 3;
+  let saves = 0;
+  const plugin = {
+    app: {},
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => dataEpoch,
+    getLibrary: (id: string) => id === library.id ? { ...library } : null,
+    getLibraryNoteProfile: () => null,
+    getEffectiveLibraryNoteProfile: () => ({
+      folder: "Knowledge Base",
+      mode: "empty" as const,
+      templatePath: "",
+      inherited: { folder: true, mode: true, templatePath: true },
+    }),
+    validateLibraryNoteProfile: () => null,
+    async setLibraryNoteProfile(): Promise<void> { saves += 1; },
+  };
+  const modal = new LibraryNoteProfileEditorModal(
+    plugin as unknown as ConstructorParameters<typeof LibraryNoteProfileEditorModal>[0],
+    library,
+  );
+  const harness = modal as unknown as { submit(reset: boolean): Promise<void> };
+
+  dataEpoch += 1;
+  await harness.submit(false);
+  await harness.submit(true);
+
+  assert.equal(saves, 0);
+  assert.equal(Notice.messages.filter((message) => /synced profile changed/i.test(message)).length, 1);
+});
+
+test("a Library creation-profile editor rejects same-object base-default and Library changes", async () => {
+  Notice.messages.length = 0;
+  const scenarios: Array<{
+    label: string;
+    mutate(data: PluginData, library: LibraryDefinition): void;
+  }> = [
+    {
+      label: "base defaults",
+      mutate: (data) => { data.settings.defaultNoteFolder = "Changed while open"; },
+    },
+    {
+      label: "Library rename",
+      mutate: (_data, library) => { library.name = "Renamed while open"; },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const data = migrateData(null);
+    const library = installLibrary(data);
+    let saves = 0;
+    const plugin = {
+      app: {},
+      data,
+      getActiveKnowledgeBaseId: () => "base-a",
+      getDataEpoch: () => 0,
+      getLibrary: (id: string) => id === library.id ? library : null,
+      getLibraryNoteProfile: () => null,
+      getEffectiveLibraryNoteProfile: () => ({
+        folder: data.settings.defaultNoteFolder,
+        mode: data.settings.defaultNewNoteMode,
+        templatePath: data.settings.defaultTemplatePath,
+        inherited: { folder: true, mode: true, templatePath: true },
+      }),
+      validateLibraryNoteProfile: () => null,
+      async setLibraryNoteProfile(): Promise<void> { saves += 1; },
+    };
+    const modal = new LibraryNoteProfileEditorModal(
+      plugin as unknown as ConstructorParameters<typeof LibraryNoteProfileEditorModal>[0],
+      library,
+    );
+    const harness = modal as unknown as { submit(reset: boolean): Promise<void> };
+
+    scenario.mutate(data, library);
+    await harness.submit(false);
+    await harness.submit(true);
+
+    assert.equal(saves, 0, scenario.label);
+  }
+  assert.equal(Notice.messages.filter((message) => /creation defaults.*changed/i.test(message)).length, 2);
+});
+
+test("Library profile folder Browse is visibly disabled until its override is enabled", () => {
+  const data = migrateData(null);
+  const library = installLibrary(data);
+  const plugin = {
+    app: {},
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    getLibrary: () => library,
+    getLibraryNoteProfile: () => null,
+    getEffectiveLibraryNoteProfile: () => ({
+      folder: "Knowledge Base",
+      mode: "empty" as const,
+      templatePath: "",
+      inherited: { folder: true, mode: true, templatePath: true },
+    }),
+  };
+  const modal = new LibraryNoteProfileEditorModal(
+    plugin as unknown as ConstructorParameters<typeof LibraryNoteProfileEditorModal>[0],
+    library,
+  );
+  const browseButton = { disabled: false };
+  const harness = modal as unknown as {
+    folderBrowseButton: typeof browseButton;
+    folderOverride: boolean;
+    syncControls(): void;
+  };
+  harness.folderBrowseButton = browseButton;
+  harness.folderOverride = false;
+  harness.syncControls();
+  assert.equal(browseButton.disabled, true);
+
+  harness.folderOverride = true;
+  harness.syncControls();
+  assert.equal(browseButton.disabled, false);
 });
 
 test("editing only a Library name preserves an imported unknown icon ID", async () => {
@@ -768,6 +922,135 @@ test("Index Manager group restore routes through the guarded atomic restore API"
   }]);
 });
 
+test("a case-variant typed group move keeps the merged domain's root order and expands its stored label", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const first = { ...record("KB/Sinusitis.md", "Sinusitis"), domain: "Rhinology", folderOrder: "Rhinology" };
+  const second = { ...record("KB/Polyps.md", "Polyps"), domain: "Rhinology", folderOrder: "Rhinology" };
+  const moved = { ...record("KB/Airway.md", "Airway"), domain: "Laryngology", folderOrder: "Laryngology" };
+  const records = [first, second, moved];
+  data.curriculumVisual.orderByContainer["root:rhinology"] = [second.path, first.path];
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    canVisuallyMoveAcrossGroups: () => true,
+    getIndexGroups: () => ["Rhinology"],
+    saveViewState: async (): Promise<void> => undefined,
+    mutate: async (_label: string, action: () => void): Promise<void> => { action(); },
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: object;
+    plugin: typeof plugin;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    records: VaultRecord[];
+    recordByPath: Map<string, VaultRecord>;
+    curriculum: ReturnType<typeof buildCurriculumTree>;
+    collapsedCurriculumDomains: Set<string>;
+    collapsedCurriculumNodes: Set<string>;
+    collapsedQueues: Set<string>;
+    openIndexGroupPicker(record: VaultRecord): void;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+  view.records = records;
+  view.recordByPath = new Map(records.map((item) => [item.path, item]));
+  view.curriculum = buildCurriculumTree(records, data.curriculumVisual, false);
+  view.collapsedCurriculumDomains = new Set(["Rhinology"]);
+  view.collapsedCurriculumNodes = new Set();
+  view.collapsedQueues = new Set();
+
+  let submitted: Promise<void> = Promise.resolve();
+  const open = Object.getOwnPropertyDescriptor(IndexGroupModal.prototype, "open");
+  IndexGroupModal.prototype.open = function submitGroup(): void {
+    const options = (this as unknown as { options: { onSubmit(group: string): void | Promise<void> } }).options;
+    submitted = Promise.resolve(options.onSubmit("rhinology"));
+  };
+  try {
+    view.openIndexGroupPicker(moved);
+    await submitted;
+  } finally {
+    if (open) Object.defineProperty(IndexGroupModal.prototype, "open", open);
+    else Reflect.deleteProperty(IndexGroupModal.prototype, "open");
+  }
+
+  assert.deepEqual(
+    data.curriculumVisual.orderByContainer["root:rhinology"],
+    [second.path, first.path, moved.path],
+    "the destination group's saved order must survive a case-variant typed name",
+  );
+  assert.equal(view.collapsedCurriculumDomains.has("Rhinology"), false, "the stored collapse label expands even when the typed case differs");
+});
+
+test("make top-level resolves a case-variant record domain against the merged curriculum group", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const first = { ...record("KB/Sinusitis.md", "Sinusitis"), domain: "Rhinology", folderOrder: "Rhinology" };
+  const variant = { ...record("KB/Rhinoplasty.md", "Rhinoplasty"), domain: "RHINOLOGY", folderOrder: "Rhinology" };
+  const records = [first, variant];
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    canVisuallyMoveAcrossGroups: () => false,
+    mutate: async (_label: string, action: () => void): Promise<void> => { action(); },
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    plugin: typeof plugin;
+    recordByPath: Map<string, VaultRecord>;
+    curriculum: ReturnType<typeof buildCurriculumTree>;
+    makeCurriculumTopLevel(record: VaultRecord): void;
+  };
+  view.plugin = plugin;
+  view.recordByPath = new Map(records.map((item) => [item.path, item]));
+  view.curriculum = buildCurriculumTree(records, data.curriculumVisual, false);
+  const mergedRoots = view.curriculum.domains.find((domain) => domain.domain === "Rhinology")?.roots.map((node) => node.record.path) ?? [];
+  assert.ok(mergedRoots.includes(variant.path), "case-variant spellings merge into one visual group");
+
+  view.makeCurriculumTopLevel(variant);
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.deepEqual(
+    data.curriculumVisual.orderByContainer["root:rhinology"],
+    [...mergedRoots.filter((path) => path !== variant.path), variant.path],
+    "the merged group's real roots must survive a case-variant record domain",
+  );
+});
+
+test("placement conflict detection normalizes stored parent curriculum ID case", () => {
+  const parent = { ...record("KB/Parent.md", "Head And Neck Overview"), role: "canonical" as const, curriculumId: "ent-hn-01", domain: "Head & Neck" };
+  const child = { ...record("KB/Child.md", "Neck Mass"), role: "canonical" as const, curriculumId: "ENT-HN-01.1", domain: "Head & Neck", parentTopic: "[[Head And Neck Overview]]" };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    plugin: {
+      isClinicalMode(): boolean;
+      resolveLink(link: string, fromPath: string, byPath: Map<string, VaultRecord>): VaultRecord | null;
+    };
+    recordByPath: Map<string, VaultRecord>;
+    hasPlacementConflict(record: VaultRecord): boolean;
+  };
+  view.recordByPath = new Map([[parent.path, parent], [child.path, child]]);
+
+  view.plugin = { isClinicalMode: () => true, resolveLink: () => parent };
+  assert.equal(view.hasPlacementConflict(child), false, "a lowercase stored parent ID is the same curriculum ID");
+
+  view.plugin = { isClinicalMode: () => true, resolveLink: () => ({ ...parent, curriculumId: "ENT-HN-02" }) };
+  assert.equal(view.hasPlacementConflict(child), true, "a genuinely wrong parent still conflicts");
+});
+
+test("backup filenames stamp the local calendar day", () => {
+  assert.equal(localDateStamp(new Date(2026, 0, 5, 12, 0)), "2026-01-05");
+  // Either edge would cross into a different UTC day in some timezone; the
+  // stamp must always follow the local clock.
+  assert.equal(localDateStamp(new Date(2026, 5, 15, 0, 10)), "2026-06-15");
+  assert.equal(localDateStamp(new Date(2026, 5, 15, 23, 50)), "2026-06-15");
+});
+
 test("link controls are limited to notes explicitly completed from portable placeholders", () => {
   assert.equal(canRelinkPortableRecord({ portableId: "local-medication" }), false);
   assert.equal(canRelinkPortableRecord({ portableId: "native-clinical", portableRelinkable: false }), false);
@@ -780,6 +1063,18 @@ test("creating a note from a custom library carries its labels into the generic 
   data.settings.workspaceMode = "generic";
   data.settings.itemSingular = "note";
   const library = installLibrary(data);
+  data.settings.libraryNoteProfiles[library.id] = {
+    folder: "Reference notes",
+    mode: "template",
+    templatePath: "Templates/Reference.md",
+  };
+  data.portableIndex.libraryLayouts[library.id] = [{
+    id: "heading-evidence",
+    title: "Evidence",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{ id: "sub-guidelines", title: "Guidelines", collapsed: false, subjects: [] }],
+  }];
   data.activeTab = libraryTabId(library.id);
   const view = Object.create(EntVaultCommandCenterView.prototype) as {
     app: object;
@@ -790,11 +1085,18 @@ test("creating a note from a custom library carries its labels into the generic 
       isClinicalMode(): boolean;
       getTemplateFiles(): [];
       getLibrary(id: string): LibraryDefinition | null;
+      getEffectiveLibraryNoteProfile(id: string): {
+        folder: string;
+        mode: "template";
+        templatePath: string;
+        inherited: { folder: false; mode: false; templatePath: false };
+      };
+      getPortableSubject(): null;
     };
     loadedBaseId: string;
     loadedDataEpoch: number;
     staleViewNoticeShown: boolean;
-    startCreateLibraryNote(libraryId: string): void;
+    startCreateLibraryNote(libraryId: string, target?: { headingId: string; subheadingId: string }): void;
   };
   view.app = {};
   view.plugin = {
@@ -804,22 +1106,154 @@ test("creating a note from a custom library carries its labels into the generic 
     isClinicalMode: () => false,
     getTemplateFiles: () => [],
     getLibrary: (id) => id === library.id ? library : null,
+    getEffectiveLibraryNoteProfile: () => ({
+      folder: "Reference notes",
+      mode: "template",
+      templatePath: "Templates/Reference.md",
+      inherited: { folder: false, mode: false, templatePath: false },
+    }),
+    getPortableSubject: () => null,
   };
   view.loadedBaseId = "base-a";
   view.loadedDataEpoch = 0;
   view.staleViewNoticeShown = false;
-  let options: { createLabel?: string; contextNotice?: string } | null = null;
+  let options: {
+    createLabel?: string;
+    contextNotice?: string;
+    initial?: { folder: string; mode: string; templatePath: string };
+    tokenContext?: { library?: string; type?: string; category?: string };
+  } | null = null;
   KnowledgeNoteModal.prototype.open = function openForTest(): void {
     options = (this as unknown as { options: typeof options }).options;
   };
   try {
-    view.startCreateLibraryNote(library.id);
+    view.startCreateLibraryNote(library.id, { headingId: "heading-evidence", subheadingId: "sub-guidelines" });
   } finally {
     delete (KnowledgeNoteModal.prototype as { open?: () => void }).open;
   }
 
   assert.equal(options?.createLabel, "Reference");
-  assert.match(options?.contextNotice ?? "", /classified in Reference Sets after creation/i);
+  assert.match(options?.contextNotice ?? "", /classified in (?:the selected heading or subheading in )?Reference Sets after creation/i);
+  assert.deepEqual(options?.initial, {
+    title: "",
+    folder: "Reference notes",
+    mode: "template",
+    templatePath: "Templates/Reference.md",
+    addToCollection: false,
+  });
+  assert.deepEqual(options?.tokenContext, {
+    id: "",
+    category: "Guidelines",
+    parent: "",
+    library: "Reference Sets",
+    type: "Reference",
+  });
+});
+
+test("an ENT custom-Library placeholder uses its profile while protected built-in placeholders keep clinical actions", () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  const custom = installLibrary(data);
+  data.portableIndex.libraryLayouts[custom.id] = [{
+    id: "evidence",
+    title: "Evidence",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{ id: "guidelines", title: "Guidelines", collapsed: false, subjects: ["paper"] }],
+  }];
+  const placeholder = record("kbcc-placeholder:paper", "Airway evidence", "note");
+  Object.assign(placeholder, {
+    role: "placeholder",
+    portableId: "paper",
+    isPlaceholder: true,
+    portableIndexed: false,
+    libraryId: custom.id,
+    curriculumId: "REF-001",
+    domain: "Guidelines",
+    topicKind: "note",
+  });
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    isClinicalMode: () => true,
+    getLibrary: (id: string) => id === custom.id ? custom : BUILTIN_LIBRARY_DEFINITIONS.find((item) => item.id === id) ?? null,
+    getEffectiveLibraryNoteProfile: () => ({
+      folder: "Evidence",
+      mode: "template" as const,
+      templatePath: "Templates/Evidence.md",
+      inherited: { folder: false, mode: false, templatePath: false },
+    }),
+    getPortableSubject: () => ({
+      id: "paper",
+      title: "Airway evidence",
+      groupId: "evidence",
+      parentId: null,
+      order: 0,
+      indexed: false,
+      configuredId: "REF-001",
+      recordKind: "note" as const,
+      libraryId: custom.id,
+    }),
+  };
+  let created: {
+    initial: Record<string, unknown>;
+    context: { createLabel?: string; tokenContext?: Record<string, string> } | undefined;
+  } | null = null;
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: object;
+    plugin: typeof plugin;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    openPlaceholderActions(value: VaultRecord): void;
+    startCreateKnowledgeNote(
+      initial: Record<string, unknown>,
+      indexAfterCreate: boolean,
+      onCreated: unknown,
+      message: string | undefined,
+      context: { createLabel?: string; tokenContext?: Record<string, string> } | undefined,
+    ): void;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+  view.startCreateKnowledgeNote = (initial, _index, _created, _message, context) => { created = { initial, context }; };
+  let modalItems: ReturnType<AddActionModal["getItems"]> = [];
+  let chooseModalItem: ((item: ReturnType<AddActionModal["getItems"]>[number]) => void) | null = null;
+  const hadOwnOpen = Object.prototype.hasOwnProperty.call(AddActionModal.prototype, "open");
+  const originalOpen = Object.getOwnPropertyDescriptor(AddActionModal.prototype, "open");
+  AddActionModal.prototype.open = function openForTest(this: AddActionModal): void {
+    modalItems = this.getItems();
+    chooseModalItem = (item) => this.onChooseItem(item);
+  };
+  try {
+    view.openPlaceholderActions(placeholder);
+    assert.deepEqual(modalItems.map((item) => item.id), ["empty", "template", "link", "keep"]);
+    const empty = modalItems.find((item) => item.id === "empty");
+    assert.ok(empty);
+    chooseModalItem?.(empty);
+  } finally {
+    if (hadOwnOpen && originalOpen) Object.defineProperty(AddActionModal.prototype, "open", originalOpen);
+    else Reflect.deleteProperty(AddActionModal.prototype, "open");
+  }
+
+  assert.deepEqual(created?.initial, {
+    title: "Airway evidence",
+    folder: "Evidence",
+    mode: "empty",
+    templatePath: "Templates/Evidence.md",
+  });
+  assert.equal(created?.context?.createLabel, "Reference");
+  assert.deepEqual(created?.context?.tokenContext, {
+    id: "REF-001",
+    category: "Guidelines",
+    parent: "",
+    library: "Reference Sets",
+    type: "Reference",
+  });
 });
 
 test("library heading reorder is portable, undo-protected, and leaves Markdown outside the mutation", async () => {
@@ -1187,6 +1621,7 @@ test("global expand and collapse controls apply to the active dynamic library hi
     isClinicalMode: () => false,
     isDataReadOnly: () => false,
     savePluginData: async () => { saves += 1; },
+    saveViewState: async () => { saves += 1; },
   };
   const view = Object.create(EntVaultCommandCenterView.prototype) as {
     app: object;
@@ -1472,7 +1907,7 @@ test("reload returns to the index when the active dynamic library tab no longer 
       getLibraries(): LibraryDefinition[];
       isClinicalMode(): boolean;
       isDataReadOnly(): boolean;
-      savePluginData(): Promise<void>;
+      saveViewState(): Promise<void>;
     };
     render(): void;
     reload(): Promise<void>;
@@ -1489,7 +1924,7 @@ test("reload returns to the index when the active dynamic library tab no longer 
     getLibraries: () => [],
     isClinicalMode: () => false,
     isDataReadOnly: () => false,
-    savePluginData: async () => { saves += 1; },
+    saveViewState: async () => { saves += 1; },
   };
   view.render = () => { renders += 1; };
 
@@ -1510,6 +1945,21 @@ test("mobile note sheets follow the visual viewport when the keyboard opens", ()
     height: 430,
     keyboardOpen: true,
     shift: -187,
+  });
+  assert.deepEqual(calculateModalViewportLayout(844, 844, 0, 414), {
+    height: 430,
+    keyboardOpen: true,
+    shift: -207,
+  });
+  assert.deepEqual(calculateModalViewportLayout(844, 430, 20, 414), {
+    height: 410,
+    keyboardOpen: true,
+    shift: -197,
+  });
+  assert.deepEqual(calculateModalViewportLayout(844, 844, 0, Number.NaN), {
+    height: 844,
+    keyboardOpen: false,
+    shift: 0,
   });
 });
 
@@ -1557,7 +2007,7 @@ test("the global result cap keeps a better inactive-base match visible", () => {
   ));
   const exactInactiveMatch = record("Inactive/Laryn.md", "laryn");
 
-  const results = prepareKnowledgeBaseSearchResults([
+  const results = crossBaseSearch([
     { baseId: "active", baseName: "Active base", records: activeRecords },
     { baseId: "inactive", baseName: "Inactive base", records: [exactInactiveMatch] },
   ], "laryn", 300);
@@ -1575,7 +2025,7 @@ test("cross-base deduplication keeps the first matching copy when an earlier sam
   const missed = record("Shared/Topic.md", "Unrelated title");
   const matched = record("Shared/Topic.md", "Laryngomalacia");
 
-  const results = prepareKnowledgeBaseSearchResults([
+  const results = crossBaseSearch([
     { baseId: "active", baseName: "Active base", records: [missed, matched] },
   ], "laryn");
 
@@ -2086,7 +2536,7 @@ test("stale rendered rows cannot write selection or collapse state into a newly 
     plugin: {
       data: typeof data;
       getActiveKnowledgeBaseId(): string;
-      savePluginData(): Promise<void>;
+      saveViewState(): Promise<void>;
     };
     loadedBaseId: string;
     staleViewNoticeShown: boolean;
@@ -2099,7 +2549,7 @@ test("stale rendered rows cannot write selection or collapse state into a newly 
   view.plugin = {
     data,
     getActiveKnowledgeBaseId: () => activeBaseId,
-    savePluginData: async () => { saves += 1; },
+    saveViewState: async () => { saves += 1; },
   };
   view.loadedBaseId = "base-a";
   view.staleViewNoticeShown = false;
@@ -2135,6 +2585,7 @@ test("reload cancels A selection and search timers before adopting B", async () 
     getLibraries: (): LibraryDefinition[] => [],
     isDataReadOnly: () => false,
     savePluginData: async () => { savesIntoB += 1; },
+    saveViewState: async () => { savesIntoB += 1; },
   };
   const view = Object.create(EntVaultCommandCenterView.prototype) as {
     plugin: typeof plugin;
@@ -2214,16 +2665,500 @@ test("settings callbacks stay bound to the knowledge base that rendered them", (
   assert.equal(Notice.messages.filter((message) => message.includes("active knowledge base changed")).length, 1);
 });
 
+type BufferedSettingsHarness = {
+  host: {
+    data: PluginData;
+    dataCompatibilityWarning: string;
+    getActiveKnowledgeBaseId(): string;
+    getDataEpoch(): number;
+    getExternalChangeGeneration(): number;
+    isDataReadOnly(): boolean;
+    savePluginData(): Promise<void>;
+    saveCompensatingRollback(): Promise<void>;
+    markPersistenceUncertain(message: string): void;
+    refreshViews(): Promise<void>;
+  };
+  containerEl: { ownerDocument: { defaultView: Window } };
+  persistedDataSnapshot: PluginData;
+  settingsSaveRevision: number;
+  persistedSettingsRevision: number;
+  pendingSettingsSaves: number;
+  settingsSaveBarrier: Promise<boolean>;
+  settingsWriteUncertain: boolean;
+  settingsRefreshPending: boolean;
+  settingsRefreshGeneration: number;
+  bufferedTextSaveTimer: number | null;
+  bufferedTextSaveWindow: Window | null;
+  bufferedTextSaveBaseId: string;
+  bufferedTextSaveDataEpoch: number;
+  bufferedTextSaveExternalGeneration: number;
+  bufferedTextSaveData: PluginData | null;
+  bufferedTextSaveRefresh: boolean;
+  update(): void;
+  scheduleTextSave(refresh?: boolean): void;
+  flushBufferedTextSave(acceptCompensatedRejection?: boolean): Promise<boolean>;
+  prepareForKnowledgeBaseChange(): Promise<boolean>;
+  save(refresh?: boolean, directDataFields?: Array<"activeTab" | "indexGroupOrder">): Promise<boolean>;
+  hide(): void;
+};
+
+function settingsTimerWindow(): { window: Window; callbacks: Map<number, () => void> } {
+  let nextTimer = 0;
+  const callbacks = new Map<number, () => void>();
+  const window = {
+    setTimeout(callback: () => void): number {
+      nextTimer += 1;
+      callbacks.set(nextTimer, callback);
+      return nextTimer;
+    },
+    clearTimeout(timer: number): void { callbacks.delete(timer); },
+  } as unknown as Window;
+  return { window, callbacks };
+}
+
+function bufferedSettingsHarness(options: {
+  onSave?: () => void | Promise<void>;
+  onCompensate?: () => void | Promise<void>;
+  onRefresh?: () => void | Promise<void>;
+  onUpdate?: () => void;
+} = {}): {
+  tab: BufferedSettingsHarness;
+  data: PluginData;
+  callbacks: Map<number, () => void>;
+  setBase(value: string): void;
+  setEpoch(value: number): void;
+  setExternalGeneration(value: number): void;
+  setOwnerWindow(value: Window): void;
+} {
+  const data = migrateData(null);
+  data.settings.setupComplete = true;
+  let activeBaseId = "base-a";
+  let epoch = 1;
+  let externalGeneration = 0;
+  let readOnly = false;
+  const initialTimers = settingsTimerWindow();
+  const tab = Object.create(EntCommandCenterSettingsTab.prototype) as BufferedSettingsHarness;
+  tab.host = {
+    data,
+    dataCompatibilityWarning: "",
+    getActiveKnowledgeBaseId: () => activeBaseId,
+    getDataEpoch: () => epoch,
+    getExternalChangeGeneration: () => externalGeneration,
+    isDataReadOnly: () => readOnly,
+    savePluginData: async () => { await options.onSave?.(); },
+    saveCompensatingRollback: async () => { await options.onCompensate?.(); },
+    markPersistenceUncertain: (message) => {
+      readOnly = true;
+      tab.host.dataCompatibilityWarning = message;
+    },
+    refreshViews: async () => { await options.onRefresh?.(); },
+  };
+  tab.containerEl = { ownerDocument: { defaultView: initialTimers.window } };
+  tab.persistedDataSnapshot = structuredClone(data);
+  tab.settingsSaveRevision = 0;
+  tab.persistedSettingsRevision = 0;
+  tab.pendingSettingsSaves = 0;
+  tab.settingsSaveBarrier = Promise.resolve(true);
+  tab.settingsWriteUncertain = false;
+  tab.settingsRefreshPending = false;
+  tab.settingsRefreshGeneration = 0;
+  tab.bufferedTextSaveTimer = null;
+  tab.bufferedTextSaveWindow = null;
+  tab.bufferedTextSaveBaseId = "";
+  tab.bufferedTextSaveDataEpoch = 0;
+  tab.bufferedTextSaveExternalGeneration = 0;
+  tab.bufferedTextSaveData = null;
+  tab.bufferedTextSaveRefresh = false;
+  tab.update = () => { options.onUpdate?.(); };
+  return {
+    tab,
+    data,
+    callbacks: initialTimers.callbacks,
+    setBase: (value) => { activeBaseId = value; },
+    setEpoch: (value) => { epoch = value; },
+    setExternalGeneration: (value) => { externalGeneration = value; },
+    setOwnerWindow: (value) => { tab.containerEl.ownerDocument.defaultView = value; },
+  };
+}
+
+async function settleBufferedSettingsSave(): Promise<void> {
+  for (let index = 0; index < 8; index += 1) await Promise.resolve();
+}
+
+test("settings text edits coalesce and unchanged drafts skip adapter writes", async () => {
+  let saves = 0;
+  let refreshes = 0;
+  const { tab, data, callbacks } = bufferedSettingsHarness({
+    onSave: () => { saves += 1; },
+    onRefresh: () => { refreshes += 1; },
+  });
+
+  for (let index = 1; index <= 20; index += 1) {
+    data.settings.workspaceSubtitle = `Typed value ${index}`;
+    tab.scheduleTextSave();
+  }
+  assert.equal(callbacks.size, 1);
+  [...callbacks.values()][0]?.();
+  await settleBufferedSettingsSave();
+  assert.equal(saves, 1);
+  assert.equal(refreshes, 1);
+  assert.equal(tab.persistedDataSnapshot.settings.workspaceSubtitle, "Typed value 20");
+
+  data.settings.workspaceSubtitle = "Temporary";
+  tab.scheduleTextSave();
+  data.settings.workspaceSubtitle = "Typed value 20";
+  tab.scheduleTextSave();
+  [...callbacks.values()][0]?.();
+  await settleBufferedSettingsSave();
+  assert.equal(saves, 1, "returning to the committed value is a no-op once no write is in flight");
+});
+
+test("reverting while an older settings write is in flight queues the durable revert", async () => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let saveCalls = 0;
+  const writes: string[] = [];
+  const { tab, data, callbacks } = bufferedSettingsHarness({
+    onSave: async () => {
+      saveCalls += 1;
+      writes.push(data.settings.workspaceSubtitle);
+      await gate;
+    },
+  });
+  const original = data.settings.workspaceSubtitle;
+
+  data.settings.workspaceSubtitle = "Pending value";
+  tab.scheduleTextSave();
+  [...callbacks.values()][0]?.();
+  await Promise.resolve();
+  assert.equal(tab.pendingSettingsSaves, 1);
+
+  data.settings.workspaceSubtitle = original;
+  tab.scheduleTextSave();
+  [...callbacks.values()][0]?.();
+  await Promise.resolve();
+  assert.equal(saveCalls, 2, "the matching baseline still needs a write behind an in-flight attempt");
+
+  release();
+  await settleBufferedSettingsSave();
+  assert.deepEqual(writes, ["Pending value", original]);
+  assert.equal(tab.persistedDataSnapshot.settings.workspaceSubtitle, original);
+  assert.equal(tab.pendingSettingsSaves, 0);
+});
+
+test("an immediate save(false) absorbs a buffered edit without losing refresh intent", async () => {
+  let saves = 0;
+  let refreshes = 0;
+  const harness = bufferedSettingsHarness({
+    onSave: () => { saves += 1; },
+    onRefresh: () => { refreshes += 1; },
+  });
+  harness.data.settings.primaryFolder = "Buffered scope";
+  harness.tab.scheduleTextSave(true);
+  harness.data.settings.openNoteBehavior = "same-tab";
+
+  assert.equal(await harness.tab.save(false), true);
+  assert.equal(harness.callbacks.size, 0);
+  assert.equal(saves, 1);
+  assert.equal(refreshes, 1);
+  assert.equal(harness.tab.settingsRefreshPending, false);
+});
+
+test("refresh intent survives while the first settings save is in flight", async () => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let saves = 0;
+  let refreshes = 0;
+  const { tab, data, callbacks } = bufferedSettingsHarness({
+    onSave: async () => { saves += 1; await gate; },
+    onRefresh: () => { refreshes += 1; },
+  });
+  data.settings.primaryFolder = "Changed scope";
+  tab.scheduleTextSave(true);
+  [...callbacks.values()][0]?.();
+  await Promise.resolve();
+
+  data.settings.openNoteBehavior = "same-tab";
+  const latestSave = tab.save(false);
+  release();
+  assert.equal(await latestSave, true);
+  await settleBufferedSettingsSave();
+
+  assert.equal(saves, 2);
+  assert.equal(refreshes, 1, "the newest successful revision performs the inherited refresh once");
+  assert.equal(tab.settingsRefreshPending, false);
+});
+
+test("a failed settings refresh remains pending for a later no-op action", async () => {
+  let refreshes = 0;
+  const harness = bufferedSettingsHarness({
+    onRefresh: () => {
+      refreshes += 1;
+      if (refreshes === 1) throw new Error("simulated refresh failure");
+    },
+  });
+  harness.data.settings.workspaceSubtitle = "Saved before refresh failure";
+
+  assert.equal(await harness.tab.save(true), true);
+  assert.equal(harness.tab.settingsRefreshPending, true);
+  assert.equal(await harness.tab.save(false), true);
+  assert.equal(refreshes, 2);
+  assert.equal(harness.tab.settingsRefreshPending, false);
+});
+
+test("a stale pre-timer base switch cannot save the prior base draft", async () => {
+  Notice.messages.length = 0;
+  let saves = 0;
+  let updates = 0;
+  const harness = bufferedSettingsHarness({
+    onSave: () => { saves += 1; },
+    onUpdate: () => { updates += 1; },
+  });
+  harness.data.settings.workspaceSubtitle = "Stale base A draft";
+  harness.tab.scheduleTextSave();
+  harness.setBase("base-b");
+  [...harness.callbacks.values()][0]?.();
+  await settleBufferedSettingsSave();
+
+  assert.equal(saves, 0);
+  assert.equal(updates, 1);
+  assert.equal(Notice.messages.some((message) => message.includes("active knowledge base changed")), true);
+});
+
+test("a same-object external generation advance invalidates a buffered settings draft", async () => {
+  let saves = 0;
+  const harness = bufferedSettingsHarness({ onSave: () => { saves += 1; } });
+  harness.data.settings.workspaceSubtitle = "Draft captured before Sync callback";
+  harness.tab.scheduleTextSave();
+  harness.setExternalGeneration(1);
+  [...harness.callbacks.values()][0]?.();
+  await settleBufferedSettingsSave();
+
+  assert.equal(saves, 0, "the callback generation guard runs before the same object can be persisted");
+});
+
+test("a rejected settings write never rolls back a replacement Sync object", async () => {
+  const incoming = migrateData(null);
+  incoming.settings.workspaceSubtitle = "Authoritative synced value";
+  let harness: ReturnType<typeof bufferedSettingsHarness>;
+  harness = bufferedSettingsHarness({
+    onSave: () => {
+      harness.tab.host.data = incoming;
+      harness.setEpoch(2);
+      harness.setExternalGeneration(1);
+      throw new Error("superseded by Sync");
+    },
+  });
+  harness.data.settings.workspaceSubtitle = "Rejected local value";
+
+  assert.equal(await harness.tab.save(false), false);
+  assert.equal(harness.tab.host.data, incoming);
+  assert.equal(incoming.settings.workspaceSubtitle, "Authoritative synced value");
+  assert.equal(harness.tab.persistedDataSnapshot.settings.workspaceSubtitle, "Authoritative synced value");
+});
+
+test("prepareForKnowledgeBaseChange accepts a rejected write after verified compensation", async () => {
+  const baseline = migrateData(null).settings.workspaceSubtitle;
+  let disk = migrateData(null);
+  let saves = 0;
+  let compensations = 0;
+  const harness = bufferedSettingsHarness({
+    onSave: () => {
+      saves += 1;
+      disk = structuredClone(harness.tab.host.data);
+      throw new Error("adapter rejected after replacement");
+    },
+    onCompensate: () => {
+      compensations += 1;
+      disk = structuredClone(harness.tab.host.data);
+    },
+  });
+  harness.data.settings.workspaceSubtitle = "Rejected draft";
+  harness.tab.scheduleTextSave();
+
+  assert.equal(await harness.tab.prepareForKnowledgeBaseChange(), true);
+  assert.equal(saves, 1);
+  assert.equal(compensations, 1);
+  assert.equal(harness.data.settings.workspaceSubtitle, baseline);
+  assert.equal(disk.settings.workspaceSubtitle, baseline, "the partial data.json replacement is compensated");
+});
+
+test("a failed settings compensation keeps the lifecycle barrier closed", async () => {
+  const harness = bufferedSettingsHarness({
+    onSave: () => { throw new Error("ambiguous first write"); },
+    onCompensate: () => { throw new Error("ambiguous compensation"); },
+  });
+  harness.data.settings.workspaceSubtitle = "Uncertain draft";
+  harness.tab.scheduleTextSave();
+
+  assert.equal(await harness.tab.prepareForKnowledgeBaseChange(), false);
+  assert.equal(harness.tab.host.isDataReadOnly(), true);
+  assert.match(harness.tab.host.dataCompatibilityWarning, /read-only/i);
+});
+
+test("settings debounce timers migrate between owner windows", async () => {
+  let saves = 0;
+  const first = settingsTimerWindow();
+  const second = settingsTimerWindow();
+  const harness = bufferedSettingsHarness({ onSave: () => { saves += 1; } });
+  harness.setOwnerWindow(first.window);
+  harness.data.settings.workspaceSubtitle = "First window";
+  harness.tab.scheduleTextSave();
+  assert.equal(first.callbacks.size, 1);
+
+  harness.setOwnerWindow(second.window);
+  harness.data.settings.workspaceSubtitle = "Second window";
+  harness.tab.scheduleTextSave();
+  assert.equal(first.callbacks.size, 0, "the timer is cleared through the window that created it");
+  assert.equal(second.callbacks.size, 1);
+  [...second.callbacks.values()][0]?.();
+  await settleBufferedSettingsSave();
+  assert.equal(saves, 1);
+  assert.equal(harness.tab.persistedDataSnapshot.settings.workspaceSubtitle, "Second window");
+});
+
+test("hiding settings flushes buffered text with its refresh intent", async () => {
+  let saves = 0;
+  let refreshes = 0;
+  const harness = bufferedSettingsHarness({
+    onSave: () => { saves += 1; },
+    onRefresh: () => { refreshes += 1; },
+  });
+  harness.data.settings.workspaceSubtitle = "Commit on hide";
+  harness.tab.scheduleTextSave(true);
+
+  harness.tab.hide();
+  await settleBufferedSettingsSave();
+  assert.equal(harness.callbacks.size, 0);
+  assert.equal(saves, 1);
+  assert.equal(refreshes, 1);
+});
+
+test("Library creation profiles are discoverable through Obsidian settings search", () => {
+  const data = migrateData(null);
+  const library = installLibrary(data);
+  const host = {
+    app: { vault: {}, metadataCache: {} },
+    data,
+    dataCompatibilityWarning: "",
+    isDataReadOnly: () => false,
+    getKnowledgeBases: () => [{ id: "base-a", data }],
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    getIndexRecords: () => [],
+    getLibraries: (includeArchived = false) => includeArchived || library.archivedAt === null ? [library] : [],
+    librarySubjectCount: () => 0,
+    getTemplateFiles: () => [],
+    getIndexGroups: () => [],
+    savePluginData: async () => undefined,
+    refreshViews: async () => undefined,
+    switchKnowledgeBase: async () => undefined,
+    renameKnowledgeBase: async () => undefined,
+  };
+  const tab = new EntCommandCenterSettingsTab(
+    host.app as never,
+    host as never,
+  );
+  const libraries = tab.getSettingDefinitions().find((definition) => (
+    "heading" in definition && definition.heading === "Libraries"
+  ));
+  assert.ok(libraries && "items" in libraries);
+  assert.ok(libraries.items.some((item) => "name" in item && item.name === "Library creation profiles"));
+});
+
+test("attachment text settings use the buffered non-refresh save pipeline", () => {
+  const data = migrateData(null);
+  const host = {
+    app: {
+      vault: { configDir: ".obsidian", getAllLoadedFiles: () => [] },
+      metadataCache: {},
+    },
+    data,
+    dataCompatibilityWarning: "",
+    isDataReadOnly: () => false,
+    getKnowledgeBases: () => [{ id: "base-a", data }],
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    getExternalChangeGeneration: () => 0,
+    getIndexRecords: () => [],
+    getLibraries: () => [],
+    librarySubjectCount: () => 0,
+    getTemplateFiles: () => [],
+    getIndexGroups: () => [],
+    getFollowUpCategories: () => [],
+    replaceFollowUpCategories: async () => undefined,
+    savePluginData: async () => undefined,
+    saveCompensatingRollback: async () => undefined,
+    markPersistenceUncertain: () => undefined,
+    refreshViews: async () => undefined,
+    switchKnowledgeBase: async () => undefined,
+    renameKnowledgeBase: async () => undefined,
+  };
+  const tab = new EntCommandCenterSettingsTab(host.app as never, host as never);
+  const requestedRefreshes: boolean[] = [];
+  (tab as unknown as { scheduleTextSave(refresh?: boolean): void }).scheduleTextSave = (refresh = true) => {
+    requestedRefreshes.push(refresh);
+  };
+  const folders = tab.getSettingDefinitions().find((definition) => (
+    "heading" in definition && definition.heading === "Folders and templates"
+  ));
+  assert.ok(folders && "items" in folders);
+
+  const renderAndChange = (name: string, value: string): void => {
+    const definition = folders.items.find((item) => "name" in item && item.name === name);
+    assert.ok(definition && "render" in definition);
+    let change: ((next: string) => void | Promise<void>) | null = null;
+    const inputEl = {
+      addEventListener: () => undefined,
+      blur: () => undefined,
+      toggleClass: () => undefined,
+    };
+    const text = {
+      inputEl,
+      setPlaceholder(): typeof text { return this; },
+      setValue(): typeof text { return this; },
+      setDisabled(): typeof text { return this; },
+      onChange(callback: (next: string) => void | Promise<void>): typeof text {
+        change = callback;
+        return this;
+      },
+    };
+    const button = {
+      setButtonText(): typeof button { return this; },
+      setDisabled(): typeof button { return this; },
+      onClick(): typeof button { return this; },
+    };
+    definition.render({
+      settingEl: { addClass: () => undefined },
+      addText(callback: (component: typeof text) => void) { callback(text); return this; },
+      addButton(callback: (component: typeof button) => void) { callback(button); return this; },
+    } as never);
+    assert.ok(change);
+    void change(value);
+  };
+
+  renderAndChange("Fixed attachment folder", "/Assets/Uploads/");
+  renderAndChange("Attachment marker", "  <!-- custom:attachments -->  ");
+  renderAndChange("Attachment heading", "### Imported files ###");
+
+  assert.deepEqual(requestedRefreshes, [false, false, false]);
+  assert.equal(data.settings.attachmentFolder, "Assets/Uploads");
+  assert.equal(data.settings.attachmentMarker, "<!-- custom:attachments -->");
+  assert.equal(data.settings.attachmentHeading, "Imported files");
+});
+
 test("a rejected direct setting save restores memory and reports the failure", async () => {
   Notice.messages.length = 0;
   const data = migrateData(null);
   data.settings.workspaceSubtitle = "Persisted subtitle";
   let refreshes = 0;
   let updates = 0;
+  let compensations = 0;
   const settingsTab = Object.create(EntCommandCenterSettingsTab.prototype) as {
     host: {
       data: typeof data;
       savePluginData(): Promise<void>;
+      saveCompensatingRollback(): Promise<void>;
       refreshViews(): Promise<void>;
     };
     persistedDataSnapshot: typeof data;
@@ -2236,6 +3171,7 @@ test("a rejected direct setting save restores memory and reports the failure", a
   settingsTab.host = {
     data,
     savePluginData: async () => { throw new Error("Sync reload won the race"); },
+    saveCompensatingRollback: async () => { compensations += 1; },
     refreshViews: async () => { refreshes += 1; },
   };
   settingsTab.persistedDataSnapshot = structuredClone(data);
@@ -2249,6 +3185,7 @@ test("a rejected direct setting save restores memory and reports the failure", a
   assert.equal(data.settings.workspaceSubtitle, "Persisted subtitle");
   assert.equal(refreshes, 1);
   assert.equal(updates, 1);
+  assert.equal(compensations, 1);
   assert.equal(Notice.messages.some((message) => message.includes("not saved") && message.includes("Sync reload")), true);
 });
 
@@ -2262,10 +3199,12 @@ test("overlapping direct setting saves roll back to the latest successful attemp
   const secondGate = new Promise<void>((_resolve, reject) => { rejectSecond = reject; });
   const persisted: PluginData[] = [];
   let saveCalls = 0;
+  let compensations = 0;
   const settingsTab = Object.create(EntCommandCenterSettingsTab.prototype) as {
     host: {
       data: typeof data;
       savePluginData(): Promise<void>;
+      saveCompensatingRollback(): Promise<void>;
       refreshViews(): Promise<void>;
     };
     persistedDataSnapshot: typeof data;
@@ -2287,6 +3226,7 @@ test("overlapping direct setting saves roll back to the latest successful attemp
         await secondGate;
       }
     },
+    saveCompensatingRollback: async () => { compensations += 1; },
     refreshViews: async () => {},
   };
   settingsTab.persistedDataSnapshot = structuredClone(data);
@@ -2308,6 +3248,7 @@ test("overlapping direct setting saves roll back to the latest successful attemp
   assert.equal(data.settings.workspaceSubtitle, "First edit", "memory follows the newest successful disk snapshot");
   assert.equal(settingsTab.persistedDataSnapshot.settings.workspaceSubtitle, "First edit");
   assert.equal(settingsTab.pendingSettingsSaves, 0);
+  assert.equal(compensations, 1);
 });
 
 test("a failed setting save preserves concurrent organization and newer view changes", async () => {
@@ -2315,10 +3256,12 @@ test("a failed setting save preserves concurrent organization and newer view cha
   data.settings.workspaceSubtitle = "Persisted subtitle";
   let rejectSave: (error: Error) => void = () => {};
   const saveGate = new Promise<void>((_resolve, reject) => { rejectSave = reject; });
+  let compensations = 0;
   const settingsTab = Object.create(EntCommandCenterSettingsTab.prototype) as {
     host: {
       data: typeof data;
       savePluginData(): Promise<void>;
+      saveCompensatingRollback(): Promise<void>;
       refreshViews(): Promise<void>;
     };
     persistedDataSnapshot: typeof data;
@@ -2331,6 +3274,7 @@ test("a failed setting save preserves concurrent organization and newer view cha
   settingsTab.host = {
     data,
     savePluginData: async () => { await saveGate; },
+    saveCompensatingRollback: async () => { compensations += 1; },
     refreshViews: async () => {},
   };
   settingsTab.persistedDataSnapshot = structuredClone(data);
@@ -2362,6 +3306,7 @@ test("a failed setting save preserves concurrent organization and newer view cha
   assert.deepEqual(data.pinnedPaths, ["Concurrent organization.md"]);
   assert.equal(data.selectedPath, "Concurrent selection.md");
   assert.deepEqual(data.indexGroupOrder, ["Concurrent group"]);
+  assert.equal(compensations, 1);
 });
 
 test("a create-note form cannot submit into a different active knowledge base", async () => {
@@ -2686,16 +3631,43 @@ test("template fallback stays transactional and does not mutate the selected imp
   data.settings.defaultNewNoteMode = "template";
   data.settings.templatesFolder = "Templates";
   data.settings.defaultTemplatePath = "Templates/Missing.md";
-  const value = createPortableExport(
+  const library = installLibrary(data);
+  const restrictedLibrary = installLibrary(data, customLibrary("restricted-reference", "Restricted reference", "Reference", 1));
+  data.settings.libraryNoteProfiles[library.id] = {
+    folder: "Reference notes",
+    mode: "template",
+    templatePath: "Templates/Missing Reference.md",
+  };
+  data.settings.libraryNoteProfiles[restrictedLibrary.id] = {
+    folder: "Restricted reference notes",
+    mode: "empty",
+    templatePath: "Outside Templates/Private.md",
+  };
+  const rawValue = createPortableExport(
     data,
     [],
     { ...EMPTY_PORTABLE_SELECTION, workspace: true },
     "2026-08-08T00:00:00.000Z",
   );
+  const rawWorkspace = rawValue.components.workspace;
+  assert.ok(rawWorkspace);
+  rawWorkspace.settings.libraryNoteProfiles[library.id] = {
+    folder: "Reference notes",
+    mode: "template",
+    templatePath: "../Templates/Missing Reference.md",
+  };
+  rawWorkspace.settings.libraryNoteProfiles[restrictedLibrary.id] = {
+    folder: "Restricted reference notes",
+    mode: "empty",
+    templatePath: "05 Sources/Private.md",
+  };
+  const value = parsePortableExport(rawValue);
   const originalPackage = structuredClone(value);
   const localData = migrateData(null);
   const originalLocalData = structuredClone(localData);
   let fallbackObservedInsideMutation = false;
+  let libraryFallbackObservedInsideMutation = false;
+  let restrictedFallbackObservedInsideMutation = false;
   const plugin = {
     data: localData,
     isDataReadOnly(): boolean { return false; },
@@ -2704,6 +3676,12 @@ test("template fallback stays transactional and does not mutate the selected imp
       action();
       fallbackObservedInsideMutation = this.data.settings.defaultNewNoteMode === "empty"
         && this.data.settings.defaultTemplatePath === "";
+      libraryFallbackObservedInsideMutation = this.data.settings.libraryNoteProfiles[library.id]?.mode === "empty"
+        && this.data.settings.libraryNoteProfiles[library.id]?.templatePath === undefined
+        && this.data.settings.libraryNoteProfiles[library.id]?.folder === "Reference notes";
+      restrictedFallbackObservedInsideMutation = this.data.settings.libraryNoteProfiles[restrictedLibrary.id]?.mode === "empty"
+        && this.data.settings.libraryNoteProfiles[restrictedLibrary.id]?.templatePath === undefined
+        && this.data.settings.libraryNoteProfiles[restrictedLibrary.id]?.folder === "Restricted reference notes";
       this.data = before;
       throw new Error("simulated save failure");
     },
@@ -2731,8 +3709,278 @@ test("template fallback stays transactional and does not mutate the selected imp
 
   await assert.rejects(center.importSelected(), /simulated save failure/);
   assert.equal(fallbackObservedInsideMutation, true);
+  assert.equal(libraryFallbackObservedInsideMutation, true);
+  assert.equal(restrictedFallbackObservedInsideMutation, true);
   assert.deepEqual(value, originalPackage);
   assert.deepEqual(plugin.data, originalLocalData);
+});
+
+test("portable workspace preflight still rejects an invalid Library profile folder", () => {
+  const data = migrateData(null);
+  const library = installLibrary(data);
+  data.settings.libraryNoteProfiles[library.id] = { folder: "Safe notes", mode: "empty" };
+  const rawValue = createPortableExport(
+    data,
+    [],
+    { ...EMPTY_PORTABLE_SELECTION, workspace: true },
+    "2026-08-11T00:00:00.000Z",
+  );
+  const workspace = rawValue.components.workspace;
+  assert.ok(workspace);
+  workspace.settings.libraryNoteProfiles[library.id] = {
+    folder: "../Private",
+    mode: "empty",
+  };
+  const value = parsePortableExport(rawValue);
+  assert.equal(value.components.workspace?.settings.libraryNoteProfiles[library.id]?.folder, "../Private");
+  const center = Object.create(ExportImportCenterModal.prototype) as {
+    app: { vault: { configDir: string; getAbstractFileByPath(path: string): null } };
+    plugin: { data: typeof data };
+    validateWorkspaceComponent(
+      input: typeof value,
+      selection: typeof EMPTY_PORTABLE_SELECTION,
+    ): unknown;
+  };
+  center.app = { vault: { configDir: ".obsidian", getAbstractFileByPath: () => null } };
+  center.plugin = { data: migrateData(null) };
+
+  assert.throws(() => center.validateWorkspaceComponent(
+    value,
+    { ...EMPTY_PORTABLE_SELECTION, workspace: true },
+  ));
+});
+
+test("workspace import preflight rejects an unsafe fixed attachment folder", () => {
+  const data = migrateData(null);
+  data.settings.attachmentStorageMode = "fixed-folder";
+  data.settings.attachmentFolder = "Safe attachments";
+  const rawValue = createPortableExport(
+    data,
+    [],
+    { ...EMPTY_PORTABLE_SELECTION, workspace: true },
+    "2026-08-12T00:00:00.000Z",
+  );
+  assert.ok(rawValue.components.workspace);
+  rawValue.components.workspace.settings.attachmentFolder = "../Outside";
+  const value = parsePortableExport(rawValue);
+  const center = Object.create(ExportImportCenterModal.prototype) as {
+    app: { vault: { configDir: string; getAbstractFileByPath(path: string): null } };
+    plugin: { data: typeof data };
+    validateWorkspaceComponent(input: typeof value, selection: typeof EMPTY_PORTABLE_SELECTION): unknown;
+  };
+  center.app = { vault: { configDir: ".obsidian", getAbstractFileByPath: () => null } };
+  center.plugin = { data: migrateData(null) };
+
+  assert.throws(
+    () => center.validateWorkspaceComponent(value, { ...EMPTY_PORTABLE_SELECTION, workspace: true }),
+    /\.\./u,
+  );
+});
+
+test("portable-v4 preflight retains and atomically resets every unsafe Library template class", () => {
+  const data = migrateData(null);
+  data.settings.templatesFolder = "Templates";
+  const cases = [
+    ["parent-template", "../Templates/Private.md"],
+    ["config-template", ".obsidian/Private.md"],
+    ["immutable-template", "05 Sources/Private.md"],
+    ["outside-template", "Other Templates/Private.md"],
+  ] as const;
+  for (const [libraryId] of cases) {
+    const library = installLibrary(data, customLibrary(libraryId, libraryId, "Item", data.portableIndex.libraries.length));
+    data.settings.libraryNoteProfiles[library.id] = { mode: "empty", templatePath: "Templates/Valid.md" };
+  }
+  const rawValue = createPortableExport(
+    data,
+    [],
+    { ...EMPTY_PORTABLE_SELECTION, workspace: true },
+    "2026-08-11T00:00:00.000Z",
+  );
+  const workspace = rawValue.components.workspace;
+  assert.ok(workspace);
+  for (const [libraryId, templatePath] of cases) {
+    workspace.settings.libraryNoteProfiles[libraryId] = { mode: "empty", templatePath };
+  }
+  const value = parsePortableExport(rawValue);
+  const center = Object.create(ExportImportCenterModal.prototype) as {
+    app: { vault: { configDir: string; getAbstractFileByPath(path: string): null } };
+    plugin: { data: typeof data };
+    validateWorkspaceComponent(
+      input: typeof value,
+      selection: typeof EMPTY_PORTABLE_SELECTION,
+    ): { libraryTemplateResetIds: string[] };
+  };
+  center.app = { vault: { configDir: ".obsidian", getAbstractFileByPath: () => null } };
+  center.plugin = { data: migrateData(null) };
+
+  const validation = center.validateWorkspaceComponent(
+    value,
+    { ...EMPTY_PORTABLE_SELECTION, workspace: true },
+  );
+  assert.deepEqual(new Set(validation.libraryTemplateResetIds), new Set(cases.map(([libraryId]) => libraryId)));
+  for (const [libraryId, templatePath] of cases) {
+    assert.equal(value.components.workspace?.settings.libraryNoteProfiles[libraryId]?.templatePath, templatePath);
+  }
+});
+
+test("workspace-only export omits archived Library profiles and descriptors so import cannot reactivate them", () => {
+  const source = migrateData(null);
+  const active = installLibrary(source, customLibrary("active-library", "Active", "Active item", 0));
+  const archived = installLibrary(source, customLibrary("archived-library", "Archived", "Archived item", 1, Date.now()));
+  source.settings.libraryNoteProfiles[active.id] = { mode: "empty", folder: "Active" };
+  source.settings.libraryNoteProfiles[archived.id] = { mode: "empty", folder: "Archived" };
+
+  const value = parsePortableExport(createPortableExport(
+    source,
+    [],
+    { ...EMPTY_PORTABLE_SELECTION, workspace: true },
+    "2026-08-11T00:00:00.000Z",
+  ));
+
+  assert.deepEqual(Object.keys(value.components.workspace?.settings.libraryNoteProfiles ?? {}), [active.id]);
+  assert.deepEqual(value.components.index?.libraries?.map((library) => library.id), [active.id]);
+  const destination = migrateData(null);
+  applyPortableExport(
+    destination,
+    value,
+    { ...EMPTY_PORTABLE_SELECTION, workspace: true },
+    "merge",
+  );
+  assert.equal(destination.portableIndex.libraries.some((library) => library.id === archived.id), false);
+  assert.equal(destination.settings.libraryNoteProfiles[archived.id], undefined);
+});
+
+test("standalone workspace import resets invalid templates and reports omitted Library profiles", async () => {
+  Notice.messages.length = 0;
+  const source = migrateData(null);
+  const library = installLibrary(source);
+  source.settings.templatesFolder = "Templates";
+  source.settings.libraryNoteProfiles[library.id] = {
+    folder: "Reference notes",
+    mode: "empty",
+    templatePath: "Outside Templates/Private.md",
+  };
+  const config = createWorkspaceConfig(source, "2026-08-11T00:00:00.000Z");
+  config.settings.libraryNoteProfiles[library.id] = {
+    folder: "Reference notes",
+    mode: "template",
+    templatePath: "../Private.md",
+  };
+  config.settings.libraryNoteProfiles["missing-library"] = {
+    folder: "Missing Library",
+    mode: "empty",
+  };
+
+  const destination = migrateData(null);
+  installLibrary(destination, { ...library });
+  let mutateOptions: { includeSettings?: boolean; requireUndo?: boolean } | null = null;
+  const plugin = {
+    data: destination,
+    getLibraries: () => destination.portableIndex.libraries,
+    isClinicalMode: () => false,
+    invalidateRecordCache(): void {},
+    async mutate(
+      _label: string,
+      action: () => void,
+      options: { includeSettings?: boolean; requireUndo?: boolean },
+    ): Promise<void> {
+      mutateOptions = options;
+      action();
+    },
+  };
+  const manager = Object.create(IndexManagerModal.prototype) as {
+    app: { vault: { configDir: string; getAbstractFileByPath(path: string): null } };
+    plugin: typeof plugin;
+    diagnosticsCache: unknown;
+    titleEl: { setText(value: string): void };
+    tab: "indexed" | "available";
+    guardOpenedBase(): boolean;
+    ownsOpenedBase(): boolean;
+    render(): void;
+    confirmWorkspaceImport(input: Promise<unknown>): void;
+  };
+  manager.app = { vault: { configDir: ".obsidian", getAbstractFileByPath: () => null } };
+  manager.plugin = plugin;
+  manager.diagnosticsCache = null;
+  manager.titleEl = { setText: () => undefined };
+  manager.tab = "indexed";
+  manager.guardOpenedBase = () => true;
+  manager.ownsOpenedBase = () => true;
+  manager.render = () => undefined;
+
+  const opened: Array<{ onConfirm(): void | Promise<void> }> = [];
+  const originalOpen = Object.getOwnPropertyDescriptor(ConfirmModal.prototype, "open");
+  ConfirmModal.prototype.open = function captureConfirm(): void {
+    opened.push(this);
+  };
+  try {
+    manager.confirmWorkspaceImport(Promise.resolve(config));
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(opened.length, 1);
+    await opened[0]?.onConfirm();
+  } finally {
+    if (originalOpen) Object.defineProperty(ConfirmModal.prototype, "open", originalOpen);
+    else Reflect.deleteProperty(ConfirmModal.prototype, "open");
+  }
+
+  assert.deepEqual(destination.settings.libraryNoteProfiles[library.id], {
+    folder: "Reference notes",
+    mode: "empty",
+  });
+  assert.equal(destination.settings.libraryNoteProfiles["missing-library"], undefined);
+  assert.deepEqual(mutateOptions, { includeSettings: true, requireUndo: true });
+  assert.ok(Notice.messages.some((message) => /1 Library profile referenced unavailable templates/i.test(message)));
+  assert.ok(Notice.messages.some((message) => /1 Library profile did not match a destination Library/i.test(message)));
+});
+
+test("standalone workspace import rejects a lossy-invalid Library folder before confirmation or mutation", async () => {
+  Notice.messages.length = 0;
+  const source = migrateData(null);
+  const library = installLibrary(source);
+  const config = createWorkspaceConfig(source, "2026-08-11T00:00:00.000Z");
+  config.settings.libraryNoteProfiles[library.id] = {
+    folder: "../Escaped notes",
+    mode: "empty",
+  };
+  const destination = migrateData(null);
+  installLibrary(destination, { ...library });
+  let mutationCount = 0;
+  const plugin = {
+    data: destination,
+    getLibraries: () => destination.portableIndex.libraries,
+    isClinicalMode: () => false,
+    invalidateRecordCache(): void {},
+    async mutate(): Promise<void> { mutationCount += 1; },
+  };
+  const manager = Object.create(IndexManagerModal.prototype) as {
+    app: { vault: { configDir: string; getAbstractFileByPath(path: string): null } };
+    plugin: typeof plugin;
+    guardOpenedBase(): boolean;
+    ownsOpenedBase(): boolean;
+    confirmWorkspaceImport(input: Promise<unknown>): void;
+  };
+  manager.app = { vault: { configDir: ".obsidian", getAbstractFileByPath: () => null } };
+  manager.plugin = plugin;
+  manager.guardOpenedBase = () => true;
+  manager.ownsOpenedBase = () => true;
+
+  const opened: unknown[] = [];
+  const originalOpen = Object.getOwnPropertyDescriptor(ConfirmModal.prototype, "open");
+  ConfirmModal.prototype.open = function captureConfirm(): void { opened.push(this); };
+  try {
+    manager.confirmWorkspaceImport(Promise.resolve(config));
+    await Promise.resolve();
+    await Promise.resolve();
+  } finally {
+    if (originalOpen) Object.defineProperty(ConfirmModal.prototype, "open", originalOpen);
+    else Reflect.deleteProperty(ConfirmModal.prototype, "open");
+  }
+
+  assert.equal(opened.length, 0);
+  assert.equal(mutationCount, 0);
+  assert.ok(Notice.messages.some((message) => /unsupported folder path/i.test(message)));
+  assert.equal(destination.settings.libraryNoteProfiles[library.id], undefined);
 });
 
 test("Index Manager refreshes stale state after a child portability mutation", () => {
@@ -2807,7 +4055,7 @@ test("closing the view waits for a pending selection save", async () => {
     staleViewNoticeShown: boolean;
     timerWindow: { clearTimeout(timer: number): void };
     plugin: {
-      savePluginData(): Promise<void>;
+      saveViewState(): Promise<void>;
       getActiveKnowledgeBaseId(): string;
       getDataEpoch(): number;
     };
@@ -2822,7 +4070,7 @@ test("closing the view waits for a pending selection save", async () => {
   view.staleViewNoticeShown = false;
   view.timerWindow = { clearTimeout: (timer) => { cleared.push(timer); } };
   view.plugin = {
-    savePluginData: async () => {
+    saveViewState: async () => {
       await saveGate;
       saveFinished = true;
     },
@@ -2851,7 +4099,7 @@ test("closing the view also waits for a selection save already in flight", async
     selectionSaveTimer: number | null;
     selectionSavePromise: Promise<void> | null;
     timerWindow: { clearTimeout(timer: number): void };
-    plugin: { savePluginData(): Promise<void> };
+    plugin: { saveViewState(): Promise<void> };
     onClose(): Promise<void>;
   };
   view.setupTimer = null;
@@ -2859,7 +4107,7 @@ test("closing the view also waits for a selection save already in flight", async
   view.selectionSaveTimer = null;
   view.selectionSavePromise = inFlight;
   view.timerWindow = { clearTimeout: () => {} };
-  view.plugin = { savePluginData: () => Promise.resolve() };
+  view.plugin = { saveViewState: () => Promise.resolve() };
 
   const closing = view.onClose().then(() => { closeFinished = true; });
   await Promise.resolve();
@@ -2899,6 +4147,124 @@ test("closing the compact record inspector hides it and restores row focus", () 
   assert.equal(renderCount, 1);
   assert.equal(workspace.scrollTop, 73);
   assert.equal(focusCount, 1);
+});
+
+test("zero-delay inspector restoration does not touch a view closed before the callback", () => {
+  let callback: (() => void) | null = null;
+  let focusCount = 0;
+  const workspace = { scrollTop: 0 };
+  const selected = { focus: () => { focusCount += 1; } };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    mobileInspectorOpen: boolean;
+    mobileInspectorNeedsFocus: boolean;
+    mobileTreeScrollTop: number;
+    viewClosed: boolean;
+    workspaceEl: typeof workspace;
+    treeEl: { querySelector(): typeof selected; focus(): void };
+    timerWindow: { setTimeout(scheduled: () => void): number };
+    render(): void;
+    closeMobileInspector(): void;
+  };
+  view.mobileInspectorOpen = true;
+  view.mobileInspectorNeedsFocus = true;
+  view.mobileTreeScrollTop = 73;
+  view.viewClosed = false;
+  view.workspaceEl = workspace;
+  view.treeEl = { querySelector: () => selected, focus: () => { focusCount += 1; } };
+  view.render = () => undefined;
+  view.timerWindow = { setTimeout: (scheduled) => { callback = scheduled; return 1; } };
+
+  view.closeMobileInspector();
+  view.viewClosed = true;
+  callback?.();
+
+  assert.equal(workspace.scrollTop, 0);
+  assert.equal(focusCount, 0);
+});
+
+test("zero-delay tab reveal ignores DOM replaced before the callback", () => {
+  const dom = createFakeDom();
+  const content = dom.document.body.createDiv();
+  const tablist = content.createDiv();
+  const active = tablist.createEl("button", { attr: { "aria-selected": "true" } });
+  let callback: (() => void) | null = null;
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    contentEl: HTMLElement;
+    viewClosed: boolean;
+    timerWindow: { setTimeout(scheduled: () => void): number };
+    revealActiveTab(tablist: HTMLElement): void;
+  };
+  view.contentEl = content as unknown as HTMLElement;
+  view.viewClosed = false;
+  view.timerWindow = { setTimeout: (scheduled) => { callback = scheduled; return 1; } };
+
+  view.revealActiveTab(tablist as unknown as HTMLElement);
+  content.empty();
+  callback?.();
+
+  assert.equal(active.scrollIntoViewCalls, 0);
+});
+
+test("window migration rehomes pending view timers before rebinding observers", () => {
+  const cleared: number[] = [];
+  const rebound: string[] = [];
+  const scheduledDelays: number[] = [];
+  let nextTimer = 20;
+  const previousWindow = { clearTimeout: (timer: number) => { cleared.push(timer); } } as unknown as Window;
+  const nextWindow = {
+    setTimeout: (_callback: () => void, delay = 0) => {
+      scheduledDelays.push(delay);
+      nextTimer += 1;
+      return nextTimer;
+    },
+  } as unknown as Window;
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    viewClosed: boolean;
+    setupTimer: number | null;
+    searchDebounce: number | null;
+    selectionSaveTimer: number | null;
+    timerWindow: Window;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    query: string;
+    plugin: {
+      data: { settings: { setupComplete: boolean } };
+      getActiveKnowledgeBaseId(): string;
+      getDataEpoch(): number;
+    };
+    bindPaneLayout(): void;
+    bindSearchViewportLayout(): void;
+    measureAndApplyPaneLayout(): void;
+    syncSearchViewportLayout(): void;
+    handleWindowMigration(viewWindow: Window): void;
+  };
+  view.viewClosed = false;
+  view.setupTimer = 11;
+  view.searchDebounce = 12;
+  view.selectionSaveTimer = 13;
+  view.timerWindow = previousWindow;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 7;
+  view.query = "lary";
+  view.plugin = {
+    data: { settings: { setupComplete: false } },
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 7,
+  };
+  view.bindPaneLayout = () => { rebound.push("pane"); };
+  view.bindSearchViewportLayout = () => { rebound.push("viewport"); };
+  view.measureAndApplyPaneLayout = () => { rebound.push("measure"); };
+  view.syncSearchViewportLayout = () => { rebound.push("sync"); };
+
+  view.handleWindowMigration(nextWindow);
+
+  assert.deepEqual(cleared, [11, 12, 13]);
+  assert.equal(view.timerWindow, nextWindow);
+  assert.deepEqual(rebound, ["pane", "viewport", "measure", "sync"]);
+  assert.deepEqual(scheduledDelays, [100, 0, 1000]);
+  assert.equal(view.setupTimer, 21);
+  assert.equal(view.searchDebounce, 22);
+  assert.equal(view.selectionSaveTimer, 23);
 });
 
 test("mobile search resets both possible result scroll containers", () => {
@@ -3110,4 +4476,1159 @@ test("organization snapshots cannot mutate memory or report success in compatibi
   assert.deepEqual(data.layoutSnapshots, snapshotsBefore);
   assert.equal(saveCalls, 0);
   assert.equal(Notice.messages.some((message) => /Saved organization snapshot/i.test(message)), false);
+});
+
+// ---------------------------------------------------------------------------
+// Nested subheadings (depth ≤ 5): shared recursive renderer and deep targets
+// ---------------------------------------------------------------------------
+
+interface LayoutMembershipTarget { headingId: string; subheadingId?: string }
+
+interface LayoutHarnessPlugin {
+  data: PluginData;
+  getActiveKnowledgeBaseId(): string;
+  getDataEpoch(): number;
+  isClinicalMode(): boolean;
+  isDataReadOnly(): boolean;
+  getLibrary(id: string): LibraryDefinition | null;
+  getLibraries(includeArchived?: boolean): LibraryDefinition[];
+  saveViewState(): Promise<void>;
+  savePluginData(): Promise<void>;
+  mutate(label: string, action: () => void, options?: { includePortableIndex?: boolean; requireUndo?: boolean }): Promise<void>;
+  assignRecordToLibrary(path: string, libraryId: string, target: LayoutMembershipTarget): Promise<void>;
+  createQuickEntryCollectionSubheading(headingId: string, title: string, parentSubheadingId?: string): Promise<void>;
+  createQuickEntryLibrarySubheading(libraryId: string, headingId: string, title: string, parentSubheadingId?: string): Promise<void>;
+}
+
+interface LayoutHarnessView {
+  app: object;
+  plugin: LayoutHarnessPlugin;
+  records: VaultRecord[];
+  recordByPath: Map<string, VaultRecord>;
+  query: string;
+  parsedQuery: ReturnType<typeof parseQuery>;
+  editMode: boolean;
+  browseRowLimit: number;
+  browseStructureLimit: number;
+  browseRowsRendered: number;
+  browseRowsOmitted: number;
+  browseStructuresRendered: number;
+  browseStructuresOmitted: number;
+  loadedBaseId: string;
+  loadedDataEpoch: number;
+  staleViewNoticeShown: boolean;
+  viewInstanceId: string;
+  libraryDragRenderToken: string;
+  activeLibraryDrag: unknown;
+  collapsedQueues: Set<string>;
+  renderTree(): void;
+  renderHeading(parent: HTMLElement, heading: LayoutHeading, mutable: boolean): number;
+  renderLibrary(parent: HTMLElement, records: VaultRecord[]): number;
+  showSubheadingMenu(event: MouseEvent, heading: LayoutHeading, subheading: LayoutSubheading): void;
+  showLibrarySubheadingMenu(event: MouseEvent, libraryId: string, heading: LayoutHeading, subheading: LayoutSubheading): void;
+  showGlobalMenu(event: MouseEvent): void;
+  openQuickCollectionHeadingPicker(): void;
+  openQuickLibraryHeadingPicker(libraryId: string): void;
+  libraryTemplateTokenContext(library: LibraryDefinition, target?: LayoutMembershipTarget): { category: string };
+  readDrag(event: DragEvent): unknown;
+  writeLibraryDrag(event: DragEvent, payload: {
+    kind: "library-membership";
+    libraryId: string;
+    subjectId: string;
+    headingId: string;
+    subheadingId?: string;
+  }): void;
+}
+
+function createLayoutRenderView(data: PluginData, records: VaultRecord[]): LayoutHarnessView {
+  const view = Object.create(EntVaultCommandCenterView.prototype) as LayoutHarnessView;
+  view.app = {};
+  view.plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    isClinicalMode: () => false,
+    isDataReadOnly: () => false,
+    getLibrary: (id) => data.portableIndex.libraries.find((library) => library.id === id) ?? null,
+    getLibraries: (includeArchived = false) => data.portableIndex.libraries
+      .filter((library) => includeArchived || library.archivedAt === null),
+    saveViewState: async () => undefined,
+    savePluginData: async () => undefined,
+    mutate: async (_label, action) => { action(); },
+    assignRecordToLibrary: async () => undefined,
+    createQuickEntryCollectionSubheading: async () => undefined,
+    createQuickEntryLibrarySubheading: async () => undefined,
+  };
+  view.records = records;
+  view.recordByPath = new Map(records.map((item) => [item.path, item]));
+  view.query = "";
+  view.parsedQuery = parseQuery("");
+  view.editMode = false;
+  view.browseRowLimit = 300;
+  view.browseStructureLimit = 300;
+  view.browseRowsRendered = 0;
+  view.browseRowsOmitted = 0;
+  view.browseStructuresRendered = 0;
+  view.browseStructuresOmitted = 0;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+  view.viewInstanceId = "layout-render-test";
+  view.libraryDragRenderToken = "layout-render-token";
+  view.activeLibraryDrag = null;
+  view.collapsedQueues = new Set();
+  view.renderTree = () => undefined;
+  return view;
+}
+
+function nestedCollectionHeading(): LayoutHeading {
+  return {
+    id: "col-h1",
+    title: "Board review",
+    collapsed: false,
+    subjects: ["Notes/Alpha.md", "Notes/Missing.md"],
+    subheadings: [{
+      id: "col-d2",
+      title: "Airway",
+      collapsed: false,
+      subjects: ["Notes/Beta.md"],
+      subheadings: [{
+        id: "col-d3",
+        title: "Intubation",
+        collapsed: false,
+        subjects: ["Notes/Gamma.md"],
+        subheadings: [{
+          id: "col-d4",
+          title: "Rapid sequence",
+          collapsed: false,
+          subjects: [],
+          subheadings: [{ id: "col-d5", title: "Medications", collapsed: false, subjects: [] }],
+        }],
+      }],
+    }],
+  };
+}
+
+function nestedLibraryLayout(): LayoutHeading[] {
+  return [{
+    id: "lib-h1",
+    title: "Guidelines",
+    collapsed: false,
+    subjects: ["subject-a", "subject-missing"],
+    subheadings: [{
+      id: "lib-d2",
+      title: "Level two",
+      collapsed: false,
+      subjects: [],
+      subheadings: [{ id: "lib-d3", title: "Level three", collapsed: false, subjects: ["subject-b", "subject-c"] }],
+    }],
+  }];
+}
+
+function nestedLibraryRecords(libraryId: string): VaultRecord[] {
+  return [
+    { ...record("Reference/A.md", "Alpha"), role: "library", portableId: "subject-a", libraryId },
+    { ...record("Reference/B.md", "Beta"), role: "library", portableId: "subject-b", libraryId },
+    { ...record("Reference/C.md", "Gamma"), role: "library", portableId: "subject-c", libraryId },
+  ];
+}
+
+interface CapturedMenuEntry { title: string; click?: () => void }
+
+function captureMenus(): { menus: CapturedMenuEntry[][]; restore(): void } {
+  const menus: CapturedMenuEntry[][] = [];
+  const byMenu = new WeakMap<object, CapturedMenuEntry[]>();
+  const descriptors = new Map(["addItem", "addSeparator", "showAtMouseEvent"].map((name) => [
+    name,
+    Object.getOwnPropertyDescriptor(Menu.prototype, name),
+  ]));
+  Object.defineProperty(Menu.prototype, "addItem", {
+    configurable: true,
+    value(this: object, configure: (item: unknown) => void): object {
+      const entries = byMenu.get(this) ?? [];
+      byMenu.set(this, entries);
+      const captured: CapturedMenuEntry = { title: "" };
+      const item = {
+        setTitle(title: string) { captured.title = title; return item; },
+        setIcon() { return item; },
+        setDisabled() { return item; },
+        onClick(callback: () => void) { captured.click = callback; return item; },
+      };
+      configure(item);
+      entries.push(captured);
+      return this;
+    },
+  });
+  Object.defineProperty(Menu.prototype, "addSeparator", {
+    configurable: true,
+    value(this: object): object { return this; },
+  });
+  Object.defineProperty(Menu.prototype, "showAtMouseEvent", {
+    configurable: true,
+    value(this: object): void { menus.push(byMenu.get(this) ?? []); },
+  });
+  return {
+    menus,
+    restore(): void {
+      for (const [name, descriptor] of descriptors) {
+        if (descriptor) Object.defineProperty(Menu.prototype, name, descriptor);
+        else Reflect.deleteProperty(Menu.prototype, name);
+      }
+    },
+  };
+}
+
+function captureConfirms(): { confirmations: Array<{ message: string; confirm: () => void | Promise<void> }>; restore(): void } {
+  const confirmations: Array<{ message: string; confirm: () => void | Promise<void> }> = [];
+  const descriptor = Object.getOwnPropertyDescriptor(ConfirmModal.prototype, "open");
+  Object.defineProperty(ConfirmModal.prototype, "open", {
+    configurable: true,
+    value(this: object): void {
+      const modal = this as unknown as { message: string; onConfirm: () => void | Promise<void> };
+      confirmations.push({ message: modal.message, confirm: modal.onConfirm });
+    },
+  });
+  return {
+    confirmations,
+    restore(): void {
+      if (descriptor) Object.defineProperty(ConfirmModal.prototype, "open", descriptor);
+      else Reflect.deleteProperty(ConfirmModal.prototype, "open");
+    },
+  };
+}
+
+const settleMicrotasks = async (): Promise<void> => {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+};
+
+test("the collections tab renders nested subheadings to depth five with depth classes and the repair tooltip", () => {
+  const dom = createFakeDom();
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const heading = nestedCollectionHeading();
+  data.collections = [heading];
+  const records = [
+    record("Notes/Alpha.md", "Alpha"),
+    record("Notes/Beta.md", "Beta"),
+    record("Notes/Gamma.md", "Gamma"),
+  ];
+  const view = createLayoutRenderView(data, records);
+  const parent = dom.document.body.createDiv();
+
+  const total = view.renderHeading(asHtmlElement(parent), heading, true);
+
+  assert.equal(total, 3, "matching totals count records at every depth");
+  const subheadingRows = parent.querySelectorAll(".ent-cc-subheading-row");
+  assert.equal(subheadingRows.length, 4, "each nested level renders one structure row");
+  assert.equal(subheadingRows[0]?.hasClass("ent-cc-depth-0"), true);
+  assert.equal(subheadingRows[1]?.hasClass("ent-cc-depth-1"), true);
+  assert.equal(subheadingRows[2]?.hasClass("ent-cc-depth-2"), true);
+  assert.equal(subheadingRows[3]?.hasClass("ent-cc-depth-3"), true);
+  assert.ok(parent.querySelector(".ent-cc-subject-row.ent-cc-level-3"), "a depth-three record row carries its indentation level");
+  assert.equal(parent.querySelector(".ent-cc-heading-row .ent-cc-row-count")?.textContent, "3", "the heading count resolves the whole subtree");
+  const missing = parent.querySelector(".ent-cc-row-missing");
+  assert.ok(missing, "unresolved references stay visible");
+  assert.match(missing.getAttribute("title") ?? "", /review or repair/i, "the collections missing count keeps its repair tooltip");
+  assert.equal(subheadingRows.every((row) => row.querySelector(".ent-cc-row-more") !== null), true, "every nested level keeps its menu control");
+});
+
+test("the library tab renders nested subheadings through the same recursive renderer, including the repair tooltip", () => {
+  const dom = createFakeDom();
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const library = installLibrary(data);
+  data.activeTab = libraryTabId(library.id);
+  data.portableIndex.libraryLayouts[library.id] = nestedLibraryLayout();
+  const records = nestedLibraryRecords(library.id);
+  const view = createLayoutRenderView(data, records);
+  const parent = dom.document.body.createDiv();
+
+  assert.equal(view.renderLibrary(asHtmlElement(parent), records), 3);
+
+  assert.equal(parent.querySelectorAll(".ent-cc-library-group").length, 1);
+  const subheadingRows = parent.querySelectorAll(".ent-cc-library-subheading .ent-cc-subheading-row");
+  assert.equal(subheadingRows.length, 2);
+  assert.equal(subheadingRows[0]?.hasClass("ent-cc-depth-0"), true);
+  assert.equal(subheadingRows[1]?.hasClass("ent-cc-depth-1"), true);
+  assert.equal(parent.querySelectorAll(".ent-cc-subject-row.ent-cc-level-3").length, 2, "records nested at depth three render with their level class");
+  const missing = parent.querySelector(".ent-cc-row-missing");
+  assert.ok(missing, "an unresolved subject reference is reported");
+  assert.match(missing.getAttribute("title") ?? "", /review or repair/i, "the library missing count regains the repair tooltip");
+  assert.equal(parent.querySelector(".ent-cc-heading-row .ent-cc-row-count")?.textContent, "3", "the heading count resolves the whole subtree");
+});
+
+test("collection menus add subheadings below the depth cap and removing a nested node promotes subjects and children in order", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const heading: LayoutHeading = {
+    id: "col-h1",
+    title: "Board review",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{
+      id: "col-d2",
+      title: "Airway",
+      collapsed: false,
+      subjects: [],
+      subheadings: [
+        { id: "col-d3a", title: "Before", collapsed: false, subjects: [] },
+        {
+          id: "col-d3b",
+          title: "Removed",
+          collapsed: false,
+          subjects: ["Notes/X.md"],
+          subheadings: [
+            { id: "col-d4a", title: "Promoted one", collapsed: false, subjects: [] },
+            {
+              id: "col-d4b",
+              title: "Promoted two",
+              collapsed: false,
+              subjects: [],
+              subheadings: [{ id: "col-d5", title: "Leaf", collapsed: false, subjects: [] }],
+            },
+          ],
+        },
+        { id: "col-d3c", title: "After", collapsed: false, subjects: [] },
+      ],
+    }],
+  };
+  data.collections = [heading];
+  const view = createLayoutRenderView(data, []);
+  const menuCapture = captureMenus();
+  const confirmCapture = captureConfirms();
+  try {
+    const parentNode = heading.subheadings[0];
+    const removed = parentNode?.subheadings?.[1];
+    const depthFour = removed?.subheadings?.[1];
+    const depthFive = depthFour?.subheadings?.[0];
+    assert.ok(parentNode && removed && depthFour && depthFive);
+
+    view.showSubheadingMenu({} as MouseEvent, heading, depthFour);
+    assert.equal((menuCapture.menus.at(-1) ?? []).some((item) => item.title === "Add subheading"), true, "a depth-four node can still gain children");
+    view.showSubheadingMenu({} as MouseEvent, heading, depthFive);
+    assert.equal((menuCapture.menus.at(-1) ?? []).some((item) => item.title === "Add subheading"), false, "a depth-five node is at the cap");
+
+    view.showSubheadingMenu({} as MouseEvent, heading, removed);
+    const removeItem = (menuCapture.menus.at(-1) ?? []).find((item) => item.title === "Remove subheading");
+    assert.ok(removeItem);
+    removeItem.click?.();
+    const confirmation = confirmCapture.confirmations.shift();
+    assert.ok(confirmation);
+    assert.match(confirmation.message, /move up under “Airway”/, "the confirm copy names the actual parent node");
+    await confirmation.confirm();
+
+    assert.deepEqual(parentNode.subjects, ["Notes/X.md"], "subjects move to the parent node, not the top heading");
+    assert.deepEqual(heading.subjects, [], "the top heading is untouched by a deep removal");
+    assert.deepEqual((parentNode.subheadings ?? []).map((item) => item.id), ["col-d3a", "col-d4a", "col-d4b", "col-d3c"], "children splice into the removed node's position");
+    assert.deepEqual(depthFour.subheadings?.map((item) => item.id), ["col-d5"], "grandchildren stay attached to their promoted parents");
+  } finally {
+    menuCapture.restore();
+    confirmCapture.restore();
+  }
+});
+
+test("library menus mirror deep add and remove semantics with portable-index mutations", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const library = installLibrary(data);
+  data.activeTab = libraryTabId(library.id);
+  data.portableIndex.libraryLayouts[library.id] = [{
+    id: "lib-h1",
+    title: "Guidelines",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{
+      id: "lib-d2",
+      title: "Level two",
+      collapsed: false,
+      subjects: [],
+      subheadings: [{
+        id: "lib-d3",
+        title: "Level three",
+        collapsed: false,
+        subjects: ["subject-x"],
+        subheadings: [{
+          id: "lib-d4",
+          title: "Level four",
+          collapsed: false,
+          subjects: [],
+          subheadings: [{ id: "lib-d5", title: "Level five", collapsed: false, subjects: [] }],
+        }],
+      }],
+    }],
+  }];
+  const view = createLayoutRenderView(data, []);
+  const mutationOptions: Array<{ includePortableIndex?: boolean; requireUndo?: boolean } | undefined> = [];
+  view.plugin.mutate = async (_label, action, options) => {
+    mutationOptions.push(options);
+    action();
+  };
+  const layout = data.portableIndex.libraryLayouts[library.id] ?? [];
+  const heading = layout[0];
+  const levelTwo = heading?.subheadings[0];
+  const levelThree = levelTwo?.subheadings?.[0];
+  const levelFour = levelThree?.subheadings?.[0];
+  const levelFive = levelFour?.subheadings?.[0];
+  assert.ok(heading && levelTwo && levelThree && levelFour && levelFive);
+  const menuCapture = captureMenus();
+  const confirmCapture = captureConfirms();
+  try {
+    view.showLibrarySubheadingMenu({} as MouseEvent, library.id, heading, levelFour);
+    assert.equal((menuCapture.menus.at(-1) ?? []).some((item) => item.title === "Add subheading"), true);
+    view.showLibrarySubheadingMenu({} as MouseEvent, library.id, heading, levelFive);
+    assert.equal((menuCapture.menus.at(-1) ?? []).some((item) => item.title === "Add subheading"), false, "the depth cap hides deeper creation");
+
+    view.showLibrarySubheadingMenu({} as MouseEvent, library.id, heading, levelThree);
+    const removeItem = (menuCapture.menus.at(-1) ?? []).find((item) => item.title === "Remove subheading");
+    assert.ok(removeItem);
+    removeItem.click?.();
+    const confirmation = confirmCapture.confirmations.shift();
+    assert.ok(confirmation);
+    assert.match(confirmation.message, /move up under “Level two”/);
+    assert.match(confirmation.message, /No Markdown note will be changed/);
+    await confirmation.confirm();
+
+    assert.deepEqual(levelTwo.subjects, ["subject-x"], "records move to the direct parent node");
+    assert.deepEqual(levelTwo.subheadings?.map((item) => item.id), ["lib-d4"], "the removed node's children take its place");
+    assert.deepEqual(mutationOptions, [{ includePortableIndex: true, requireUndo: true }]);
+  } finally {
+    menuCapture.restore();
+    confirmCapture.restore();
+  }
+});
+
+test("drops onto depth-three nodes add memberships there and row drops reorder within the deep parent", async () => {
+  const dom = createFakeDom();
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const library = installLibrary(data);
+  data.activeTab = libraryTabId(library.id);
+  data.portableIndex.libraryLayouts[library.id] = nestedLibraryLayout();
+  const records = nestedLibraryRecords(library.id);
+  const view = createLayoutRenderView(data, records);
+  view.editMode = true;
+  const assignments: Array<{ path: string; target: LayoutMembershipTarget }> = [];
+  view.plugin.assignRecordToLibrary = async (path, _libraryId, target) => { assignments.push({ path, target }); };
+  view.plugin.mutate = async (_label, action, options) => {
+    assert.deepEqual(options, { includePortableIndex: true, requireUndo: true });
+    action();
+  };
+  const parent = dom.document.body.createDiv();
+  const dataTransfer = { effectAllowed: "none", dropEffect: "none", setData: () => undefined, getData: () => "" };
+  const dragEvent = { dataTransfer } as unknown as DragEvent;
+
+  const mobilePlatform = Platform as unknown as { isMobile: boolean };
+  const previousMobile = mobilePlatform.isMobile;
+  mobilePlatform.isMobile = false;
+  try {
+    assert.equal(view.renderLibrary(asHtmlElement(parent), records), 3);
+    const subheadingRows = parent.querySelectorAll(".ent-cc-subheading-row");
+    const depthThreeRow = subheadingRows[1];
+    assert.ok(depthThreeRow);
+
+    view.writeLibraryDrag(dragEvent, { kind: "library-membership", libraryId: library.id, subjectId: "subject-a", headingId: "lib-h1" });
+    const dragover = depthThreeRow.dispatch("dragover");
+    assert.equal(dragover.defaultPrevented, true, "a deep node is a live drop target");
+    depthThreeRow.dispatch("drop");
+    await settleMicrotasks();
+    assert.deepEqual(assignments, [{
+      path: "Reference/A.md",
+      target: { libraryId: library.id, headingId: "lib-h1", subheadingId: "lib-d3" },
+    }], "the drop payload carries the deep node id");
+
+    view.writeLibraryDrag(dragEvent, { kind: "library-membership", libraryId: library.id, subjectId: "subject-b", headingId: "lib-h1", subheadingId: "lib-d3" });
+    const subjectRows = parent.querySelectorAll(".ent-cc-subject-row");
+    const targetRow = subjectRows[2];
+    assert.ok(targetRow);
+    targetRow.setBoundingClientRect({ top: 0, height: 44, bottom: 44 });
+    targetRow.dispatch("dragover", { clientY: 40 });
+    targetRow.dispatch("drop", { clientY: 40 });
+    await settleMicrotasks();
+    const deepNode = data.portableIndex.libraryLayouts[library.id]?.[0]?.subheadings[0]?.subheadings?.[0];
+    assert.deepEqual(deepNode?.subjects, ["subject-c", "subject-b"], "row drops reorder inside the depth-three parent");
+  } finally {
+    mobilePlatform.isMobile = previousMobile;
+  }
+});
+
+test("collection drops resolve deep membership targets and remove them from every level", async () => {
+  const dom = createFakeDom();
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const heading = nestedCollectionHeading();
+  data.collections = [heading];
+  const records = [
+    record("Notes/Alpha.md", "Alpha"),
+    record("Notes/Beta.md", "Beta"),
+    record("Notes/Gamma.md", "Gamma"),
+  ];
+  const view = createLayoutRenderView(data, records);
+  view.editMode = true;
+  const parent = dom.document.body.createDiv();
+
+  const mobilePlatform = Platform as unknown as { isMobile: boolean };
+  const previousMobile = mobilePlatform.isMobile;
+  mobilePlatform.isMobile = false;
+  try {
+    view.renderHeading(asHtmlElement(parent), heading, true);
+    const depthThreeRow = parent.querySelectorAll(".ent-cc-subheading-row")[1];
+    assert.ok(depthThreeRow);
+    (view as unknown as { readDrag(): unknown }).readDrag = () => ({
+      kind: "membership",
+      path: "Notes/Alpha.md",
+      headingId: "col-h1",
+    });
+    depthThreeRow.dispatch("drop");
+    await settleMicrotasks();
+    const depthThree = heading.subheadings[0]?.subheadings?.[0];
+    assert.equal(heading.subjects.includes("Notes/Alpha.md"), false, "the membership left its old level");
+    assert.deepEqual(depthThree?.subjects, ["Notes/Gamma.md", "Notes/Alpha.md"], "the drop landed on the depth-three node");
+
+    (view as unknown as { readDrag(): unknown }).readDrag = () => ({
+      kind: "membership",
+      path: "Notes/Alpha.md",
+      headingId: "col-h1",
+      subheadingId: "col-d3",
+    });
+    const subjectRows = parent.querySelectorAll(".ent-cc-subject-row");
+    const gammaRow = subjectRows.find((row) => row.textContent.includes("Gamma"));
+    assert.ok(gammaRow);
+    gammaRow.setBoundingClientRect({ top: 0, height: 44, bottom: 44 });
+    gammaRow.dispatch("dragover", { clientY: 4 });
+    gammaRow.dispatch("drop", { clientY: 4 });
+    await settleMicrotasks();
+    assert.deepEqual(depthThree?.subjects, ["Notes/Alpha.md", "Notes/Gamma.md"], "row drops reorder inside the deep parent list");
+  } finally {
+    mobilePlatform.isMobile = previousMobile;
+  }
+});
+
+test("collapse toggles at depth persist through saveViewState and roll back when the save fails", async () => {
+  Notice.messages.length = 0;
+  const dom = createFakeDom();
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const heading = nestedCollectionHeading();
+  data.collections = [heading];
+  const view = createLayoutRenderView(data, [
+    record("Notes/Alpha.md", "Alpha"),
+    record("Notes/Beta.md", "Beta"),
+    record("Notes/Gamma.md", "Gamma"),
+  ]);
+  let saves = 0;
+  let failSave = false;
+  view.plugin.saveViewState = async () => {
+    if (failSave) throw new Error("save failed for the toggle test");
+    saves += 1;
+  };
+  const parent = dom.document.body.createDiv();
+  view.renderHeading(asHtmlElement(parent), heading, true);
+  const depthThreeRow = parent.querySelectorAll(".ent-cc-subheading-row")[1];
+  const disclosure = depthThreeRow?.querySelector(".ent-cc-disclosure");
+  assert.ok(disclosure);
+  const depthThree = heading.subheadings[0]?.subheadings?.[0];
+  assert.ok(depthThree);
+
+  disclosure.dispatch("click");
+  await settleMicrotasks();
+  assert.equal(depthThree.collapsed, true, "the nested node's collapse state is written");
+  assert.equal(saves, 1, "the collapse state reaches the persisted view state");
+
+  failSave = true;
+  disclosure.dispatch("click");
+  await settleMicrotasks();
+  assert.equal(depthThree.collapsed, true, "a failed save rolls the optimistic toggle back");
+  assert.equal(Notice.messages.some((message) => /save failed for the toggle test/.test(message)), true);
+});
+
+test("expand all and collapse all reach nested subheadings on the collections and library tabs", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const library = installLibrary(data);
+  data.collections = [nestedCollectionHeading()];
+  data.portableIndex.libraryLayouts[library.id] = nestedLibraryLayout();
+  data.activeTab = "collections";
+  const view = createLayoutRenderView(data, []);
+  const menuCapture = captureMenus();
+  const choose = async (title: string): Promise<void> => {
+    const item = (menuCapture.menus.at(-1) ?? []).find((entry) => entry.title === title);
+    assert.ok(item, `missing menu item ${title}`);
+    item.click?.();
+    await settleMicrotasks();
+  };
+  try {
+    view.showGlobalMenu({} as MouseEvent);
+    await choose("Collapse all visible groups");
+    const depthFive = data.collections[0]?.subheadings[0]?.subheadings?.[0]?.subheadings?.[0]?.subheadings?.[0];
+    assert.equal(depthFive?.collapsed, true, "collapse all reaches depth five");
+
+    view.showGlobalMenu({} as MouseEvent);
+    await choose("Expand all visible groups");
+    assert.equal(depthFive?.collapsed, false, "expand all reaches depth five");
+
+    data.activeTab = libraryTabId(library.id);
+    view.showGlobalMenu({} as MouseEvent);
+    await choose("Collapse all visible groups");
+    const libraryDepthThree = data.portableIndex.libraryLayouts[library.id]?.[0]?.subheadings[0]?.subheadings?.[0];
+    assert.equal(libraryDepthThree?.collapsed, true, "library collapse all reaches nested nodes");
+
+    view.showGlobalMenu({} as MouseEvent);
+    await choose("Expand all visible groups");
+    assert.equal(libraryDepthThree?.collapsed, false);
+  } finally {
+    menuCapture.restore();
+  }
+});
+
+test("quick-create subheading pickers list deep parents with path labels and resolve the owning heading id plus the deep parent id", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const library = installLibrary(data);
+  data.collections = [nestedCollectionHeading()];
+  data.portableIndex.libraryLayouts[library.id] = nestedLibraryLayout();
+  const view = createLayoutRenderView(data, []);
+  const collectionCreates: Array<{ headingId: string; title: string; parentSubheadingId?: string }> = [];
+  const libraryCreates: Array<{ libraryId: string; headingId: string; title: string; parentSubheadingId?: string }> = [];
+  view.plugin.createQuickEntryCollectionSubheading = async (headingId, title, parentSubheadingId) => { collectionCreates.push({ headingId, title, parentSubheadingId }); };
+  view.plugin.createQuickEntryLibrarySubheading = async (libraryId, headingId, title, parentSubheadingId) => { libraryCreates.push({ libraryId, headingId, title, parentSubheadingId }); };
+
+  interface CapturedPicker {
+    getItems(): Array<{ id: string; title: string; description: string }>;
+    onChooseItem(item: { id: string; title: string; description: string; icon: string }): void;
+  }
+  const pickers: CapturedPicker[] = [];
+  const prompts: Array<(value: string) => void | Promise<void>> = [];
+  const pickerOpen = Object.getOwnPropertyDescriptor(AddActionModal.prototype, "open");
+  const promptOpen = Object.getOwnPropertyDescriptor(TextPromptModal.prototype, "open");
+  Object.defineProperty(AddActionModal.prototype, "open", {
+    configurable: true,
+    value(this: object): void { pickers.push(this as unknown as CapturedPicker); },
+  });
+  TextPromptModal.prototype.open = function capturePrompt(): void {
+    const modal = this as unknown as { options: { onSubmit(value: string): void | Promise<void> } };
+    prompts.push((value) => modal.options.onSubmit(value));
+  };
+  try {
+    view.openQuickCollectionHeadingPicker();
+    const collectionPicker = pickers.at(-1);
+    assert.ok(collectionPicker);
+    const labels = collectionPicker.getItems().map((item) => item.title);
+    assert.deepEqual(labels, [
+      "Board review",
+      "Board review / Airway",
+      "Board review / Airway / Intubation",
+      "Board review / Airway / Intubation / Rapid sequence",
+    ], "every node below the cap is offered with its full path; the depth-five node is not");
+    assert.equal(collectionPicker.getItems()[0]?.description, "4 nested subheadings", "descriptions count nested children recursively");
+    const topLevelParent = collectionPicker.getItems()[0];
+    assert.ok(topLevelParent);
+    collectionPicker.onChooseItem({ ...topLevelParent, icon: "folder" });
+    const submitTopLevel = prompts.shift();
+    assert.ok(submitTopLevel);
+    await submitTopLevel("Top leaf");
+    const deepParent = collectionPicker.getItems().at(-1);
+    assert.ok(deepParent);
+    collectionPicker.onChooseItem({ ...deepParent, icon: "folder" });
+    const submitCollection = prompts.shift();
+    assert.ok(submitCollection);
+    await submitCollection("Deep leaf");
+    assert.deepEqual(collectionCreates, [
+      { headingId: "col-h1", title: "Top leaf", parentSubheadingId: undefined },
+      { headingId: "col-h1", title: "Deep leaf", parentSubheadingId: "col-d4" },
+    ], "the plugin API takes the owning top-level heading id plus the deep parent's own id");
+
+    view.openQuickLibraryHeadingPicker(library.id);
+    const libraryPicker = pickers.at(-1);
+    assert.ok(libraryPicker);
+    assert.deepEqual(libraryPicker.getItems().map((item) => item.title), [
+      "Guidelines",
+      "Guidelines / Level two",
+      "Guidelines / Level two / Level three",
+    ]);
+    const deepLibraryParent = libraryPicker.getItems().at(-1);
+    assert.ok(deepLibraryParent);
+    libraryPicker.onChooseItem({ ...deepLibraryParent, icon: "folder" });
+    const submitLibrary = prompts.shift();
+    assert.ok(submitLibrary);
+    await submitLibrary("Deep library leaf");
+    assert.deepEqual(libraryCreates, [
+      { libraryId: library.id, headingId: "lib-h1", title: "Deep library leaf", parentSubheadingId: "lib-d3" },
+    ], "library creation also resolves the owning heading and passes the nested node separately");
+  } finally {
+    if (pickerOpen) Object.defineProperty(AddActionModal.prototype, "open", pickerOpen);
+    else Reflect.deleteProperty(AddActionModal.prototype, "open");
+    if (promptOpen) Object.defineProperty(TextPromptModal.prototype, "open", promptOpen);
+    else Reflect.deleteProperty(TextPromptModal.prototype, "open");
+  }
+});
+
+test("quick-create subheading pickers create nodes under depth-two parents through the real plugin", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.setupComplete = true;
+  const library = installLibrary(data);
+  data.collections = [nestedCollectionHeading()];
+  data.portableIndex.libraryLayouts[library.id] = nestedLibraryLayout();
+  const store = createDefaultStore(data, 1, "vault-quick-subheading-e2e");
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getMarkdownFiles: () => [],
+      getAbstractFileByPath: () => null,
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => ({ frontmatter: {} }), resolvedLinks: {} },
+    fileManager: {},
+    loadLocalStorage: () => null,
+    saveLocalStorage: () => undefined,
+  };
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & { loadedData: unknown };
+  plugin.loadedData = store;
+  await plugin.loadPluginData();
+
+  const view = Object.create(EntVaultCommandCenterView.prototype) as LayoutHarnessView;
+  view.app = app;
+  view.plugin = plugin as unknown as LayoutHarnessPlugin;
+  view.staleViewNoticeShown = false;
+  view.viewInstanceId = "quick-subheading-e2e";
+  view.renderTree = () => undefined;
+  const syncViewToPlugin = (): void => {
+    view.loadedBaseId = plugin.getActiveKnowledgeBaseId();
+    view.loadedDataEpoch = plugin.getDataEpoch();
+  };
+
+  interface CapturedPicker {
+    getItems(): Array<{ id: string; title: string; description: string }>;
+    onChooseItem(item: { id: string; title: string; description: string; icon: string }): void;
+  }
+  const pickers: CapturedPicker[] = [];
+  const prompts: Array<(value: string) => void | Promise<void>> = [];
+  const pickerOpen = Object.getOwnPropertyDescriptor(AddActionModal.prototype, "open");
+  const promptOpen = Object.getOwnPropertyDescriptor(TextPromptModal.prototype, "open");
+  Object.defineProperty(AddActionModal.prototype, "open", {
+    configurable: true,
+    value(this: object): void { pickers.push(this as unknown as CapturedPicker); },
+  });
+  TextPromptModal.prototype.open = function capturePrompt(): void {
+    const modal = this as unknown as { options: { onSubmit(value: string): void | Promise<void> } };
+    prompts.push((value) => modal.options.onSubmit(value));
+  };
+  try {
+    syncViewToPlugin();
+    view.openQuickCollectionHeadingPicker();
+    const collectionPicker = pickers.at(-1);
+    assert.ok(collectionPicker);
+    const depthTwoCollection = collectionPicker.getItems().find((item) => item.title === "Board review / Airway");
+    assert.ok(depthTwoCollection, "the depth-two collection parent is offered");
+    collectionPicker.onChooseItem({ ...depthTwoCollection, icon: "folder" });
+    const submitCollection = prompts.shift();
+    assert.ok(submitCollection);
+    await submitCollection("Deep quick leaf");
+    const airway = plugin.data.collections.find((heading) => heading.id === "col-h1")?.subheadings.find((node) => node.id === "col-d2");
+    assert.ok(airway);
+    assert.equal((airway.subheadings ?? []).some((node) => node.title === "Deep quick leaf"), true, "the new subheading lands under the depth-two collection parent");
+    assert.equal(plugin.data.collections.find((heading) => heading.id === "col-h1")?.subheadings.some((node) => node.title === "Deep quick leaf"), false, "the new node does not fall back to the heading level");
+
+    syncViewToPlugin();
+    view.openQuickLibraryHeadingPicker(library.id);
+    const libraryPicker = pickers.at(-1);
+    assert.ok(libraryPicker);
+    const depthTwoLibrary = libraryPicker.getItems().find((item) => item.title === "Guidelines / Level two");
+    assert.ok(depthTwoLibrary, "the depth-two library parent is offered");
+    libraryPicker.onChooseItem({ ...depthTwoLibrary, icon: "folder" });
+    const submitLibrary = prompts.shift();
+    assert.ok(submitLibrary);
+    await submitLibrary("Deep quick library leaf");
+    const levelTwo = (plugin.data.portableIndex.libraryLayouts[library.id] ?? [])
+      .find((heading) => heading.id === "lib-h1")?.subheadings.find((node) => node.id === "lib-d2");
+    assert.ok(levelTwo);
+    assert.equal((levelTwo.subheadings ?? []).some((node) => node.title === "Deep quick library leaf"), true, "the new subheading lands under the depth-two library parent");
+  } finally {
+    if (pickerOpen) Object.defineProperty(AddActionModal.prototype, "open", pickerOpen);
+    else Reflect.deleteProperty(AddActionModal.prototype, "open");
+    if (promptOpen) Object.defineProperty(TextPromptModal.prototype, "open", promptOpen);
+    else Reflect.deleteProperty(TextPromptModal.prototype, "open");
+  }
+});
+
+test("confirming a collection subheading removal after the node was already removed reports stale structure instead of duplicating its subtree", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const heading = nestedCollectionHeading();
+  data.collections = [heading];
+  const view = createLayoutRenderView(data, []);
+  let mutations = 0;
+  view.plugin.mutate = async (_label, action) => {
+    mutations += 1;
+    action();
+  };
+  const menuCapture = captureMenus();
+  const confirmCapture = captureConfirms();
+  try {
+    const airway = heading.subheadings[0];
+    const intubation = airway?.subheadings?.[0];
+    assert.ok(airway && intubation);
+
+    view.showSubheadingMenu({} as MouseEvent, heading, intubation);
+    const removeItem = (menuCapture.menus.at(-1) ?? []).find((item) => item.title === "Remove subheading");
+    assert.ok(removeItem);
+    removeItem.click?.();
+    const confirmation = confirmCapture.confirmations.shift();
+    assert.ok(confirmation);
+
+    // Another window (or Sync) already removed the node: subjects and children
+    // were promoted into its parent while this confirm dialog stayed open.
+    airway.subjects.push(...intubation.subjects.filter((path) => !airway.subjects.includes(path)));
+    airway.subheadings = [...(intubation.subheadings ?? [])];
+
+    await assert.rejects(Promise.resolve(confirmation.confirm()), /subheading is no longer available/i);
+    assert.deepEqual((airway.subheadings ?? []).map((item) => item.id), ["col-d4"], "the already-promoted subtree is not appended a second time");
+    assert.deepEqual(airway.subjects, ["Notes/Beta.md", "Notes/Gamma.md"], "already-promoted subjects are not re-merged");
+    assert.equal(mutations, 0, "a removed target must reject before starting a mutation");
+  } finally {
+    menuCapture.restore();
+    confirmCapture.restore();
+  }
+});
+
+test("the category template token resolves the deepest placed node title at any depth", () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const library = installLibrary(data);
+  data.portableIndex.libraryLayouts[library.id] = nestedLibraryLayout();
+  const view = createLayoutRenderView(data, []);
+
+  assert.equal(view.libraryTemplateTokenContext(library, { headingId: "lib-h1", subheadingId: "lib-d3" }).category, "Level three");
+  assert.equal(view.libraryTemplateTokenContext(library, { subheadingId: "lib-d3" }).category, "Level three", "a deep subheading id alone locates its heading recursively");
+  assert.equal(view.libraryTemplateTokenContext(library, { headingId: "lib-h1" }).category, "Guidelines", "heading placements fall back to the heading title");
+});
+
+// --- Wave 3: shared UI helpers (vault-snapshot caching, JSON transfer size
+// --- guards, and the one promoted stale-base guard).
+
+/**
+ * The obsidian test double ships an empty `Setting`; the index manager footer
+ * needs a chainable one before a full `render()` can be exercised.
+ */
+function withSettingStub<T>(run: () => T): T {
+  const prototype = Setting.prototype as unknown as Record<string, unknown>;
+  const button = {
+    setButtonText: (): typeof button => button,
+    onClick: (): typeof button => button,
+    setCta: (): typeof button => button,
+    setDisabled: (): typeof button => button,
+  };
+  prototype.addButton = function addButton(this: unknown, callback: (value: typeof button) => void): unknown {
+    callback(button);
+    return this;
+  };
+  prototype.settingEl = { addClass: (): void => undefined };
+  try {
+    return run();
+  } finally {
+    Reflect.deleteProperty(prototype, "addButton");
+    Reflect.deleteProperty(prototype, "settingEl");
+  }
+}
+
+/** Fake elements have no text-selection API; the caret restore needs one. */
+function withCaretSupport<T>(run: () => T): T {
+  const prototype = FakeElement.prototype as unknown as Record<string, unknown>;
+  prototype.setSelectionRange = (): void => undefined;
+  try {
+    return run();
+  } finally {
+    Reflect.deleteProperty(prototype, "setSelectionRange");
+  }
+}
+
+/** Production builds the download anchor and file picker with the global createEl. */
+function withCreateEl<T>(document: FakeDocument, run: (created: FakeElement[]) => T): T {
+  const created: FakeElement[] = [];
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "createEl");
+  Object.defineProperty(globalThis, "createEl", {
+    configurable: true,
+    value: (tag: string, options?: Record<string, unknown>) => {
+      const element = document.createElement(tag, options ?? {});
+      created.push(element);
+      return element;
+    },
+  });
+  try {
+    return run(created);
+  } finally {
+    if (previous) Object.defineProperty(globalThis, "createEl", previous);
+    else Reflect.deleteProperty(globalThis, "createEl");
+  }
+}
+
+function indexManagerHarness(dom: ReturnType<typeof createFakeDom>, initialTab: string): {
+  manager: {
+    app: unknown;
+    plugin: unknown;
+    contentEl: HTMLElement;
+    titleEl: HTMLElement;
+    tab: string;
+    query: string;
+    selected: Set<string>;
+    managerOpen: boolean;
+    openedBaseId: string;
+    openedDataEpoch: number;
+    searchTimer: number | null;
+    pendingTimers: Set<number>;
+    selectionButtons: unknown[];
+    noteListCache: Map<string, unknown>;
+    render(): void;
+  };
+  scans: () => number;
+} {
+  let vaultScans = 0;
+  const vaultFiles = [new TFile("Knowledge Base/Alpha.md"), new TFile("Knowledge Base/Beta.md")];
+  const plugin = {
+    data: {
+      settings: { indexLabel: "Knowledge Index", groupLabel: "Group", itemSingular: "note", itemPlural: "notes" },
+      manualIndexPaths: [],
+      excludedIndexPaths: [],
+      displayNameByPath: {},
+    },
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 3,
+    getIndexRecords: () => [],
+    getRecords: () => [],
+    getIndexGroups: () => [],
+    getIndexDiagnostics: () => [],
+    // Stands in for getVaultNoteFiles(): the full vault.getMarkdownFiles()
+    // scan, two filters, and the locale sort that must not run per keystroke.
+    getIndexCandidateFiles: () => { vaultScans += 1; return vaultFiles; },
+    isClinicalMode: () => false,
+    isDataReadOnly: () => false,
+    canVisuallyMoveAcrossGroups: () => true,
+  };
+  const manager = Object.create(IndexManagerModal.prototype) as ReturnType<typeof indexManagerHarness>["manager"];
+  manager.app = { vault: { getAbstractFileByPath: () => null } };
+  manager.plugin = plugin;
+  manager.contentEl = asHtmlElement(dom.document.body.createDiv());
+  manager.titleEl = asHtmlElement(dom.document.body.createEl("h2"));
+  manager.tab = initialTab;
+  manager.query = "";
+  manager.selected = new Set();
+  manager.managerOpen = true;
+  manager.openedBaseId = "base-a";
+  manager.openedDataEpoch = 3;
+  manager.searchTimer = null;
+  manager.pendingTimers = new Set();
+  manager.selectionButtons = [];
+  manager.noteListCache = new Map();
+  return { manager, scans: () => vaultScans };
+}
+
+test("index manager keystrokes filter one cached vault snapshot instead of rescanning", () => {
+  const dom = createFakeDom();
+  const { manager, scans } = indexManagerHarness(dom, "available");
+
+  // A global window exists in Obsidian; installing one keeps this test about
+  // the number of vault scans rather than about timer window resolution.
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { activeWindow: { setTimeout: (callback: () => void) => { callback(); return 1; }, clearTimeout: () => undefined } },
+  });
+  try {
+  withSettingStub(() => withCaretSupport(() => {
+    manager.render();
+    assert.equal(scans(), 1, "the first paint reads the vault once");
+    assert.equal(manager.contentEl.querySelectorAll(".ent-cc-manager-note").length, 2);
+
+    for (const value of ["a", "al", "alp"]) {
+      const search = manager.contentEl.querySelector('.ent-cc-manager-toolbar input[type="search"]') as unknown as {
+        value: string;
+        dispatch(type: string): void;
+      } | null;
+      assert.ok(search);
+      search.value = value;
+      search.dispatch("input");
+    }
+
+    assert.equal(scans(), 1, "every keystroke reuses the snapshot it is filtering");
+    assert.equal(manager.query, "alp");
+    assert.equal(manager.contentEl.querySelectorAll(".ent-cc-manager-note").length, 1, "the filter still narrowed the list");
+
+    // A deliberate refresh must still re-read: vault files can appear or
+    // disappear without any plugin data epoch change.
+    const hidden = manager.contentEl.querySelector('[data-manager-tab="hidden"]');
+    assert.ok(hidden);
+    hidden.click();
+    assert.equal(scans(), 2, "switching tabs re-reads the vault");
+  }));
+  } finally {
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("oversized JSON is refused before it is read at both the workspace and backup import sites", async () => {
+  const dom = createFakeDom();
+  const oversized = { size: 10 * 1024 * 1024 + 1, text: async (): Promise<string> => "{}" };
+
+  Notice.messages.length = 0;
+  let workspaceValues = 0;
+  const manager = Object.create(IndexManagerModal.prototype) as {
+    app: unknown;
+    plugin: unknown;
+    openedBaseId: string;
+    managerOpen: boolean;
+    close(): void;
+    importWorkspace(): void;
+    confirmWorkspaceImport(value: unknown): void;
+  };
+  manager.app = {};
+  manager.plugin = { getActiveKnowledgeBaseId: () => "base-a", getDataEpoch: () => 1 };
+  manager.openedBaseId = "";
+  manager.managerOpen = true;
+  manager.close = () => undefined;
+  manager.confirmWorkspaceImport = () => { workspaceValues += 1; };
+
+  await withCreateEl(dom.document, async (created) => {
+    manager.importWorkspace();
+    const input = created.find((element) => element.tagName === "input");
+    assert.ok(input);
+    (input as unknown as { files: unknown[] }).files = [oversized];
+    input.dispatch("change");
+    await settleMicrotasks();
+  });
+
+  assert.equal(workspaceValues, 0, "the workspace import never parsed the oversized file");
+  assert.equal(Notice.messages.filter((message) => message.includes("larger than the 10 MB import limit")).length, 1);
+
+  Notice.messages.length = 0;
+  let backupValues = 0;
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: unknown;
+    plugin: unknown;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    importOrganizationBackup(): void;
+    confirmOrganizationImport(value: unknown, ownsBase?: () => boolean): void;
+  };
+  view.app = {};
+  view.plugin = { getActiveKnowledgeBaseId: () => "base-a", getDataEpoch: () => 1 };
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 1;
+  view.confirmOrganizationImport = () => { backupValues += 1; };
+
+  await withCreateEl(dom.document, async (created) => {
+    view.importOrganizationBackup();
+    const input = created.find((element) => element.tagName === "input");
+    assert.ok(input);
+    (input as unknown as { files: unknown[] }).files = [oversized];
+    input.dispatch("change");
+    await settleMicrotasks();
+  });
+
+  assert.equal(backupValues, 0, "the backup import never parsed the oversized file");
+  assert.equal(Notice.messages.filter((message) => message.includes("larger than the 10 MB import limit")).length, 1);
+
+  // A file inside the cap still reaches the parser, so the guard is a cap and
+  // not a blanket refusal.
+  Notice.messages.length = 0;
+  await withCreateEl(dom.document, async (created) => {
+    view.importOrganizationBackup();
+    const input = created.find((element) => element.tagName === "input");
+    assert.ok(input);
+    (input as unknown as { files: unknown[] }).files = [{ size: 12, text: async (): Promise<string> => '{"kind":"x"}' }];
+    input.dispatch("change");
+    await settleMicrotasks();
+  });
+  assert.equal(backupValues, 1);
+  assert.deepEqual(Notice.messages, []);
+});
+
+test("the shared stale-base guard blocks every later action and notices exactly once", () => {
+  Notice.messages.length = 0;
+  const opened = { id: "opened" };
+  const replaced = { id: "replaced" };
+  let liveData: object = opened;
+  let baseId = "base-a";
+  let epoch = 4;
+  let generation = 2;
+  let stales = 0;
+  const host = {
+    get data(): object { return liveData; },
+    getActiveKnowledgeBaseId: () => baseId,
+    getDataEpoch: () => epoch,
+    getExternalChangeGeneration: () => generation,
+  };
+  const guard = createOpenedBaseGuard(host, { message: "Stale base.", onStale: () => { stales += 1; } });
+
+  assert.equal(guard(), true);
+  assert.equal(guard.owns(), true);
+
+  // Same id and epoch, but Sync handed the plugin a replacement data object.
+  liveData = replaced;
+  assert.equal(guard(), false);
+  assert.equal(guard(), false);
+  assert.equal(guard.owns(), false, "the silent variant agrees without a side effect");
+  assert.equal(stales, 2, "every blocked action still closes its surface");
+  assert.equal(Notice.messages.filter((message) => message === "Stale base.").length, 1);
+
+  // Each of the four captured facts invalidates on its own.
+  for (const drift of [
+    (): void => { liveData = opened; baseId = "base-b"; },
+    (): void => { baseId = "base-a"; epoch = 5; },
+    (): void => { epoch = 4; generation = 3; },
+  ]) {
+    Notice.messages.length = 0;
+    liveData = opened;
+    baseId = "base-a";
+    epoch = 4;
+    generation = 2;
+    const scoped = createOpenedBaseGuard(host, { message: "Stale base." });
+    assert.equal(scoped(), true);
+    drift();
+    assert.equal(scoped(), false);
+    assert.equal(Notice.messages.length, 1);
+  }
+});
+
+test("guarded timers schedule on the window that owns the modal, not the focused one", () => {
+  const owner = createFakeDom();
+  const focused = createFakeDom();
+  let ownerTimers = 0;
+  let focusedTimers = 0;
+  const ownerSetTimeout = owner.window.setTimeout.bind(owner.window);
+  owner.window.setTimeout = (callback, delay) => { ownerTimers += 1; return ownerSetTimeout(callback, delay); };
+  focused.window.setTimeout = () => { focusedTimers += 1; return 1; };
+
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: focused.window });
+  try {
+    const contentEl = owner.document.body.createDiv();
+    assert.equal(modalOwnerWindow(contentEl as unknown as HTMLElement), owner.window as unknown as Window);
+    let ran = 0;
+    setGuardedTimer({
+      contentEl: contentEl as unknown as HTMLElement,
+      timers: new Set<number>(),
+      proceed: () => true,
+      action: () => { ran += 1; },
+      delay: 0,
+    });
+    assert.equal(ran, 1);
+    assert.equal(ownerTimers, 1);
+    assert.equal(focusedTimers, 0, "a pop-out modal must not queue work on the focused window");
+
+    let blocked = 0;
+    setGuardedTimer({
+      contentEl: contentEl as unknown as HTMLElement,
+      timers: new Set<number>(),
+      proceed: () => false,
+      action: () => { blocked += 1; },
+      delay: 0,
+    });
+    assert.equal(blocked, 0, "a stale or closed surface drops its callback");
+  } finally {
+    if (previous) Object.defineProperty(globalThis, "window", previous);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
 });

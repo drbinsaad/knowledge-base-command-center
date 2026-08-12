@@ -5,12 +5,15 @@ import {
   BUILTIN_LIBRARY_IDS,
   buildCurriculumTree,
   canonicalIdIsValid,
+  childSubheadings,
   cleanLibraryLayouts,
+  cleanLibraryNoteProfiles,
   cloneCollections,
   cloneCurriculumVisual,
   createPersonalBackup,
   createWorkspaceConfig,
   curriculumContainerKey,
+  fingerprintText,
   isPortablePlaceholderPath,
   isSafeObjectKey,
   isValidLibraryId,
@@ -21,12 +24,15 @@ import {
   libraryIdFromTab,
   libraryTabId,
   LayoutHeading,
+  LayoutSubheading,
   MainTab,
   makeId,
+  MAX_LAYOUT_DEPTH,
   MAX_LIBRARIES,
   MAX_TRANSFER_COLLECTIONS,
   MAX_TRANSFER_LIST_ITEMS,
   MAX_TRANSFER_TOTAL_REFERENCES,
+  normalizedNameKey,
   parsePersonalBackup,
   parseWorkspaceConfig,
   pathIsInsideFolder,
@@ -45,20 +51,25 @@ import {
   WorkspaceConfig,
   WorkspaceMode,
 } from "./model";
+import { hasUnpairedSurrogate } from "./follow-up";
 
 export const PORTABLE_EXPORT_KIND = "knowledge-base-command-center-portable-export" as const;
 /**
- * Version 4 carries stable, user-defined library identities. Older builds
- * reject it rather than flattening dynamic libraries or silently discarding
- * their hierarchy. The importer continues to accept versions 1 through 3.
+ * Version 5 carries nested subheading hierarchies (up to MAX_LAYOUT_DEPTH
+ * levels) in collections and library layouts. Older builds reject it rather
+ * than silently flattening or discarding nested organization. Version 4 added
+ * stable, user-defined library identities. The importer continues to accept
+ * versions 1 through 4.
  */
-export const PORTABLE_EXPORT_VERSION = 4 as const;
+export const PORTABLE_EXPORT_VERSION = 5 as const;
+const LIBRARY_IDENTITY_PORTABLE_EXPORT_VERSION = 4 as const;
 const LIBRARY_LAYOUT_PORTABLE_EXPORT_VERSION = 3 as const;
 const CATALOG_PORTABLE_EXPORT_VERSION = 2 as const;
 const LEGACY_PORTABLE_EXPORT_VERSION = 1 as const;
 type PortableExportVersion = typeof LEGACY_PORTABLE_EXPORT_VERSION
   | typeof CATALOG_PORTABLE_EXPORT_VERSION
   | typeof LIBRARY_LAYOUT_PORTABLE_EXPORT_VERSION
+  | typeof LIBRARY_IDENTITY_PORTABLE_EXPORT_VERSION
   | typeof PORTABLE_EXPORT_VERSION;
 export const MAX_PORTABLE_PACKAGE_BYTES = 10 * 1024 * 1024;
 const MAX_PORTABLE_GROUPS = 10_000;
@@ -164,6 +175,12 @@ export interface PortableCollectionSubheadingV1 {
   title: string;
   collapsed: boolean;
   subjectIds: string[];
+  /**
+   * Version 5+ nested children. Following the canonical layout convention the
+   * key is present exactly when children exist; leaf subheadings omit it so
+   * flat packages stay byte-identical across export/import round-trips.
+   */
+  subheadings?: PortableCollectionSubheadingV1[];
 }
 
 export interface PortableCollectionV1 {
@@ -254,10 +271,6 @@ export function serializePortableExport(value: PortableExportV1): string {
   return serialized;
 }
 
-function normalizeText(value: string): string {
-  return value.trim().normalize("NFC").toLowerCase();
-}
-
 function safeId(value: unknown, label: string): string {
   if (typeof value !== "string") throw new Error(`${label} must be text.`);
   const id = value.trim();
@@ -266,18 +279,6 @@ function safeId(value: unknown, label: string): string {
   }
   if (!/^[\p{L}\p{N}._:@+-]+$/u.test(id)) throw new Error(`${label} contains unsupported characters.`);
   return id;
-}
-
-function hasUnpairedSurrogate(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code >= 0xD800 && code <= 0xDBFF) {
-      const next = value.charCodeAt(index + 1);
-      if (!(next >= 0xDC00 && next <= 0xDFFF)) return true;
-      index += 1;
-    } else if (code >= 0xDC00 && code <= 0xDFFF) return true;
-  }
-  return false;
 }
 
 function safeTitle(value: unknown, label: string): string {
@@ -310,6 +311,32 @@ function isMainTab(value: unknown): value is MainTab {
 
 function unique(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))];
+}
+
+/** Depth-first visit of every layout node, including nested subheadings. */
+function forEachLayoutNode(
+  nodes: readonly (LayoutHeading | LayoutSubheading)[],
+  visit: (node: LayoutHeading | LayoutSubheading) => void,
+): void {
+  for (const node of nodes) {
+    visit(node);
+    forEachLayoutNode(childSubheadings(node), visit);
+  }
+}
+
+function countLayoutStructures(nodes: readonly (LayoutHeading | LayoutSubheading)[]): number {
+  let count = 0;
+  forEachLayoutNode(nodes, () => { count += 1; });
+  return count;
+}
+
+/** Depth-first visit of a portable collection node and all nested children. */
+function forEachPortableCollectionNode(
+  node: PortableCollectionV1 | PortableCollectionSubheadingV1,
+  visit: (node: PortableCollectionV1 | PortableCollectionSubheadingV1) => void,
+): void {
+  visit(node);
+  for (const child of node.subheadings ?? []) forEachPortableCollectionNode(child, visit);
 }
 
 export function normalizePortableSelection(selection: PortableExportSelection): NormalizedPortableExportSelection {
@@ -394,6 +421,22 @@ function packageDeclaresCatalogs(version: PortableExportVersion): boolean {
   return version >= CATALOG_PORTABLE_EXPORT_VERSION;
 }
 
+function selectedLayoutSubheading(
+  subheading: LayoutSubheading,
+  includedIds: Set<string>,
+): LayoutSubheading {
+  // Preserve the canonical presence rule: the nested key exists exactly when
+  // children exist, and filtering subjects never removes a child node.
+  const selected: LayoutSubheading = {
+    ...subheading,
+    subjects: subheading.subjects.filter((subjectId) => includedIds.has(subjectId)),
+  };
+  if (subheading.subheadings) {
+    selected.subheadings = subheading.subheadings.map((child) => selectedLayoutSubheading(child, includedIds));
+  }
+  return selected;
+}
+
 function selectedLibraryLayout(
   layouts: LibraryLayouts,
   libraryId: string,
@@ -402,10 +445,7 @@ function selectedLibraryLayout(
   return (layouts[libraryId] ?? []).map((heading) => ({
     ...heading,
     subjects: heading.subjects.filter((subjectId) => includedIds.has(subjectId)),
-    subheadings: heading.subheadings.map((subheading) => ({
-      ...subheading,
-      subjects: subheading.subjects.filter((subjectId) => includedIds.has(subjectId)),
-    })),
+    subheadings: heading.subheadings.map((subheading) => selectedLayoutSubheading(subheading, includedIds)),
   }));
 }
 
@@ -438,25 +478,16 @@ export function portableSubjectPath(data: PluginData, subjectId: string): string
   return resolved || portablePlaceholderPath(subjectId);
 }
 
-export function portableSubjectIdForPath(data: PluginData, path: string): string {
-  const placeholderId = portableSubjectIdFromPath(path);
-  if (placeholderId) return placeholderId;
-  for (const [subjectId, resolvedPath] of Object.entries(data.portableIndex.resolvedPathBySubjectId)) {
-    if (resolvedPath === path) return subjectId;
-  }
-  return "";
-}
-
 function portableGroupsWithTitle(data: PluginData, title: string): PortableGroupDefinition[] {
-  const normalized = normalizeText(title);
-  return data.portableIndex.groups.filter((group) => normalizeText(group.title) === normalized);
+  const normalized = normalizedNameKey(title);
+  return data.portableIndex.groups.filter((group) => normalizedNameKey(group.title) === normalized);
 }
 
 function makePortableGroup(data: PluginData, title: string): PortableGroupDefinition {
   let id = makeId("group");
   const existingIds = new Set(data.portableIndex.groups.map((group) => group.id));
   while (existingIds.has(id)) id = makeId("group");
-  const order = data.indexGroupOrder.findIndex((group) => normalizeText(group) === normalizeText(title));
+  const order = data.indexGroupOrder.findIndex((group) => normalizedNameKey(group) === normalizedNameKey(title));
   const group = {
     id,
     title,
@@ -583,10 +614,7 @@ export function synchronizePortableRegistry(data: PluginData, records: VaultReco
     ...data.pinnedPaths,
     ...data.nextStudyPaths,
   ]);
-  for (const heading of data.collections) {
-    heading.subjects.forEach((path) => requiredPaths.add(path));
-    heading.subheadings.forEach((subheading) => subheading.subjects.forEach((path) => requiredPaths.add(path)));
-  }
+  forEachLayoutNode(data.collections, (node) => node.subjects.forEach((path) => requiredPaths.add(path)));
 
   const subjectById = new Map(data.portableIndex.subjects.map((subject) => [subject.id, subject]));
   // Group ownership must be claimed from the pre-scan catalog state. Clearing
@@ -610,14 +638,14 @@ export function synchronizePortableRegistry(data: PluginData, records: VaultReco
   const unclaimedGroupsByTitle = new Map<string, PortableGroupDefinition[]>();
   for (const group of data.portableIndex.groups) {
     groupById.set(group.id, group);
-    const key = normalizeText(group.title);
+    const key = normalizedNameKey(group.title);
     const candidates = unclaimedGroupsByTitle.get(key) ?? [];
     candidates.push(group);
     unclaimedGroupsByTitle.set(key, candidates);
   }
   const groupScopeById = new Map<string, PortableCatalogScope>();
   const groupByScopeAndTitle = new Map<string, PortableGroupDefinition>();
-  const scopedGroupKey = (scope: PortableCatalogScope, title: string): string => `${scope}\0${normalizeText(title)}`;
+  const scopedGroupKey = (scope: PortableCatalogScope, title: string): string => `${scope}\0${normalizedNameKey(title)}`;
   const claimGroup = (scope: PortableCatalogScope, group: PortableGroupDefinition): boolean => {
     const claimedScope = groupScopeById.get(group.id);
     if (claimedScope && claimedScope !== scope) return false;
@@ -640,7 +668,7 @@ export function synchronizePortableRegistry(data: PluginData, records: VaultReco
     const key = scopedGroupKey(scope, cleanTitle);
     const existing = groupByScopeAndTitle.get(key);
     if (existing) return existing;
-    const unclaimed = unclaimedGroupsByTitle.get(normalizeText(cleanTitle));
+    const unclaimed = unclaimedGroupsByTitle.get(normalizedNameKey(cleanTitle));
     let reusable: PortableGroupDefinition | undefined;
     while (unclaimed && unclaimed.length > 0 && !reusable) {
       const candidate = unclaimed.shift();
@@ -770,25 +798,25 @@ export function synchronizePortableRegistry(data: PluginData, records: VaultReco
   // `indexGroupOrder`, which is commonly empty. Persist the rendered order
   // first, followed by deliberately-created empty headings and then any
   // internal groups retained only for non-index organization.
-  const renderedGroupKeys = new Set(tree.domains.map((domain) => normalizeText(domain.domain)));
+  const renderedGroupKeys = new Set(tree.domains.map((domain) => normalizedNameKey(domain.domain)));
   const remainingGroups = [...data.portableIndex.groups]
     .sort((a, b) => a.order - b.order || a.title.localeCompare(b.title));
   const effectiveGroupTitles: string[] = [];
   const effectiveGroupKeys = new Set<string>();
   const addEffectiveGroup = (title: string): void => {
-    const key = normalizeText(title);
+    const key = normalizedNameKey(title);
     if (!key || effectiveGroupKeys.has(key)) return;
     effectiveGroupKeys.add(key);
     effectiveGroupTitles.push(title);
   };
   tree.domains.forEach((domain) => addEffectiveGroup(domain.domain));
   data.indexGroupOrder
-    .filter((title) => !renderedGroupKeys.has(normalizeText(title)))
+    .filter((title) => !renderedGroupKeys.has(normalizedNameKey(title)))
     .forEach(addEffectiveGroup);
   remainingGroups.forEach((group) => addEffectiveGroup(group.title));
-  const orderByTitle = new Map(effectiveGroupTitles.map((title, order) => [normalizeText(title), order]));
+  const orderByTitle = new Map(effectiveGroupTitles.map((title, order) => [normalizedNameKey(title), order]));
   data.portableIndex.groups.forEach((group, fallback) => {
-    group.order = orderByTitle.get(normalizeText(group.title)) ?? (effectiveGroupTitles.length + fallback);
+    group.order = orderByTitle.get(normalizedNameKey(group.title)) ?? (effectiveGroupTitles.length + fallback);
   });
   data.portableIndex.groups.sort((a, b) => a.order - b.order || a.title.localeCompare(b.title));
 
@@ -818,9 +846,9 @@ export function synchronizePortableRegistry(data: PluginData, records: VaultReco
     .filter((subjectId) => survivingSubjectIds.has(subjectId)
       && Boolean(data.portableIndex.resolvedPathBySubjectId[subjectId]));
   const retainedGroupIds = new Set(data.portableIndex.subjects.map((subject) => subject.groupId));
-  const retainedEmptyGroupTitles = new Set(data.indexGroupOrder.map(normalizeText));
+  const retainedEmptyGroupTitles = new Set(data.indexGroupOrder.map(normalizedNameKey));
   data.portableIndex.groups = data.portableIndex.groups.filter((group) => retainedGroupIds.has(group.id)
-    || retainedEmptyGroupTitles.has(normalizeText(group.title)));
+    || retainedEmptyGroupTitles.has(normalizedNameKey(group.title)));
   reconcilePortableLibraryLayouts(data.portableIndex);
   return before !== JSON.stringify(data.portableIndex);
 }
@@ -869,6 +897,7 @@ export function createPortableExport(
   if (!portableSelectionHasAny(selection)) throw new Error("Choose at least one export component.");
   if (selectionNeedsSubjectCatalog(selection)) synchronizePortableRegistry(data, records);
   const libraryById = new Map(data.portableIndex.libraries.map((library) => [library.id, library]));
+  const workspaceConfig = selection.workspace ? createWorkspaceConfig(data, exportedAt) : undefined;
   for (const libraryId of selection.libraryIds) {
     let library = libraryById.get(libraryId);
     const builtin = BUILTIN_LIBRARY_DEFINITIONS.find((definition) => definition.id === libraryId);
@@ -885,10 +914,7 @@ export function createPortableExport(
     if (id) referencedIds.add(id);
   });
   if (selection.collections) {
-    for (const heading of data.collections) {
-      addPaths(heading.subjects);
-      heading.subheadings.forEach((subheading) => addPaths(subheading.subjects));
-    }
+    forEachLayoutNode(data.collections, (node) => addPaths(node.subjects));
   }
   if (selection.study) {
     addPaths(data.pinnedPaths);
@@ -940,10 +966,10 @@ export function createPortableExport(
   const groupById = new Map(groups.map((group) => [group.id, group]));
   const groupIdByTitle = new Map(indexGroupIds.map((groupId) => {
     const group = groupById.get(groupId);
-    return [normalizeText(group?.title ?? ""), groupId] as const;
+    return [normalizedNameKey(group?.title ?? ""), groupId] as const;
   }));
   const collapsedGroupIds = unique(data.collapsed.curriculumDomains
-    .map((title) => groupIdByTitle.get(normalizeText(title)) ?? "")
+    .map((title) => groupIdByTitle.get(normalizedNameKey(title)) ?? "")
     .filter((id) => selection.index && indexGroupIdSet.has(id)));
   const collapsedSubjectIds = selection.index ? unique(data.collapsed.curriculumNodes
     .map((path) => pathToId.get(path) ?? "")
@@ -954,8 +980,11 @@ export function createPortableExport(
     if (libraryId) dependencyLibraryIds.add(libraryId);
   }
   if (selection.workspace) {
-    const libraryId = libraryIdFromTab(data.settings.defaultTab);
-    if (libraryId) dependencyLibraryIds.add(libraryId);
+    const libraryId = libraryIdFromTab(workspaceConfig?.settings.defaultTab);
+    if (libraryId && libraryById.get(libraryId)?.archivedAt === null) dependencyLibraryIds.add(libraryId);
+    Object.keys(workspaceConfig?.settings.libraryNoteProfiles ?? {}).forEach((profileLibraryId) => {
+      if (libraryById.get(profileLibraryId)?.archivedAt === null) dependencyLibraryIds.add(profileLibraryId);
+    });
   }
   if (selection.savedViews) {
     for (const view of data.savedViews) {
@@ -971,7 +1000,7 @@ export function createPortableExport(
     .sort((left, right) => left.order - right.order || left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
   const needsIndexComponent = selectionNeedsSubjectCatalog(selection) || libraries.length > 0;
   const components: PortableExportV1["components"] = {};
-  if (selection.workspace) components.workspace = createWorkspaceConfig(data, exportedAt);
+  if (workspaceConfig) components.workspace = workspaceConfig;
   if (needsIndexComponent) {
     components.index = {
       version: PORTABLE_EXPORT_VERSION,
@@ -987,19 +1016,27 @@ export function createPortableExport(
     };
   }
   if (selection.collections) {
+    const portableSubjectIds = (paths: string[]): string[] => (
+      unique(paths.map((path) => pathToId.get(path) || "").filter((id) => includedIds.has(id)))
+    );
+    const portableSubheading = (subheading: LayoutSubheading): PortableCollectionSubheadingV1 => {
+      const children = childSubheadings(subheading);
+      return {
+        id: subheading.id,
+        title: subheading.title,
+        collapsed: subheading.collapsed,
+        subjectIds: portableSubjectIds(subheading.subjects),
+        ...(children.length > 0 ? { subheadings: children.map(portableSubheading) } : {}),
+      };
+    };
     components.collections = {
       version: 1,
       collections: data.collections.map((heading) => ({
         id: heading.id,
         title: heading.title,
         collapsed: heading.collapsed,
-        subjectIds: unique(heading.subjects.map((path) => pathToId.get(path) || "").filter((id) => includedIds.has(id))),
-        subheadings: heading.subheadings.map((subheading) => ({
-          id: subheading.id,
-          title: subheading.title,
-          collapsed: subheading.collapsed,
-          subjectIds: unique(subheading.subjects.map((path) => pathToId.get(path) || "").filter((id) => includedIds.has(id))),
-        })),
+        subjectIds: portableSubjectIds(heading.subjects),
+        subheadings: heading.subheadings.map(portableSubheading),
       })),
     };
   }
@@ -1044,7 +1081,7 @@ function legacyPortableLibraries(
 }
 
 function parsePortableLibraries(input: unknown): PortableLibraryDefinition[] {
-  if (!Array.isArray(input)) throw new Error("Portable version 4 subject catalogs are missing library definitions.");
+  if (!Array.isArray(input)) throw new Error("Portable version 4+ subject catalogs are missing library definitions.");
   if (input.length > MAX_LIBRARIES) throw new Error(`A portable package can contain at most ${MAX_LIBRARIES} libraries.`);
   const libraries: PortableLibraryDefinition[] = [];
   const ids = new Set<string>();
@@ -1096,7 +1133,7 @@ function parsePortableIndex(
     groupIds.add(id);
     groups.push({ id, title: safeTitle(group.title, `Group ${index + 1} title`), order: safeOrder(group.order, index) });
   }
-  let libraries = packageVersion === PORTABLE_EXPORT_VERSION ? parsePortableLibraries(value.libraries) : [];
+  let libraries = packageVersion >= LIBRARY_IDENTITY_PORTABLE_EXPORT_VERSION ? parsePortableLibraries(value.libraries) : [];
   const subjects: PortableSubjectDefinition[] = [];
   const subjectIds = new Set<string>();
   for (const [index, raw] of value.subjects.entries()) {
@@ -1108,7 +1145,7 @@ function parsePortableIndex(
     const rawParentId = subject.parentId === null || subject.parentId === undefined
       ? null
       : safeId(subject.parentId, `Subject ${id} parent ID`);
-    if (packageVersion === PORTABLE_EXPORT_VERSION && !isRecordKind(subject.recordKind)) {
+    if (packageVersion >= LIBRARY_IDENTITY_PORTABLE_EXPORT_VERSION && !isRecordKind(subject.recordKind)) {
       throw new Error(`Subject ${id} has an unsupported record kind.`);
     }
     if (subject.recordKind !== undefined && !isRecordKind(subject.recordKind)) {
@@ -1119,9 +1156,9 @@ function parsePortableIndex(
     if (configuredId.length > MAX_PORTABLE_TITLE_LENGTH) throw new Error(`Subject ${id} configured ID is too long.`);
     let libraryId: string | null;
     let indexed: boolean;
-    if (packageVersion === PORTABLE_EXPORT_VERSION) {
+    if (packageVersion >= LIBRARY_IDENTITY_PORTABLE_EXPORT_VERSION) {
       if (!Object.prototype.hasOwnProperty.call(subject, "libraryId")) {
-        throw new Error(`Subject ${id} must declare libraryId in portable version 4.`);
+        throw new Error(`Subject ${id} must declare libraryId in portable version ${packageVersion}.`);
       }
       if (subject.libraryId === null) libraryId = null;
       else {
@@ -1215,7 +1252,7 @@ function parsePortableIndex(
     }
     const rawSections = value.includedSections as Record<string, unknown>;
     if (typeof rawSections.index !== "boolean") throw new Error("Portable includedSections.index must be true or false.");
-    if (packageVersion === PORTABLE_EXPORT_VERSION) {
+    if (packageVersion >= LIBRARY_IDENTITY_PORTABLE_EXPORT_VERSION) {
       if (!Array.isArray(rawSections.libraryIds)) throw new Error("Portable includedSections.libraryIds must be a list.");
       if (rawSections.libraryIds.length > MAX_LIBRARIES) throw new Error("Portable includedSections.libraryIds has too many entries.");
       const libraryIds: string[] = [];
@@ -1258,7 +1295,7 @@ function parsePortableIndex(
     }
   }
   const selectedLibraryIds = includedSections?.libraryIds ?? [];
-  if (packageVersion !== PORTABLE_EXPORT_VERSION) {
+  if (packageVersion < LIBRARY_IDENTITY_PORTABLE_EXPORT_VERSION) {
     libraries = legacyPortableLibraries(
       subjects,
       selectedLibraryIds,
@@ -1272,13 +1309,13 @@ function parsePortableIndex(
       throw new Error(`Subject ${subject.id} references unknown library ${libraryId}.`);
     }
   }
-  if (packageVersion === PORTABLE_EXPORT_VERSION) {
+  if (packageVersion >= LIBRARY_IDENTITY_PORTABLE_EXPORT_VERSION) {
     for (const [groupId, scopes] of portableGroupScopes(subjects)) {
       if (scopes.size > 1) throw new Error(`Group ${groupId} is shared by more than one catalog scope.`);
     }
   }
   let libraryLayouts: LibraryLayouts;
-  if (packageVersion === PORTABLE_EXPORT_VERSION) {
+  if (packageVersion >= LIBRARY_IDENTITY_PORTABLE_EXPORT_VERSION) {
     libraryLayouts = parsePortableLibraryLayouts(
       value.libraryLayouts,
       subjects,
@@ -1365,6 +1402,10 @@ function parsePortableLibraryLayouts(
     }
   }
   let structureCount = 0;
+  const chargeStructure = (): void => {
+    structureCount += 1;
+    if (structureCount > MAX_PORTABLE_COLLECTIONS) throw new Error("Portable library layouts have too many headings and subheadings.");
+  };
   const parsed: LibraryLayouts = {};
   for (const libraryId of libraryIds) {
     const rawLayout = value[libraryId];
@@ -1372,49 +1413,76 @@ function parsePortableLibraryLayouts(
     if (rawLayout.length > MAX_PORTABLE_COLLECTIONS) throw new Error(`Portable ${libraryId} layout has too many headings.`);
     const structureIds = new Set<string>();
     const placed = new Set<string>();
-    parsed[libraryId] = rawLayout.map((rawHeading, headingIndex) => {
-      structureCount += 1;
-      if (structureCount > MAX_PORTABLE_COLLECTIONS) throw new Error("Portable library layouts have too many headings and subheadings.");
-      const heading = asUnknownRecord(rawHeading);
-      const id = safeId(heading.id, `${libraryId} heading ${headingIndex + 1} ID`);
+    const claimStructureId = (rawId: unknown, label: string): string => {
+      const id = safeId(rawId, label);
       if (structureIds.has(id)) throw new Error(`Duplicate ${libraryId} layout ID: ${id}`);
       structureIds.add(id);
-      if (!Array.isArray(heading.subheadings)) throw new Error(`${libraryId} heading ${id} subheadings must be a list.`);
-      const directSubjects = parseSubjectIds(heading.subjects, knownSubjects, `${libraryId} heading ${id} subjects`, budget)
-        .filter((subjectId) => {
-          if (libraryBySubjectId.get(subjectId) !== libraryId) {
-            throw new Error(`${libraryId} heading ${id} references a subject from another library.`);
-          }
-          if (placed.has(subjectId)) throw new Error(`${libraryId} subject ${subjectId} appears more than once in its library layout.`);
-          placed.add(subjectId);
-          return true;
-        });
-      const subheadings = heading.subheadings.map((rawSubheading, subheadingIndex) => {
-        structureCount += 1;
-        if (structureCount > MAX_PORTABLE_COLLECTIONS) throw new Error("Portable library layouts have too many headings and subheadings.");
+      return id;
+    };
+    const parseNodeSubjects = (rawSubjects: unknown, label: string): string[] => (
+      parseSubjectIds(rawSubjects, knownSubjects, `${label} subjects`, budget).filter((subjectId) => {
+        if (libraryBySubjectId.get(subjectId) !== libraryId) {
+          throw new Error(`${label} references a subject from another library.`);
+        }
+        if (placed.has(subjectId)) throw new Error(`${libraryId} subject ${subjectId} appears more than once in its library layout.`);
+        placed.add(subjectId);
+        return true;
+      })
+    );
+    /**
+     * Depth-capped content is merged upward instead of lost, mirroring the
+     * canonical cleaner: every node past MAX_LAYOUT_DEPTH contributes its
+     * subjects, in document order, to the nearest allowed ancestor. Budget
+     * and identity rules still apply to every visited node.
+     */
+    const parseNestedSubheadings = (
+      input: unknown,
+      depth: number,
+      parentLabel: string,
+      parentSubjects: string[],
+    ): LayoutSubheading[] => {
+      if (input === undefined) return [];
+      if (!Array.isArray(input)) throw new Error(`${parentLabel} subheadings must be a list.`);
+      if (depth > MAX_PORTABLE_DEPTH) throw new Error(`Portable library subheadings exceed ${MAX_PORTABLE_DEPTH} levels.`);
+      if (depth > MAX_LAYOUT_DEPTH) {
+        for (const [index, rawSubheading] of input.entries()) {
+          chargeStructure();
+          const subheading = asUnknownRecord(rawSubheading);
+          const subheadingId = claimStructureId(subheading.id, `${parentLabel} subheading ${index + 1} ID`);
+          safeTitle(subheading.title, `${libraryId} subheading ${subheadingId} title`);
+          // The global `placed` set already deduplicates merged subjects.
+          parentSubjects.push(...parseNodeSubjects(subheading.subjects, `${libraryId} subheading ${subheadingId}`));
+          parseNestedSubheadings(subheading.subheadings, depth + 1, `${libraryId} subheading ${subheadingId}`, parentSubjects);
+        }
+        return [];
+      }
+      return input.map((rawSubheading, index) => {
+        chargeStructure();
         const subheading = asUnknownRecord(rawSubheading);
-        const subheadingId = safeId(subheading.id, `${libraryId} heading ${id} subheading ${subheadingIndex + 1} ID`);
-        if (structureIds.has(subheadingId)) throw new Error(`Duplicate ${libraryId} layout ID: ${subheadingId}`);
-        structureIds.add(subheadingId);
+        const subheadingId = claimStructureId(subheading.id, `${parentLabel} subheading ${index + 1} ID`);
+        const subjects = parseNodeSubjects(subheading.subjects, `${libraryId} subheading ${subheadingId}`);
+        const nested = parseNestedSubheadings(
+          subheading.subheadings,
+          depth + 1,
+          `${libraryId} subheading ${subheadingId}`,
+          subjects,
+        );
         return {
           id: subheadingId,
           title: safeTitle(subheading.title, `${libraryId} subheading ${subheadingId} title`),
           collapsed: subheading.collapsed === true,
-          subjects: parseSubjectIds(
-            subheading.subjects,
-            knownSubjects,
-            `${libraryId} subheading ${subheadingId} subjects`,
-            budget,
-          ).filter((subjectId) => {
-            if (libraryBySubjectId.get(subjectId) !== libraryId) {
-              throw new Error(`${libraryId} subheading ${subheadingId} references a subject from another library.`);
-            }
-            if (placed.has(subjectId)) throw new Error(`${libraryId} subject ${subjectId} appears more than once in its library layout.`);
-            placed.add(subjectId);
-            return true;
-          }),
+          subjects,
+          ...(nested.length > 0 ? { subheadings: nested } : {}),
         };
       });
+    };
+    parsed[libraryId] = rawLayout.map((rawHeading, headingIndex) => {
+      chargeStructure();
+      const heading = asUnknownRecord(rawHeading);
+      const id = claimStructureId(heading.id, `${libraryId} heading ${headingIndex + 1} ID`);
+      if (!Array.isArray(heading.subheadings)) throw new Error(`${libraryId} heading ${id} subheadings must be a list.`);
+      const directSubjects = parseNodeSubjects(heading.subjects, `${libraryId} heading ${id}`);
+      const subheadings = parseNestedSubheadings(heading.subheadings, 2, `${libraryId} heading ${id}`, directSubjects);
       return {
         id,
         title: safeTitle(heading.title, `${libraryId} heading ${id} title`),
@@ -1432,34 +1500,75 @@ function parsePortableCollections(input: unknown, known: Set<string>, budget: Po
   if (value.version !== 1 || !Array.isArray(value.collections) || value.collections.length > MAX_PORTABLE_COLLECTIONS) {
     throw new Error("Unsupported portable collections component.");
   }
-  const ids = new Set<string>();
+  const structureIds = new Set<string>();
   let subheadingCount = 0;
+  const claimStructureId = (rawId: unknown, label: string): string => {
+    const id = safeId(rawId, label);
+    if (structureIds.has(id)) throw new Error(`Duplicate collection or subheading ID: ${id}`);
+    structureIds.add(id);
+    return id;
+  };
+  /**
+   * Depth-capped content is merged upward instead of lost, mirroring the
+   * canonical cleaner: every node past MAX_LAYOUT_DEPTH contributes its
+   * subjects, deduplicated and in document order, to the nearest allowed
+   * ancestor. Budget and identity rules still apply to every visited node.
+   * One `seen` set, seeded from the depth-cap ancestor's subjects, is threaded
+   * through the whole too-deep subtree of a merge target, so merging stays
+   * linear instead of rebuilding the set once per too-deep node.
+   */
+  const parseSubheadings = (
+    input: unknown,
+    depth: number,
+    parentLabel: string,
+    parentSubjectIds: string[],
+    mergedSeen?: Set<string>,
+  ): PortableCollectionSubheadingV1[] => {
+    if (input === undefined) return [];
+    if (!Array.isArray(input)) throw new Error(`${parentLabel} subheadings must be a list.`);
+    if (depth > MAX_PORTABLE_DEPTH) throw new Error(`Portable collection subheadings exceed ${MAX_PORTABLE_DEPTH} levels.`);
+    subheadingCount += input.length;
+    if (subheadingCount > MAX_PORTABLE_COLLECTIONS) throw new Error("The portable collections component has too many subheadings.");
+    if (depth > MAX_LAYOUT_DEPTH) {
+      const seen = mergedSeen ?? new Set(parentSubjectIds);
+      for (const [index, rawSub] of input.entries()) {
+        const subheading = asUnknownRecord(rawSub);
+        const subId = claimStructureId(subheading.id, `${parentLabel} subheading ${index + 1} ID`);
+        safeTitle(subheading.title, `${parentLabel} subheading ${index + 1} title`);
+        for (const subjectId of parseSubjectIds(subheading.subjectIds, known, `Subheading ${subId} subjects`, budget)) {
+          if (seen.has(subjectId)) continue;
+          seen.add(subjectId);
+          parentSubjectIds.push(subjectId);
+        }
+        parseSubheadings(subheading.subheadings, depth + 1, `Subheading ${subId}`, parentSubjectIds, seen);
+      }
+      return [];
+    }
+    return input.map((rawSub, subIndex) => {
+      const subheading = asUnknownRecord(rawSub);
+      const subId = claimStructureId(subheading.id, `${parentLabel} subheading ${subIndex + 1} ID`);
+      const subjectIds = parseSubjectIds(subheading.subjectIds, known, `Subheading ${subId} subjects`, budget);
+      const nested = parseSubheadings(subheading.subheadings, depth + 1, `Subheading ${subId}`, subjectIds);
+      return {
+        id: subId,
+        title: safeTitle(subheading.title, `${parentLabel} subheading ${subIndex + 1} title`),
+        collapsed: subheading.collapsed === true,
+        subjectIds,
+        ...(nested.length > 0 ? { subheadings: nested } : {}),
+      };
+    });
+  };
   const collections: PortableCollectionV1[] = value.collections.map((raw, collectionIndex) => {
     const collection = asUnknownRecord(raw);
-    const id = safeId(collection.id, `Collection ${collectionIndex + 1} ID`);
-    if (ids.has(id)) throw new Error(`Duplicate collection ID: ${id}`);
-    ids.add(id);
+    const id = claimStructureId(collection.id, `Collection ${collectionIndex + 1} ID`);
     if (!Array.isArray(collection.subheadings)) throw new Error(`Collection ${id} subheadings must be a list.`);
-    subheadingCount += collection.subheadings.length;
-    if (subheadingCount > MAX_PORTABLE_COLLECTIONS) throw new Error("The portable collections component has too many subheadings.");
-    const subIds = new Set<string>();
+    const subjectIds = parseSubjectIds(collection.subjectIds, known, `Collection ${id} subjects`, budget);
     return {
       id,
       title: safeTitle(collection.title, `Collection ${collectionIndex + 1} title`),
       collapsed: collection.collapsed === true,
-      subjectIds: parseSubjectIds(collection.subjectIds, known, `Collection ${id} subjects`, budget),
-      subheadings: collection.subheadings.map((rawSub, subIndex) => {
-        const subheading = asUnknownRecord(rawSub);
-        const subId = safeId(subheading.id, `Collection ${id} subheading ${subIndex + 1} ID`);
-        if (subIds.has(subId)) throw new Error(`Duplicate subheading ID: ${subId}`);
-        subIds.add(subId);
-        return {
-          id: subId,
-          title: safeTitle(subheading.title, `Collection ${id} subheading ${subIndex + 1} title`),
-          collapsed: subheading.collapsed === true,
-          subjectIds: parseSubjectIds(subheading.subjectIds, known, `Subheading ${subId} subjects`, budget),
-        };
-      }),
+      subjectIds,
+      subheadings: parseSubheadings(collection.subheadings, 2, `Collection ${id}`, subjectIds),
     };
   });
   return { version: 1, collections };
@@ -1474,7 +1583,7 @@ function parseSavedViews(input: unknown, packageVersion: PortableExportVersion):
     const id = safeId(view.id, `Saved view ${index + 1} ID`);
     if (ids.has(id)) throw new Error(`Duplicate saved view ID: ${id}`);
     ids.add(id);
-    const legacyLibraryId = packageVersion < PORTABLE_EXPORT_VERSION
+    const legacyLibraryId = packageVersion < LIBRARY_IDENTITY_PORTABLE_EXPORT_VERSION
       ? view.tab === "procedures" ? BUILTIN_LIBRARY_IDS.procedure
         : view.tab === "medications" ? BUILTIN_LIBRARY_IDS.medication
           : view.tab === "syndromes" ? BUILTIN_LIBRARY_IDS.syndrome
@@ -1496,6 +1605,7 @@ export function parsePortableExport(input: unknown): PortableExportV1 {
     || (value.version !== LEGACY_PORTABLE_EXPORT_VERSION
       && value.version !== CATALOG_PORTABLE_EXPORT_VERSION
       && value.version !== LIBRARY_LAYOUT_PORTABLE_EXPORT_VERSION
+      && value.version !== LIBRARY_IDENTITY_PORTABLE_EXPORT_VERSION
       && value.version !== PORTABLE_EXPORT_VERSION)) {
     throw new Error("Unsupported Command Center portable export.");
   }
@@ -1526,8 +1636,7 @@ export function parsePortableExport(input: unknown): PortableExportV1 {
     if (!sections) throw new Error(`Portable version ${packageVersion} subject catalogs are missing includedSections.`);
     const referenced = new Set<string>();
     for (const collection of components.collections?.collections ?? []) {
-      collection.subjectIds.forEach((id) => referenced.add(id));
-      collection.subheadings.forEach((subheading) => subheading.subjectIds.forEach((id) => referenced.add(id)));
+      forEachPortableCollectionNode(collection, (node) => node.subjectIds.forEach((id) => referenced.add(id)));
     }
     components.study?.pinnedSubjectIds.forEach((id) => referenced.add(id));
     components.study?.nextSubjectIds.forEach((id) => referenced.add(id));
@@ -1542,11 +1651,14 @@ export function parsePortableExport(input: unknown): PortableExportV1 {
       }
     }
   }
-  if (packageVersion === PORTABLE_EXPORT_VERSION) {
+  if (packageVersion >= LIBRARY_IDENTITY_PORTABLE_EXPORT_VERSION) {
     const knownLibraries = new Set(components.index?.libraries?.map((library) => library.id) ?? []);
     const referencedLibraryIds = new Set<string>();
     const defaultLibraryId = components.workspace ? libraryIdFromTab(components.workspace.settings.defaultTab) : null;
     if (defaultLibraryId) referencedLibraryIds.add(defaultLibraryId);
+    Object.keys(components.workspace?.settings.libraryNoteProfiles ?? {}).forEach((libraryId) => {
+      referencedLibraryIds.add(libraryId);
+    });
     for (const view of components.savedViews?.views ?? []) {
       const libraryId = libraryIdFromTab(view.tab);
       if (libraryId) referencedLibraryIds.add(libraryId);
@@ -1622,7 +1734,7 @@ export function summarizePortableExport(
       id,
       name: libraryDefinitions.get(id)?.name ?? id,
       subjects: index?.subjects.filter((subject) => subjectLibraryId(subject) === id).length ?? 0,
-      headings: layout.reduce((count, heading) => count + 1 + heading.subheadings.length, 0),
+      headings: countLayoutStructures(layout),
     };
   });
   return {
@@ -1649,68 +1761,319 @@ function mergeOrdered(existing: string[], incoming: string[]): string[] {
 
 function translateLibraryLayout(layout: LayoutHeading[], subjectIdMap: Map<string, string>): LayoutHeading[] {
   const translate = (ids: string[]): string[] => unique(ids.map((id) => subjectIdMap.get(id) || id));
+  const translateSubheading = (subheading: LayoutSubheading): LayoutSubheading => {
+    const translated: LayoutSubheading = { ...subheading, subjects: translate(subheading.subjects) };
+    if (subheading.subheadings) translated.subheadings = subheading.subheadings.map(translateSubheading);
+    return translated;
+  };
   return layout.map((heading) => ({
     ...heading,
     subjects: translate(heading.subjects),
-    subheadings: heading.subheadings.map((subheading) => ({
-      ...subheading,
-      subjects: translate(subheading.subjects),
-    })),
+    subheadings: heading.subheadings.map(translateSubheading),
   }));
 }
 
-function mergeLibraryLayout(existing: LayoutHeading[], incoming: LayoutHeading[]): LayoutHeading[] {
-  const incomingSubjectIds = new Set<string>();
-  for (const heading of incoming) {
-    heading.subjects.forEach((id) => incomingSubjectIds.add(id));
-    heading.subheadings.forEach((subheading) => subheading.subjects.forEach((id) => incomingSubjectIds.add(id)));
+/**
+ * A destination layout node addressed by identity. Cleaned layouts guarantee
+ * globally unique node IDs, so the resolved parent ID pins the node's full
+ * ancestor path: two nodes share a parent ID exactly when they share every
+ * ancestor. Top-level headings carry a null parent.
+ */
+interface CollectionStructureOwner {
+  parentId: string | null;
+  node: LayoutHeading | LayoutSubheading;
+}
+
+function mergeCollectionsLayout(existing: LayoutHeading[], incoming: LayoutHeading[]): LayoutHeading[] {
+  const merged = cloneCollections(existing);
+  const owners = new Map<string, CollectionStructureOwner>();
+  const availableHeadingIdsByTitle = new Map<string, Set<string>>();
+  const registerOwners = (nodes: readonly (LayoutHeading | LayoutSubheading)[], parentId: string | null): void => {
+    for (const node of nodes) {
+      owners.set(node.id, { parentId, node });
+      registerOwners(childSubheadings(node), node.id);
+    }
+  };
+  registerOwners(merged, null);
+  for (const heading of merged) {
+    const headingTitle = normalizedNameKey(heading.title);
+    const headingIds = availableHeadingIdsByTitle.get(headingTitle) ?? new Set<string>();
+    headingIds.add(heading.id);
+    availableHeadingIdsByTitle.set(headingTitle, headingIds);
   }
+  const reservedIncomingIds = new Set<string>();
+  forEachLayoutNode(incoming, (node) => reservedIncomingIds.add(node.id));
+  const claimedIds = new Set<string>();
+  const claimId = (id: string): void => {
+    if (claimedIds.has(id)) return;
+    claimedIds.add(id);
+    const owner = owners.get(id);
+    if (!owner) return;
+    if (owner.parentId === null) {
+      availableHeadingIdsByTitle.get(normalizedNameKey(owner.node.title))?.delete(id);
+    }
+  };
+  // Compatibility is the same normalized title under the same resolved parent
+  // node and therefore, through globally unique layout IDs, under the same
+  // full ancestor path.
+  const compatibleNode = (owner: CollectionStructureOwner, title: string, parentId: string | null): boolean => (
+    owner.parentId === parentId && normalizedNameKey(owner.node.title) === normalizedNameKey(title)
+  );
+  const deterministicFork = (
+    seed: string,
+    compatible: (owner: CollectionStructureOwner) => boolean,
+  ): { owner?: CollectionStructureOwner; id?: string } => {
+    const base = `collection-import-${fingerprintText(seed)}`;
+    for (let attempt = 1; ; attempt += 1) {
+      const id = attempt === 1 ? base : `${base}-${attempt}`;
+      // A generated fork must not consume (or weakly match through) the stable
+      // ID of another incoming node that has not been processed yet.
+      if (reservedIncomingIds.has(id)) continue;
+      const owner = owners.get(id);
+      if (owner) {
+        if (!claimedIds.has(id) && compatible(owner)) return { owner };
+        continue;
+      }
+      return { id };
+    }
+  };
+  /**
+   * Fork seeds are keyed by the node's full incoming ancestor path. For nodes
+   * at depth one and two the seeds are byte-identical to the historical flat
+   * seeds, so identities forked by earlier builds remain stable on reimport.
+   */
+  const forkSeed = (incomingAncestorIds: readonly string[], node: LayoutHeading | LayoutSubheading): string => (
+    incomingAncestorIds.length === 0
+      ? `heading\u0000${node.id}\u0000${normalizedNameKey(node.title)}`
+      : `subheading\u0000${incomingAncestorIds.join("\u0000")}\u0000${node.id}\u0000${normalizedNameKey(node.title)}`
+  );
+
+  const mergeLevel = (
+    incomingNodes: readonly (LayoutHeading | LayoutSubheading)[],
+    incomingAncestorIds: readonly string[],
+    targetParent: LayoutHeading | LayoutSubheading | null,
+  ): void => {
+    const parentId = targetParent?.id ?? null;
+
+    // Reserve every safe exact match at this level before weaker matching.
+    // Otherwise an earlier same-title sibling can consume the destination node
+    // that a later incoming node addresses by its stable ID.
+    const exactTargets = new Map<string, LayoutHeading | LayoutSubheading>();
+    for (const node of incomingNodes) {
+      const owner = owners.get(node.id);
+      if (!owner || claimedIds.has(node.id) || !compatibleNode(owner, node.title, parentId)) continue;
+      exactTargets.set(node.id, owner.node);
+      claimId(node.id);
+    }
+
+    const forkTargets = new Map<string, LayoutHeading | LayoutSubheading>();
+    for (const node of incomingNodes) {
+      if (exactTargets.has(node.id)) continue;
+      const fork = deterministicFork(
+        forkSeed(incomingAncestorIds, node),
+        (owner) => compatibleNode(owner, node.title, parentId),
+      );
+      if (!fork.owner) continue;
+      forkTargets.set(node.id, fork.owner.node);
+      claimId(fork.owner.node.id);
+    }
+
+    for (const incomingNode of incomingNodes) {
+      let target = exactTargets.get(incomingNode.id) ?? forkTargets.get(incomingNode.id);
+      let fork: { owner?: CollectionStructureOwner; id?: string } | undefined;
+      if (!target) {
+        fork = deterministicFork(
+          forkSeed(incomingAncestorIds, incomingNode),
+          (owner) => compatibleNode(owner, incomingNode.title, parentId),
+        );
+        if (fork.owner) target = fork.owner.node;
+      }
+      if (!target && parentId === null) {
+        // Weak title matching remains a top-level-only fallback to exactly one
+        // unambiguous unclaimed pre-existing destination heading.
+        const candidateIds = availableHeadingIdsByTitle.get(normalizedNameKey(incomingNode.title));
+        if (candidateIds?.size === 1) {
+          const candidateId = candidateIds.values().next().value as string;
+          const owner = owners.get(candidateId);
+          if (owner && owner.parentId === null) target = owner.node;
+        }
+      }
+      if (!target) {
+        const preferredIsFree = !owners.has(incomingNode.id);
+        const id = preferredIsFree
+          ? incomingNode.id
+          : fork?.id ?? deterministicFork(
+            forkSeed(incomingAncestorIds, incomingNode),
+            (owner) => compatibleNode(owner, incomingNode.title, parentId),
+          ).id;
+        if (!id) {
+          throw new Error(`A portable collection ${parentId === null ? "heading" : "subheading"} identity could not be allocated safely.`);
+        }
+        if (targetParent === null) {
+          const created: LayoutHeading = {
+            id,
+            title: incomingNode.title,
+            collapsed: incomingNode.collapsed,
+            subjects: [],
+            subheadings: [],
+          };
+          merged.push(created);
+          target = created;
+        } else {
+          // Nested targets stay canonical: the parent's child key materializes
+          // only once an actual child node is appended.
+          const created: LayoutSubheading = {
+            id,
+            title: incomingNode.title,
+            collapsed: incomingNode.collapsed,
+            subjects: [],
+          };
+          (targetParent.subheadings ??= []).push(created);
+          target = created;
+        }
+        owners.set(id, { parentId, node: target });
+      }
+      claimId(target.id);
+      target.title = incomingNode.title;
+      target.subjects = unique([...target.subjects, ...incomingNode.subjects]);
+      mergeLevel(childSubheadings(incomingNode), [...incomingAncestorIds, incomingNode.id], target);
+    }
+  };
+  mergeLevel(incoming, [], null);
+  return merged;
+}
+
+function mergeLibraryLayout(existing: LayoutHeading[], incoming: LayoutHeading[], libraryId: string): LayoutHeading[] {
+  const incomingSubjectIds = new Set<string>();
+  forEachLayoutNode(incoming, (node) => node.subjects.forEach((id) => incomingSubjectIds.add(id)));
+  const withoutIncomingSubjects = (subheading: LayoutSubheading): LayoutSubheading => {
+    const stripped: LayoutSubheading = {
+      ...subheading,
+      subjects: subheading.subjects.filter((id) => !incomingSubjectIds.has(id)),
+    };
+    if (subheading.subheadings) stripped.subheadings = subheading.subheadings.map(withoutIncomingSubjects);
+    return stripped;
+  };
   const merged = cloneCollections(existing).map((heading) => ({
     ...heading,
     subjects: heading.subjects.filter((id) => !incomingSubjectIds.has(id)),
-    subheadings: heading.subheadings.map((subheading) => ({
-      ...subheading,
-      subjects: subheading.subjects.filter((id) => !incomingSubjectIds.has(id)),
-    })),
+    subheadings: heading.subheadings.map(withoutIncomingSubjects),
   }));
   const usedStructureIds = new Set<string>();
-  for (const heading of merged) {
-    usedStructureIds.add(heading.id);
-    for (const subheading of heading.subheadings) usedStructureIds.add(subheading.id);
-  }
-  const allocateStructureId = (preferredId: string, prefix: string): string => {
-    let id = preferredId;
-    if (usedStructureIds.has(id)) {
-      id = makeId(prefix);
-      while (usedStructureIds.has(id)) id = makeId(prefix);
+  forEachLayoutNode(merged, (node) => usedStructureIds.add(node.id));
+  const reservedIncomingIds = new Set<string>();
+  forEachLayoutNode(incoming, (node) => reservedIncomingIds.add(node.id));
+  /**
+   * Reminted identities mirror the deterministic collection fork scheme:
+   * layout node IDs are semantic state, so two devices importing the same
+   * package must allocate identical forks or their otherwise-identical
+   * stores would diverge into a spurious sync conflict. The seed is the
+   * node's full incoming ancestor path under a library discriminator, and a
+   * generated fork must not consume the stable ID of another incoming node.
+   */
+  const allocateStructureId = (
+    incomingAncestorIds: readonly string[],
+    node: LayoutHeading | LayoutSubheading,
+  ): string => {
+    if (!usedStructureIds.has(node.id)) {
+      usedStructureIds.add(node.id);
+      return node.id;
     }
-    usedStructureIds.add(id);
-    return id;
+    const seed = incomingAncestorIds.length === 0
+      ? `library-heading\u0000${libraryId}\u0000${node.id}\u0000${normalizedNameKey(node.title)}`
+      : `library-subheading\u0000${libraryId}\u0000${incomingAncestorIds.join("\u0000")}\u0000${node.id}\u0000${normalizedNameKey(node.title)}`;
+    const base = `library-import-${fingerprintText(seed)}`;
+    for (let attempt = 1; ; attempt += 1) {
+      const id = attempt === 1 ? base : `${base}-${attempt}`;
+      if (usedStructureIds.has(id) || reservedIncomingIds.has(id)) continue;
+      usedStructureIds.add(id);
+      return id;
+    }
+  };
+  // Stable IDs distinguish intentionally repeated labels. A title fallback is
+  // only a best-effort match to one pre-existing destination node under the
+  // same resolved ancestor path; it must never consume a node created (or
+  // already claimed) by another incoming sibling, otherwise two valid
+  // same-title nodes collapse into one.
+  const mergeChildren = (
+    incomingChildren: readonly LayoutSubheading[],
+    incomingAncestorIds: readonly string[],
+    targetParent: LayoutHeading | LayoutSubheading,
+  ): void => {
+    if (incomingChildren.length === 0) return;
+    const children = (targetParent.subheadings ??= []);
+    const byId = new Map(children.map((child) => [child.id, child]));
+    const byTitle = new Map<string, LayoutSubheading[]>();
+    for (const child of children) {
+      const candidates = byTitle.get(normalizedNameKey(child.title)) ?? [];
+      candidates.push(child);
+      byTitle.set(normalizedNameKey(child.title), candidates);
+    }
+    const claimedIds = new Set<string>();
+    // Reserve every exact stable-ID match at this level before weaker title
+    // matching, mirroring the collections merge: otherwise an earlier
+    // same-title sibling's title fallback consumes the destination node that
+    // a later incoming sibling addresses by its stable ID.
+    const exactTargets = new Map<string, LayoutSubheading>();
+    for (const incomingChild of incomingChildren) {
+      const candidate = byId.get(incomingChild.id);
+      if (!candidate || claimedIds.has(candidate.id)
+        || normalizedNameKey(candidate.title) !== normalizedNameKey(incomingChild.title)) continue;
+      exactTargets.set(incomingChild.id, candidate);
+      claimedIds.add(candidate.id);
+    }
+    for (const incomingChild of incomingChildren) {
+      let target = exactTargets.get(incomingChild.id);
+      if (!target) {
+        const candidates = (byTitle.get(normalizedNameKey(incomingChild.title)) ?? [])
+          .filter((candidate) => !claimedIds.has(candidate.id));
+        if (candidates.length === 1) target = candidates[0];
+      }
+      if (!target) {
+        const created: LayoutSubheading = {
+          id: allocateStructureId(incomingAncestorIds, incomingChild),
+          title: incomingChild.title,
+          collapsed: incomingChild.collapsed,
+          subjects: [],
+        };
+        children.push(created);
+        byId.set(created.id, created);
+        target = created;
+      }
+      claimedIds.add(target.id);
+      target.title = incomingChild.title;
+      target.subjects = unique([...target.subjects, ...incomingChild.subjects]);
+      mergeChildren(childSubheadings(incomingChild), [...incomingAncestorIds, incomingChild.id], target);
+    }
   };
   const byId = new Map(merged.map((heading) => [heading.id, heading]));
   const titleCandidates = new Map<string, LayoutHeading[]>();
   for (const heading of merged) {
-    const candidates = titleCandidates.get(normalizeText(heading.title)) ?? [];
+    const candidates = titleCandidates.get(normalizedNameKey(heading.title)) ?? [];
     candidates.push(heading);
-    titleCandidates.set(normalizeText(heading.title), candidates);
+    titleCandidates.set(normalizedNameKey(heading.title), candidates);
   }
-  // Stable IDs distinguish intentionally repeated labels. A title fallback is
-  // only a best-effort match to one pre-existing destination heading; it must
-  // never consume a heading created (or already claimed) by another incoming
-  // sibling, otherwise two valid same-title headings collapse into one.
   const claimedHeadingIds = new Set<string>();
+  // The same reservation applies at the top level: exact stable-ID matches
+  // claim their destination headings before any title-based matching.
+  const exactHeadingTargets = new Map<string, LayoutHeading>();
   for (const incomingHeading of incoming) {
-    let target = byId.get(incomingHeading.id);
-    if (target && (claimedHeadingIds.has(target.id)
-      || normalizeText(target.title) !== normalizeText(incomingHeading.title))) target = undefined;
+    const candidate = byId.get(incomingHeading.id);
+    if (!candidate || claimedHeadingIds.has(candidate.id)
+      || normalizedNameKey(candidate.title) !== normalizedNameKey(incomingHeading.title)) continue;
+    exactHeadingTargets.set(incomingHeading.id, candidate);
+    claimedHeadingIds.add(candidate.id);
+  }
+  for (const incomingHeading of incoming) {
+    let target = exactHeadingTargets.get(incomingHeading.id);
     if (!target) {
-      const candidates = (titleCandidates.get(normalizeText(incomingHeading.title)) ?? [])
+      const candidates = (titleCandidates.get(normalizedNameKey(incomingHeading.title)) ?? [])
         .filter((candidate) => !claimedHeadingIds.has(candidate.id));
       if (candidates.length === 1) target = candidates[0];
     }
     if (!target) {
       target = {
-        id: allocateStructureId(incomingHeading.id, "library-heading"),
+        id: allocateStructureId([], incomingHeading),
         title: incomingHeading.title,
         collapsed: incomingHeading.collapsed,
         subjects: [],
@@ -1722,38 +2085,7 @@ function mergeLibraryLayout(existing: LayoutHeading[], incoming: LayoutHeading[]
     claimedHeadingIds.add(target.id);
     target.title = incomingHeading.title;
     target.subjects = unique([...target.subjects, ...incomingHeading.subjects]);
-    const subheadingById = new Map(target.subheadings.map((subheading) => [subheading.id, subheading]));
-    const subheadingsByTitle = new Map<string, typeof target.subheadings>();
-    for (const subheading of target.subheadings) {
-      const candidates = subheadingsByTitle.get(normalizeText(subheading.title)) ?? [];
-      candidates.push(subheading);
-      subheadingsByTitle.set(normalizeText(subheading.title), candidates);
-    }
-    const claimedSubheadingIds = new Set<string>();
-    for (const incomingSubheading of incomingHeading.subheadings) {
-      let targetSubheading = subheadingById.get(incomingSubheading.id);
-      if (targetSubheading && (claimedSubheadingIds.has(targetSubheading.id)
-        || normalizeText(targetSubheading.title) !== normalizeText(incomingSubheading.title))) targetSubheading = undefined;
-      if (!targetSubheading) {
-        const candidates = (subheadingsByTitle.get(normalizeText(incomingSubheading.title)) ?? [])
-          .filter((candidate) => !claimedSubheadingIds.has(candidate.id));
-        if (candidates.length === 1) targetSubheading = candidates[0];
-      }
-      if (targetSubheading) {
-        claimedSubheadingIds.add(targetSubheading.id);
-        targetSubheading.title = incomingSubheading.title;
-        targetSubheading.subjects = unique([...targetSubheading.subjects, ...incomingSubheading.subjects]);
-      } else {
-        const created = {
-          ...incomingSubheading,
-          id: allocateStructureId(incomingSubheading.id, "library-subheading"),
-          subjects: [...incomingSubheading.subjects],
-        };
-        target.subheadings.push(created);
-        subheadingById.set(created.id, created);
-        claimedSubheadingIds.add(created.id);
-      }
-    }
+    mergeChildren(childSubheadings(incomingHeading), [incomingHeading.id], target);
   }
   return merged;
 }
@@ -1766,6 +2098,9 @@ function navigationLibraryIdsForSelection(
   if (selection.workspace && value.components.workspace) {
     const libraryId = libraryIdFromTab(value.components.workspace.settings.defaultTab);
     if (libraryId) libraryIds.add(libraryId);
+    Object.keys(value.components.workspace.settings.libraryNoteProfiles).forEach((profileLibraryId) => {
+      libraryIds.add(profileLibraryId);
+    });
   }
   if (selection.savedViews) {
     for (const view of value.components.savedViews?.views ?? []) {
@@ -1789,8 +2124,7 @@ function portableIndexForSelection(
   const referencedIds = new Set<string>();
   if (selection.collections) {
     for (const collection of value.components.collections?.collections ?? []) {
-      collection.subjectIds.forEach((id) => referencedIds.add(id));
-      collection.subheadings.forEach((subheading) => subheading.subjectIds.forEach((id) => referencedIds.add(id)));
+      forEachPortableCollectionNode(collection, (node) => node.subjectIds.forEach((id) => referencedIds.add(id)));
     }
   }
   if (selection.study) {
@@ -2037,6 +2371,10 @@ export function applyPortableExport(
     const destinationMode = data.settings.workspaceMode;
     const protectedPrimaryFolder = data.settings.primaryFolder;
     const incomingSettings = structuredClone(incomingWorkspace.settings);
+    incomingSettings.libraryNoteProfiles = cleanLibraryNoteProfiles(
+      incomingSettings.libraryNoteProfiles,
+      new Set(state.libraries.map((library) => library.id)),
+    );
     if (!navigationTabIsAvailable(incomingSettings.defaultTab)) incomingSettings.defaultTab = "curriculum";
     data.settings = {
       ...incomingSettings,
@@ -2104,10 +2442,7 @@ export function applyPortableExport(
       }
     };
     if (!selection.collections) {
-      for (const heading of data.collections) {
-        protectPaths(heading.subjects);
-        for (const subheading of heading.subheadings) protectPaths(subheading.subjects);
-      }
+      forEachLayoutNode(data.collections, (node) => protectPaths(node.subjects));
     }
     if (!selection.study) {
       protectPaths(data.pinnedPaths);
@@ -2118,7 +2453,7 @@ export function applyPortableExport(
     const groupById = new Map(localGroups.map((group) => [group.id, group]));
     const groupsByTitle = new Map<string, Set<string>>();
     for (const group of localGroups) {
-      const key = normalizeText(group.title);
+      const key = normalizedNameKey(group.title);
       const ids = groupsByTitle.get(key) ?? new Set<string>();
       ids.add(group.id);
       groupsByTitle.set(key, ids);
@@ -2126,7 +2461,7 @@ export function applyPortableExport(
     const claimedGroupIds = new Set<string>();
     const groupIdMap = new Map<string, string>();
     const addGroupTitleCandidate = (group: PortableGroupDefinition): void => {
-      const key = normalizeText(group.title);
+      const key = normalizedNameKey(group.title);
       const ids = groupsByTitle.get(key) ?? new Set<string>();
       ids.add(group.id);
       groupsByTitle.set(key, ids);
@@ -2136,7 +2471,7 @@ export function applyPortableExport(
       incomingGroupId: string,
     ): PortableGroupDefinition | undefined => {
       const expectedScopes = incomingGroupScopes.get(incomingGroupId);
-      const candidates = [...(groupsByTitle.get(normalizeText(title)) ?? [])]
+      const candidates = [...(groupsByTitle.get(normalizedNameKey(title)) ?? [])]
         .filter((id) => !claimedGroupIds.has(id)
           && groupScopesEqual(localGroupScopes.get(id), expectedScopes));
       return candidates.length === 1 ? groupById.get(candidates[0] ?? "") : undefined;
@@ -2154,7 +2489,7 @@ export function applyPortableExport(
       let local = groupById.get(incoming.id);
       if (local
         && groupsUsedByUnselectedSections.has(local.id)
-        && (normalizeText(local.title) !== normalizeText(incoming.title)
+        && (normalizedNameKey(local.title) !== normalizedNameKey(incoming.title)
           || !groupScopesEqual(localGroupScopes.get(local.id), incomingGroupScopes.get(incoming.id)))) {
         // A selective import must not rename a group still owned by an
         // unselected catalog or make two independent catalogs share one group.
@@ -2168,10 +2503,10 @@ export function applyPortableExport(
       if (!local) {
         local = createMappedGroup(incoming, true);
       } else if (!groupsUsedByUnselectedSections.has(local.id)) {
-        const previousTitleKey = normalizeText(local.title);
+        const previousTitleKey = normalizedNameKey(local.title);
         local.title = incoming.title;
         local.order = incoming.order;
-        const nextTitleKey = normalizeText(local.title);
+        const nextTitleKey = normalizedNameKey(local.title);
         if (previousTitleKey !== nextTitleKey) {
           groupsByTitle.get(previousTitleKey)?.delete(local.id);
           addGroupTitleCandidate(local);
@@ -2187,14 +2522,14 @@ export function applyPortableExport(
     const titlePools = new Map<string, Set<string>>();
     const incomingSubjectIds = new Set(incomingIndex.subjects.map((subject) => subject.id));
     const configuredKey = (subject: PortableSubjectDefinition): string => [
-      normalizeText(subject.configuredId),
+      normalizedNameKey(subject.configuredId),
       portableCatalogScope(subject),
-      normalizeText(localGroupTitle(subject.groupId)),
+      normalizedNameKey(localGroupTitle(subject.groupId)),
     ].join("\0");
     const titleKey = (subject: PortableSubjectDefinition): string => [
-      normalizeText(subject.title),
+      normalizedNameKey(subject.title),
       portableCatalogScope(subject),
-      normalizeText(localGroupTitle(subject.groupId)),
+      normalizedNameKey(localGroupTitle(subject.groupId)),
     ].join("\0");
     const addToPool = (pool: Map<string, Set<string>>, key: string, id: string): void => {
       const ids = pool.get(key) ?? new Set<string>();
@@ -2316,7 +2651,7 @@ export function applyPortableExport(
       const translated = translateLibraryLayout(incomingLibraryLayouts[libraryId] ?? [], subjectIdMap);
       state.libraryLayouts[libraryId] = mode === "replace"
         ? translated
-        : mergeLibraryLayout(state.libraryLayouts[libraryId] ?? [], translated);
+        : mergeLibraryLayout(state.libraryLayouts[libraryId] ?? [], translated, libraryId);
     }
     reconcilePortableLibraryLayouts(state);
 
@@ -2425,58 +2760,26 @@ export function applyPortableExport(
 
   const translateIds = (ids: string[]): string[] => unique(ids.map((id) => subjectIdMap.get(id) || id).map((id) => portableSubjectPath(data, id)));
   if (selection.collections && value.components.collections) {
+    const toLayoutSubheading = (subheading: PortableCollectionSubheadingV1): LayoutSubheading => {
+      const children = subheading.subheadings ?? [];
+      return {
+        id: subheading.id,
+        title: subheading.title,
+        collapsed: subheading.collapsed,
+        subjects: translateIds(subheading.subjectIds),
+        ...(children.length > 0 ? { subheadings: children.map(toLayoutSubheading) } : {}),
+      };
+    };
     const incomingHeadings: LayoutHeading[] = value.components.collections.collections.map((collection) => ({
       id: collection.id,
       title: collection.title,
       collapsed: collection.collapsed,
       subjects: translateIds(collection.subjectIds),
-      subheadings: collection.subheadings.map((subheading) => ({
-        id: subheading.id,
-        title: subheading.title,
-        collapsed: subheading.collapsed,
-        subjects: translateIds(subheading.subjectIds),
-      })),
+      subheadings: collection.subheadings.map(toLayoutSubheading),
     }));
     result.importedCollections = incomingHeadings.length;
     if (mode === "replace") data.collections = incomingHeadings;
-    else {
-      const incomingCollectionIds = new Set(incomingHeadings.map((heading) => heading.id));
-      const collectionById = new Map(data.collections.map((heading) => [heading.id, heading]));
-      const collectionsByTitle = new Map<string, Set<string>>();
-      for (const heading of data.collections) {
-        if (incomingCollectionIds.has(heading.id)) continue;
-        const key = normalizeText(heading.title);
-        const ids = collectionsByTitle.get(key) ?? new Set<string>();
-        ids.add(heading.id);
-        collectionsByTitle.set(key, ids);
-      }
-      for (const incoming of incomingHeadings) {
-        let existing = collectionById.get(incoming.id);
-        if (!existing) {
-          const candidates = collectionsByTitle.get(normalizeText(incoming.title));
-          if (candidates?.size === 1) existing = collectionById.get(candidates.values().next().value as string);
-        }
-        if (!existing) {
-          data.collections.push(incoming);
-          collectionById.set(incoming.id, incoming);
-          continue;
-        }
-        collectionsByTitle.get(normalizeText(existing.title))?.delete(existing.id);
-        existing.title = incoming.title;
-        existing.subjects = unique([...existing.subjects, ...incoming.subjects]);
-        const subheadingById = new Map(existing.subheadings.map((subheading) => [subheading.id, subheading]));
-        for (const incomingSub of incoming.subheadings) {
-          const existingSub = subheadingById.get(incomingSub.id);
-          if (existingSub) {
-            existingSub.title = incomingSub.title;
-            existingSub.subjects = unique([...existingSub.subjects, ...incomingSub.subjects]);
-          } else {
-            existing.subheadings.push(incomingSub);
-            subheadingById.set(incomingSub.id, incomingSub);
-          }
-        }
-      }
-    }
+    else data.collections = mergeCollectionsLayout(data.collections, incomingHeadings);
   }
   if (selection.study && value.components.study) {
     const pinned = translateIds(value.components.study.pinnedSubjectIds);

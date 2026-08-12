@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 430" width="900" height="430" role="img" aria-label="Diagram: your vault files stay where they are while Knowledge Base Command Center keeps the structure in its own plugin data.">
+  <title>How Knowledge Base Command Center organizes a vault</title>
+  <desc>On the left, an unchanged vault folder of Markdown notes. An arrow labelled "reads paths and frontmatter" points right to the plugin, which holds an index, nested collections, libraries and queues in its own data. A caption states that files are never moved or rewritten.</desc>
+
+  <style>
+    .card { fill: #f6f8f7; }
+    .panel { fill: #ffffff; stroke: #dfe5e2; }
+    .rule { stroke: #dfe5e2; }
+    .h { font: 600 15px system-ui, -apple-system, "Segoe UI", sans-serif; fill: #1c2422; }
+    .txt { font: 13px system-ui, -apple-system, "Segoe UI", sans-serif; fill: #3c4a47; }
+    .dim { font: 12px system-ui, -apple-system, "Segoe UI", sans-serif; fill: #5b6663; }
+    .lbl { font: 600 11px system-ui, -apple-system, "Segoe UI", sans-serif; fill: #0f6b62; letter-spacing: .08em; }
+    .accent { fill: #0f6b62; }
+    .chip { fill: #eef2f0; stroke: #dfe5e2; }
+    .arrow { stroke: #0f6b62; fill: none; stroke-width: 2; }
+  </style>
+
+  <rect class="card" x="0" y="0" width="900" height="430" rx="14"/>
+
+  <!-- Left: the vault -->
+  <text class="lbl" x="40" y="46">YOUR VAULT</text>
+  <rect class="panel" x="40" y="60" width="300" height="300" rx="10" stroke-width="1"/>
+  <text class="h" x="60" y="90">Knowledge Base/</text>
+  <g class="txt">
+    <text x="76" y="118">Airway anatomy.md</text>
+    <text x="76" y="144">Stridor workup.md</text>
+    <text x="76" y="170">Vocal fold palsy.md</text>
+  </g>
+  <text class="h" x="60" y="204">Projects/</text>
+  <g class="txt">
+    <text x="76" y="232">Thesis outline.md</text>
+    <text x="76" y="258">Reading list.md</text>
+  </g>
+  <line class="rule" x1="60" y1="284" x2="320" y2="284" stroke-width="1"/>
+  <text class="dim" x="60" y="308">Names, folders and frontmatter</text>
+  <text class="dim" x="60" y="328">stay exactly as you wrote them.</text>
+
+  <!-- Arrow -->
+  <path class="arrow" d="M356 200 H 520" marker-end="url(#tip)"/>
+  <defs>
+    <marker id="tip" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#0f6b62"/>
+    </marker>
+  </defs>
+  <text class="dim" x="368" y="188">reads paths and</text>
+  <text class="dim" x="368" y="228">frontmatter only</text>
+
+  <!-- Right: the plugin -->
+  <text class="lbl" x="536" y="46">PLUGIN DATA</text>
+  <rect class="panel" x="536" y="60" width="324" height="300" rx="10" stroke-width="1"/>
+
+  <g>
+    <rect class="chip" x="556" y="82" width="76" height="24" rx="12" stroke-width="1"/>
+    <text class="dim" x="570" y="98">Index</text>
+    <rect class="chip" x="640" y="82" width="98" height="24" rx="12" stroke-width="1"/>
+    <text class="dim" x="654" y="98">Collections</text>
+    <rect class="chip" x="746" y="82" width="80" height="24" rx="12" stroke-width="1"/>
+    <text class="dim" x="760" y="98">Libraries</text>
+  </g>
+
+  <text class="h" x="556" y="140">Board review</text>
+  <g class="txt">
+    <text x="576" y="168">Airway</text>
+    <text x="596" y="194">Emergencies</text>
+    <text x="616" y="220">Stridor workup.md</text>
+    <text x="576" y="248">Voice</text>
+    <text x="596" y="274">Vocal fold palsy.md</text>
+  </g>
+  <path class="rule" d="M566 152 V 262" stroke-width="1"/>
+  <path class="rule" d="M586 180 V 214" stroke-width="1"/>
+
+  <line class="rule" x1="556" y1="298" x2="840" y2="298" stroke-width="1"/>
+  <text class="dim" x="556" y="322">Nesting, pins, queues and labels</text>
+  <text class="dim" x="556" y="342">live here, not in your Markdown.</text>
+
+  <text class="h" x="40" y="398">Your files are never moved, renamed or rewritten.</text>
+  <text class="dim" x="40" y="418">Uninstalling the plugin leaves every note exactly where it was.</text>
+</svg>

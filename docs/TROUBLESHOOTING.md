@@ -13,6 +13,10 @@ Start with a complete vault backup and a current private recovery export for eac
 
 Run **BRAT: Check for updates to all beta plugins and UPDATE** and verify that the matching GitHub release contains all three required assets.
 
+## The What’s New window did not appear
+
+The window appears automatically once per device only when a compatible Knowledge Base Command Center payload already existed before version 0.12.0 opened. It intentionally does not interrupt a fresh install, an incompatible/read-only startup, a downgrade, or a repeat reload. Run **Open what’s new** from the Command Palette to open the current release summary manually. Its GitHub link makes no request until you activate it.
+
 Before removing and re-adding the BRAT entry, export current organization and back up the vault.
 
 ## A note is missing from the Index
@@ -47,9 +51,9 @@ If the subject was previously linked, check whether the note has not yet synced 
 
 ## Edit a Library on iPhone or iPad
 
-Use **… → Manage libraries** to edit the Library definition. Open that Library, choose **Arrange**, and use the heading, subheading, or record **…** menus.
+Use **… → Manage libraries** to edit the Library definition. Open that Library, choose **Arrange**, and use the heading, subheading, or record **…** menus. **Add subheading** appears on any heading or subheading below the five-level depth cap.
 
-Deleting a heading leaves its records under the explicit Unplaced section. It does not delete notes. Permanent deletion is available only after a custom Library is archived and requires choosing a destination for any remaining subjects.
+Deleting a heading leaves its records under the explicit Unplaced section. It does not delete notes. Removing a nested subheading instead moves its records and child subheadings up under its parent. Permanent deletion is available only after a custom Library is archived and requires choosing a destination for any remaining subjects.
 
 ## Visual movement on iPhone
 
@@ -69,6 +73,10 @@ Place the JSON file anywhere inside the vault, then open **Export / import cente
 
 The file must be 10 MB or smaller and pass bounded-list and aggregate-reference validation. Same-vault recovery starts unselected and needs a separate exact-path confirmation.
 
+## Nested subheadings do not appear on another device
+
+Update the plugin on that device. Nested Collection and Library subheadings need the current release everywhere; an older build cannot faithfully interpret the newer synced store, so it preserves the data read-only instead of guessing. After updating, let Sync settle and reopen the Command Center. See [Settings are read-only](#settings-are-read-only).
+
 ## Settings are read-only
 
 The plugin detected unrecognized, damaged, or newer plugin data and intentionally refused to overwrite it.
@@ -80,7 +88,7 @@ The plugin detected unrecognized, damaged, or newer plugin data and intentionall
 5. Update every device to the same current plugin version.
 6. Report the issue without attaching private plugin data publicly.
 
-A 0.8.3 device can describe a version-13 multi-base store as a migration failure. That is expected downgrade protection; reopen it with 0.10.x.
+An older device can describe the version-15 store with schema-14 knowledge-base data as a migration failure. That is expected downgrade protection. Update every synced device to the same current release before editing again.
 
 ## Export/import center is in salvage mode
 
@@ -90,7 +98,7 @@ Other sections may be available as a one-time salvage export. Newly generated po
 
 ## First upgrade differs across devices
 
-Install the same 0.10.x build everywhere and stop organizing until Sync settles. Identical pristine upgrades can converge; two independently edited upgrades remain protected rather than being guessed together.
+Install the same current 0.12.x build everywhere and stop organizing until Sync settles. Identical pristine upgrades can converge; two independently edited upgrades remain protected rather than being guessed together.
 
 If a recovery was exported before identity convergence, export it again afterward. A file carrying a losing provisional identity is intentionally rejected.
 
@@ -98,9 +106,9 @@ See [Getting started: Upgrade from the old single-base format](GETTING_STARTED.m
 
 ## Same-base changes were lost after Sync
 
-Established concurrent edits to the same knowledge base use whole-base last-write-wins behavior. There is no field-level merge and no guaranteed conflict rescue for the losing same-base payload.
+Current semantic metadata can identify divergent same-base edits that have no proven causal relationship. Before deterministic whole-base selection, the plugin attempts to preserve every possible losing complete envelope in a private conflict rescue. There is still no field-level merge, and a failed rescue forces protected read-only mode rather than guessing.
 
-Avoid editing the same base on several devices at once. Let Sync finish before switching devices and keep current private recovery exports. Changes to different knowledge bases can reconcile independently.
+Open **Sync & recovery center** to review the locally recorded conflict warning and rescue count. This is historical evidence only: it does not inspect Sync or prove that another device has settled. Avoid editing the same base on several devices at once, let the provider finish before switching devices, and keep current private recovery exports. Changes to different knowledge bases can reconcile independently.
 
 ## A conflict-rescue JSON appeared
 
@@ -127,7 +135,9 @@ Do not edit IDs or identity fields by hand to bypass these checks. Use a current
 
 ## Uninstall or reset
 
-Removing the plugin folder removes <code>data.json</code> and all plugin-owned settings and organization. It does not remove Markdown notes.
+Before disabling the plugin, run **Knowledge Base Command Center: Clear device-local data…** from the Command Palette (or choose the same action in **Sync & recovery center**) and confirm. Then remove the plugin through Community Plugins or delete its manual plugin folder.
+
+Removing the folder removes <code>data.json</code> and the synced settings and organization stored there. It does not reliably remove device-only routes, collapsed sections, Undo/Redo history, local Sync/Recovery facts, or update-announcement history because Obsidian keeps those two plugin-owned App-local values outside the folder. The clear action removes only those local values; it does not change <code>data.json</code>, Markdown notes, attachments, or recovery exports. Local tracking stays suppressed until Obsidian restarts, so disable or uninstall in that same session. If the plugin was already removed without clearing them, reinstall and enable the same or a newer release, run the clear action, then remove it again.
 
 Before uninstalling, export current private recovery for every available base, temporarily restore any archived base that needs recovery, and back up the complete vault including <code>.obsidian</code>.
 

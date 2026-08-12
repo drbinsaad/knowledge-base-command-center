@@ -19,12 +19,32 @@ test("release metadata is internally consistent and mobile-compatible", async ()
   assert.equal(packageJson.license, "MIT");
 });
 
+test("the manifest release has curated one-time news and an exact immutable GitHub tag link", async () => {
+  const manifest = await readJson("manifest.json");
+  const version = String(manifest.version);
+  const announcement = await readFile(path.join(root, "src", "update-announcement.ts"), "utf8");
+  const main = await readFile(path.join(root, "src", "main.ts"), "utf8");
+  const escapedVersion = version.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  const exactUrl = `https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/${version}`;
+  const escapedUrl = exactUrl.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  assert.match(
+    announcement,
+    new RegExp(`version:\\s*"${escapedVersion}"[\\s\\S]*?releaseUrl:\\s*"${escapedUrl}"`, "u"),
+    "every published manifest version must carry curated news linked to its exact immutable release tag",
+  );
+  assert.match(main, /id: "open-whats-new"/u);
+  assert.match(main, /maybeShowUpdateAnnouncement\(initialLoad\)/u);
+  assert.doesNotMatch(announcement, /\b(?:fetch|XMLHttpRequest|WebSocket|requestUrl|sendBeacon)\b/u);
+});
+
 test("public repository metadata is present", async () => {
   const manifest = await readJson("manifest.json");
   const license = await readFile(path.join(root, "LICENSE"), "utf8");
   const readme = await readFile(path.join(root, "README.md"), "utf8");
   const changelog = await readFile(path.join(root, "CHANGELOG.md"), "utf8");
   const iphoneChecklist = await readFile(path.join(root, "docs", "manual-iphone-release-checklist.md"), "utf8");
+  const userGuide = await readFile(path.join(root, "docs", "USER_GUIDE.md"), "utf8");
+  const packageJson = await readFile(path.join(root, "package.json"), "utf8");
   assert.match(license, /MIT License/);
   assert.match(readme, /Privacy and permissions/);
   assert.match(readme, /enumerates whole-vault Markdown file paths/);
@@ -39,10 +59,31 @@ test("public repository metadata is present", async () => {
   assert.match(readme, /## Known limitations/);
   assert.match(readme, /every available, non-archived knowledge base/);
   assert.match(readme, /Showing the first 300 of _N_ results/);
-  assert.match(readme, /Two deliberate ENT-only workflows are exceptions/);
+  assert.match(readme, /Two additional ENT-only workflows can change selected files/);
+  assert.match(readme, /Quick append is a deliberate generic exception/);
   assert.match(readme, /stable internal ID `ent-vault-command-center`/);
-  assert.match(readme, /Portable packages created by version .* use format version 4/i);
-  assert.match(readme, /Current v9 (?:snapshots|files)/i);
+  // The README must state the versions the code actually writes, so a format
+  // bump cannot silently leave the public documentation behind.
+  const portability = await readFile(path.join(root, "src", "portability.ts"), "utf8");
+  const portableVersion = /export const PORTABLE_EXPORT_VERSION = (\d+) as const/u.exec(portability)?.[1];
+  assert.ok(portableVersion, "src/portability.ts must declare PORTABLE_EXPORT_VERSION");
+  const model = await readFile(path.join(root, "src", "model.ts"), "utf8");
+  const backupVersion = /export interface PersonalBackup extends PersonalOrganizationState \{[\s\S]*?\n {2}version: (\d+);/u.exec(model)?.[1];
+  assert.ok(backupVersion, "src/model.ts must declare the PersonalBackup version");
+  assert.match(readme, new RegExp(`Portable packages created by version .* use format version ${portableVersion}`, "iu"));
+  assert.match(readme, new RegExp(`Current v${backupVersion} (?:snapshots|files)`, "iu"));
+  assert.match(readme, /obsidian:\/\/kbcc-quick-entry/);
+  assert.match(readme, /obsidian:\/\/kbcc-create-subject/);
+  assert.match(readme, /obsidian:\/\/kbcc-create-heading/);
+  assert.match(readme, /obsidian:\/\/kbcc-create-subheading/);
+  assert.match(readme, /obsidian:\/\/kbcc-create-note/);
+  assert.match(readme, /obsidian:\/\/kbcc-add-current-note/);
+  assert.match(readme, /obsidian:\/\/kbcc-add-existing-note/);
+  assert.match(readme, /obsidian:\/\/kbcc-quick-append-current/);
+  assert.match(readme, /obsidian:\/\/kbcc-quick-append-existing/);
+  assert.match(readme, /obsidian:\/\/kbcc-attach-current/);
+  assert.match(readme, /Quick append follow-up notes/);
+  assert.match(readme, /Settings → Mobile → Manage toolbar options/);
   const latestChangelogVersion = /^##\s+(\d+\.\d+\.\d+)\s*$/m.exec(changelog)?.[1];
   assert.equal(latestChangelogVersion, manifest.version, "the first changelog release must match the release manifest");
   assert.match(changelog, /Version 0\.8\.1 was not published as a tag or GitHub release/);
@@ -50,6 +91,21 @@ test("public repository metadata is present", async () => {
   assert.match(iphoneChecklist, /physical iPhone/);
   assert.match(iphoneChecklist, /no more than 300 result rows are rendered/);
   assert.match(iphoneChecklist, /grouped by knowledge base and then library section/);
+  assert.match(iphoneChecklist, /Taxonomy health center/);
+  assert.match(iphoneChecklist, /Manage categories/);
+  assert.match(iphoneChecklist, /Turn on VoiceOver/);
+  assert.match(iphoneChecklist, /What’s new/);
+  assert.match(iphoneChecklist, /releases\/tag\/0\.12\.0/);
+  const commandAppendix = userGuide.slice(userGuide.indexOf("\n## Commands\n"), userGuide.indexOf("\n## Safety boundary\n"));
+  for (const command of [
+    "Quick append: Add to current note…",
+    "Quick append: Choose a note…",
+    "Quick append: Undo last append",
+  ]) assert.match(commandAppendix, new RegExp(command.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
+  assert.match(userGuide, /Any focused Quick Entry or Quick Append command/);
+  assert.match(userGuide, /Open Library: _Library name_/);
+  assert.match(packageJson, /tests\/follow-up\.test\.ts/);
+  assert.match(packageJson, /tests\/update-announcement\.test\.ts/);
 });
 
 test("manual release surface contains the three required nonempty assets", async () => {
@@ -71,13 +127,18 @@ test("mobile flows keep primary actions visible and empty states actionable", as
   const view = await readFile(path.join(root, "src/view.ts"), "utf8");
   const manager = await readFile(path.join(root, "src/index-manager.ts"), "utf8");
   const modals = await readFile(path.join(root, "src/modals.ts"), "utf8");
+  const followUpModal = await readFile(path.join(root, "src/follow-up-modal.ts"), "utf8");
   const libraryModal = await readFile(path.join(root, "src/library-modal.ts"), "utf8");
   const styles = await readFile(path.join(root, "styles.css"), "utf8");
   assert.match(view, /Add existing \$\{settings\.itemPlural\}/);
   assert.match(view, /ent-cc-history-action/);
-  assert.match(manager, /Browse \$\{availableCount\} available/);
+  // The count binding was renamed when the list became lazy; pin the button
+  // label, not the local variable's name.
+  assert.match(manager, /Browse \$\{available[A-Za-z]*\} available/);
   assert.match(manager, /aria-selected/);
-  assert.match(styles, /grid-template-columns: repeat\(3, max-content\) 44px/);
+  assert.match(styles, /grid-auto-flow: column/);
+  assert.match(styles, /\.ent-cc-header-actions\s*\{[^}]*overflow-x: auto/s);
+  assert.match(styles, /\.ent-cc-quick-entry-button\s*\{[^}]*min-width: 44px/s);
   assert.match(styles, /scroll-snap-type: x proximity/);
   assert.match(styles, /height: calc\(100dvh - 16px\)/);
   assert.match(styles, /ent-cc-manager-bulk-actions\.is-idle/);
@@ -89,6 +150,24 @@ test("mobile flows keep primary actions visible and empty states actionable", as
   assert.match(styles, /ent-cc-library-manager-action/);
   assert.match(styles, /ent-cc-knowledge-note-content/);
   assert.match(styles, /--ent-cc-modal-visual-height/);
+  assert.match(styles, /\.ent-cc-knowledge-note-modal > \.modal-content\.ent-cc-knowledge-note-content\s*\{[^}]*flex: 1 1 0;[^}]*height: 0;/s);
+  assert.match(styles, /scroll-padding-block: 12px 88px/);
+  assert.match(modals, /handleViewportFocus/);
+  assert.match(modals, /\[0, 60, 180, 420\]/);
+  assert.match(modals, /--keyboard-height/);
+  assert.match(followUpModal, /calculateModalViewportLayout/);
+  assert.match(followUpModal, /--keyboard-height/);
+  assert.match(followUpModal, /\[0, 60, 180, 420\]/);
+  assert.match(followUpModal, /ent-cc-modal-footer/);
+  assert.match(styles, /\.ent-cc-follow-up-modal textarea\s*\{[^}]*width: 100%;/s);
+  assert.match(styles, /\.ent-cc-follow-up-category-manager/);
+  assert.match(modals, /setName\(this\.options\.placeholder\)/);
+  assert.match(modals, /setAttribute\("aria-label", this\.options\.placeholder\)/);
+  assert.match(modals, /ent-cc-action-suggestion-title[\s\S]*?attr: \{ dir: "auto" \}/);
+  assert.match(modals, /ent-cc-action-suggestion-description[\s\S]*?attr: \{ dir: "auto" \}/);
+  assert.match(styles, /\.ent-cc-action-suggestion-description\s*\{[^}]*font-size:\s*var\(--font-ui-small\);[^}]*overflow-wrap:\s*anywhere;[^}]*white-space:\s*normal;/s);
+  assert.doesNotMatch(styles, /\.ent-cc-action-suggestion-description\s*\{[^}]*(?:font-size:\s*10px|text-overflow:\s*ellipsis|white-space:\s*nowrap)/s);
+  assert.match(styles, /\.ent-cc-catalog-context\s*\{[^}]*border-inline-start:/s);
   assert.match(view, /const backLabel = "Back to main page"/);
   assert.match(view, /"aria-label": backLabel, title: backLabel/);
   assert.match(view, /createSpan\(\{ text: backLabel \}\)/);

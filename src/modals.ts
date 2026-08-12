@@ -1,12 +1,14 @@
-import { App, FuzzyMatch, FuzzySuggestModal, Modal, Notice, prepareFuzzySearch, Setting, TFile, setIcon } from "obsidian";
+import { App, FuzzyMatch, FuzzySuggestModal, Modal, Notice, Platform, prepareFuzzySearch, Setting, TFile, setIcon } from "obsidian";
 import {
   canonicalPath,
+  childSubheadings,
   DOMAIN_DEFINITIONS,
   expectedParentCurriculumId,
   GenericNoteFormValue,
   genericNotePath,
   isExtensionCurriculumId,
   LayoutHeading,
+  LayoutSubheading,
   NewNoteMode,
   normalizeSearchText,
   pathIsInsideFolder,
@@ -45,9 +47,247 @@ abstract class NormalizedFuzzySuggestModal<T> extends FuzzySuggestModal<T> {
   }
 }
 
+/**
+ * Local calendar day for export filenames. A UTC stamp names the file after the
+ * wrong day for most of the world, so exports follow the same local convention
+ * as every other date this plugin writes.
+ */
+export function localDateStamp(date = new Date()): string {
+  const year = String(date.getFullYear());
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function reportAsyncError(error: unknown): void {
   console.error("ENT Command Center action failed", error);
   new Notice(error instanceof Error ? error.message : String(error));
+}
+
+/** Obsidian's DOM `Window` type omits `URL`, which the download path needs. */
+export type OwnerWindow = Window & { URL: typeof URL };
+
+/**
+ * Resolve the window that owns a modal or view. A pop-out window has its own
+ * timer queue and its own `URL` object store, so resolving through the element
+ * is the only variant that stays correct there; `window.activeWindow` follows
+ * whichever window has focus, which is not necessarily the owner.
+ */
+export function modalOwnerWindow(contentEl?: { ownerDocument?: Document | null } | null): OwnerWindow {
+  return contentEl?.ownerDocument?.defaultView ?? (window.activeWindow as OwnerWindow | null) ?? window;
+}
+
+export interface OpenedBaseGuardHost {
+  data: unknown;
+  getActiveKnowledgeBaseId(): string;
+  getDataEpoch?(): number;
+  getExternalChangeGeneration?(): number;
+}
+
+export interface OpenedBaseGuardOptions {
+  /** Shown at most once per guard, so a stale surface cannot spam notices. */
+  message: string;
+  /** Runs before the notice; modals use it to close themselves. */
+  onStale?: () => void;
+  /** Overrides the captured base id when the caller already resolved one. */
+  openedBaseId?: string;
+  /** Overrides the captured data epoch for surfaces that render older data. */
+  openedDataEpoch?: number;
+}
+
+export interface OpenedBaseGuard {
+  /** Reports ownership and, on a stale base, closes and notices exactly once. */
+  (): boolean;
+  /** Same comparison with no side effect, for silent focus/announce timers. */
+  owns(): boolean;
+}
+
+/**
+ * One stale-base guard for every surface that can outlive the data it rendered.
+ *
+ * Ownership is the conjunction of four facts: the live data object identity,
+ * the active knowledge-base id, the data epoch, and the external-change
+ * generation. Identity catches a replacement object that reused an id; the
+ * generation catches a synced data.json that arrived without swapping the
+ * active object. Both were previously checked in the settings tab only.
+ */
+export function createOpenedBaseGuard(
+  host: OpenedBaseGuardHost,
+  options: OpenedBaseGuardOptions,
+): OpenedBaseGuard {
+  const openedData = host.data;
+  const openedBaseId = options.openedBaseId ?? host.getActiveKnowledgeBaseId();
+  const openedDataEpoch = options.openedDataEpoch ?? host.getDataEpoch?.() ?? 0;
+  const openedExternalGeneration = host.getExternalChangeGeneration?.() ?? 0;
+  let noticeShown = false;
+  const owns = (): boolean => host.data === openedData
+    && host.getActiveKnowledgeBaseId() === openedBaseId
+    && (host.getDataEpoch?.() ?? 0) === openedDataEpoch
+    && (host.getExternalChangeGeneration?.() ?? 0) === openedExternalGeneration;
+  const guard = (): boolean => {
+    if (owns()) return true;
+    options.onStale?.();
+    if (!noticeShown) {
+      noticeShown = true;
+      new Notice(options.message, 8000);
+    }
+    return false;
+  };
+  return Object.assign(guard, { owns });
+}
+
+export interface GuardedTimerRequest {
+  /** Element whose owner window schedules and clears the timer. */
+  contentEl?: { ownerDocument?: Document | null } | null;
+  /** Live registry so `onClose` can cancel everything still pending. */
+  timers: Set<number>;
+  /** Re-checked when the timer fires; a false result drops the callback. */
+  proceed: () => boolean;
+  action: () => void;
+  delay: number;
+}
+
+/**
+ * Schedule work that must not run after its surface closed or its base changed.
+ * A zero-delay timer can fire before `setTimeout` returns in some environments,
+ * so the id is only registered when the callback has not already consumed it.
+ */
+export function setGuardedTimer(request: GuardedTimerRequest): number {
+  const viewWindow = modalOwnerWindow(request.contentEl);
+  let timer = 0;
+  let firedSynchronously = false;
+  timer = viewWindow.setTimeout(() => {
+    firedSynchronously = true;
+    request.timers.delete(timer);
+    if (!request.proceed()) return;
+    request.action();
+  }, request.delay);
+  if (!firedSynchronously) request.timers.add(timer);
+  return timer;
+}
+
+export function clearGuardedTimer(
+  contentEl: { ownerDocument?: Document | null } | null | undefined,
+  timers: Set<number> | undefined,
+  timer: number,
+): void {
+  modalOwnerWindow(contentEl).clearTimeout(timer);
+  timers?.delete(timer);
+}
+
+export type PortableJsonKind = "backup" | "workspace" | "portable" | "portfolio" | "conflict";
+
+export interface JsonExportHost {
+  writePortableJson(kind: PortableJsonKind, value: unknown): Promise<TFile>;
+}
+
+export type JsonExportDelivery =
+  | { medium: "vault"; file: TFile }
+  | { medium: "download"; filename: string };
+
+export interface JsonExportOptions {
+  /** Owner element; a pop-out window must mint and revoke its own object URL. */
+  contentEl?: { ownerDocument?: Document | null } | null;
+  /** Already-serialized payload, when the caller size-validated its own text. */
+  serialized?: string;
+  /** Date used for the local filename stamp. */
+  date?: Date;
+}
+
+/**
+ * The one mobile-vs-desktop JSON export branch. Mobile has no download target,
+ * so the payload is written inside the vault; desktop streams a blob through a
+ * detached anchor and revokes the object URL after the click was consumed.
+ */
+export async function deliverJsonExport(
+  plugin: JsonExportHost,
+  kind: PortableJsonKind,
+  stem: string,
+  value: unknown,
+  options: JsonExportOptions = {},
+): Promise<JsonExportDelivery> {
+  if (Platform.isMobile) {
+    return { medium: "vault", file: await plugin.writePortableJson(kind, value) };
+  }
+  const viewWindow = modalOwnerWindow(options.contentEl);
+  const serialized = options.serialized ?? JSON.stringify(value, null, 2);
+  const filename = `${stem}-${localDateStamp(options.date ?? new Date())}.json`;
+  const url = viewWindow.URL.createObjectURL(new Blob([serialized], { type: "application/json" }));
+  const link = createEl("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  viewWindow.setTimeout(() => viewWindow.URL.revokeObjectURL(url), 1000);
+  return { medium: "download", filename };
+}
+
+export interface JsonImportHost {
+  getPortableJsonFiles(): TFile[];
+  readPortableJson(file: TFile): Promise<unknown>;
+}
+
+export interface JsonImportOptions {
+  /** Title of the in-vault picker shown on mobile. */
+  title: string;
+  /** Hard cap for the desktop picker, matching the in-vault reader's cap. */
+  maxBytes: number;
+  /** Message thrown when the chosen file exceeds `maxBytes`. */
+  oversizeMessage: string;
+  /** Message shown when the vault holds no JSON at all. */
+  emptyVaultMessage: string;
+  onValue: (value: unknown, sourceLabel: string) => void | Promise<void>;
+  /** Runs the async body; defaults to reporting a failure as a notice. */
+  run?: (task: () => Promise<void>) => void;
+  /** Re-checked around the read so a base change abandons the import. */
+  guard?: () => boolean;
+  /** In-vault reader; defaults to the plugin's size-checked reader. */
+  readVaultJson?: (file: TFile) => Promise<unknown>;
+}
+
+/**
+ * The one mobile-vs-desktop JSON import branch, including the size cap.
+ *
+ * Both media are capped: the in-vault reader checks `stat.size` and the desktop
+ * picker checks `File.size` before `text()` is ever called, so a multi-gigabyte
+ * pick cannot be read into memory on either platform.
+ */
+export function requestJsonImport(app: App, plugin: JsonImportHost, options: JsonImportOptions): void {
+  const guard = options.guard ?? ((): boolean => true);
+  const run = options.run ?? ((task: () => Promise<void>): void => { void task().catch(reportAsyncError); });
+  const readVaultJson = options.readVaultJson ?? ((file: TFile): Promise<unknown> => plugin.readPortableJson(file));
+  if (!guard()) return;
+  if (Platform.isMobile) {
+    const files = plugin.getPortableJsonFiles();
+    if (files.length === 0) {
+      new Notice(options.emptyVaultMessage);
+      return;
+    }
+    new VaultFilePickerModal(app, files, options.title, (file) => {
+      if (!guard()) return;
+      run(async () => {
+        const value = await readVaultJson(file);
+        if (!guard()) return;
+        await options.onValue(value, file.path);
+      });
+    }).open();
+    return;
+  }
+  const input = createEl("input");
+  input.type = "file";
+  input.accept = "application/json,.json";
+  input.addEventListener("change", () => {
+    if (!guard()) return;
+    const file = input.files?.[0];
+    if (!file) return;
+    run(async () => {
+      // Checked before text() so an oversized pick is never decoded at all.
+      if (file.size > options.maxBytes) throw new Error(options.oversizeMessage);
+      const parsed = JSON.parse(await file.text()) as unknown;
+      if (!guard()) return;
+      await options.onValue(parsed, file.name);
+    });
+  });
+  input.click();
 }
 
 export class TextPromptModal extends Modal {
@@ -70,9 +310,11 @@ export class TextPromptModal extends Modal {
     this.titleEl.setText(this.options.title);
     let value = this.options.initialValue ?? "";
     let input: HTMLInputElement | null = null;
-    new Setting(this.contentEl).addText((control) => {
+    new Setting(this.contentEl).setName(this.options.placeholder).addText((control) => {
       control.setPlaceholder(this.options.placeholder).setValue(value).onChange((next) => { value = next; });
       input = control.inputEl;
+      control.inputEl.setAttribute("aria-label", this.options.placeholder);
+      control.inputEl.setAttribute("dir", "auto");
       control.inputEl.addEventListener("keydown", (event) => {
         if (event.key === "Enter") {
           event.preventDefault();
@@ -132,6 +374,10 @@ export class ConfirmModal extends Modal {
 
 export interface CollectionTarget {
   headingId: string;
+  /**
+   * Layout-global unique node id of a subheading at any depth under the
+   * heading. Omitted when the target is the heading itself.
+   */
   subheadingId?: string;
   label: string;
 }
@@ -140,13 +386,11 @@ export function collectionTargets(collections: LayoutHeading[]): CollectionTarge
   const targets: CollectionTarget[] = [];
   for (const heading of collections) {
     targets.push({ headingId: heading.id, label: heading.title });
-    for (const subheading of heading.subheadings) {
-      targets.push({
-        headingId: heading.id,
-        subheadingId: subheading.id,
-        label: `${heading.title} / ${subheading.title}`,
-      });
-    }
+    const visit = (node: LayoutSubheading, label: string): void => {
+      targets.push({ headingId: heading.id, subheadingId: node.id, label });
+      for (const child of childSubheadings(node)) visit(child, `${label} / ${child.title}`);
+    };
+    for (const subheading of heading.subheadings) visit(subheading, `${heading.title} / ${subheading.title}`);
   }
   return targets;
 }
@@ -202,14 +446,15 @@ export class AddActionModal extends NormalizedFuzzySuggestModal<AddAction> {
     const icon = element.createSpan({ cls: "ent-cc-action-suggestion-icon" });
     setIcon(icon, item.icon);
     const text = element.createDiv();
-    text.createDiv({ cls: "ent-cc-action-suggestion-title", text: item.title });
-    text.createDiv({ cls: "ent-cc-action-suggestion-description", text: item.description });
+    text.createDiv({ cls: "ent-cc-action-suggestion-title", text: item.title, attr: { dir: "auto" } });
+    text.createDiv({ cls: "ent-cc-action-suggestion-description", text: item.description, attr: { dir: "auto" } });
   }
 
   onOpen(): void {
     void super.onOpen();
     this.modalEl.addClass("ent-cc-modal", "ent-cc-add-modal");
     this.titleEl.setText(this.heading);
+    this.titleEl.setAttribute("dir", "auto");
   }
 }
 
@@ -370,13 +615,27 @@ export function calculateModalViewportLayout(
   innerHeight: number,
   viewportHeight: number,
   viewportOffsetTop = 0,
+  keyboardHeight = 0,
 ): ModalViewportLayout {
-  const safeInnerHeight = Math.max(1, innerHeight);
-  const safeViewportHeight = Math.max(1, Math.min(viewportHeight, safeInnerHeight));
+  const safeInnerHeight = Number.isFinite(innerHeight) ? Math.max(1, innerHeight) : 1;
+  const safeOffsetTop = Number.isFinite(viewportOffsetTop)
+    ? Math.max(0, Math.min(viewportOffsetTop, safeInnerHeight - 1))
+    : 0;
+  const safeViewportHeight = Number.isFinite(viewportHeight)
+    ? Math.max(1, Math.min(viewportHeight, safeInnerHeight - safeOffsetTop))
+    : safeInnerHeight - safeOffsetTop;
+  const safeKeyboardHeight = Number.isFinite(keyboardHeight)
+    ? Math.max(0, Math.min(keyboardHeight, safeInnerHeight - 1))
+    : 0;
+  const visibleBottom = Math.max(safeOffsetTop + 1, Math.min(
+    safeOffsetTop + safeViewportHeight,
+    safeInnerHeight - safeKeyboardHeight,
+  ));
+  const visibleHeight = visibleBottom - safeOffsetTop;
   return {
-    height: Math.round(safeViewportHeight),
-    keyboardOpen: safeInnerHeight - safeViewportHeight > 100,
-    shift: Math.round(viewportOffsetTop + safeViewportHeight / 2 - safeInnerHeight / 2),
+    height: Math.round(visibleHeight),
+    keyboardOpen: safeKeyboardHeight > 100 || safeInnerHeight - safeViewportHeight > 100,
+    shift: Math.round(safeOffsetTop + visibleHeight / 2 - safeInnerHeight / 2),
   };
 }
 
@@ -387,19 +646,34 @@ export class KnowledgeNoteModal extends Modal {
   private templateSettingEl: HTMLElement | null = null;
   private errorEl: HTMLElement | null = null;
   private viewportWindow: Window | null = null;
+  private viewportSyncTimers: number[] = [];
 
   private readonly syncViewportLayout = (): void => {
     const viewWindow = this.viewportWindow;
     if (!viewWindow) return;
     const viewport = viewWindow.visualViewport;
+    const keyboardHeight = Number.parseFloat(
+      viewWindow.getComputedStyle(this.modalEl).getPropertyValue("--keyboard-height"),
+    );
     const layout = calculateModalViewportLayout(
       viewWindow.innerHeight,
       viewport?.height ?? viewWindow.innerHeight,
       viewport?.offsetTop ?? 0,
+      keyboardHeight,
     );
     this.modalEl.style.setProperty("--ent-cc-modal-visual-height", `${layout.height}px`);
     this.modalEl.style.setProperty("--ent-cc-modal-visual-shift", `${layout.shift}px`);
     this.modalEl.toggleClass("is-virtual-keyboard-open", layout.keyboardOpen);
+  };
+
+  private readonly handleViewportFocus = (event: FocusEvent): void => {
+    this.scheduleViewportSync();
+    const target = event.target as HTMLElement | null;
+    const viewWindow = this.viewportWindow;
+    if (!viewWindow || !target || typeof target.scrollIntoView !== "function") return;
+    this.viewportSyncTimers.push(viewWindow.setTimeout(() => {
+      target.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }, 80));
   };
 
   constructor(app: App, private readonly options: KnowledgeNoteModalOptions) {
@@ -470,7 +744,7 @@ export class KnowledgeNoteModal extends Modal {
 
     const templateSetting = new Setting(formBody)
       .setName("Template")
-      .setDesc("Supports {{title}}, {{date}}, and {{time}}. Other template syntax is copied unchanged.")
+      .setDesc("Supports legacy {{title}}, {{date}}, and {{time}} tokens. {{yaml:id}}, {{yaml:category}}, {{yaml:parent}}, {{yaml:library}}, and {{yaml:type}} insert YAML-safe quoted scalars. Other syntax is copied unchanged.")
       .addButton((button) => {
         this.templateButton = button.buttonEl;
         button.buttonEl.setAttribute("aria-label", "Choose note template");
@@ -521,6 +795,9 @@ export class KnowledgeNoteModal extends Modal {
     viewport?.removeEventListener("resize", this.syncViewportLayout);
     viewport?.removeEventListener("scroll", this.syncViewportLayout);
     viewWindow?.removeEventListener("resize", this.syncViewportLayout);
+    this.contentEl.removeEventListener("focusin", this.handleViewportFocus);
+    for (const timer of this.viewportSyncTimers) viewWindow?.clearTimeout(timer);
+    this.viewportSyncTimers = [];
     this.viewportWindow = null;
     this.modalEl.style.removeProperty("--ent-cc-modal-visual-height");
     this.modalEl.style.removeProperty("--ent-cc-modal-visual-shift");
@@ -534,7 +811,15 @@ export class KnowledgeNoteModal extends Modal {
     viewWindow.visualViewport?.addEventListener("resize", this.syncViewportLayout);
     viewWindow.visualViewport?.addEventListener("scroll", this.syncViewportLayout);
     viewWindow.addEventListener("resize", this.syncViewportLayout);
-    this.syncViewportLayout();
+    this.contentEl.addEventListener("focusin", this.handleViewportFocus);
+    this.scheduleViewportSync();
+  }
+
+  private scheduleViewportSync(): void {
+    const viewWindow = this.viewportWindow;
+    if (!viewWindow) return;
+    for (const timer of this.viewportSyncTimers) viewWindow.clearTimeout(timer);
+    this.viewportSyncTimers = [0, 60, 180, 420].map((delay) => viewWindow.setTimeout(this.syncViewportLayout, delay));
   }
 
   private updateTemplateButton(): void {

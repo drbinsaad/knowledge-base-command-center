@@ -7,6 +7,7 @@ Knowledge Base Command Center separates portable organization from private same-
 | Artifact | Intended use | Path exposure |
 | --- | --- | --- |
 | **Portable set** | Move selected workspace organization to another vault or knowledge base. | Index and Libraries are path-free. Workspace settings can contain configured vault-relative folders; saved queries are literal. |
+| **Multi-base portfolio** | Move selected components from as many as 50 available knowledge bases in one bounded bundle, with an independent ordinary portable package for each base. | The same portable boundaries apply independently to every package; private recovery is forbidden. |
 | **Same-vault recovery** | Restore one knowledge base in the vault that created it. | Contains exact vault-relative note paths and private plugin organization. |
 | **Complete vault backup** | Recover Markdown notes, attachments, Obsidian configuration, and plugin data. | Contains the vault's actual files and should be protected accordingly. |
 
@@ -14,16 +15,16 @@ No plugin export contains Markdown note bodies or attachments.
 
 ## Export components
 
-Open **Export / import center…** from the Command palette, Index Manager, or Command Center menu.
+Open **Export / import center…** from the Command palette, Index Manager, or Command Center menu for a single-base package. Open **Multi-base portfolio transfer…** from the Command palette or Command Center menu for a portfolio.
 
-Export and import operate on the active knowledge base. Switch to each base and handle it separately; archived bases must be restored temporarily before export.
+The single-base center operates on the active knowledge base. A portfolio can include several available bases without switching between them. Archived bases must still be restored temporarily before either kind of export.
 
 | Component | Contents |
 | --- | --- |
-| **Workspace settings** | Labels, compatible configured folders and template location, metadata mappings, behavior, and visual group order. The destination base name and preset do not change. |
+| **Workspace settings** | Labels, compatible configured folders, base and per-Library creation profiles, template locations, metadata mappings, behavior, and visual group order. The destination base name and preset do not change. |
 | **Index blueprint** | Stable subject identities, titles, groups, nested parent relationships, record kinds, collapse state, and visual order. It contains no source note paths. |
-| **Each selected Library** | Stable Library identity, configured labels/icon, subject names, editable headings/subheadings, unplaced state, visual order, and portable identities. Doses, note bodies, source paths, and attachments are excluded. |
-| **Collections** | Collection and subheading structure with membership stored by portable subject identity. |
+| **Each selected Library** | Stable Library identity, configured labels/icon, subject names, editable headings and nested subheadings, unplaced state, visual order, and portable identities. Doses, note bodies, source paths, and attachments are excluded. |
+| **Collections** | Collection heading and nested subheading structure with membership stored by portable subject identity. |
 | **Study state** | Pins and the personal Next list stored by portable subject identity. |
 | **Saved views** | Named sections and literal search queries. A query can contain a path if it was typed. |
 | **Same-vault recovery** | Private restoration data for the active base, including exact vault-relative note paths. |
@@ -38,6 +39,30 @@ Collections and study state carry only the portable identities they reference. T
 
 The complete Portable set is not necessarily path-free. Deselect Workspace settings when configured vault-relative folders should not be shared, and deselect Saved views when literal queries may disclose a private term or path.
 
+## Multi-base portfolio transfer
+
+A portfolio is a small manifest plus one independent, current portable-format package for each selected source base. Each embedded package is created, serialized, and parsed by the same strict portable-package implementation used by the single-base center. The manifest does not introduce another organization schema, and an importer rejects a package whose declared components, preset, byte count, or aggregate counts do not match its parsed contents.
+
+Export chooses available knowledge bases and a component set. Libraries means the complete active Library set in each chosen base, including empty Libraries, empty headings, nested subheadings, placeholders, and intentionally unplaced subjects. Archived Libraries stay excluded. Note bodies, attachments, exact note bindings, and same-vault recovery are never allowed in a portfolio.
+
+Import maps each selected source to either a new compatible knowledge base or one distinct existing compatible destination. A new base is initialized with Merge. For an existing destination, choose Merge or Replace independently and then narrow the source's components or individual Libraries if needed. Two sources cannot target the same destination in one plan.
+
+**Build exact preview** computes the sole immutable mutation plan. The apply action commits that already-computed post-state; it does not rerun matching or rebuild the import. The preview reports these categories, including explicit zero-count sections:
+
+- knowledge bases to add or replace;
+- headings to add, rename, or remove;
+- subjects to add, move, or leave unplaced;
+- Libraries to add or archive;
+- identity and naming conflicts;
+- unavailable template or folder fallbacks; and
+- what will not change.
+
+Large categories initially show 50 entries and expand in bounded 50-entry pages. A stale destination base, active-base selection, complete store snapshot, or externally synced generation invalidates the plan before mutation. The selected portfolio remains unchanged.
+
+Every Replace destination requires the displayed typed phrase. Before any plugin-data mutation, the plugin writes a separate strict same-vault recovery package for every destination that will be replaced. If one recovery write fails, no plan operation is applied. The final multi-base store change uses the existing atomic persistence and rollback path and each destination also receives an in-plugin Undo snapshot when its bounded size permits. A plan that cannot retain the required Undo snapshot is rejected.
+
+Cross-vault Merge and new-base initialization retain the normal portable behavior. Cross-vault Replace has an additional acknowledgement because it can remove selected destination organization even though it never changes Markdown files.
+
 ## What “path-free” means
 
 The Index blueprint and Libraries can recreate:
@@ -45,7 +70,7 @@ The Index blueprint and Libraries can recreate:
 - stable subject and Library identities;
 - subject names;
 - Index nesting;
-- Library headings and subheadings;
+- Library headings and nested subheadings;
 - intentionally unplaced records;
 - group labels, collapse state, and visual order; and
 - selected Collection and study references.
@@ -64,11 +89,11 @@ Creating or linking preserves the portable identity and its Index/Library placem
 
 ## Portable format compatibility
 
-Version 0.10.0 writes portable format version 4. It adds arbitrary stable Library definitions and selective Library IDs to version 3's nested layouts and intentionally unplaced records.
+The current release writes portable format version 5. It adds nested Collection and Library subheadings—up to five levels in one branch, counting the top heading as level 1—to version 4's arbitrary stable Library definitions and selective Library IDs.
 
-Version 0.10.0 continues to read versions 1–3. Legacy Procedures, Medications, and Syndromes catalogs migrate to reserved stable Library IDs. Non-topic identities in version 1 files are treated conservatively as Collection or study dependencies rather than authoritative complete Libraries.
+The current release continues to read versions 1–4, so older flat packages still import. Legacy Procedures, Medications, and Syndromes catalogs migrate to reserved stable Library IDs. Non-topic identities in version 1 files are treated conservatively as Collection or study dependencies rather than authoritative complete Libraries. Imported content nested deeper than five levels keeps its records by merging them into the nearest allowed level.
 
-Older plugin builds reject version 4 rather than guessing destructively. Update every importing device before applying a new export.
+Older plugin builds reject version 5 rather than guessing destructively, and an older build that encounters a synced version-15 store with version-14 knowledge-base data preserves it read-only instead of rewriting it. Update every importing and syncing device before applying a new export.
 
 ## Review an import
 
@@ -79,7 +104,9 @@ After choosing a JSON file, select only the available sections to apply and choo
 
 When source and destination use different Generic/ENT presets, Workspace settings is automatically excluded. Path-free Index, Library, Collection, and study components can still transfer without changing the destination's name or preset.
 
-Workspace folders are validated against the destination vault. If an imported default template is unavailable, restricted, or outside the configured templates folder, it safely falls back to an empty note.
+Workspace folders and Library-profile paths are validated against the destination vault. A portable workspace includes dependency descriptors for every Library referenced by a creation profile, even when that Library's subject catalog was not selected. An existing local archive decision remains authoritative. Legacy standalone workspace-configuration files cannot declare custom Library dependencies, so import retains only profiles whose stable Library IDs already exist in the destination and reports how many unmatched profiles were omitted. If an imported base or Library template is unavailable, restricted, or outside the configured templates folder, that creation default safely falls back to an empty note inside the same Undo-protected import; an invalid destination folder still blocks the import. The selected JSON package is not modified.
+
+Workspace settings can disclose Library-specific vault-relative folder and template paths. Deselect **Workspace settings** before sharing when those paths are private. Profiles contain no note bodies or attachments and never cause import to create or rewrite a Markdown note.
 
 Older standalone workspace exports and organization backups remain readable through the same center, subject to their legacy identity checks.
 
@@ -91,18 +118,18 @@ The plugin itself does not read or write outside the vault. On desktop, the oper
 
 On iPhone and iPad, Export writes JSON under <code>Knowledge Base Command Center Exports/</code> inside the vault so it can sync or be shared through Files. Import uses an in-vault JSON picker and displays the selected vault path during review.
 
-Import and export enforce a 10 MB ceiling plus per-list and aggregate-reference limits. Export validates the exact serialized JSON before saving, so the plugin does not intentionally create a package its own importer refuses to read.
+Single-base import and export enforce a 10 MB ceiling plus per-list and aggregate-reference limits. A portfolio is limited to 50 bases and 32 MB total, and also enforces strict aggregate subject, structure, and reference budgets across its already-bounded packages. Export validates the exact serialized JSON before saving, so the plugin does not intentionally create a package its own importer refuses to read.
 
 ## Same-vault recovery
 
 Same-vault recovery starts unselected when an import file is opened. It must be selected and confirmed separately, is restored by itself, and is never described or executed as a merge with portable sections.
 
-Current version-9 recovery files embed:
+Current version-10 recovery files embed:
 
 - source vault identity;
 - source knowledge-base ID and name;
 - Generic/ENT preset identity;
-- dynamic Library definitions and layouts;
+- dynamic Library definitions and layouts, including nested subheadings;
 - exact local note bindings and paths; and
 - the base's plugin-owned organization.
 
@@ -110,7 +137,8 @@ Before an Undo snapshot or mutation starts, the plugin verifies that the source 
 
 ### Recovery versions
 
-- **Version 9:** current format with dynamic Library definitions and layouts plus source vault/base/preset locks.
+- **Version 10:** current format with nested Collection and Library subheading layouts, dynamic Library definitions, and source vault/base/preset locks.
+- **Version 9:** dynamic Library definitions and layouts plus the same identity locks, but its subheadings stay a single level deep.
 - **Version 8:** same identity locks and fixed clinical Library layouts, but predates arbitrary Library definitions.
 - **Version 7:** predates nested Library-layout recovery but carries current-style vault/base/preset identity.
 - **Versions 1–6:** do not carry a trusted knowledge-base identity or preset and require a separate **base/preset unverified** override.
@@ -152,9 +180,11 @@ Do not use a different-base or legacy-identity override unless the displayed unc
 
 ## Sync model and conflict handling
 
-Different knowledge bases can merge independently through Obsidian Sync. Concurrent or offline edits to the same established base use whole-base last-write-wins reconciliation, not field-level merging.
+Different knowledge bases can merge independently through Obsidian Sync. Current stores carry a per-base semantic revision, head, payload fingerprint, and bounded causal lineage. When two different semantic payloads have no proven ancestor relationship, the plugin treats them as concurrent edits, writes every possible losing complete envelope to private conflict rescue, and only then selects a deterministic whole-base winner. It still does not field-merge simultaneous edits.
 
-The plugin cannot reliably distinguish a genuine same-base concurrent edit from a normal sequential Sync update. The losing same-base payload therefore does not receive a dedicated conflict notice or automatic rescue. Avoid editing the same base on two devices at once, let Sync finish before switching devices, and keep current recovery exports.
+Run **Open sync & recovery center** for local evidence about the active base, last successful local save, last external plugin-data reload, conflict rescues, recovery age, and any recorded active-base conflict. The center does not inspect Obsidian Sync, a provider queue, the network, or another device. An absent warning is not proof that it is safe to switch devices. Avoid editing the same base on two devices at once, let your provider settle using its supported surface, and keep current recovery exports.
+
+Conflict-rescue counts use only direct export-folder file metadata and the documented <code>knowledge-base-command-center-conflict-*.json</code> name pattern. The bounded scan never opens the JSON. Recovery age comes from a confirmed recovery export on this device or the standalone backup name pattern; the center does not open an arbitrary portable package to infer its selected components.
 
 When a newly enabled device starts before <code>data.json</code> arrives, it does not immediately publish an authoritative empty store. Meaningful local work is written to a private conflict-rescue JSON before an established synced store is adopted.
 

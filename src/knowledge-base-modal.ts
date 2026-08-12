@@ -1,7 +1,7 @@
 import { Modal, Notice, Setting, setIcon } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
 import { sanitizeFileName, type KnowledgeBaseEntry, type WorkspaceMode } from "./model";
-import { ConfirmModal, TextPromptModal } from "./modals";
+import { ConfirmModal, createOpenedBaseGuard, TextPromptModal, type OpenedBaseGuard } from "./modals";
 
 function reportError(error: unknown): void {
   console.error("Knowledge Base Command Center base action failed", error);
@@ -191,8 +191,7 @@ class DeleteArchivedKnowledgeBaseModal extends Modal {
   private readonly entryId: string;
   private readonly entryName: string;
   private readonly expectedUpdatedAt: number;
-  private readonly openedBaseId: string;
-  private readonly openedDataEpoch: number;
+  private readonly ownsBase: OpenedBaseGuard;
   private confirmation = "";
   private busy = false;
   private confirmButtonEl: HTMLButtonElement | null = null;
@@ -207,8 +206,10 @@ class DeleteArchivedKnowledgeBaseModal extends Modal {
     this.entryId = entry.id;
     this.entryName = entry.data.settings.workspaceName;
     this.expectedUpdatedAt = entry.updatedAt;
-    this.openedBaseId = plugin.getActiveKnowledgeBaseId();
-    this.openedDataEpoch = plugin.getDataEpoch();
+    this.ownsBase = createOpenedBaseGuard(plugin, {
+      message: "Knowledge-base data changed while this confirmation was open. Nothing was deleted; review the archived base again.",
+      onStale: () => this.close(),
+    });
   }
 
   onOpen(): void {
@@ -260,11 +261,7 @@ class DeleteArchivedKnowledgeBaseModal extends Modal {
 
   private async submit(): Promise<void> {
     if (this.busy || this.confirmation.normalize("NFC") !== this.entryName.normalize("NFC")) return;
-    if (this.plugin.getActiveKnowledgeBaseId() !== this.openedBaseId || this.plugin.getDataEpoch() !== this.openedDataEpoch) {
-      new Notice("Knowledge-base data changed while this confirmation was open. Nothing was deleted; review the archived base again.", 8000);
-      this.close();
-      return;
-    }
+    if (!this.ownsBase()) return;
     this.busy = true;
     this.errorEl?.setText("");
     this.updateConfirmationState();
@@ -287,6 +284,8 @@ class DeleteArchivedKnowledgeBaseModal extends Modal {
 }
 
 export class ManageKnowledgeBasesModal extends Modal {
+  private ownsRendered: OpenedBaseGuard | null = null;
+
   constructor(private readonly plugin: EntVaultCommandCenterPlugin) {
     super(plugin.app);
   }
@@ -297,7 +296,23 @@ export class ManageKnowledgeBasesModal extends Modal {
     this.render();
   }
 
+  private guardRenderedData(): boolean {
+    // Prototype-only unit-test fixtures do not run render() first.
+    this.ownsRendered ??= this.createRenderedDataGuard();
+    return this.ownsRendered();
+  }
+
+  private createRenderedDataGuard(): OpenedBaseGuard {
+    return createOpenedBaseGuard(this.plugin, {
+      message: "Knowledge-base data changed while this manager was open. Nothing was changed; reopen the knowledge-base manager.",
+      onStale: () => this.close(),
+    });
+  }
+
   private render(): void {
+    // Every row is a snapshot of the base list. Record the data identity it was
+    // built from so a synced replacement cannot be acted on by a stale row.
+    this.ownsRendered = this.createRenderedDataGuard();
     this.contentEl.empty();
     this.titleEl.setText("Manage knowledge bases");
     this.contentEl.createEl("p", {
@@ -373,6 +388,7 @@ export class ManageKnowledgeBasesModal extends Modal {
         placeholder: "Knowledge-base name",
         initialValue: entry.data.settings.workspaceName,
         onSubmit: async (name) => {
+          if (!this.guardRenderedData()) return;
           await this.plugin.renameKnowledgeBase(entry.id, name);
           this.render();
         },
@@ -385,6 +401,7 @@ export class ManageKnowledgeBasesModal extends Modal {
         initialValue: `${entry.data.settings.workspaceName} copy`,
         submitLabel: "Duplicate and switch",
         onSubmit: async (name) => {
+          if (!this.guardRenderedData()) return;
           const duplicate = await this.plugin.duplicateKnowledgeBase(entry.id, name);
           this.close();
           new Notice(`Created and opened “${duplicate.data.settings.workspaceName}”.`);
@@ -405,6 +422,7 @@ export class ManageKnowledgeBasesModal extends Modal {
         `“${entry.data.settings.workspaceName}” will leave the switcher but remain fully restorable.${fallback ? ` The Command Center will switch to “${fallback}”.` : ""} Its ${subjects} ${countLabel}, collections, pins, views, and history stay in plugin data. No Markdown note will be deleted, moved, or changed.`,
         "Archive base",
         async () => {
+          if (!this.guardRenderedData()) return;
           await this.plugin.archiveKnowledgeBase(entry.id);
           if (active) this.close(); else this.render();
         },
@@ -422,7 +440,9 @@ export class ManageKnowledgeBasesModal extends Modal {
     setIcon(button.createSpan(), icon);
     button.createSpan({ text: label });
     button.disabled = disabled;
-    button.addEventListener("click", action);
+    button.addEventListener("click", () => {
+      if (this.guardRenderedData()) action();
+    });
     return button;
   }
 

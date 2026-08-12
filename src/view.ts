@@ -1,7 +1,10 @@
 import { ItemView, Menu, Notice, Platform, setIcon, TFile, WorkspaceLeaf, normalizePath } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
+import type { CatalogPlacementTarget } from "./main";
 import { IndexManagerModal, type ManagerTab } from "./index-manager";
 import { ExportImportCenterModal } from "./portability-modal";
+import { PortfolioTransferModal } from "./portfolio-modal";
+import { MAX_PORTABLE_PACKAGE_BYTES } from "./portability";
 import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge-base-modal";
 import { LibraryEditorModal, ManageLibrariesModal } from "./library-modal";
 import { resolveLibraryIconId } from "./library-icons";
@@ -9,8 +12,9 @@ import {
   assertPersonalBackupMatchesVault,
   buildCurriculumTree,
   canonicalPath,
+  childSubheadings,
+  clonePersonalOrganization,
   curriculumChildPaths,
-  countHeading,
   createPersonalBackup,
   curriculumDescendantPaths,
   CurriculumDomainTree,
@@ -30,6 +34,7 @@ import {
   limitSnapshotStack,
   MainTab,
   makeId,
+  MAX_LAYOUT_DEPTH,
   matchesParsedQuery,
   metadataHasGap,
   ParsedQuery,
@@ -47,6 +52,7 @@ import {
   snapshotStackDepthIsTruncated,
   TopicFormValue,
   PluginSettings,
+  TemplateTokenContext,
   unknownQueryTokens,
   validateWritableFolderPath,
   validateTemplateFilePath,
@@ -54,7 +60,6 @@ import {
   visualPlacementPathSet,
 } from "./model";
 import {
-  collectKnowledgeBaseSearchResults,
   DEFAULT_CROSS_BASE_SEARCH_LIMIT,
   knowledgeBaseSearchRank,
   type KnowledgeBaseSearchGroup as BoundedKnowledgeBaseSearchGroup,
@@ -67,8 +72,11 @@ import {
   CollectionPickerModal,
   collectionTargets,
   ConfirmModal,
+  createOpenedBaseGuard,
+  deliverJsonExport,
   IndexGroupModal,
   KnowledgeNoteModal,
+  requestJsonImport,
   RecordPickerModal,
   TextPromptModal,
   TopicEditorModal,
@@ -82,19 +90,6 @@ export const MAX_RENDERED_BROWSE_RECORDS = 300;
 export const MAX_RENDERED_BROWSE_STRUCTURES = 300;
 export type KnowledgeBaseSearchGroup = BoundedKnowledgeBaseSearchGroup<KnowledgeBaseSearchSourceIdentity>;
 export type KnowledgeBaseSearchResultSet = BoundedKnowledgeBaseSearchResultSet<KnowledgeBaseSearchSourceIdentity>;
-
-/** Match every available base, preserving the plugin's active-first base order. */
-export function prepareKnowledgeBaseSearchResults<TSource extends KnowledgeBaseSearchSourceIdentity>(
-  sources: Array<TSource & { records: VaultRecord[] }>,
-  query: string,
-  limit = MAX_RENDERED_SEARCH_RESULTS,
-): BoundedKnowledgeBaseSearchResultSet<TSource> {
-  return collectKnowledgeBaseSearchResults(
-    sources.map((source) => ({ source, records: source.records })),
-    parseQuery(query),
-    limit,
-  );
-}
 
 interface Membership {
   headingId: string;
@@ -127,6 +122,22 @@ interface CurriculumDrag {
   kind: "curriculum-record";
   path: string;
 }
+
+interface CollectionsLayoutContext {
+  kind: "collections";
+  heading: LayoutHeading;
+  mutable: boolean;
+}
+
+interface LibraryLayoutContext {
+  kind: "library";
+  heading: LayoutHeading;
+  library: LibraryDefinition;
+  bySubjectId: Map<string, VaultRecord>;
+}
+
+/** Per-heading context threaded through the shared Collections/library renderer. */
+type LayoutRenderContext = CollectionsLayoutContext | LibraryLayoutContext;
 
 interface QueueDefinition {
   id: string;
@@ -163,6 +174,64 @@ export interface SearchViewportLayout {
   keyboardInset: number;
   keyboardOpen: boolean;
   shift: number;
+}
+
+export type PaneLayout = "wide" | "compact" | "narrow";
+
+export const PANE_WIDE_MIN_WIDTH = 1050;
+export const PANE_COMPACT_MIN_WIDTH = 680;
+
+/** Classify the space Obsidian assigned to this leaf, independent of window size. */
+export function classifyPaneWidth(width: number): PaneLayout {
+  const safeWidth = Number.isFinite(width) ? Math.max(0, width) : 0;
+  if (safeWidth >= PANE_WIDE_MIN_WIDTH) return "wide";
+  if (safeWidth >= PANE_COMPACT_MIN_WIDTH) return "compact";
+  return "narrow";
+}
+
+function measuredPaneWidth(element: HTMLElement): number {
+  const rectWidth = element.getBoundingClientRect().width;
+  const clientWidth = element.clientWidth;
+  return Math.max(
+    Number.isFinite(rectWidth) ? rectWidth : 0,
+    Number.isFinite(clientWidth) ? clientWidth : 0,
+  );
+}
+
+/**
+ * Observe one stable Obsidian leaf element using its owning window. A zero-width
+ * callback means the stacked tab is temporarily hidden, not that its layout
+ * should be discarded.
+ */
+export function observePaneWidth(element: HTMLElement, onWidth: (width: number) => void): () => void {
+  const viewWindow = element.ownerDocument.defaultView;
+  if (!viewWindow) return () => undefined;
+  let active = true;
+  const report = (width: number): void => {
+    if (active && Number.isFinite(width) && width > 0) onWidth(width);
+  };
+  const sync = (): void => report(measuredPaneWidth(element));
+  const ResizeObserverConstructor = (viewWindow as Window & {
+    ResizeObserver?: typeof ResizeObserver;
+  }).ResizeObserver;
+  if (ResizeObserverConstructor) {
+    const observer = new ResizeObserverConstructor((entries) => {
+      const entry = entries.find((candidate) => candidate.target === element);
+      report(entry?.contentRect.width ?? measuredPaneWidth(element));
+    });
+    observer.observe(element);
+    sync();
+    return () => {
+      active = false;
+      observer.disconnect();
+    };
+  }
+  viewWindow.addEventListener("resize", sync);
+  sync();
+  return () => {
+    active = false;
+    viewWindow.removeEventListener("resize", sync);
+  };
 }
 
 /**
@@ -235,6 +304,18 @@ function iconButton(parent: HTMLElement, icon: string, label: string, className 
   return button;
 }
 
+/** Accessible in-view entry point shared by desktop and compact mobile layouts. */
+export function createQuickEntryButton(parent: HTMLElement, onActivate: () => void): HTMLButtonElement {
+  const button = parent.createEl("button", {
+    cls: "ent-cc-button ent-cc-quick-entry-button",
+    attr: { type: "button", "aria-label": "Open quick entry", title: "Open quick entry" },
+  });
+  setIcon(button.createSpan(), "zap");
+  button.createSpan({ cls: "ent-cc-quick-entry-label", text: "Quick entry" });
+  button.addEventListener("click", onActivate);
+  return button;
+}
+
 /** Marks a disclosure control so assistive technology can announce open/closed state. */
 function disclosureButton(parent: HTMLElement, collapsed: boolean, label: string): HTMLButtonElement {
   const button = iconButton(parent, collapsed ? "chevron-right" : "chevron-down", `${collapsed ? "Expand" : "Collapse"} ${label}`, "ent-cc-disclosure");
@@ -271,12 +352,90 @@ export function matchingKnowledgeBaseRecords(records: VaultRecord[], query: stri
   });
 }
 
+type LayoutNode = LayoutHeading | LayoutSubheading;
+
+/** All subject references in a node's subtree, in render order. */
+function layoutSubjects(node: LayoutNode): string[] {
+  const subjects = [...node.subjects];
+  for (const child of childSubheadings(node)) subjects.push(...layoutSubjects(child));
+  return subjects;
+}
+
+/** First subheading anywhere beneath a node that satisfies the predicate. */
+function findNestedSubheading(node: LayoutNode, predicate: (candidate: LayoutSubheading) => boolean): LayoutSubheading | null {
+  for (const child of childSubheadings(node)) {
+    if (predicate(child)) return child;
+    const nested = findNestedSubheading(child, predicate);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+/** Heading-to-node chain for a nested subheading id; null when the id is absent. */
+function subheadingChain(
+  heading: LayoutHeading,
+  subheadingId: string,
+): { chain: LayoutNode[]; node: LayoutSubheading } | null {
+  const walk = (trail: LayoutNode[], parent: LayoutNode): { chain: LayoutNode[]; node: LayoutSubheading } | null => {
+    const chain = [...trail, parent];
+    for (const child of childSubheadings(parent)) {
+      if (child.id === subheadingId) return { chain: [...chain, child], node: child };
+      const nested = walk(chain, child);
+      if (nested) return nested;
+    }
+    return null;
+  };
+  return walk([], heading);
+}
+
+/**
+ * Owning top-level heading for a layout-unique id. nested is the node itself
+ * when the id names a subheading at any depth, and null when it names the
+ * heading; the plugin quick-entry API takes the two ids separately.
+ */
+function findLayoutNode(headings: LayoutHeading[], id: string): { heading: LayoutHeading; nested: LayoutSubheading | null } | null {
+  for (const heading of headings) {
+    if (heading.id === id) return { heading, nested: null };
+    const nested = findNestedSubheading(heading, (node) => node.id === id);
+    if (nested) return { heading, nested };
+  }
+  return null;
+}
+
+/** Visit every node in these layouts depth-first with its depth (heading = 1) and title path. */
+function visitLayoutNodes(
+  headings: LayoutHeading[],
+  visit: (node: LayoutNode, depth: number, titles: string[]) => void,
+): void {
+  const walk = (node: LayoutNode, depth: number, titles: string[]): void => {
+    visit(node, depth, titles);
+    for (const child of childSubheadings(node)) walk(child, depth + 1, [...titles, child.title]);
+  };
+  for (const heading of headings) walk(heading, 1, [heading.title]);
+}
+
+/** Count subheadings nested anywhere beneath a node. */
+function countNestedSubheadings(node: LayoutNode): number {
+  return childSubheadings(node).reduce((sum, child) => sum + 1 + countNestedSubheadings(child), 0);
+}
+
+/**
+ * Mutable child list of a node, created on demand. Callers that can empty the
+ * list must restore the canonical leaf form via dropEmptyChildList afterwards.
+ */
+function ensureChildList(node: LayoutNode): LayoutSubheading[] {
+  if (!node.subheadings) node.subheadings = [];
+  return node.subheadings;
+}
+
+/** Canonical cleaned data keeps the nested key only while children exist. */
+function dropEmptyChildList(node: LayoutNode, isHeading: boolean): void {
+  if (!isHeading && node.subheadings && node.subheadings.length === 0) delete node.subheadings;
+}
+
 function collectionPaths(collections: LayoutHeading[]): string[] {
   const paths: string[] = [];
-  for (const heading of collections) {
-    paths.push(...heading.subjects);
-    for (const subheading of heading.subheadings) paths.push(...subheading.subjects);
-  }
+  for (const heading of collections) paths.push(...layoutSubjects(heading));
   return paths;
 }
 
@@ -296,7 +455,9 @@ export class EntVaultCommandCenterView extends ItemView {
   private setupTimer: number | null = null;
   private selectionSaveTimer: number | null = null;
   private selectionSavePromise: Promise<void> | null = null;
-  private readonly timerWindow: Window = window.activeWindow ?? window;
+  /** Window that owns the currently rendered leaf and therefore its timers. */
+  private timerWindow: Window = window.activeWindow ?? window;
+  private windowMigrationCleanup: (() => void) | null = null;
   private editMode = false;
   private curriculumArrangeMode = false;
   private mobileInspectorOpen = false;
@@ -323,6 +484,11 @@ export class EntVaultCommandCenterView extends ItemView {
   private browseStructuresOmitted = 0;
   private viewClosed = false;
   private searchViewportWindow: Window | null = null;
+  private paneLayout: PaneLayout = "narrow";
+  private paneWidth = 0;
+  private paneLayoutRenderInProgress = false;
+  private paneResizeWindow: Window | null = null;
+  private paneResizeCleanup: (() => void) | null = null;
   private collapsedQueues = new Set<string>();
   private collapsedCurriculumDomains = new Set<string>();
   private collapsedCurriculumNodes = new Set<string>();
@@ -330,6 +496,8 @@ export class EntVaultCommandCenterView extends ItemView {
   private readonly viewInstanceId = makeId("view");
   /** Invalidates an in-flight desktop drag whenever its rendered tree is replaced. */
   private libraryDragRenderToken = makeId("library-drag-render");
+  /** In-flight drag payload; browsers keep dataTransfer unreadable during dragover. */
+  private activeLibraryDrag: LibraryDragMembership | null = null;
   private setupPromptShown = false;
   private loadedBaseId = "";
   private loadedDataEpoch = 0;
@@ -350,16 +518,14 @@ export class EntVaultCommandCenterView extends ItemView {
 
   async onOpen(): Promise<void> {
     this.viewClosed = false;
+    this.bindWindowMigration();
+    this.measureAndApplyPaneLayout(false);
     await this.reload();
+    this.bindPaneLayout();
     this.bindSearchViewportLayout();
     if (!this.plugin.data.settings.setupComplete && !this.setupPromptShown) {
-      const ownsBase = this.createOpenedBaseGuard();
       this.setupPromptShown = true;
-      this.setupTimer = this.timerWindow.setTimeout(() => {
-        this.setupTimer = null;
-        if (!ownsBase()) return;
-        this.openSetupWizard();
-      }, 100);
+      this.scheduleSetupPrompt();
     }
   }
 
@@ -367,6 +533,8 @@ export class EntVaultCommandCenterView extends ItemView {
     this.viewClosed = true;
     this.globalSearchRequestGeneration += 1;
     this.globalSearchPendingKey = "";
+    this.unbindWindowMigration();
+    this.unbindPaneLayout();
     this.unbindSearchViewportLayout();
     const selectionSavePending = this.selectionSaveTimer !== null;
     for (const timer of [this.setupTimer, this.searchDebounce, this.selectionSaveTimer]) {
@@ -386,7 +554,114 @@ export class EntVaultCommandCenterView extends ItemView {
     }
   }
 
-  async reload(): Promise<void> {
+  onResize(): void {
+    if (this.viewClosed) return;
+    const ownerWindow = this.contentEl.ownerDocument.defaultView;
+    if (ownerWindow && ownerWindow !== this.timerWindow) {
+      // Fallback for Obsidian builds or test hosts that do not expose
+      // HTMLElement.onWindowMigrated(). The migration hook remains the
+      // deterministic path; onResize keeps older hosts safe.
+      this.handleWindowMigration(ownerWindow);
+      return;
+    }
+    // Obsidian can adopt a leaf into a pop-out window. Rebind both observers
+    // to the element's current owner instead of retaining the original window.
+    this.bindPaneLayout();
+    this.bindSearchViewportLayout();
+    this.measureAndApplyPaneLayout();
+    this.syncSearchViewportLayout();
+  }
+
+  /**
+   * Obsidian migrates an existing leaf element when it moves into or out of a
+   * pop-out. Rebind every window-owned observer and move pending timers before
+   * the old window can be closed or background-throttled.
+   */
+  private bindWindowMigration(): void {
+    this.unbindWindowMigration();
+    const ownerWindow = this.contentEl.ownerDocument.defaultView;
+    if (ownerWindow) this.timerWindow = ownerWindow;
+    if (typeof this.contentEl.onWindowMigrated !== "function") return;
+    this.windowMigrationCleanup = this.contentEl.onWindowMigrated((migratedWindow) => {
+      this.handleWindowMigration(migratedWindow);
+    });
+  }
+
+  private unbindWindowMigration(): void {
+    this.windowMigrationCleanup?.();
+    this.windowMigrationCleanup = null;
+  }
+
+  private handleWindowMigration(migratedWindow: Window): void {
+    if (this.viewClosed) return;
+    // The callback argument is Obsidian's authoritative destination window.
+    // ownerDocument is expected to agree after adoption, while the explicit
+    // value also keeps this deterministic during the migration callback.
+    const ownerWindow = migratedWindow;
+    const previousWindow = this.timerWindow;
+    const setupPending = this.setupTimer !== null;
+    const searchPending = this.searchDebounce !== null;
+    const selectionPending = this.selectionSaveTimer !== null;
+    if (previousWindow !== ownerWindow) {
+      for (const timer of [this.setupTimer, this.searchDebounce, this.selectionSaveTimer]) {
+        if (timer !== null) previousWindow.clearTimeout(timer);
+      }
+      this.setupTimer = null;
+      this.searchDebounce = null;
+      this.selectionSaveTimer = null;
+      this.timerWindow = ownerWindow;
+    }
+    this.bindPaneLayout();
+    this.bindSearchViewportLayout();
+    this.measureAndApplyPaneLayout();
+    this.syncSearchViewportLayout();
+    if (setupPending) this.scheduleSetupPrompt();
+    if (searchPending) this.scheduleSearchRefresh(0);
+    if (selectionPending) this.scheduleSelectionSave();
+  }
+
+  private scheduleSetupPrompt(delay = 100): void {
+    if (this.viewClosed || this.plugin.data.settings.setupComplete) return;
+    if (this.setupTimer !== null) this.timerWindow.clearTimeout(this.setupTimer);
+    const ownsBase = this.createOpenedBaseGuard();
+    this.setupTimer = this.timerWindow.setTimeout(() => {
+      this.setupTimer = null;
+      if (this.viewClosed || !ownsBase()) return;
+      this.openSetupWizard();
+    }, delay);
+  }
+
+  private scheduleSearchRefresh(delay = 120): void {
+    if (this.searchDebounce !== null) this.timerWindow.clearTimeout(this.searchDebounce);
+    const scheduledQuery = this.query;
+    const scheduledBaseId = this.loadedBaseId;
+    const scheduledDataEpoch = this.loadedDataEpoch;
+    this.searchDebounce = this.timerWindow.setTimeout(() => {
+      this.searchDebounce = null;
+      if (this.viewClosed
+        || scheduledQuery !== this.query
+        || scheduledBaseId !== this.plugin.getActiveKnowledgeBaseId()
+        || scheduledDataEpoch !== this.currentDataEpoch()) return;
+      this.renderTree();
+      this.resetSearchScrollPosition();
+      this.timerWindow.requestAnimationFrame(() => {
+        if (!this.viewClosed && scheduledQuery === this.query) this.resetSearchScrollPosition();
+      });
+    }, delay);
+  }
+
+  private scheduleSelectionSave(delay = 1000): void {
+    if (this.selectionSaveTimer !== null) this.timerWindow.clearTimeout(this.selectionSaveTimer);
+    const ownsBase = this.createOpenedBaseGuard();
+    this.selectionSaveTimer = this.timerWindow.setTimeout(() => {
+      this.selectionSaveTimer = null;
+      if (this.viewClosed || !ownsBase()) return;
+      this.run(() => this.saveSelectionState());
+    }, delay);
+  }
+
+  async reload(withinOperation = false): Promise<void> {
+    this.measureAndApplyPaneLayout(false);
     const activeBaseId = this.plugin.getActiveKnowledgeBaseId();
     const dataEpoch = this.currentDataEpoch();
     const baseChanged = this.loadedBaseId !== activeBaseId;
@@ -431,7 +706,7 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     this.records = this.plugin.getRecords();
     this.recordByPath = new Map(this.records.map((record) => [record.path, record]));
-    if (await this.plugin.reconcileRecords(this.records)) {
+    if (await this.plugin.reconcileRecords(this.records, withinOperation)) {
       this.records = this.plugin.getRecords();
       this.recordByPath = new Map(this.records.map((record) => [record.path, record]));
     }
@@ -439,7 +714,7 @@ export class EntVaultCommandCenterView extends ItemView {
       .some((tab) => tab.id === this.plugin.data.activeTab)
       && !this.plugin.isDataReadOnly()) {
       this.plugin.data.activeTab = "curriculum";
-      await this.plugin.savePluginData();
+      await this.plugin.saveViewState(withinOperation);
       if (!this.guardLoadedBase()) return;
     }
     this.curriculum = buildCurriculumTree(
@@ -452,6 +727,10 @@ export class EntVaultCommandCenterView extends ItemView {
     if (searchWasFocused && !baseChanged && !dataChanged && this.treeEl) {
       this.refreshChromeCounts();
       this.renderTree();
+      // The wide-layout inspector pane must not keep showing a record this
+      // vault change deleted or renamed. Compact layouts render the inspector
+      // as its own route and have no pane element here.
+      if (!this.isCompactInspectorLayout() && this.inspectorEl) this.renderInspector();
       return;
     }
     this.render();
@@ -479,17 +758,11 @@ export class EntVaultCommandCenterView extends ItemView {
     // Capture the owner of the rendered DOM, not merely whichever base the
     // plugin has already switched to. During the async switch window old rows
     // can still receive a click while plugin.data points at the new base.
-    const openedBaseId = this.loadedBaseId || this.plugin.getActiveKnowledgeBaseId();
-    const openedDataEpoch = this.loadedBaseId ? this.loadedDataEpoch : this.currentDataEpoch();
-    let noticeShown = false;
-    return (): boolean => {
-      if (this.plugin.getActiveKnowledgeBaseId() === openedBaseId && this.currentDataEpoch() === openedDataEpoch) return true;
-      if (!noticeShown) {
-        noticeShown = true;
-        new Notice("The active knowledge base changed. Close and reopen this action before continuing.", 8000);
-      }
-      return false;
-    };
+    return createOpenedBaseGuard(this.plugin, {
+      message: "The active knowledge base changed. Close and reopen this action before continuing.",
+      openedBaseId: this.loadedBaseId || this.plugin.getActiveKnowledgeBaseId(),
+      openedDataEpoch: this.loadedBaseId ? this.loadedDataEpoch : this.currentDataEpoch(),
+    });
   }
 
   private currentDataEpoch(): number {
@@ -576,7 +849,7 @@ export class EntVaultCommandCenterView extends ItemView {
   private saveSelectionState(): Promise<void> {
     if (!this.guardLoadedBase()) return Promise.resolve();
     const previous = this.selectionSavePromise?.catch(() => undefined) ?? Promise.resolve();
-    const save = previous.then(() => this.plugin.savePluginData());
+    const save = previous.then(() => this.plugin.saveViewState());
     this.selectionSavePromise = save;
     return save.finally(() => {
       if (this.selectionSavePromise === save) this.selectionSavePromise = null;
@@ -590,7 +863,435 @@ export class EntVaultCommandCenterView extends ItemView {
       curriculumNodes: [...this.collapsedCurriculumNodes],
       queues: [...this.collapsedQueues],
     };
-    this.run(() => this.plugin.savePluginData());
+    this.run(() => this.plugin.saveViewState());
+  }
+
+  public openQuickEntry(explicitCurrentPath?: string): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const settings = this.plugin.data.settings;
+    const bases = this.plugin.getKnowledgeBases();
+    const actions = [
+      ...(bases.length > 1 ? [{
+        id: "switch-base",
+        title: `Knowledge base: ${settings.workspaceName}`,
+        description: "Choose which independent knowledge base receives this entry.",
+        icon: "library-big",
+      }] : []),
+      { id: "create-subject", title: "Create subject without a note", description: `Add a portable No note subject to ${settings.indexLabel}; create or link its Markdown note later.`, icon: "bookmark-plus" },
+      { id: "create-note", title: "Create note", description: "Choose the Index or a Library, a visual group, and empty or template-based content.", icon: "file-plus-2" },
+      { id: "add-current", title: "Add current note", description: "Use the note that was active when Quick Entry opened; its file is not moved or rewritten.", icon: "panel-top" },
+      { id: "add-existing", title: "Add existing note", description: "Choose an existing Markdown note, then its Index, Library, or Collection destination.", icon: "list-plus" },
+      { id: "append-current", title: "Quick Append to current note", description: "Add a source, question, thought, lecture, reading item, or other follow-up under its managed category.", icon: "list-end" },
+      { id: "append-existing", title: "Quick Append to another note", description: "Choose a Markdown note, then append one categorized follow-up item without moving the file.", icon: "file-input" },
+      { id: "create-heading", title: "Create heading", description: "Create an Index group, Collection heading, or Library heading.", icon: "folder-plus" },
+      { id: "create-subheading", title: "Create subheading", description: "Create a nested Index subject, Collection subheading, or Library subheading.", icon: "list-tree" },
+      { id: "more", title: "More add actions", description: "Open the full Add or create menu for proposals, advanced workflows, and other actions.", icon: "ellipsis" },
+    ];
+    new AddActionModal(this.app, actions, (action) => {
+      if (!ownsBase()) return;
+      if (action.id === "switch-base") this.openQuickEntryBasePicker(explicitCurrentPath);
+      else if (action.id === "create-subject") this.startQuickCreatePlaceholder();
+      else if (action.id === "create-note") this.startQuickCreateNote();
+      else if (action.id === "add-current") this.startQuickAddCurrentNote(explicitCurrentPath);
+      else if (action.id === "add-existing") this.startQuickAddExistingNote();
+      else if (action.id === "append-current") this.plugin.openQuickAppendCurrentNote(explicitCurrentPath);
+      else if (action.id === "append-existing") this.plugin.openQuickAppendExistingNote();
+      else if (action.id === "create-heading") this.startQuickCreateHeading();
+      else if (action.id === "create-subheading") this.startQuickCreateSubheading();
+      else this.openAddActions();
+    }, `Quick Entry — ${settings.workspaceName}`).open();
+  }
+
+  private openQuickEntryBasePicker(explicitCurrentPath?: string): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const activeId = this.plugin.getActiveKnowledgeBaseId();
+    const bases = this.plugin.getKnowledgeBases();
+    new AddActionModal(this.app, bases.map((entry) => ({
+      id: entry.id,
+      title: entry.data.settings.workspaceName,
+      description: entry.id === activeId
+        ? "Current knowledge base"
+        : `Switch to this ${entry.data.settings.workspaceMode === "ent-clinical" ? "ENT clinical" : "Generic"} knowledge base.`,
+      icon: entry.id === activeId ? "check" : "library-big",
+    })), (action) => {
+      if (!ownsBase()) return;
+      this.run(async () => {
+        // The guard is checked immediately before the intentional switch. A
+        // Sync replacement or another base switch while the picker was open
+        // must never be mistaken for the user's explicit destination choice.
+        if (!ownsBase()) return;
+        if (action.id !== this.plugin.getActiveKnowledgeBaseId()) await this.plugin.switchKnowledgeBase(action.id);
+        // Switching invalidates this view's original data guard. Re-acquire the
+        // active view after the committed switch before opening another form.
+        const activeView = await this.plugin.activateView();
+        activeView.openQuickEntry(explicitCurrentPath);
+      });
+    }, "Choose knowledge base").open();
+  }
+
+  public startQuickCreatePlaceholder(): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    new TextPromptModal(this.app, {
+      title: "Create subject without a note",
+      placeholder: "Subject name",
+      submitLabel: "Choose group",
+      onSubmit: (title) => {
+        if (!ownsBase()) return;
+        new IndexGroupModal(this.app, {
+          title: `Place “${title}” in ${this.plugin.data.settings.indexLabel}`,
+          groupLabel: this.plugin.data.settings.groupLabel,
+          initialValue: this.plugin.getIndexGroups()[0] ?? "Ungrouped",
+          existingGroups: this.plugin.getIndexGroups(),
+          submitLabel: "Create placeholder",
+          onSubmit: async (group) => {
+            if (!ownsBase()) return;
+            await this.plugin.createQuickEntryPlaceholder({ title, group });
+            if (!ownsBase()) return;
+            new Notice(`Created “${title}” as a No note subject. No Markdown file was created.`);
+          },
+        }).open();
+      },
+    }).open();
+  }
+
+  public startQuickCreateHeading(): void {
+    if (!this.guardLoadedBase()) return;
+    const libraries = this.plugin.getLibraries();
+    const actions = [
+      { id: "index", title: `${this.plugin.data.settings.indexLabel} group`, description: "Create a stable visual group that can remain empty until subjects are added.", icon: "library" },
+      { id: "collection", title: "Collection heading", description: "Create a reusable cross-category list.", icon: "folders" },
+      ...libraries.map((library) => ({
+        id: `library:${library.id}`,
+        title: `${library.name} heading`,
+        description: `Create an empty visual heading inside ${library.name}.`,
+        icon: libraryIcon(library),
+      })),
+    ];
+    const ownsBase = this.createOpenedBaseGuard();
+    new AddActionModal(this.app, actions, (action) => {
+      if (!ownsBase()) return;
+      if (action.id === "index") {
+        new TextPromptModal(this.app, {
+          title: `Create ${this.plugin.data.settings.groupLabel.toLocaleLowerCase()}`,
+          placeholder: `${this.plugin.data.settings.groupLabel} name`,
+          submitLabel: "Create heading",
+          onSubmit: async (title) => {
+            if (!ownsBase()) return;
+            await this.plugin.createQuickEntryIndexGroup(title);
+          },
+        }).open();
+      } else if (action.id === "collection") {
+        new TextPromptModal(this.app, {
+          title: "Create collection heading",
+          placeholder: "Collection name",
+          submitLabel: "Create heading",
+          onSubmit: async (title) => {
+            if (!ownsBase()) return;
+            await this.plugin.createQuickEntryCollectionHeading(title);
+          },
+        }).open();
+      } else {
+        const libraryId = action.id.slice("library:".length);
+        const library = this.plugin.getLibrary(libraryId);
+        if (!library) return;
+        new TextPromptModal(this.app, {
+          title: `Create heading in ${library.name}`,
+          placeholder: "Heading name",
+          submitLabel: "Create heading",
+          onSubmit: async (title) => {
+            if (!ownsBase()) return;
+            await this.plugin.createQuickEntryLibraryHeading(libraryId, title);
+          },
+        }).open();
+      }
+    }, "Create heading").open();
+  }
+
+  public startQuickCreateSubheading(): void {
+    if (!this.guardLoadedBase()) return;
+    const actions = [
+      ...(this.plugin.getIndexRecords().length > 0 ? [{
+        id: "index",
+        title: `Nested ${this.plugin.data.settings.itemSingular}`,
+        description: `Create a No note subject beneath an existing ${this.plugin.data.settings.indexLabel} subject.`,
+        icon: "list-tree",
+      }] : []),
+      ...(this.plugin.data.collections.length > 0 ? [{
+        id: "collection",
+        title: "Collection subheading",
+        description: "Choose a Collection heading or nested subheading, then create one subheading inside it.",
+        icon: "folders",
+      }] : []),
+      ...this.plugin.getLibraries()
+        .filter((library) => (this.plugin.data.portableIndex.libraryLayouts[library.id] ?? []).length > 0)
+        .map((library) => ({
+          id: `library:${library.id}`,
+          title: `${library.name} subheading`,
+          description: `Choose a heading or nested subheading inside ${library.name}.`,
+          icon: libraryIcon(library),
+        })),
+    ];
+    if (actions.length === 0) {
+      new Notice("Create a parent index subject, collection heading, or library heading first.");
+      return;
+    }
+    const ownsBase = this.createOpenedBaseGuard();
+    new AddActionModal(this.app, actions, (action) => {
+      if (!ownsBase()) return;
+      if (action.id === "index") this.openQuickIndexParentPicker();
+      else if (action.id === "collection") this.openQuickCollectionHeadingPicker();
+      else this.openQuickLibraryHeadingPicker(action.id.slice("library:".length));
+    }, "Create subheading").open();
+  }
+
+  private openQuickIndexParentPicker(): void {
+    const ownsBase = this.createOpenedBaseGuard();
+    new RecordPickerModal(
+      this.app,
+      this.plugin.getIndexRecords(),
+      "Choose parent subject",
+      "Search indexed subjects…",
+      (parent) => {
+        if (!ownsBase()) return;
+        new TextPromptModal(this.app, {
+          title: `New subject under ${parent.title}`,
+          placeholder: "Subheading or subject name",
+          submitLabel: "Create placeholder",
+          onSubmit: async (title) => {
+            if (!ownsBase()) return;
+            await this.plugin.createQuickEntryPlaceholder({ title, group: parent.domain || "Ungrouped", parentPath: parent.path });
+            if (!ownsBase()) return;
+            new Notice(`Created “${title}” under “${parent.title}” without creating a Markdown file.`);
+          },
+        }).open();
+      },
+    ).open();
+  }
+
+  /** Every node below the depth cap can parent one more subheading level. */
+  private quickSubheadingParentActions(headings: LayoutHeading[]): Array<{ id: string; title: string; description: string; icon: string }> {
+    const parents: Array<{ id: string; title: string; description: string; icon: string }> = [];
+    visitLayoutNodes(headings, (node, depth, titles) => {
+      if (depth >= MAX_LAYOUT_DEPTH) return;
+      const nested = countNestedSubheadings(node);
+      parents.push({
+        id: node.id,
+        title: titles.join(" / "),
+        description: `${nested} nested subheading${nested === 1 ? "" : "s"}`,
+        icon: "folder",
+      });
+    });
+    return parents;
+  }
+
+  private openQuickCollectionHeadingPicker(): void {
+    const ownsBase = this.createOpenedBaseGuard();
+    new AddActionModal(this.app, this.quickSubheadingParentActions(this.plugin.data.collections), (action) => {
+      if (!ownsBase()) return;
+      const located = findLayoutNode(this.plugin.data.collections, action.id);
+      if (!located) return;
+      const parent = located.nested ?? located.heading;
+      new TextPromptModal(this.app, {
+        title: `New subheading in ${parent.title}`,
+        placeholder: "Subheading name",
+        submitLabel: "Create subheading",
+        onSubmit: async (title) => {
+          if (!ownsBase()) return;
+          await this.plugin.createQuickEntryCollectionSubheading(located.heading.id, title, located.nested?.id);
+        },
+      }).open();
+    }, "Choose Collection heading or subheading").open();
+  }
+
+  private openQuickLibraryHeadingPicker(libraryId: string): void {
+    const library = this.plugin.getLibrary(libraryId);
+    if (!library) return;
+    const layout = this.plugin.data.portableIndex.libraryLayouts[libraryId] ?? [];
+    if (layout.length === 0) {
+      new Notice(`Create a heading in ${library.name} first.`);
+      return;
+    }
+    const ownsBase = this.createOpenedBaseGuard();
+    new AddActionModal(this.app, this.quickSubheadingParentActions(layout), (action) => {
+      if (!ownsBase()) return;
+      const located = findLayoutNode(this.plugin.data.portableIndex.libraryLayouts[libraryId] ?? [], action.id);
+      if (!located) return;
+      const parent = located.nested ?? located.heading;
+      new TextPromptModal(this.app, {
+        title: `New subheading in ${parent.title}`,
+        placeholder: "Subheading name",
+        submitLabel: "Create subheading",
+        onSubmit: async (title) => {
+          if (!ownsBase()) return;
+          await this.plugin.createQuickEntryLibrarySubheading(libraryId, located.heading.id, title, located.nested?.id);
+        },
+      }).open();
+    }, `Choose heading or subheading in ${library.name}`).open();
+  }
+
+  public startQuickCreateNote(): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const libraries = this.plugin.getLibraries()
+      .filter((library) => !this.plugin.isClinicalMode() || library.sourceKind === null);
+    const actions = [
+      ...(!this.plugin.isClinicalMode() ? [{
+        id: "index",
+        title: `Create in ${this.plugin.data.settings.indexLabel}`,
+        description: `Choose a ${this.plugin.data.settings.groupLabel.toLocaleLowerCase()}, destination folder, and empty or template content.`,
+        icon: "library",
+      }] : [{
+        id: "proposal",
+        title: "Create unverified topic proposal",
+        description: "Use the protected clinical Inbox workflow; Quick Entry never bypasses review safeguards.",
+        icon: "shield-alert",
+      }]),
+      ...libraries.map((library) => ({
+        id: `library:${library.id}`,
+        title: `Create ${library.singularName}`,
+        description: `Create a note and classify it in ${library.name}.`,
+        icon: libraryIcon(library),
+      })),
+      ...(!this.plugin.isClinicalMode() ? [{
+        id: "inbox",
+        title: `Create in ${this.plugin.data.settings.inboxLabel}`,
+        description: "Create an empty or template-based note without adding it to the Index.",
+        icon: "inbox",
+      }] : []),
+    ];
+    new AddActionModal(this.app, actions, (action) => {
+      if (!ownsBase()) return;
+      if (action.id === "index") this.openQuickCreateIndexNote();
+      else if (action.id === "proposal") this.startCreateProposal();
+      else if (action.id === "inbox") this.startCreateKnowledgeNote({ folder: this.plugin.data.settings.proposalFolder }, false);
+      else {
+        const libraryId = action.id.slice("library:".length);
+        this.openQuickLibraryPlacementPicker(libraryId, (target) => this.startCreateLibraryNote(libraryId, target));
+      }
+    }, "Quick create note").open();
+  }
+
+  private openQuickCreateIndexNote(): void {
+    const ownsBase = this.createOpenedBaseGuard();
+    new IndexGroupModal(this.app, {
+      title: `Choose ${this.plugin.data.settings.groupLabel.toLocaleLowerCase()}`,
+      groupLabel: this.plugin.data.settings.groupLabel,
+      initialValue: this.plugin.getIndexGroups()[0] ?? "Ungrouped",
+      existingGroups: this.plugin.getIndexGroups(),
+      submitLabel: "Continue to note",
+      onSubmit: (group) => {
+        if (!ownsBase()) return;
+        this.startCreateKnowledgeNote({}, false, async (file) => {
+          if (!ownsBase()) return;
+          await this.plugin.assignRecordToCatalog(file.path, "topic", { headingTitle: group });
+        }, `${this.plugin.data.settings.itemSingular} created in ${this.plugin.data.settings.indexLabel} under ${group}. Existing notes were not changed.`);
+      },
+    }).open();
+  }
+
+  public startQuickAddExistingNote(): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const libraries = this.plugin.getLibraries()
+      .filter((library) => !this.plugin.isClinicalMode() || library.sourceKind === null);
+    const actions = [
+      ...(!this.plugin.isClinicalMode() ? [{ id: "index", title: `Add to ${this.plugin.data.settings.indexLabel}`, description: "Choose an eligible Markdown note and its visual group.", icon: "library" }] : []),
+      ...libraries.map((library) => ({ id: `library:${library.id}`, title: `Add to ${library.name}`, description: "Classify an existing note without changing its file.", icon: libraryIcon(library) })),
+      { id: "collection", title: "Add to a Collection", description: "Choose an existing note, then a Collection heading or subheading.", icon: "folders" },
+    ];
+    new AddActionModal(this.app, actions, (action) => {
+      if (!ownsBase()) return;
+      if (action.id === "index") this.startAddExistingToIndex();
+      else if (action.id === "collection") this.startLinkVaultNote(false);
+      else {
+        const libraryId = action.id.slice("library:".length);
+        this.openQuickLibraryPlacementPicker(libraryId, (target) => this.startAddExistingToLibrary(libraryId, target));
+      }
+    }, "Add existing note").open();
+  }
+
+  public startQuickAddCurrentNote(explicitPath?: string): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const file = explicitPath ? this.app.vault.getAbstractFileByPath(explicitPath) : this.app.workspace.getActiveFile();
+    if (!(file instanceof TFile) || file.extension.toLocaleLowerCase() !== "md") {
+      new Notice("Open a Markdown note first, then run quick entry: add current note.");
+      return;
+    }
+    const libraries = this.plugin.getLibraries()
+      .filter((library) => !this.plugin.isClinicalMode() || library.sourceKind === null);
+    const actions = [
+      ...(!this.plugin.isClinicalMode() ? [{ id: "index", title: `Add to ${this.plugin.data.settings.indexLabel}`, description: "Choose a visual group; the current note stays in place.", icon: "library" }] : []),
+      ...libraries.map((library) => ({ id: `library:${library.id}`, title: `Add to ${library.name}`, description: "Classify the current note without changing it.", icon: libraryIcon(library) })),
+      { id: "collection", title: "Add to a Collection", description: "Place the current note in a reusable list.", icon: "folders" },
+    ];
+    new AddActionModal(this.app, actions, (action) => {
+      if (!ownsBase()) return;
+      if (action.id === "index") this.startQuickAddCurrentToIndex(file.path);
+      else if (action.id === "collection") this.startAddCurrentNote(file.path);
+      else {
+        const libraryId = action.id.slice("library:".length);
+        this.openQuickLibraryPlacementPicker(
+          libraryId,
+          (target) => this.startAddCurrentToLibrary(libraryId, file.path, target),
+        );
+      }
+    }, `Add “${file.basename}”`).open();
+  }
+
+  private openQuickLibraryPlacementPicker(
+    libraryId: string,
+    onChoose: (target: CatalogPlacementTarget) => void | Promise<void>,
+  ): void {
+    if (!this.guardLoadedBase()) return;
+    const library = this.plugin.getLibrary(libraryId);
+    if (!library || library.archivedAt !== null) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const layout = this.plugin.data.portableIndex.libraryLayouts[libraryId] ?? [];
+    if (layout.length === 0) {
+      new TextPromptModal(this.app, {
+        title: `Create the first heading in ${library.name}`,
+        placeholder: "Heading name",
+        submitLabel: "Create heading and continue",
+        onSubmit: async (title) => {
+          if (!ownsBase()) return;
+          const headingId = await this.plugin.createQuickEntryLibraryHeading(libraryId, title);
+          if (!ownsBase()) return;
+          await onChoose({ headingId });
+        },
+      }).open();
+      return;
+    }
+    const targets = collectionTargets(layout);
+    new CollectionPickerModal(this.app, targets, "Add", async (target) => {
+      if (!ownsBase()) return;
+      await onChoose({ headingId: target.headingId, subheadingId: target.subheadingId });
+    }, `heading or subheading in ${library.name}`).open();
+  }
+
+  private startQuickAddCurrentToIndex(path: string): void {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) {
+      new Notice("The previously active Markdown note could not be found.");
+      return;
+    }
+    const ownsBase = this.createOpenedBaseGuard();
+    new IndexGroupModal(this.app, {
+      title: `Place “${file.basename}” in ${this.plugin.data.settings.indexLabel}`,
+      groupLabel: this.plugin.data.settings.groupLabel,
+      initialValue: this.plugin.suggestedIndexGroup(file),
+      existingGroups: this.plugin.getIndexGroups(),
+      submitLabel: `Add to ${this.plugin.data.settings.indexLabel}`,
+      onSubmit: async (group) => {
+        if (!ownsBase()) return;
+        await this.plugin.assignRecordToCatalog(file.path, "topic", { headingTitle: group });
+        if (!ownsBase()) return;
+        new Notice(`Added “${file.basename}” under ${group}. The Markdown note was not changed.`);
+      },
+    }).open();
   }
 
   public openAddActions(): void {
@@ -685,20 +1386,69 @@ export class EntVaultCommandCenterView extends ItemView {
     }, `Add to ${library.name}`).open();
   }
 
-  private startCreateLibraryNote(libraryId: string): void {
+  private startCreateLibraryNote(libraryId: string, target: CatalogPlacementTarget = {}): void {
     const library = this.plugin.getLibrary(libraryId);
     if (!library || library.archivedAt !== null) return;
+    if (this.plugin.isClinicalMode() && library.sourceKind !== null) {
+      new Notice(`The built-in ${library.name} library follows native clinical source classification.`);
+      return;
+    }
     const ownsBase = this.createOpenedBaseGuard();
-    this.startCreateKnowledgeNote({}, false, async (file) => {
+    const profile = this.plugin.getEffectiveLibraryNoteProfile(libraryId);
+    this.startCreateKnowledgeNote({
+      folder: profile.folder,
+      mode: profile.mode,
+      templatePath: profile.templatePath,
+    }, false, async (file) => {
       if (!ownsBase()) return;
-      await this.plugin.assignRecordToLibrary(file.path, libraryId);
+      await this.plugin.assignRecordToLibrary(file.path, libraryId, target);
     }, `${library.singularName} created and added to ${library.name}. The Markdown note was not rewritten.`, {
       createLabel: library.singularName,
-      contextNotice: `This Markdown note will be classified in ${library.name} after creation. You can choose its heading or subheading from the record’s actions menu.`,
+      contextNotice: target.headingId
+        ? `This Markdown note will be classified in the selected heading or subheading in ${library.name} after creation.`
+        : `This Markdown note will be classified in ${library.name} after creation. You can choose its heading or subheading from the record’s actions menu.`,
+      tokenContext: this.libraryTemplateTokenContext(library, target),
     });
   }
 
-  private startAddExistingToLibrary(libraryId: string): void {
+  private libraryTemplateTokenContext(
+    library: LibraryDefinition,
+    target: CatalogPlacementTarget = {},
+    record?: VaultRecord,
+  ): TemplateTokenContext {
+    const layout = this.plugin.data.portableIndex.libraryLayouts[library.id] ?? [];
+    const heading = target.headingId
+      ? layout.find((candidate) => candidate.id === target.headingId)
+      : target.subheadingId
+        ? layout.find((candidate) => findNestedSubheading(candidate, (node) => node.id === target.subheadingId) !== null)
+        : undefined;
+    // {{yaml:category}} resolves to the exact node the subject is placed in,
+    // however deep, falling back to the heading title.
+    const subheading = target.subheadingId && heading
+      ? findNestedSubheading(heading, (node) => node.id === target.subheadingId) ?? undefined
+      : undefined;
+    const subject = record?.portableId ? this.plugin.getPortableSubject(record.portableId) : null;
+    const parent = subject?.parentId ? this.plugin.getPortableSubject(subject.parentId) : null;
+    return {
+      id: record?.curriculumId ?? "",
+      category: subheading?.title ?? heading?.title ?? record?.domain ?? library.name,
+      parent: parent?.title ?? record?.parentTopic ?? "",
+      library: library.name,
+      type: library.singularName,
+    };
+  }
+
+  private libraryPlacementForSubject(libraryId: string, subjectId: string | undefined): CatalogPlacementTarget {
+    if (!subjectId) return {};
+    for (const heading of this.plugin.data.portableIndex.libraryLayouts[libraryId] ?? []) {
+      if (heading.subjects.includes(subjectId)) return { headingId: heading.id };
+      const subheading = findNestedSubheading(heading, (node) => node.subjects.includes(subjectId));
+      if (subheading) return { headingId: heading.id, subheadingId: subheading.id };
+    }
+    return {};
+  }
+
+  private startAddExistingToLibrary(libraryId: string, target: CatalogPlacementTarget = {}): void {
     if (!this.guardLoadedBase()) return;
     const library = this.plugin.getLibrary(libraryId);
     if (!library || library.archivedAt !== null) return;
@@ -713,13 +1463,17 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     new VaultFilePickerModal(this.app, files, `Add existing note to ${library.name}`, async (file) => {
       if (!ownsBase()) return;
-      await this.plugin.assignRecordToLibrary(file.path, libraryId);
+      await this.plugin.assignRecordToLibrary(file.path, libraryId, target);
       if (!ownsBase()) return;
       new Notice(`Added “${file.basename}” to ${library.name}. The note stayed at ${file.path} and its contents were not changed.`);
     }).open();
   }
 
-  private startAddCurrentToLibrary(libraryId: string, explicitPath?: string): void {
+  private startAddCurrentToLibrary(
+    libraryId: string,
+    explicitPath?: string,
+    target: CatalogPlacementTarget = {},
+  ): void {
     if (!this.guardLoadedBase()) return;
     const library = this.plugin.getLibrary(libraryId);
     if (!library || library.archivedAt !== null) return;
@@ -731,7 +1485,7 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     this.run(async () => {
       if (!ownsBase()) return;
-      await this.plugin.assignRecordToLibrary(file.path, libraryId);
+      await this.plugin.assignRecordToLibrary(file.path, libraryId, target);
       if (!ownsBase()) return;
       new Notice(`Added “${file.basename}” to ${library.name}. The Markdown note was not changed.`);
     });
@@ -743,6 +1497,10 @@ export class EntVaultCommandCenterView extends ItemView {
 
   public openPortabilityCenter(mode: "export" | "import" = "export"): void {
     new ExportImportCenterModal(this.plugin, mode).open();
+  }
+
+  public openPortfolioTransfer(): void {
+    new PortfolioTransferModal(this.plugin).open();
   }
 
   public openKnowledgeBaseManager(): void {
@@ -851,7 +1609,9 @@ export class EntVaultCommandCenterView extends ItemView {
       return;
     }
     const settings = this.plugin.data.settings;
-    const actions = this.plugin.isClinicalMode()
+    const library = record.libraryId ? this.plugin.getLibrary(record.libraryId) : null;
+    const canCreateGenericNote = !this.plugin.isClinicalMode() || library?.sourceKind === null;
+    const actions = !canCreateGenericNote
       ? [
           ...(record.kind === "topic" ? [{ id: "proposal", title: "Create unverified proposal", description: "Create a safety-gated topic proposal in the configured clinical Inbox, then link it.", icon: "shield-alert" }] : []),
           { id: "link", title: "Link existing note", description: "Connect this subject to an existing Markdown note without changing that note.", icon: "link" },
@@ -862,14 +1622,35 @@ export class EntVaultCommandCenterView extends ItemView {
           { id: "template", title: "Create from template", description: "Choose a local template, create a note, and retain this subject’s placement.", icon: "copy-plus" },
           { id: "link", title: "Link existing note", description: "Connect this subject to an existing Markdown note without changing that note.", icon: "link" },
           { id: "keep", title: "Keep placeholder", description: "Leave the subject in the index with no Markdown note for now.", icon: "bookmark" },
-        ];
+    ];
     new AddActionModal(this.app, actions, (action) => {
       if (!ownsBase()) return;
       const resolve = (file: TFile): Promise<void> => this.plugin.resolvePortableSubject(record.portableId ?? "", file.path);
+      const profile = library
+        ? this.plugin.getEffectiveLibraryNoteProfile(library.id)
+        : { folder: settings.defaultNoteFolder, mode: settings.defaultNewNoteMode, templatePath: settings.defaultTemplatePath };
+      const tokenContext = library
+        ? this.libraryTemplateTokenContext(
+            library,
+            this.libraryPlacementForSubject(library.id, record.portableId),
+            record,
+          )
+        : {
+            id: record.curriculumId,
+            category: record.domain,
+            parent: record.parentTopic,
+            library: "",
+            type: record.topicKind,
+          };
+      const formContext = library ? {
+        createLabel: library.singularName,
+        contextNotice: `This note will resolve “${record.title}” in ${library.name} without rewriting any existing Markdown note.`,
+        tokenContext,
+      } : { tokenContext };
       if (action.id === "empty") {
-        this.startCreateKnowledgeNote({ title: record.title, folder: settings.defaultNoteFolder, mode: "empty" }, false, resolve);
+        this.startCreateKnowledgeNote({ title: record.title, folder: profile.folder, mode: "empty", templatePath: profile.templatePath }, false, resolve, undefined, formContext);
       } else if (action.id === "template") {
-        this.startCreateKnowledgeNote({ title: record.title, folder: settings.defaultNoteFolder, mode: "template", templatePath: settings.defaultTemplatePath }, false, resolve);
+        this.startCreateKnowledgeNote({ title: record.title, folder: profile.folder, mode: "template", templatePath: profile.templatePath }, false, resolve, undefined, formContext);
       } else if (action.id === "proposal") {
         this.startCreateProposal({ title: record.title, domain: record.domain, topicKind: "condition", priority: "P2", safetyCritical: false }, resolve);
       } else if (action.id === "link") {
@@ -885,7 +1666,7 @@ export class EntVaultCommandCenterView extends ItemView {
     indexAfterCreate = !this.plugin.isClinicalMode(),
     onCreated?: (file: TFile) => void | Promise<void>,
     completionMessage?: string,
-    formContext?: { createLabel?: string; contextNotice?: string },
+    formContext?: { createLabel?: string; contextNotice?: string; tokenContext?: TemplateTokenContext },
   ): void {
     if (!this.guardLoadedBase()) return;
     const ownsBase = this.createOpenedBaseGuard();
@@ -906,7 +1687,7 @@ export class EntVaultCommandCenterView extends ItemView {
         : "The active knowledge base changed. Close and reopen this form.",
       onSubmit: async (value) => {
         if (!ownsBase()) return;
-        const file = await this.plugin.createKnowledgeNote(value);
+        const file = await this.plugin.createKnowledgeNote(value, formContext?.tokenContext);
         if (!ownsBase()) return;
         if (onCreated) {
           await onCreated(file);
@@ -922,7 +1703,7 @@ export class EntVaultCommandCenterView extends ItemView {
           if (!ownsBase()) return;
         } else {
           this.plugin.data.selectedPath = file.path;
-          await this.plugin.savePluginData();
+          await this.plugin.saveViewState();
           if (!ownsBase()) return;
           await this.reload();
           if (!ownsBase()) return;
@@ -1065,7 +1846,7 @@ export class EntVaultCommandCenterView extends ItemView {
           this.plugin.data.selectedPath = file.path;
           this.mobileInspectorOpen = false;
           this.mobileInspectorNeedsFocus = false;
-          await this.plugin.savePluginData();
+          await this.plugin.saveViewState();
           if (!ownsBase()) return;
           await this.reload();
           if (!ownsBase()) return;
@@ -1073,7 +1854,7 @@ export class EntVaultCommandCenterView extends ItemView {
         } else {
           this.plugin.data.activeTab = "inbox";
           this.plugin.data.selectedPath = file.path;
-          await this.plugin.savePluginData();
+          await this.plugin.saveViewState();
           if (!ownsBase()) return;
           await this.reload();
           if (!ownsBase()) return;
@@ -1112,7 +1893,7 @@ export class EntVaultCommandCenterView extends ItemView {
         if (!ownsBase()) return;
         this.plugin.data.activeTab = "curriculum";
         this.plugin.data.selectedPath = file.path;
-        await this.plugin.savePluginData();
+        await this.plugin.saveViewState();
         if (!ownsBase()) return;
         await this.reload();
         if (!ownsBase()) return;
@@ -1166,7 +1947,7 @@ export class EntVaultCommandCenterView extends ItemView {
         if (!ownsBase()) return;
         this.plugin.data.activeTab = "curriculum";
         this.plugin.data.selectedPath = file.path;
-        await this.plugin.savePluginData();
+        await this.plugin.saveViewState();
         if (!ownsBase()) return;
         await this.reload();
         if (!ownsBase()) return;
@@ -1220,7 +2001,7 @@ export class EntVaultCommandCenterView extends ItemView {
         const file = await this.plugin.editCanonicalPlacement(record.path, value);
         if (!ownsBase()) return;
         this.plugin.data.selectedPath = file.path;
-        await this.plugin.savePluginData();
+        await this.plugin.saveViewState();
         if (!ownsBase()) return;
         await this.reload();
         if (!ownsBase()) return;
@@ -1244,23 +2025,23 @@ export class EntVaultCommandCenterView extends ItemView {
     ];
   }
 
-  private render(): void {
+  private render(preserveBrowseLimits = false): void {
     // A full route/tab render returns to the bounded initial page. Incremental
     // "Show more" actions use renderTree() and therefore preserve their limit.
-    this.browseRowLimit = MAX_RENDERED_BROWSE_RECORDS;
-    this.browseStructureLimit = MAX_RENDERED_BROWSE_STRUCTURES;
+    if (!preserveBrowseLimits) {
+      this.browseRowLimit = MAX_RENDERED_BROWSE_RECORDS;
+      this.browseStructureLimit = MAX_RENDERED_BROWSE_STRUCTURES;
+    }
     const compact = this.isCompactInspectorLayout();
     if (compact && this.mobileInspectorOpen) {
       const currentBody = this.inspectorEl?.querySelector<HTMLElement>(".ent-cc-inspector-body");
-      if (currentBody) this.mobileInspectorScrollTop = currentBody.scrollTop;
+      if (currentBody && !this.paneLayoutRenderInProgress) this.mobileInspectorScrollTop = currentBody.scrollTop;
       this.mobileInspectorNeedsFocus = true;
-    } else if (!compact) {
-      this.mobileInspectorOpen = false;
-      this.mobileInspectorNeedsFocus = false;
     }
     this.contentEl.empty();
     this.contentEl.addClass("ent-cc-view");
-    const shell = this.contentEl.createDiv({ cls: "ent-cc-shell" });
+    this.applyPaneLayoutClasses();
+    const shell = this.contentEl.createDiv({ cls: `ent-cc-shell is-pane-${this.paneLayout}` });
 
     if (compact && this.mobileInspectorOpen && !this.recordByPath.has(this.plugin.data.selectedPath)) {
       this.mobileInspectorOpen = false;
@@ -1308,6 +2089,7 @@ export class EntVaultCommandCenterView extends ItemView {
       setup.createSpan({ text: "Set up" });
       setup.addEventListener("click", () => this.openSetupWizard());
     }
+    createQuickEntryButton(actions, () => this.openQuickEntry(this.app.workspace.getActiveFile()?.path));
     const globalAdd = actions.createEl("button", { cls: "ent-cc-button ent-cc-add-button" });
     setIcon(globalAdd.createSpan(), "plus");
     globalAdd.createSpan({ text: "Add" });
@@ -1439,6 +2221,8 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private revealActiveTab(tablist: HTMLElement): void {
     this.timerWindow.setTimeout(() => {
+      if (this.viewClosed
+        || (typeof this.contentEl?.contains === "function" && !this.contentEl.contains(tablist))) return;
       const active = tablist.querySelector<HTMLElement>('[aria-selected="true"]');
       active?.scrollIntoView({ block: "nearest", inline: "center" });
     }, 0);
@@ -1453,10 +2237,18 @@ export class EntVaultCommandCenterView extends ItemView {
     this.plugin.data.activeTab = tab;
     this.editMode = false;
     this.curriculumArrangeMode = false;
-    await this.plugin.savePluginData();
+    await this.plugin.saveViewState();
     if (!this.guardLoadedBase()) return;
     this.render();
     if (focusTab) this.contentEl.querySelector<HTMLElement>(`[data-tab="${tab}"]`)?.focus();
+  }
+
+  async openLibrary(libraryId: string): Promise<void> {
+    const library = this.plugin.getLibrary(libraryId);
+    if (!library || library.archivedAt !== null) {
+      throw new Error("That Library is no longer available in the active knowledge base.");
+    }
+    await this.changeTab(libraryTabId(libraryId), true);
   }
 
   private tabCount(tab: MainTab): number {
@@ -1538,6 +2330,7 @@ export class EntVaultCommandCenterView extends ItemView {
     });
     input.addEventListener("blur", () => {
       this.timerWindow.setTimeout(() => {
+        if (this.viewClosed || !this.contentEl.contains(searchRow) || !this.contentEl.contains(parent)) return;
         if (!searchRow.contains(input.ownerDocument.activeElement)) {
           parent.removeClass("is-search-focused", "is-virtual-keyboard-open");
           parent.style.removeProperty("--ent-cc-search-visual-height");
@@ -1555,13 +2348,7 @@ export class EntVaultCommandCenterView extends ItemView {
       this.parsedQuery = parseQuery(this.query);
       clear.hidden = !this.query;
       if (bulkButton) bulkButton.disabled = !this.query.trim();
-      if (this.searchDebounce !== null) this.timerWindow.clearTimeout(this.searchDebounce);
-      this.searchDebounce = this.timerWindow.setTimeout(() => {
-        this.searchDebounce = null;
-        this.renderTree();
-        this.resetSearchScrollPosition();
-        this.timerWindow.requestAnimationFrame(() => this.resetSearchScrollPosition());
-      }, 120);
+      this.scheduleSearchRefresh();
     });
     input.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && this.query) {
@@ -2084,92 +2871,124 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private renderHeading(parent: HTMLElement, heading: LayoutHeading, mutable: boolean): number {
-    const matchingDirect = heading.subjects.filter((path) => this.matchesPath(path));
-    const matchingSubs = heading.subheadings.map((subheading) => ({
-      subheading,
-      paths: subheading.subjects.filter((path) => this.matchesPath(path)),
-    })).filter((item) => item.paths.length > 0 || !this.query);
-    const total = matchingDirect.length + matchingSubs.reduce((sum, item) => sum + item.paths.length, 0);
+    const context: LayoutRenderContext = { kind: "collections", heading, mutable };
+    const total = this.matchingLayoutRows(context, heading);
     if (this.query && total === 0) return 0;
-
-    const collapsed = heading.collapsed && !this.query;
-    const visibleRecordCount = collapsed
-      ? 0
-      : matchingDirect.length + matchingSubs.reduce((sum, item) => (
-        sum + (item.subheading.collapsed && !this.query ? 0 : item.paths.length)
-      ), 0);
-    const visibleStructureCount = collapsed ? 1 : 1 + matchingSubs.length;
-    if (!this.beginBrowseStructure(visibleRecordCount, visibleStructureCount)) return total;
-
-    const section = parent.createDiv({ cls: "ent-cc-heading" });
-    const row = section.createDiv({ cls: "ent-cc-row ent-cc-heading-row" });
-    const disclosure = disclosureButton(row, collapsed, heading.title);
-    disclosure.addEventListener("click", () => this.run(async () => {
-      heading.collapsed = !heading.collapsed;
-      if (mutable) await this.plugin.savePluginData();
-      this.renderTree();
-    }));
-    const leading = row.createSpan({ cls: "ent-cc-leading-icon" });
-    setIcon(leading, mutable ? "folders" : "library");
-    const title = row.createEl("button", { cls: "ent-cc-row-title", text: heading.title, attr: { dir: "auto" } });
-    title.addEventListener("click", () => this.run(async () => {
-      heading.collapsed = !heading.collapsed;
-      if (mutable) await this.plugin.savePluginData();
-      this.renderTree();
-    }));
-    const resolved = this.resolvableCount(heading);
-    row.createSpan({ text: String(resolved), cls: "ent-cc-row-count" });
-    const missing = countHeading(heading) - resolved;
-    if (missing > 0) {
-      row.createSpan({
-        text: `${missing} missing`,
-        cls: "ent-cc-row-missing",
-        attr: { title: `${missing} referenced ${missing === 1 ? "note no longer exists" : "notes no longer exist"}. Open Manage index → Diagnostics to review or repair.` },
-      });
-    }
-    if (mutable) iconButton(row, "ellipsis", `Actions for ${heading.title}`, "ent-cc-row-more").addEventListener("click", (event) => this.showHeadingMenu(event, heading));
-    if (mutable && this.editMode) this.applyDrop(row, { headingId: heading.id });
-
-    if (collapsed) return total;
-    const content = section.createDiv({ cls: "ent-cc-heading-body" });
-    if (mutable && this.editMode) this.applyDrop(content, { headingId: heading.id });
-    matchingDirect.forEach((path) => {
-      const record = this.recordByPath.get(path);
-      if (record) this.renderBrowseRecordRow(content, record, 1, mutable ? { headingId: heading.id } : undefined);
-    });
-    for (const item of matchingSubs) this.renderSubheading(content, heading, item.subheading, item.paths, mutable);
+    this.renderLayoutNode(parent, context, heading, 1);
     return total;
   }
 
-  private renderSubheading(parent: HTMLElement, heading: LayoutHeading, subheading: LayoutSubheading, paths: string[], mutable: boolean): void {
-    const collapsed = subheading.collapsed && !this.query;
-    if (!this.beginBrowseStructure(collapsed ? 0 : paths.length)) return;
-    const section = parent.createDiv({ cls: "ent-cc-subheading" });
-    const row = section.createDiv({ cls: "ent-cc-row ent-cc-subheading-row" });
-    const disclosure = disclosureButton(row, collapsed, subheading.title);
-    disclosure.addEventListener("click", () => this.run(async () => {
-      subheading.collapsed = !subheading.collapsed;
-      if (mutable) await this.plugin.savePluginData();
-      this.renderTree();
-    }));
-    const leading = row.createSpan({ cls: "ent-cc-leading-icon" });
-    setIcon(leading, "folder");
-    const title = row.createEl("button", { cls: "ent-cc-row-title", text: subheading.title, attr: { dir: "auto" } });
-    title.addEventListener("click", () => this.run(async () => {
-      subheading.collapsed = !subheading.collapsed;
-      if (mutable) await this.plugin.savePluginData();
-      this.renderTree();
-    }));
-    row.createSpan({ text: String(subheading.subjects.filter((path) => this.recordByPath.has(path)).length), cls: "ent-cc-row-count" });
-    if (mutable) iconButton(row, "ellipsis", `Actions for ${subheading.title}`, "ent-cc-row-more").addEventListener("click", (event) => this.showSubheadingMenu(event, heading, subheading));
-    if (mutable && this.editMode) this.applyDrop(row, { headingId: heading.id, subheadingId: subheading.id });
-    if (collapsed) return;
-    const content = section.createDiv({ cls: "ent-cc-subheading-body" });
-    if (mutable && this.editMode) this.applyDrop(content, { headingId: heading.id, subheadingId: subheading.id });
-    for (const path of paths) {
-      const record = this.recordByPath.get(path);
-      if (record) this.renderBrowseRecordRow(content, record, 2, mutable ? { headingId: heading.id, subheadingId: subheading.id } : undefined);
+  /** Query-matching records placed directly on one layout node, in stored order. */
+  private matchingLayoutRecords(context: LayoutRenderContext, node: LayoutNode): VaultRecord[] {
+    const records: VaultRecord[] = [];
+    for (const key of node.subjects) {
+      const record = context.kind === "collections" ? this.recordByPath.get(key) : context.bySubjectId.get(key);
+      if (!record) continue;
+      if (context.kind === "collections" && !matchesParsedQuery(record, this.parsedQuery)) continue;
+      records.push(record);
     }
+    return records;
+  }
+
+  /** Query-matching record rows anywhere in a node's subtree. */
+  private matchingLayoutRows(context: LayoutRenderContext, node: LayoutNode): number {
+    return this.matchingLayoutRecords(context, node).length
+      + childSubheadings(node).reduce((sum, child) => sum + this.matchingLayoutRows(context, child), 0);
+  }
+
+  /** Children that render at all: every child while browsing, matching subtrees while searching. */
+  private renderableLayoutChildren(context: LayoutRenderContext, node: LayoutNode): LayoutSubheading[] {
+    return childSubheadings(node).filter((child) => !this.query || this.matchingLayoutRows(context, child) > 0);
+  }
+
+  /** Record rows this node's subtree would put on screen given current collapse state. */
+  private visibleLayoutRows(context: LayoutRenderContext, node: LayoutNode): number {
+    if (node.collapsed && !this.query) return 0;
+    return this.matchingLayoutRecords(context, node).length
+      + this.renderableLayoutChildren(context, node).reduce((sum, child) => sum + this.visibleLayoutRows(context, child), 0);
+  }
+
+  /** Structure rows (this node plus its expanded descendants) for browse-budget accounting. */
+  private visibleLayoutStructures(context: LayoutRenderContext, node: LayoutNode): number {
+    if (node.collapsed && !this.query) return 1;
+    return 1 + this.renderableLayoutChildren(context, node).reduce((sum, child) => sum + this.visibleLayoutStructures(context, child), 0);
+  }
+
+  /** Subject references in the subtree that resolve to a known record. */
+  private resolvedLayoutCount(context: LayoutRenderContext, node: LayoutNode): number {
+    if (context.kind === "collections") {
+      return layoutSubjects(node).filter((path) => this.recordByPath.has(path)).length;
+    }
+    return layoutSubjects(node).filter((subjectId) => context.bySubjectId.has(subjectId)).length;
+  }
+
+  /**
+   * Shared recursive renderer behind the Collections and library tabs. The two
+   * tabs differ only in record lookup, menus, drag payloads, and empty states;
+   * structure, budgets, collapse handling, and depth styling stay identical.
+   */
+  private renderLayoutNode(parent: HTMLElement, context: LayoutRenderContext, node: LayoutNode, depth: number): void {
+    if (!this.beginBrowseStructure(this.visibleLayoutRows(context, node), this.visibleLayoutStructures(context, node))) return;
+    const isHeading = depth === 1;
+    const isLibrary = context.kind === "library";
+    const mutable = context.kind === "collections" ? context.mutable : true;
+    const collapsed = node.collapsed && !this.query;
+    const membership: Membership = isHeading
+      ? { headingId: context.heading.id }
+      : { headingId: context.heading.id, subheadingId: node.id };
+    const section = parent.createDiv({
+      cls: isHeading
+        ? `ent-cc-heading${isLibrary ? " ent-cc-library-group" : ""}`
+        : `ent-cc-subheading${isLibrary ? " ent-cc-library-subheading" : ""}`,
+    });
+    const row = section.createDiv({ cls: `ent-cc-row ${isHeading ? "ent-cc-heading-row" : "ent-cc-subheading-row"}` });
+    if (!isHeading) row.addClass(`ent-cc-depth-${Math.min(depth - 2, 12)}`);
+    const toggle = (): void => this.toggleLayoutNode(context, node.id);
+    disclosureButton(row, collapsed, node.title).addEventListener("click", toggle);
+    const leading = row.createSpan({ cls: "ent-cc-leading-icon" });
+    setIcon(leading, isHeading
+      ? (isLibrary ? libraryIcon(context.library) : mutable ? "folders" : "library")
+      : "folder");
+    const title = row.createEl("button", { cls: "ent-cc-row-title", text: node.title, attr: { dir: "auto" } });
+    title.addEventListener("click", toggle);
+    const resolved = this.resolvedLayoutCount(context, node);
+    row.createSpan({ text: String(resolved), cls: "ent-cc-row-count" });
+    if (isHeading) {
+      const missing = layoutSubjects(node).length - resolved;
+      if (missing > 0 && (context.kind === "collections" || !this.query)) {
+        row.createSpan({
+          text: `${missing} missing`,
+          cls: "ent-cc-row-missing",
+          attr: { title: `${missing} referenced ${missing === 1 ? "note no longer exists" : "notes no longer exist"}. Open Manage index → Diagnostics to review or repair.` },
+        });
+      }
+    }
+    if (mutable) {
+      iconButton(row, "ellipsis", `Actions for ${node.title}`, "ent-cc-row-more").addEventListener("click", (event) => {
+        if (context.kind === "library") {
+          if (isHeading) this.showLibraryHeadingMenu(event, context.library.id, context.heading);
+          else this.showLibrarySubheadingMenu(event, context.library.id, context.heading, node);
+        } else if (isHeading) this.showHeadingMenu(event, context.heading);
+        else this.showSubheadingMenu(event, context.heading, node);
+      });
+    }
+    const applyNodeDrop = (element: HTMLElement): void => {
+      if (context.kind === "library") this.applyLibraryDrop(element, { libraryId: context.library.id, ...membership });
+      else this.applyDrop(element, membership);
+    };
+    if (mutable && this.editMode) applyNodeDrop(row);
+    if (collapsed) return;
+    const content = section.createDiv({ cls: isHeading ? "ent-cc-heading-body" : "ent-cc-subheading-body" });
+    if (mutable && this.editMode) applyNodeDrop(content);
+    const level = Math.min(depth, MAX_LAYOUT_DEPTH);
+    for (const record of this.matchingLayoutRecords(context, node)) {
+      if (context.kind === "library") {
+        this.renderBrowseRecordRow(content, record, level, undefined, undefined, { libraryId: context.library.id, ...membership });
+      } else {
+        this.renderBrowseRecordRow(content, record, level, mutable ? membership : undefined);
+      }
+    }
+    for (const child of this.renderableLayoutChildren(context, node)) this.renderLayoutNode(content, context, child, depth + 1);
   }
 
   private renderQueue(parent: HTMLElement, queue: QueueDefinition): number {
@@ -2221,8 +3040,7 @@ export class EntVaultCommandCenterView extends ItemView {
     }
 
     for (const heading of layout) {
-      for (const subjectId of heading.subjects) placed.add(subjectId);
-      for (const subheading of heading.subheadings) for (const subjectId of subheading.subjects) placed.add(subjectId);
+      for (const subjectId of layoutSubjects(heading)) placed.add(subjectId);
       this.renderLibraryHeading(parent, library, heading, bySubjectId);
     }
 
@@ -2266,79 +3084,9 @@ export class EntVaultCommandCenterView extends ItemView {
     heading: LayoutHeading,
     bySubjectId: Map<string, VaultRecord>,
   ): void {
-    const recordsForSubjectIds = (subjectIds: string[]): Array<{ subjectId: string; record: VaultRecord }> => {
-      const resolved: Array<{ subjectId: string; record: VaultRecord }> = [];
-      for (const subjectId of subjectIds) {
-        const record = bySubjectId.get(subjectId);
-        if (record) resolved.push({ subjectId, record });
-      }
-      return resolved;
-    };
-    const direct = recordsForSubjectIds(heading.subjects);
-    const subheadings = heading.subheadings.map((subheading) => ({
-      subheading,
-      records: recordsForSubjectIds(subheading.subjects),
-    }));
-    const visibleCount = direct.length + subheadings.reduce((sum, item) => sum + item.records.length, 0);
-    const totalReferences = heading.subjects.length + heading.subheadings.reduce((sum, item) => sum + item.subjects.length, 0);
-    if (this.query && visibleCount === 0) return;
-
-    const collapsed = heading.collapsed && !this.query;
-    const visibleRecordCount = collapsed
-      ? 0
-      : direct.length + subheadings.reduce((sum, item) => (
-        sum + (item.subheading.collapsed && !this.query ? 0 : item.records.length)
-      ), 0);
-    const visibleStructureCount = collapsed ? 1 : 1 + subheadings.length;
-    if (!this.beginBrowseStructure(visibleRecordCount, visibleStructureCount)) return;
-    const section = parent.createDiv({ cls: "ent-cc-heading ent-cc-library-group" });
-    const row = section.createDiv({ cls: "ent-cc-row ent-cc-heading-row" });
-    disclosureButton(row, collapsed, heading.title).addEventListener("click", () => this.toggleLibraryHeading(heading));
-    const icon = row.createSpan({ cls: "ent-cc-leading-icon" });
-    setIcon(icon, libraryIcon(library));
-    const title = row.createEl("button", { cls: "ent-cc-row-title", text: heading.title, attr: { dir: "auto" } });
-    title.addEventListener("click", () => this.toggleLibraryHeading(heading));
-    row.createSpan({ cls: "ent-cc-row-count", text: String(visibleCount) });
-    const missing = totalReferences - visibleCount;
-    if (missing > 0 && !this.query) row.createSpan({ cls: "ent-cc-row-missing", text: `${missing} missing` });
-    iconButton(row, "ellipsis", `Actions for ${heading.title}`, "ent-cc-row-more").addEventListener("click", (event) => this.showLibraryHeadingMenu(event, library.id, heading));
-    if (this.editMode) this.applyLibraryDrop(row, { libraryId: library.id, headingId: heading.id });
-    if (collapsed) return;
-
-    const content = section.createDiv({ cls: "ent-cc-heading-body" });
-    if (this.editMode) this.applyLibraryDrop(content, { libraryId: library.id, headingId: heading.id });
-    for (const { record } of direct) {
-      this.renderBrowseRecordRow(content, record, 1, undefined, undefined, { libraryId: library.id, headingId: heading.id });
-    }
-    for (const item of subheadings) this.renderLibrarySubheading(content, library, heading, item.subheading, item.records);
-  }
-
-  private renderLibrarySubheading(
-    parent: HTMLElement,
-    library: LibraryDefinition,
-    heading: LayoutHeading,
-    subheading: LayoutSubheading,
-    records: Array<{ subjectId: string; record: VaultRecord }>,
-  ): void {
-    if (this.query && records.length === 0) return;
-    const collapsed = subheading.collapsed && !this.query;
-    if (!this.beginBrowseStructure(collapsed ? 0 : records.length)) return;
-    const section = parent.createDiv({ cls: "ent-cc-subheading ent-cc-library-subheading" });
-    const row = section.createDiv({ cls: "ent-cc-row ent-cc-subheading-row" });
-    disclosureButton(row, collapsed, subheading.title).addEventListener("click", () => this.toggleLibrarySubheading(heading, subheading));
-    const icon = row.createSpan({ cls: "ent-cc-leading-icon" });
-    setIcon(icon, "folder");
-    const title = row.createEl("button", { cls: "ent-cc-row-title", text: subheading.title, attr: { dir: "auto" } });
-    title.addEventListener("click", () => this.toggleLibrarySubheading(heading, subheading));
-    row.createSpan({ cls: "ent-cc-row-count", text: String(records.length) });
-    iconButton(row, "ellipsis", `Actions for ${subheading.title}`, "ent-cc-row-more").addEventListener("click", (event) => this.showLibrarySubheadingMenu(event, library.id, heading, subheading));
-    if (this.editMode) this.applyLibraryDrop(row, { libraryId: library.id, headingId: heading.id, subheadingId: subheading.id });
-    if (collapsed) return;
-    const content = section.createDiv({ cls: "ent-cc-subheading-body" });
-    if (this.editMode) this.applyLibraryDrop(content, { libraryId: library.id, headingId: heading.id, subheadingId: subheading.id });
-    for (const { record } of records) {
-      this.renderBrowseRecordRow(content, record, 2, undefined, undefined, { libraryId: library.id, headingId: heading.id, subheadingId: subheading.id });
-    }
+    const context: LayoutRenderContext = { kind: "library", heading, library, bySubjectId };
+    if (this.query && this.matchingLayoutRows(context, heading) === 0) return;
+    this.renderLayoutNode(parent, context, heading, 1);
   }
 
   private renderGlobalSearchResults(parent: HTMLElement): number {
@@ -2442,17 +3190,6 @@ export class EntVaultCommandCenterView extends ItemView {
     return results.total;
   }
 
-  private resolvableCount(heading: LayoutHeading): number {
-    let total = heading.subjects.filter((path) => this.recordByPath.has(path)).length;
-    for (const subheading of heading.subheadings) total += subheading.subjects.filter((path) => this.recordByPath.has(path)).length;
-    return total;
-  }
-
-  private matchesPath(path: string): boolean {
-    const record = this.recordByPath.get(path);
-    return Boolean(record && matchesParsedQuery(record, this.parsedQuery));
-  }
-
   private recordRoleName(record: VaultRecord, data = this.plugin.data): string {
     if (record.isPlaceholder) return "No note yet";
     if (record.libraryId) {
@@ -2504,7 +3241,10 @@ export class EntVaultCommandCenterView extends ItemView {
         ...libraryMembership,
       }));
       handle.addEventListener("dragstart", () => row.addClass("is-dragging"));
-      handle.addEventListener("dragend", () => row.removeClass("is-dragging", "is-drop-before", "is-drop-after"));
+      handle.addEventListener("dragend", () => {
+        this.activeLibraryDrag = null;
+        row.removeClass("is-dragging", "is-drop-before", "is-drop-after");
+      });
       this.applyLibraryRowDrop(row, libraryMembership, record.portableId);
     } else if (membership && this.editMode && !Platform.isMobile) {
       const handle = iconButton(row, "grip-vertical", `Drag ${record.title}`, "ent-cc-drag-handle");
@@ -2658,6 +3398,98 @@ export class EntVaultCommandCenterView extends ItemView {
     });
   }
 
+  private applyPaneLayoutClasses(): void {
+    for (const layout of ["wide", "compact", "narrow"] as const) {
+      this.contentEl.toggleClass(`is-pane-${layout}`, this.paneLayout === layout);
+    }
+    this.contentEl.setAttribute("data-pane-layout", this.paneLayout);
+  }
+
+  private measureAndApplyPaneLayout(allowRender = true): void {
+    if (!this.contentEl?.getBoundingClientRect) return;
+    const width = measuredPaneWidth(this.contentEl);
+    if (width > 0) this.applyPaneWidth(width, allowRender);
+    else this.applyPaneLayoutClasses();
+  }
+
+  private applyPaneWidth(width: number, allowRender = true): void {
+    if (!Number.isFinite(width) || width <= 0) return;
+    const previous = this.paneLayout;
+    const next = classifyPaneWidth(width);
+    const modeChanged = next !== previous;
+    this.paneWidth = width;
+    this.paneLayout = next;
+    this.applyPaneLayoutClasses();
+    if (!allowRender || !modeChanged || this.viewClosed) return;
+    if (!this.contentEl.querySelector(".ent-cc-shell")) return;
+    this.renderPaneLayoutChange(previous, next);
+  }
+
+  private renderPaneLayoutChange(previous: PaneLayout, next: PaneLayout): void {
+    const activeElement = this.contentEl.ownerDocument.activeElement;
+    const search = this.contentEl.querySelector<HTMLInputElement>('.ent-cc-search-box input[type="search"]');
+    const restoreSearchFocus = Boolean(search && activeElement === search);
+    const searchSelectionStart = search?.selectionStart ?? null;
+    const searchSelectionEnd = search?.selectionEnd ?? null;
+    const restoreTreeFocus = Boolean(this.treeEl && activeElement && this.treeEl.contains(activeElement));
+    const listScrollTop = previous === "wide"
+      ? this.treeEl?.scrollTop ?? this.mobileTreeScrollTop
+      : this.workspaceEl?.scrollTop ?? this.mobileTreeScrollTop;
+    const inspectorBody = this.inspectorEl?.querySelector<HTMLElement>(".ent-cc-inspector-body");
+    const detailScrollTop = previous === "wide"
+      ? this.inspectorEl?.scrollTop ?? this.mobileInspectorScrollTop
+      : inspectorBody?.scrollTop ?? this.mobileInspectorScrollTop;
+
+    this.mobileTreeScrollTop = listScrollTop;
+    this.mobileInspectorScrollTop = detailScrollTop;
+    this.paneLayoutRenderInProgress = true;
+    try {
+      this.render(true);
+    } finally {
+      this.paneLayoutRenderInProgress = false;
+    }
+
+    const listOwner = next === "wide" ? this.treeEl : this.workspaceEl;
+    if (listOwner) listOwner.scrollTop = listScrollTop;
+    const replacementInspectorBody = this.inspectorEl?.querySelector<HTMLElement>(".ent-cc-inspector-body");
+    const detailOwner = next === "wide" ? this.inspectorEl : replacementInspectorBody;
+    if (detailOwner) detailOwner.scrollTop = detailScrollTop;
+    if (restoreSearchFocus) {
+      const replacement = this.contentEl.querySelector<HTMLInputElement>('.ent-cc-search-box input[type="search"]');
+      replacement?.focus({ preventScroll: true });
+      if (replacement && searchSelectionStart !== null && searchSelectionEnd !== null
+        && typeof replacement.setSelectionRange === "function") {
+        replacement.setSelectionRange(searchSelectionStart, searchSelectionEnd);
+      }
+    } else if (restoreTreeFocus && !this.mobileInspectorOpen) {
+      const selected = this.treeEl?.querySelector<HTMLElement>(".ent-cc-subject-row.is-selected .ent-cc-subject-title");
+      (selected ?? this.treeEl)?.focus({ preventScroll: true });
+    }
+  }
+
+  private bindPaneLayout(): void {
+    if (this.viewClosed) return;
+    const ownerWindow = this.contentEl.ownerDocument.defaultView;
+    if (!ownerWindow) return;
+    if (this.paneResizeCleanup && this.paneResizeWindow === ownerWindow) return;
+    this.unbindPaneLayout();
+    this.paneResizeWindow = ownerWindow;
+    this.paneResizeCleanup = observePaneWidth(this.contentEl, (width) => {
+      if (this.viewClosed) return;
+      if (this.contentEl.ownerDocument.defaultView !== this.paneResizeWindow) {
+        this.bindPaneLayout();
+        return;
+      }
+      this.applyPaneWidth(width);
+    });
+  }
+
+  private unbindPaneLayout(): void {
+    this.paneResizeCleanup?.();
+    this.paneResizeCleanup = null;
+    this.paneResizeWindow = null;
+  }
+
   private selectRecord(path: string): void {
     if (!this.guardLoadedBase()) return;
     this.plugin.data.selectedPath = path;
@@ -2673,11 +3505,7 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     // Selection is transient UI state; persisting it on every click rewrites the
     // whole plugin data file and drives needless vault-sync traffic.
-    if (this.selectionSaveTimer !== null) this.timerWindow.clearTimeout(this.selectionSaveTimer);
-    this.selectionSaveTimer = this.timerWindow.setTimeout(() => {
-      this.selectionSaveTimer = null;
-      this.run(() => this.saveSelectionState());
-    }, 1000);
+    this.scheduleSelectionSave();
     if (compact) this.render();
     else {
       this.renderTree();
@@ -2686,8 +3514,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private isCompactInspectorLayout(): boolean {
-    const viewWindow = this.contentEl.ownerDocument.defaultView;
-    return viewWindow?.matchMedia("(max-width: 900px)").matches === true;
+    return this.paneLayout !== "wide";
   }
 
   private closeMobileInspector(): void {
@@ -2695,6 +3522,7 @@ export class EntVaultCommandCenterView extends ItemView {
     this.mobileInspectorNeedsFocus = false;
     this.render();
     this.timerWindow.setTimeout(() => {
+      if (this.viewClosed || this.mobileInspectorOpen) return;
       if (this.workspaceEl) this.workspaceEl.scrollTop = this.mobileTreeScrollTop;
       const selected = this.treeEl?.querySelector<HTMLElement>(".ent-cc-subject-row.is-selected .ent-cc-subject-title");
       (selected ?? this.treeEl)?.focus({ preventScroll: true });
@@ -2786,7 +3614,10 @@ export class EntVaultCommandCenterView extends ItemView {
       this.inspectorField(body, "Note status", "Not created or linked");
       if (mobileOpen && this.mobileInspectorNeedsFocus) {
         this.mobileInspectorNeedsFocus = false;
-        this.timerWindow.setTimeout(() => this.inspectorEl?.querySelector<HTMLElement>(".ent-cc-inspector-close")?.focus(), 0);
+        this.timerWindow.setTimeout(() => {
+          if (this.viewClosed || !this.mobileInspectorOpen || !this.inspectorEl?.contains(body)) return;
+          this.inspectorEl.querySelector<HTMLElement>(".ent-cc-inspector-close")?.focus();
+        }, 0);
       }
       return;
     }
@@ -2803,6 +3634,19 @@ export class EntVaultCommandCenterView extends ItemView {
     const open = actions.createEl("button", { cls: "ent-cc-button ent-cc-primary-button" });
     setIcon(open.createSpan(), "external-link"); open.createSpan({ text: "Open note" });
     open.addEventListener("click", () => this.run(() => this.openRecord(record.path)));
+    if (!record.isPlaceholder) {
+      const attach = actions.createEl("button", { cls: "ent-cc-button" });
+      setIcon(attach.createSpan(), "paperclip"); attach.createSpan({ text: "Attach file…" });
+      attach.disabled = record.aiLock;
+      attach.addEventListener("click", () => {
+        const file = this.app.vault.getAbstractFileByPath(record.path);
+        if (!(file instanceof TFile)) {
+          new Notice("The selected note is not currently available in the vault.", 7000);
+          return;
+        }
+        this.plugin.openAttachmentImport(file);
+      });
+    }
     const add = actions.createEl("button", { cls: "ent-cc-button" });
     setIcon(add.createSpan(), "folder-plus"); add.createSpan({ text: "Add to collection" });
     add.addEventListener("click", () => this.openCollectionPicker(record.path));
@@ -2858,7 +3702,7 @@ export class EntVaultCommandCenterView extends ItemView {
     if (mobileOpen && this.mobileInspectorNeedsFocus) {
       this.mobileInspectorNeedsFocus = false;
       this.timerWindow.setTimeout(() => {
-        if (!this.mobileInspectorOpen || !this.inspectorEl) return;
+        if (this.viewClosed || !this.mobileInspectorOpen || !this.inspectorEl?.contains(body)) return;
         body.scrollTop = this.mobileInspectorScrollTop;
         this.inspectorEl.querySelector<HTMLElement>(".ent-cc-inspector-close")?.focus();
       }, 0);
@@ -3012,7 +3856,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const resolvedParent = record.parentTopic ? this.plugin.resolveLink(record.parentTopic, record.path, this.recordByPath) : null;
     if (isExtensionCurriculumId(record.curriculumId)) return Boolean(record.parentTopic) && (!resolvedParent || resolvedParent.domain !== record.domain);
     if (!expectedId) return Boolean(resolvedParent);
-    return !resolvedParent || resolvedParent.domain !== record.domain || resolvedParent.curriculumId !== expectedId;
+    return !resolvedParent || resolvedParent.domain !== record.domain || resolvedParent.curriculumId.trim().toUpperCase() !== expectedId;
   }
 
   private matchingRecordsForCurrentView(): VaultRecord[] {
@@ -3075,16 +3919,19 @@ export class EntVaultCommandCenterView extends ItemView {
     }).open();
   }
 
-  private promptNewSubheading(heading: LayoutHeading): void {
+  private promptNewSubheading(heading: LayoutHeading, parent: LayoutNode = heading): void {
     const ownsBase = this.createOpenedBaseGuard();
     new TextPromptModal(this.app, {
-      title: `New subheading in ${heading.title}`,
+      title: `New subheading in ${parent.title}`,
       placeholder: "Subheading name",
       submitLabel: "Create subheading",
       onSubmit: async (title) => {
         if (!ownsBase()) return;
         await this.plugin.mutate(`Create subheading “${title}”`, () => {
-          heading.subheadings.push({ id: makeId("subheading"), title, collapsed: false, subjects: [] });
+          // New nodes are canonical leaves: the nested key appears only once
+          // they gain children of their own.
+          ensureChildList(parent).push({ id: makeId("subheading"), title, collapsed: false, subjects: [] });
+          parent.collapsed = false;
           heading.collapsed = false;
         });
       },
@@ -3112,7 +3959,7 @@ export class EntVaultCommandCenterView extends ItemView {
     }).open();
   }
 
-  private promptNewLibrarySubheading(libraryId: string, heading: LayoutHeading): void {
+  private promptNewLibrarySubheading(libraryId: string, heading: LayoutHeading, parent: LayoutNode = heading): void {
     if (!this.guardLoadedBase()) return;
     const ownsBase = this.createOpenedBaseGuard();
     const openedLayout = this.libraryLayout(libraryId);
@@ -3121,8 +3968,16 @@ export class EntVaultCommandCenterView extends ItemView {
       new Notice("That library heading is no longer available. Reopen the action and try again.");
       return;
     }
+    const locateParent = (currentHeading: LayoutHeading): LayoutNode | null => parent.id === heading.id
+      ? currentHeading
+      : subheadingChain(currentHeading, parent.id)?.node ?? null;
+    const openedParent = locateParent(openedHeading);
+    if (!openedParent) {
+      new Notice("That library subheading is no longer available. Reopen the action and try again.");
+      return;
+    }
     new TextPromptModal(this.app, {
-      title: `New subheading in ${openedHeading.title}`,
+      title: `New subheading in ${openedParent.title}`,
       placeholder: "Subheading name",
       submitLabel: "Create subheading",
       onSubmit: async (title) => {
@@ -3130,51 +3985,46 @@ export class EntVaultCommandCenterView extends ItemView {
         if (this.libraryLayout(libraryId) !== openedLayout) throw new Error("The library organization changed. Reopen the action and try again.");
         const currentHeading = openedLayout.find((item) => item.id === openedHeading.id);
         if (!currentHeading) throw new Error("That library heading is no longer available. Reopen the action and try again.");
+        const currentParent = locateParent(currentHeading);
+        if (!currentParent) throw new Error("That library subheading is no longer available. Reopen the action and try again.");
         await this.plugin.mutate(`Create library subheading “${title}”`, () => {
-          currentHeading.subheadings.push({ id: makeId(`library-${libraryId}-subheading`), title, collapsed: false, subjects: [] });
+          // New nodes are canonical leaves: the nested key appears only once
+          // they gain children of their own.
+          ensureChildList(currentParent).push({ id: makeId(`library-${libraryId}-subheading`), title, collapsed: false, subjects: [] });
+          currentParent.collapsed = false;
           currentHeading.collapsed = false;
         }, { includePortableIndex: true, requireUndo: true });
       },
     }).open();
   }
 
-  private toggleLibraryHeading(heading: LayoutHeading): void {
+  /**
+   * Flip one node's collapse state by re-finding it in the current layout, so
+   * a stale render can never write into replaced organization. The write is
+   * optimistic: a failed save restores every collapse flag it touched.
+   */
+  private toggleLayoutNode(context: LayoutRenderContext, nodeId: string): void {
     const ownsBase = this.createOpenedBaseGuard();
     this.run(async () => {
       if (!ownsBase()) return;
-      const libraryId = libraryIdForTab(this.plugin.data.activeTab);
-      const currentHeading = libraryId ? this.libraryLayout(libraryId).find((item) => item.id === heading.id) : null;
-      if (!currentHeading) return;
-      const previous = currentHeading.collapsed;
-      currentHeading.collapsed = !previous;
-      try {
-        await this.plugin.savePluginData();
-      } catch (error) {
-        currentHeading.collapsed = previous;
-        throw error;
-      }
-      if (ownsBase()) this.renderTree();
-    });
-  }
-
-  private toggleLibrarySubheading(heading: LayoutHeading, subheading: LayoutSubheading): void {
-    const ownsBase = this.createOpenedBaseGuard();
-    this.run(async () => {
-      if (!ownsBase()) return;
-      const libraryId = libraryIdForTab(this.plugin.data.activeTab);
-      const currentHeading = libraryId ? this.libraryLayout(libraryId).find((item) => item.id === heading.id) : null;
-      const currentSubheading = currentHeading?.subheadings.find((item) => item.id === subheading.id);
-      if (!currentHeading || !currentSubheading) return;
-      const previousSubheading = currentSubheading.collapsed;
-      const previousHeading = currentHeading.collapsed;
-      currentSubheading.collapsed = !previousSubheading;
-      currentHeading.collapsed = false;
-      try {
-        await this.plugin.savePluginData();
-      } catch (error) {
-        currentSubheading.collapsed = previousSubheading;
-        currentHeading.collapsed = previousHeading;
-        throw error;
+      const layout = context.kind === "library" ? this.libraryLayout(context.library.id) : this.plugin.data.collections;
+      const heading = layout.find((item) => item.id === context.heading.id);
+      if (!heading) return;
+      const located = heading.id === nodeId
+        ? { chain: [heading as LayoutNode], node: heading as LayoutNode }
+        : subheadingChain(heading, nodeId);
+      if (!located) return;
+      const previous = located.chain.map((item) => item.collapsed);
+      located.node.collapsed = !located.node.collapsed;
+      // A toggled nested node must be reachable, so its ancestors stay open.
+      for (const ancestor of located.chain.slice(0, -1)) ancestor.collapsed = false;
+      if (context.kind === "library" || context.mutable) {
+        try {
+          await this.plugin.saveViewState();
+        } catch (error) {
+          located.chain.forEach((item, index) => { item.collapsed = previous[index] ?? item.collapsed; });
+          throw error;
+        }
       }
       if (ownsBase()) this.renderTree();
     });
@@ -3184,14 +4034,15 @@ export class EntVaultCommandCenterView extends ItemView {
     const heading = this.libraryLayout(membership.libraryId).find((item) => item.id === membership.headingId);
     if (!heading) return [];
     if (!membership.subheadingId) return heading.subjects;
-    return heading.subheadings.find((item) => item.id === membership.subheadingId)?.subjects ?? [];
+    return subheadingChain(heading, membership.subheadingId)?.node.subjects ?? [];
   }
 
   private removeLibraryMembership(subjectId: string, libraryId: string): void {
-    for (const heading of this.libraryLayout(libraryId)) {
-      heading.subjects = heading.subjects.filter((item) => item !== subjectId);
-      for (const subheading of heading.subheadings) subheading.subjects = subheading.subjects.filter((item) => item !== subjectId);
-    }
+    const strip = (node: LayoutNode): void => {
+      node.subjects = node.subjects.filter((item) => item !== subjectId);
+      for (const child of childSubheadings(node)) strip(child);
+    };
+    for (const heading of this.libraryLayout(libraryId)) strip(heading);
   }
 
   private async moveLibraryHeading(libraryId: string, from: number, to: number): Promise<void> {
@@ -3203,11 +4054,13 @@ export class EntVaultCommandCenterView extends ItemView {
     }, { includePortableIndex: true, requireUndo: true });
   }
 
-  private async moveLibrarySubheading(_libraryId: string, heading: LayoutHeading, from: number, to: number): Promise<void> {
-    if (from < 0 || to < 0 || from >= heading.subheadings.length || to >= heading.subheadings.length) return;
+  private async moveLibrarySubheading(_libraryId: string, parent: LayoutNode, from: number, to: number): Promise<void> {
+    const children = childSubheadings(parent);
+    if (from < 0 || to < 0 || from >= children.length || to >= children.length) return;
     await this.plugin.mutate("Reorder library subheading", () => {
-      const [subheading] = heading.subheadings.splice(from, 1);
-      if (subheading) heading.subheadings.splice(to, 0, subheading);
+      const list = ensureChildList(parent);
+      const [subheading] = list.splice(from, 1);
+      if (subheading) list.splice(to, 0, subheading);
     }, { includePortableIndex: true, requireUndo: true });
   }
 
@@ -3318,26 +4171,43 @@ export class EntVaultCommandCenterView extends ItemView {
     const ownsBase = this.createOpenedBaseGuard();
     const openedLayout = this.libraryLayout(libraryId);
     const layoutIsCurrent = (): boolean => openedLayout === this.libraryLayout(libraryId);
-    const index = heading.subheadings.findIndex((item) => item.id === subheading.id);
+    /** Re-find the node and its parent in the current layout; ids are layout-unique. */
+    const locateCurrent = (): { parent: LayoutNode; node: LayoutSubheading; siblings: LayoutSubheading[] } | null => {
+      const currentHeading = this.libraryLayout(libraryId).find((item) => item.id === heading.id);
+      const located = currentHeading ? subheadingChain(currentHeading, subheading.id) : null;
+      if (!currentHeading || !located) return null;
+      const parent = located.chain[located.chain.length - 2] ?? currentHeading;
+      return { parent, node: located.node, siblings: childSubheadings(parent) };
+    };
+    const opened = locateCurrent();
+    const depth = subheadingChain(heading, subheading.id)?.chain.length ?? 2;
+    const siblings = opened?.siblings ?? [];
+    const index = siblings.findIndex((item) => item.id === subheading.id);
+    const parentTitle = opened?.parent.title ?? heading.title;
     const menu = new Menu();
     menu.addItem((item) => item.setTitle("Move subheading up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => {
       if (!ownsBase() || !layoutIsCurrent()) return;
-      const currentHeading = this.libraryLayout(libraryId).find((item) => item.id === heading.id);
-      const currentIndex = currentHeading?.subheadings.findIndex((item) => item.id === subheading.id) ?? -1;
-      if (currentHeading && currentIndex > 0) this.run(() => this.moveLibrarySubheading(libraryId, currentHeading, currentIndex, currentIndex - 1));
+      const current = locateCurrent();
+      const currentIndex = current ? current.siblings.findIndex((item) => item.id === subheading.id) : -1;
+      if (current && currentIndex > 0) this.run(() => this.moveLibrarySubheading(libraryId, current.parent, currentIndex, currentIndex - 1));
     }));
-    menu.addItem((item) => item.setTitle("Move subheading down").setIcon("arrow-down").setDisabled(index < 0 || index >= heading.subheadings.length - 1).onClick(() => {
+    menu.addItem((item) => item.setTitle("Move subheading down").setIcon("arrow-down").setDisabled(index < 0 || index >= siblings.length - 1).onClick(() => {
       if (!ownsBase() || !layoutIsCurrent()) return;
-      const currentHeading = this.libraryLayout(libraryId).find((item) => item.id === heading.id);
-      const currentIndex = currentHeading?.subheadings.findIndex((item) => item.id === subheading.id) ?? -1;
-      if (currentHeading && currentIndex >= 0 && currentIndex < currentHeading.subheadings.length - 1) {
-        this.run(() => this.moveLibrarySubheading(libraryId, currentHeading, currentIndex, currentIndex + 1));
+      const current = locateCurrent();
+      const currentIndex = current ? current.siblings.findIndex((item) => item.id === subheading.id) : -1;
+      if (current && currentIndex >= 0 && currentIndex < current.siblings.length - 1) {
+        this.run(() => this.moveLibrarySubheading(libraryId, current.parent, currentIndex, currentIndex + 1));
       }
     }));
     menu.addSeparator();
     menu.addItem((item) => item.setTitle("Place record here…").setIcon("file-input").onClick(() => {
       if (ownsBase() && layoutIsCurrent()) this.openPlaceLibraryRecordPicker(libraryId, { headingId: heading.id, subheadingId: subheading.id });
     }));
+    if (depth < MAX_LAYOUT_DEPTH) {
+      menu.addItem((item) => item.setTitle("Add subheading").setIcon("folder-plus").onClick(() => {
+        if (ownsBase() && layoutIsCurrent()) this.promptNewLibrarySubheading(libraryId, heading, subheading);
+      }));
+    }
     menu.addItem((item) => item.setTitle("Rename subheading").setIcon("pencil").onClick(() => {
       if (!ownsBase() || !layoutIsCurrent()) return;
       new TextPromptModal(this.app, {
@@ -3345,8 +4215,7 @@ export class EntVaultCommandCenterView extends ItemView {
         onSubmit: async (title) => {
           if (!ownsBase()) return;
           if (!layoutIsCurrent()) throw new Error("The library organization changed. Reopen the action and try again.");
-          const currentHeading = this.libraryLayout(libraryId).find((item) => item.id === heading.id);
-          const currentSubheading = currentHeading?.subheadings.find((item) => item.id === subheading.id);
+          const currentSubheading = locateCurrent()?.node;
           if (!currentSubheading) throw new Error("That library subheading is no longer available. Reopen the action and try again.");
           await this.plugin.mutate(`Rename library subheading “${currentSubheading.title}”`, () => { currentSubheading.title = title; }, { includePortableIndex: true, requireUndo: true });
         },
@@ -3354,15 +4223,19 @@ export class EntVaultCommandCenterView extends ItemView {
     }));
     menu.addItem((item) => item.setTitle("Remove subheading").setIcon("trash-2").onClick(() => {
       if (!ownsBase() || !layoutIsCurrent()) return;
-      new ConfirmModal(this.app, "Remove library subheading?", `Its records will remain directly under “${heading.title}”. No Markdown note will be changed.`, "Remove subheading", async () => {
+      new ConfirmModal(this.app, "Remove library subheading?", `Its records and nested subheadings will move up under “${parentTitle}”. No Markdown note will be changed.`, "Remove subheading", async () => {
         if (!ownsBase()) return;
         if (!layoutIsCurrent()) throw new Error("The library organization changed. Reopen the action and try again.");
-        const currentHeading = this.libraryLayout(libraryId).find((item) => item.id === heading.id);
-        const currentSubheading = currentHeading?.subheadings.find((item) => item.id === subheading.id);
-        if (!currentHeading || !currentSubheading) throw new Error("That library subheading is no longer available. Reopen the action and try again.");
-        await this.plugin.mutate(`Remove library subheading “${currentSubheading.title}”`, () => {
-          currentHeading.subjects.push(...currentSubheading.subjects.filter((subjectId) => !currentHeading.subjects.includes(subjectId)));
-          currentHeading.subheadings = currentHeading.subheadings.filter((item) => item.id !== currentSubheading.id);
+        const current = locateCurrent();
+        if (!current) throw new Error("That library subheading is no longer available. Reopen the action and try again.");
+        await this.plugin.mutate(`Remove library subheading “${current.node.title}”`, () => {
+          const { parent, node } = current;
+          parent.subjects.push(...node.subjects.filter((subjectId) => !parent.subjects.includes(subjectId)));
+          const children = ensureChildList(parent);
+          const removeIndex = children.findIndex((item) => item.id === node.id);
+          // The removed node's own children take its place, keeping order.
+          children.splice(removeIndex < 0 ? children.length : removeIndex, removeIndex < 0 ? 0 : 1, ...childSubheadings(node));
+          dropEmptyChildList(parent, parent.id === heading.id);
         }, { includePortableIndex: true, requireUndo: true });
       }).open();
     }));
@@ -3393,10 +4266,11 @@ export class EntVaultCommandCenterView extends ItemView {
     if (!heading) return;
     let list = heading.subjects;
     if (target.subheadingId) {
-      const subheading = heading.subheadings.find((item) => item.id === target.subheadingId);
-      if (!subheading) return;
-      list = subheading.subjects;
-      subheading.collapsed = false;
+      // The target may sit at any depth under this heading; ids are unique.
+      const located = subheadingChain(heading, target.subheadingId);
+      if (!located) return;
+      list = located.node.subjects;
+      for (const node of located.chain) node.collapsed = false;
     }
     if (!list.includes(path)) list.push(path);
     heading.collapsed = false;
@@ -3407,7 +4281,7 @@ export class EntVaultCommandCenterView extends ItemView {
     if (!heading) return;
     if (!membership.subheadingId) heading.subjects = heading.subjects.filter((item) => item !== path);
     else {
-      const subheading = heading.subheadings.find((item) => item.id === membership.subheadingId);
+      const subheading = subheadingChain(heading, membership.subheadingId)?.node;
       if (subheading) subheading.subjects = subheading.subjects.filter((item) => item !== path);
     }
   }
@@ -3416,7 +4290,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const heading = this.plugin.data.collections.find((item) => item.id === membership.headingId);
     if (!heading) return [];
     if (!membership.subheadingId) return heading.subjects;
-    return heading.subheadings.find((item) => item.id === membership.subheadingId)?.subjects ?? [];
+    return subheadingChain(heading, membership.subheadingId)?.node.subjects ?? [];
   }
 
   private async moveCollection(from: number, to: number): Promise<void> {
@@ -3427,11 +4301,13 @@ export class EntVaultCommandCenterView extends ItemView {
     });
   }
 
-  private async moveSubheading(heading: LayoutHeading, from: number, to: number): Promise<void> {
-    if (from < 0 || to < 0 || from >= heading.subheadings.length || to >= heading.subheadings.length) return;
+  private async moveSubheading(parent: LayoutNode, from: number, to: number): Promise<void> {
+    const children = childSubheadings(parent);
+    if (from < 0 || to < 0 || from >= children.length || to >= children.length) return;
     await this.plugin.mutate("Reorder subheading", () => {
-      const [item] = heading.subheadings.splice(from, 1);
-      if (item) heading.subheadings.splice(to, 0, item);
+      const list = ensureChildList(parent);
+      const [item] = list.splice(from, 1);
+      if (item) list.splice(to, 0, item);
     });
   }
 
@@ -3502,14 +4378,31 @@ export class EntVaultCommandCenterView extends ItemView {
     if (!this.guardLoadedBase()) return;
     const ownsBase = this.createOpenedBaseGuard();
     const menu = new Menu();
-    const index = heading.subheadings.findIndex((item) => item.id === subheading.id);
+    /** Re-find the node and its parent in the current layout; ids are layout-unique. */
+    const locateCurrent = (): { parent: LayoutNode; node: LayoutSubheading } | null => {
+      const currentHeading = this.plugin.data.collections.find((item) => item.id === heading.id);
+      const currentChain = currentHeading ? subheadingChain(currentHeading, subheading.id) : null;
+      if (!currentHeading || !currentChain) return null;
+      return { parent: currentChain.chain[currentChain.chain.length - 2] ?? currentHeading, node: currentChain.node };
+    };
+    const located = subheadingChain(heading, subheading.id);
+    if (!located) return;
+    const depth = located.chain.length;
+    const parent = located.chain[located.chain.length - 2] ?? heading;
+    const siblings = childSubheadings(parent);
+    const index = siblings.findIndex((item) => item.id === subheading.id);
     menu.addItem((item) => item.setTitle("Move subheading up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => {
-      if (ownsBase()) this.run(() => this.moveSubheading(heading, index, index - 1));
+      if (ownsBase()) this.run(() => this.moveSubheading(parent, index, index - 1));
     }));
-    menu.addItem((item) => item.setTitle("Move subheading down").setIcon("arrow-down").setDisabled(index < 0 || index >= heading.subheadings.length - 1).onClick(() => {
-      if (ownsBase()) this.run(() => this.moveSubheading(heading, index, index + 1));
+    menu.addItem((item) => item.setTitle("Move subheading down").setIcon("arrow-down").setDisabled(index < 0 || index >= siblings.length - 1).onClick(() => {
+      if (ownsBase()) this.run(() => this.moveSubheading(parent, index, index + 1));
     }));
     menu.addSeparator();
+    if (depth < MAX_LAYOUT_DEPTH) {
+      menu.addItem((item) => item.setTitle("Add subheading").setIcon("folder-plus").onClick(() => {
+        if (ownsBase()) this.promptNewSubheading(heading, subheading);
+      }));
+    }
     menu.addItem((item) => item.setTitle("Rename subheading").setIcon("pencil").onClick(() => {
       if (!ownsBase()) return;
       new TextPromptModal(this.app, {
@@ -3522,11 +4415,18 @@ export class EntVaultCommandCenterView extends ItemView {
     }));
     menu.addItem((item) => item.setTitle("Remove subheading").setIcon("trash-2").onClick(() => {
       if (!ownsBase()) return;
-      new ConfirmModal(this.app, "Remove subheading?", `Its ${this.plugin.data.settings.itemSingular} memberships will remain directly under “${heading.title}”.`, "Remove subheading", async () => {
+      new ConfirmModal(this.app, "Remove subheading?", `Its ${this.plugin.data.settings.itemSingular} memberships and nested subheadings will move up under “${parent.title}”.`, "Remove subheading", async () => {
         if (!ownsBase()) return;
-        await this.plugin.mutate(`Remove subheading “${subheading.title}”`, () => {
-          heading.subjects.push(...subheading.subjects.filter((path) => !heading.subjects.includes(path)));
-          heading.subheadings = heading.subheadings.filter((item) => item.id !== subheading.id);
+        const current = locateCurrent();
+        if (!current) throw new Error("That subheading is no longer available. Reopen the action and try again.");
+        await this.plugin.mutate(`Remove subheading “${current.node.title}”`, () => {
+          const { parent: currentParent, node } = current;
+          currentParent.subjects.push(...node.subjects.filter((path) => !currentParent.subjects.includes(path)));
+          const children = ensureChildList(currentParent);
+          const removeIndex = children.findIndex((item) => item.id === node.id);
+          // The removed node's own children take its place, keeping order.
+          children.splice(removeIndex < 0 ? children.length : removeIndex, removeIndex < 0 ? 0 : 1, ...childSubheadings(node));
+          dropEmptyChildList(currentParent, currentParent.id === heading.id);
         });
       }).open();
     }));
@@ -3598,8 +4498,14 @@ export class EntVaultCommandCenterView extends ItemView {
     this.run(() => this.moveCurriculumRecord(record, grandParentPath, parentSiblings, index, `Outdent “${record.title}”`));
   }
 
+  /** buildCurriculumTree merges group spellings case-insensitively; resolve labels the same way. */
+  private curriculumDomainNode(domain: string): CurriculumDomainTree | undefined {
+    const key = domain.trim().toLowerCase();
+    return this.curriculum.domains.find((candidate) => candidate.domain.toLowerCase() === key);
+  }
+
   private makeCurriculumTopLevel(record: VaultRecord): void {
-    const roots = this.curriculum.domains.find((domain) => domain.domain === record.domain)?.roots.map((node) => node.record.path).filter((path) => path !== record.path) ?? [];
+    const roots = this.curriculumDomainNode(record.domain)?.roots.map((node) => node.record.path).filter((path) => path !== record.path) ?? [];
     this.run(() => this.moveCurriculumRecord(record, null, roots, roots.length, `Make “${record.title}” top-level`));
   }
 
@@ -3624,7 +4530,7 @@ export class EntVaultCommandCenterView extends ItemView {
       submitLabel: "Move visually",
       onSubmit: async (group) => {
         if (!ownsBase()) return;
-        const roots = this.curriculum.domains.find((domain) => domain.domain === group)?.roots.map((node) => node.record.path).filter((path) => path !== record.path) ?? [];
+        const roots = this.curriculumDomainNode(group)?.roots.map((node) => node.record.path).filter((path) => path !== record.path) ?? [];
         await this.moveIndexRecordToGroup(record, group, null, roots, roots.length, `Move “${record.title}” to ${group}`);
       },
     }).open();
@@ -3649,12 +4555,16 @@ export class EntVaultCommandCenterView extends ItemView {
       new Notice(`Choose a parent inside ${cleanGroup}.`);
       return;
     }
+    // The collapse set stores the rendered tree's label, which can differ in
+    // case from the typed group name; capture it before the tree is replaced.
+    const destinationLabel = this.curriculumDomainNode(cleanGroup)?.domain ?? cleanGroup;
     await this.plugin.mutate(label, () => {
       if (!this.plugin.data.indexGroupOrder.includes(cleanGroup)) this.plugin.data.indexGroupOrder.push(cleanGroup);
       for (const path of [record.path, ...descendants]) this.plugin.data.indexGroupByPath[path] = cleanGroup;
       moveCurriculumVisual(this.plugin.data.curriculumVisual, { ...record, domain: cleanGroup, folderOrder: cleanGroup }, parentPath, siblingPaths, index);
     });
     this.collapsedCurriculumDomains.delete(cleanGroup);
+    this.collapsedCurriculumDomains.delete(destinationLabel);
     if (parentPath) this.collapsedCurriculumNodes.delete(parentPath);
     this.persistCollapseState();
     new Notice(`Moved visually to ${cleanGroup}. Note paths and metadata were not changed.`);
@@ -3952,14 +4862,11 @@ export class EntVaultCommandCenterView extends ItemView {
         this.collapsedCurriculumDomains.clear();
         this.collapsedCurriculumNodes.clear();
       } else if (this.plugin.data.activeTab === "collections") {
-        this.plugin.data.collections.forEach((heading) => { heading.collapsed = false; heading.subheadings.forEach((sub) => { sub.collapsed = false; }); });
+        visitLayoutNodes(this.plugin.data.collections, (node) => { node.collapsed = false; });
       } else if (activeLibraryId) {
-        this.libraryLayout(activeLibraryId).forEach((heading) => {
-          heading.collapsed = false;
-          heading.subheadings.forEach((subheading) => { subheading.collapsed = false; });
-        });
+        visitLayoutNodes(this.libraryLayout(activeLibraryId), (node) => { node.collapsed = false; });
       }
-      if (this.plugin.data.activeTab === "collections" || activeLibraryId) await this.plugin.savePluginData();
+      if (this.plugin.data.activeTab === "collections" || activeLibraryId) await this.plugin.saveViewState();
       else this.persistCollapseState();
       if (!ownsBase()) return;
       this.renderTree();
@@ -3973,14 +4880,11 @@ export class EntVaultCommandCenterView extends ItemView {
         const visit = (node: CurriculumTreeNode): void => { if (node.children.length > 0) this.collapsedCurriculumNodes.add(node.record.path); node.children.forEach(visit); };
         this.curriculum.domains.forEach((domain) => domain.roots.forEach(visit));
       } else if (this.plugin.data.activeTab === "collections") {
-        this.plugin.data.collections.forEach((heading) => { heading.collapsed = true; heading.subheadings.forEach((sub) => { sub.collapsed = true; }); });
+        visitLayoutNodes(this.plugin.data.collections, (node) => { node.collapsed = true; });
       } else if (activeLibraryId) {
-        this.libraryLayout(activeLibraryId).forEach((heading) => {
-          heading.collapsed = true;
-          heading.subheadings.forEach((subheading) => { subheading.collapsed = true; });
-        });
+        visitLayoutNodes(this.libraryLayout(activeLibraryId), (node) => { node.collapsed = true; });
       }
-      if (this.plugin.data.activeTab === "collections" || activeLibraryId) await this.plugin.savePluginData();
+      if (this.plugin.data.activeTab === "collections" || activeLibraryId) await this.plugin.saveViewState();
       else this.persistCollapseState();
       if (!ownsBase()) return;
       this.renderTree();
@@ -4038,6 +4942,9 @@ export class EntVaultCommandCenterView extends ItemView {
     menu.addSeparator();
     menu.addItem((item) => item.setTitle("Export / import center…").setIcon("arrow-left-right").onClick(() => {
       if (ownsBase()) this.openPortabilityCenter();
+    }));
+    menu.addItem((item) => item.setTitle("Multi-base portfolio transfer…").setIcon("package-open").onClick(() => {
+      if (ownsBase()) this.openPortfolioTransfer();
     }));
     menu.showAtMouseEvent(event);
   }
@@ -4111,20 +5018,18 @@ export class EntVaultCommandCenterView extends ItemView {
         this.plugin.data.settings.workspaceName,
       );
       const workspaceName = this.plugin.data.settings.workspaceName;
-      if (Platform.isMobile) {
-        await this.plugin.writePortableJson("backup", backup);
+      const slug = workspaceName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "knowledge-command-center";
+      const delivery = await deliverJsonExport(this.plugin, "backup", `${slug}-backup`, backup, {
+        contentEl: this.contentEl,
+        date: now,
+      });
+      if (delivery.medium === "vault") {
         if (!ownsBase()) return;
+        this.plugin.recordRecoveryExport(now.getTime());
         new Notice("Backup saved in the export folder inside the vault. Source notes were not included.");
         return;
       }
-      const viewWindow = this.contentEl.ownerDocument.defaultView ?? window;
-      const url = viewWindow.URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" }));
-      const link = createEl("a");
-      link.href = url;
-      const slug = workspaceName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "knowledge-command-center";
-      link.download = `${slug}-backup-${now.toISOString().slice(0, 10)}.json`;
-      link.click();
-      viewWindow.setTimeout(() => viewWindow.URL.revokeObjectURL(url), 1000);
+      this.plugin.recordRecoveryExport(now.getTime());
       new Notice("Organization backup exported. Source notes were not included.");
     } catch (error) {
       if (ownsBase()) new Notice(error instanceof Error ? error.message : String(error));
@@ -4133,42 +5038,24 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private importOrganizationBackup(): void {
     const ownsBase = this.createOpenedBaseGuard();
-    if (Platform.isMobile) {
-      const files = this.plugin.getPortableJsonFiles();
-      if (files.length === 0) {
-        new Notice("No JSON files were found in the vault. Copy a backup JSON into the vault, then try again.");
-        return;
-      }
-      new VaultFilePickerModal(this.app, files, "Choose an organization backup JSON", async (file) => {
-        if (!ownsBase()) return;
-        try {
-          this.confirmOrganizationImport(this.plugin.readPortableJson(file), ownsBase);
-        } catch (error) {
+    requestJsonImport(this.app, this.plugin, {
+      title: "Choose an organization backup JSON",
+      maxBytes: MAX_PORTABLE_PACKAGE_BYTES,
+      oversizeMessage: "The selected JSON is larger than the 10 MB import limit.",
+      emptyVaultMessage: "No JSON files were found in the vault. Copy a backup JSON into the vault, then try again.",
+      guard: ownsBase,
+      run: (task) => {
+        void task().catch((error: unknown) => {
           if (ownsBase()) new Notice(error instanceof Error ? error.message : String(error));
-        }
-      }).open();
-      return;
-    }
-    const input = createEl("input");
-    input.type = "file";
-    input.accept = "application/json,.json";
-    input.addEventListener("change", () => {
-      if (!ownsBase()) return;
-      const file = input.files?.[0];
-      if (!file) return;
-      void file.text().then((raw) => {
-        if (!ownsBase()) return;
-        this.confirmOrganizationImport(Promise.resolve(JSON.parse(raw) as unknown), ownsBase);
-      }).catch((error) => {
-        if (ownsBase()) new Notice(error instanceof Error ? error.message : String(error));
-      });
+        });
+      },
+      onValue: (value) => { this.confirmOrganizationImport(value, ownsBase); },
     });
-    input.click();
   }
 
-  private confirmOrganizationImport(input: Promise<unknown>, ownsBase = this.createOpenedBaseGuard()): void {
+  private confirmOrganizationImport(input: unknown, ownsBase = this.createOpenedBaseGuard()): void {
     if (!ownsBase()) return;
-    void input.then((value) => {
+    void Promise.resolve(input).then((value) => {
       if (!ownsBase()) return;
       const backup = parsePersonalBackup(value);
       const recoveryCheck = assertPersonalBackupMatchesVault(
@@ -4211,17 +5098,9 @@ export class EntVaultCommandCenterView extends ItemView {
               allowBaseOverride,
             );
             await this.plugin.mutate("Import organization backup", () => {
-              this.plugin.data.collections = backup.collections;
-              this.plugin.data.pinnedPaths = backup.pinnedPaths;
-              this.plugin.data.nextStudyPaths = backup.nextStudyPaths;
-              this.plugin.data.savedViews = backup.savedViews;
-              this.plugin.data.curriculumVisual = backup.curriculumVisual;
-              this.plugin.data.manualIndexPaths = backup.manualIndexPaths;
-              this.plugin.data.excludedIndexPaths = backup.excludedIndexPaths;
-              this.plugin.data.indexGroupByPath = backup.indexGroupByPath;
-              this.plugin.data.displayNameByPath = backup.displayNameByPath;
-              this.plugin.data.indexGroupAliases = backup.indexGroupAliases;
-              this.plugin.data.indexGroupOrder = backup.indexGroupOrder;
+              // The shared field list keeps this import in step with the
+              // snapshot, restore, and backup paths.
+              Object.assign(this.plugin.data, clonePersonalOrganization(backup));
               this.plugin.data.layoutSnapshots = limitSnapshotStack(backup.layoutSnapshots, 10);
               this.plugin.data.portableIndex = backup.portableIndex;
             }, {
@@ -4284,7 +5163,7 @@ export class EntVaultCommandCenterView extends ItemView {
         if (libraryId && (!library || library.archivedAt !== null)) {
           new Notice("That saved view points to an archived or removed library. Opened the knowledge index instead; the saved search text was preserved.");
         }
-        await this.plugin.savePluginData();
+        await this.plugin.saveViewState();
         if (!ownsBase()) return;
         this.render();
       })));
@@ -4427,6 +5306,7 @@ export class EntVaultCommandCenterView extends ItemView {
       dataEpoch: this.currentDataEpoch(),
     };
     event.dataTransfer.setData("application/x-ent-command-center-library-membership", JSON.stringify(guardedPayload));
+    this.activeLibraryDrag = guardedPayload;
   }
 
   private readLibraryDrag(event: DragEvent): LibraryDragMembership | null {
@@ -4458,7 +5338,9 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private applyLibraryDrop(element: HTMLElement, target: LibraryMembership): void {
     element.addEventListener("dragover", (event) => {
-      const payload = this.readLibraryDrag(event);
+      // dataTransfer data is unreadable during dragover, so validate from the
+      // tracked in-flight payload instead of readLibraryDrag(event).
+      const payload = this.activeLibraryDrag;
       if (!payload || payload.libraryId !== target.libraryId || !this.libraryDragIsCurrent(payload)) return;
       event.preventDefault();
       event.stopPropagation();
@@ -4472,7 +5354,8 @@ export class EntVaultCommandCenterView extends ItemView {
       event.preventDefault();
       event.stopPropagation();
       element.removeClass("is-drop-target");
-      const payload = this.readLibraryDrag(event);
+      const payload = this.readLibraryDrag(event) ?? this.activeLibraryDrag;
+      this.activeLibraryDrag = null;
       if (!payload || payload.libraryId !== target.libraryId || !this.libraryDragIsCurrent(payload)) return;
       const record = this.records.find((candidate) => candidate.portableId === payload.subjectId);
       if (!record) return;
@@ -4482,7 +5365,7 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private applyLibraryRowDrop(row: HTMLElement, target: LibraryMembership, targetSubjectId: string): void {
     row.addEventListener("dragover", (event) => {
-      const payload = this.readLibraryDrag(event);
+      const payload = this.activeLibraryDrag;
       if (!payload || payload.libraryId !== target.libraryId || payload.subjectId === targetSubjectId || !this.libraryDragIsCurrent(payload)) return;
       event.preventDefault();
       event.stopPropagation();
@@ -4500,7 +5383,8 @@ export class EntVaultCommandCenterView extends ItemView {
       event.stopPropagation();
       const after = row.hasClass("is-drop-after");
       row.removeClass("is-drop-before", "is-drop-after");
-      const payload = this.readLibraryDrag(event);
+      const payload = this.readLibraryDrag(event) ?? this.activeLibraryDrag;
+      this.activeLibraryDrag = null;
       if (!payload || payload.libraryId !== target.libraryId || payload.subjectId === targetSubjectId || !this.libraryDragIsCurrent(payload)) return;
       this.run(() => this.plugin.mutate("Place record in library order", () => {
         this.removeLibraryMembership(payload.subjectId, target.libraryId);
