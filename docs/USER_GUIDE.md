@@ -49,9 +49,22 @@ Open **Manage Index…** from the Command palette, Index header, or overflow men
 | **Available** | Add eligible existing notes that are not currently in the Generic Index. |
 | **Hidden** | Restore records removed from the active base, including protected ENT subjects. |
 | **Groups** | Create, reorder, rename, merge, or remove visual groups safely. |
-| **Diagnostics** | Inspect missing references, duplicate membership, broken visual parents, and orphaned group state, then apply safe plugin-state repair. |
+| **Diagnostics** | Inspect missing references, duplicate membership, broken visual parents, and orphaned group state, apply the established safe reference cleanup, or open the broader Taxonomy Health Center. |
 
 Index Manager changes plugin state only. It does not move, delete, or rewrite Markdown notes.
+
+### Taxonomy Health Center
+
+Open **Taxonomy health center** from the Command palette or **Manage Index… → Diagnostics**. It checks the active knowledge base for:
+
+- duplicate display names, case/hyphen variants, and a small audited set of visually confusable Latin/Greek/Cyrillic characters;
+- missing, self-referential, ambiguous, or cyclic visual, portable, and configured parent relationships;
+- empty or unreachable Index, Collection, and Library headings or subheadings;
+- configured folders or templates that are not currently available;
+- multiple portable identities bound to one note; and
+- unresolved portable placeholders whose title or configured ID may match a local note.
+
+The report never rewrites Markdown or links identities automatically. Ambiguous findings are report-only. A deterministic invalid visual or portable parent can be cleared only after reviewing an exact preview; that repair changes plugin-owned organization in one transaction and can be reversed with **Undo**. Empty headings are preserved because they may be intentional scaffolding. Historical load-repair counts are not persisted in the current data format, so the center does not invent them.
 
 ## Libraries
 
@@ -94,6 +107,20 @@ The ENT preset supplies Procedures, Medications, and Syndromes as protected sema
 
 Built-in ENT Libraries may be archived and restored but cannot be permanently deleted. Removing a record from a Library leaves it explicitly unassigned; it does not silently add the record to the Knowledge Index. Move it to the Index or another Library deliberately.
 
+### Library creation profiles
+
+Open **Settings → Libraries → Library creation profiles** to configure creation defaults for active or archived Libraries. Each Library can independently override:
+
+- destination folder;
+- starting content: Empty note or Copy a template; and
+- template path.
+
+Every field left on **Inherit** follows the active knowledge base's default. There are only two levels—knowledge-base defaults and one optional Library override. There is no content-type × Library matrix. The effective folder and content choice appear in the profile manager, and the Create note form remains editable for a one-note exception.
+
+Profiles use stable Library IDs, so a rename or reorder keeps the profile. Archiving keeps it for later restoration. Permanently deleting a custom Library deletes its profile in the same Undo-protected transaction. Folder and template-file renames inside the vault update current settings and history entries that carry settings, including settings-bearing named snapshots and Undo/Redo entries. Profiles never move or rewrite notes, frontmatter, or attachments.
+
+In the ENT preset, custom Libraries use these creation profiles. Protected source-derived Procedures, Medications, and Syndromes continue to follow their clinical classification safeguards rather than becoming a property-driven note generator.
+
 ## Collections
 
 Collections are personal reusable lists across the Index and Libraries. A record can belong to several Collection headings or subheadings without duplication or file movement.
@@ -124,6 +151,19 @@ Use **Add → Create note** or **Create note from template or empty note…**. T
 
 Templates may use <code>{{title}}</code>, <code>{{date}}</code>, and <code>{{time}}</code>. Other template syntax is copied unchanged. The path preview shows the destination before creation. Missing destination folders are created safely, and existing files are never overwritten.
 
+When creation has an explicit Library context, templates may also use these quoted-scalar tokens:
+
+| Token | Creation-time value |
+| --- | --- |
+| <code>{{yaml:title}}</code> | The note title as one quoted YAML scalar. Prefer this over plain <code>{{title}}</code> inside frontmatter. |
+| <code>{{yaml:id}}</code> | Stable/configured subject ID when the placeholder already has one; otherwise <code>""</code>. |
+| <code>{{yaml:category}}</code> | Selected Library subheading or heading, then the record group/Library fallback. |
+| <code>{{yaml:parent}}</code> | Existing portable/configured parent title when known; otherwise <code>""</code>. |
+| <code>{{yaml:library}}</code> | Current Library name. |
+| <code>{{yaml:type}}</code> | Current Library's singular item label. |
+
+The <code>yaml:</code> prefix is deliberate. Values are emitted as YAML-compatible double-quoted scalars, including escaping quotes, line breaks, and control characters. A template can safely write <code>category: {{yaml:category}}</code>. Tokens resolve only during explicit note creation; they are not reevaluated when a note opens, a Library is renamed, or organization changes. Plain <code>{{id}}</code>, <code>{{category}}</code>, and other third-party template syntax remain untouched. Legacy title/date/time behavior is unchanged.
+
 Notes created through the primary action join the active Index or Library as requested, even when their destination is outside the automatically indexed folder and the profile permits manual membership.
 
 ## Quick entry and shortcuts
@@ -136,7 +176,9 @@ Open Quick entry from the lightning-bolt desktop ribbon action or the Command Ce
 - create a nested Index subject, Collection subheading, or Library subheading;
 - create a note after choosing its Index/Library destination, visual group, destination folder, and empty or template content;
 - add the note that was active when Quick entry opened; and
-- choose and add another existing Markdown note.
+- choose and add another existing Markdown note;
+- append a categorized follow-up item to the current note; and
+- choose another Markdown note and append a categorized follow-up item.
 
 Placeholder and visual-structure changes are transactional, stay in plugin data, and participate in Undo. Creating a note remains the only ordinary Quick entry action that writes a Markdown file. The ENT preset continues to route topic creation through the unverified proposal workflow and does not expose manual protected-Library classification.
 
@@ -155,20 +197,47 @@ Available focused commands are:
 - Quick entry: Create note…
 - Quick entry: Add current note…
 - Quick entry: Add existing note…
+- Quick append: Add to current note…
+- Quick append: Choose a note…
+- Quick append: Undo last append
 
 ### Add a mobile toolbar button
 
-On iPhone or iPad, open **Settings → Mobile → Manage toolbar options**, scroll to the bottom, choose **Add global command**, then search for and select **Quick entry…**. Any focused Quick Entry command can be selected instead. Command icons are supplied for the mobile toolbar, but the plugin does not force a toolbar layout.
+On iPhone or iPad, open **Settings → Mobile → Manage toolbar options**, scroll to the bottom, choose **Add global command**, then search for and select **Quick entry…**. Any focused Quick Entry or Quick Append command can be selected instead. Each active Library also provides an **Open Library: _Library name_** command, which can be placed on the toolbar or assigned as Obsidian's Quick Action. Command icons are supplied for the mobile toolbar, but the plugin does not force a toolbar layout.
 
 ### Use Apple Shortcuts safely
 
-Create an Apple Shortcut with **Open URLs** and use exactly:
+Create an Apple Shortcut with **Open URLs** and use one exact action URL:
 
 ~~~text
 obsidian://kbcc-quick-entry
+obsidian://kbcc-create-subject
+obsidian://kbcc-create-heading
+obsidian://kbcc-create-subheading
+obsidian://kbcc-create-note
+obsidian://kbcc-add-current-note
+obsidian://kbcc-add-existing-note
+obsidian://kbcc-quick-append-current
+obsidian://kbcc-quick-append-existing
+obsidian://kbcc-attach-current
 ~~~
 
-This URL can only open the hub. It cannot create an entry, select a note, or prefill a title, path, content, or clinical field. The protocol accepts only Obsidian's intrinsic `action=kbcc-quick-entry` value. Any additional query key—including `title`, `path`, `content`, or an unknown key—fails closed and the hub does not open.
+The first URL opens only the hub. The next six invoke the matching focused Quick Entry command: create a subject, heading, subheading, or note; classify the locally active note; or choose an existing note. The two Quick append URLs open a blank form for the locally active note or open the note picker first. The final URL opens Attach file only when the locally active Markdown note is eligible; otherwise it gives a generic notice without disclosing the note or protection reason.
+
+All ten routes use the same guarded blank flows as their commands. They cannot prefill a title, path, content, category, clinical field, or file. Current-note routes resolve the note only from Obsidian's local active workspace and never accept a note path in the URL. Each protocol accepts only Obsidian's intrinsic action value. Any additional query key—including `title`, `path`, `content`, or an unknown key—fails closed before a hub, picker, or form opens.
+
+## Quick append
+
+Use Quick append when a topic note needs a short follow-up item without opening its full editor workflow. Choose a category and enter one item. The defaults are:
+
+- **Questions** and **Lectures to watch** as checkboxes;
+- **Sources** and **Thoughts** as bullets;
+- **To read** as a checkbox; and
+- **Other** as a bullet.
+
+The first item creates one managed **Follow-up notes** block at the end of the note. A later item in the same category is appended below the existing category heading. Another category receives its own heading inside the same block. Open **Settings → Knowledge Base Command Center → Quick append → Categories** to rename, reorder, add, archive, or restore categories and to choose bullet/checkbox and optional-date behavior.
+
+Quick append refuses locked notes, ambiguous managed markers, malformed frontmatter, oversized notes, and stale undo. Its five-minute undo stores only positions and integrity fingerprints in memory; it never stores the note body in plugin data. Ordinary attachments remain controlled by Obsidian.
 
 ## Portable placeholders
 
@@ -221,11 +290,27 @@ Unknown <code>word:</code> filters fail closed instead of becoming unexpectedly 
 
 Search reports the full match count but renders at most the strongest 300 rows. Browse views render at most 300 record rows and 300 structural sections at once, with **Show more** for the next page.
 
+## Obsidian Bases view
+
+This plugin also registers **Knowledge hierarchy** as a view for Obsidian `.base` files. This is a read-only presentation of the `.base` query result; it is separate from the independent plugin knowledge bases described elsewhere in this guide. Selecting it does not import a `.base`, change the active Command Center knowledge base, or write note properties.
+
+Use the Bases view-options menu to configure:
+
+- **Title** — defaults to <code>note.title</code>, then the filename;
+- **ID** — defaults to <code>note.curriculum_id</code>;
+- **Fallback group** — defaults to <code>note.domain</code>, then the immediate folder;
+- **Status** — defaults to <code>note.review_status</code>;
+- **Priority** — defaults to <code>note.priority</code>;
+- **Rows per page** — 100 by default and always bounded between 25 and 300; and
+- **Show group counts** — on by default.
+
+The properties may point to supported note, file, or formula values. Native Bases filters, limits, user sorting, and **Group by** remain authoritative. The fallback group is used only when the `.base` view has no native Group by. The view keeps that user order, uses semantic group headings, prepares large fallback groups in short generation-safe slices, and replaces one bounded page at a time with **Previous** and **Next**. Narrow panes place status and priority on a second clipped line while keeping rows and pager buttons at least 44 pixels high. A data refresh or pop-out-window move cancels or transfers delayed work so a stale result cannot replace the current one.
+
 ## Record details
 
 Selecting a record opens its inspector with identity, path/status information, note or study actions, and resolved related knowledge.
 
-Desktop keeps the Index and inspector side by side. On a narrow phone screen, selecting a row opens a focused detail route. **Back to main page** or Escape returns to the same compact row and list position.
+A wide Obsidian leaf keeps the Index and inspector side by side. Compact or narrow leaves—including desktop stacked tabs, side-by-side splits, pop-out windows, and phones—open the selected record as a focused detail route. **Back to main page** or Escape returns to the same compact row and list position. Expanding the leaf restores the two-column inspector without clearing the current selection or search.
 
 ## Saved views, snapshots, and history
 
@@ -234,6 +319,33 @@ A saved view retains the current section and literal search query. Queries can c
 Undo/Redo covers personal organization and guarded import changes. Named organization snapshots are base-local and restore plugin state, not Markdown note bodies.
 
 For durable recovery, use a same-vault recovery export in addition to a complete vault backup. See [Portability and recovery](PORTABILITY_AND_RECOVERY.md).
+
+## Multi-base portfolio transfer
+
+Choose **Multi-base portfolio transfer…** to export several available knowledge bases in one file. Each base remains an independent ordinary portable package inside the bundle; same-vault recovery, note bodies, attachments, and exact note paths cannot be included. The bundle is limited to 50 bases and 32 MB plus aggregate subject, structure, and reference budgets.
+
+During import, enable the sources you want, map each one to a new base or one distinct existing base, choose Merge or Replace per existing destination, and select the exact components and Libraries. **Build exact preview** shows base, heading, subject, Library, conflict, unavailable folder/template fallback, and will-not-change categories. Apply commits this exact precomputed plan without rematching. If the store, destination, active-base state, or Sync generation changes, rebuild the preview.
+
+Replace requires the displayed typed phrase. Before changing plugin data, the plugin saves a same-vault recovery package for every replacement destination; failure to write any recovery aborts all mutation. Cross-vault Replace also requires its own acknowledgement. No portfolio operation moves, rewrites, or deletes Markdown notes or attachments.
+
+## Sync and recovery center
+
+Run **Open sync & recovery center** from the Command palette, or open **Manage index → Diagnostics → Sync & recovery center**. The modal remains available in compatibility or sticky read-only mode and reports a fixed, bounded set of local facts:
+
+- the active knowledge-base name and Generic/ENT profile;
+- its semantic revision, a shortened semantic-head fingerprint, and whether it matches the last committed local snapshot;
+- the last successful local organization save and the last locally observed external <code>data.json</code> reload;
+- the number and newest age of direct export-folder files matching the documented <code>knowledge-base-command-center-conflict-*.json</code> pattern;
+- the newest recovery export confirmed by an export action on this device or by the documented standalone backup filename pattern;
+- the path-safe reason for read-only protection and whether that protection is sticky until restart;
+- device-local runtime, default/custom configuration-folder status, and active-base view-profile status; and
+- a warning when existing semantic conflict metadata shows that the active base participated in a concurrent edit.
+
+The artifact scan examines at most 2,000 direct children of the export folder and reads only paths and modification times. A capped count is labelled as a lower bound, and the age is labelled as the newest inspected rescue. The plugin does not open JSON packages to guess whether an arbitrary portable package contains recovery.
+
+This is not a Sync-status surface. It makes no network request, calls no private Obsidian Sync API, and cannot tell whether a provider is online, queued, caught up, or safe for a device handoff. It never reads note bodies. Full paths, export filenames, custom configuration names, vault/base identifiers, and full semantic fingerprints are not shown.
+
+Choose **Clear device-local data…** in this center, or run the command of the same name, when preparing to uninstall or intentionally resetting this device. A confirmation explains that it clears only this plugin's App-local route, disclosure, Undo/Redo, local diagnostic facts, and update-announcement history. It does not write synced <code>data.json</code> or change Markdown, attachments, or recovery exports. Tracking remains suppressed until Obsidian restarts, so disable or uninstall in the same session; restart only when you want local tracking to resume.
 
 ## Settings
 
@@ -244,6 +356,8 @@ Configurable Generic-base settings include:
 - indexed, Inbox, default note, and templates folders;
 - ID, group, and parent metadata mappings;
 - default starting content and template;
+- optional per-Library folder, starting-content, and template profiles;
+- explicit attachment storage and Markdown-link insertion policies;
 - default section and recent-change limit;
 - hover previews and note-opening behavior; and
 - active knowledge-base and Library management.
@@ -253,14 +367,20 @@ The ENT preset also exposes safety-badge display and optional advanced canonical
 ## Commands
 
 - Open workspace
+- Open Library: *Library name* (one dynamically maintained global command for every active Library)
 - New knowledge base…
 - Switch knowledge base…
 - Manage knowledge bases…
 - Manage libraries…
+- Open sync & recovery center
+- Open what’s new
 - Open export / import center
+- Open multi-base portfolio transfer
 - Manage index…
+- Open taxonomy health center
 - Add or create…
 - Create note from template or empty note…
+- Attach file to current note…
 - Add current note to a collection
 - Quick entry…
 - Quick entry: Create subject without a note…
@@ -269,6 +389,9 @@ The ENT preset also exposes safety-badge display and optional advanced canonical
 - Quick entry: Create note…
 - Quick entry: Add current note…
 - Quick entry: Add existing note…
+- Quick append: Add to current note…
+- Quick append: Choose a note…
+- Quick append: Undo last append
 - Undo / redo personal organization
 
 The ENT preset adds proposal-promotion and advanced canonical-placement commands where applicable.

@@ -16,10 +16,16 @@ import {
   portabilityLibraryUnavailableText,
   preparePortableExport,
 } from "../src/portability-modal.ts";
-import { createPortableExport, EMPTY_PORTABLE_SELECTION } from "../src/portability.ts";
+import {
+  applyPortableExport,
+  createPortableExport,
+  EMPTY_PORTABLE_SELECTION,
+  parsePortableExport,
+} from "../src/portability.ts";
 import {
   BUILTIN_LIBRARY_DEFINITIONS,
   createPersonalBackup,
+  createWorkspaceConfig,
   emptyCurriculumTree,
   libraryTabId,
   migrateData,
@@ -32,6 +38,7 @@ import {
 import { collectKnowledgeBaseSearchResults } from "../src/search.ts";
 import { EntCommandCenterSettingsTab } from "../src/settings.ts";
 import { LibraryEditorModal, ManageLibrariesModal } from "../src/library-modal.ts";
+import { LibraryNoteProfileEditorModal } from "../src/library-profile-modal.ts";
 import { createFakeDom } from "./support/fake-dom.ts";
 
 function record(path: string, title: string, kind: VaultRecord["kind"] = "topic"): VaultRecord {
@@ -166,6 +173,130 @@ test("a stale library editor cannot overwrite a changed, reordered, archived, or
     assert.equal(updates, 0, `${scenario.name} library must reject the stale editor`);
   }
   assert.equal(Notice.messages.filter((message) => /after the editor opened/i.test(message)).length, scenarios.length);
+});
+
+test("a same-base Sync replacement invalidates an open Library creation-profile editor", async () => {
+  Notice.messages.length = 0;
+  const data = migrateData(null);
+  const library = installLibrary(data);
+  let dataEpoch = 3;
+  let saves = 0;
+  const plugin = {
+    app: {},
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => dataEpoch,
+    getLibrary: (id: string) => id === library.id ? { ...library } : null,
+    getLibraryNoteProfile: () => null,
+    getEffectiveLibraryNoteProfile: () => ({
+      folder: "Knowledge Base",
+      mode: "empty" as const,
+      templatePath: "",
+      inherited: { folder: true, mode: true, templatePath: true },
+    }),
+    validateLibraryNoteProfile: () => null,
+    async setLibraryNoteProfile(): Promise<void> { saves += 1; },
+  };
+  const modal = new LibraryNoteProfileEditorModal(
+    plugin as unknown as ConstructorParameters<typeof LibraryNoteProfileEditorModal>[0],
+    library,
+  );
+  const harness = modal as unknown as { submit(reset: boolean): Promise<void> };
+
+  dataEpoch += 1;
+  await harness.submit(false);
+  await harness.submit(true);
+
+  assert.equal(saves, 0);
+  assert.equal(Notice.messages.filter((message) => /synced profile changed/i.test(message)).length, 1);
+});
+
+test("a Library creation-profile editor rejects same-object base-default and Library changes", async () => {
+  Notice.messages.length = 0;
+  const scenarios: Array<{
+    label: string;
+    mutate(data: PluginData, library: LibraryDefinition): void;
+  }> = [
+    {
+      label: "base defaults",
+      mutate: (data) => { data.settings.defaultNoteFolder = "Changed while open"; },
+    },
+    {
+      label: "Library rename",
+      mutate: (_data, library) => { library.name = "Renamed while open"; },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const data = migrateData(null);
+    const library = installLibrary(data);
+    let saves = 0;
+    const plugin = {
+      app: {},
+      data,
+      getActiveKnowledgeBaseId: () => "base-a",
+      getDataEpoch: () => 0,
+      getLibrary: (id: string) => id === library.id ? library : null,
+      getLibraryNoteProfile: () => null,
+      getEffectiveLibraryNoteProfile: () => ({
+        folder: data.settings.defaultNoteFolder,
+        mode: data.settings.defaultNewNoteMode,
+        templatePath: data.settings.defaultTemplatePath,
+        inherited: { folder: true, mode: true, templatePath: true },
+      }),
+      validateLibraryNoteProfile: () => null,
+      async setLibraryNoteProfile(): Promise<void> { saves += 1; },
+    };
+    const modal = new LibraryNoteProfileEditorModal(
+      plugin as unknown as ConstructorParameters<typeof LibraryNoteProfileEditorModal>[0],
+      library,
+    );
+    const harness = modal as unknown as { submit(reset: boolean): Promise<void> };
+
+    scenario.mutate(data, library);
+    await harness.submit(false);
+    await harness.submit(true);
+
+    assert.equal(saves, 0, scenario.label);
+  }
+  assert.equal(Notice.messages.filter((message) => /creation defaults.*changed/i.test(message)).length, 2);
+});
+
+test("Library profile folder Browse is visibly disabled until its override is enabled", () => {
+  const data = migrateData(null);
+  const library = installLibrary(data);
+  const plugin = {
+    app: {},
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    getLibrary: () => library,
+    getLibraryNoteProfile: () => null,
+    getEffectiveLibraryNoteProfile: () => ({
+      folder: "Knowledge Base",
+      mode: "empty" as const,
+      templatePath: "",
+      inherited: { folder: true, mode: true, templatePath: true },
+    }),
+  };
+  const modal = new LibraryNoteProfileEditorModal(
+    plugin as unknown as ConstructorParameters<typeof LibraryNoteProfileEditorModal>[0],
+    library,
+  );
+  const browseButton = { disabled: false };
+  const harness = modal as unknown as {
+    folderBrowseButton: typeof browseButton;
+    folderOverride: boolean;
+    syncControls(): void;
+  };
+  harness.folderBrowseButton = browseButton;
+  harness.folderOverride = false;
+  harness.syncControls();
+  assert.equal(browseButton.disabled, true);
+
+  harness.folderOverride = true;
+  harness.syncControls();
+  assert.equal(browseButton.disabled, false);
 });
 
 test("editing only a Library name preserves an imported unknown icon ID", async () => {
@@ -780,6 +911,18 @@ test("creating a note from a custom library carries its labels into the generic 
   data.settings.workspaceMode = "generic";
   data.settings.itemSingular = "note";
   const library = installLibrary(data);
+  data.settings.libraryNoteProfiles[library.id] = {
+    folder: "Reference notes",
+    mode: "template",
+    templatePath: "Templates/Reference.md",
+  };
+  data.portableIndex.libraryLayouts[library.id] = [{
+    id: "heading-evidence",
+    title: "Evidence",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{ id: "sub-guidelines", title: "Guidelines", collapsed: false, subjects: [] }],
+  }];
   data.activeTab = libraryTabId(library.id);
   const view = Object.create(EntVaultCommandCenterView.prototype) as {
     app: object;
@@ -790,11 +933,18 @@ test("creating a note from a custom library carries its labels into the generic 
       isClinicalMode(): boolean;
       getTemplateFiles(): [];
       getLibrary(id: string): LibraryDefinition | null;
+      getEffectiveLibraryNoteProfile(id: string): {
+        folder: string;
+        mode: "template";
+        templatePath: string;
+        inherited: { folder: false; mode: false; templatePath: false };
+      };
+      getPortableSubject(): null;
     };
     loadedBaseId: string;
     loadedDataEpoch: number;
     staleViewNoticeShown: boolean;
-    startCreateLibraryNote(libraryId: string): void;
+    startCreateLibraryNote(libraryId: string, target?: { headingId: string; subheadingId: string }): void;
   };
   view.app = {};
   view.plugin = {
@@ -804,22 +954,154 @@ test("creating a note from a custom library carries its labels into the generic 
     isClinicalMode: () => false,
     getTemplateFiles: () => [],
     getLibrary: (id) => id === library.id ? library : null,
+    getEffectiveLibraryNoteProfile: () => ({
+      folder: "Reference notes",
+      mode: "template",
+      templatePath: "Templates/Reference.md",
+      inherited: { folder: false, mode: false, templatePath: false },
+    }),
+    getPortableSubject: () => null,
   };
   view.loadedBaseId = "base-a";
   view.loadedDataEpoch = 0;
   view.staleViewNoticeShown = false;
-  let options: { createLabel?: string; contextNotice?: string } | null = null;
+  let options: {
+    createLabel?: string;
+    contextNotice?: string;
+    initial?: { folder: string; mode: string; templatePath: string };
+    tokenContext?: { library?: string; type?: string; category?: string };
+  } | null = null;
   KnowledgeNoteModal.prototype.open = function openForTest(): void {
     options = (this as unknown as { options: typeof options }).options;
   };
   try {
-    view.startCreateLibraryNote(library.id);
+    view.startCreateLibraryNote(library.id, { headingId: "heading-evidence", subheadingId: "sub-guidelines" });
   } finally {
     delete (KnowledgeNoteModal.prototype as { open?: () => void }).open;
   }
 
   assert.equal(options?.createLabel, "Reference");
-  assert.match(options?.contextNotice ?? "", /classified in Reference Sets after creation/i);
+  assert.match(options?.contextNotice ?? "", /classified in (?:the selected heading or subheading in )?Reference Sets after creation/i);
+  assert.deepEqual(options?.initial, {
+    title: "",
+    folder: "Reference notes",
+    mode: "template",
+    templatePath: "Templates/Reference.md",
+    addToCollection: false,
+  });
+  assert.deepEqual(options?.tokenContext, {
+    id: "",
+    category: "Guidelines",
+    parent: "",
+    library: "Reference Sets",
+    type: "Reference",
+  });
+});
+
+test("an ENT custom-Library placeholder uses its profile while protected built-in placeholders keep clinical actions", () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  const custom = installLibrary(data);
+  data.portableIndex.libraryLayouts[custom.id] = [{
+    id: "evidence",
+    title: "Evidence",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{ id: "guidelines", title: "Guidelines", collapsed: false, subjects: ["paper"] }],
+  }];
+  const placeholder = record("kbcc-placeholder:paper", "Airway evidence", "note");
+  Object.assign(placeholder, {
+    role: "placeholder",
+    portableId: "paper",
+    isPlaceholder: true,
+    portableIndexed: false,
+    libraryId: custom.id,
+    curriculumId: "REF-001",
+    domain: "Guidelines",
+    topicKind: "note",
+  });
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    isClinicalMode: () => true,
+    getLibrary: (id: string) => id === custom.id ? custom : BUILTIN_LIBRARY_DEFINITIONS.find((item) => item.id === id) ?? null,
+    getEffectiveLibraryNoteProfile: () => ({
+      folder: "Evidence",
+      mode: "template" as const,
+      templatePath: "Templates/Evidence.md",
+      inherited: { folder: false, mode: false, templatePath: false },
+    }),
+    getPortableSubject: () => ({
+      id: "paper",
+      title: "Airway evidence",
+      groupId: "evidence",
+      parentId: null,
+      order: 0,
+      indexed: false,
+      configuredId: "REF-001",
+      recordKind: "note" as const,
+      libraryId: custom.id,
+    }),
+  };
+  let created: {
+    initial: Record<string, unknown>;
+    context: { createLabel?: string; tokenContext?: Record<string, string> } | undefined;
+  } | null = null;
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: object;
+    plugin: typeof plugin;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    openPlaceholderActions(value: VaultRecord): void;
+    startCreateKnowledgeNote(
+      initial: Record<string, unknown>,
+      indexAfterCreate: boolean,
+      onCreated: unknown,
+      message: string | undefined,
+      context: { createLabel?: string; tokenContext?: Record<string, string> } | undefined,
+    ): void;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+  view.startCreateKnowledgeNote = (initial, _index, _created, _message, context) => { created = { initial, context }; };
+  let modalItems: ReturnType<AddActionModal["getItems"]> = [];
+  let chooseModalItem: ((item: ReturnType<AddActionModal["getItems"]>[number]) => void) | null = null;
+  const hadOwnOpen = Object.prototype.hasOwnProperty.call(AddActionModal.prototype, "open");
+  const originalOpen = Object.getOwnPropertyDescriptor(AddActionModal.prototype, "open");
+  AddActionModal.prototype.open = function openForTest(this: AddActionModal): void {
+    modalItems = this.getItems();
+    chooseModalItem = (item) => this.onChooseItem(item);
+  };
+  try {
+    view.openPlaceholderActions(placeholder);
+    assert.deepEqual(modalItems.map((item) => item.id), ["empty", "template", "link", "keep"]);
+    const empty = modalItems.find((item) => item.id === "empty");
+    assert.ok(empty);
+    chooseModalItem?.(empty);
+  } finally {
+    if (hadOwnOpen && originalOpen) Object.defineProperty(AddActionModal.prototype, "open", originalOpen);
+    else Reflect.deleteProperty(AddActionModal.prototype, "open");
+  }
+
+  assert.deepEqual(created?.initial, {
+    title: "Airway evidence",
+    folder: "Evidence",
+    mode: "empty",
+    templatePath: "Templates/Evidence.md",
+  });
+  assert.equal(created?.context?.createLabel, "Reference");
+  assert.deepEqual(created?.context?.tokenContext, {
+    id: "REF-001",
+    category: "Guidelines",
+    parent: "",
+    library: "Reference Sets",
+    type: "Reference",
+  });
 });
 
 test("library heading reorder is portable, undo-protected, and leaves Markdown outside the mutation", async () => {
@@ -1187,6 +1469,7 @@ test("global expand and collapse controls apply to the active dynamic library hi
     isClinicalMode: () => false,
     isDataReadOnly: () => false,
     savePluginData: async () => { saves += 1; },
+    saveViewState: async () => { saves += 1; },
   };
   const view = Object.create(EntVaultCommandCenterView.prototype) as {
     app: object;
@@ -1472,7 +1755,7 @@ test("reload returns to the index when the active dynamic library tab no longer 
       getLibraries(): LibraryDefinition[];
       isClinicalMode(): boolean;
       isDataReadOnly(): boolean;
-      savePluginData(): Promise<void>;
+      saveViewState(): Promise<void>;
     };
     render(): void;
     reload(): Promise<void>;
@@ -1489,7 +1772,7 @@ test("reload returns to the index when the active dynamic library tab no longer 
     getLibraries: () => [],
     isClinicalMode: () => false,
     isDataReadOnly: () => false,
-    savePluginData: async () => { saves += 1; },
+    saveViewState: async () => { saves += 1; },
   };
   view.render = () => { renders += 1; };
 
@@ -1510,6 +1793,21 @@ test("mobile note sheets follow the visual viewport when the keyboard opens", ()
     height: 430,
     keyboardOpen: true,
     shift: -187,
+  });
+  assert.deepEqual(calculateModalViewportLayout(844, 844, 0, 414), {
+    height: 430,
+    keyboardOpen: true,
+    shift: -207,
+  });
+  assert.deepEqual(calculateModalViewportLayout(844, 430, 20, 414), {
+    height: 410,
+    keyboardOpen: true,
+    shift: -197,
+  });
+  assert.deepEqual(calculateModalViewportLayout(844, 844, 0, Number.NaN), {
+    height: 844,
+    keyboardOpen: false,
+    shift: 0,
   });
 });
 
@@ -2086,7 +2384,7 @@ test("stale rendered rows cannot write selection or collapse state into a newly 
     plugin: {
       data: typeof data;
       getActiveKnowledgeBaseId(): string;
-      savePluginData(): Promise<void>;
+      saveViewState(): Promise<void>;
     };
     loadedBaseId: string;
     staleViewNoticeShown: boolean;
@@ -2099,7 +2397,7 @@ test("stale rendered rows cannot write selection or collapse state into a newly 
   view.plugin = {
     data,
     getActiveKnowledgeBaseId: () => activeBaseId,
-    savePluginData: async () => { saves += 1; },
+    saveViewState: async () => { saves += 1; },
   };
   view.loadedBaseId = "base-a";
   view.staleViewNoticeShown = false;
@@ -2135,6 +2433,7 @@ test("reload cancels A selection and search timers before adopting B", async () 
     getLibraries: (): LibraryDefinition[] => [],
     isDataReadOnly: () => false,
     savePluginData: async () => { savesIntoB += 1; },
+    saveViewState: async () => { savesIntoB += 1; },
   };
   const view = Object.create(EntVaultCommandCenterView.prototype) as {
     plugin: typeof plugin;
@@ -2214,16 +2513,500 @@ test("settings callbacks stay bound to the knowledge base that rendered them", (
   assert.equal(Notice.messages.filter((message) => message.includes("active knowledge base changed")).length, 1);
 });
 
+type BufferedSettingsHarness = {
+  host: {
+    data: PluginData;
+    dataCompatibilityWarning: string;
+    getActiveKnowledgeBaseId(): string;
+    getDataEpoch(): number;
+    getExternalChangeGeneration(): number;
+    isDataReadOnly(): boolean;
+    savePluginData(): Promise<void>;
+    saveCompensatingRollback(): Promise<void>;
+    markPersistenceUncertain(message: string): void;
+    refreshViews(): Promise<void>;
+  };
+  containerEl: { ownerDocument: { defaultView: Window } };
+  persistedDataSnapshot: PluginData;
+  settingsSaveRevision: number;
+  persistedSettingsRevision: number;
+  pendingSettingsSaves: number;
+  settingsSaveBarrier: Promise<boolean>;
+  settingsWriteUncertain: boolean;
+  settingsRefreshPending: boolean;
+  settingsRefreshGeneration: number;
+  bufferedTextSaveTimer: number | null;
+  bufferedTextSaveWindow: Window | null;
+  bufferedTextSaveBaseId: string;
+  bufferedTextSaveDataEpoch: number;
+  bufferedTextSaveExternalGeneration: number;
+  bufferedTextSaveData: PluginData | null;
+  bufferedTextSaveRefresh: boolean;
+  update(): void;
+  scheduleTextSave(refresh?: boolean): void;
+  flushBufferedTextSave(acceptCompensatedRejection?: boolean): Promise<boolean>;
+  prepareForKnowledgeBaseChange(): Promise<boolean>;
+  save(refresh?: boolean, directDataFields?: Array<"activeTab" | "indexGroupOrder">): Promise<boolean>;
+  hide(): void;
+};
+
+function settingsTimerWindow(): { window: Window; callbacks: Map<number, () => void> } {
+  let nextTimer = 0;
+  const callbacks = new Map<number, () => void>();
+  const window = {
+    setTimeout(callback: () => void): number {
+      nextTimer += 1;
+      callbacks.set(nextTimer, callback);
+      return nextTimer;
+    },
+    clearTimeout(timer: number): void { callbacks.delete(timer); },
+  } as unknown as Window;
+  return { window, callbacks };
+}
+
+function bufferedSettingsHarness(options: {
+  onSave?: () => void | Promise<void>;
+  onCompensate?: () => void | Promise<void>;
+  onRefresh?: () => void | Promise<void>;
+  onUpdate?: () => void;
+} = {}): {
+  tab: BufferedSettingsHarness;
+  data: PluginData;
+  callbacks: Map<number, () => void>;
+  setBase(value: string): void;
+  setEpoch(value: number): void;
+  setExternalGeneration(value: number): void;
+  setOwnerWindow(value: Window): void;
+} {
+  const data = migrateData(null);
+  data.settings.setupComplete = true;
+  let activeBaseId = "base-a";
+  let epoch = 1;
+  let externalGeneration = 0;
+  let readOnly = false;
+  const initialTimers = settingsTimerWindow();
+  const tab = Object.create(EntCommandCenterSettingsTab.prototype) as BufferedSettingsHarness;
+  tab.host = {
+    data,
+    dataCompatibilityWarning: "",
+    getActiveKnowledgeBaseId: () => activeBaseId,
+    getDataEpoch: () => epoch,
+    getExternalChangeGeneration: () => externalGeneration,
+    isDataReadOnly: () => readOnly,
+    savePluginData: async () => { await options.onSave?.(); },
+    saveCompensatingRollback: async () => { await options.onCompensate?.(); },
+    markPersistenceUncertain: (message) => {
+      readOnly = true;
+      tab.host.dataCompatibilityWarning = message;
+    },
+    refreshViews: async () => { await options.onRefresh?.(); },
+  };
+  tab.containerEl = { ownerDocument: { defaultView: initialTimers.window } };
+  tab.persistedDataSnapshot = structuredClone(data);
+  tab.settingsSaveRevision = 0;
+  tab.persistedSettingsRevision = 0;
+  tab.pendingSettingsSaves = 0;
+  tab.settingsSaveBarrier = Promise.resolve(true);
+  tab.settingsWriteUncertain = false;
+  tab.settingsRefreshPending = false;
+  tab.settingsRefreshGeneration = 0;
+  tab.bufferedTextSaveTimer = null;
+  tab.bufferedTextSaveWindow = null;
+  tab.bufferedTextSaveBaseId = "";
+  tab.bufferedTextSaveDataEpoch = 0;
+  tab.bufferedTextSaveExternalGeneration = 0;
+  tab.bufferedTextSaveData = null;
+  tab.bufferedTextSaveRefresh = false;
+  tab.update = () => { options.onUpdate?.(); };
+  return {
+    tab,
+    data,
+    callbacks: initialTimers.callbacks,
+    setBase: (value) => { activeBaseId = value; },
+    setEpoch: (value) => { epoch = value; },
+    setExternalGeneration: (value) => { externalGeneration = value; },
+    setOwnerWindow: (value) => { tab.containerEl.ownerDocument.defaultView = value; },
+  };
+}
+
+async function settleBufferedSettingsSave(): Promise<void> {
+  for (let index = 0; index < 8; index += 1) await Promise.resolve();
+}
+
+test("settings text edits coalesce and unchanged drafts skip adapter writes", async () => {
+  let saves = 0;
+  let refreshes = 0;
+  const { tab, data, callbacks } = bufferedSettingsHarness({
+    onSave: () => { saves += 1; },
+    onRefresh: () => { refreshes += 1; },
+  });
+
+  for (let index = 1; index <= 20; index += 1) {
+    data.settings.workspaceSubtitle = `Typed value ${index}`;
+    tab.scheduleTextSave();
+  }
+  assert.equal(callbacks.size, 1);
+  [...callbacks.values()][0]?.();
+  await settleBufferedSettingsSave();
+  assert.equal(saves, 1);
+  assert.equal(refreshes, 1);
+  assert.equal(tab.persistedDataSnapshot.settings.workspaceSubtitle, "Typed value 20");
+
+  data.settings.workspaceSubtitle = "Temporary";
+  tab.scheduleTextSave();
+  data.settings.workspaceSubtitle = "Typed value 20";
+  tab.scheduleTextSave();
+  [...callbacks.values()][0]?.();
+  await settleBufferedSettingsSave();
+  assert.equal(saves, 1, "returning to the committed value is a no-op once no write is in flight");
+});
+
+test("reverting while an older settings write is in flight queues the durable revert", async () => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let saveCalls = 0;
+  const writes: string[] = [];
+  const { tab, data, callbacks } = bufferedSettingsHarness({
+    onSave: async () => {
+      saveCalls += 1;
+      writes.push(data.settings.workspaceSubtitle);
+      await gate;
+    },
+  });
+  const original = data.settings.workspaceSubtitle;
+
+  data.settings.workspaceSubtitle = "Pending value";
+  tab.scheduleTextSave();
+  [...callbacks.values()][0]?.();
+  await Promise.resolve();
+  assert.equal(tab.pendingSettingsSaves, 1);
+
+  data.settings.workspaceSubtitle = original;
+  tab.scheduleTextSave();
+  [...callbacks.values()][0]?.();
+  await Promise.resolve();
+  assert.equal(saveCalls, 2, "the matching baseline still needs a write behind an in-flight attempt");
+
+  release();
+  await settleBufferedSettingsSave();
+  assert.deepEqual(writes, ["Pending value", original]);
+  assert.equal(tab.persistedDataSnapshot.settings.workspaceSubtitle, original);
+  assert.equal(tab.pendingSettingsSaves, 0);
+});
+
+test("an immediate save(false) absorbs a buffered edit without losing refresh intent", async () => {
+  let saves = 0;
+  let refreshes = 0;
+  const harness = bufferedSettingsHarness({
+    onSave: () => { saves += 1; },
+    onRefresh: () => { refreshes += 1; },
+  });
+  harness.data.settings.primaryFolder = "Buffered scope";
+  harness.tab.scheduleTextSave(true);
+  harness.data.settings.openNoteBehavior = "same-tab";
+
+  assert.equal(await harness.tab.save(false), true);
+  assert.equal(harness.callbacks.size, 0);
+  assert.equal(saves, 1);
+  assert.equal(refreshes, 1);
+  assert.equal(harness.tab.settingsRefreshPending, false);
+});
+
+test("refresh intent survives while the first settings save is in flight", async () => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let saves = 0;
+  let refreshes = 0;
+  const { tab, data, callbacks } = bufferedSettingsHarness({
+    onSave: async () => { saves += 1; await gate; },
+    onRefresh: () => { refreshes += 1; },
+  });
+  data.settings.primaryFolder = "Changed scope";
+  tab.scheduleTextSave(true);
+  [...callbacks.values()][0]?.();
+  await Promise.resolve();
+
+  data.settings.openNoteBehavior = "same-tab";
+  const latestSave = tab.save(false);
+  release();
+  assert.equal(await latestSave, true);
+  await settleBufferedSettingsSave();
+
+  assert.equal(saves, 2);
+  assert.equal(refreshes, 1, "the newest successful revision performs the inherited refresh once");
+  assert.equal(tab.settingsRefreshPending, false);
+});
+
+test("a failed settings refresh remains pending for a later no-op action", async () => {
+  let refreshes = 0;
+  const harness = bufferedSettingsHarness({
+    onRefresh: () => {
+      refreshes += 1;
+      if (refreshes === 1) throw new Error("simulated refresh failure");
+    },
+  });
+  harness.data.settings.workspaceSubtitle = "Saved before refresh failure";
+
+  assert.equal(await harness.tab.save(true), true);
+  assert.equal(harness.tab.settingsRefreshPending, true);
+  assert.equal(await harness.tab.save(false), true);
+  assert.equal(refreshes, 2);
+  assert.equal(harness.tab.settingsRefreshPending, false);
+});
+
+test("a stale pre-timer base switch cannot save the prior base draft", async () => {
+  Notice.messages.length = 0;
+  let saves = 0;
+  let updates = 0;
+  const harness = bufferedSettingsHarness({
+    onSave: () => { saves += 1; },
+    onUpdate: () => { updates += 1; },
+  });
+  harness.data.settings.workspaceSubtitle = "Stale base A draft";
+  harness.tab.scheduleTextSave();
+  harness.setBase("base-b");
+  [...harness.callbacks.values()][0]?.();
+  await settleBufferedSettingsSave();
+
+  assert.equal(saves, 0);
+  assert.equal(updates, 1);
+  assert.equal(Notice.messages.some((message) => message.includes("active knowledge base changed")), true);
+});
+
+test("a same-object external generation advance invalidates a buffered settings draft", async () => {
+  let saves = 0;
+  const harness = bufferedSettingsHarness({ onSave: () => { saves += 1; } });
+  harness.data.settings.workspaceSubtitle = "Draft captured before Sync callback";
+  harness.tab.scheduleTextSave();
+  harness.setExternalGeneration(1);
+  [...harness.callbacks.values()][0]?.();
+  await settleBufferedSettingsSave();
+
+  assert.equal(saves, 0, "the callback generation guard runs before the same object can be persisted");
+});
+
+test("a rejected settings write never rolls back a replacement Sync object", async () => {
+  const incoming = migrateData(null);
+  incoming.settings.workspaceSubtitle = "Authoritative synced value";
+  let harness: ReturnType<typeof bufferedSettingsHarness>;
+  harness = bufferedSettingsHarness({
+    onSave: () => {
+      harness.tab.host.data = incoming;
+      harness.setEpoch(2);
+      harness.setExternalGeneration(1);
+      throw new Error("superseded by Sync");
+    },
+  });
+  harness.data.settings.workspaceSubtitle = "Rejected local value";
+
+  assert.equal(await harness.tab.save(false), false);
+  assert.equal(harness.tab.host.data, incoming);
+  assert.equal(incoming.settings.workspaceSubtitle, "Authoritative synced value");
+  assert.equal(harness.tab.persistedDataSnapshot.settings.workspaceSubtitle, "Authoritative synced value");
+});
+
+test("prepareForKnowledgeBaseChange accepts a rejected write after verified compensation", async () => {
+  const baseline = migrateData(null).settings.workspaceSubtitle;
+  let disk = migrateData(null);
+  let saves = 0;
+  let compensations = 0;
+  const harness = bufferedSettingsHarness({
+    onSave: () => {
+      saves += 1;
+      disk = structuredClone(harness.tab.host.data);
+      throw new Error("adapter rejected after replacement");
+    },
+    onCompensate: () => {
+      compensations += 1;
+      disk = structuredClone(harness.tab.host.data);
+    },
+  });
+  harness.data.settings.workspaceSubtitle = "Rejected draft";
+  harness.tab.scheduleTextSave();
+
+  assert.equal(await harness.tab.prepareForKnowledgeBaseChange(), true);
+  assert.equal(saves, 1);
+  assert.equal(compensations, 1);
+  assert.equal(harness.data.settings.workspaceSubtitle, baseline);
+  assert.equal(disk.settings.workspaceSubtitle, baseline, "the partial data.json replacement is compensated");
+});
+
+test("a failed settings compensation keeps the lifecycle barrier closed", async () => {
+  const harness = bufferedSettingsHarness({
+    onSave: () => { throw new Error("ambiguous first write"); },
+    onCompensate: () => { throw new Error("ambiguous compensation"); },
+  });
+  harness.data.settings.workspaceSubtitle = "Uncertain draft";
+  harness.tab.scheduleTextSave();
+
+  assert.equal(await harness.tab.prepareForKnowledgeBaseChange(), false);
+  assert.equal(harness.tab.host.isDataReadOnly(), true);
+  assert.match(harness.tab.host.dataCompatibilityWarning, /read-only/i);
+});
+
+test("settings debounce timers migrate between owner windows", async () => {
+  let saves = 0;
+  const first = settingsTimerWindow();
+  const second = settingsTimerWindow();
+  const harness = bufferedSettingsHarness({ onSave: () => { saves += 1; } });
+  harness.setOwnerWindow(first.window);
+  harness.data.settings.workspaceSubtitle = "First window";
+  harness.tab.scheduleTextSave();
+  assert.equal(first.callbacks.size, 1);
+
+  harness.setOwnerWindow(second.window);
+  harness.data.settings.workspaceSubtitle = "Second window";
+  harness.tab.scheduleTextSave();
+  assert.equal(first.callbacks.size, 0, "the timer is cleared through the window that created it");
+  assert.equal(second.callbacks.size, 1);
+  [...second.callbacks.values()][0]?.();
+  await settleBufferedSettingsSave();
+  assert.equal(saves, 1);
+  assert.equal(harness.tab.persistedDataSnapshot.settings.workspaceSubtitle, "Second window");
+});
+
+test("hiding settings flushes buffered text with its refresh intent", async () => {
+  let saves = 0;
+  let refreshes = 0;
+  const harness = bufferedSettingsHarness({
+    onSave: () => { saves += 1; },
+    onRefresh: () => { refreshes += 1; },
+  });
+  harness.data.settings.workspaceSubtitle = "Commit on hide";
+  harness.tab.scheduleTextSave(true);
+
+  harness.tab.hide();
+  await settleBufferedSettingsSave();
+  assert.equal(harness.callbacks.size, 0);
+  assert.equal(saves, 1);
+  assert.equal(refreshes, 1);
+});
+
+test("Library creation profiles are discoverable through Obsidian settings search", () => {
+  const data = migrateData(null);
+  const library = installLibrary(data);
+  const host = {
+    app: { vault: {}, metadataCache: {} },
+    data,
+    dataCompatibilityWarning: "",
+    isDataReadOnly: () => false,
+    getKnowledgeBases: () => [{ id: "base-a", data }],
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    getIndexRecords: () => [],
+    getLibraries: (includeArchived = false) => includeArchived || library.archivedAt === null ? [library] : [],
+    librarySubjectCount: () => 0,
+    getTemplateFiles: () => [],
+    getIndexGroups: () => [],
+    savePluginData: async () => undefined,
+    refreshViews: async () => undefined,
+    switchKnowledgeBase: async () => undefined,
+    renameKnowledgeBase: async () => undefined,
+  };
+  const tab = new EntCommandCenterSettingsTab(
+    host.app as never,
+    host as never,
+  );
+  const libraries = tab.getSettingDefinitions().find((definition) => (
+    "heading" in definition && definition.heading === "Libraries"
+  ));
+  assert.ok(libraries && "items" in libraries);
+  assert.ok(libraries.items.some((item) => "name" in item && item.name === "Library creation profiles"));
+});
+
+test("attachment text settings use the buffered non-refresh save pipeline", () => {
+  const data = migrateData(null);
+  const host = {
+    app: {
+      vault: { configDir: ".obsidian", getAllLoadedFiles: () => [] },
+      metadataCache: {},
+    },
+    data,
+    dataCompatibilityWarning: "",
+    isDataReadOnly: () => false,
+    getKnowledgeBases: () => [{ id: "base-a", data }],
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    getExternalChangeGeneration: () => 0,
+    getIndexRecords: () => [],
+    getLibraries: () => [],
+    librarySubjectCount: () => 0,
+    getTemplateFiles: () => [],
+    getIndexGroups: () => [],
+    getFollowUpCategories: () => [],
+    replaceFollowUpCategories: async () => undefined,
+    savePluginData: async () => undefined,
+    saveCompensatingRollback: async () => undefined,
+    markPersistenceUncertain: () => undefined,
+    refreshViews: async () => undefined,
+    switchKnowledgeBase: async () => undefined,
+    renameKnowledgeBase: async () => undefined,
+  };
+  const tab = new EntCommandCenterSettingsTab(host.app as never, host as never);
+  const requestedRefreshes: boolean[] = [];
+  (tab as unknown as { scheduleTextSave(refresh?: boolean): void }).scheduleTextSave = (refresh = true) => {
+    requestedRefreshes.push(refresh);
+  };
+  const folders = tab.getSettingDefinitions().find((definition) => (
+    "heading" in definition && definition.heading === "Folders and templates"
+  ));
+  assert.ok(folders && "items" in folders);
+
+  const renderAndChange = (name: string, value: string): void => {
+    const definition = folders.items.find((item) => "name" in item && item.name === name);
+    assert.ok(definition && "render" in definition);
+    let change: ((next: string) => void | Promise<void>) | null = null;
+    const inputEl = {
+      addEventListener: () => undefined,
+      blur: () => undefined,
+      toggleClass: () => undefined,
+    };
+    const text = {
+      inputEl,
+      setPlaceholder(): typeof text { return this; },
+      setValue(): typeof text { return this; },
+      setDisabled(): typeof text { return this; },
+      onChange(callback: (next: string) => void | Promise<void>): typeof text {
+        change = callback;
+        return this;
+      },
+    };
+    const button = {
+      setButtonText(): typeof button { return this; },
+      setDisabled(): typeof button { return this; },
+      onClick(): typeof button { return this; },
+    };
+    definition.render({
+      settingEl: { addClass: () => undefined },
+      addText(callback: (component: typeof text) => void) { callback(text); return this; },
+      addButton(callback: (component: typeof button) => void) { callback(button); return this; },
+    } as never);
+    assert.ok(change);
+    void change(value);
+  };
+
+  renderAndChange("Fixed attachment folder", "/Assets/Uploads/");
+  renderAndChange("Attachment marker", "  <!-- custom:attachments -->  ");
+  renderAndChange("Attachment heading", "### Imported files ###");
+
+  assert.deepEqual(requestedRefreshes, [false, false, false]);
+  assert.equal(data.settings.attachmentFolder, "Assets/Uploads");
+  assert.equal(data.settings.attachmentMarker, "<!-- custom:attachments -->");
+  assert.equal(data.settings.attachmentHeading, "Imported files");
+});
+
 test("a rejected direct setting save restores memory and reports the failure", async () => {
   Notice.messages.length = 0;
   const data = migrateData(null);
   data.settings.workspaceSubtitle = "Persisted subtitle";
   let refreshes = 0;
   let updates = 0;
+  let compensations = 0;
   const settingsTab = Object.create(EntCommandCenterSettingsTab.prototype) as {
     host: {
       data: typeof data;
       savePluginData(): Promise<void>;
+      saveCompensatingRollback(): Promise<void>;
       refreshViews(): Promise<void>;
     };
     persistedDataSnapshot: typeof data;
@@ -2236,6 +3019,7 @@ test("a rejected direct setting save restores memory and reports the failure", a
   settingsTab.host = {
     data,
     savePluginData: async () => { throw new Error("Sync reload won the race"); },
+    saveCompensatingRollback: async () => { compensations += 1; },
     refreshViews: async () => { refreshes += 1; },
   };
   settingsTab.persistedDataSnapshot = structuredClone(data);
@@ -2249,6 +3033,7 @@ test("a rejected direct setting save restores memory and reports the failure", a
   assert.equal(data.settings.workspaceSubtitle, "Persisted subtitle");
   assert.equal(refreshes, 1);
   assert.equal(updates, 1);
+  assert.equal(compensations, 1);
   assert.equal(Notice.messages.some((message) => message.includes("not saved") && message.includes("Sync reload")), true);
 });
 
@@ -2262,10 +3047,12 @@ test("overlapping direct setting saves roll back to the latest successful attemp
   const secondGate = new Promise<void>((_resolve, reject) => { rejectSecond = reject; });
   const persisted: PluginData[] = [];
   let saveCalls = 0;
+  let compensations = 0;
   const settingsTab = Object.create(EntCommandCenterSettingsTab.prototype) as {
     host: {
       data: typeof data;
       savePluginData(): Promise<void>;
+      saveCompensatingRollback(): Promise<void>;
       refreshViews(): Promise<void>;
     };
     persistedDataSnapshot: typeof data;
@@ -2287,6 +3074,7 @@ test("overlapping direct setting saves roll back to the latest successful attemp
         await secondGate;
       }
     },
+    saveCompensatingRollback: async () => { compensations += 1; },
     refreshViews: async () => {},
   };
   settingsTab.persistedDataSnapshot = structuredClone(data);
@@ -2308,6 +3096,7 @@ test("overlapping direct setting saves roll back to the latest successful attemp
   assert.equal(data.settings.workspaceSubtitle, "First edit", "memory follows the newest successful disk snapshot");
   assert.equal(settingsTab.persistedDataSnapshot.settings.workspaceSubtitle, "First edit");
   assert.equal(settingsTab.pendingSettingsSaves, 0);
+  assert.equal(compensations, 1);
 });
 
 test("a failed setting save preserves concurrent organization and newer view changes", async () => {
@@ -2315,10 +3104,12 @@ test("a failed setting save preserves concurrent organization and newer view cha
   data.settings.workspaceSubtitle = "Persisted subtitle";
   let rejectSave: (error: Error) => void = () => {};
   const saveGate = new Promise<void>((_resolve, reject) => { rejectSave = reject; });
+  let compensations = 0;
   const settingsTab = Object.create(EntCommandCenterSettingsTab.prototype) as {
     host: {
       data: typeof data;
       savePluginData(): Promise<void>;
+      saveCompensatingRollback(): Promise<void>;
       refreshViews(): Promise<void>;
     };
     persistedDataSnapshot: typeof data;
@@ -2331,6 +3122,7 @@ test("a failed setting save preserves concurrent organization and newer view cha
   settingsTab.host = {
     data,
     savePluginData: async () => { await saveGate; },
+    saveCompensatingRollback: async () => { compensations += 1; },
     refreshViews: async () => {},
   };
   settingsTab.persistedDataSnapshot = structuredClone(data);
@@ -2362,6 +3154,7 @@ test("a failed setting save preserves concurrent organization and newer view cha
   assert.deepEqual(data.pinnedPaths, ["Concurrent organization.md"]);
   assert.equal(data.selectedPath, "Concurrent selection.md");
   assert.deepEqual(data.indexGroupOrder, ["Concurrent group"]);
+  assert.equal(compensations, 1);
 });
 
 test("a create-note form cannot submit into a different active knowledge base", async () => {
@@ -2686,16 +3479,43 @@ test("template fallback stays transactional and does not mutate the selected imp
   data.settings.defaultNewNoteMode = "template";
   data.settings.templatesFolder = "Templates";
   data.settings.defaultTemplatePath = "Templates/Missing.md";
-  const value = createPortableExport(
+  const library = installLibrary(data);
+  const restrictedLibrary = installLibrary(data, customLibrary("restricted-reference", "Restricted reference", "Reference", 1));
+  data.settings.libraryNoteProfiles[library.id] = {
+    folder: "Reference notes",
+    mode: "template",
+    templatePath: "Templates/Missing Reference.md",
+  };
+  data.settings.libraryNoteProfiles[restrictedLibrary.id] = {
+    folder: "Restricted reference notes",
+    mode: "empty",
+    templatePath: "Outside Templates/Private.md",
+  };
+  const rawValue = createPortableExport(
     data,
     [],
     { ...EMPTY_PORTABLE_SELECTION, workspace: true },
     "2026-08-08T00:00:00.000Z",
   );
+  const rawWorkspace = rawValue.components.workspace;
+  assert.ok(rawWorkspace);
+  rawWorkspace.settings.libraryNoteProfiles[library.id] = {
+    folder: "Reference notes",
+    mode: "template",
+    templatePath: "../Templates/Missing Reference.md",
+  };
+  rawWorkspace.settings.libraryNoteProfiles[restrictedLibrary.id] = {
+    folder: "Restricted reference notes",
+    mode: "empty",
+    templatePath: "05 Sources/Private.md",
+  };
+  const value = parsePortableExport(rawValue);
   const originalPackage = structuredClone(value);
   const localData = migrateData(null);
   const originalLocalData = structuredClone(localData);
   let fallbackObservedInsideMutation = false;
+  let libraryFallbackObservedInsideMutation = false;
+  let restrictedFallbackObservedInsideMutation = false;
   const plugin = {
     data: localData,
     isDataReadOnly(): boolean { return false; },
@@ -2704,6 +3524,12 @@ test("template fallback stays transactional and does not mutate the selected imp
       action();
       fallbackObservedInsideMutation = this.data.settings.defaultNewNoteMode === "empty"
         && this.data.settings.defaultTemplatePath === "";
+      libraryFallbackObservedInsideMutation = this.data.settings.libraryNoteProfiles[library.id]?.mode === "empty"
+        && this.data.settings.libraryNoteProfiles[library.id]?.templatePath === undefined
+        && this.data.settings.libraryNoteProfiles[library.id]?.folder === "Reference notes";
+      restrictedFallbackObservedInsideMutation = this.data.settings.libraryNoteProfiles[restrictedLibrary.id]?.mode === "empty"
+        && this.data.settings.libraryNoteProfiles[restrictedLibrary.id]?.templatePath === undefined
+        && this.data.settings.libraryNoteProfiles[restrictedLibrary.id]?.folder === "Restricted reference notes";
       this.data = before;
       throw new Error("simulated save failure");
     },
@@ -2731,8 +3557,278 @@ test("template fallback stays transactional and does not mutate the selected imp
 
   await assert.rejects(center.importSelected(), /simulated save failure/);
   assert.equal(fallbackObservedInsideMutation, true);
+  assert.equal(libraryFallbackObservedInsideMutation, true);
+  assert.equal(restrictedFallbackObservedInsideMutation, true);
   assert.deepEqual(value, originalPackage);
   assert.deepEqual(plugin.data, originalLocalData);
+});
+
+test("portable workspace preflight still rejects an invalid Library profile folder", () => {
+  const data = migrateData(null);
+  const library = installLibrary(data);
+  data.settings.libraryNoteProfiles[library.id] = { folder: "Safe notes", mode: "empty" };
+  const rawValue = createPortableExport(
+    data,
+    [],
+    { ...EMPTY_PORTABLE_SELECTION, workspace: true },
+    "2026-08-11T00:00:00.000Z",
+  );
+  const workspace = rawValue.components.workspace;
+  assert.ok(workspace);
+  workspace.settings.libraryNoteProfiles[library.id] = {
+    folder: "../Private",
+    mode: "empty",
+  };
+  const value = parsePortableExport(rawValue);
+  assert.equal(value.components.workspace?.settings.libraryNoteProfiles[library.id]?.folder, "../Private");
+  const center = Object.create(ExportImportCenterModal.prototype) as {
+    app: { vault: { configDir: string; getAbstractFileByPath(path: string): null } };
+    plugin: { data: typeof data };
+    validateWorkspaceComponent(
+      input: typeof value,
+      selection: typeof EMPTY_PORTABLE_SELECTION,
+    ): unknown;
+  };
+  center.app = { vault: { configDir: ".obsidian", getAbstractFileByPath: () => null } };
+  center.plugin = { data: migrateData(null) };
+
+  assert.throws(() => center.validateWorkspaceComponent(
+    value,
+    { ...EMPTY_PORTABLE_SELECTION, workspace: true },
+  ));
+});
+
+test("workspace import preflight rejects an unsafe fixed attachment folder", () => {
+  const data = migrateData(null);
+  data.settings.attachmentStorageMode = "fixed-folder";
+  data.settings.attachmentFolder = "Safe attachments";
+  const rawValue = createPortableExport(
+    data,
+    [],
+    { ...EMPTY_PORTABLE_SELECTION, workspace: true },
+    "2026-08-12T00:00:00.000Z",
+  );
+  assert.ok(rawValue.components.workspace);
+  rawValue.components.workspace.settings.attachmentFolder = "../Outside";
+  const value = parsePortableExport(rawValue);
+  const center = Object.create(ExportImportCenterModal.prototype) as {
+    app: { vault: { configDir: string; getAbstractFileByPath(path: string): null } };
+    plugin: { data: typeof data };
+    validateWorkspaceComponent(input: typeof value, selection: typeof EMPTY_PORTABLE_SELECTION): unknown;
+  };
+  center.app = { vault: { configDir: ".obsidian", getAbstractFileByPath: () => null } };
+  center.plugin = { data: migrateData(null) };
+
+  assert.throws(
+    () => center.validateWorkspaceComponent(value, { ...EMPTY_PORTABLE_SELECTION, workspace: true }),
+    /\.\./u,
+  );
+});
+
+test("portable-v4 preflight retains and atomically resets every unsafe Library template class", () => {
+  const data = migrateData(null);
+  data.settings.templatesFolder = "Templates";
+  const cases = [
+    ["parent-template", "../Templates/Private.md"],
+    ["config-template", ".obsidian/Private.md"],
+    ["immutable-template", "05 Sources/Private.md"],
+    ["outside-template", "Other Templates/Private.md"],
+  ] as const;
+  for (const [libraryId] of cases) {
+    const library = installLibrary(data, customLibrary(libraryId, libraryId, "Item", data.portableIndex.libraries.length));
+    data.settings.libraryNoteProfiles[library.id] = { mode: "empty", templatePath: "Templates/Valid.md" };
+  }
+  const rawValue = createPortableExport(
+    data,
+    [],
+    { ...EMPTY_PORTABLE_SELECTION, workspace: true },
+    "2026-08-11T00:00:00.000Z",
+  );
+  const workspace = rawValue.components.workspace;
+  assert.ok(workspace);
+  for (const [libraryId, templatePath] of cases) {
+    workspace.settings.libraryNoteProfiles[libraryId] = { mode: "empty", templatePath };
+  }
+  const value = parsePortableExport(rawValue);
+  const center = Object.create(ExportImportCenterModal.prototype) as {
+    app: { vault: { configDir: string; getAbstractFileByPath(path: string): null } };
+    plugin: { data: typeof data };
+    validateWorkspaceComponent(
+      input: typeof value,
+      selection: typeof EMPTY_PORTABLE_SELECTION,
+    ): { libraryTemplateResetIds: string[] };
+  };
+  center.app = { vault: { configDir: ".obsidian", getAbstractFileByPath: () => null } };
+  center.plugin = { data: migrateData(null) };
+
+  const validation = center.validateWorkspaceComponent(
+    value,
+    { ...EMPTY_PORTABLE_SELECTION, workspace: true },
+  );
+  assert.deepEqual(new Set(validation.libraryTemplateResetIds), new Set(cases.map(([libraryId]) => libraryId)));
+  for (const [libraryId, templatePath] of cases) {
+    assert.equal(value.components.workspace?.settings.libraryNoteProfiles[libraryId]?.templatePath, templatePath);
+  }
+});
+
+test("workspace-only export omits archived Library profiles and descriptors so import cannot reactivate them", () => {
+  const source = migrateData(null);
+  const active = installLibrary(source, customLibrary("active-library", "Active", "Active item", 0));
+  const archived = installLibrary(source, customLibrary("archived-library", "Archived", "Archived item", 1, Date.now()));
+  source.settings.libraryNoteProfiles[active.id] = { mode: "empty", folder: "Active" };
+  source.settings.libraryNoteProfiles[archived.id] = { mode: "empty", folder: "Archived" };
+
+  const value = parsePortableExport(createPortableExport(
+    source,
+    [],
+    { ...EMPTY_PORTABLE_SELECTION, workspace: true },
+    "2026-08-11T00:00:00.000Z",
+  ));
+
+  assert.deepEqual(Object.keys(value.components.workspace?.settings.libraryNoteProfiles ?? {}), [active.id]);
+  assert.deepEqual(value.components.index?.libraries?.map((library) => library.id), [active.id]);
+  const destination = migrateData(null);
+  applyPortableExport(
+    destination,
+    value,
+    { ...EMPTY_PORTABLE_SELECTION, workspace: true },
+    "merge",
+  );
+  assert.equal(destination.portableIndex.libraries.some((library) => library.id === archived.id), false);
+  assert.equal(destination.settings.libraryNoteProfiles[archived.id], undefined);
+});
+
+test("standalone workspace import resets invalid templates and reports omitted Library profiles", async () => {
+  Notice.messages.length = 0;
+  const source = migrateData(null);
+  const library = installLibrary(source);
+  source.settings.templatesFolder = "Templates";
+  source.settings.libraryNoteProfiles[library.id] = {
+    folder: "Reference notes",
+    mode: "empty",
+    templatePath: "Outside Templates/Private.md",
+  };
+  const config = createWorkspaceConfig(source, "2026-08-11T00:00:00.000Z");
+  config.settings.libraryNoteProfiles[library.id] = {
+    folder: "Reference notes",
+    mode: "template",
+    templatePath: "../Private.md",
+  };
+  config.settings.libraryNoteProfiles["missing-library"] = {
+    folder: "Missing Library",
+    mode: "empty",
+  };
+
+  const destination = migrateData(null);
+  installLibrary(destination, { ...library });
+  let mutateOptions: { includeSettings?: boolean; requireUndo?: boolean } | null = null;
+  const plugin = {
+    data: destination,
+    getLibraries: () => destination.portableIndex.libraries,
+    isClinicalMode: () => false,
+    invalidateRecordCache(): void {},
+    async mutate(
+      _label: string,
+      action: () => void,
+      options: { includeSettings?: boolean; requireUndo?: boolean },
+    ): Promise<void> {
+      mutateOptions = options;
+      action();
+    },
+  };
+  const manager = Object.create(IndexManagerModal.prototype) as {
+    app: { vault: { configDir: string; getAbstractFileByPath(path: string): null } };
+    plugin: typeof plugin;
+    diagnosticsCache: unknown;
+    titleEl: { setText(value: string): void };
+    tab: "indexed" | "available";
+    guardOpenedBase(): boolean;
+    ownsOpenedBase(): boolean;
+    render(): void;
+    confirmWorkspaceImport(input: Promise<unknown>): void;
+  };
+  manager.app = { vault: { configDir: ".obsidian", getAbstractFileByPath: () => null } };
+  manager.plugin = plugin;
+  manager.diagnosticsCache = null;
+  manager.titleEl = { setText: () => undefined };
+  manager.tab = "indexed";
+  manager.guardOpenedBase = () => true;
+  manager.ownsOpenedBase = () => true;
+  manager.render = () => undefined;
+
+  const opened: Array<{ onConfirm(): void | Promise<void> }> = [];
+  const originalOpen = Object.getOwnPropertyDescriptor(ConfirmModal.prototype, "open");
+  ConfirmModal.prototype.open = function captureConfirm(): void {
+    opened.push(this);
+  };
+  try {
+    manager.confirmWorkspaceImport(Promise.resolve(config));
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(opened.length, 1);
+    await opened[0]?.onConfirm();
+  } finally {
+    if (originalOpen) Object.defineProperty(ConfirmModal.prototype, "open", originalOpen);
+    else Reflect.deleteProperty(ConfirmModal.prototype, "open");
+  }
+
+  assert.deepEqual(destination.settings.libraryNoteProfiles[library.id], {
+    folder: "Reference notes",
+    mode: "empty",
+  });
+  assert.equal(destination.settings.libraryNoteProfiles["missing-library"], undefined);
+  assert.deepEqual(mutateOptions, { includeSettings: true, requireUndo: true });
+  assert.ok(Notice.messages.some((message) => /1 Library profile referenced unavailable templates/i.test(message)));
+  assert.ok(Notice.messages.some((message) => /1 Library profile did not match a destination Library/i.test(message)));
+});
+
+test("standalone workspace import rejects a lossy-invalid Library folder before confirmation or mutation", async () => {
+  Notice.messages.length = 0;
+  const source = migrateData(null);
+  const library = installLibrary(source);
+  const config = createWorkspaceConfig(source, "2026-08-11T00:00:00.000Z");
+  config.settings.libraryNoteProfiles[library.id] = {
+    folder: "../Escaped notes",
+    mode: "empty",
+  };
+  const destination = migrateData(null);
+  installLibrary(destination, { ...library });
+  let mutationCount = 0;
+  const plugin = {
+    data: destination,
+    getLibraries: () => destination.portableIndex.libraries,
+    isClinicalMode: () => false,
+    invalidateRecordCache(): void {},
+    async mutate(): Promise<void> { mutationCount += 1; },
+  };
+  const manager = Object.create(IndexManagerModal.prototype) as {
+    app: { vault: { configDir: string; getAbstractFileByPath(path: string): null } };
+    plugin: typeof plugin;
+    guardOpenedBase(): boolean;
+    ownsOpenedBase(): boolean;
+    confirmWorkspaceImport(input: Promise<unknown>): void;
+  };
+  manager.app = { vault: { configDir: ".obsidian", getAbstractFileByPath: () => null } };
+  manager.plugin = plugin;
+  manager.guardOpenedBase = () => true;
+  manager.ownsOpenedBase = () => true;
+
+  const opened: unknown[] = [];
+  const originalOpen = Object.getOwnPropertyDescriptor(ConfirmModal.prototype, "open");
+  ConfirmModal.prototype.open = function captureConfirm(): void { opened.push(this); };
+  try {
+    manager.confirmWorkspaceImport(Promise.resolve(config));
+    await Promise.resolve();
+    await Promise.resolve();
+  } finally {
+    if (originalOpen) Object.defineProperty(ConfirmModal.prototype, "open", originalOpen);
+    else Reflect.deleteProperty(ConfirmModal.prototype, "open");
+  }
+
+  assert.equal(opened.length, 0);
+  assert.equal(mutationCount, 0);
+  assert.ok(Notice.messages.some((message) => /unsupported folder path/i.test(message)));
+  assert.equal(destination.settings.libraryNoteProfiles[library.id], undefined);
 });
 
 test("Index Manager refreshes stale state after a child portability mutation", () => {
@@ -2807,7 +3903,7 @@ test("closing the view waits for a pending selection save", async () => {
     staleViewNoticeShown: boolean;
     timerWindow: { clearTimeout(timer: number): void };
     plugin: {
-      savePluginData(): Promise<void>;
+      saveViewState(): Promise<void>;
       getActiveKnowledgeBaseId(): string;
       getDataEpoch(): number;
     };
@@ -2822,7 +3918,7 @@ test("closing the view waits for a pending selection save", async () => {
   view.staleViewNoticeShown = false;
   view.timerWindow = { clearTimeout: (timer) => { cleared.push(timer); } };
   view.plugin = {
-    savePluginData: async () => {
+    saveViewState: async () => {
       await saveGate;
       saveFinished = true;
     },
@@ -2851,7 +3947,7 @@ test("closing the view also waits for a selection save already in flight", async
     selectionSaveTimer: number | null;
     selectionSavePromise: Promise<void> | null;
     timerWindow: { clearTimeout(timer: number): void };
-    plugin: { savePluginData(): Promise<void> };
+    plugin: { saveViewState(): Promise<void> };
     onClose(): Promise<void>;
   };
   view.setupTimer = null;
@@ -2859,7 +3955,7 @@ test("closing the view also waits for a selection save already in flight", async
   view.selectionSaveTimer = null;
   view.selectionSavePromise = inFlight;
   view.timerWindow = { clearTimeout: () => {} };
-  view.plugin = { savePluginData: () => Promise.resolve() };
+  view.plugin = { saveViewState: () => Promise.resolve() };
 
   const closing = view.onClose().then(() => { closeFinished = true; });
   await Promise.resolve();
@@ -2899,6 +3995,124 @@ test("closing the compact record inspector hides it and restores row focus", () 
   assert.equal(renderCount, 1);
   assert.equal(workspace.scrollTop, 73);
   assert.equal(focusCount, 1);
+});
+
+test("zero-delay inspector restoration does not touch a view closed before the callback", () => {
+  let callback: (() => void) | null = null;
+  let focusCount = 0;
+  const workspace = { scrollTop: 0 };
+  const selected = { focus: () => { focusCount += 1; } };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    mobileInspectorOpen: boolean;
+    mobileInspectorNeedsFocus: boolean;
+    mobileTreeScrollTop: number;
+    viewClosed: boolean;
+    workspaceEl: typeof workspace;
+    treeEl: { querySelector(): typeof selected; focus(): void };
+    timerWindow: { setTimeout(scheduled: () => void): number };
+    render(): void;
+    closeMobileInspector(): void;
+  };
+  view.mobileInspectorOpen = true;
+  view.mobileInspectorNeedsFocus = true;
+  view.mobileTreeScrollTop = 73;
+  view.viewClosed = false;
+  view.workspaceEl = workspace;
+  view.treeEl = { querySelector: () => selected, focus: () => { focusCount += 1; } };
+  view.render = () => undefined;
+  view.timerWindow = { setTimeout: (scheduled) => { callback = scheduled; return 1; } };
+
+  view.closeMobileInspector();
+  view.viewClosed = true;
+  callback?.();
+
+  assert.equal(workspace.scrollTop, 0);
+  assert.equal(focusCount, 0);
+});
+
+test("zero-delay tab reveal ignores DOM replaced before the callback", () => {
+  const dom = createFakeDom();
+  const content = dom.document.body.createDiv();
+  const tablist = content.createDiv();
+  const active = tablist.createEl("button", { attr: { "aria-selected": "true" } });
+  let callback: (() => void) | null = null;
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    contentEl: HTMLElement;
+    viewClosed: boolean;
+    timerWindow: { setTimeout(scheduled: () => void): number };
+    revealActiveTab(tablist: HTMLElement): void;
+  };
+  view.contentEl = content as unknown as HTMLElement;
+  view.viewClosed = false;
+  view.timerWindow = { setTimeout: (scheduled) => { callback = scheduled; return 1; } };
+
+  view.revealActiveTab(tablist as unknown as HTMLElement);
+  content.empty();
+  callback?.();
+
+  assert.equal(active.scrollIntoViewCalls, 0);
+});
+
+test("window migration rehomes pending view timers before rebinding observers", () => {
+  const cleared: number[] = [];
+  const rebound: string[] = [];
+  const scheduledDelays: number[] = [];
+  let nextTimer = 20;
+  const previousWindow = { clearTimeout: (timer: number) => { cleared.push(timer); } } as unknown as Window;
+  const nextWindow = {
+    setTimeout: (_callback: () => void, delay = 0) => {
+      scheduledDelays.push(delay);
+      nextTimer += 1;
+      return nextTimer;
+    },
+  } as unknown as Window;
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    viewClosed: boolean;
+    setupTimer: number | null;
+    searchDebounce: number | null;
+    selectionSaveTimer: number | null;
+    timerWindow: Window;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    query: string;
+    plugin: {
+      data: { settings: { setupComplete: boolean } };
+      getActiveKnowledgeBaseId(): string;
+      getDataEpoch(): number;
+    };
+    bindPaneLayout(): void;
+    bindSearchViewportLayout(): void;
+    measureAndApplyPaneLayout(): void;
+    syncSearchViewportLayout(): void;
+    handleWindowMigration(viewWindow: Window): void;
+  };
+  view.viewClosed = false;
+  view.setupTimer = 11;
+  view.searchDebounce = 12;
+  view.selectionSaveTimer = 13;
+  view.timerWindow = previousWindow;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 7;
+  view.query = "lary";
+  view.plugin = {
+    data: { settings: { setupComplete: false } },
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 7,
+  };
+  view.bindPaneLayout = () => { rebound.push("pane"); };
+  view.bindSearchViewportLayout = () => { rebound.push("viewport"); };
+  view.measureAndApplyPaneLayout = () => { rebound.push("measure"); };
+  view.syncSearchViewportLayout = () => { rebound.push("sync"); };
+
+  view.handleWindowMigration(nextWindow);
+
+  assert.deepEqual(cleared, [11, 12, 13]);
+  assert.equal(view.timerWindow, nextWindow);
+  assert.deepEqual(rebound, ["pane", "viewport", "measure", "sync"]);
+  assert.deepEqual(scheduledDelays, [100, 0, 1000]);
+  assert.equal(view.setupTimer, 21);
+  assert.equal(view.searchDebounce, 22);
+  assert.equal(view.selectionSaveTimer, 23);
 });
 
 test("mobile search resets both possible result scroll containers", () => {

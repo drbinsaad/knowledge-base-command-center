@@ -5,10 +5,15 @@ import { Notice, TFile } from "obsidian";
 import EntVaultCommandCenterPlugin from "../src/main.ts";
 import type { CatalogPlacementTarget } from "../src/main.ts";
 import {
+  ATTACHMENT_PROTOCOL_ACTIONS,
   createQuickEntryCommands,
+  privacySafeFixedActionRequest,
   privacySafeQuickEntryRequest,
+  QUICK_APPEND_PROTOCOL_ACTIONS,
+  QUICK_ENTRY_FOCUSED_PROTOCOL_ACTIONS,
   QUICK_ENTRY_PROTOCOL_ACTIONS,
   QUICK_ENTRY_PROTOCOL_ALLOWED_PARAMETER_KEYS,
+  runQuickEntryFocusedProtocolAction,
 } from "../src/quick-entry.ts";
 import { createQuickEntryButton, EntVaultCommandCenterView } from "../src/view.ts";
 import { AddActionModal, CollectionPickerModal, TextPromptModal, VaultFilePickerModal } from "../src/modals.ts";
@@ -63,6 +68,8 @@ test("Quick Entry commands are focused, icon-ready, and never assign default hot
     createNote: () => calls.push("note"),
     addCurrentNote: () => calls.push("current"),
     addExistingNote: () => calls.push("existing"),
+    appendCurrentNote: () => calls.push("append-current"),
+    appendExistingNote: () => calls.push("append-existing"),
   });
 
   assert.deepEqual(commands.map((command) => command.id), [
@@ -73,11 +80,23 @@ test("Quick Entry commands are focused, icon-ready, and never assign default hot
     "quick-create-note",
     "quick-add-current-note",
     "quick-add-existing-note",
+    "quick-append-current-note",
+    "quick-append-existing-note",
   ]);
   assert.equal(commands.every((command) => Boolean(command.icon)), true);
   assert.equal(commands.every((command) => !("hotkeys" in command)), true);
   commands.forEach((command) => command.callback?.());
-  assert.deepEqual(calls, ["hub", "subject", "heading", "subheading", "note", "current", "existing"]);
+  assert.deepEqual(calls, [
+    "hub",
+    "subject",
+    "heading",
+    "subheading",
+    "note",
+    "current",
+    "existing",
+    "append-current",
+    "append-existing",
+  ]);
 });
 
 test("Quick Entry protocol is action-only and fails closed for every query field", () => {
@@ -98,8 +117,111 @@ test("Quick Entry protocol is action-only and fails closed for every query field
   assert.deepEqual(sensitive.rejectedParameterKeys, ["content", "path", "patient", "title"]);
   assert.equal(JSON.stringify(sensitive).includes("private"), false, "rejected query values must not be retained");
 
+  assert.deepEqual(QUICK_APPEND_PROTOCOL_ACTIONS, [
+    "kbcc-quick-append-current",
+    "kbcc-quick-append-existing",
+  ]);
+  assert.deepEqual(QUICK_ENTRY_FOCUSED_PROTOCOL_ACTIONS, [
+    "kbcc-create-subject",
+    "kbcc-create-heading",
+    "kbcc-create-subheading",
+    "kbcc-create-note",
+    "kbcc-add-current-note",
+    "kbcc-add-existing-note",
+  ]);
+  assert.deepEqual(ATTACHMENT_PROTOCOL_ACTIONS, ["kbcc-attach-current"]);
+  for (const action of [
+    ...QUICK_ENTRY_FOCUSED_PROTOCOL_ACTIONS,
+    ...QUICK_APPEND_PROTOCOL_ACTIONS,
+    ...ATTACHMENT_PROTOCOL_ACTIONS,
+  ]) {
+    assert.equal(privacySafeFixedActionRequest({ action }, action), true);
+    assert.equal(privacySafeFixedActionRequest({ action, title: "private" }, action), false);
+    assert.equal(privacySafeFixedActionRequest({ action, path: "Private/Note.md" }, action), false);
+    assert.equal(privacySafeFixedActionRequest({ action, content: "private" }, action), false);
+    assert.equal(privacySafeFixedActionRequest({ action, unknown: "private" }, action), false);
+    assert.equal(privacySafeFixedActionRequest({ action: "other" }, action), false);
+    assert.equal(privacySafeFixedActionRequest({}, action), false);
+  }
+
   const mainSource = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
   assert.match(mainSource, /if \(!privacySafeQuickEntryRequest\(parameters\)\.openHub\) return;/);
+  assert.equal(
+    mainSource.match(/if \(!privacySafeFixedActionRequest\(parameters, action\)\) return;/gu)?.length,
+    3,
+    "focused Quick Entry, Quick append, and Attach file protocol groups must each fail closed",
+  );
+  assert.match(mainSource, /runQuickEntryFocusedProtocolAction\(action, quickEntryHandlers\)/);
+  assert.match(mainSource, /this\.openPrivacySafeAttachmentImportCurrentNote\(\)/);
+});
+
+test("fixed Quick Entry URLs dispatch through the command handlers", () => {
+  const calls: string[] = [];
+  const handlers = {
+    openHub: () => calls.push("hub"),
+    createSubject: () => calls.push("subject"),
+    createHeading: () => calls.push("heading"),
+    createSubheading: () => calls.push("subheading"),
+    createNote: () => calls.push("note"),
+    addCurrentNote: () => calls.push("current"),
+    addExistingNote: () => calls.push("existing"),
+    appendCurrentNote: () => calls.push("append-current"),
+    appendExistingNote: () => calls.push("append-existing"),
+  };
+
+  for (const action of QUICK_ENTRY_FOCUSED_PROTOCOL_ACTIONS) {
+    runQuickEntryFocusedProtocolAction(action, handlers);
+  }
+
+  assert.deepEqual(calls, ["subject", "heading", "subheading", "note", "current", "existing"]);
+});
+
+test("Attach-current protocol target is local, exact, writable, and privacy-safe", () => {
+  Notice.messages.length = 0;
+  const note = new TFile("Notes/Eligible.md");
+  let active: TFile | null = note;
+  let current: TFile | null = note;
+  const app = {
+    vault: { getAbstractFileByPath: () => current },
+    workspace: { getActiveFile: () => active },
+  };
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never);
+  const opened: TFile[] = [];
+  const target = plugin as unknown as {
+    openAttachmentImport(note: TFile): void;
+    openPrivacySafeAttachmentImportCurrentNote(): void;
+  };
+  target.openAttachmentImport = (file) => opened.push(file);
+
+  target.openPrivacySafeAttachmentImportCurrentNote();
+  assert.deepEqual(opened, [note]);
+  assert.deepEqual(Notice.messages, []);
+
+  const replacement = new TFile(note.path);
+  current = replacement;
+  target.openPrivacySafeAttachmentImportCurrentNote();
+  assert.equal(opened.length, 1, "a same-path replacement must not inherit the active note action");
+  assert.equal(Notice.messages.at(-1), "No eligible active Markdown note is available for attach file.");
+
+  current = note;
+  plugin.dataCompatibilityWarning = "private read-only reason";
+  target.openPrivacySafeAttachmentImportCurrentNote();
+  assert.equal(opened.length, 1);
+  assert.equal(Notice.messages.at(-1), "No eligible active Markdown note is available for attach file.");
+  assert.equal(Notice.messages.some((message) => message.includes("private")), false);
+
+  plugin.dataCompatibilityWarning = "";
+  active = new TFile("05 Sources/_books/Immutable.md");
+  current = active;
+  target.openPrivacySafeAttachmentImportCurrentNote();
+  assert.equal(opened.length, 1);
+  assert.equal(Notice.messages.at(-1), "No eligible active Markdown note is available for attach file.");
+
+  active = null;
+  current = null;
+  target.openPrivacySafeAttachmentImportCurrentNote();
+  assert.equal(opened.length, 1);
+  assert.equal(Notice.messages.at(-1), "No eligible active Markdown note is available for attach file.");
 });
 
 test("Quick Entry delayed menus reject base switches and same-base data replacements", () => {
@@ -459,7 +581,15 @@ test("Library create and add services preserve the Quick Entry placement target"
     data,
     getActiveKnowledgeBaseId: () => "base-a",
     getDataEpoch: () => 1,
+    isClinicalMode: () => false,
     getLibrary: (id: string) => id === library.id ? library : null,
+    getEffectiveLibraryNoteProfile: () => ({
+      folder: data.settings.defaultNoteFolder,
+      mode: data.settings.defaultNewNoteMode,
+      templatePath: data.settings.defaultTemplatePath,
+      inherited: { folder: true, mode: true, templatePath: true },
+    }),
+    getPortableSubject: () => null,
     getVaultNoteFiles: () => [existingFile],
     async assignRecordToLibrary(path: string, libraryId: string, placement: CatalogPlacementTarget): Promise<void> {
       assignments.push({ path, libraryId, target: placement });

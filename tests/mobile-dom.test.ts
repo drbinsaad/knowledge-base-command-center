@@ -10,7 +10,14 @@ import {
   type PluginData,
   type VaultRecord,
 } from "../src/model.ts";
-import { EntVaultCommandCenterView, prepareKnowledgeBaseSearchResults } from "../src/view.ts";
+import {
+  classifyPaneWidth,
+  EntVaultCommandCenterView,
+  observePaneWidth,
+  PANE_COMPACT_MIN_WIDTH,
+  PANE_WIDE_MIN_WIDTH,
+  prepareKnowledgeBaseSearchResults,
+} from "../src/view.ts";
 import { asHtmlElement, createFakeDom, type FakeWindow } from "./support/fake-dom.ts";
 
 interface MobileViewHarness {
@@ -43,6 +50,47 @@ interface SearchSource {
   baseName: string;
   data: PluginData;
   records: VaultRecord[];
+}
+
+interface ControlledResizeObserver {
+  disconnected: boolean;
+  emit(target: Element, width: number): void;
+}
+
+function installResizeObserver(window: FakeWindow): ControlledResizeObserver[] {
+  const instances: ControlledResizeObserver[] = [];
+  class TestResizeObserver implements ControlledResizeObserver {
+    disconnected = false;
+    private readonly targets = new Set<Element>();
+
+    constructor(private readonly callback: ResizeObserverCallback) {
+      instances.push(this);
+    }
+
+    disconnect(): void {
+      this.disconnected = true;
+      this.targets.clear();
+    }
+
+    observe(target: Element): void {
+      this.targets.add(target);
+    }
+
+    unobserve(target: Element): void {
+      this.targets.delete(target);
+    }
+
+    emit(target: Element, width: number): void {
+      if (this.disconnected || !this.targets.has(target)) return;
+      const entry = { target, contentRect: { width } } as ResizeObserverEntry;
+      this.callback([entry], this);
+    }
+  }
+  Object.defineProperty(window, "ResizeObserver", {
+    configurable: true,
+    value: TestResizeObserver,
+  });
+  return instances;
 }
 
 function record(path: string, title: string): VaultRecord {
@@ -124,6 +172,7 @@ function createView(window: FakeWindow, inputSources: SearchSource[] = []): EntV
     reconcileRecords: async () => false,
     isDataReadOnly: () => false,
     savePluginData: async () => undefined,
+    saveViewState: async () => undefined,
     getIndexRecords: () => sources[0].records,
     getIndexCandidateFiles: () => [],
     searchKnowledgeBases: async (query: string, options?: { limit?: number }) => prepareKnowledgeBaseSearchResults(
@@ -132,6 +181,10 @@ function createView(window: FakeWindow, inputSources: SearchSource[] = []): EntV
       options?.limit,
     ),
     isClinicalMode: () => false,
+    canVisuallyMoveAcrossGroups: () => false,
+    countMemberships: () => 0,
+    getBacklinkPaths: () => [],
+    resolveLink: () => null,
     getLibraries: (includeArchived = false) => data.portableIndex.libraries
       .filter((library) => includeArchived || library.archivedAt === null)
       .map((library) => ({ ...library })),
@@ -148,6 +201,198 @@ function createView(window: FakeWindow, inputSources: SearchSource[] = []): EntV
     restoreWindow();
   }
 }
+
+test("pane-width classification uses stable wide, compact, and narrow boundaries", () => {
+  assert.equal(classifyPaneWidth(PANE_WIDE_MIN_WIDTH), "wide");
+  assert.equal(classifyPaneWidth(PANE_WIDE_MIN_WIDTH - 1), "compact");
+  assert.equal(classifyPaneWidth(PANE_COMPACT_MIN_WIDTH), "compact");
+  assert.equal(classifyPaneWidth(PANE_COMPACT_MIN_WIDTH - 1), "narrow");
+  assert.equal(classifyPaneWidth(Number.NaN), "narrow");
+});
+
+test("pane-width observation ignores hidden zero widths and stops after cleanup", () => {
+  const dom = createFakeDom();
+  const observers = installResizeObserver(dom.window);
+  const content = dom.document.body.createDiv({ cls: "view-content" });
+  content.setBoundingClientRect({ width: 1200 });
+  const widths: number[] = [];
+
+  const cleanup = observePaneWidth(asHtmlElement(content), (width) => widths.push(width));
+
+  assert.deepEqual(widths, [1200]);
+  assert.equal(observers.length, 1);
+  observers[0]?.emit(content as unknown as Element, 0);
+  assert.deepEqual(widths, [1200], "an inactive stacked tab must not become a false narrow layout");
+  observers[0]?.emit(content as unknown as Element, 800);
+  assert.deepEqual(widths, [1200, 800]);
+
+  cleanup();
+  assert.equal(observers[0]?.disconnected, true);
+  observers[0]?.emit(content as unknown as Element, 500);
+  assert.deepEqual(widths, [1200, 800]);
+});
+
+test("stacked-pane transitions preserve active list and detail scroll owners in both directions", async () => {
+  const dom = createFakeDom();
+  const observers = installResizeObserver(dom.window);
+  const selected = record("Knowledge Base/Airway.md", "Airway");
+  const source = searchSource("base-stacked", "A deliberately long knowledge base title", [selected]);
+  source.data.settings.setupComplete = true;
+  source.data.selectedPath = selected.path;
+  const view = createView(dom.window, [source]);
+  const content = dom.document.body.createDiv({ cls: "view-content" });
+  content.setBoundingClientRect({ width: 1200 });
+  const harness = view as unknown as {
+    browseRowLimit: number;
+    contentEl: HTMLElement;
+    mobileInspectorOpen: boolean;
+    mobileInspectorScrollTop: number;
+    mobileTreeScrollTop: number;
+    paneLayout: string;
+    paneWidth: number;
+    query: string;
+    bindPaneLayout(): void;
+    closeMobileInspector(): void;
+    render(preserveBrowseLimits?: boolean): void;
+    selectRecord(path: string): void;
+  };
+  harness.contentEl = asHtmlElement(content);
+  await view.reload();
+  assert.equal(content.hasClass("is-pane-wide"), true);
+  assert.equal(content.querySelector(".ent-cc-inspector")?.getAttribute("role"), "complementary");
+
+  harness.query = "air";
+  harness.browseRowLimit = 600;
+  const originalRender = harness.render.bind(view);
+  let resizeRenders = 0;
+  harness.render = (preserveBrowseLimits = false) => {
+    resizeRenders += 1;
+    originalRender(preserveBrowseLimits);
+  };
+  harness.bindPaneLayout();
+  assert.equal(observers.length, 1);
+  const observer = observers[0];
+  assert.ok(observer);
+
+  const initialWorkspace = content.querySelector(".ent-cc-workspace");
+  const initialTree = content.querySelector(".ent-cc-tree-panel");
+  const initialInspector = content.querySelector(".ent-cc-inspector");
+  const initialInspectorBody = content.querySelector(".ent-cc-inspector-body");
+  assert.ok(initialWorkspace && initialTree && initialInspector && initialInspectorBody);
+  initialWorkspace.scrollTop = 7;
+  initialTree.scrollTop = 91;
+  initialInspector.scrollTop = 57;
+  initialInspectorBody.scrollTop = 9;
+  observer.emit(content as unknown as Element, 900);
+  assert.equal(content.hasClass("is-pane-compact"), true);
+  assert.equal(content.querySelector(".ent-cc-inspector"), null);
+  assert.equal(source.data.selectedPath, selected.path);
+  assert.equal(harness.browseRowLimit, 600);
+  assert.equal(content.querySelector(".ent-cc-workspace")?.scrollTop, 91);
+  assert.equal(harness.mobileTreeScrollTop, 91, "wide list state comes from the tree panel, not the grid workspace");
+  assert.equal(harness.mobileInspectorScrollTop, 57, "wide detail state comes from the inspector, not its body");
+  assert.equal(resizeRenders, 1);
+
+  observer.emit(content as unknown as Element, 800);
+  observer.emit(content as unknown as Element, 0);
+  assert.equal(resizeRenders, 1, "same-mode and zero-width observations must not replace the DOM");
+  assert.equal(harness.paneWidth, 800);
+
+  observer.emit(content as unknown as Element, 600);
+  assert.equal(content.hasClass("is-pane-narrow"), true);
+  assert.equal(resizeRenders, 2);
+
+  harness.selectRecord(selected.path);
+  assert.equal(harness.mobileInspectorOpen, true);
+  assert.ok(content.querySelector(".ent-cc-shell.is-inspector-route"));
+  assert.equal(content.querySelector(".ent-cc-inspector")?.getAttribute("role"), "dialog");
+  const compactInspectorBody = content.querySelector(".ent-cc-inspector-body");
+  assert.ok(compactInspectorBody);
+  compactInspectorBody.scrollTop = 73;
+
+  observer.emit(content as unknown as Element, 1200);
+  assert.equal(content.hasClass("is-pane-wide"), true);
+  assert.ok(content.querySelector(".ent-cc-tree-panel"));
+  assert.equal(content.querySelector(".ent-cc-inspector")?.getAttribute("role"), "complementary");
+  assert.equal(content.querySelector(".ent-cc-tree-panel")?.scrollTop, 91);
+  assert.equal(content.querySelector(".ent-cc-inspector")?.scrollTop, 73);
+  assert.equal(source.data.selectedPath, selected.path);
+  assert.equal((content.querySelector('input[type="search"]') as unknown as { value?: string } | null)?.value, "air");
+
+  const expandedWorkspace = content.querySelector(".ent-cc-workspace");
+  const expandedTree = content.querySelector(".ent-cc-tree-panel");
+  const expandedInspector = content.querySelector(".ent-cc-inspector");
+  const expandedInspectorBody = content.querySelector(".ent-cc-inspector-body");
+  assert.ok(expandedWorkspace && expandedTree && expandedInspector && expandedInspectorBody);
+  expandedWorkspace.scrollTop = 5;
+  expandedTree.scrollTop = 123;
+  expandedInspector.scrollTop = 87;
+  expandedInspectorBody.scrollTop = 6;
+  observer.emit(content as unknown as Element, 600);
+  assert.ok(content.querySelector(".ent-cc-shell.is-inspector-route"));
+  assert.equal(content.querySelector(".ent-cc-inspector-body")?.scrollTop, 87);
+  assert.equal(harness.mobileTreeScrollTop, 123);
+
+  harness.closeMobileInspector();
+  const restoredCompactWorkspace = content.querySelector(".ent-cc-workspace");
+  assert.ok(restoredCompactWorkspace);
+  assert.equal(restoredCompactWorkspace.scrollTop, 123);
+  restoredCompactWorkspace.scrollTop = 141;
+  observer.emit(content as unknown as Element, 1200);
+  assert.equal(content.querySelector(".ent-cc-tree-panel")?.scrollTop, 141);
+  assert.equal(content.querySelector(".ent-cc-inspector")?.scrollTop, 87);
+
+  const renderCountBeforeClose = resizeRenders;
+  await view.onClose();
+  assert.equal(observer.disconnected, true);
+  observer.emit(content as unknown as Element, 500);
+  view.onResize();
+  assert.equal(resizeRenders, renderCountBeforeClose);
+  assert.equal(observers.length, 1, "a late Obsidian resize must not rebind a closed view");
+});
+
+test("moving a command-center leaf to a pop-out rebinds the pane observer", async () => {
+  const firstDom = createFakeDom();
+  const secondDom = createFakeDom();
+  const firstObservers = installResizeObserver(firstDom.window);
+  const secondObservers = installResizeObserver(secondDom.window);
+  const source = searchSource("base-popout", "Pop-out base", []);
+  source.data.settings.setupComplete = true;
+  const view = createView(firstDom.window, [source]);
+  const content = firstDom.document.body.createDiv({ cls: "view-content" });
+  content.setBoundingClientRect({ width: 1200 });
+  let migrationListener: ((viewWindow: Window) => void) | null = null;
+  let migrationListenerRemoved = false;
+  (content as unknown as {
+    onWindowMigrated(listener: (viewWindow: Window) => void): () => void;
+  }).onWindowMigrated = (listener) => {
+    migrationListener = listener;
+    return () => { migrationListenerRemoved = true; };
+  };
+  const harness = view as unknown as {
+    contentEl: HTMLElement;
+    paneResizeWindow: Window | null;
+    timerWindow: Window;
+  };
+  harness.contentEl = asHtmlElement(content);
+  await view.onOpen();
+  assert.equal(firstObservers.length, 1);
+  assert.ok(migrationListener, "the view must subscribe to Obsidian's deterministic migration hook");
+
+  (content as unknown as { ownerDocument: typeof secondDom.document }).ownerDocument = secondDom.document;
+  content.setBoundingClientRect({ width: 820 });
+  migrationListener(secondDom.window);
+
+  assert.equal(firstObservers[0]?.disconnected, true);
+  assert.equal(secondObservers.length, 1);
+  assert.equal(harness.paneResizeWindow, secondDom.window as unknown as Window);
+  assert.equal(harness.timerWindow, secondDom.window as unknown as Window);
+  assert.equal(content.hasClass("is-pane-compact"), true);
+
+  await view.onClose();
+  assert.equal(secondObservers[0]?.disconnected, true);
+  assert.equal(migrationListenerRemoved, true);
+});
 
 test("real mobile search focus applies the keyboard viewport and resets every scroll owner", () => {
   const dom = createFakeDom();
@@ -401,13 +646,58 @@ test("mobile renders and reveals an active custom-library tab without exposing a
 test("mobile heading and subheading title controls retain a 44px touch target", () => {
   const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
   assert.match(styles, /\.ent-cc-view \.ent-cc-heading-row button\.ent-cc-row-title,\s*\.ent-cc-view \.ent-cc-subheading-row button\.ent-cc-row-title\s*\{\s*min-height:\s*44px;/);
-  assert.match(styles, /\.ent-cc-tab-label\s*\{\s*max-width:\s*42vw;/);
+  assert.match(styles, /\.ent-cc-tab-label\s*\{\s*max-width:\s*16rem;/);
   assert.match(styles, /\.ent-cc-tab\s*\{[^}]*min-height:\s*44px;[^}]*font-size:\s*0\.8125rem;/s);
   assert.match(styles, /\.ent-cc-filter-chip\s*\{[^}]*min-height:\s*44px;[^}]*font-size:\s*0\.75rem;/s);
   assert.match(styles, /\.ent-cc-view button\.ent-cc-row-title\s*\{[^}]*display:\s*block;[^}]*text-align:\s*start;/s);
   assert.match(styles, /\.ent-cc-view button\.ent-cc-subject-title\s*\{[^}]*text-align:\s*start;/s);
   assert.doesNotMatch(styles, /font-size:\s*(?:8|9)px/);
   assert.doesNotMatch(styles, /text-align:\s*(?:left|right)/);
+});
+
+test("stacked-pane CSS responds to leaf classes without viewport-relative view sizing", () => {
+  const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+  assert.match(styles, /\.ent-cc-view\.is-pane-wide \.ent-cc-workspace\s*\{[^}]*grid-template-columns:/s);
+  assert.match(styles, /\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-header\s*\{[^}]*flex-direction: column;/s);
+  assert.match(styles, /\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-header-actions\s*\{[^}]*overflow-x: auto;/s);
+  assert.match(styles, /\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-search-row\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\) repeat\(3, 44px\);/s);
+  assert.match(styles, /\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-shell\.is-inspector-route \.ent-cc-inspector\.is-mobile-open/s);
+  assert.match(styles, /\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-shell\.is-inspector-route \.ent-cc-related-record,\s*\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-shell\.is-inspector-route \.ent-cc-study-action\s*\{\s*min-height:\s*44px;/s);
+  assert.match(styles, /\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-shell\.is-inspector-route \.ent-cc-inspector-actions \.ent-cc-icon-button\s*\{[^}]*min-width:\s*44px;[^}]*min-height:\s*44px;/s);
+  assert.match(styles, /\.ent-cc-view\.is-pane-narrow \.ent-cc-quick-entry-button\s*\{[^}]*min-width: 44px;/s);
+  assert.match(styles, /\.ent-cc-search-icon\s*\{[^}]*inset-inline-start: 11px;/s);
+  assert.match(styles, /\.ent-cc-search-clear\s*\{[^}]*inset-inline-end: 2px;/s);
+  assert.match(styles, /\.ent-cc-search-box input\s*\{[^}]*padding-inline: 35px 40px;/s);
+  assert.match(styles, /\.ent-cc-search-box input\s*\{[^}]*padding-inline-end: 50px;/s);
+  const directionalSearchRules = [...styles.matchAll(/\.ent-cc-search-(?:box input|clear|icon)\s*\{([^}]*)\}/g)];
+  assert.ok(directionalSearchRules.length >= 6);
+  for (const [, declarations = ""] of directionalSearchRules) {
+    assert.doesNotMatch(declarations, /\b(?:left|right|padding-left|padding-right)\s*:/);
+  }
+  assert.doesNotMatch(styles, /(?:42|58)vw/);
+});
+
+test("Library creation-profile sheets remain keyboard-aware and touch-sized on iPhone", () => {
+  const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+  assert.match(styles, /\.ent-cc-library-profile-modal\s*\{[^}]*width:\s*min\(760px, calc\(100vw - 32px\)\);[^}]*max-height:\s*calc\(100dvh - 40px\);/s);
+  assert.match(styles, /@media \(max-width: 1024px\)\s*\{[\s\S]*?\.ent-cc-library-profile-modal\s*\{[^}]*height:\s*calc\(var\(--ent-cc-modal-visual-height, 100dvh\) - 16px\);[^}]*translate:\s*0 var\(--ent-cc-modal-visual-shift, 0\);/s);
+  assert.match(styles, /\.ent-cc-library-profile-modal input,\s*\.ent-cc-library-profile-modal select,\s*\.ent-cc-library-profile-modal button\s*\{\s*min-height:\s*44px;/s);
+  assert.match(styles, /\.ent-cc-library-profile-modal input,\s*\.ent-cc-library-profile-modal select\s*\{[^}]*font-size:\s*16px;/s);
+  assert.match(styles, /\.ent-cc-library-profile-footer \.setting-item-control\s*\{\s*display:\s*grid;\s*grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\);/s);
+  assert.match(styles, /@media \(max-width: 420px\)\s*\{\s*\.ent-cc-library-profile-footer \.setting-item-control\s*\{\s*grid-template-columns:\s*minmax\(0, 1fr\);/s);
+});
+
+test("portfolio transfer stays scrollable, touch-sized, and stacked across iPhone orientations", () => {
+  const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+  assert.match(styles, /\.ent-cc-portfolio-modal\s*\{[^}]*width:\s*min\(820px, calc\(100vw - 32px\)\);[^}]*max-height:\s*calc\(var\(--ent-cc-portfolio-visual-height, 100dvh\) - 40px\);[^}]*translate:\s*0 var\(--ent-cc-portfolio-visual-shift, 0\);/s);
+  assert.match(styles, /\.ent-cc-portfolio-center\s*\{[^}]*overflow:\s*hidden;/s);
+  assert.match(styles, /\.ent-cc-portfolio-panel\s*\{[^}]*overflow-y:\s*auto;/s);
+  assert.match(styles, /\.ent-cc-portfolio-components > summary\s*\{[^}]*min-height:\s*44px;/s);
+  assert.match(styles, /\.ent-cc-portfolio-diff-section > button\s*\{[^}]*min-height:\s*44px;/s);
+  assert.match(styles, /@media \(max-width: 1024px\)\s*\{[\s\S]*?\.ent-cc-portfolio-center \.setting-item-control button,[\s\S]*?min-height:\s*44px;/s);
+  assert.match(styles, /@media \(max-width: 1024px\)\s*\{[\s\S]*?\.ent-cc-portfolio-center \.setting-item\s*\{[^}]*flex-direction:\s*column;/s);
+  assert.match(styles, /\.ent-cc-portfolio-center \.setting-item-control select,[\s\S]*?\.ent-cc-portfolio-center \.setting-item-control input\s*\{\s*font-size:\s*16px;/s);
+  assert.match(styles, /\.ent-cc-portfolio-footer\s*\{[^}]*padding-bottom:\s*max\(0px, env\(safe-area-inset-bottom\)\);/s);
 });
 
 test("desktop library drag and drop moves records across headings and reorders rows", async () => {

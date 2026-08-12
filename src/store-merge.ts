@@ -1,11 +1,18 @@
 import {
+  applyPluginViewState,
+  boundedSemanticLineage,
   canonicalInterimEnvelopeString,
+  capturePluginViewState,
+  deterministicSemanticHead,
   MAX_DELETED_KNOWLEDGE_BASE_IDS,
   MAX_KNOWLEDGE_BASES,
   pristineProvisionalInterimEnvelopeStoreFingerprint,
   pristineProvisionalMigratedStoreFingerprint,
   provisionalInterimEnvelopeVaultFingerprint,
   provisionalMigratedVaultFingerprint,
+  resetPluginViewState,
+  semanticEntryFingerprint,
+  semanticPluginDataProjection,
   STORE_KIND,
   STORE_VERSION,
   type KnowledgeBaseEntry,
@@ -14,8 +21,18 @@ import {
 
 export interface StoreMergeResult {
   store: PluginStore;
-  /** True when base payloads—not only this device's active selection—differ from the incoming file. */
+  /** True when semantic base payloads—not this device's view state—differ from the incoming file. */
   incomingNeedsWriteback: boolean;
+  /** Unrelated semantic divergence that must be rescued before adoption. */
+  semanticConflicts: SemanticStoreConflict[];
+}
+
+export interface SemanticStoreConflict {
+  baseId: string;
+  revision: number;
+  winner: "local" | "incoming";
+  localFingerprint: string;
+  incomingFingerprint: string;
 }
 
 function normalizedName(name: string): string {
@@ -48,15 +65,136 @@ function canonicalStringify(value: unknown): string {
 }
 
 function entryFingerprint(entry: KnowledgeBaseEntry): string {
-  // updatedAt normally resolves the winner. A deterministic payload comparison
-  // makes same-millisecond edits converge instead of each device choosing the
-  // other device's copy forever.
-  return canonicalStringify([entry.createdAt, entry.archivedAt, entry.data]);
+  return canonicalStringify([
+    entry.createdAt,
+    entry.archivedAt,
+    semanticPluginDataProjection(entry.data),
+  ]);
 }
 
-function winningEntry(local: KnowledgeBaseEntry, incoming: KnowledgeBaseEntry): KnowledgeBaseEntry {
-  if (local.updatedAt !== incoming.updatedAt) return local.updatedAt > incoming.updatedAt ? local : incoming;
-  return entryFingerprint(local) >= entryFingerprint(incoming) ? local : incoming;
+function deterministicWinner(
+  local: KnowledgeBaseEntry,
+  incoming: KnowledgeBaseEntry,
+  localFingerprint: string,
+  incomingFingerprint: string,
+): "local" | "incoming" {
+  if (local.semanticRevision !== incoming.semanticRevision) {
+    return local.semanticRevision > incoming.semanticRevision ? "local" : "incoming";
+  }
+  if (localFingerprint !== incomingFingerprint) return localFingerprint >= incomingFingerprint ? "local" : "incoming";
+  return local.semanticHead >= incoming.semanticHead ? "local" : "incoming";
+}
+
+function mergeEquivalentCausality(local: KnowledgeBaseEntry, incoming: KnowledgeBaseEntry): {
+  semanticHead: string;
+  semanticHash: string;
+  semanticLineage: string[];
+  semanticRevision: number;
+} {
+  const headWinner = local.semanticHead >= incoming.semanticHead ? local : incoming;
+  const other = headWinner === local ? incoming : local;
+  return {
+    semanticHead: headWinner.semanticHead,
+    semanticHash: headWinner.semanticHash,
+    semanticLineage: boundedSemanticLineage([
+      other.semanticHead,
+      ...headWinner.semanticLineage,
+      ...other.semanticLineage,
+    ], headWinner.semanticHead),
+    semanticRevision: Math.max(local.semanticRevision, incoming.semanticRevision),
+  };
+}
+
+function mergeMatchingEntry(
+  local: KnowledgeBaseEntry,
+  incoming: KnowledgeBaseEntry,
+): { entry: KnowledgeBaseEntry; conflict: SemanticStoreConflict | null } {
+  const localFingerprint = entryFingerprint(local);
+  const incomingFingerprint = entryFingerprint(incoming);
+  const semanticsEqual = localFingerprint === incomingFingerprint;
+  // A lineage is causal proof only while each endpoint's stored semantic hash
+  // still describes its payload. This makes malformed, stale, and hand-edited
+  // envelopes fail closed into conflict rescue instead of claiming ancestry.
+  const localTrusted = local.semanticHash === semanticEntryFingerprint(local);
+  const incomingTrusted = incoming.semanticHash === semanticEntryFingerprint(incoming);
+  const localDescendsFromIncoming = localTrusted && incomingTrusted
+    && local.semanticLineage.includes(incoming.semanticHead);
+  const incomingDescendsFromLocal = localTrusted && incomingTrusted
+    && incoming.semanticLineage.includes(local.semanticHead);
+  const causallyOrdered = localDescendsFromIncoming !== incomingDescendsFromLocal;
+  let winner: "local" | "incoming";
+  if (semanticsEqual) {
+    // The captured file is already authoritative for equal semantics. Local
+    // device view state is overlaid below and never forces a writeback.
+    winner = "incoming";
+  } else if (causallyOrdered) {
+    winner = localDescendsFromIncoming ? "local" : "incoming";
+  } else {
+    // Revisions guide only deterministic adoption after a conflict is known;
+    // they never prove that one independently edited device descends from the
+    // other.
+    winner = deterministicWinner(local, incoming, localFingerprint, incomingFingerprint);
+  }
+
+  const merged = structuredClone(winner === "local" ? local : incoming);
+  if (semanticsEqual) {
+    // Legacy v11-v13 builds advanced updatedAt for UI-only saves. Preserve the
+    // greater timestamp deterministically while the v14 projection discards
+    // those harmless view differences; choosing the directional incoming copy
+    // would otherwise make this semantic metadata non-commutative.
+    merged.updatedAt = Math.max(local.updatedAt, incoming.updatedAt);
+    if (localTrusted && incomingTrusted) {
+      const causality = mergeEquivalentCausality(local, incoming);
+      merged.semanticHead = causality.semanticHead;
+      merged.semanticHash = causality.semanticHash;
+      merged.semanticLineage = causality.semanticLineage;
+      merged.semanticRevision = causality.semanticRevision;
+    } else {
+      // Equal payloads need no rescue, but untrusted ancestry is discarded so
+      // it cannot influence a later divergent merge.
+      merged.semanticHash = semanticEntryFingerprint(merged);
+      merged.semanticHead = merged.semanticHash;
+      merged.semanticLineage = [];
+      merged.semanticRevision = Math.max(local.semanticRevision, incoming.semanticRevision);
+    }
+  } else if (causallyOrdered) {
+    const ancestor = winner === "local" ? incoming : local;
+    merged.semanticLineage = boundedSemanticLineage([
+      ancestor.semanticHead,
+      ...merged.semanticLineage,
+      ...ancestor.semanticLineage,
+    ], merged.semanticHead);
+  }
+  // Routes and live disclosure state stay local. A remote semantic replacement
+  // invalidates this device's Undo/Redo snapshots; equal semantics do not.
+  applyPluginViewState(
+    merged.data,
+    capturePluginViewState(local.data),
+    winner === "local" || semanticsEqual,
+  );
+  const conflict = !semanticsEqual && !causallyOrdered
+    ? {
+      baseId: local.id,
+      revision: Math.max(local.semanticRevision, incoming.semanticRevision),
+      winner,
+      localFingerprint,
+      incomingFingerprint,
+    }
+    : null;
+  return { entry: merged, conflict };
+}
+
+function semanticEntryForComparison(entry: KnowledgeBaseEntry): unknown {
+  return {
+    id: entry.id,
+    createdAt: entry.createdAt,
+    semanticRevision: entry.semanticRevision,
+    semanticHead: entry.semanticHead,
+    semanticHash: entry.semanticHash,
+    semanticLineage: entry.semanticLineage,
+    archivedAt: entry.archivedAt,
+    data: semanticPluginDataProjection(entry.data),
+  };
 }
 
 function sortedEntries(entries: Iterable<KnowledgeBaseEntry>): KnowledgeBaseEntry[] {
@@ -77,7 +215,17 @@ function makeAvailableNamesUnique(entries: KnowledgeBaseEntry[]): boolean {
       suffixNumber += 1;
     }
     if (candidate !== entry.data.settings.workspaceName) {
+      if (!Number.isSafeInteger(entry.semanticRevision) || entry.semanticRevision < 0
+        || entry.semanticRevision >= Number.MAX_SAFE_INTEGER) {
+        throw new Error("A synced knowledge-base semantic revision cannot be advanced safely during name repair.");
+      }
+      const parentHead = entry.semanticHead;
       entry.data.settings.workspaceName = candidate;
+      entry.semanticRevision += 1;
+      entry.semanticHash = semanticEntryFingerprint(entry);
+      entry.semanticHead = deterministicSemanticHead(parentHead, entry.semanticHash, "unique-synced-name");
+      entry.semanticLineage = boundedSemanticLineage([parentHead, ...entry.semanticLineage], entry.semanticHead);
+      entry.updatedAt += 1;
       changed = true;
     }
     used.add(normalizedName(candidate));
@@ -86,10 +234,10 @@ function makeAvailableNamesUnique(entries: KnowledgeBaseEntry[]): boolean {
 }
 
 /**
- * Merge two already-migrated v11 envelopes by stable base ID. Separate bases
- * are independent conflict units; the newer `updatedAt` wins only within the
- * same base. Archive timestamps act as tombstones because archived entries are
- * retained rather than deleted.
+ * Merge two already-migrated current-version envelopes by stable base ID. Separate bases
+ * are independent conflict units. Bounded causal ancestry decides descendants;
+ * scalar revisions guide only deterministic adoption after unrelated edits
+ * have been classified as a conflict and rescued.
  *
  * `preferredActiveId` is device-local UI state. It is preserved whenever that
  * base still exists and is available, so Sync cannot switch an open modal from
@@ -151,11 +299,20 @@ export function mergeKnowledgeBaseStores(
     throw new Error(`Synced knowledge-base changes contain more than ${MAX_DELETED_KNOWLEDGE_BASE_IDS.toLocaleString()} permanent-deletion tombstones. No tombstone was discarded.`);
   }
   const byId = new Map<string, KnowledgeBaseEntry>();
+  const semanticConflicts: SemanticStoreConflict[] = [];
   for (const entry of local.bases) if (!Object.prototype.hasOwnProperty.call(deletedBaseIds, entry.id)) byId.set(entry.id, entry);
   for (const entry of incoming.bases) {
     if (Object.prototype.hasOwnProperty.call(deletedBaseIds, entry.id)) continue;
     const current = byId.get(entry.id);
-    byId.set(entry.id, current ? winningEntry(current, entry) : entry);
+    if (current) {
+      const merged = mergeMatchingEntry(current, entry);
+      byId.set(entry.id, merged.entry);
+      if (merged.conflict) semanticConflicts.push(merged.conflict);
+    } else {
+      const firstOnDevice = structuredClone(entry);
+      resetPluginViewState(firstOnDevice.data);
+      byId.set(entry.id, firstOnDevice);
+    }
   }
   if (byId.size > MAX_KNOWLEDGE_BASES) {
     throw new Error(`Synced knowledge-base changes contain ${byId.size} bases, above the safe limit of ${MAX_KNOWLEDGE_BASES}. No base was discarded.`);
@@ -181,12 +338,13 @@ export function mergeKnowledgeBaseStores(
   };
   const normalizeForComparison = (value: PluginStore): string => canonicalStringify(
     {
-      bases: sortedEntries(value.bases).map((entry) => entry),
+      bases: sortedEntries(value.bases).map((entry) => semanticEntryForComparison(entry)),
       deletedBaseIds: value.deletedBaseIds,
     },
   );
   return {
     store,
+    semanticConflicts,
     incomingNeedsWriteback: namesChanged
       || vaultId !== incoming.vaultId
       || normalizeForComparison(store) !== normalizeForComparison(incoming),

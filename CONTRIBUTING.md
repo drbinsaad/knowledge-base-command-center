@@ -35,6 +35,7 @@ The review task runs strict typechecking, zero-warning lint and JSON validation,
 
 - <code>src/main.ts</code>: plugin lifecycle, commands, storage, Sync, and guarded mutations.
 - <code>src/view.ts</code>: main Command Center, search, Index, Libraries, Collections, queues, and inspector.
+- <code>src/bases-view.ts</code>: the configurable, bounded custom view for Obsidian <code>.base</code> query results.
 - <code>src/index-manager.ts</code>: bulk membership, group, and diagnostic workflows.
 - <code>src/knowledge-base-modal.ts</code>: knowledge-base creation and lifecycle.
 - <code>src/library-modal.ts</code>: Library creation and lifecycle.

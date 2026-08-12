@@ -170,6 +170,12 @@ export class FakeElement {
     this.listeners.set(type, listeners);
   }
 
+  removeEventListener(type: string, listener: FakeListener): void {
+    const listeners = this.listeners.get(type);
+    if (!listeners) return;
+    this.listeners.set(type, listeners.filter((candidate) => candidate !== listener));
+  }
+
   dispatch(type: string, init: FakeEventInit = {}): FakeEvent {
     const event = new FakeEvent(type, init);
     event.target = this;
@@ -213,6 +219,15 @@ export class FakeElement {
     this.ownText = "";
   }
 
+  remove(): void {
+    const parent = this.parentElement;
+    if (parent) {
+      const index = parent.children.indexOf(this);
+      if (index >= 0) parent.children.splice(index, 1);
+    }
+    this.parentElement = null;
+  }
+
   getAttribute(name: string): string | null { return this.attributes.get(name) ?? null; }
   hasAttribute(name: string): boolean { return this.attributes.has(name); }
   removeAttribute(name: string): void { this.attributes.delete(name); }
@@ -254,6 +269,8 @@ class FakeEventTarget {
 
   removeEventListener(type: string, listener: () => void): void { this.listeners.get(type)?.delete(listener); }
 
+  listenerCount(type: string): number { return this.listeners.get(type)?.size ?? 0; }
+
   dispatch(type: string): void {
     for (const listener of this.listeners.get(type) ?? []) listener();
   }
@@ -269,9 +286,13 @@ export class FakeWindow extends FakeEventTarget {
   document: FakeDocument | null = null;
   innerHeight = 844;
   readonly visualViewport = new FakeVisualViewport();
+  keyboardHeightCss = "0px";
   private nextTimerId = 1;
 
   clearTimeout(_id: number): void {}
+  getComputedStyle(_element: unknown): { getPropertyValue: (name: string) => string } {
+    return { getPropertyValue: (name: string) => name === "--keyboard-height" ? this.keyboardHeightCss : "" };
+  }
   matchMedia(_query: string): { matches: boolean } { return { matches: true }; }
   requestAnimationFrame(callback: FrameRequestCallback): number {
     const id = this.nextTimerId;

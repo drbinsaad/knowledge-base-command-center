@@ -1,14 +1,26 @@
+import {
+  cleanFollowUpCategoryDefinitions,
+  DEFAULT_FOLLOW_UP_CATEGORIES,
+  MAX_FOLLOW_UP_CATEGORIES,
+  type FollowUpCategoryDefinition,
+} from "./follow-up";
+
 export const TOPIC_ROOT = "03 Clinical Topics/";
 export const PROCEDURE_ROOT = "04 Procedures/";
 export const MEDICATION_ROOT = "06 Clinical Tools/Medications/";
 export const SYNDROME_ROOT = "06 Clinical Tools/Syndromes/";
 export const DEFAULT_PROPOSAL_FOLDER = "01 Inbox/ENT Topic Proposals";
-export const DATA_VERSION = 12;
-export const STORE_VERSION = 13;
+export const DATA_VERSION = 13;
+export const STORE_VERSION = 14;
 export const MIN_RECOGNIZED_STORE_VERSION = 11;
 export const STORE_KIND = "knowledge-base-command-center-store";
 export const MAX_KNOWLEDGE_BASES = 50;
 export const MAX_LIBRARIES = 50;
+/** Recent semantic heads retained to prove causal descent without unbounded store growth. */
+export const MAX_SEMANTIC_LINEAGE = 64;
+/** Device-local routes, disclosure state, and bounded history must fit comfortably in localStorage. */
+export const MAX_DEVICE_LOCAL_STATE_BYTES = 4 * 1024 * 1024;
+export const DEVICE_LOCAL_STATE_VERSION = 2;
 /** Permanent base-deletion tombstones are small, but remain bounded and are never silently evicted. */
 export const MAX_DELETED_KNOWLEDGE_BASE_IDS = 10_000;
 export const DEFAULT_KNOWLEDGE_BASE_ID = "base-default";
@@ -31,6 +43,10 @@ export const MAX_TRANSFER_LIST_ITEMS = 50_000;
 export const MAX_TRANSFER_TOTAL_REFERENCES = 250_000;
 export const MAX_TRANSFER_COLLECTIONS = 10_000;
 export const MAX_TRANSFER_SNAPSHOTS = 10;
+/** Any individual persisted label, path, query, or other consumed text value. */
+export const MAX_TRANSFER_TEXT_LENGTH = 10_000;
+/** Aggregate raw UTF-8 text bytes per store envelope or retained history candidate. */
+export const MAX_TRANSFER_TOTAL_TEXT_LENGTH = 64 * 1024 * 1024;
 /** Per retained legacy backup; a store keeps at most one v1 and one v2 payload. */
 export const MAX_MIGRATION_BACKUP_BYTES = 2 * 1024 * 1024;
 const MAX_MIGRATION_BACKUP_DEPTH = 16;
@@ -66,6 +82,38 @@ export type MainTab = CoreTab | LibraryTab;
 export type OpenNoteBehavior = "new-tab" | "same-tab" | "split";
 export type WorkspaceMode = "generic" | "ent-clinical";
 export type NewNoteMode = "empty" | "template";
+export type AttachmentStorageMode = "obsidian" | "fixed-folder" | "note-subfolder" | "ask";
+export type AttachmentInsertionMode = "cursor" | "marker" | "heading" | "end";
+
+/** Optional per-Library creation defaults. Missing fields inherit the active base defaults. */
+export interface LibraryNoteProfile {
+  folder?: string;
+  mode?: NewNoteMode;
+  templatePath?: string;
+}
+
+export type LibraryNoteProfiles = Record<string, LibraryNoteProfile>;
+
+export interface EffectiveLibraryNoteProfile {
+  folder: string;
+  mode: NewNoteMode;
+  templatePath: string;
+  inherited: {
+    folder: boolean;
+    mode: boolean;
+    templatePath: boolean;
+  };
+}
+
+/** Extra values available only through explicit YAML-quoted template tokens. */
+export interface TemplateTokenContext {
+  title?: string;
+  id?: string;
+  category?: string;
+  parent?: string;
+  library?: string;
+  type?: string;
+}
 
 export interface DomainDefinition {
   name: string;
@@ -309,6 +357,13 @@ export interface PluginSettings {
   defaultNoteFolder: string;
   defaultNewNoteMode: NewNoteMode;
   defaultTemplatePath: string;
+  /** Stable Library IDs map to optional overrides; absent fields inherit base defaults. */
+  libraryNoteProfiles: LibraryNoteProfiles;
+  attachmentStorageMode: AttachmentStorageMode;
+  attachmentFolder: string;
+  attachmentInsertionMode: AttachmentInsertionMode;
+  attachmentMarker: string;
+  attachmentHeading: string;
   defaultTab: MainTab;
   recentLimit: number;
   enableHoverPreview: boolean;
@@ -317,6 +372,7 @@ export interface PluginSettings {
   enableAdvancedCanonicalActions: boolean;
   openNoteBehavior: OpenNoteBehavior;
   allowClinicalVisualGroupMoves: boolean;
+  followUpCategories: FollowUpCategoryDefinition[];
 }
 
 export interface MigrationBackup {
@@ -336,7 +392,7 @@ export interface V2MigrationBackup {
 }
 
 export interface PluginData {
-  version: 12;
+  version: typeof DATA_VERSION;
   collections: LayoutHeading[];
   pinnedPaths: string[];
   nextStudyPaths: string[];
@@ -364,6 +420,17 @@ export interface KnowledgeBaseEntry {
   id: string;
   createdAt: number;
   updatedAt: number;
+  /** Monotonic per-base revision for semantic organization changes only. */
+  semanticRevision: number;
+  /** Stable identity of the semantic save event represented by this entry. */
+  semanticHead: string;
+  /** Fingerprint of the semantic payload represented by semanticHead. */
+  semanticHash: string;
+  /**
+   * Newest-first fingerprints of semantic ancestors. A larger scalar revision
+   * is never treated as causal proof without one of these fingerprints.
+   */
+  semanticLineage: string[];
   archivedAt: number | null;
   /** Existing v12 workspace payload, deliberately kept intact per base. */
   data: PluginData;
@@ -378,6 +445,20 @@ export interface PluginStore {
   bases: KnowledgeBaseEntry[];
   /** Stable IDs permanently removed from this vault. Tombstones prevent Sync from resurrecting them. */
   deletedBaseIds: Record<string, number>;
+}
+
+export interface DeviceLocalKnowledgeBaseState {
+  baseId: string;
+  view: PluginViewState;
+}
+
+/** Stored through App.saveLocalStorage, never through plugin data.json. */
+export interface DeviceLocalPluginState {
+  version: typeof DEVICE_LOCAL_STATE_VERSION;
+  /** Prevents a retained App-local payload from attaching to a reinstalled or different vault store. */
+  vaultId: string;
+  activeBaseId: string;
+  bases: DeviceLocalKnowledgeBaseState[];
 }
 
 export const DEFAULT_SETTINGS: PluginSettings = {
@@ -398,6 +479,12 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   defaultNoteFolder: "Knowledge Base",
   defaultNewNoteMode: "empty",
   defaultTemplatePath: "",
+  libraryNoteProfiles: {},
+  attachmentStorageMode: "obsidian",
+  attachmentFolder: "Attachments",
+  attachmentInsertionMode: "cursor",
+  attachmentMarker: "<!-- kbcc:attachments -->",
+  attachmentHeading: "Attachments",
   defaultTab: "curriculum",
   recentLimit: 25,
   enableHoverPreview: true,
@@ -406,10 +493,12 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   enableAdvancedCanonicalActions: false,
   openNoteBehavior: "new-tab",
   allowClinicalVisualGroupMoves: false,
+  followUpCategories: DEFAULT_FOLLOW_UP_CATEGORIES.map((category) => ({ ...category })),
 };
 
 export const ENT_CLINICAL_SETTINGS: PluginSettings = {
   ...DEFAULT_SETTINGS,
+  followUpCategories: DEFAULT_FOLLOW_UP_CATEGORIES.map((category) => ({ ...category })),
   setupComplete: true,
   workspaceMode: "ent-clinical",
   workspaceName: "ENT Vault Command Center",
@@ -427,11 +516,12 @@ export const ENT_CLINICAL_SETTINGS: PluginSettings = {
   defaultNoteFolder: "01 Inbox",
   defaultNewNoteMode: "empty",
   defaultTemplatePath: "",
+  libraryNoteProfiles: {},
   proposalFolder: DEFAULT_PROPOSAL_FOLDER,
 };
 
 export const DEFAULT_DATA: PluginData = {
-  version: 12,
+  version: DATA_VERSION,
   collections: [],
   pinnedPaths: [],
   nextStudyPaths: [],
@@ -454,7 +544,11 @@ export const DEFAULT_DATA: PluginData = {
   },
   selectedPath: "",
   activeTab: "curriculum",
-  settings: { ...DEFAULT_SETTINGS },
+  settings: {
+    ...DEFAULT_SETTINGS,
+    followUpCategories: DEFAULT_FOLLOW_UP_CATEGORIES.map((category) => ({ ...category })),
+    libraryNoteProfiles: {},
+  },
   layoutSnapshots: [],
   undoStack: [],
   redoStack: [],
@@ -465,17 +559,195 @@ export const DEFAULT_DATA: PluginData = {
   },
 };
 
+interface CollapsedLayoutItemState {
+  id: string;
+  collapsed: boolean;
+  subheadings: Array<{ id: string; collapsed: boolean }>;
+}
+
+interface CollapsedLibraryLayoutState {
+  libraryId: string;
+  headings: CollapsedLayoutItemState[];
+}
+
+/**
+ * Per-device state that may be persisted without advancing semantic conflict
+ * resolution. Keep this list explicit: adding a field here changes what the
+ * safe view-state save path is allowed to copy from live mutable data.
+ */
+export interface PluginViewState {
+  selectedPath: string;
+  activeTab: MainTab;
+  collapsed: ViewCollapseState;
+  collections: CollapsedLayoutItemState[];
+  libraryLayouts: CollapsedLibraryLayoutState[];
+  undoStack: PersonalSnapshot[];
+  redoStack: PersonalSnapshot[];
+}
+
+function captureCollapsedLayout(layout: readonly LayoutHeading[]): CollapsedLayoutItemState[] {
+  return layout.map((heading) => ({
+    id: heading.id,
+    collapsed: heading.collapsed,
+    subheadings: heading.subheadings.map((subheading) => ({
+      id: subheading.id,
+      collapsed: subheading.collapsed,
+    })),
+  }));
+}
+
+function applyCollapsedLayout(
+  layout: LayoutHeading[],
+  state: readonly CollapsedLayoutItemState[],
+): void {
+  const stateById = new Map(state.map((heading) => [heading.id, heading]));
+  for (const heading of layout) {
+    const prior = stateById.get(heading.id);
+    heading.collapsed = prior?.collapsed ?? false;
+    const subheadingStateById = new Map((prior?.subheadings ?? []).map((subheading) => [subheading.id, subheading]));
+    for (const subheading of heading.subheadings) {
+      subheading.collapsed = subheadingStateById.get(subheading.id)?.collapsed ?? false;
+    }
+  }
+}
+
+/** Capture exactly the device-local fields permitted by saveViewState(). */
+export function capturePluginViewState(data: PluginData): PluginViewState {
+  return {
+    selectedPath: data.selectedPath,
+    activeTab: data.activeTab,
+    collapsed: structuredClone(data.collapsed),
+    collections: captureCollapsedLayout(data.collections),
+    libraryLayouts: Object.entries(data.portableIndex.libraryLayouts ?? {})
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([libraryId, headings]) => ({ libraryId, headings: captureCollapsedLayout(headings) })),
+    undoStack: structuredClone(data.undoStack),
+    redoStack: structuredClone(data.redoStack),
+  };
+}
+
+/**
+ * Overlay local view state by stable layout IDs. Structure introduced by the
+ * semantic winner starts expanded instead of inheriting another device's UI.
+ */
+export function applyPluginViewState(
+  data: PluginData,
+  state: PluginViewState,
+  preserveHistory = true,
+): void {
+  data.selectedPath = state.selectedPath;
+  data.activeTab = state.activeTab;
+  data.collapsed = structuredClone(state.collapsed);
+  applyCollapsedLayout(data.collections, state.collections);
+  const libraryStateById = new Map(state.libraryLayouts.map((library) => [library.libraryId, library.headings]));
+  for (const [libraryId, layout] of Object.entries(data.portableIndex.libraryLayouts)) {
+    applyCollapsedLayout(layout, libraryStateById.get(libraryId) ?? []);
+  }
+  data.undoStack = preserveHistory ? structuredClone(state.undoStack) : [];
+  data.redoStack = preserveHistory ? structuredClone(state.redoStack) : [];
+}
+
+/** Give a base first opened on this device a neutral route and empty history. */
+export function resetPluginViewState(data: PluginData): void {
+  data.selectedPath = "";
+  data.activeTab = data.settings.defaultTab;
+  data.collapsed = structuredClone(DEFAULT_DATA.collapsed);
+  applyCollapsedLayout(data.collections, []);
+  for (const layout of Object.values(data.portableIndex.libraryLayouts ?? {})) applyCollapsedLayout(layout, []);
+  data.undoStack = [];
+  data.redoStack = [];
+}
+
+/**
+ * One canonical semantic projection shared by migration identity, merge
+ * ordering, conflict detection, and safe-save validation. Named snapshots are
+ * intentionally untouched: their collapse fields are user-authored content.
+ */
+export function semanticPluginDataProjection(data: PluginData): PluginData {
+  const projected = structuredClone(data);
+  projected.selectedPath = "";
+  projected.activeTab = "curriculum";
+  projected.collapsed = structuredClone(DEFAULT_DATA.collapsed);
+  projected.undoStack = [];
+  projected.redoStack = [];
+  applyCollapsedLayout(projected.collections, []);
+  for (const layout of Object.values(projected.portableIndex.libraryLayouts ?? {})) applyCollapsedLayout(layout, []);
+  return projected;
+}
+
+/** Stable compact identity for one base's semantic payload. */
+export function semanticEntryFingerprint(
+  entry: Pick<KnowledgeBaseEntry, "createdAt" | "archivedAt" | "data">,
+): string {
+  return fingerprintText(JSON.stringify(canonicalMigrationValue([
+    entry.createdAt,
+    entry.archivedAt,
+    semanticPluginDataProjection(entry.data),
+  ])));
+}
+
+/** Allocate a new causal event identity; semantic content alone may repeat after Undo. */
+export function nextSemanticHead(parentHead: string, semanticFingerprint: string): string {
+  return fingerprintText(`${parentHead}:${semanticFingerprint}:${randomMigrationNonce()}`);
+}
+
+/** Deterministic causal identity for a merge-time repair applied on every device. */
+export function deterministicSemanticHead(
+  parentHead: string,
+  semanticFingerprint: string,
+  reason: string,
+): string {
+  return fingerprintText(`deterministic:${reason}:${parentHead}:${semanticFingerprint}`);
+}
+
+function isSemanticFingerprint(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{16}$/i.test(value);
+}
+
+/**
+ * Preserve the newest occurrence of each ancestor and bound the causal proof.
+ * Dropped old ancestry can only produce a false conflict, never a false win.
+ */
+export function boundedSemanticLineage(
+  fingerprints: readonly string[],
+  currentFingerprint = "",
+): string[] {
+  const output: string[] = [];
+  const used = new Set<string>(currentFingerprint ? [currentFingerprint] : []);
+  for (const fingerprint of fingerprints) {
+    const normalized = fingerprint.toLowerCase();
+    if (!isSemanticFingerprint(normalized) || used.has(normalized)) continue;
+    used.add(normalized);
+    output.push(normalized);
+    if (output.length >= MAX_SEMANTIC_LINEAGE) break;
+  }
+  return output;
+}
+
 export function createDefaultStore(
   data: PluginData = structuredClone(DEFAULT_DATA),
   now = Date.now(),
   vaultId = makeId("vault"),
 ): PluginStore {
+  const entry: KnowledgeBaseEntry = {
+    id: DEFAULT_KNOWLEDGE_BASE_ID,
+    createdAt: now,
+    updatedAt: now,
+    semanticRevision: 0,
+    semanticHead: "0000000000000000",
+    semanticHash: "0000000000000000",
+    semanticLineage: [],
+    archivedAt: null,
+    data,
+  };
+  entry.semanticHash = semanticEntryFingerprint(entry);
+  entry.semanticHead = entry.semanticHash;
   return {
     kind: STORE_KIND,
     version: STORE_VERSION,
     vaultId: cleanKnowledgeBaseId(vaultId, "Vault"),
     activeBaseId: DEFAULT_KNOWLEDGE_BASE_ID,
-    bases: [{ id: DEFAULT_KNOWLEDGE_BASE_ID, createdAt: now, updatedAt: now, archivedAt: null, data }],
+    bases: [entry],
     deletedBaseIds: {},
   };
 }
@@ -487,12 +759,23 @@ export function makeId(prefix: string): string {
 function canonicalMigrationValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map((item) => canonicalMigrationValue(item) ?? null);
   if (!value || typeof value !== "object") return value;
-  const output: Record<string, unknown> = {};
+  const output = Object.create(null) as Record<string, unknown>;
   for (const key of Object.keys(value).sort()) {
     const normalized = canonicalMigrationValue((value as Record<string, unknown>)[key]);
     if (normalized !== undefined) output[key] = normalized;
   }
   return output;
+}
+
+/** Whether a current persisted envelope differs from its safely cleaned form. */
+export function pluginStoreNeedsNormalization(input: unknown, normalized: PluginStore): boolean {
+  const raw = asUnknownRecord(input);
+  // Vault-identity creation/rotation has its own writeback signal in main.ts.
+  // Excluding it here keeps this predicate specific to deterministic payload
+  // and envelope-structure repair.
+  const comparableNormalized = { ...normalized, vaultId: raw.vaultId };
+  return JSON.stringify(canonicalMigrationValue(input))
+    !== JSON.stringify(canonicalMigrationValue(comparableNormalized));
 }
 
 function fingerprintText(text: string): string {
@@ -508,7 +791,7 @@ function fingerprintText(text: string): string {
 }
 
 function migrationFingerprint(data: PluginData): string {
-  const comparable = structuredClone(data);
+  const comparable = semanticPluginDataProjection(data);
   const migrationBackup = asUnknownRecord(comparable.migrationBackup);
   const v2MigrationBackup = asUnknownRecord(comparable.v2MigrationBackup);
   if (migrationBackup.version === 1) migrationBackup.migratedAt = 0;
@@ -548,12 +831,9 @@ export function freshStoreHasOnlyBootstrapChanges(store: PluginStore): boolean {
     || Object.keys(store.deletedBaseIds).length !== 0) return false;
   const entry = store.bases[0];
   if (!entry || entry.id !== DEFAULT_KNOWLEDGE_BASE_ID || entry.archivedAt !== null) return false;
-  const comparable = structuredClone(entry.data);
-  comparable.selectedPath = DEFAULT_DATA.selectedPath;
-  comparable.activeTab = DEFAULT_DATA.activeTab;
-  comparable.collapsed = structuredClone(DEFAULT_DATA.collapsed);
+  const comparable = semanticPluginDataProjection(entry.data);
   return JSON.stringify(canonicalMigrationValue(comparable))
-    === JSON.stringify(canonicalMigrationValue(DEFAULT_DATA));
+    === JSON.stringify(canonicalMigrationValue(semanticPluginDataProjection(DEFAULT_DATA)));
 }
 
 function migratedVaultId(data: PluginData): string {
@@ -580,16 +860,26 @@ type InterimEnvelopeIdentitySource = Pick<PluginStore, "bases" | "deletedBaseIds
 
 /**
  * Stable serialization of the complete multi-base payload that existed when a
- * v11 envelope without `vaultId` was first loaded. `activeBaseId` is omitted
- * because it is device-local UI state; every base, tombstone, timestamp, and
- * nested payload remains part of the identity material.
+ * v11 envelope without `vaultId` was first loaded. Device-local state and the
+ * legacy `updatedAt` clock are omitted because older builds advanced that
+ * timestamp for view-only saves; semantic revisions, tombstones, and nested
+ * semantic payloads remain part of the identity material.
  */
 export function canonicalInterimEnvelopeString(store: InterimEnvelopeIdentitySource): string {
   const bases = [...store.bases].sort((left, right) => left.id.localeCompare(right.id));
   return JSON.stringify(canonicalMigrationValue({
     kind: STORE_KIND,
     version: STORE_VERSION,
-    bases,
+    bases: bases.map((entry) => ({
+      id: entry.id,
+      createdAt: entry.createdAt,
+      semanticRevision: entry.semanticRevision,
+      semanticHead: entry.semanticHead,
+      semanticHash: entry.semanticHash,
+      semanticLineage: entry.semanticLineage,
+      archivedAt: entry.archivedAt,
+      data: semanticPluginDataProjection(entry.data),
+    })),
     deletedBaseIds: store.deletedBaseIds,
   }));
 }
@@ -638,39 +928,118 @@ export function pristineProvisionalMigratedStoreFingerprint(store: PluginStore):
   return fingerprint;
 }
 
-function sameMigrationEnvelopeMetadata(before: PluginStore, after: PluginStore): boolean {
-  if (before.activeBaseId !== after.activeBaseId
-    || before.bases.length !== after.bases.length
-    || canonicalMigrationValue(before.deletedBaseIds) === undefined
+export interface DeterministicRepairRebaseContext {
+  /** The safely normalized envelope immediately before deterministic repair. */
+  parentStore: PluginStore;
+  /** The fixed reason used to derive a causal child for repaired entries. */
+  reason?: "clinical-index-remediation";
+}
+
+function sameSemanticMetadata(left: KnowledgeBaseEntry, right: KnowledgeBaseEntry): boolean {
+  const leftFingerprint = semanticEntryFingerprint(left);
+  const rightFingerprint = semanticEntryFingerprint(right);
+  return left.semanticHash === leftFingerprint
+    && right.semanticHash === rightFingerprint
+    && leftFingerprint === rightFingerprint
+    && left.semanticRevision === right.semanticRevision
+    && left.semanticHead === right.semanticHead
+    && left.semanticHash === right.semanticHash
+    && JSON.stringify(left.semanticLineage) === JSON.stringify(right.semanticLineage);
+}
+
+function isExactDeterministicRepairChild(
+  parent: KnowledgeBaseEntry,
+  repaired: KnowledgeBaseEntry,
+  reason: string,
+): boolean {
+  if (!Number.isSafeInteger(parent.semanticRevision)
+    || parent.semanticRevision < 0
+    || parent.semanticRevision >= Number.MAX_SAFE_INTEGER
+    || !Number.isSafeInteger(repaired.semanticRevision)) return false;
+  const semanticHash = semanticEntryFingerprint(repaired);
+  const semanticHead = deterministicSemanticHead(parent.semanticHead, semanticHash, reason);
+  const semanticLineage = boundedSemanticLineage(
+    [parent.semanticHead, ...parent.semanticLineage],
+    semanticHead,
+  );
+  return repaired.semanticRevision === parent.semanticRevision + 1
+    && repaired.semanticHash === semanticHash
+    && repaired.semanticHead === semanticHead
+    && JSON.stringify(repaired.semanticLineage) === JSON.stringify(semanticLineage);
+}
+
+function sameMigrationEnvelopeMetadata(
+  before: PluginStore,
+  after: PluginStore,
+  context?: DeterministicRepairRebaseContext,
+): boolean {
+  const parentStore = context?.parentStore ?? before;
+  const beforeIds = before.bases.map((entry) => entry.id).sort();
+  const parentIds = parentStore.bases.map((entry) => entry.id).sort();
+  const afterIds = after.bases.map((entry) => entry.id).sort();
+  const sourceHasCausalMetadata = Number(before.version) >= 14;
+  const identitySourceMetadataIsStable = before.bases.every((source) => {
+    const parent = parentStore.bases.find((entry) => entry.id === source.id);
+    return Boolean(parent
+      && source.createdAt === parent.createdAt
+      && source.updatedAt === parent.updatedAt
+      && source.archivedAt === parent.archivedAt
+      && (!sourceHasCausalMetadata || source.semanticRevision === parent.semanticRevision));
+  });
+  if (parentStore.vaultId !== after.vaultId
+    || parentStore.activeBaseId !== after.activeBaseId
+    || JSON.stringify(beforeIds) !== JSON.stringify(parentIds)
+    || JSON.stringify(beforeIds) !== JSON.stringify(afterIds)
+    || !identitySourceMetadataIsStable
     || JSON.stringify(canonicalMigrationValue(before.deletedBaseIds))
+      !== JSON.stringify(canonicalMigrationValue(parentStore.deletedBaseIds))
+    || canonicalMigrationValue(parentStore.deletedBaseIds) === undefined
+    || JSON.stringify(canonicalMigrationValue(parentStore.deletedBaseIds))
       !== JSON.stringify(canonicalMigrationValue(after.deletedBaseIds))) return false;
-  return before.bases.every((entry, index) => {
-    const repaired = after.bases[index];
+  return parentStore.bases.every((parent) => {
+    const repaired = after.bases.find((entry) => entry.id === parent.id);
     return Boolean(repaired
-      && entry.id === repaired.id
-      && entry.createdAt === repaired.createdAt
-      && entry.updatedAt === repaired.updatedAt
-      && entry.archivedAt === repaired.archivedAt);
+      && parent.createdAt === repaired.createdAt
+      && parent.updatedAt === repaired.updatedAt
+      && parent.archivedAt === repaired.archivedAt
+      && (sameSemanticMetadata(parent, repaired)
+        || Boolean(context?.reason
+          && isExactDeterministicRepairChild(parent, repaired, context.reason))));
   });
 }
 
 /**
- * Rebase a still-pristine provisional migration identity after a deterministic
- * schema repair changes only knowledge-base payload data. The original random
- * nonce remains intact, so independently upgraded devices stay distinct while
- * carrying the same repaired fingerprint and can converge through Sync.
+ * Rebase a still-pristine provisional migration identity after deterministic
+ * schema migration or repair changes only knowledge-base payload data. The
+ * original random nonce remains intact, so independently upgraded devices stay
+ * distinct while carrying the same repaired fingerprint and can converge
+ * through Sync.
  *
- * The caller must provide the snapshot from immediately before the repair.
- * Normal identities, edited provisional stores, and metadata-changing repairs
+ * The caller must provide the earliest envelope from before migration/repair.
+ * Normal identities, edited provisional stores, and metadata-changing changes
  * are deliberately rejected.
  */
 export function rebaseProvisionalVaultIdAfterDeterministicRepair(
   before: PluginStore,
   after: PluginStore,
+  context?: DeterministicRepairRebaseContext,
 ): boolean {
-  if (before.vaultId !== after.vaultId || !sameMigrationEnvelopeMetadata(before, after)) return false;
+  if (!sameMigrationEnvelopeMetadata(before, after, context)) return false;
 
-  const flatMatch = /^vault-migrated-([0-9a-f]{16})-([a-z0-9]{12,64})$/i.exec(before.vaultId.trim());
+  // migrateStore rotates the supported legacy deterministic flat identity to
+  // a nonce-bearing provisional ID before callers can apply later structural
+  // repairs. Accept only that exact fingerprint-preserving transition; every
+  // other identity change remains ineligible for rebasing.
+  const legacyFlatMatch = /^vault-migrated-([0-9a-f]{16})$/i.exec(before.vaultId.trim());
+  const rotatedFlatMatch = /^vault-migrated-([0-9a-f]{16})-([a-z0-9]{12,64})$/i.exec(after.vaultId.trim());
+  const validLegacyRotation = Boolean(legacyFlatMatch
+    && rotatedFlatMatch
+    && legacyFlatMatch[1]?.toLowerCase() === rotatedFlatMatch[1]?.toLowerCase());
+  if (before.vaultId !== after.vaultId && !validLegacyRotation) return false;
+
+  const flatMatch = validLegacyRotation
+    ? rotatedFlatMatch
+    : /^vault-migrated-([0-9a-f]{16})-([a-z0-9]{12,64})$/i.exec(before.vaultId.trim());
   if (flatMatch && pristineProvisionalMigratedStoreFingerprint(before)) {
     const entry = after.bases[0];
     if (!entry) return false;
@@ -698,6 +1067,13 @@ export function asStringList(value: unknown): string[] {
   if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean);
   if (typeof value === "string" && value.trim()) return [value.trim()];
   return [];
+}
+
+/** Persisted JSON dictionaries must be ordinary own-property records. */
+export function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype: unknown = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 export function asUnknownRecord(value: unknown): Record<string, unknown> {
@@ -842,7 +1218,7 @@ export function cleanLibraryDefinitions(
       ids.add(id);
     }
   }
-  const layouts = asUnknownRecord(legacyLayouts);
+  const layouts = isPlainRecord(legacyLayouts) ? legacyLayouts : {};
   for (const kind of LIBRARY_KINDS) {
     const id = BUILTIN_LIBRARY_IDS[kind];
     const usedByLayout = Array.isArray(layouts[id]) && layouts[id].length > 0;
@@ -870,11 +1246,20 @@ export function ensureSystemLibraries(state: PortableIndexLocalState): void {
   state.libraries.sort((left, right) => left.order - right.order || left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
 }
 
-function deterministicLayoutId(preferred: string, used: Set<string>): string {
+function deterministicLayoutId(
+  preferred: string,
+  used: Set<string>,
+  reserved: ReadonlySet<string> = used,
+  preserveReservedPreferred = true,
+): string {
   const base = preferred.trim() || "layout";
+  if (!used.has(base) && (preserveReservedPreferred || !reserved.has(base))) {
+    used.add(base);
+    return base;
+  }
   let candidate = base;
   let suffix = 2;
-  while (used.has(candidate)) {
+  while (used.has(candidate) || reserved.has(candidate)) {
     candidate = `${base}-${suffix}`;
     suffix += 1;
   }
@@ -924,6 +1309,26 @@ function cleanLibraryLayout(
 ): LayoutHeading[] {
   const allowed = new Set(librarySubjectsById(subjects, libraryId).map((subject) => subject.id));
   const placed = new Set<string>();
+  // Reserve every intact identity before generating replacements. Without
+  // this first pass, an earlier missing/unsafe node can take the fallback ID
+  // of a later intact heading or subheading, forcing that intact node to be
+  // renamed merely because of array order.
+  const reservedIds = new Set<string>();
+  if (Array.isArray(input)) {
+    for (const rawHeading of input) {
+      const heading = asUnknownRecord(rawHeading);
+      if (!asText(heading.title)) continue;
+      const headingId = asText(heading.id);
+      if (headingId && isSafeObjectKey(headingId)) reservedIds.add(headingId);
+      if (!Array.isArray(heading.subheadings)) continue;
+      for (const rawSubheading of heading.subheadings) {
+        const subheading = asUnknownRecord(rawSubheading);
+        if (!asText(subheading.title)) continue;
+        const subheadingId = asText(subheading.id);
+        if (subheadingId && isSafeObjectKey(subheadingId)) reservedIds.add(subheadingId);
+      }
+    }
+  }
   const structureIds = new Set<string>();
   const headings: LayoutHeading[] = [];
   if (Array.isArray(input)) {
@@ -931,11 +1336,15 @@ function cleanLibraryLayout(
       const heading = asUnknownRecord(rawHeading);
       const title = asText(heading.title);
       if (!title) continue;
+      const preferredHeadingId = asText(heading.id);
+      const hasSafeHeadingId = Boolean(preferredHeadingId && isSafeObjectKey(preferredHeadingId));
       const headingId = deterministicLayoutId(
-        isSafeObjectKey(asText(heading.id)) && asText(heading.id)
-          ? asText(heading.id)
+        hasSafeHeadingId
+          ? preferredHeadingId
           : `library-${libraryId}-heading-${headingIndex + 1}`,
         structureIds,
+        reservedIds,
+        hasSafeHeadingId,
       );
       const takeSubjects = (rawSubjects: unknown): string[] => {
         const output: string[] = [];
@@ -953,12 +1362,16 @@ function cleanLibraryLayout(
           const subheading = asUnknownRecord(rawSubheading);
           const subheadingTitle = asText(subheading.title);
           if (!subheadingTitle) continue;
+          const preferredSubheadingId = asText(subheading.id);
+          const hasSafeSubheadingId = Boolean(preferredSubheadingId && isSafeObjectKey(preferredSubheadingId));
           subheadings.push({
             id: deterministicLayoutId(
-              isSafeObjectKey(asText(subheading.id)) && asText(subheading.id)
-                ? asText(subheading.id)
+              hasSafeSubheadingId
+                ? preferredSubheadingId
                 : `${headingId}-subheading-${subheadingIndex + 1}`,
               structureIds,
+              reservedIds,
+              hasSafeSubheadingId,
             ),
             title: subheadingTitle,
             collapsed: subheading.collapsed === true,
@@ -990,7 +1403,7 @@ export function cleanLibraryLayouts(
   subjects: PortableSubjectDefinition[],
   libraries?: readonly LibraryDefinition[],
 ): LibraryLayouts {
-  const value = asUnknownRecord(input);
+  const value = isPlainRecord(input) ? input : {};
   const definitions = libraries ?? cleanLibraryDefinitions(undefined, input, subjects);
   const layouts = emptyLibraryLayouts(definitions);
   for (const definition of definitions) {
@@ -1229,6 +1642,7 @@ const FOLDER_PATH_SETTING_KEYS = [
   "templatesFolder",
   "defaultNoteFolder",
   "defaultTemplatePath",
+  "attachmentFolder",
 ] as const satisfies ReadonlyArray<keyof PluginSettings>;
 
 interface FolderDerivedGroupState {
@@ -1283,6 +1697,17 @@ function rewriteFolderPathSettings(settings: PluginSettings, oldPath: string, ne
     if (next !== current) {
       settings[key] = next;
       changed = true;
+    }
+  }
+  for (const profile of Object.values(settings.libraryNoteProfiles)) {
+    for (const key of ["folder", "templatePath"] as const) {
+      const current = profile[key];
+      if (current === undefined) continue;
+      const next = replacePathPrefix(current, oldPath, newPath);
+      if (next !== current) {
+        profile[key] = next;
+        changed = true;
+      }
     }
   }
   return changed;
@@ -1430,6 +1855,11 @@ function rewriteSnapshotTemplatePathRename(snapshot: PersonalSnapshot, oldPath: 
       snapshot.settings.defaultTemplatePath = next;
       changed = true;
     }
+    for (const profile of Object.values(snapshot.settings.libraryNoteProfiles)) {
+      if (profile.templatePath !== oldPath) continue;
+      profile.templatePath = newPath;
+      changed = true;
+    }
   }
   for (const nested of snapshot.layoutSnapshots ?? []) {
     if (rewriteSnapshotTemplatePathRename(nested, oldPath, newPath)) changed = true;
@@ -1446,6 +1876,11 @@ export function rewritePluginDataTemplatePathRename(data: PluginData, oldPath: s
   const next = current === oldPath ? newPath : current;
   if (next !== current) {
     data.settings.defaultTemplatePath = next;
+    changed = true;
+  }
+  for (const profile of Object.values(data.settings.libraryNoteProfiles)) {
+    if (profile.templatePath !== oldPath) continue;
+    profile.templatePath = newPath;
     changed = true;
   }
   for (const snapshot of [...data.layoutSnapshots, ...data.undoStack, ...data.redoStack]) {
@@ -1599,19 +2034,53 @@ function recoveredLegacyId(prefix: string, parts: unknown[]): string {
 
 function cleanLayout(input: unknown): LayoutHeading[] {
   if (!Array.isArray(input)) return [];
+  const reservedIds = new Set<string>();
+  for (const raw of input as unknown[]) {
+    const value = asUnknownRecord(raw);
+    if (!asText(value.title)) continue;
+    const headingId = asText(value.id);
+    if (headingId && isSafeObjectKey(headingId)) reservedIds.add(headingId);
+    if (!Array.isArray(value.subheadings)) continue;
+    for (const rawSub of value.subheadings as unknown[]) {
+      const subheading = asUnknownRecord(rawSub);
+      if (!asText(subheading.title)) continue;
+      const subheadingId = asText(subheading.id);
+      if (subheadingId && isSafeObjectKey(subheadingId)) reservedIds.add(subheadingId);
+    }
+  }
   const headings: LayoutHeading[] = [];
+  const structureIds = new Set<string>();
   for (const [headingIndex, raw] of (input as unknown[]).entries()) {
     const value = asUnknownRecord(raw);
     const title = asText(value.title);
     if (!title) continue;
+    const preferredHeadingId = asText(value.id);
+    const hasSafeHeadingId = Boolean(preferredHeadingId && isSafeObjectKey(preferredHeadingId));
+    const headingId = deterministicLayoutId(
+      hasSafeHeadingId
+        ? preferredHeadingId
+        : recoveredLegacyId("collection", [headingIndex, title]),
+      structureIds,
+      reservedIds,
+      hasSafeHeadingId,
+    );
     const subheadings: LayoutSubheading[] = [];
     if (Array.isArray(value.subheadings)) {
       for (const [subheadingIndex, rawSub] of (value.subheadings as unknown[]).entries()) {
         const sub = asUnknownRecord(rawSub);
         const subTitle = asText(sub.title);
         if (!subTitle) continue;
+        const preferredSubheadingId = asText(sub.id);
+        const hasSafeSubheadingId = Boolean(preferredSubheadingId && isSafeObjectKey(preferredSubheadingId));
         subheadings.push({
-          id: asText(sub.id) || recoveredLegacyId("subheading", [headingIndex, subheadingIndex, subTitle]),
+          id: deterministicLayoutId(
+            hasSafeSubheadingId
+              ? preferredSubheadingId
+              : recoveredLegacyId("subheading", [headingIndex, subheadingIndex, subTitle]),
+            structureIds,
+            reservedIds,
+            hasSafeSubheadingId,
+          ),
           title: subTitle,
           collapsed: sub.collapsed === true,
           subjects: asStringList(sub.subjects),
@@ -1619,7 +2088,7 @@ function cleanLayout(input: unknown): LayoutHeading[] {
       }
     }
     headings.push({
-      id: asText(value.id) || recoveredLegacyId("collection", [headingIndex, title]),
+      id: headingId,
       title,
       collapsed: value.collapsed === true,
       subjects: asStringList(value.subjects),
@@ -1645,9 +2114,122 @@ function isNewNoteMode(value: unknown): value is NewNoteMode {
   return value === "empty" || value === "template";
 }
 
+export const MAX_LIBRARY_NOTE_PROFILE_PATH_LENGTH = 1_024;
+
+function cleanProfilePathOverride(value: unknown, folder: boolean): string | undefined {
+  if (typeof value !== "string" || value.length > MAX_LIBRARY_NOTE_PROFILE_PATH_LENGTH) return undefined;
+  const normalized = value
+    .normalize("NFC")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/\/{2,}/g, "/")
+    .replace(folder ? /^\/+|\/+$/g : /^\/+/, "");
+  if (/[\p{Cc}\p{Cf}]/u.test(normalized)) return undefined;
+  const segments = normalized.split("/").map((segment) => segment.trim().toLowerCase());
+  if (segments.some((segment) => segment === "." || segment === "..")) return undefined;
+  if (segments[0] === ".trash" || isImmutableSourcePath(normalized)) return undefined;
+  return normalized;
+}
+
+/**
+ * Clean bounded, stable-ID keyed Library creation overrides. Unknown fields,
+ * unsafe IDs, invalid paths, and entries beyond the Library cap are dropped.
+ */
+export function cleanLibraryNoteProfiles(
+  input: unknown,
+  allowedLibraryIds?: ReadonlySet<string>,
+): LibraryNoteProfiles {
+  const output: LibraryNoteProfiles = {};
+  if (!input || typeof input !== "object" || Array.isArray(input)) return output;
+  let retained = 0;
+  for (const [libraryId, raw] of Object.entries(input as Record<string, unknown>)) {
+    if (retained >= MAX_LIBRARIES) break;
+    if (!isValidLibraryId(libraryId) || (allowedLibraryIds && !allowedLibraryIds.has(libraryId))) continue;
+    const value = asUnknownRecord(raw);
+    const profile: LibraryNoteProfile = {};
+    if (Object.prototype.hasOwnProperty.call(value, "folder")) {
+      const folder = cleanProfilePathOverride(value.folder, true);
+      if (folder !== undefined) profile.folder = folder;
+    }
+    if (Object.prototype.hasOwnProperty.call(value, "mode") && isNewNoteMode(value.mode)) {
+      profile.mode = value.mode;
+    }
+    if (Object.prototype.hasOwnProperty.call(value, "templatePath")) {
+      const templatePath = cleanProfilePathOverride(value.templatePath, false);
+      if (templatePath !== undefined) profile.templatePath = templatePath;
+    }
+    if (Object.keys(profile).length === 0) continue;
+    output[libraryId] = profile;
+    retained += 1;
+  }
+  return output;
+}
+
+export function resolveLibraryNoteProfile(
+  settings: Pick<PluginSettings, "defaultNoteFolder" | "defaultNewNoteMode" | "defaultTemplatePath" | "libraryNoteProfiles">,
+  libraryId: string,
+): EffectiveLibraryNoteProfile {
+  const profile = isValidLibraryId(libraryId) ? settings.libraryNoteProfiles[libraryId] : undefined;
+  return {
+    folder: profile?.folder ?? settings.defaultNoteFolder,
+    mode: profile?.mode ?? settings.defaultNewNoteMode,
+    templatePath: profile?.templatePath ?? settings.defaultTemplatePath,
+    inherited: {
+      folder: profile?.folder === undefined,
+      mode: profile?.mode === undefined,
+      templatePath: profile?.templatePath === undefined,
+    },
+  };
+}
+
+export function validateLibraryNoteProfile(
+  profile: LibraryNoteProfile,
+  baseSettings: Pick<PluginSettings, "defaultNoteFolder" | "defaultNewNoteMode" | "defaultTemplatePath" | "templatesFolder" | "libraryNoteProfiles">,
+  libraryId: string,
+  configDir: string,
+): string | null {
+  const cleaned = cleanLibraryNoteProfiles({ [libraryId]: profile }, new Set([libraryId]))[libraryId];
+  if (!cleaned || Object.keys(cleaned).length !== Object.keys(profile).length) {
+    return "The Library profile contains an unsupported value or vault path.";
+  }
+  if (cleaned.folder !== undefined) {
+    const folderError = validateWritableFolderPath(cleaned.folder, configDir);
+    if (folderError) return folderError;
+  }
+  if (cleaned.templatePath) {
+    const templateError = validateTemplateFilePath(
+      cleaned.templatePath,
+      baseSettings.templatesFolder,
+      configDir,
+    );
+    if (templateError) return templateError;
+  }
+  const effective = resolveLibraryNoteProfile({ ...baseSettings, libraryNoteProfiles: { [libraryId]: cleaned } }, libraryId);
+  if (effective.mode === "template") {
+    return validateTemplateFilePath(effective.templatePath, baseSettings.templatesFolder, configDir);
+  }
+  return null;
+}
+
+function isAttachmentStorageMode(value: unknown): value is AttachmentStorageMode {
+  return value === "obsidian" || value === "fixed-folder" || value === "note-subfolder" || value === "ask";
+}
+
+function isAttachmentInsertionMode(value: unknown): value is AttachmentInsertionMode {
+  return value === "cursor" || value === "marker" || value === "heading" || value === "end";
+}
+
 function cleanSavedViews(input: unknown): SavedView[] {
   if (!Array.isArray(input)) return [];
+  const reservedIds = new Set<string>();
+  for (const raw of input as unknown[]) {
+    const view = asUnknownRecord(raw);
+    if (!asText(view.name) || (!isMainTab(view.tab) && !legacyLibraryIdFromTab(view.tab))) continue;
+    const id = asText(view.id);
+    if (id && isSafeObjectKey(id)) reservedIds.add(id);
+  }
   const views: SavedView[] = [];
+  const usedIds = new Set<string>();
   for (const [viewIndex, raw] of (input as unknown[]).entries()) {
     const view = asUnknownRecord(raw);
     const name = asText(view.name);
@@ -1655,8 +2237,17 @@ function cleanSavedViews(input: unknown): SavedView[] {
     const tab = migrateMainTab(view.tab, "curriculum");
     if (!name) continue;
     const query = asText(view.query);
+    const preferredId = asText(view.id);
+    const hasSafeId = Boolean(preferredId && isSafeObjectKey(preferredId));
     views.push({
-      id: asText(view.id) || recoveredLegacyId("view", [viewIndex, name, tab, query]),
+      id: deterministicLayoutId(
+        hasSafeId
+          ? preferredId
+          : recoveredLegacyId("view", [viewIndex, name, tab, query]),
+        usedIds,
+        reservedIds,
+        hasSafeId,
+      ),
       name,
       tab,
       query,
@@ -1797,7 +2388,7 @@ export function cleanPortableIndex(input: unknown): PortableIndexLocalState {
   const validSubjects = new Set(subjects.map((subject) => subject.id));
   const resolvedPathBySubjectId: Record<string, string> = {};
   const usedPaths = new Set<string>();
-  const rawBindings = asUnknownRecord(value.resolvedPathBySubjectId);
+  const rawBindings = isPlainRecord(value.resolvedPathBySubjectId) ? value.resolvedPathBySubjectId : {};
   for (const [subjectId, rawPath] of Object.entries(rawBindings)) {
     const path = asText(rawPath);
     if (!isSafeObjectKey(subjectId) || !validSubjects.has(subjectId) || !path || usedPaths.has(path) || isPortablePlaceholderPath(path)) continue;
@@ -1835,18 +2426,18 @@ function cleanCollapseState(input: unknown): ViewCollapseState {
 }
 
 export function cleanCurriculumVisual(input: unknown): CurriculumVisualState {
-  if (!input || typeof input !== "object") return { parentByPath: {}, orderByContainer: {} };
-  const raw = input as Record<string, unknown>;
+  if (!isPlainRecord(input)) return { parentByPath: {}, orderByContainer: {} };
+  const raw = input;
   const parentByPath: Record<string, string | null> = {};
-  if (raw.parentByPath && typeof raw.parentByPath === "object") {
-    for (const [path, parent] of Object.entries(raw.parentByPath as Record<string, unknown>)) {
+  if (isPlainRecord(raw.parentByPath)) {
+    for (const [path, parent] of Object.entries(raw.parentByPath)) {
       const cleanPath = asText(path);
       if (isSafeObjectKey(cleanPath) && cleanPath && (parent === null || typeof parent === "string")) parentByPath[cleanPath] = parent === null ? null : asText(parent);
     }
   }
   const orderByContainer: Record<string, string[]> = {};
-  if (raw.orderByContainer && typeof raw.orderByContainer === "object") {
-    for (const [key, paths] of Object.entries(raw.orderByContainer as Record<string, unknown>)) {
+  if (isPlainRecord(raw.orderByContainer)) {
+    for (const [key, paths] of Object.entries(raw.orderByContainer)) {
       const cleanKey = asText(key);
       if (isSafeObjectKey(cleanKey) && cleanKey) orderByContainer[cleanKey] = [...new Set(asStringList(paths))];
     }
@@ -1855,9 +2446,9 @@ export function cleanCurriculumVisual(input: unknown): CurriculumVisualState {
 }
 
 function cleanPathMap(input: unknown): Record<string, string> {
-  if (!input || typeof input !== "object") return {};
+  if (!isPlainRecord(input)) return {};
   const output: Record<string, string> = {};
-  for (const [path, value] of Object.entries(input as Record<string, unknown>)) {
+  for (const [path, value] of Object.entries(input)) {
     const cleanPath = asText(path);
     const cleanValue = asText(value);
     if (isSafeObjectKey(cleanPath) && cleanPath && cleanValue) output[cleanPath] = cleanValue;
@@ -1865,12 +2456,27 @@ function cleanPathMap(input: unknown): Record<string, string> {
   return output;
 }
 
-function cleanSnapshots(input: unknown, allowNested = true, maxCount = 20): PersonalSnapshot[] {
+function cleanSnapshots(input: unknown, allowNested = true, maxCount = 20, maxBytes?: number): PersonalSnapshot[] {
   if (!Array.isArray(input)) return [];
   const snapshots: PersonalSnapshot[] = [];
   // Histories are untrusted synced input. Limit the raw entries before cloning
   // nested structures, then apply the same byte budget used by local writes.
   for (const [snapshotIndex, raw] of (input as unknown[]).slice(-maxCount).entries()) {
+    try {
+      // Invalid history is non-authoritative and may be dropped. Validate one
+      // retained candidate before allocating its cleaned maps/lists; this keeps
+      // a hostile Undo entry from making otherwise-valid primary data read-only.
+      validateRecoverySnapshot(
+        raw,
+        "Stored history",
+        { references: 0, collectionStructures: 0, snapshots: 0 },
+        allowNested ? 1 : 0,
+        true,
+      );
+      validateLoadedSnapshotText(raw, "Stored history", createLoadTextValidationBudget(), allowNested ? 1 : 0, true);
+    } catch {
+      continue;
+    }
     const snapshot = asUnknownRecord(raw);
     const rawAt = Number(snapshot.at);
     snapshots.push({
@@ -1897,15 +2503,19 @@ function cleanSnapshots(input: unknown, allowNested = true, maxCount = 20): Pers
         : undefined,
     });
   }
-  return limitSnapshotStack(snapshots, maxCount);
+  return limitSnapshotStack(snapshots, maxCount, maxBytes);
 }
 
 function cleanMigrationBackup(input: unknown): MigrationBackup | undefined {
   try {
-    const value = asUnknownRecord(input);
+    const value = optionalPlainRecord(input, "Migration backup");
     if (value.version !== 1
       || !Array.isArray(value.headings)
       || value.headings.length > MAX_TRANSFER_COLLECTIONS) return undefined;
+    const validationBudget = createPluginLoadValidationBudget();
+    validateRecoveryCollections(value.headings, "Migration backup headings", validationBudget.transfer);
+    validateLoadedLayoutText(value.headings, "Migration backup headings", validationBudget.text);
+    validateLoadedNumber(value.migratedAt, "Migration backup timestamp");
     return boundedMigrationBackup<MigrationBackup>({
       version: 1,
       headings: value.headings,
@@ -1918,7 +2528,7 @@ function cleanMigrationBackup(input: unknown): MigrationBackup | undefined {
 
 function cleanV2MigrationBackup(input: unknown): V2MigrationBackup | undefined {
   try {
-    const value = asUnknownRecord(input);
+    const value = optionalPlainRecord(input, "V2 migration backup");
     if (value.version !== 2) return undefined;
     const budget: TransferValidationBudget = { references: 0, collectionStructures: 0, snapshots: 0 };
     validateRecoveryCollections(value.collections, "V2 migration backup collections", budget);
@@ -1926,6 +2536,13 @@ function cleanV2MigrationBackup(input: unknown): V2MigrationBackup | undefined {
     validateRecoveryReferenceList(value.nextStudyPaths, "V2 migration backup Next list", budget);
     transferArrayLength(value.savedViews, "V2 migration backup saved views", MAX_TRANSFER_COLLECTIONS);
     ownEntryCount(value.settings, "V2 migration backup settings");
+    const textBudget = createLoadTextValidationBudget();
+    validateLoadedLayoutText(value.collections, "V2 migration backup collections", textBudget);
+    validateLoadedTextList(value.pinnedPaths, "V2 migration backup pins", textBudget);
+    validateLoadedTextList(value.nextStudyPaths, "V2 migration backup Next list", textBudget);
+    validateLoadedSavedViewsText(value.savedViews, "V2 migration backup saved views", textBudget);
+    validateLoadedSettingsText(value.settings, "V2 migration backup settings", textBudget);
+    validateLoadedNumber(value.migratedAt, "V2 migration backup timestamp");
     return boundedMigrationBackup<V2MigrationBackup>({
       version: 2,
       migratedAt: cleanMigrationTimestamp(value.migratedAt),
@@ -1961,6 +2578,21 @@ function cleanSettings(input: unknown, legacyEnt = false): PluginSettings {
     defaultNoteFolder: asText(settings.defaultNoteFolder, base.defaultNoteFolder).replace(/^\/+|\/+$/g, ""),
     defaultNewNoteMode: isNewNoteMode(settings.defaultNewNoteMode) ? settings.defaultNewNoteMode : base.defaultNewNoteMode,
     defaultTemplatePath: asText(settings.defaultTemplatePath, base.defaultTemplatePath).replace(/^\/+/, ""),
+    libraryNoteProfiles: cleanLibraryNoteProfiles(settings.libraryNoteProfiles),
+    attachmentStorageMode: isAttachmentStorageMode(settings.attachmentStorageMode)
+      ? settings.attachmentStorageMode
+      : base.attachmentStorageMode,
+    attachmentFolder: asText(settings.attachmentFolder, base.attachmentFolder).replace(/^\/+|\/+$/g, ""),
+    attachmentInsertionMode: isAttachmentInsertionMode(settings.attachmentInsertionMode)
+      ? settings.attachmentInsertionMode
+      : base.attachmentInsertionMode,
+    attachmentMarker: asText(settings.attachmentMarker, base.attachmentMarker).replace(/[\r\n]+/gu, " ").trim() || base.attachmentMarker,
+    attachmentHeading: asText(settings.attachmentHeading, base.attachmentHeading)
+      .replace(/[\r\n]+/gu, " ")
+      .trim()
+      .replace(/^#{1,6}\s+/u, "")
+      .replace(/\s+#+\s*$/u, "")
+      || base.attachmentHeading,
     defaultTab: migrateMainTab(settings.defaultTab, base.defaultTab),
     recentLimit: Math.max(5, Math.min(100, Number(settings.recentLimit) || base.recentLimit)),
     enableHoverPreview: settings.enableHoverPreview !== false,
@@ -1969,21 +2601,47 @@ function cleanSettings(input: unknown, legacyEnt = false): PluginSettings {
     enableAdvancedCanonicalActions: settings.enableAdvancedCanonicalActions === true,
     openNoteBehavior: isOpenNoteBehavior(settings.openNoteBehavior) ? settings.openNoteBehavior : base.openNoteBehavior,
     allowClinicalVisualGroupMoves: settings.allowClinicalVisualGroupMoves === true,
+    followUpCategories: cleanFollowUpCategoryDefinitions(settings.followUpCategories),
   };
 }
 
+function parseExplicitVersion(input: Record<string, unknown>, label: string): number {
+  if (!Object.prototype.hasOwnProperty.call(input, "version")) return 0;
+  const rawVersion = input.version;
+  if (typeof rawVersion !== "number" && typeof rawVersion !== "string") {
+    throw new Error(`${label} version must be a positive finite integer.`);
+  }
+  if (typeof rawVersion === "string" && rawVersion.length > 64) {
+    throw new Error(`${label} version must be a positive finite integer.`);
+  }
+  const version = Number(rawVersion);
+  if (!Number.isFinite(version) || !Number.isInteger(version) || version <= 0) {
+    throw new Error(`${label} version must be a positive finite integer.`);
+  }
+  return version;
+}
+
 export function storedDataVersion(input: unknown): number {
-  if (!input || typeof input !== "object") return 0;
-  const version = Number((input as Record<string, unknown>).version);
-  return Number.isFinite(version) && version > 0 ? version : 0;
+  if (!isPlainRecord(input)) return 0;
+  try {
+    return parseExplicitVersion(input, "Plugin data");
+  } catch {
+    return 0;
+  }
 }
 
 export function isRecognizedPluginData(input: unknown): boolean {
-  if (!input || typeof input !== "object" || Array.isArray(input)) return false;
-  const loaded = input as Record<string, unknown>;
+  if (!isPlainRecord(input)) return false;
+  const loaded = input;
+  let version = 0;
+  try {
+    version = parseExplicitVersion(loaded, "Plugin data");
+  } catch {
+    return false;
+  }
   if (Object.keys(loaded).length === 0) return true;
-  if (storedDataVersion(loaded) === 1 && Array.isArray(loaded.headings)) return true;
-  if (storedDataVersion(loaded) === 2) return true;
+  if (version === 1 && Array.isArray(loaded.headings)) return true;
+  if (version === 2) return true;
   return [
     "collections",
     "pinnedPaths",
@@ -2011,6 +2669,26 @@ function cleanTimestamp(input: unknown, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+function cleanSemanticRevision(input: unknown, fallback: number): number {
+  const value = Number(input);
+  return Number.isSafeInteger(value) && value >= 0 && value < Number.MAX_SAFE_INTEGER ? value : fallback;
+}
+
+function cleanSemanticLineage(input: unknown): string[] {
+  if (input === undefined) return [];
+  if (!Array.isArray(input)) throw new Error("A knowledge-base semantic lineage is malformed.");
+  const output: string[] = [];
+  const used = new Set<string>();
+  for (const raw of input) {
+    if (!isSemanticFingerprint(raw)) throw new Error("A knowledge-base semantic lineage contains an invalid fingerprint.");
+    const fingerprint = raw.toLowerCase();
+    if (used.has(fingerprint)) continue;
+    used.add(fingerprint);
+    if (output.length < MAX_SEMANTIC_LINEAGE) output.push(fingerprint);
+  }
+  return output;
+}
+
 export function createKnowledgeBaseEntry(data: PluginData, id = makeId("base"), now = Date.now()): KnowledgeBaseEntry {
   // These raw legacy payloads exist only to recover the base that underwent
   // migration. Copying them into every duplicated base adds no recovery value
@@ -2020,13 +2698,20 @@ export function createKnowledgeBaseEntry(data: PluginData, id = makeId("base"), 
     delete entryData.migrationBackup;
     delete entryData.v2MigrationBackup;
   }
-  return {
+  const entry: KnowledgeBaseEntry = {
     id: cleanKnowledgeBaseId(id, "Knowledge base"),
     createdAt: now,
     updatedAt: now,
+    semanticRevision: 0,
+    semanticHead: "0000000000000000",
+    semanticHash: "0000000000000000",
+    semanticLineage: [],
     archivedAt: null,
     data: entryData,
   };
+  entry.semanticHash = semanticEntryFingerprint(entry);
+  entry.semanticHead = entry.semanticHash;
+  return entry;
 }
 
 /** Retain one bounded copy of each historical migration payload store-wide. */
@@ -2047,9 +2732,15 @@ function limitStoreMigrationBackups(bases: KnowledgeBaseEntry[]): void {
 }
 
 export function isRecognizedPluginStore(input: unknown): boolean {
-  if (!input || typeof input !== "object" || Array.isArray(input)) return false;
-  const value = input as Record<string, unknown>;
-  return value.kind === STORE_KIND && Number(value.version) >= MIN_RECOGNIZED_STORE_VERSION && Array.isArray(value.bases);
+  if (!isPlainRecord(input)) return false;
+  const value = input;
+  let version = 0;
+  try {
+    version = parseExplicitVersion(value, "Knowledge-base store");
+  } catch {
+    return false;
+  }
+  return value.kind === STORE_KIND && version >= MIN_RECOGNIZED_STORE_VERSION && Array.isArray(value.bases);
 }
 
 /**
@@ -2072,39 +2763,85 @@ export function migrateStore(input: unknown, now = Date.now()): PluginStore {
   }
 
   const value = input as Record<string, unknown>;
+  const sourceStoreVersion = Number(value.version);
   const rawBases = value.bases as unknown[];
   if (rawBases.length === 0 || rawBases.length > MAX_KNOWLEDGE_BASES) {
     throw new Error(`The knowledge-base store must contain between 1 and ${MAX_KNOWLEDGE_BASES} bases.`);
   }
   const ids = new Set<string>();
+  // One budget spans the full envelope. Without this, fifty individually
+  // valid bases could multiply the documented reference/text caps fifty-fold
+  // and exhaust memory on a synced mobile device.
+  const envelopeValidationBudget = createPluginLoadValidationBudget();
   const bases: KnowledgeBaseEntry[] = rawBases.map((raw, index) => {
-    const entry = asUnknownRecord(raw);
+    const entry = requiredPlainRecord(raw, `Knowledge base ${index + 1}`);
     const id = cleanKnowledgeBaseId(entry.id, `Knowledge base ${index + 1}`);
     if (ids.has(id)) throw new Error(`Duplicate knowledge-base ID: ${id}`);
     ids.add(id);
     if (!isRecognizedPluginData(entry.data)) throw new Error(`Knowledge base ${id} has unrecognized data.`);
     const innerVersion = storedDataVersion(entry.data);
     if (innerVersion > DATA_VERSION) throw new Error(`Knowledge base ${id} uses unsupported data version ${innerVersion}.`);
+    validateLoadedNumber(entry.createdAt, `Knowledge base ${id} createdAt`);
+    validateLoadedNumber(entry.updatedAt, `Knowledge base ${id} updatedAt`);
+    validateLoadedNumber(entry.archivedAt, `Knowledge base ${id} archivedAt`, true);
     const createdAt = cleanTimestamp(entry.createdAt, now);
     const updatedAt = cleanTimestamp(entry.updatedAt, createdAt);
+    const semanticRevision = sourceStoreVersion >= 14
+      ? cleanSemanticRevision(entry.semanticRevision, -1)
+      : 0;
+    if (semanticRevision < 0) throw new Error(`Knowledge base ${id} has an invalid semantic revision.`);
+    const migratedData = migrateDataWithBudget(
+      entry.data,
+      envelopeValidationBudget,
+      sourceStoreVersion < STORE_VERSION,
+    );
+    let semanticLineage = sourceStoreVersion >= 14
+      ? cleanSemanticLineage(entry.semanticLineage)
+      : [];
     const archivedValue = entry.archivedAt;
     const archivedAt = archivedValue === null || archivedValue === undefined
       ? null
       : cleanTimestamp(archivedValue, now);
-    return { id, createdAt, updatedAt, archivedAt, data: migrateData(entry.data) };
+    const fingerprintSource = { createdAt, archivedAt, data: migratedData };
+    const semanticHash = semanticEntryFingerprint(fingerprintSource);
+    const rawSemanticHead = entry.semanticHead;
+    const advertisedSemanticHeadIsValid = sourceStoreVersion >= 14
+      && isSemanticFingerprint(rawSemanticHead);
+    let semanticHead = advertisedSemanticHeadIsValid
+      ? String(rawSemanticHead).toLowerCase()
+      : semanticHash;
+    // Early v14 development builds did not carry `semanticHash`, and a
+    // partially-written or hand-repaired envelope can contain stale causal
+    // metadata. Never trust ancestry unless its advertised payload hash
+    // matches the payload we just parsed. Resetting to a fresh root is
+    // deliberately conservative: later merges can produce a false conflict,
+    // never a false causal win.
+    const impossibleSemanticAncestry = semanticLineage.includes(semanticHead)
+      || (semanticRevision === 0 && semanticLineage.length > 0)
+      || (semanticHead === semanticHash && semanticLineage.length > 0);
+    if (sourceStoreVersion < 14
+      || !advertisedSemanticHeadIsValid
+      || !isSemanticFingerprint(entry.semanticHash)
+      || entry.semanticHash.toLowerCase() !== semanticHash
+      || impossibleSemanticAncestry) {
+      semanticHead = semanticHash;
+      semanticLineage = [];
+    }
+    return { id, createdAt, updatedAt, semanticRevision, semanticHead, semanticHash, semanticLineage, archivedAt, data: migratedData };
   });
   limitStoreMigrationBackups(bases);
   const rawDeletedBaseIds = value.deletedBaseIds;
-  if (rawDeletedBaseIds !== undefined && (!rawDeletedBaseIds || typeof rawDeletedBaseIds !== "object" || Array.isArray(rawDeletedBaseIds))) {
+  if (rawDeletedBaseIds !== undefined && !isPlainRecord(rawDeletedBaseIds)) {
     throw new Error("Deleted knowledge-base IDs must be a timestamp map.");
   }
-  const deletedEntries = Object.entries((rawDeletedBaseIds ?? {}) as Record<string, unknown>);
+  const deletedEntries = Object.entries(rawDeletedBaseIds ?? {});
   if (deletedEntries.length > MAX_DELETED_KNOWLEDGE_BASE_IDS) {
     throw new Error(`The knowledge-base store contains more than ${MAX_DELETED_KNOWLEDGE_BASE_IDS.toLocaleString()} permanent-deletion tombstones.`);
   }
   const deletedBaseIds: Record<string, number> = {};
   for (const [rawId, rawTimestamp] of deletedEntries) {
     const id = cleanKnowledgeBaseId(rawId, "Deleted knowledge base");
+    validateLoadedNumber(rawTimestamp, `Deleted knowledge base ${id} timestamp`);
     const deletedAt = Number(rawTimestamp);
     if (!Number.isFinite(deletedAt) || deletedAt <= 0) throw new Error(`Deleted knowledge base ${id} has an invalid timestamp.`);
     if (ids.has(id)) throw new Error(`Deleted knowledge base ${id} is still present in the base list.`);
@@ -2145,6 +2882,10 @@ export function normalizeKnowledgeBaseLibrariesAndNavigation(data: PluginData): 
     }
   }
   reconcilePortableLibraryLayouts(data.portableIndex);
+  data.settings.libraryNoteProfiles = cleanLibraryNoteProfiles(
+    data.settings.libraryNoteProfiles,
+    new Set(data.portableIndex.libraries.map((definition) => definition.id)),
+  );
   const availableLibraryIds = new Set(data.portableIndex.libraries
     .filter((definition) => definition.archivedAt === null)
     .map((definition) => definition.id));
@@ -2162,15 +2903,29 @@ export function normalizeKnowledgeBaseLibrariesAndNavigation(data: PluginData): 
 }
 
 export function migrateData(input: unknown): PluginData {
+  return migrateDataWithBudget(input);
+}
+
+function migrateDataWithBudget(
+  input: unknown,
+  validationBudget = createPluginLoadValidationBudget(),
+  preserveLegacyDeviceHistory = false,
+): PluginData {
   if (!input || typeof input !== "object") return structuredClone(DEFAULT_DATA);
-  const loaded = input as Record<string, unknown>;
-  const loadedVersion = storedDataVersion(loaded);
+  if (!isPlainRecord(input)) throw new Error("Plugin data must be an object.");
+  const loaded = input;
+  const loadedVersion = parseExplicitVersion(loaded, "Plugin data");
+  if (loadedVersion === 1) validateLegacyV1LoadShape(loaded, validationBudget);
+  else if (loadedVersion >= 2
+    || (loadedVersion === 0 && isRecognizedPluginData(loaded) && Object.keys(loaded).length > 0)) {
+    validatePluginDataLoadShape(loaded, validationBudget);
+  }
   // Versions newer than this plugin are read through the latest compatible
   // shape instead of being mistaken for v1. main.ts keeps them read-only.
   if (loadedVersion >= 3 || (loadedVersion === 0 && isRecognizedPluginData(loaded) && Object.keys(loaded).length > 0)) {
     const settings = cleanSettings(loaded.settings, loadedVersion > 0 && loadedVersion <= 5);
     const data: PluginData = {
-      version: 12,
+      version: DATA_VERSION,
       collections: cleanLayout(loaded.collections),
       pinnedPaths: asStringList(loaded.pinnedPaths),
       nextStudyPaths: asStringList(loaded.nextStudyPaths),
@@ -2187,8 +2942,11 @@ export function migrateData(input: unknown): PluginData {
       activeTab: migrateMainTab(loaded.activeTab, settings.defaultTab),
       settings,
       layoutSnapshots: cleanSnapshots(loaded.layoutSnapshots, true, MAX_TRANSFER_SNAPSHOTS),
-      undoStack: cleanSnapshots(loaded.undoStack),
-      redoStack: cleanSnapshots(loaded.redoStack),
+      // v11-v13 kept device history inside data.json. Preserve its validated
+      // newest 20 entries here long enough for main.ts to move the aggregate
+      // into the vault-bound 4 MiB local payload before semantic writeback.
+      undoStack: cleanSnapshots(loaded.undoStack, true, 20, preserveLegacyDeviceHistory ? MAX_PORTABLE_UNDO_BYTES : undefined),
+      redoStack: cleanSnapshots(loaded.redoStack, true, 20, preserveLegacyDeviceHistory ? MAX_PORTABLE_UNDO_BYTES : undefined),
       collapsed: cleanCollapseState(loaded.collapsed),
       migrationBackup: cleanMigrationBackup(loaded.migrationBackup),
       v2MigrationBackup: cleanV2MigrationBackup(loaded.v2MigrationBackup),
@@ -2196,7 +2954,7 @@ export function migrateData(input: unknown): PluginData {
     return normalizeKnowledgeBaseLibrariesAndNavigation(data);
   }
 
-  if (loaded.version === 2) {
+  if (loadedVersion === 2) {
     const collections = cleanLayout(loaded.collections);
     const pinnedPaths = asStringList(loaded.pinnedPaths);
     const nextStudyPaths = asStringList(loaded.nextStudyPaths);
@@ -2204,7 +2962,7 @@ export function migrateData(input: unknown): PluginData {
     const rawSettings = loaded.settings && typeof loaded.settings === "object" ? loaded.settings as Record<string, unknown> : {};
     const settings = cleanSettings(rawSettings, true);
     const data: PluginData = {
-      version: 12,
+      version: DATA_VERSION,
       collections,
       pinnedPaths,
       nextStudyPaths,
@@ -2232,7 +2990,9 @@ export function migrateData(input: unknown): PluginData {
         pinnedPaths: [...pinnedPaths],
         nextStudyPaths: [...nextStudyPaths],
         savedViews: savedViews.map((view) => ({ ...view })),
-        settings: structuredClone(rawSettings),
+        // cleanV2MigrationBackup performs its own bounded JSON clone. Avoid an
+        // eager clone of untrusted legacy settings before that budget applies.
+        settings: rawSettings,
       }),
     };
     return normalizeKnowledgeBaseLibrariesAndNavigation(data);
@@ -2251,7 +3011,10 @@ export function migrateData(input: unknown): PluginData {
     ...structuredClone(DEFAULT_DATA),
     collections: cleanLayout(custom),
     selectedPath: asText(loaded.selectedPath),
-    settings: { ...ENT_CLINICAL_SETTINGS },
+    settings: {
+      ...ENT_CLINICAL_SETTINGS,
+      followUpCategories: ENT_CLINICAL_SETTINGS.followUpCategories.map((category) => ({ ...category })),
+    },
     migrationBackup: cleanMigrationBackup({ version: 1, headings: oldHeadings, migratedAt: Date.now() }),
   };
   return normalizeKnowledgeBaseLibrariesAndNavigation(data);
@@ -2773,11 +3536,46 @@ export function configuredGroupFromPath(path: string, primaryFolder: string, fal
   return segments.length > 1 ? segments[0] || fallback : fallback;
 }
 
-export function applyTemplateTokens(content: string, title: string, date: string, time: string): string {
-  return content
+function yamlQuotedTemplateScalar(value: string): string {
+  return JSON.stringify(value.normalize("NFC"))
+    .replace(/[\u007f-\u009f]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`)
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+export function applyTemplateTokens(
+  content: string,
+  title: string,
+  date: string,
+  time: string,
+  context: TemplateTokenContext = {},
+): string {
+  const contextualValues = {
+    title: context.title ?? title,
+    id: context.id ?? "",
+    category: context.category ?? "",
+    parent: context.parent ?? "",
+    library: context.library ?? "",
+    type: context.type ?? "",
+  };
+  const protectedTokens: string[] = [];
+  let placeholderPrefix = "\u0000KBCC_YAML_TOKEN_";
+  while (content.includes(placeholderPrefix)) placeholderPrefix += "_";
+  const protectedContent = content.replace(/{{\s*yaml:(title|id|category|parent|library|type)\s*}}/gi, (_match, key: string) => {
+    const placeholder = `${placeholderPrefix}${protectedTokens.length}\u0000`;
+    protectedTokens.push(yamlQuotedTemplateScalar(
+      contextualValues[key.toLowerCase() as keyof typeof contextualValues],
+    ));
+    return placeholder;
+  });
+  let rendered = protectedContent
     .replace(/{{\s*title\s*}}/gi, () => title)
     .replace(/{{\s*date\s*}}/gi, () => date)
     .replace(/{{\s*time\s*}}/gi, () => time);
+  protectedTokens.forEach((value, index) => {
+    rendered = rendered.replace(`${placeholderPrefix}${index}\u0000`, value);
+  });
+  return rendered;
 }
 
 export function validateWritableFolderPath(folder: string, configDir: string): string | null {
@@ -3151,32 +3949,83 @@ export function buildIndexDiagnostics(data: PluginData, records: VaultRecord[], 
 
 export interface WorkspaceConfig {
   kind: "knowledge-base-command-center-workspace";
-  version: 1;
+  version: 1 | 2;
   exportedAt: string;
   settings: PluginSettings;
   indexGroupOrder: string[];
 }
 
 export function createWorkspaceConfig(data: PluginData, exportedAt: string): WorkspaceConfig {
+  const settings = structuredClone(data.settings);
+  settings.libraryNoteProfiles = cleanLibraryNoteProfiles(
+    settings.libraryNoteProfiles,
+    new Set(data.portableIndex.libraries
+      .filter((definition) => definition.archivedAt === null)
+      .map((definition) => definition.id)),
+  );
   return {
     kind: "knowledge-base-command-center-workspace",
-    version: 1,
+    version: 2,
     exportedAt,
-    settings: structuredClone(data.settings),
+    settings,
     indexGroupOrder: [...data.indexGroupOrder],
   };
+}
+
+/**
+ * Transfer files need stricter destination-aware validation than persisted
+ * plugin data. Keep bounded path strings exactly as supplied until the import
+ * preflight can reject an unsafe folder or atomically reset an unusable
+ * template. Normal load/migration continues to use cleanLibraryNoteProfiles.
+ */
+function parseTransferredLibraryNoteProfiles(input: unknown): LibraryNoteProfiles {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const entries = Object.entries(input as Record<string, unknown>);
+  if (entries.length > MAX_LIBRARIES) {
+    throw new Error(`Workspace Library creation profiles exceed the ${MAX_LIBRARIES}-Library limit.`);
+  }
+  const profiles = cleanLibraryNoteProfiles(input);
+  for (const [libraryId, raw] of entries) {
+    if (!isValidLibraryId(libraryId)) continue;
+    const value = asUnknownRecord(raw);
+    const retainPath = (key: "folder" | "templatePath"): void => {
+      if (!Object.prototype.hasOwnProperty.call(value, key)) return;
+      const path = value[key];
+      if (typeof path !== "string") {
+        throw new Error(`Workspace Library profile ${libraryId} ${key} must be text.`);
+      }
+      if (path.length > MAX_LIBRARY_NOTE_PROFILE_PATH_LENGTH) {
+        throw new Error(`Workspace Library profile ${libraryId} ${key} is too long.`);
+      }
+      const profile = profiles[libraryId] ?? {};
+      profile[key] = path;
+      profiles[libraryId] = profile;
+    };
+    retainPath("folder");
+    retainPath("templatePath");
+  }
+  return profiles;
 }
 
 export function parseWorkspaceConfig(input: unknown): WorkspaceConfig {
   if (!input || typeof input !== "object") throw new Error("The selected file is not a Command Center workspace configuration.");
   const value = input as Record<string, unknown>;
-  if (value.kind !== "knowledge-base-command-center-workspace" || value.version !== 1) throw new Error("Unsupported Command Center workspace configuration.");
+  if (value.kind !== "knowledge-base-command-center-workspace"
+    || (value.version !== 1 && value.version !== 2)) {
+    throw new Error("Unsupported Command Center workspace configuration.");
+  }
   transferArrayLength(value.indexGroupOrder, "Workspace group order", MAX_TRANSFER_COLLECTIONS);
+  const rawSettings = asUnknownRecord(value.settings);
+  const settings = { ...cleanSettings(rawSettings), setupComplete: true };
+  if (!settings.followUpCategories.some((category) => !category.archived)) {
+    throw new Error("Workspace Quick Append settings must contain at least one active category.");
+  }
+  settings.libraryNoteProfiles = parseTransferredLibraryNoteProfiles(rawSettings.libraryNoteProfiles);
   return {
     kind: "knowledge-base-command-center-workspace",
-    version: 1,
+    version: value.version,
     exportedAt: asText(value.exportedAt),
-    settings: { ...cleanSettings(value.settings), setupComplete: true },
+    settings,
     indexGroupOrder: [...new Set(asStringList(value.indexGroupOrder))],
   };
 }
@@ -3265,8 +4114,32 @@ interface TransferValidationBudget {
   snapshots: number;
 }
 
+interface PluginLoadValidationBudget {
+  transfer: TransferValidationBudget;
+  text: LoadTextValidationBudget;
+}
+
+function createPluginLoadValidationBudget(): PluginLoadValidationBudget {
+  return {
+    transfer: { references: 0, collectionStructures: 0, snapshots: 0 },
+    text: createLoadTextValidationBudget(),
+  };
+}
+
+function optionalPlainRecord(input: unknown, label: string): Record<string, unknown> {
+  if (input === undefined) return {};
+  if (!isPlainRecord(input)) throw new Error(`${label} must be an object.`);
+  return input;
+}
+
+function requiredPlainRecord(input: unknown, label: string): Record<string, unknown> {
+  if (!isPlainRecord(input)) throw new Error(`${label} must be an object.`);
+  return input;
+}
+
 function transferArrayLength(input: unknown, label: string, max: number): number {
-  if (!Array.isArray(input)) return 0;
+  if (input === undefined) return 0;
+  if (!Array.isArray(input)) throw new Error(`${label} must be a list.`);
   if (input.length > max) throw new Error(`${label} has too many entries.`);
   return input.length;
 }
@@ -3280,14 +4153,24 @@ function addTransferReferenceCount(budget: TransferValidationBudget, count: numb
 }
 
 function validateRecoveryReferenceList(input: unknown, label: string, budget: TransferValidationBudget): void {
-  const count = Array.isArray(input) ? input.length : typeof input === "string" && input.trim() ? 1 : 0;
+  if (input === undefined) return;
+  if (typeof input === "string") {
+    addTransferReferenceCount(budget, input.trim() ? 1 : 0, label);
+    return;
+  }
+  if (!Array.isArray(input)) throw new Error(`${label} must be a text list.`);
+  input.forEach((item, index) => {
+    if (typeof item !== "string") throw new Error(`${label} ${index + 1} must be text.`);
+  });
+  const count = input.length;
   addTransferReferenceCount(budget, count, label);
 }
 
 function ownEntryCount(input: unknown, label: string): number {
-  if (!input || typeof input !== "object" || Array.isArray(input)) return 0;
+  if (input === undefined) return 0;
+  if (!isPlainRecord(input)) throw new Error(`${label} must be an object.`);
   let count = 0;
-  for (const key in input as Record<string, unknown>) {
+  for (const key in input) {
     if (!Object.prototype.hasOwnProperty.call(input, key)) continue;
     count += 1;
     if (count > MAX_TRANSFER_LIST_ITEMS) throw new Error(`${label} has too many entries.`);
@@ -3296,16 +4179,30 @@ function ownEntryCount(input: unknown, label: string): number {
 }
 
 function validateRecoveryPortableIndex(input: unknown, label: string, budget: TransferValidationBudget): void {
-  const value = asUnknownRecord(input);
-  transferArrayLength(value.groups, `${label} groups`, MAX_TRANSFER_COLLECTIONS);
-  transferArrayLength(value.subjects, `${label} subjects`, MAX_TRANSFER_LIST_ITEMS);
-  transferArrayLength(value.libraries, `${label} libraries`, MAX_LIBRARIES);
+  const value = optionalPlainRecord(input, label);
+  addTransferReferenceCount(
+    budget,
+    transferArrayLength(value.groups, `${label} groups`, MAX_TRANSFER_COLLECTIONS),
+    `${label} groups`,
+  );
+  addTransferReferenceCount(
+    budget,
+    transferArrayLength(value.subjects, `${label} subjects`, MAX_TRANSFER_LIST_ITEMS),
+    `${label} subjects`,
+  );
+  addTransferReferenceCount(
+    budget,
+    transferArrayLength(value.libraries, `${label} libraries`, MAX_LIBRARIES),
+    `${label} libraries`,
+  );
   addTransferReferenceCount(budget, ownEntryCount(value.resolvedPathBySubjectId, `${label} note bindings`), `${label} note bindings`);
   validateRecoveryReferenceList(value.relinkableSubjectIds, `${label} relinkable identities`, budget);
-  const libraryLayouts = asUnknownRecord(value.libraryLayouts);
-  if (ownEntryCount(libraryLayouts, `${label} library layouts`) > MAX_LIBRARIES) {
+  const libraryLayouts = optionalPlainRecord(value.libraryLayouts, `${label} library layouts`);
+  const libraryLayoutCount = ownEntryCount(libraryLayouts, `${label} library layouts`);
+  if (libraryLayoutCount > MAX_LIBRARIES) {
     throw new Error(`${label} has too many library layouts.`);
   }
+  addTransferReferenceCount(budget, libraryLayoutCount, `${label} library layouts`);
   for (const [libraryId, layout] of Object.entries(libraryLayouts)) {
     if (!isValidLibraryId(libraryId)) throw new Error(`${label} has an invalid library ID.`);
     validateRecoveryCollections(layout, `${label} ${libraryId} layout`, budget);
@@ -3313,11 +4210,15 @@ function validateRecoveryPortableIndex(input: unknown, label: string, budget: Tr
 }
 
 function validateRecoveryVisual(input: unknown, label: string, budget: TransferValidationBudget): void {
-  const value = asUnknownRecord(input);
+  const value = optionalPlainRecord(input, label);
   const parentCount = ownEntryCount(value.parentByPath, `${label} parent map`);
   addTransferReferenceCount(budget, parentCount, `${label} parent map`);
-  const orders = asUnknownRecord(value.orderByContainer);
-  ownEntryCount(orders, `${label} order containers`);
+  const orders = optionalPlainRecord(value.orderByContainer, `${label} order containers`);
+  addTransferReferenceCount(
+    budget,
+    ownEntryCount(orders, `${label} order containers`),
+    `${label} order containers`,
+  );
   for (const [key, paths] of Object.entries(orders)) {
     validateRecoveryReferenceList(paths, `${label} order ${key}`, budget);
   }
@@ -3331,7 +4232,7 @@ function validateRecoveryCollections(input: unknown, label: string, budget: Tran
   budget.collectionStructures += collectionCount;
   if (!Array.isArray(input)) return;
   for (const [collectionIndex, raw] of input.entries()) {
-    const collection = asUnknownRecord(raw);
+    const collection = requiredPlainRecord(raw, `${label} ${collectionIndex + 1}`);
     validateRecoveryReferenceList(collection.subjects, `${label} ${collectionIndex + 1} subjects`, budget);
     const subheadingCount = transferArrayLength(collection.subheadings, `${label} ${collectionIndex + 1} subheadings`, MAX_TRANSFER_COLLECTIONS);
     if (budget.collectionStructures > MAX_TRANSFER_COLLECTIONS - subheadingCount) {
@@ -3340,7 +4241,7 @@ function validateRecoveryCollections(input: unknown, label: string, budget: Tran
     budget.collectionStructures += subheadingCount;
     if (!Array.isArray(collection.subheadings)) continue;
     for (const [subheadingIndex, rawSubheading] of collection.subheadings.entries()) {
-      const subheading = asUnknownRecord(rawSubheading);
+      const subheading = requiredPlainRecord(rawSubheading, `${label} ${collectionIndex + 1} subheading ${subheadingIndex + 1}`);
       validateRecoveryReferenceList(
         subheading.subjects,
         `${label} ${collectionIndex + 1} subheading ${subheadingIndex + 1} subjects`,
@@ -3350,8 +4251,14 @@ function validateRecoveryCollections(input: unknown, label: string, budget: Tran
   }
 }
 
-function validateRecoverySnapshot(input: unknown, label: string, budget: TransferValidationBudget, remainingSnapshotLevels: number): void {
-  const value = asUnknownRecord(input);
+function validateRecoverySnapshot(
+  input: unknown,
+  label: string,
+  budget: TransferValidationBudget,
+  remainingSnapshotLevels: number,
+  trimExcessSnapshots = false,
+): void {
+  const value = requiredPlainRecord(input, label);
   validateRecoveryCollections(value.collections, `${label} collections`, budget);
   for (const [key, list] of [
     ["pins", value.pinnedPaths],
@@ -3359,29 +4266,363 @@ function validateRecoverySnapshot(input: unknown, label: string, budget: Transfe
     ["manual index", value.manualIndexPaths],
     ["hidden index", value.excludedIndexPaths],
   ] as const) validateRecoveryReferenceList(list, `${label} ${key}`, budget);
-  transferArrayLength(value.savedViews, `${label} saved views`, MAX_TRANSFER_COLLECTIONS);
-  transferArrayLength(value.indexGroupOrder, `${label} group order`, MAX_TRANSFER_COLLECTIONS);
+  addTransferReferenceCount(
+    budget,
+    transferArrayLength(value.savedViews, `${label} saved views`, MAX_TRANSFER_COLLECTIONS),
+    `${label} saved views`,
+  );
+  addTransferReferenceCount(
+    budget,
+    transferArrayLength(value.indexGroupOrder, `${label} group order`, MAX_TRANSFER_COLLECTIONS),
+    `${label} group order`,
+  );
   addTransferReferenceCount(budget, ownEntryCount(value.indexGroupByPath, `${label} visual groups`), `${label} visual groups`);
   addTransferReferenceCount(budget, ownEntryCount(value.displayNameByPath, `${label} display names`), `${label} display names`);
   addTransferReferenceCount(budget, ownEntryCount(value.indexGroupAliases, `${label} group aliases`), `${label} group aliases`);
   validateRecoveryVisual(value.curriculumVisual, `${label} visual hierarchy`, budget);
   if (value.portableIndex !== undefined) validateRecoveryPortableIndex(value.portableIndex, `${label} portable index`, budget);
   if (remainingSnapshotLevels <= 0 || value.layoutSnapshots === undefined) return;
-  const snapshotCount = transferArrayLength(value.layoutSnapshots, `${label} named snapshots`, MAX_TRANSFER_SNAPSHOTS);
+  const rawSnapshots = value.layoutSnapshots;
+  const retainedSnapshots = trimExcessSnapshots && Array.isArray(rawSnapshots)
+    ? rawSnapshots.slice(-MAX_TRANSFER_SNAPSHOTS)
+    : rawSnapshots;
+  const snapshotCount = transferArrayLength(retainedSnapshots, `${label} named snapshots`, MAX_TRANSFER_SNAPSHOTS);
   if (budget.snapshots > MAX_TRANSFER_SNAPSHOTS - snapshotCount) throw new Error(`The recovery backup contains too many named snapshots.`);
   budget.snapshots += snapshotCount;
-  if (!Array.isArray(value.layoutSnapshots)) return;
-  value.layoutSnapshots.forEach((snapshot, index) => validateRecoverySnapshot(
+  if (!Array.isArray(retainedSnapshots)) return;
+  retainedSnapshots.forEach((snapshot, index) => validateRecoverySnapshot(
     snapshot,
     `${label} snapshot ${index + 1}`,
     budget,
     remainingSnapshotLevels - 1,
+    trimExcessSnapshots,
   ));
+}
+
+interface LoadTextValidationBudget {
+  bytes: number;
+  byteLengthByText: Map<string, number>;
+}
+
+function createLoadTextValidationBudget(): LoadTextValidationBudget {
+  return { bytes: 0, byteLengthByText: new Map<string, number>() };
+}
+
+function loadedTextByteLength(input: string, budget: LoadTextValidationBudget): number {
+  // Cache only a bounded set of long repeated values (for example a hostile
+  // repeated 10k title). Short unique IDs are cheaper to scan than to retain
+  // in another potentially 250k-entry map.
+  const cacheable = input.length >= 256;
+  const cached = cacheable ? budget.byteLengthByText.get(input) : undefined;
+  if (cached !== undefined) return cached;
+  let asciiOnly = true;
+  for (let index = 0; index < input.length; index += 1) {
+    if (input.charCodeAt(index) > 0x7f) {
+      asciiOnly = false;
+      break;
+    }
+  }
+  const bytes = asciiOnly ? input.length : snapshotUtf8Encoder.encode(input).byteLength;
+  if (cacheable && budget.byteLengthByText.size < 1_024) budget.byteLengthByText.set(input, bytes);
+  return bytes;
+}
+
+function validateLoadedBoolean(input: unknown, label: string): void {
+  if (input !== undefined && typeof input !== "boolean") throw new Error(`${label} must be true or false.`);
+}
+
+function validateLoadedNumber(input: unknown, label: string, allowNull = false): void {
+  if (input === undefined || (allowNull && input === null)) return;
+  if (typeof input !== "number" && typeof input !== "string") {
+    throw new Error(`${label} must be a number${allowNull ? " or null" : ""}.`);
+  }
+  if (typeof input === "string" && input.length > 64) throw new Error(`${label} is too long.`);
+  if (!Number.isFinite(Number(input))) throw new Error(`${label} must be a finite number.`);
+}
+
+function validateLoadedText(
+  input: unknown,
+  label: string,
+  budget: LoadTextValidationBudget,
+  allowNull = false,
+): void {
+  if (input === undefined || (allowNull && input === null)) return;
+  if (typeof input !== "string") throw new Error(`${label} must be text${allowNull ? " or null" : ""}.`);
+  // Bound individual raw allocations, then charge their exact raw UTF-8 size.
+  // Counting pre-trim bytes prevents whitespace padding from evading the
+  // envelope cap, while UTF-8 measurement correctly charges multibyte text.
+  if (input.length > MAX_TRANSFER_TEXT_LENGTH) {
+    throw new Error(`${label} is longer than ${MAX_TRANSFER_TEXT_LENGTH.toLocaleString()} characters.`);
+  }
+  const bytes = loadedTextByteLength(input, budget);
+  if (budget.bytes > MAX_TRANSFER_TOTAL_TEXT_LENGTH - bytes) {
+    throw new Error(`Plugin data contains more than ${MAX_TRANSFER_TOTAL_TEXT_LENGTH.toLocaleString()} bytes of text.`);
+  }
+  budget.bytes += bytes;
+}
+
+function validateLoadedTextList(input: unknown, label: string, budget: LoadTextValidationBudget): void {
+  if (input === undefined) return;
+  if (typeof input === "string") {
+    validateLoadedText(input, label, budget);
+    return;
+  }
+  if (!Array.isArray(input)) throw new Error(`${label} must be a text list.`);
+  input.forEach((item, index) => {
+    if (typeof item !== "string") throw new Error(`${label} ${index + 1} must be text.`);
+    validateLoadedText(item, `${label} ${index + 1}`, budget);
+  });
+}
+
+function validateLoadedTextMap(
+  input: unknown,
+  label: string,
+  budget: LoadTextValidationBudget,
+  allowNullValues = false,
+): void {
+  const value = optionalPlainRecord(input, label);
+  for (const key in value) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    validateLoadedText(key, `${label} key`, budget);
+    validateLoadedText(value[key], `${label} value`, budget, allowNullValues);
+  }
+}
+
+function validateLoadedLayoutText(input: unknown, label: string, budget: LoadTextValidationBudget): void {
+  if (input === undefined) return;
+  if (!Array.isArray(input)) throw new Error(`${label} must be a list.`);
+  input.forEach((rawHeading, headingIndex) => {
+    const headingLabel = `${label} ${headingIndex + 1}`;
+    const heading = requiredPlainRecord(rawHeading, headingLabel);
+    validateLoadedText(heading.id, `${headingLabel} ID`, budget);
+    validateLoadedText(heading.title, `${headingLabel} title`, budget);
+    validateLoadedTextList(heading.subjects, `${headingLabel} subjects`, budget);
+    if (heading.collapsed !== undefined && typeof heading.collapsed !== "boolean") {
+      throw new Error(`${headingLabel} collapsed state must be true or false.`);
+    }
+    if (heading.subheadings === undefined) return;
+    if (!Array.isArray(heading.subheadings)) throw new Error(`${headingLabel} subheadings must be a list.`);
+    heading.subheadings.forEach((rawSubheading, subheadingIndex) => {
+      const subheadingLabel = `${headingLabel} subheading ${subheadingIndex + 1}`;
+      const subheading = requiredPlainRecord(rawSubheading, subheadingLabel);
+      validateLoadedText(subheading.id, `${subheadingLabel} ID`, budget);
+      validateLoadedText(subheading.title, `${subheadingLabel} title`, budget);
+      validateLoadedTextList(subheading.subjects, `${subheadingLabel} subjects`, budget);
+      if (subheading.collapsed !== undefined && typeof subheading.collapsed !== "boolean") {
+        throw new Error(`${subheadingLabel} collapsed state must be true or false.`);
+      }
+    });
+  });
+}
+
+function validateLoadedSavedViewsText(input: unknown, label: string, budget: LoadTextValidationBudget): void {
+  if (input === undefined) return;
+  if (!Array.isArray(input)) throw new Error(`${label} must be a list.`);
+  input.forEach((rawView, index) => {
+    const viewLabel = `${label} ${index + 1}`;
+    const view = requiredPlainRecord(rawView, viewLabel);
+    validateLoadedText(view.id, `${viewLabel} ID`, budget);
+    validateLoadedText(view.name, `${viewLabel} name`, budget);
+    validateLoadedText(view.tab, `${viewLabel} tab`, budget);
+    validateLoadedText(view.query, `${viewLabel} query`, budget);
+  });
+}
+
+function validateLoadedVisualText(input: unknown, label: string, budget: LoadTextValidationBudget): void {
+  const value = optionalPlainRecord(input, label);
+  validateLoadedTextMap(value.parentByPath, `${label} parent map`, budget, true);
+  const orders = optionalPlainRecord(value.orderByContainer, `${label} order containers`);
+  for (const key in orders) {
+    if (!Object.prototype.hasOwnProperty.call(orders, key)) continue;
+    validateLoadedText(key, `${label} order-container key`, budget);
+    validateLoadedTextList(orders[key], `${label} order`, budget);
+  }
+}
+
+function validateLoadedSettingsText(input: unknown, label: string, budget: LoadTextValidationBudget): void {
+  const settings = optionalPlainRecord(input, label);
+  for (const key of [
+    "workspaceMode",
+    "workspaceName",
+    "workspaceSubtitle",
+    "indexLabel",
+    "itemSingular",
+    "itemPlural",
+    "groupLabel",
+    "primaryFolder",
+    "inboxLabel",
+    "idProperty",
+    "groupProperty",
+    "parentProperty",
+    "templatesFolder",
+    "defaultNoteFolder",
+    "defaultNewNoteMode",
+    "defaultTemplatePath",
+    "attachmentStorageMode",
+    "attachmentFolder",
+    "attachmentInsertionMode",
+    "attachmentMarker",
+    "attachmentHeading",
+    "defaultTab",
+    "proposalFolder",
+    "openNoteBehavior",
+  ] as const) validateLoadedText(settings[key], `${label} ${key}`, budget);
+  for (const key of [
+    "setupComplete",
+    "enableHoverPreview",
+    "showSafetyBadges",
+    "enableAdvancedCanonicalActions",
+    "allowClinicalVisualGroupMoves",
+  ] as const) validateLoadedBoolean(settings[key], `${label} ${key}`);
+  validateLoadedNumber(settings.recentLimit, `${label} recentLimit`);
+
+  const categories = settings.followUpCategories;
+  if (categories !== undefined) {
+    if (!Array.isArray(categories)) throw new Error(`${label} followUpCategories must be a list.`);
+    if (categories.length > MAX_FOLLOW_UP_CATEGORIES) {
+      throw new Error(`${label} followUpCategories has too many entries.`);
+    }
+    categories.forEach((rawCategory, index) => {
+      const category = requiredPlainRecord(rawCategory, `${label} followUpCategories ${index + 1}`);
+      validateLoadedText(category.id, `${label} followUpCategories ${index + 1} ID`, budget);
+      validateLoadedText(category.label, `${label} followUpCategories ${index + 1} label`, budget);
+      validateLoadedText(category.style, `${label} followUpCategories ${index + 1} style`, budget);
+      validateLoadedBoolean(category.includeDate, `${label} followUpCategories ${index + 1} includeDate`);
+      validateLoadedBoolean(category.archived, `${label} followUpCategories ${index + 1} archived`);
+    });
+  }
+
+  const profiles = optionalPlainRecord(settings.libraryNoteProfiles, `${label} libraryNoteProfiles`);
+  let profileCount = 0;
+  for (const [libraryId, rawProfile] of Object.entries(profiles)) {
+    profileCount += 1;
+    if (profileCount > MAX_LIBRARIES) throw new Error(`${label} libraryNoteProfiles has too many entries.`);
+    validateLoadedText(libraryId, `${label} libraryNoteProfiles key`, budget);
+    const profile = requiredPlainRecord(rawProfile, `${label} libraryNoteProfiles ${libraryId}`);
+    validateLoadedText(profile.folder, `${label} libraryNoteProfiles ${libraryId} folder`, budget);
+    validateLoadedText(profile.mode, `${label} libraryNoteProfiles ${libraryId} mode`, budget);
+    validateLoadedText(profile.templatePath, `${label} libraryNoteProfiles ${libraryId} templatePath`, budget);
+  }
+}
+
+function validateLoadedPortableIndexText(input: unknown, label: string, budget: LoadTextValidationBudget): void {
+  const value = optionalPlainRecord(input, label);
+  validateLoadedNumber(value.version, `${label} version`);
+  if (value.groups !== undefined && !Array.isArray(value.groups)) throw new Error(`${label} groups must be a list.`);
+  if (Array.isArray(value.groups)) value.groups.forEach((rawGroup, index) => {
+    const group = requiredPlainRecord(rawGroup, `${label} group ${index + 1}`);
+    validateLoadedText(group.id, `${label} group ${index + 1} ID`, budget);
+    validateLoadedText(group.title, `${label} group ${index + 1} title`, budget);
+    validateLoadedNumber(group.order, `${label} group ${index + 1} order`);
+  });
+  if (value.subjects !== undefined && !Array.isArray(value.subjects)) throw new Error(`${label} subjects must be a list.`);
+  if (Array.isArray(value.subjects)) value.subjects.forEach((rawSubject, index) => {
+    const subjectLabel = `${label} subject ${index + 1}`;
+    const subject = requiredPlainRecord(rawSubject, subjectLabel);
+    for (const key of ["id", "title", "groupId", "parentId", "configuredId", "recordKind", "libraryId"] as const) {
+      validateLoadedText(subject[key], `${subjectLabel} ${key}`, budget, key === "parentId" || key === "libraryId");
+    }
+    validateLoadedNumber(subject.order, `${subjectLabel} order`);
+    validateLoadedBoolean(subject.indexed, `${subjectLabel} indexed`);
+  });
+  validateLoadedTextMap(value.resolvedPathBySubjectId, `${label} note bindings`, budget);
+  validateLoadedTextList(value.relinkableSubjectIds, `${label} relinkable identities`, budget);
+  if (value.libraries !== undefined && !Array.isArray(value.libraries)) throw new Error(`${label} libraries must be a list.`);
+  if (Array.isArray(value.libraries)) value.libraries.forEach((rawLibrary, index) => {
+    const libraryLabel = `${label} library ${index + 1}`;
+    const library = requiredPlainRecord(rawLibrary, libraryLabel);
+    for (const key of ["id", "name", "singularName", "icon", "sourceKind"] as const) {
+      validateLoadedText(library[key], `${libraryLabel} ${key}`, budget, key === "sourceKind");
+    }
+    validateLoadedNumber(library.order, `${libraryLabel} order`);
+    validateLoadedNumber(library.archivedAt, `${libraryLabel} archivedAt`, true);
+  });
+  const layouts = optionalPlainRecord(value.libraryLayouts, `${label} library layouts`);
+  for (const key in layouts) {
+    if (!Object.prototype.hasOwnProperty.call(layouts, key)) continue;
+    validateLoadedText(key, `${label} library-layout ID`, budget);
+    validateLoadedLayoutText(layouts[key], `${label} ${key} layout`, budget);
+  }
+}
+
+function validateLoadedSnapshotText(
+  input: unknown,
+  label: string,
+  budget: LoadTextValidationBudget,
+  remainingSnapshotLevels: number,
+  trimExcessSnapshots = false,
+): void {
+  const value = requiredPlainRecord(input, label);
+  validateLoadedText(value.label, `${label} label`, budget);
+  validateLoadedText(value.activeTab, `${label} active tab`, budget);
+  validateLoadedNumber(value.at, `${label} timestamp`);
+  validateLoadedLayoutText(value.collections, `${label} collections`, budget);
+  for (const [name, list] of [
+    ["pins", value.pinnedPaths],
+    ["Next list", value.nextStudyPaths],
+    ["manual index", value.manualIndexPaths],
+    ["hidden index", value.excludedIndexPaths],
+    ["group order", value.indexGroupOrder],
+  ] as const) validateLoadedTextList(list, `${label} ${name}`, budget);
+  validateLoadedSavedViewsText(value.savedViews, `${label} saved views`, budget);
+  validateLoadedVisualText(value.curriculumVisual, `${label} visual hierarchy`, budget);
+  validateLoadedTextMap(value.indexGroupByPath, `${label} visual groups`, budget);
+  validateLoadedTextMap(value.displayNameByPath, `${label} display names`, budget);
+  validateLoadedTextMap(value.indexGroupAliases, `${label} group aliases`, budget);
+  if (value.portableIndex !== undefined) validateLoadedPortableIndexText(value.portableIndex, `${label} portable index`, budget);
+  if (value.settings !== undefined) validateLoadedSettingsText(value.settings, `${label} settings`, budget);
+  if (remainingSnapshotLevels <= 0 || value.layoutSnapshots === undefined) return;
+  if (!Array.isArray(value.layoutSnapshots)) throw new Error(`${label} named snapshots must be a list.`);
+  const snapshots = trimExcessSnapshots
+    ? value.layoutSnapshots.slice(-MAX_TRANSFER_SNAPSHOTS)
+    : value.layoutSnapshots;
+  snapshots.forEach((snapshot, index) => validateLoadedSnapshotText(
+    snapshot,
+    `${label} snapshot ${index + 1}`,
+    budget,
+    remainingSnapshotLevels - 1,
+    trimExcessSnapshots,
+  ));
+}
+
+function validatePluginDataLoadShape(
+  input: Record<string, unknown>,
+  validationBudget = createPluginLoadValidationBudget(),
+): void {
+  const { transfer: transferBudget, text: textBudget } = validationBudget;
+  parseExplicitVersion(input, "Plugin data");
+  // Named snapshots and Undo/Redo are independently bounded and safely
+  // droppable by cleanSnapshots. Primary organization is authoritative and
+  // therefore fails read-only instead of being silently truncated.
+  validateRecoverySnapshot(input, "Plugin data", transferBudget, 0);
+  const collapsed = optionalPlainRecord(input.collapsed, "Plugin data collapsed state");
+  for (const [name, list] of [
+    ["collapsed curriculum domains", collapsed.curriculumDomains],
+    ["collapsed curriculum nodes", collapsed.curriculumNodes],
+    ["collapsed queues", collapsed.queues],
+  ] as const) validateRecoveryReferenceList(list, `Plugin data ${name}`, transferBudget);
+
+  validateLoadedSnapshotText(input, "Plugin data", textBudget, 0);
+  validateLoadedText(input.selectedPath, "Plugin data selected path", textBudget);
+  validateLoadedTextList(collapsed.curriculumDomains, "Plugin data collapsed curriculum domains", textBudget);
+  validateLoadedTextList(collapsed.curriculumNodes, "Plugin data collapsed curriculum nodes", textBudget);
+  validateLoadedTextList(collapsed.queues, "Plugin data collapsed queues", textBudget);
+}
+
+function validateLegacyV1LoadShape(
+  input: Record<string, unknown>,
+  validationBudget = createPluginLoadValidationBudget(),
+): void {
+  if (!Array.isArray(input.headings)) throw new Error("Legacy plugin headings must be a list.");
+  validateRecoveryCollections(input.headings, "Legacy plugin headings", validationBudget.transfer);
+  validateLoadedLayoutText(input.headings, "Legacy plugin headings", validationBudget.text);
+  validateLoadedText(input.selectedPath, "Legacy plugin selected path", validationBudget.text);
 }
 
 function validatePersonalBackupTransferShape(value: Record<string, unknown>): void {
   const budget: TransferValidationBudget = { references: 0, collectionStructures: 0, snapshots: 0 };
   validateRecoverySnapshot(value, "Recovery", budget, 2);
+  validateLoadedSnapshotText(value, "Recovery", createLoadTextValidationBudget(), 2);
 }
 
 export function parsePersonalBackup(input: unknown): PersonalBackup {
@@ -3426,6 +4667,247 @@ export function parsePersonalBackup(input: unknown): PersonalBackup {
     layoutSnapshots: cleanSnapshots(value.layoutSnapshots, true, MAX_TRANSFER_SNAPSHOTS),
     portableIndex: cleanPortableIndex(value.portableIndex),
   };
+}
+
+function serializedUtf8Bytes(value: unknown): number {
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) throw new Error("Device-local state is not serializable.");
+  return new TextEncoder().encode(serialized).byteLength;
+}
+
+function strictLocalString(value: unknown, label: string, maxLength: number): string {
+  if (typeof value !== "string" || value.length > maxLength || /[\p{Cc}\p{Cf}]/u.test(value)) {
+    throw new Error(`${label} is malformed.`);
+  }
+  return value;
+}
+
+function strictLocalStringList(input: unknown, label: string, maxCount = MAX_TRANSFER_LIST_ITEMS): string[] {
+  if (!Array.isArray(input) || input.length > maxCount) throw new Error(`${label} is malformed or too large.`);
+  return input.map((value, index) => strictLocalString(value, `${label} entry ${index + 1}`, 4096));
+}
+
+function parseLocalCollapsedLayout(
+  input: unknown,
+  label: string,
+  budget: { structures: number },
+): CollapsedLayoutItemState[] {
+  if (!Array.isArray(input) || input.length > MAX_TRANSFER_COLLECTIONS) {
+    throw new Error(`${label} is malformed or too large.`);
+  }
+  const output: CollapsedLayoutItemState[] = [];
+  for (const [headingIndex, raw] of input.entries()) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${label} heading ${headingIndex + 1} is malformed.`);
+    const value = raw as Record<string, unknown>;
+    const id = cleanKnowledgeBaseId(value.id, `${label} heading ${headingIndex + 1}`);
+    if (typeof value.collapsed !== "boolean" || !Array.isArray(value.subheadings)) {
+      throw new Error(`${label} heading ${headingIndex + 1} is malformed.`);
+    }
+    budget.structures += 1 + value.subheadings.length;
+    if (budget.structures > MAX_TRANSFER_COLLECTIONS) throw new Error("Device-local collapse state is too large.");
+    const subheadings = value.subheadings.map((rawSubheading, subheadingIndex) => {
+      if (!rawSubheading || typeof rawSubheading !== "object" || Array.isArray(rawSubheading)) {
+        throw new Error(`${label} subheading ${subheadingIndex + 1} is malformed.`);
+      }
+      const subheading = rawSubheading as Record<string, unknown>;
+      if (typeof subheading.collapsed !== "boolean") throw new Error(`${label} subheading ${subheadingIndex + 1} is malformed.`);
+      return {
+        id: cleanKnowledgeBaseId(subheading.id, `${label} subheading ${subheadingIndex + 1}`),
+        collapsed: subheading.collapsed,
+      };
+    });
+    output.push({ id, collapsed: value.collapsed, subheadings });
+  }
+  return output;
+}
+
+function parseDeviceHistory(input: unknown, label: string): PersonalSnapshot[] {
+  if (!Array.isArray(input) || input.length > 20) throw new Error(`${label} is malformed or too large.`);
+  const budget: TransferValidationBudget = { references: 0, collectionStructures: 0, snapshots: 0 };
+  for (const [index, raw] of input.entries()) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${label} entry ${index + 1} is malformed.`);
+    const snapshot = raw as Record<string, unknown>;
+    if (typeof snapshot.label !== "string"
+      || !Number.isFinite(Number(snapshot.at))
+      || !Array.isArray(snapshot.collections)
+      || !Array.isArray(snapshot.pinnedPaths)
+      || !Array.isArray(snapshot.nextStudyPaths)
+      || !Array.isArray(snapshot.savedViews)
+      || !snapshot.curriculumVisual
+      || typeof snapshot.curriculumVisual !== "object") {
+      throw new Error(`${label} entry ${index + 1} is malformed.`);
+    }
+    validateRecoverySnapshot(snapshot, `${label} entry ${index + 1}`, budget, 2);
+  }
+  const cleaned = cleanSnapshots(input);
+  if (cleaned.length !== input.length) throw new Error(`${label} could not be parsed without dropping entries.`);
+  return cleaned;
+}
+
+/** Strictly parse one device's state; malformed input is discarded by the caller. */
+export function parseDeviceLocalPluginState(input: unknown): DeviceLocalPluginState {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Device-local state is malformed.");
+  if (serializedUtf8Bytes(input) > MAX_DEVICE_LOCAL_STATE_BYTES) throw new Error("Device-local state is too large.");
+  const value = input as Record<string, unknown>;
+  if (value.version !== DEVICE_LOCAL_STATE_VERSION || !Array.isArray(value.bases) || value.bases.length > MAX_KNOWLEDGE_BASES) {
+    throw new Error("Device-local state has an unsupported or malformed shape.");
+  }
+  const vaultId = cleanKnowledgeBaseId(value.vaultId, "Device-local vault");
+  const activeBaseId = cleanKnowledgeBaseId(value.activeBaseId, "Device-local active knowledge base");
+  const baseIds = new Set<string>();
+  const budget = { structures: 0 };
+  const bases: DeviceLocalKnowledgeBaseState[] = value.bases.map((raw, index) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`Device-local base ${index + 1} is malformed.`);
+    const base = raw as Record<string, unknown>;
+    const baseId = cleanKnowledgeBaseId(base.baseId, `Device-local base ${index + 1}`);
+    if (baseIds.has(baseId)) throw new Error(`Device-local base ${baseId} is duplicated.`);
+    baseIds.add(baseId);
+    if (!base.view || typeof base.view !== "object" || Array.isArray(base.view)) throw new Error(`Device-local base ${baseId} is malformed.`);
+    const view = base.view as Record<string, unknown>;
+    if (!isMainTab(view.activeTab)) throw new Error(`Device-local base ${baseId} has an invalid active tab.`);
+    const collapsed = view.collapsed as Record<string, unknown> | null;
+    if (!collapsed || typeof collapsed !== "object" || Array.isArray(collapsed)) {
+      throw new Error(`Device-local base ${baseId} has malformed collapse state.`);
+    }
+    if (!Array.isArray(view.libraryLayouts) || view.libraryLayouts.length > MAX_LIBRARIES) {
+      throw new Error(`Device-local base ${baseId} has malformed Library collapse state.`);
+    }
+    const libraryIds = new Set<string>();
+    const libraryLayouts: CollapsedLibraryLayoutState[] = view.libraryLayouts.map((rawLibrary, libraryIndex) => {
+      if (!rawLibrary || typeof rawLibrary !== "object" || Array.isArray(rawLibrary)) {
+        throw new Error(`Device-local base ${baseId} Library ${libraryIndex + 1} is malformed.`);
+      }
+      const library = rawLibrary as Record<string, unknown>;
+      if (!isValidLibraryId(library.libraryId) || libraryIds.has(library.libraryId)) {
+        throw new Error(`Device-local base ${baseId} has an invalid or duplicate Library ID.`);
+      }
+      libraryIds.add(library.libraryId);
+      return {
+        libraryId: library.libraryId,
+        headings: parseLocalCollapsedLayout(library.headings, `Device-local base ${baseId} Library ${library.libraryId}`, budget),
+      };
+    });
+    return {
+      baseId,
+      view: {
+        selectedPath: strictLocalString(view.selectedPath, `Device-local base ${baseId} selected path`, 4096),
+        activeTab: view.activeTab,
+        collapsed: {
+          curriculumDomains: strictLocalStringList(collapsed.curriculumDomains, `Device-local base ${baseId} collapsed domains`),
+          curriculumNodes: strictLocalStringList(collapsed.curriculumNodes, `Device-local base ${baseId} collapsed nodes`),
+          queues: strictLocalStringList(collapsed.queues, `Device-local base ${baseId} collapsed queues`, 1000),
+        },
+        collections: parseLocalCollapsedLayout(view.collections, `Device-local base ${baseId} collections`, budget),
+        libraryLayouts,
+        undoStack: parseDeviceHistory(view.undoStack, `Device-local base ${baseId} Undo history`),
+        redoStack: parseDeviceHistory(view.redoStack, `Device-local base ${baseId} Redo history`),
+      },
+    };
+  });
+  return { version: DEVICE_LOCAL_STATE_VERSION, vaultId, activeBaseId, bases };
+}
+
+export interface DeviceLocalPluginStateBuildResult {
+  state: DeviceLocalPluginState;
+  historyTruncated: boolean;
+  viewStateTruncated: boolean;
+}
+
+/**
+ * Build a bounded localStorage payload. Under aggregate pressure, discard the
+ * oldest history depth across bases first while preserving a suffix containing
+ * each stack's newest entries. Ties are deterministic and favor retaining the
+ * active base. Route/collapse data is reduced only after all history is gone.
+ */
+export function createDeviceLocalPluginStateWithReport(store: PluginStore): DeviceLocalPluginStateBuildResult {
+  const available = store.bases.filter((entry) => entry.archivedAt === null);
+  const activeBaseId = available.some((entry) => entry.id === store.activeBaseId)
+    ? store.activeBaseId
+    : available[0]?.id ?? store.bases[0]?.id ?? DEFAULT_KNOWLEDGE_BASE_ID;
+  const state: DeviceLocalPluginState = {
+    version: DEVICE_LOCAL_STATE_VERSION,
+    vaultId: store.vaultId,
+    activeBaseId,
+    bases: store.bases.map((entry) => ({ baseId: entry.id, view: capturePluginViewState(entry.data) })),
+  };
+  if (serializedUtf8Bytes(state) <= MAX_DEVICE_LOCAL_STATE_BYTES) {
+    return { state, historyTruncated: false, viewStateTruncated: false };
+  }
+
+  type HistoryCandidate = {
+    activeRank: number;
+    baseId: string;
+    index: number;
+    recencyDepth: number;
+    snapshot: PersonalSnapshot;
+    stack: "redo" | "undo";
+  };
+  const candidates: HistoryCandidate[] = [];
+  const originalHistory = new Map(state.bases.map((base) => [base.baseId, {
+    undo: [...base.view.undoStack],
+    redo: [...base.view.redoStack],
+  }]));
+  for (const base of state.bases) {
+    for (const [stack, snapshots] of [
+      ["undo", base.view.undoStack],
+      ["redo", base.view.redoStack],
+    ] as const) {
+      snapshots.forEach((snapshot, index) => candidates.push({
+        activeRank: base.baseId === activeBaseId ? 1 : 0,
+        baseId: base.baseId,
+        index,
+        recencyDepth: snapshots.length - index,
+        snapshot,
+        stack,
+      }));
+    }
+  }
+  candidates.sort((left, right) => right.recencyDepth - left.recencyDepth
+    || left.activeRank - right.activeRank
+    || left.baseId.localeCompare(right.baseId)
+    || left.stack.localeCompare(right.stack)
+    || left.index - right.index);
+  const rank = new Map(candidates.map((candidate, index) => [candidate.snapshot, index]));
+  const applyHistoryDropCount = (dropCount: number): void => {
+    for (const base of state.bases) {
+      const original = originalHistory.get(base.baseId);
+      base.view.undoStack = (original?.undo ?? []).filter((snapshot) => (rank.get(snapshot) ?? candidates.length) >= dropCount);
+      base.view.redoStack = (original?.redo ?? []).filter((snapshot) => (rank.get(snapshot) ?? candidates.length) >= dropCount);
+    }
+  };
+  let low = 0;
+  let high = candidates.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    applyHistoryDropCount(middle);
+    if (serializedUtf8Bytes(state) <= MAX_DEVICE_LOCAL_STATE_BYTES) high = middle;
+    else low = middle + 1;
+  }
+  applyHistoryDropCount(low);
+  const historyTruncated = low > 0;
+  if (serializedUtf8Bytes(state) <= MAX_DEVICE_LOCAL_STATE_BYTES) {
+    return { state, historyTruncated, viewStateTruncated: false };
+  }
+
+  const active = state.bases.find((base) => base.baseId === activeBaseId);
+  const viewStateTruncated = state.bases.length > (active ? 1 : 0);
+  state.bases = active ? [active] : [];
+  if (serializedUtf8Bytes(state) <= MAX_DEVICE_LOCAL_STATE_BYTES) {
+    return { state, historyTruncated, viewStateTruncated };
+  }
+  if (active) {
+    active.view.selectedPath = "";
+    active.view.collapsed = structuredClone(DEFAULT_DATA.collapsed);
+    active.view.collections = [];
+    active.view.libraryLayouts = [];
+  }
+  if (serializedUtf8Bytes(state) > MAX_DEVICE_LOCAL_STATE_BYTES) throw new Error("Device-local state could not be bounded safely.");
+  return { state, historyTruncated, viewStateTruncated: true };
+}
+
+/** Build the ordinary bounded localStorage payload without migration metadata. */
+export function createDeviceLocalPluginState(store: PluginStore): DeviceLocalPluginState {
+  return createDeviceLocalPluginStateWithReport(store).state;
 }
 
 export interface PersonalBackupVaultCheck {
