@@ -62,8 +62,16 @@ test("public repository metadata is present", async () => {
   assert.match(readme, /Two additional ENT-only workflows can change selected files/);
   assert.match(readme, /Quick append is a deliberate generic exception/);
   assert.match(readme, /stable internal ID `ent-vault-command-center`/);
-  assert.match(readme, /Portable packages created by version .* use format version 4/i);
-  assert.match(readme, /Current v9 (?:snapshots|files)/i);
+  // The README must state the versions the code actually writes, so a format
+  // bump cannot silently leave the public documentation behind.
+  const portability = await readFile(path.join(root, "src", "portability.ts"), "utf8");
+  const portableVersion = /export const PORTABLE_EXPORT_VERSION = (\d+) as const/u.exec(portability)?.[1];
+  assert.ok(portableVersion, "src/portability.ts must declare PORTABLE_EXPORT_VERSION");
+  const model = await readFile(path.join(root, "src", "model.ts"), "utf8");
+  const backupVersion = /export interface PersonalBackup extends PersonalOrganizationState \{[\s\S]*?\n {2}version: (\d+);/u.exec(model)?.[1];
+  assert.ok(backupVersion, "src/model.ts must declare the PersonalBackup version");
+  assert.match(readme, new RegExp(`Portable packages created by version .* use format version ${portableVersion}`, "iu"));
+  assert.match(readme, new RegExp(`Current v${backupVersion} (?:snapshots|files)`, "iu"));
   assert.match(readme, /obsidian:\/\/kbcc-quick-entry/);
   assert.match(readme, /obsidian:\/\/kbcc-create-subject/);
   assert.match(readme, /obsidian:\/\/kbcc-create-heading/);
@@ -124,7 +132,9 @@ test("mobile flows keep primary actions visible and empty states actionable", as
   const styles = await readFile(path.join(root, "styles.css"), "utf8");
   assert.match(view, /Add existing \$\{settings\.itemPlural\}/);
   assert.match(view, /ent-cc-history-action/);
-  assert.match(manager, /Browse \$\{availableCount\} available/);
+  // The count binding was renamed when the list became lazy; pin the button
+  // label, not the local variable's name.
+  assert.match(manager, /Browse \$\{available[A-Za-z]*\} available/);
   assert.match(manager, /aria-selected/);
   assert.match(styles, /grid-auto-flow: column/);
   assert.match(styles, /\.ent-cc-header-actions\s*\{[^}]*overflow-x: auto/s);

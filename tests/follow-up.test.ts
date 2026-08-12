@@ -11,6 +11,8 @@ import {
   DEFAULT_FOLLOW_UP_CATEGORIES,
   FOLLOW_UP_END_MARKER,
   FOLLOW_UP_START_MARKER,
+  followUpCategoryLabelKey,
+  hasUnpairedSurrogate,
   MAX_FOLLOW_UP_CONTENT_BYTES,
   MAX_FOLLOW_UP_ENTRIES,
   reverseFollowUpAppend,
@@ -429,4 +431,58 @@ test("a rejected duplicate category name keeps the editor open with its typed dr
     includeDate: true,
     archived: false,
   });
+});
+
+test("a trailing lone surrogate is rejected on the way in, exactly as the portable exporter rejects it", () => {
+  // charCodeAt past the end of the string is NaN, and every NaN comparison is
+  // false, so a "next < 0xDC00 || next > 0xDFFF" form accepted a string ending
+  // in a high surrogate. Quick Append therefore let invalid Unicode into the
+  // store that portable export later refused, stranding the note.
+  const trailingHigh = "Trailing \uD83D";
+  const trailingLow = "Trailing \uDE00";
+  assert.equal(hasUnpairedSurrogate(trailingHigh), true, "a string ending in a high surrogate is invalid");
+  assert.equal(hasUnpairedSurrogate(trailingLow), true, "a lone low surrogate is invalid anywhere");
+  assert.equal(hasUnpairedSurrogate("Interior \uD800 text"), true);
+  // Well-formed pairs and plain text stay valid.
+  assert.equal(hasUnpairedSurrogate("Headphones 🎧"), false);
+  assert.equal(hasUnpairedSurrogate(""), false);
+  assert.equal(hasUnpairedSurrogate("🎧🎧"), false);
+
+  for (const text of [trailingHigh, trailingLow]) {
+    assert.throws(
+      () => append("", {}, text),
+      /invalid Unicode/u,
+      `Quick Append must refuse ${JSON.stringify(text)}`,
+    );
+  }
+  assert.throws(() => append("", { label: "Reading \uD83D" }), /invalid Unicode|category label/u);
+  // A valid surrogate pair is still accepted end to end.
+  assert.doesNotThrow(() => append("", {}, "Headphones 🎧"));
+});
+
+test("heading matching and category dedupe share one label key", () => {
+  // These are two views of the same question — "is this the same category?" —
+  // so they must never disagree. If they drift, an entry is appended under a
+  // second heading the category picker already considers a duplicate.
+  const variants = ["Questions", "  questions  ", "QUESTIONS", "Caf\u00E9 notes", "Lectures  to\twatch"];
+  for (const label of variants) {
+    assert.equal(
+      followUpCategoryLabelKey(label),
+      followUpCategoryLabelKey(label.normalize("NFD")),
+      `${label} folds to one key regardless of composition`,
+    );
+  }
+  assert.equal(followUpCategoryLabelKey("  Lectures \t to  watch "), "lectures to watch");
+
+  // An existing heading whose text differs only by spacing and case is reused
+  // rather than duplicated.
+  const seeded = append("", { id: "questions", label: "Questions" }, "First");
+  const reused = append(seeded.content, { id: "questions", label: "  QUESTIONS  " }, "Second");
+  assert.equal(
+    (reused.content.match(/^### /gmu) ?? []).length,
+    1,
+    "a spacing- and case-variant label must not mint a second heading",
+  );
+  assert.match(reused.content, /First/u);
+  assert.match(reused.content, /Second/u);
 });

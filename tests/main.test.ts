@@ -9322,14 +9322,14 @@ test("path-scoped vault-event invalidation preserves unrelated base caches and a
     invalidateRecordCachesForPath(path: string): boolean;
     recordLinkIndex: Map<string, { title: string }>;
     recordLinkIndexBaseId: string;
-    recordPathsCacheByBase: Map<string, Set<string>>;
+    recordsByPathCacheByBase: Map<string, Map<string, VaultRecord>>;
     recordsCacheByBase: Map<string, unknown[]>;
     referencedPathsCacheByBase: Map<string, Set<string>>;
   };
   await plugin.loadPluginData();
   const activeRecords = plugin.getRecords();
   internal.recordsCacheByBase.set("base-second", []);
-  internal.recordPathsCacheByBase.set("base-second", new Set([inactiveFile.path]));
+  internal.recordsByPathCacheByBase.set("base-second", new Map([[inactiveFile.path, { path: inactiveFile.path } as VaultRecord]]));
   internal.referencedPathsCacheByBase.set("base-second", new Set());
   internal.excludedPathsCacheByBase.set("base-second", new Set());
   const activeReferenced = internal.referencedPathsCacheByBase.get("base-default");
@@ -9953,4 +9953,455 @@ test("library placement targets resolve a subheading at any depth under its owni
   assert.equal(outer?.subjects.length, 0, "the outer heading gains no direct copy");
   assert.equal(plugin.getPortableSubject(subjectId)?.libraryId, "reading");
   assert.equal(sourceMutationCount(), 0);
+});
+
+interface RecordCacheInternals {
+  getRecordsForEntry(entry: KnowledgeBaseEntry): VaultRecord[];
+  invalidateRecordCachesForPath(path: string, change?: { file: TFile | null }): boolean;
+  recordsByPathCacheByBase: Map<string, Map<string, VaultRecord>>;
+  recordsCacheByBase: Map<string, VaultRecord[]>;
+}
+
+/** Every base's projection, so cross-base consistency is compared too. */
+function allBaseProjections(plugin: EntVaultCommandCenterPlugin): VaultRecord[][] {
+  const internal = plugin as unknown as RecordCacheInternals;
+  return plugin.getKnowledgeBases(true).map((entry) => internal.getRecordsForEntry(entry));
+}
+
+function twoBaseRecordStore(vaultId: string): PluginStore {
+  const active = migrateData(null);
+  active.settings.workspaceMode = "generic";
+  active.settings.primaryFolder = "Active";
+  active.portableIndex.groups = [{ id: "group-one", title: "Group one", order: 0 }];
+  // A portable identity resolved to a path that may or may not exist on disk is
+  // the one record whose very existence depends on the file scan: it projects a
+  // placeholder while the note is missing and disappears when the note arrives.
+  active.portableIndex.subjects = [{
+    id: "subject-resolved",
+    title: "Resolved subject",
+    groupId: "group-one",
+    parentId: null,
+    order: 0,
+    indexed: true,
+    configuredId: "",
+    recordKind: "topic",
+    libraryId: null,
+  }];
+  active.portableIndex.resolvedPathBySubjectId = { "subject-resolved": "Active/Resolved.md" };
+  const inactive = migrateData(null);
+  inactive.settings.workspaceMode = "generic";
+  inactive.settings.primaryFolder = "Inactive";
+  const store = createDefaultStore(active, 1, vaultId);
+  store.bases.push(createKnowledgeBaseEntry(inactive, "base-second", 2));
+  return store;
+}
+
+test("incremental vault-event cache updates match a full rebuild after every step", async () => {
+  const files: TFile[] = [
+    new TFile("Active/Alpha.md"),
+    new TFile("Active/Beta.md"),
+    new TFile("Inactive/Gamma.md"),
+    new TFile("Outside/Delta.md"),
+  ];
+  const frontmatterByPath: Record<string, Record<string, unknown>> = {
+    "Active/Alpha.md": { title: "Alpha note" },
+    "Active/Beta.md": { title: "Beta note" },
+    "Inactive/Gamma.md": { title: "Gamma note" },
+    "Outside/Delta.md": { title: "Delta note" },
+  };
+  // Two plugins over the identical vault: one driven by scoped vault events,
+  // one rebuilt from scratch after every step. Their projections must never
+  // diverge, including for the paths a scoped event decides to ignore.
+  const live = pluginWithFiles(twoBaseRecordStore("vault-incremental-live"), files, frontmatterByPath);
+  const reference = pluginWithFiles(twoBaseRecordStore("vault-incremental-reference"), files, frontmatterByPath);
+  await live.plugin.loadPluginData();
+  await reference.plugin.loadPluginData();
+  const liveInternal = live.plugin as unknown as RecordCacheInternals;
+
+  const settle = (step: string): void => {
+    reference.plugin.invalidateRecordCache();
+    assert.deepEqual(allBaseProjections(live.plugin), allBaseProjections(reference.plugin), step);
+  };
+
+  settle("the initial projection");
+  const enumerationsAfterWarmup = live.vaultEnumerationCount();
+  const placeholder = live.plugin.getRecords().find((record) => record.path === "Active/Resolved.md");
+  assert.equal(placeholder?.isPlaceholder, true, "the unresolved portable subject starts as a placeholder");
+
+  // create — a real note arrives at a path a portable placeholder was holding.
+  const resolved = new TFile("Active/Resolved.md");
+  files.push(resolved);
+  frontmatterByPath[resolved.path] = { title: "Resolved note" };
+  assert.equal(liveInternal.invalidateRecordCachesForPath(resolved.path, { file: resolved }), true);
+  assert.equal(
+    live.plugin.getRecords().find((record) => record.path === resolved.path)?.isPlaceholder,
+    undefined,
+    "the arriving note replaces its placeholder",
+  );
+  settle("after creating a note over a resolved placeholder");
+
+  // modify — a title change moves the record to a different sort position.
+  frontmatterByPath["Active/Alpha.md"] = { title: "Zulu renamed alpha" };
+  assert.equal(liveInternal.invalidateRecordCachesForPath("Active/Alpha.md", { file: files[0] ?? null }), true);
+  assert.equal(
+    live.plugin.getRecords().at(-1)?.path,
+    "Active/Alpha.md",
+    "the retitled record is spliced into its new sorted position",
+  );
+  settle("after a modify that changes the sort key");
+
+  // modify — a note that belongs only to the other knowledge base.
+  frontmatterByPath["Inactive/Gamma.md"] = { title: "Gamma updated" };
+  assert.equal(liveInternal.invalidateRecordCachesForPath("Inactive/Gamma.md", { file: files[2] ?? null }), true);
+  settle("after a modify inside the inactive base");
+
+  // modify — a note no base indexes at all.
+  frontmatterByPath["Outside/Delta.md"] = { title: "Delta updated" };
+  assert.equal(
+    liveInternal.invalidateRecordCachesForPath("Outside/Delta.md", { file: files[3] ?? null }),
+    false,
+    "an unindexed note reports no relevant base",
+  );
+  settle("after a modify of an unindexed note");
+
+  // rename — delivered as the removal of the old path and arrival of the new.
+  const renamed = new TFile("Active/Renamed beta.md");
+  files.splice(1, 1, renamed);
+  delete frontmatterByPath["Active/Beta.md"];
+  frontmatterByPath[renamed.path] = { title: "Beta note" };
+  assert.equal(liveInternal.invalidateRecordCachesForPath("Active/Beta.md", { file: null }), true);
+  assert.equal(liveInternal.invalidateRecordCachesForPath(renamed.path, { file: renamed }), true);
+  settle("after a rename");
+
+  // delete — the portable placeholder must come back at the freed path.
+  files.splice(files.indexOf(resolved), 1);
+  delete frontmatterByPath[resolved.path];
+  assert.equal(liveInternal.invalidateRecordCachesForPath(resolved.path, { file: null }), true);
+  assert.equal(
+    live.plugin.getRecords().find((record) => record.path === resolved.path)?.isPlaceholder,
+    true,
+    "deleting the note restores its portable placeholder",
+  );
+  settle("after deleting the note behind a resolved placeholder");
+
+  // A non-markdown sibling sits inside a configured root, so it is reported as
+  // relevant, but it must project exactly as an absent file does.
+  const attachment = new TFile("Active/Diagram.png");
+  const beforeAttachment = live.plugin.getRecords().length;
+  assert.equal(liveInternal.invalidateRecordCachesForPath(attachment.path, { file: attachment }), true);
+  assert.equal(live.plugin.getRecords().length, beforeAttachment, "a non-markdown file adds no record");
+  settle("after a non-markdown vault event");
+
+  assert.equal(
+    live.vaultEnumerationCount(),
+    enumerationsAfterWarmup,
+    "no scoped vault event re-enumerated the vault",
+  );
+});
+
+test("a single edit in a large vault patches the cache instead of rescanning every file", async () => {
+  const fileCount = 2_000;
+  const files = Array.from({ length: fileCount }, (_, index) => new TFile(`Knowledge Base/Note ${index}.md`));
+  const frontmatterByPath: Record<string, Record<string, unknown>> = {};
+  for (const [index, file] of files.entries()) frontmatterByPath[file.path] = { title: `Note ${index}` };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.primaryFolder = "Knowledge Base";
+  const { plugin, metadataReadCount, vaultEnumerationCount } = pluginWithFiles(
+    createDefaultStore(data, 1, "vault-large-incremental-edit"),
+    files,
+    frontmatterByPath,
+  );
+  const internal = plugin as unknown as RecordCacheInternals;
+  await plugin.loadPluginData();
+
+  assert.equal(plugin.getRecords().length, fileCount);
+  const enumerationsAfterWarmup = vaultEnumerationCount();
+  const readsAfterWarmup = metadataReadCount();
+
+  const edited = files[1_234];
+  assert.ok(edited);
+  frontmatterByPath[edited.path] = { title: "Edited note" };
+  const started = performance.now();
+  assert.equal(internal.invalidateRecordCachesForPath(edited.path, { file: edited }), true);
+  const records = plugin.getRecords();
+  const elapsed = performance.now() - started;
+
+  assert.equal(records.length, fileCount, "the projection keeps every record");
+  assert.equal(records.find((record) => record.path === edited.path)?.title, "Edited note");
+  assert.equal(
+    vaultEnumerationCount(),
+    enumerationsAfterWarmup,
+    "a typing pause must not re-enumerate every markdown file",
+  );
+  assert.ok(
+    metadataReadCount() - readsAfterWarmup <= 4,
+    `a single edit read ${metadataReadCount() - readsAfterWarmup} metadata entries`,
+  );
+  assert.ok(elapsed < 100, `patching one record in a ${fileCount}-file vault took ${elapsed.toFixed(1)} ms`);
+
+  // The counters really do move when the whole projection is discarded.
+  plugin.invalidateRecordCache();
+  plugin.getRecords();
+  assert.ok(vaultEnumerationCount() > enumerationsAfterWarmup, "a full invalidation still rescans");
+});
+
+interface BulkLookupSpy {
+  recordLookups: () => number;
+  subjectLookups: () => number;
+}
+
+function spyOnLinearLookups(plugin: EntVaultCommandCenterPlugin): BulkLookupSpy {
+  let recordLookups = 0;
+  let subjectLookups = 0;
+  const host = plugin as unknown as {
+    getRecord(path: string): unknown;
+    getPortableSubject(subjectId: string): unknown;
+  };
+  const originalGetRecord = host.getRecord.bind(plugin);
+  const originalGetPortableSubject = host.getPortableSubject.bind(plugin);
+  host.getRecord = (path: string) => { recordLookups += 1; return originalGetRecord(path); };
+  host.getPortableSubject = (subjectId: string) => { subjectLookups += 1; return originalGetPortableSubject(subjectId); };
+  return { recordLookups: () => recordLookups, subjectLookups: () => subjectLookups };
+}
+
+test("bulk index removal and restore resolve records and subjects without a per-item scan", async () => {
+  const itemCount = 600;
+  const files = Array.from({ length: itemCount }, (_, index) => new TFile(`Knowledge Base/Note ${index}.md`));
+  const frontmatterByPath: Record<string, Record<string, unknown>> = {};
+  for (const [index, file] of files.entries()) frontmatterByPath[file.path] = { title: `Note ${index}` };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.primaryFolder = "Knowledge Base";
+  data.portableIndex.groups = [{ id: "bulk-group", title: "Bulk group", order: 0 }];
+  data.portableIndex.subjects = files.map((file, index) => ({
+    id: `bulk-subject-${index}`,
+    title: `Note ${index}`,
+    groupId: "bulk-group",
+    parentId: null,
+    order: index,
+    indexed: true,
+    configuredId: "",
+    recordKind: "topic" as const,
+    libraryId: null,
+  }));
+  data.portableIndex.resolvedPathBySubjectId = Object.fromEntries(
+    files.map((file, index) => [`bulk-subject-${index}`, file.path]),
+  );
+  const { plugin } = pluginWithFiles(createDefaultStore(data, 1, "vault-bulk-lookup"), files, frontmatterByPath);
+  await plugin.loadPluginData();
+  assert.equal(plugin.getRecords().length, itemCount);
+  const paths = files.map((file) => file.path);
+  const spy = spyOnLinearLookups(plugin);
+
+  plugin.removeRecordsFromIndexState(paths);
+  assert.equal(
+    plugin.data.portableIndex.subjects.every((subject) => !subject.indexed),
+    true,
+    "every selected identity leaves the index",
+  );
+  assert.equal(new Set(plugin.data.excludedIndexPaths).size, itemCount, "every removed path is hidden exactly once");
+  assert.equal(spy.recordLookups(), 0, "removal indexes the projection once instead of scanning it per path");
+  assert.equal(spy.subjectLookups(), 0, "removal indexes the portable registry once instead of scanning it per path");
+
+  await plugin.restoreRecordsToIndex(paths, "Bulk restore");
+  assert.equal(
+    plugin.data.portableIndex.subjects.every((subject) => subject.indexed),
+    true,
+    "every selected identity returns to the index",
+  );
+  assert.deepEqual(plugin.data.excludedIndexPaths, [], "restoring clears every hidden entry");
+  assert.equal(spy.recordLookups(), 0, "restore performs no per-path record scan");
+  assert.equal(spy.subjectLookups(), 0, "restore performs no per-path portable-registry scan");
+});
+
+test("adopting a large native library mints identities without scanning the registry per record", async () => {
+  const itemCount = 400;
+  const files = Array.from({ length: itemCount }, (_, index) => new TFile(`06 Clinical Tools/Medications/Drug - Agent ${index}.md`));
+  const frontmatterByPath: Record<string, Record<string, unknown>> = {};
+  for (const [index, file] of files.entries()) frontmatterByPath[file.path] = { title: `Agent ${index}` };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  data.settings.primaryFolder = "03 Clinical Topics";
+  const { plugin } = pluginWithFiles(createDefaultStore(data, 1, "vault-library-adoption"), files, frontmatterByPath);
+  await plugin.loadPluginData();
+  assert.equal(
+    plugin.getRecords().filter((record) => record.libraryId === "medication").length,
+    itemCount,
+    "every native drug note projects into its built-in library",
+  );
+  const spy = spyOnLinearLookups(plugin);
+
+  await plugin.initializeLibraryCatalog("medication");
+
+  const adopted = plugin.data.portableIndex.subjects.filter((subject) => subject.libraryId === "medication");
+  assert.equal(adopted.length, itemCount, "every native record gains exactly one portable identity");
+  assert.equal(new Set(adopted.map((subject) => subject.id)).size, itemCount, "the minted identities stay unique");
+  assert.equal(spy.subjectLookups(), 0, "adoption resolves and de-duplicates identities through one index");
+});
+
+test("a steady-state startup takes no speculative pre-repair clone of the whole store", async () => {
+  const first = migrateData(null);
+  first.settings.workspaceMode = "generic";
+  first.settings.primaryFolder = "Knowledge Base";
+  first.manualIndexPaths = Array.from({ length: 200 }, (_, index) => `Elsewhere/Manual ${index}.md`);
+  const second = migrateData(null);
+  second.settings.workspaceMode = "ent-clinical";
+  const store = createDefaultStore(first, 1, "vault-startup-clone-budget");
+  store.bases.push(createKnowledgeBaseEntry(second, "base-clinical", 2));
+  // A settled payload: current schema, final vault identity, nothing to
+  // normalize — the launch every user gets on every ordinary Obsidian start.
+  const plugin = pluginWith(structuredClone(migrateStore(structuredClone(store))));
+
+  const clonedInputs: unknown[] = [];
+  const originalStructuredClone = globalThis.structuredClone;
+  globalThis.structuredClone = <T,>(value: T, options?: StructuredSerializeOptions): T => {
+    clonedInputs.push(value);
+    return originalStructuredClone(value, options);
+  };
+  try {
+    await plugin.loadPluginData();
+  } finally {
+    globalThis.structuredClone = originalStructuredClone;
+  }
+
+  const internal = plugin as unknown as {
+    committedStoreSnapshot: PluginStore | null;
+    rollbackStoreSnapshot: PluginStore | null;
+    store: PluginStore;
+  };
+  const liveStoreClones = clonedInputs.filter((value) => value === internal.store).length;
+  assert.equal(plugin.data.settings.primaryFolder, "Knowledge Base", "the store still loads normally");
+  assert.equal(plugin.getKnowledgeBases(true).length, 2);
+  assert.equal(plugin.savedData.length, 0, "a settled payload triggers no startup writeback");
+  assert.ok(internal.committedStoreSnapshot, "a trusted committed snapshot is still published");
+  assert.ok(internal.rollbackStoreSnapshot, "a trusted rollback snapshot is still published");
+  assert.notEqual(
+    internal.committedStoreSnapshot,
+    internal.rollbackStoreSnapshot,
+    "the committed and rollback snapshots stay independent objects",
+  );
+  assert.deepEqual(internal.committedStoreSnapshot, internal.rollbackStoreSnapshot);
+  assert.ok(
+    liveStoreClones <= 1,
+    `a startup with nothing to repair deep-cloned the whole multi-base store ${liveStoreClones} times`,
+  );
+});
+
+test("a startup that does repair still restores the pre-repair store when its writeback is rejected", async () => {
+  const file = new TFile("06 Clinical Tools/Medications/Drug - Allergodil.md");
+  const data = invalidEntMedicationIndexData(file);
+  const store = createDefaultStore(data, 1, "vault-repair-rollback-lazy-clone");
+  const { plugin } = pluginWithFiles(store, [file], { [file.path]: { title: "Allergodil" } });
+  (plugin as unknown as { saveData(value: unknown): Promise<void> }).saveData = () =>
+    Promise.reject(new Error("simulated startup writeback failure"));
+
+  await assert.rejects(plugin.loadPluginData(), /simulated startup writeback failure/u);
+
+  const subject = plugin.data.portableIndex.subjects.find((candidate) => candidate.id === "legacy-medication");
+  assert.equal(subject?.indexed, true, "the in-memory store returns to its pre-repair shape");
+  assert.deepEqual(plugin.data.manualIndexPaths, [file.path]);
+  assert.equal(plugin.isDataReadOnly(), true, "the rejected repair leaves the bases read-only");
+});
+
+test("live classification and deterministic startup repair share one clinical source table", async () => {
+  const cases = [
+    { path: "04 Procedures/Procedure - Tonsillectomy.md", kind: "procedure" },
+    { path: "06 Clinical Tools/Medications/Drug - Allergodil.md", kind: "medication" },
+    { path: "06 Clinical Tools/Syndromes/Syndrome - Treacher Collins.md", kind: "syndrome" },
+  ] as const;
+  const files = cases.map((item) => new TFile(item.path));
+  const frontmatterByPath: Record<string, Record<string, unknown>> = {};
+  for (const file of files) frontmatterByPath[file.path] = { title: file.basename };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  data.settings.primaryFolder = "03 Clinical Topics";
+  data.portableIndex.groups = [{ id: "legacy-index", title: "Legacy Index", order: 0 }];
+  // Every one of these paths was persisted as an indexed clinical topic, which
+  // the deterministic repair pass must reject using the same (root, prefix,
+  // kind) table the live record scan uses.
+  data.portableIndex.subjects = cases.map((item, index) => ({
+    id: `legacy-${item.kind}`,
+    title: `Legacy ${item.kind}`,
+    groupId: "legacy-index",
+    parentId: null,
+    order: index,
+    indexed: true,
+    configuredId: "",
+    recordKind: "topic" as const,
+    libraryId: null,
+  }));
+  data.portableIndex.resolvedPathBySubjectId = Object.fromEntries(
+    cases.map((item) => [`legacy-${item.kind}`, item.path]),
+  );
+  data.manualIndexPaths = cases.map((item) => item.path);
+  const { plugin } = pluginWithFiles(createDefaultStore(data, 1, "vault-clinical-source-table"), files, frontmatterByPath);
+  await plugin.loadPluginData();
+
+  const records = new Map(plugin.getRecords().map((record) => [record.path, record]));
+  for (const item of cases) {
+    const record = records.get(item.path);
+    assert.equal(record?.kind, item.kind, `the live scan classifies ${item.path}`);
+    assert.equal(record?.role, "library", `${item.path} stays a native library source`);
+    const subject = plugin.data.portableIndex.subjects.find((candidate) => candidate.id === `legacy-${item.kind}`);
+    assert.equal(subject?.recordKind, item.kind, `startup repair agrees about ${item.path}`);
+    assert.equal(subject?.indexed, false, `${item.path} is rehomed out of the Index`);
+    assert.equal(subject?.libraryId, item.kind, `${item.path} lands in its built-in library`);
+  }
+  // Repair is a fixed point: a second pass over the already-repaired store must
+  // find nothing left to change, which is only true if both tables agree.
+  const repaired = plugin as unknown as { remediateInvalidClinicalIndexes(): boolean };
+  assert.equal(repaired.remediateInvalidClinicalIndexes(), false, "the repaired store needs no further repair");
+  assert.deepEqual(plugin.data.manualIndexPaths, [], "no invalid manual entrance survives");
+});
+
+test("scoped events reclassify a clinical proposal in place and still match a full rebuild", async () => {
+  const files: TFile[] = [new TFile("Clinical Topics/Airway.md")];
+  const frontmatterByPath: Record<string, Record<string, unknown>> = {
+    "Clinical Topics/Airway.md": { title: "Airway", curriculum_id: "1.1" },
+  };
+  const clinicalStore = (vaultId: string): PluginStore => {
+    const data = migrateData(null);
+    data.settings.workspaceMode = "ent-clinical";
+    data.settings.primaryFolder = "Clinical Topics";
+    data.settings.proposalFolder = "Inbox/Topic Proposals";
+    return createDefaultStore(data, 1, vaultId);
+  };
+  const live = pluginWithFiles(clinicalStore("vault-proposal-incremental-live"), files, frontmatterByPath);
+  const reference = pluginWithFiles(clinicalStore("vault-proposal-incremental-reference"), files, frontmatterByPath);
+  await live.plugin.loadPluginData();
+  await reference.plugin.loadPluginData();
+  const liveInternal = live.plugin as unknown as RecordCacheInternals;
+  const settle = (step: string): void => {
+    reference.plugin.invalidateRecordCache();
+    assert.deepEqual(live.plugin.getRecords(), reference.plugin.getRecords(), step);
+  };
+  settle("the initial clinical projection");
+
+  // A proposal created outside the configured Inbox is recognized only by its
+  // frontmatter, so its role can flip without the file ever moving.
+  const adhoc = new TFile("Notes/Adhoc proposal.md");
+  files.push(adhoc);
+  frontmatterByPath[adhoc.path] = { type: "topic-proposal", title: "Adhoc proposal" };
+  assert.equal(liveInternal.invalidateRecordCachesForPath(adhoc.path, { file: adhoc }), true);
+  assert.equal(live.plugin.getRecords().find((record) => record.path === adhoc.path)?.role, "proposal");
+  settle("after an out-of-folder proposal appears");
+
+  frontmatterByPath[adhoc.path] = { title: "Ordinary note" };
+  assert.equal(liveInternal.invalidateRecordCachesForPath(adhoc.path, { file: adhoc }), true);
+  assert.equal(
+    live.plugin.getRecords().some((record) => record.path === adhoc.path),
+    false,
+    "dropping the proposal type removes the record instead of leaving a ghost",
+  );
+  settle("after the proposal type is removed");
+
+  frontmatterByPath[adhoc.path] = { type: "topic-proposal", title: "Adhoc proposal" };
+  assert.equal(liveInternal.invalidateRecordCachesForPath(adhoc.path, { file: adhoc }), true);
+  settle("after the proposal type returns");
+
+  files.splice(files.indexOf(adhoc), 1);
+  delete frontmatterByPath[adhoc.path];
+  assert.equal(liveInternal.invalidateRecordCachesForPath(adhoc.path, { file: null }), true);
+  settle("after the proposal file is deleted");
 });

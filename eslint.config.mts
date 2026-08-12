@@ -6,6 +6,9 @@ export default defineConfig(
   globalIgnores([
     "node_modules",
     "dist",
+    // Agent worktrees and session scratch space are checkouts of this repo;
+    // linting them re-reports every file against the wrong tsconfig root.
+    ".claude",
     "main.js",
     "package-lock.json",
     "manifest.json",

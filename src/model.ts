@@ -327,11 +327,14 @@ export interface SavedView {
   query: string;
 }
 
-export interface PersonalSnapshot {
-  label: string;
-  at: number;
-  /** Included only when the operation can change the selected workspace tab. */
-  activeTab?: MainTab;
+/**
+ * Every field of a base's personal organization that undo snapshots, snapshot
+ * restores, and same-vault recovery backups must all carry. Adding a field here
+ * and to clonePersonalOrganization is the single change required for it to flow
+ * into all three; enumerating the list per call site is how a new field
+ * silently disappears from undo or from backups.
+ */
+export interface PersonalOrganizationState {
   collections: LayoutHeading[];
   pinnedPaths: string[];
   nextStudyPaths: string[];
@@ -345,6 +348,28 @@ export interface PersonalSnapshot {
   /** Visual aliases for configured/folder-derived group names. */
   indexGroupAliases: Record<string, string>;
   indexGroupOrder: string[];
+}
+
+/** The field names of PersonalOrganizationState, in clone order. */
+export const PERSONAL_ORGANIZATION_FIELDS: ReadonlyArray<keyof PersonalOrganizationState> = [
+  "collections",
+  "pinnedPaths",
+  "nextStudyPaths",
+  "savedViews",
+  "curriculumVisual",
+  "manualIndexPaths",
+  "excludedIndexPaths",
+  "indexGroupByPath",
+  "displayNameByPath",
+  "indexGroupAliases",
+  "indexGroupOrder",
+];
+
+export interface PersonalSnapshot extends PersonalOrganizationState {
+  label: string;
+  at: number;
+  /** Included only when the operation can change the selected workspace tab. */
+  activeTab?: MainTab;
   /** Included only when the operation can change portable identity state. */
   portableIndex?: PortableIndexLocalState;
   /** Present only for a component-aware import snapshot. */
@@ -708,7 +733,7 @@ export function semanticPluginDataProjection(data: PluginData): PluginData {
 export function semanticEntryFingerprint(
   entry: Pick<KnowledgeBaseEntry, "createdAt" | "archivedAt" | "data">,
 ): string {
-  return fingerprintText(JSON.stringify(canonicalMigrationValue([
+  return fingerprintText(JSON.stringify(canonicalJsonValue([
     entry.createdAt,
     entry.archivedAt,
     semanticPluginDataProjection(entry.data),
@@ -785,15 +810,40 @@ export function makeId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function canonicalMigrationValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map((item) => canonicalMigrationValue(item) ?? null);
+/**
+ * The one canonical JSON projection: key-sorted, `undefined`-stripped, and
+ * shared by migration-equality writeback checks, sync winner selection, and
+ * portfolio plan guards.
+ *
+ * The accumulator is deliberately a null-prototype object. A plain `{}` routes
+ * `output["__proto__"] = value` through Object.prototype's `__proto__` setter,
+ * which never creates an own property, so that key vanishes from the serialized
+ * form. Independent copies that used `{}` made the same store canonicalize two
+ * different ways depending on which module asked.
+ */
+export function canonicalJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => canonicalJsonValue(item) ?? null);
   if (!value || typeof value !== "object") return value;
   const output = Object.create(null) as Record<string, unknown>;
   for (const key of Object.keys(value).sort()) {
-    const normalized = canonicalMigrationValue((value as Record<string, unknown>)[key]);
+    const normalized = canonicalJsonValue((value as Record<string, unknown>)[key]);
     if (normalized !== undefined) output[key] = normalized;
   }
   return output;
+}
+
+/** Canonical serialized text for any value that is compared or fingerprinted. */
+export function canonicalJsonString(value: unknown): string {
+  return JSON.stringify(canonicalJsonValue(value));
+}
+
+/**
+ * Case- and width-insensitive key for user-visible names (knowledge bases,
+ * group titles, layout headings). Uniqueness checks that disagree about this
+ * key hand out duplicate names, so every module shares this one definition.
+ */
+export function normalizedNameKey(value: string): string {
+  return value.trim().normalize("NFC").toLowerCase();
 }
 
 /** Whether a current persisted envelope differs from its safely cleaned form. */
@@ -803,11 +853,20 @@ export function pluginStoreNeedsNormalization(input: unknown, normalized: Plugin
   // Excluding it here keeps this predicate specific to deterministic payload
   // and envelope-structure repair.
   const comparableNormalized = { ...normalized, vaultId: raw.vaultId };
-  return JSON.stringify(canonicalMigrationValue(input))
-    !== JSON.stringify(canonicalMigrationValue(comparableNormalized));
+  return JSON.stringify(canonicalJsonValue(input))
+    !== JSON.stringify(canonicalJsonValue(comparableNormalized));
 }
 
-function fingerprintText(text: string): string {
+/**
+ * Double FNV-1a over UTF-16 code units, rendered as two 8-hex-digit halves.
+ *
+ * Outputs are persisted as identity: imported collection and library IDs,
+ * portfolio destination base IDs, plan-guard tokens, and recovered legacy IDs
+ * in vaults already in the wild. Every consumer must call this exact function —
+ * a local copy that later "improves" the mixing silently breaks dedupe against
+ * IDs the plugin already wrote. The seeds and output shape are frozen.
+ */
+export function fingerprintText(text: string): string {
   const hash = (seed: number): string => {
     let value = seed >>> 0;
     for (let index = 0; index < text.length; index += 1) {
@@ -825,7 +884,7 @@ function migrationFingerprint(data: PluginData): string {
   const v2MigrationBackup = asUnknownRecord(comparable.v2MigrationBackup);
   if (migrationBackup.version === 1) migrationBackup.migratedAt = 0;
   if (v2MigrationBackup.version === 2) v2MigrationBackup.migratedAt = 0;
-  return fingerprintText(JSON.stringify(canonicalMigrationValue(comparable)));
+  return fingerprintText(JSON.stringify(canonicalJsonValue(comparable)));
 }
 
 function randomMigrationNonce(): string {
@@ -861,8 +920,8 @@ export function freshStoreHasOnlyBootstrapChanges(store: PluginStore): boolean {
   const entry = store.bases[0];
   if (!entry || entry.id !== DEFAULT_KNOWLEDGE_BASE_ID || entry.archivedAt !== null) return false;
   const comparable = semanticPluginDataProjection(entry.data);
-  return JSON.stringify(canonicalMigrationValue(comparable))
-    === JSON.stringify(canonicalMigrationValue(semanticPluginDataProjection(DEFAULT_DATA)));
+  return JSON.stringify(canonicalJsonValue(comparable))
+    === JSON.stringify(canonicalJsonValue(semanticPluginDataProjection(DEFAULT_DATA)));
 }
 
 function migratedVaultId(data: PluginData): string {
@@ -892,7 +951,7 @@ function interimEnvelopeStringSortedBy(
   compareIds: (left: string, right: string) => number,
 ): string {
   const bases = [...store.bases].sort((left, right) => compareIds(left.id, right.id));
-  return JSON.stringify(canonicalMigrationValue({
+  return JSON.stringify(canonicalJsonValue({
     kind: STORE_KIND,
     version: STORE_VERSION,
     bases: bases.map((entry) => ({
@@ -1045,11 +1104,11 @@ function sameMigrationEnvelopeMetadata(
     || JSON.stringify(beforeIds) !== JSON.stringify(parentIds)
     || JSON.stringify(beforeIds) !== JSON.stringify(afterIds)
     || !identitySourceMetadataIsStable
-    || JSON.stringify(canonicalMigrationValue(before.deletedBaseIds))
-      !== JSON.stringify(canonicalMigrationValue(parentStore.deletedBaseIds))
-    || canonicalMigrationValue(parentStore.deletedBaseIds) === undefined
-    || JSON.stringify(canonicalMigrationValue(parentStore.deletedBaseIds))
-      !== JSON.stringify(canonicalMigrationValue(after.deletedBaseIds))) return false;
+    || JSON.stringify(canonicalJsonValue(before.deletedBaseIds))
+      !== JSON.stringify(canonicalJsonValue(parentStore.deletedBaseIds))
+    || canonicalJsonValue(parentStore.deletedBaseIds) === undefined
+    || JSON.stringify(canonicalJsonValue(parentStore.deletedBaseIds))
+      !== JSON.stringify(canonicalJsonValue(after.deletedBaseIds))) return false;
   return parentStore.bases.every((parent) => {
     const repaired = after.bases.find((entry) => entry.id === parent.id);
     return Boolean(repaired
@@ -1660,13 +1719,6 @@ export function snapshotStackDepthIsTruncated(
   return kept.length < Math.min(snapshots.length, maxCount);
 }
 
-export function replacePathMapKey(map: Record<string, string>, oldPath: string, newPath: string): boolean {
-  if (!Object.prototype.hasOwnProperty.call(map, oldPath)) return false;
-  map[newPath] = map[oldPath] ?? "";
-  delete map[oldPath];
-  return true;
-}
-
 export function replacePathPrefix(path: string, oldPath: string, newPath: string): string {
   if (path === oldPath) return newPath;
   return path.startsWith(`${oldPath}/`) ? `${newPath}${path.slice(oldPath.length)}` : path;
@@ -2076,6 +2128,27 @@ export function rewritePluginDataPathPrefix(data: PluginData, oldPath: string, n
   return changed;
 }
 
+/**
+ * Deep-copy the whole personal-organization payload. Snapshot capture, snapshot
+ * restore, and recovery-backup creation all route through here so a new field
+ * can never reach one of them and miss the other two.
+ */
+export function clonePersonalOrganization(source: PersonalOrganizationState): PersonalOrganizationState {
+  return {
+    collections: cloneCollections(source.collections),
+    pinnedPaths: [...source.pinnedPaths],
+    nextStudyPaths: [...source.nextStudyPaths],
+    savedViews: source.savedViews.map((view) => ({ ...view })),
+    curriculumVisual: cloneCurriculumVisual(source.curriculumVisual),
+    manualIndexPaths: [...source.manualIndexPaths],
+    excludedIndexPaths: [...source.excludedIndexPaths],
+    indexGroupByPath: clonePathMap(source.indexGroupByPath),
+    displayNameByPath: clonePathMap(source.displayNameByPath),
+    indexGroupAliases: clonePathMap(source.indexGroupAliases),
+    indexGroupOrder: [...source.indexGroupOrder],
+  };
+}
+
 export function snapshotPersonal(
   data: PluginData,
   label: string,
@@ -2087,17 +2160,7 @@ export function snapshotPersonal(
   const snapshot: PersonalSnapshot = {
     label,
     at: Date.now(),
-    collections: cloneCollections(data.collections),
-    pinnedPaths: [...data.pinnedPaths],
-    nextStudyPaths: [...data.nextStudyPaths],
-    savedViews: data.savedViews.map((view) => ({ ...view })),
-    curriculumVisual: cloneCurriculumVisual(data.curriculumVisual),
-    manualIndexPaths: [...data.manualIndexPaths],
-    excludedIndexPaths: [...data.excludedIndexPaths],
-    indexGroupByPath: clonePathMap(data.indexGroupByPath),
-    displayNameByPath: clonePathMap(data.displayNameByPath),
-    indexGroupAliases: clonePathMap(data.indexGroupAliases),
-    indexGroupOrder: [...data.indexGroupOrder],
+    ...clonePersonalOrganization(data),
   };
   if (includeActiveTab) snapshot.activeTab = data.activeTab;
   if (includeSettings) snapshot.settings = structuredClone(data.settings);
@@ -2108,24 +2171,14 @@ export function snapshotPersonal(
 
 export function restoreSnapshot(data: PluginData, snapshot: PersonalSnapshot): void {
   if (snapshot.activeTab !== undefined) data.activeTab = snapshot.activeTab;
-  data.collections = cloneCollections(snapshot.collections);
-  data.pinnedPaths = [...snapshot.pinnedPaths];
-  data.nextStudyPaths = [...snapshot.nextStudyPaths];
-  data.savedViews = snapshot.savedViews.map((view) => ({ ...view }));
-  data.curriculumVisual = cloneCurriculumVisual(snapshot.curriculumVisual);
-  data.manualIndexPaths = [...snapshot.manualIndexPaths];
-  data.excludedIndexPaths = [...snapshot.excludedIndexPaths];
-  data.indexGroupByPath = clonePathMap(snapshot.indexGroupByPath);
-  data.displayNameByPath = clonePathMap(snapshot.displayNameByPath);
-  data.indexGroupAliases = clonePathMap(snapshot.indexGroupAliases);
-  data.indexGroupOrder = [...snapshot.indexGroupOrder];
+  Object.assign(data, clonePersonalOrganization(snapshot));
   if (snapshot.portableIndex) data.portableIndex = clonePortableIndex(snapshot.portableIndex);
   if (snapshot.settings) data.settings = structuredClone(snapshot.settings);
   if (snapshot.layoutSnapshots) data.layoutSnapshots = snapshot.layoutSnapshots.map((item) => structuredClone(item));
 }
 
 function recoveredLegacyId(prefix: string, parts: unknown[]): string {
-  return `${prefix}-recovered-${fingerprintText(JSON.stringify(canonicalMigrationValue(parts)))}`;
+  return `${prefix}-recovered-${fingerprintText(JSON.stringify(canonicalJsonValue(parts)))}`;
 }
 
 /**
@@ -3189,12 +3242,6 @@ function migrateDataWithBudget(
   return normalizeKnowledgeBaseLibrariesAndNavigation(data);
 }
 
-export function recordMatchesLink(record: VaultRecord, link: string): boolean {
-  const normalized = normalizeWikiLink(link).toLowerCase();
-  const basename = record.path.split("/").pop()?.replace(/\.md$/, "").toLowerCase() ?? "";
-  return Boolean(normalized && (normalized === record.title.toLowerCase() || normalized === basename || record.aliases.some((alias) => alias.toLowerCase() === normalized)));
-}
-
 export function curriculumContainerKey(domain: string, parentPath: string | null): string {
   return parentPath ? `parent:${parentPath}` : `root:${domain.toLowerCase()}`;
 }
@@ -3562,10 +3609,6 @@ export function matchesParsedQuery(record: VaultRecord, parsed: ParsedQuery): bo
   const { text, words } = searchHaystack(record);
   return parsed.terms.every((term) => text.includes(term)
     || words.some((word) => word[0] === term[0] && fuzzyContains(word, term)));
-}
-
-export function matchesQuery(record: VaultRecord, query: string): boolean {
-  return matchesParsedQuery(record, parseQuery(query));
 }
 
 /**
@@ -4201,7 +4244,7 @@ export function parseWorkspaceConfig(input: unknown): WorkspaceConfig {
   };
 }
 
-export interface PersonalBackup {
+export interface PersonalBackup extends PersonalOrganizationState {
   kind: "ent-vault-command-center-personal-backup";
   /** v10 introduced nested collection/library subheadings; v9 layouts stay flat. */
   version: 10;
@@ -4213,17 +4256,6 @@ export interface PersonalBackup {
   sourceBaseName: string;
   /** Recovery is never allowed to cross the generic/clinical preset boundary. */
   sourceWorkspaceMode: WorkspaceMode | "";
-  collections: LayoutHeading[];
-  pinnedPaths: string[];
-  nextStudyPaths: string[];
-  savedViews: SavedView[];
-  curriculumVisual: CurriculumVisualState;
-  manualIndexPaths: string[];
-  excludedIndexPaths: string[];
-  indexGroupByPath: Record<string, string>;
-  displayNameByPath: Record<string, string>;
-  indexGroupAliases: Record<string, string>;
-  indexGroupOrder: string[];
   layoutSnapshots: PersonalSnapshot[];
   portableIndex: PortableIndexLocalState;
 }
@@ -4264,17 +4296,7 @@ export function createPersonalBackup(
     sourceBaseId: cleanSourceBaseId,
     sourceBaseName: cleanSourceBaseName,
     sourceWorkspaceMode: data.settings.workspaceMode,
-    collections: cloneCollections(data.collections),
-    pinnedPaths: [...data.pinnedPaths],
-    nextStudyPaths: [...data.nextStudyPaths],
-    savedViews: data.savedViews.map((view) => ({ ...view })),
-    curriculumVisual: cloneCurriculumVisual(data.curriculumVisual),
-    manualIndexPaths: [...data.manualIndexPaths],
-    excludedIndexPaths: [...data.excludedIndexPaths],
-    indexGroupByPath: clonePathMap(data.indexGroupByPath),
-    displayNameByPath: clonePathMap(data.displayNameByPath),
-    indexGroupAliases: clonePathMap(data.indexGroupAliases),
-    indexGroupOrder: [...data.indexGroupOrder],
+    ...clonePersonalOrganization(data),
     layoutSnapshots: cleanSnapshots(data.layoutSnapshots, true, MAX_TRANSFER_SNAPSHOTS),
     portableIndex: clonePortableIndex(data.portableIndex),
   };

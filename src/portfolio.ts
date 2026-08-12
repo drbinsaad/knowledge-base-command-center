@@ -1,5 +1,6 @@
 import {
   boundedSemanticLineage,
+  canonicalJsonString,
   childSubheadings,
   createKnowledgeBaseEntry,
   createPersonalBackup,
@@ -7,10 +8,12 @@ import {
   DEFAULT_SETTINGS,
   deterministicSemanticHead,
   ENT_CLINICAL_SETTINGS,
+  fingerprintText,
   isSafeObjectKey,
   limitSnapshotStack,
   MAX_KNOWLEDGE_BASES,
   MAX_TRANSFER_TOTAL_REFERENCES,
+  normalizedNameKey,
   normalizeKnowledgeBaseLibrariesAndNavigation,
   semanticEntryFingerprint,
   snapshotPersonal,
@@ -213,32 +216,8 @@ function safeNonNegativeInteger(input: unknown, label: string): number {
   return input;
 }
 
-function canonicalValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map((item) => canonicalValue(item) ?? null);
-  if (!value || typeof value !== "object") return value;
-  const output: Record<string, unknown> = {};
-  for (const key of Object.keys(value).sort()) {
-    const normalized = canonicalValue((value as Record<string, unknown>)[key]);
-    if (normalized !== undefined) output[key] = normalized;
-  }
-  return output;
-}
-
-function canonicalString(value: unknown): string {
-  return JSON.stringify(canonicalValue(value));
-}
-
 function fingerprint(value: unknown): string {
-  const text = typeof value === "string" ? value : canonicalString(value);
-  const hash = (seed: number): string => {
-    let result = seed >>> 0;
-    for (let index = 0; index < text.length; index += 1) {
-      result ^= text.charCodeAt(index);
-      result = Math.imul(result, 0x01000193) >>> 0;
-    }
-    return result.toString(16).padStart(8, "0");
-  };
-  return `${hash(0x811c9dc5)}${hash(0x9e3779b9)}`;
+  return fingerprintText(typeof value === "string" ? value : canonicalJsonString(value));
 }
 
 function byteLength(value: string): number {
@@ -303,7 +282,7 @@ function selectionsEqual(left: PortableExportSelection, right: PortableExportSel
       recovery: value.recovery,
     };
   };
-  return canonicalString(normalize(left)) === canonicalString(normalize(right));
+  return canonicalJsonString(normalize(left)) === canonicalJsonString(normalize(right));
 }
 
 interface PackageBudget {
@@ -384,9 +363,12 @@ export function createPortfolioExport(
       sourceBaseId,
       request.entry.data.settings.workspaceName,
     );
-    const serialized = serializePortableExport(portable);
-    const parsed = parsePortableExport(JSON.parse(serialized) as unknown);
-    const packageBytes = byteLength(serialized);
+    const parsed = parsePortableExport(JSON.parse(serializePortableExport(portable)) as unknown);
+    // The bundle carries the parsed package, and parsing NFC-normalizes every
+    // title, so a decomposed name shrinks between the draft and what is
+    // written. Measure the parsed form: the manifest has to declare the bytes
+    // the importer will re-derive, not the bytes of the pre-normalization draft.
+    const packageBytes = byteLength(serializePortableExport(parsed));
     const budget = packageBudget(parsed);
     const selectedLibraryIds = selection.libraryIds ?? [];
     entries.push({
@@ -849,8 +831,8 @@ function assertSelectionIsAvailable(
 
 function uniqueBaseName(store: PluginStore, requested: string, reserved: Set<string>): string {
   const used = new Set(store.bases.filter((entry) => entry.archivedAt === null)
-    .map((entry) => entry.data.settings.workspaceName.trim().normalize("NFC").toLowerCase()));
-  reserved.forEach((name) => used.add(name.trim().normalize("NFC").toLowerCase()));
+    .map((entry) => normalizedNameKey(entry.data.settings.workspaceName)));
+  reserved.forEach((name) => used.add(normalizedNameKey(name)));
   const root = safeName(requested, "Destination knowledge-base name");
   let candidate = root;
   let suffix = 2;
@@ -1240,11 +1222,6 @@ export function applyPortfolioImportPlan(
 /** Stable guard exposed for plan/apply identity tests and UI staleness diagnostics. */
 export function portfolioStoreGuard(store: PluginStore): string {
   return storeGuard(store);
-}
-
-/** Count references without exposing or traversing note bodies (which are never present). */
-export function portfolioPackageBudget(value: PortableExportV1): PackageBudget {
-  return packageBudget(value);
 }
 
 /** Small helper for preview renderers that want deterministic category order. */

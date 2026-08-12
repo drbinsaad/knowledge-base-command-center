@@ -1,4 +1,4 @@
-import { Menu, Modal, Notice, Platform, Setting, TFile, setIcon } from "obsidian";
+import { Menu, Modal, Notice, Setting, TFile, setIcon } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
 import {
   cleanLibraryNoteProfiles,
@@ -16,13 +16,27 @@ import {
   validateWritableFolderPath,
   VaultRecord,
 } from "./model";
-import { ConfirmModal, IndexGroupModal, localDateStamp, StringPickerModal, TextPromptModal, VaultFilePickerModal } from "./modals";
-import { registerPortableGroup, removePortableGroup, renameOrMergePortableGroup } from "./portability";
+import {
+  clearGuardedTimer,
+  ConfirmModal,
+  createOpenedBaseGuard,
+  deliverJsonExport,
+  type OpenedBaseGuard,
+  IndexGroupModal,
+  modalOwnerWindow,
+  requestJsonImport,
+  setGuardedTimer,
+  StringPickerModal,
+  TextPromptModal,
+} from "./modals";
+import { MAX_PORTABLE_PACKAGE_BYTES, registerPortableGroup, removePortableGroup, renameOrMergePortableGroup } from "./portability";
 import { ExportImportCenterModal } from "./portability-modal";
 import { TaxonomyHealthModal } from "./taxonomy-health-modal";
 import { SyncRecoveryCenterModal } from "./sync-recovery-modal";
 
 export type ManagerTab = "indexed" | "available" | "hidden" | "groups" | "diagnostics";
+
+type NoteListTab = Extract<ManagerTab, "indexed" | "available" | "hidden">;
 
 interface ManagerNote {
   path: string;
@@ -42,8 +56,15 @@ export class IndexManagerModal extends Modal {
   private managerOpen = false;
   private openedBaseId = "";
   private openedDataEpoch = 0;
-  private staleBaseNoticeShown = false;
+  private ownsBase: OpenedBaseGuard | null = null;
   private pendingTimers = new Set<number>();
+  /**
+   * Vault-derived note lists are memoized for the lifetime of one rendered
+   * snapshot. Search re-renders on a 150 ms debounce, and recomputing
+   * `availableNotes()` there means a full `getMarkdownFiles()` scan, two
+   * filters, and a locale sort on every keystroke.
+   */
+  private noteListCache = new Map<NoteListTab, ManagerNote[]>();
 
   constructor(private readonly plugin: EntVaultCommandCenterPlugin, initialTab: ManagerTab = "indexed") {
     super(plugin.app);
@@ -53,7 +74,8 @@ export class IndexManagerModal extends Modal {
   onOpen(): void {
     this.openedBaseId = this.plugin.getActiveKnowledgeBaseId();
     this.openedDataEpoch = this.plugin.getDataEpoch();
-    this.staleBaseNoticeShown = false;
+    this.ownsBase = this.createBaseGuard();
+    this.invalidateNoteLists();
     this.managerOpen = true;
     this.modalEl.addClass("ent-cc-index-manager-modal");
     this.contentEl.addClass("ent-cc-modal", "ent-cc-index-manager");
@@ -63,12 +85,14 @@ export class IndexManagerModal extends Modal {
 
   onClose(): void {
     this.managerOpen = false;
-    for (const timer of this.pendingTimers) window.activeWindow.clearTimeout(timer);
+    const viewWindow = modalOwnerWindow(this.contentEl);
+    for (const timer of this.pendingTimers) viewWindow.clearTimeout(timer);
     this.pendingTimers.clear();
     this.searchTimer = null;
     this.selectionCountEl = null;
     this.selectionActionsEl = null;
     this.selectionButtons = [];
+    this.invalidateNoteLists();
   }
 
   private openPortabilityCenter(mode: "export" | "import"): void {
@@ -84,12 +108,48 @@ export class IndexManagerModal extends Modal {
     this.query = "";
     this.selected.clear();
     this.diagnosticsCache = null;
+    this.invalidateNoteLists();
     if (this.plugin.isClinicalMode() && this.tab === "available") this.tab = "indexed";
     this.titleEl.setText(`Manage ${this.plugin.data.settings.indexLabel}`);
     this.render();
   }
 
+  /**
+   * Drop memoized note lists. Vault files can appear or disappear without any
+   * plugin data epoch change, so every deliberate refresh — tab switch,
+   * mutation, portability round trip — re-reads the vault; only the search
+   * debounce reuses the snapshot it is filtering.
+   */
+  private invalidateNoteLists(): void {
+    this.noteListCache?.clear();
+    this.noteListCache ??= new Map<NoteListTab, ManagerNote[]>();
+  }
+
+  private noteList(tab: NoteListTab): ManagerNote[] {
+    const cached = this.noteListCache?.get(tab);
+    if (cached) return cached;
+    const computed = tab === "indexed"
+      ? this.indexedNotes()
+      : tab === "available" ? this.availableNotes() : this.hiddenNotes();
+    (this.noteListCache ??= new Map<NoteListTab, ManagerNote[]>()).set(tab, computed);
+    return computed;
+  }
+
+  private switchTab(tab: ManagerTab): void {
+    this.tab = tab;
+    this.query = "";
+    this.selected.clear();
+    this.render();
+  }
+
+  /** Re-read the vault, then paint. Every caller except the search debounce. */
   private render(): void {
+    this.invalidateNoteLists();
+    this.renderSnapshot();
+  }
+
+  /** Paint from the memoized lists; used where only the query or selection moved. */
+  private renderSnapshot(): void {
     if (!this.guardOpenedBase()) return;
     // Do not retain controls detached by contentEl.empty(); selection refreshes
     // must address only the currently rendered toolbar.
@@ -98,9 +158,6 @@ export class IndexManagerModal extends Modal {
     this.selectionButtons = [];
     this.contentEl.empty();
     const settings = this.plugin.data.settings;
-    const indexed = this.indexedNotes();
-    const available = this.availableNotes();
-    const hidden = this.hiddenNotes();
     const groups = this.plugin.getIndexGroups();
     const diagnostics = this.tab === "diagnostics"
       ? (this.diagnosticsCache ??= this.plugin.getIndexDiagnostics())
@@ -113,12 +170,14 @@ export class IndexManagerModal extends Modal {
     this.actionButton(portability, "upload", "Import…", () => this.openPortabilityCenter("import"));
 
     const tabs = this.contentEl.createDiv({ cls: "ent-cc-manager-tabs", attr: { role: "tablist" } });
-    const definitions: Array<{ id: ManagerTab; label: string; count: number | string; genericOnly?: boolean }> = [
-      { id: "indexed", label: "Indexed", count: indexed.length },
-      { id: "available", label: "Available", count: available.length, genericOnly: true },
-      { id: "hidden", label: "Hidden", count: hidden.length },
-      { id: "groups", label: "Index headings", count: groups.length },
-      { id: "diagnostics", label: "Diagnostics", count: this.diagnosticsCache?.length ?? "—" },
+    // Counts stay lazy: a tab hidden by the clinical preset must not pay for
+    // the vault scan that its list would need.
+    const definitions: Array<{ id: ManagerTab; label: string; count: () => number | string; genericOnly?: boolean }> = [
+      { id: "indexed", label: "Indexed", count: () => this.noteList("indexed").length },
+      { id: "available", label: "Available", count: () => this.noteList("available").length, genericOnly: true },
+      { id: "hidden", label: "Hidden", count: () => this.noteList("hidden").length },
+      { id: "groups", label: "Index headings", count: () => groups.length },
+      { id: "diagnostics", label: "Diagnostics", count: () => this.diagnosticsCache?.length ?? "—" },
     ];
     for (const definition of definitions.filter((item) => !item.genericOnly || !this.plugin.isClinicalMode())) {
       const active = this.tab === definition.id;
@@ -127,19 +186,13 @@ export class IndexManagerModal extends Modal {
         attr: { role: "tab", "aria-selected": String(active), tabindex: active ? "0" : "-1", "data-manager-tab": definition.id },
       });
       button.createSpan({ text: definition.label });
-      button.createSpan({ cls: "ent-cc-manager-tab-count", text: String(definition.count) });
-      button.addEventListener("click", () => {
-        this.tab = definition.id;
-        this.query = "";
-        this.selected.clear();
-        this.render();
-      });
+      button.createSpan({ cls: "ent-cc-manager-tab-count", text: String(definition.count()) });
+      button.addEventListener("click", () => this.switchTab(definition.id));
     }
     this.revealActiveTab(tabs);
 
-    if (["indexed", "available", "hidden"].includes(this.tab)) {
-      const notes = this.tab === "indexed" ? indexed : this.tab === "available" ? available : hidden;
-      this.renderNoteManager(notes, available.length);
+    if (this.tab === "indexed" || this.tab === "available" || this.tab === "hidden") {
+      this.renderNoteManager(this.noteList(this.tab), () => this.noteList("available").length);
     } else if (this.tab === "groups") {
       this.renderGroups(groups);
     } else {
@@ -211,7 +264,7 @@ export class IndexManagerModal extends Modal {
     return [...hidden, ...placeholders];
   }
 
-  private renderNoteManager(notes: ManagerNote[], availableCount: number): void {
+  private renderNoteManager(notes: ManagerNote[], availableCount: () => number): void {
     const toolbar = this.contentEl.createDiv({ cls: "ent-cc-manager-toolbar" });
     const search = toolbar.createEl("input", { type: "search", placeholder: "Search note title or path…", attr: { "aria-label": "Search index manager notes" } });
     search.value = this.query;
@@ -227,7 +280,9 @@ export class IndexManagerModal extends Modal {
       if (this.searchTimer !== null) this.clearTimer(this.searchTimer);
       this.searchTimer = this.setGuardedTimer(() => {
         this.searchTimer = null;
-        this.render();
+        // Filtering the memoized snapshot: a keystroke must never trigger the
+        // full vault scan that building the candidate list requires.
+        this.renderSnapshot();
         this.setGuardedTimer(() => {
           const next = this.contentEl.querySelector<HTMLInputElement>('.ent-cc-manager-toolbar input[type="search"]');
           next?.focus();
@@ -244,7 +299,7 @@ export class IndexManagerModal extends Modal {
     this.actionButton(toolbar, "list-checks", selectionCoversMatches ? "Clear selection" : "Select matches", () => {
       if (selectionCoversMatches) this.selected.clear();
       else filtered.forEach((note) => this.selected.add(note.path));
-      this.render();
+      this.renderSnapshot();
     }, filtered.length === 0);
 
     const actions = this.contentEl.createDiv({ cls: `ent-cc-manager-bulk-actions ${this.selected.size === 0 ? "is-idle" : ""} ${filtered.length === 0 ? "is-empty-list" : ""}` });
@@ -265,17 +320,14 @@ export class IndexManagerModal extends Modal {
     for (const note of visible) this.renderNoteRow(list, note);
     if (filtered.length > visible.length) list.createDiv({ cls: "ent-cc-manager-limit", text: `Showing the first ${visible.length} matches. Narrow the search to reach the remaining ${filtered.length - visible.length}.` });
     if (filtered.length === 0) {
-      if (!this.query && this.tab === "indexed" && !this.plugin.isClinicalMode() && availableCount > 0) {
+      const available = !this.query && this.tab === "indexed" && !this.plugin.isClinicalMode() ? availableCount() : 0;
+      if (available > 0) {
         const empty = list.createDiv({ cls: "ent-cc-empty ent-cc-empty-action" });
         setIcon(empty.createSpan(), "list-plus");
         empty.createEl("strong", { text: `Start your ${this.plugin.data.settings.indexLabel.toLowerCase()}` });
-        empty.createEl("p", { text: `${availableCount} existing note${availableCount === 1 ? " is" : "s are"} available to add. Their files will not be moved or rewritten.` });
-        const browse = empty.createEl("button", { cls: "ent-cc-button ent-cc-add-button", text: `Browse ${availableCount} available` });
-        browse.addEventListener("click", () => {
-          this.tab = "available";
-          this.selected.clear();
-          this.render();
-        });
+        empty.createEl("p", { text: `${available} existing note${available === 1 ? " is" : "s are"} available to add. Their files will not be moved or rewritten.` });
+        const browse = empty.createEl("button", { cls: "ent-cc-button ent-cc-add-button", text: `Browse ${available} available` });
+        browse.addEventListener("click", () => this.switchTab("available"));
       } else {
         list.createDiv({ cls: "ent-cc-empty", text: this.query ? "No notes match this search." : "Nothing in this section." });
       }
@@ -679,50 +731,40 @@ export class IndexManagerModal extends Modal {
     if (diagnostics.length === 0) list.createDiv({ cls: "ent-cc-empty", text: "Index organization is healthy." });
   }
 
-  private ownsOpenedBase(): boolean {
-    // Prototype-only unit-test fixtures do not run onOpen(); real modal
-    // instances always capture a non-empty ID before their first render.
-    const currentEpoch = typeof this.plugin.getDataEpoch === "function" ? this.plugin.getDataEpoch() : 0;
-    return !this.openedBaseId || (this.plugin.getActiveKnowledgeBaseId() === this.openedBaseId
-      && currentEpoch === (this.openedDataEpoch ?? 0));
+  private createBaseGuard(): OpenedBaseGuard {
+    return createOpenedBaseGuard(this.plugin, {
+      message: "The active knowledge base changed. Reopen the index manager before making more changes.",
+      openedBaseId: this.openedBaseId,
+      openedDataEpoch: this.openedDataEpoch ?? 0,
+      onStale: () => { if (this.managerOpen) this.close(); },
+    });
   }
 
   private guardOpenedBase(): boolean {
-    if (this.ownsOpenedBase()) return true;
-    const showNotice = !this.staleBaseNoticeShown;
-    this.staleBaseNoticeShown = true;
-    if (this.managerOpen) this.close();
-    if (showNotice) {
-      new Notice("The active knowledge base changed. Reopen the index manager before making more changes.", 8000);
-    }
-    return false;
+    // Prototype-only unit-test fixtures do not run onOpen(); with no captured
+    // base id there is nothing they could have gone stale against.
+    if (!this.openedBaseId) return true;
+    return (this.ownsBase ??= this.createBaseGuard())();
   }
 
   private setGuardedTimer(action: () => void, delay: number): number {
-    let timer = 0;
-    let firedSynchronously = false;
-    timer = window.activeWindow.setTimeout(() => {
-      firedSynchronously = true;
-      this.pendingTimers?.delete(timer);
-      if (!this.managerOpen || !this.guardOpenedBase()) return;
-      action();
-    }, delay);
-    if (!firedSynchronously) (this.pendingTimers ??= new Set<number>()).add(timer);
-    return timer;
+    return setGuardedTimer({
+      contentEl: this.contentEl,
+      timers: (this.pendingTimers ??= new Set<number>()),
+      proceed: () => this.managerOpen && this.guardOpenedBase(),
+      action,
+      delay,
+    });
   }
 
   private clearTimer(timer: number): void {
-    window.activeWindow.clearTimeout(timer);
-    this.pendingTimers?.delete(timer);
+    clearGuardedTimer(this.contentEl, this.pendingTimers, timer);
   }
 
   private run(action: () => Promise<unknown>): void {
     if (!this.guardOpenedBase()) return;
     void action().catch((error) => {
-      if (!this.ownsOpenedBase()) {
-        this.guardOpenedBase();
-        return;
-      }
+      if (!this.guardOpenedBase()) return;
       new Notice(error instanceof Error ? error.message : String(error));
     });
   }
@@ -731,60 +773,38 @@ export class IndexManagerModal extends Modal {
     if (!this.guardOpenedBase()) return;
     const now = new Date();
     const config = createWorkspaceConfig(this.plugin.data, now.toISOString());
-    if (Platform.isMobile) {
-      await this.plugin.writePortableJson("workspace", config);
+    const delivery = await deliverJsonExport(this.plugin, "workspace", "knowledge-command-center-workspace", config, {
+      contentEl: this.contentEl,
+      date: now,
+    });
+    if (delivery.medium === "vault") {
       if (!this.guardOpenedBase()) return;
       new Notice("Workspace saved in the export folder inside the vault. No note contents included.");
       return;
     }
-    const viewWindow = this.contentEl.ownerDocument.defaultView ?? window;
-    const url = viewWindow.URL.createObjectURL(new Blob([JSON.stringify(config, null, 2)], { type: "application/json" }));
-    const link = createEl("a");
-    link.href = url;
-    link.download = `knowledge-command-center-workspace-${localDateStamp(now)}.json`;
-    link.click();
-    viewWindow.setTimeout(() => viewWindow.URL.revokeObjectURL(url), 1000);
     new Notice("Workspace configuration exported without note contents or note-specific memberships.");
   }
 
   private importWorkspace(): void {
-    if (!this.guardOpenedBase()) return;
-    if (Platform.isMobile) {
-      const files = this.plugin.getPortableJsonFiles();
-      if (files.length === 0) {
-        new Notice("No JSON files were found in the vault. Copy a workspace JSON into the vault, then try again.");
-        return;
-      }
-      new VaultFilePickerModal(this.app, files, "Choose a workspace configuration JSON", (file) => {
-        if (!this.guardOpenedBase()) return;
-        this.confirmWorkspaceImport(this.plugin.readPortableJson(file));
-      }).open();
-      return;
-    }
-    const input = createEl("input");
-    input.type = "file";
-    input.accept = "application/json,.json";
-    input.addEventListener("change", () => {
-      if (!this.guardOpenedBase()) return;
-      const file = input.files?.[0];
-      if (!file) return;
-      void file.text().then((raw) => {
-        if (!this.guardOpenedBase()) return;
-        this.confirmWorkspaceImport(Promise.resolve(JSON.parse(raw) as unknown));
-      }).catch((error) => {
-        if (!this.ownsOpenedBase()) {
-          this.guardOpenedBase();
-          return;
-        }
-        new Notice(error instanceof Error ? error.message : String(error));
-      });
+    requestJsonImport(this.app, this.plugin, {
+      title: "Choose a workspace configuration JSON",
+      maxBytes: MAX_PORTABLE_PACKAGE_BYTES,
+      oversizeMessage: "The selected JSON is larger than the 10 MB import limit.",
+      emptyVaultMessage: "No JSON files were found in the vault. Copy a workspace JSON into the vault, then try again.",
+      guard: () => this.guardOpenedBase(),
+      run: (task) => {
+        void task().catch((error: unknown) => {
+          if (!this.guardOpenedBase()) return;
+          new Notice(error instanceof Error ? error.message : String(error));
+        });
+      },
+      onValue: (value) => { this.confirmWorkspaceImport(value); },
     });
-    input.click();
   }
 
-  private confirmWorkspaceImport(input: Promise<unknown>): void {
+  private confirmWorkspaceImport(input: unknown): void {
     if (!this.guardOpenedBase()) return;
-    void input.then((value) => {
+    void Promise.resolve(input).then((value) => {
       if (!this.guardOpenedBase()) return;
       const config = parseWorkspaceConfig(value);
       const destinationSettings = this.plugin.data.settings;
@@ -886,16 +906,14 @@ export class IndexManagerModal extends Modal {
         }, { includeSettings: true, requireUndo: true });
         if (!this.guardOpenedBase()) return;
         this.diagnosticsCache = null;
+        this.invalidateNoteLists();
         this.titleEl.setText(`Manage ${this.plugin.data.settings.indexLabel}`);
         if (this.plugin.isClinicalMode() && this.tab === "available") this.tab = "indexed";
         this.render();
         new Notice(`Workspace configuration imported.${profileResetNotice}${droppedProfileNotice} Markdown notes were not changed.`);
       }).open();
     }).catch((error) => {
-      if (!this.ownsOpenedBase()) {
-        this.guardOpenedBase();
-        return;
-      }
+      if (!this.guardOpenedBase()) return;
       new Notice(error instanceof Error ? error.message : String(error));
     });
   }

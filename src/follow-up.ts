@@ -148,12 +148,22 @@ function assertContentSize(value: string, phase: "input" | "output"): void {
   }
 }
 
-function hasUnpairedSurrogate(value: string): boolean {
+/**
+ * Whether the text contains a lone surrogate, which is not valid Unicode and
+ * cannot survive a UTF-8 round trip.
+ *
+ * Shared with the portable exporter so a string accepted into the store is the
+ * same set of strings the exporter will accept. The trailing check must be an
+ * explicit in-range test: `charCodeAt` past the end returns NaN, and a
+ * `next < 0xDC00 || next > 0xDFFF` form silently accepts a string ending in a
+ * high surrogate because every NaN comparison is false.
+ */
+export function hasUnpairedSurrogate(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index);
     if (code >= 0xD800 && code <= 0xDBFF) {
       const next = value.charCodeAt(index + 1);
-      if (next < 0xDC00 || next > 0xDFFF) return true;
+      if (!(next >= 0xDC00 && next <= 0xDFFF)) return true;
       index += 1;
     } else if (code >= 0xDC00 && code <= 0xDFFF) {
       return true;
@@ -460,8 +470,13 @@ function headingFromLine(line: MarkdownLine): ParsedHeading | null {
   return { level: match[1] === "##" ? 2 : 3, label };
 }
 
+/**
+ * Heading matching must use exactly the key that category dedupe uses:
+ * if the two drifted apart, an entry would be appended under a second heading
+ * that the picker already considers a duplicate of the first.
+ */
 function normalizedHeadingLabel(value: string): string {
-  return value.normalize("NFC").trim().replace(/[ \t]+/gu, " ").toLocaleLowerCase("en-US");
+  return followUpCategoryLabelKey(value);
 }
 
 function firstNonblankLine(lines: MarkdownLine[], start: number, end: number): number {
@@ -767,6 +782,13 @@ function applyPlannedEdits(content: string, planned: PlannedEdit[]): AppliedEdit
   return { content: output, edits, reverseEdits, finalSpans };
 }
 
+/**
+ * Deliberately NOT the shared model.ts fingerprint. Undo verification needs a
+ * position-sensitive digest, so the second lane mixes `code + index` with a
+ * different constant and the output carries a version tag and the content
+ * length. Do not "consolidate" this into fingerprintText: that would drop the
+ * positional term and stop detecting a transposition inside a managed block.
+ */
 function contentFingerprint(content: string): string {
   let left = 0x811C9DC5;
   let right = 0x9E3779B9;

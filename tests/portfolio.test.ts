@@ -27,6 +27,7 @@ import {
 import {
   EMPTY_PORTABLE_SELECTION,
   parsePortableExport,
+  serializePortableExport,
   type PortableExportSelection,
 } from "../src/portability";
 import { PortfolioTransferModal } from "../src/portfolio-modal";
@@ -793,4 +794,80 @@ test("plan previews key layout structures collision-proof against crafted local 
   assert.ok(removed.some((line) => line.includes("Child of Two")), "a crafted sibling cannot shadow another node's key");
   assert.ok(removed.some((line) => line.includes("Heading One")), "both crafted headings stay distinct in the preview");
   assert.ok(removed.some((line) => line.includes("Heading Two")), "both crafted headings stay distinct in the preview");
+});
+
+test("the plan guard canonicalizes a __proto__ key the same way the model and merge serializers do", () => {
+  // The guard's local canonicalizer accumulated into a plain object, where
+  // output["__proto__"] = value creates no own property. A store edit that
+  // lived only under that key was therefore invisible to the tamper check
+  // while model.ts treated it as a real change.
+  const base = entry("base-guard", "Guarded");
+  base.data.indexGroupByPath = JSON.parse('{"__proto__":"Research"}') as Record<string, string>;
+  const tampered = structuredClone(base);
+  tampered.data.indexGroupByPath = JSON.parse('{"__proto__":"Teaching"}') as Record<string, string>;
+
+  assert.notEqual(
+    semanticEntryFingerprint(base),
+    semanticEntryFingerprint(tampered),
+    "model.ts already treats these as different payloads",
+  );
+  assert.notEqual(
+    portfolioStoreGuard(storeWith([base])),
+    portfolioStoreGuard(storeWith([tampered])),
+    "the plan guard must not collapse a __proto__-only edit into the same token",
+  );
+  assert.equal(
+    portfolioStoreGuard(storeWith([base])),
+    portfolioStoreGuard(storeWith([structuredClone(base)])),
+    "the guard stays deterministic for identical stores",
+  );
+  assert.match(portfolioStoreGuard(storeWith([base])), /^[0-9a-f]{16}$/, "guards keep the shared fingerprint shape");
+});
+
+test("destination base names dedupe on the one shared name key, not on raw text", () => {
+  // Two names that differ only by case or by Unicode composition are the same
+  // name to the store, so the second import must be suffixed rather than
+  // silently claiming a duplicate display name.
+  const existing = entry("base-existing", "Existing");
+  existing.data.settings.workspaceName = "CAFE\u0301";
+  const store = storeWith([existing], "vault-local");
+  const source = entry("base-source", "Source");
+  source.data.settings.workspaceName = "Caf\u00E9";
+  const bundle = bundleFor([source], "vault-local");
+  const plan = createPortfolioImportPlan(store, bundle, [{
+    sourceBaseId: "base-source",
+    destination: { kind: "new" },
+    mode: "merge",
+  }], { now: 1_700_000_000_000 });
+
+  const created = plan.operations[0];
+  assert.ok(created);
+  assert.notEqual(created.destinationBaseName, "Café");
+  assert.match(created.destinationBaseName, / \(2\)$/, "a composition-only duplicate is suffixed like any other duplicate");
+  assert.match(created.destinationBaseId, /^base-portfolio-[0-9a-f]{16}(-\d+)?$/, "destination IDs use the shared fingerprint");
+});
+
+test("a decomposed source name is measured in the composed form the bundle actually carries", () => {
+  // The portable parser NFC-normalizes every title, so "E" + combining acute
+  // loses a UTF-8 byte between the draft package and the one written into the
+  // bundle. Declaring the draft's length made the exporter reject its own
+  // output as not matching its declared resource counts.
+  const source = entry("base-source", "Source");
+  addPortableFixtures(source.data, "decomposed");
+  source.data.settings.workspaceName = "CAFE\u0301";
+  source.data.portableIndex.subjects[0].title = "Cafe\u0301 topic";
+
+  const bundle = bundleFor([source], "vault-local");
+  const manifestEntry = bundle.manifest.entries[0];
+  const shipped = bundle.packages[0]?.package;
+  assert.ok(manifestEntry && shipped);
+  assert.equal(manifestEntry.sourceBaseName, "CAF\u00C9");
+  assert.equal(shipped.sourceWorkspace, "CAF\u00C9");
+  assert.ok(shipped.components.index?.subjects.some((subject) => subject.title === "Caf\u00E9 topic"));
+  assert.equal(
+    manifestEntry.packageBytes,
+    new TextEncoder().encode(serializePortableExport(shipped)).byteLength,
+    "the manifest declares the bytes of the package the bundle carries",
+  );
+  assert.doesNotThrow(() => parsePortfolioExport(JSON.parse(serializePortfolioExport(bundle)) as unknown));
 });

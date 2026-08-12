@@ -251,7 +251,9 @@ test("taxonomy health UI is bounded, touch-sized, and uses one scrolling list", 
   assert.match(source, /const PAGE_SIZE = 200/);
   assert.match(source, /role: "list"/);
   assert.match(source, /Review repair…/);
-  assert.match(source, /getActiveKnowledgeBaseId\(\) !== this\.openedBaseId/);
+  // Staleness is delegated to the one shared guard factory in src/modals.ts.
+  assert.match(source, /createOpenedBaseGuard\(this\.plugin, \{/);
+  assert.doesNotMatch(source, /getActiveKnowledgeBaseId\(\) !== this\.openedBaseId/);
   assert.match(styles, /\.ent-cc-taxonomy-list\s*\{[^}]*overflow-y:\s*auto/s);
   assert.match(styles, /\.ent-cc-taxonomy-finding-actions \.ent-cc-button,[\s\S]*?min-height:\s*44px/);
   assert.doesNotMatch(styles, /\.ent-cc-taxonomy-finding-content\s*\{[^}]*overflow-y:/s);
@@ -450,9 +452,9 @@ test("index manager bulk selection matches the notes the filter shows", () => {
     pendingTimers: Set<number>;
     selectionButtons: unknown[];
     guardOpenedBase(): boolean;
-    ownsOpenedBase(): boolean;
     render(): void;
-    renderNoteManager(notes: Array<{ path: string; title: string; meta: string }>, availableCount: number): void;
+    renderSnapshot(): void;
+    renderNoteManager(notes: Array<{ path: string; title: string; meta: string }>, availableCount: () => number): void;
   };
   manager.app = { vault: { getAbstractFileByPath: () => null } };
   manager.plugin = plugin;
@@ -466,8 +468,8 @@ test("index manager bulk selection matches the notes the filter shows", () => {
   manager.pendingTimers = new Set();
   manager.selectionButtons = [];
   manager.guardOpenedBase = () => true;
-  manager.ownsOpenedBase = () => true;
   manager.render = () => undefined;
+  manager.renderSnapshot = () => undefined;
 
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
   Object.defineProperty(globalThis, "window", {
@@ -476,7 +478,7 @@ test("index manager bulk selection matches the notes the filter shows", () => {
   });
   try {
     withCaretSupport(() => {
-      manager.renderNoteManager(notes, 0);
+      manager.renderNoteManager(notes, () => 0);
       const toggle = manager.contentEl.querySelector(".ent-cc-manager-toolbar button");
       assert.ok(toggle);
       assert.match(toggle.textContent, /Select matches/u, "a selection holding hidden notes is not a full selection");
@@ -554,4 +556,44 @@ test("health center flags an empty depth-3 node without flagging its subject-bea
     assert.equal(emptyIds.some((id) => id.endsWith(`:${ancestorId}`)), false, `${ancestorId} has a subject-bearing subtree and is not empty`);
   }
   assert.equal(findings.some((item) => item.kind === "unreachable-structure"), false);
+});
+
+test("the taxonomy health stale guard closes every time but notices only once", () => {
+  Notice.messages.length = 0;
+  let epoch = 1;
+  let closes = 0;
+  const plugin = {
+    app: {},
+    data: { id: "opened" },
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => epoch,
+  };
+  const modal = Object.create(TaxonomyHealthModal.prototype) as {
+    plugin: typeof plugin;
+    ownsBase: (() => boolean) | null;
+    openedBaseId: string;
+    openedDataEpoch: number;
+    close(): void;
+    guardOpenedBase(): boolean;
+  };
+  modal.plugin = plugin;
+  modal.ownsBase = null;
+  // Also seed the fields the hand-rolled copy used, so this stays a test about
+  // notice deduplication rather than about which fields the guard reads.
+  modal.openedBaseId = "base-a";
+  modal.openedDataEpoch = 1;
+  modal.close = () => { closes += 1; };
+
+  assert.equal(modal.guardOpenedBase(), true);
+  epoch = 2;
+  assert.equal(modal.guardOpenedBase(), false);
+  assert.equal(modal.guardOpenedBase(), false);
+  assert.equal(modal.guardOpenedBase(), false);
+
+  assert.equal(closes, 3, "each blocked action still closes the modal");
+  assert.equal(
+    Notice.messages.filter((message) => message.includes("Reopen taxonomy health")).length,
+    1,
+    "the promoted guard dedupes the notice this copy used to spam",
+  );
 });

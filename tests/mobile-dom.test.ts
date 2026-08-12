@@ -13,11 +13,12 @@ import {
 import {
   classifyPaneWidth,
   EntVaultCommandCenterView,
+  MAX_RENDERED_SEARCH_RESULTS,
   observePaneWidth,
   PANE_COMPACT_MIN_WIDTH,
   PANE_WIDE_MIN_WIDTH,
-  prepareKnowledgeBaseSearchResults,
 } from "../src/view.ts";
+import { collectKnowledgeBaseSearchResults } from "../src/search.ts";
 import { asHtmlElement, createFakeDom, type FakeWindow } from "./support/fake-dom.ts";
 
 interface MobileViewHarness {
@@ -36,7 +37,7 @@ interface MobileViewHarness {
 interface SearchStateHarness extends MobileViewHarness {
   plugin: {
     getDataEpoch(): number;
-    searchKnowledgeBases(query: string, options?: { limit?: number }): Promise<ReturnType<typeof prepareKnowledgeBaseSearchResults>>;
+    searchKnowledgeBases(query: string, options?: { limit?: number }): Promise<ReturnType<typeof crossBaseSearch>>;
   };
   cancelPendingGlobalSearch(): void;
 }
@@ -50,6 +51,22 @@ interface SearchSource {
   baseName: string;
   data: PluginData;
   records: VaultRecord[];
+}
+
+/**
+ * Stand in for the plugin's own `searchKnowledgeBases` by driving the same
+ * production collector it uses, so this harness exercises shipped code.
+ */
+function crossBaseSearch(
+  sources: SearchSource[],
+  query: string,
+  limit = MAX_RENDERED_SEARCH_RESULTS,
+): ReturnType<typeof collectKnowledgeBaseSearchResults<SearchSource>> {
+  return collectKnowledgeBaseSearchResults(
+    sources.map((source) => ({ source, records: source.records })),
+    parseQuery(query),
+    limit,
+  );
 }
 
 interface ControlledResizeObserver {
@@ -175,7 +192,7 @@ function createView(window: FakeWindow, inputSources: SearchSource[] = []): EntV
     saveViewState: async () => undefined,
     getIndexRecords: () => sources[0].records,
     getIndexCandidateFiles: () => [],
-    searchKnowledgeBases: async (query: string, options?: { limit?: number }) => prepareKnowledgeBaseSearchResults(
+    searchKnowledgeBases: async (query: string, options?: { limit?: number }) => crossBaseSearch(
       sources,
       query,
       options?.limit,
@@ -994,14 +1011,14 @@ test("changing a global query keeps prior rows dimmed until the replacement resu
   const source = searchSource("base-mobile", "Mobile base", [record("KB/Laryngomalacia.md", "Laryngomalacia")]);
   const view = createView(dom.window, [source]) as unknown as SearchStateHarness;
   const parent = dom.document.body.createDiv();
-  const pending: Array<(result: ReturnType<typeof prepareKnowledgeBaseSearchResults>) => void> = [];
+  const pending: Array<(result: ReturnType<typeof crossBaseSearch>) => void> = [];
   view.plugin.searchKnowledgeBases = (query, options) => new Promise((resolve) => {
-    pending.push(() => resolve(prepareKnowledgeBaseSearchResults([source], query, options?.limit)));
+    pending.push(() => resolve(crossBaseSearch([source], query, options?.limit)));
   });
 
   view.query = "laryn";
   view.renderGlobalSearchResults(asHtmlElement(parent));
-  pending.shift()?.(prepareKnowledgeBaseSearchResults([source], "laryn"));
+  pending.shift()?.(crossBaseSearch([source], "laryn"));
   await Promise.resolve();
   await Promise.resolve();
   parent.empty();

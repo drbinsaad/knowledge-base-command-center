@@ -1,11 +1,12 @@
 import { Modal, Notice, setIcon } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
+import { createOpenedBaseGuard, type OpenedBaseGuard } from "./modals";
 import { formatLocalAge, type SyncRecoveryCenterSnapshot } from "./sync-recovery";
 
 export class SyncRecoveryCenterModal extends Modal {
   private openedBaseId = "";
   private openedDataEpoch = 0;
-  private staleNoticeShown = false;
+  private ownsBase: OpenedBaseGuard | null = null;
   private focusTimer: number | null = null;
   private announcementTimer: number | null = null;
   private recheckAnnouncement = "";
@@ -17,7 +18,7 @@ export class SyncRecoveryCenterModal extends Modal {
   onOpen(): void {
     this.openedBaseId = this.plugin.getActiveKnowledgeBaseId();
     this.openedDataEpoch = this.plugin.getDataEpoch();
-    this.staleNoticeShown = false;
+    this.ownsBase = this.createBaseGuard();
     this.recheckAnnouncement = "";
     this.modalEl.addClass("ent-cc-sync-recovery-modal");
     this.contentEl.addClass("ent-cc-modal", "ent-cc-sync-recovery");
@@ -39,19 +40,26 @@ export class SyncRecoveryCenterModal extends Modal {
     }
   }
 
-  private ownsOpenedBase(): boolean {
-    return this.plugin.getActiveKnowledgeBaseId() === this.openedBaseId
-      && this.plugin.getDataEpoch() === this.openedDataEpoch;
+  private createBaseGuard(): OpenedBaseGuard {
+    return createOpenedBaseGuard(this.plugin, {
+      message: "Knowledge-base data changed. Reopen sync & recovery center for a current local snapshot.",
+      openedBaseId: this.openedBaseId,
+      openedDataEpoch: this.openedDataEpoch,
+      onStale: () => this.close(),
+    });
+  }
+
+  /** Prototype-only unit-test fixtures do not run onOpen(); create on demand. */
+  private baseGuard(): OpenedBaseGuard {
+    return (this.ownsBase ??= this.createBaseGuard());
   }
 
   private guardOpenedBase(): boolean {
-    if (this.ownsOpenedBase()) return true;
-    this.close();
-    if (!this.staleNoticeShown) {
-      this.staleNoticeShown = true;
-      new Notice("Knowledge-base data changed. Reopen sync & recovery center for a current local snapshot.", 8000);
-    }
-    return false;
+    return this.baseGuard()();
+  }
+
+  private ownsOpenedBase(): boolean {
+    return this.baseGuard().owns();
   }
 
   private render(focusAction = false): void {

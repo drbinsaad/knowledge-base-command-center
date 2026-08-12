@@ -2,10 +2,12 @@ import {
   applyPluginViewState,
   boundedSemanticLineage,
   canonicalInterimEnvelopeString,
+  canonicalJsonString,
   capturePluginViewState,
   deterministicSemanticHead,
   MAX_DELETED_KNOWLEDGE_BASE_IDS,
   MAX_KNOWLEDGE_BASES,
+  normalizedNameKey,
   pristineProvisionalInterimEnvelopeStoreFingerprint,
   pristineProvisionalMigratedStoreFingerprint,
   provisionalInterimEnvelopeVaultFingerprint,
@@ -35,10 +37,6 @@ export interface SemanticStoreConflict {
   incomingFingerprint: string;
 }
 
-function normalizedName(name: string): string {
-  return name.trim().normalize("NFC").toLowerCase();
-}
-
 function clippedSyncedName(name: string, suffix: string): string {
   const available = Math.max(1, 100 - suffix.length);
   const prefix = name.trim().slice(0, available).trim() || "Knowledge base";
@@ -49,23 +47,8 @@ function nameWithoutGeneratedSyncSuffix(name: string): string {
   return name.trim().replace(/(?:\s+\(synced \d+\))+$/i, "").trim() || "Knowledge base";
 }
 
-function canonicalJsonValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map((item) => canonicalJsonValue(item) ?? null);
-  if (!value || typeof value !== "object") return value;
-  const output: Record<string, unknown> = {};
-  for (const key of Object.keys(value).sort()) {
-    const normalized = canonicalJsonValue((value as Record<string, unknown>)[key]);
-    if (normalized !== undefined) output[key] = normalized;
-  }
-  return output;
-}
-
-function canonicalStringify(value: unknown): string {
-  return JSON.stringify(canonicalJsonValue(value));
-}
-
 function entryFingerprint(entry: KnowledgeBaseEntry): string {
-  return canonicalStringify([
+  return canonicalJsonString([
     entry.createdAt,
     entry.archivedAt,
     semanticPluginDataProjection(entry.data),
@@ -210,7 +193,7 @@ function makeAvailableNamesUnique(entries: KnowledgeBaseEntry[]): boolean {
     const suffixRoot = nameWithoutGeneratedSyncSuffix(original);
     let candidate = original;
     let suffixNumber = 2;
-    while (used.has(normalizedName(candidate))) {
+    while (used.has(normalizedNameKey(candidate))) {
       candidate = clippedSyncedName(suffixRoot, ` (synced ${suffixNumber})`);
       suffixNumber += 1;
     }
@@ -228,7 +211,7 @@ function makeAvailableNamesUnique(entries: KnowledgeBaseEntry[]): boolean {
       entry.updatedAt += 1;
       changed = true;
     }
-    used.add(normalizedName(candidate));
+    used.add(normalizedNameKey(candidate));
   }
   return changed;
 }
@@ -368,7 +351,7 @@ export function mergeKnowledgeBaseStores(
     bases,
     deletedBaseIds,
   };
-  const normalizeForComparison = (value: PluginStore): string => canonicalStringify(
+  const normalizeForComparison = (value: PluginStore): string => canonicalJsonString(
     {
       bases: sortedEntries(value.bases).map((entry) => semanticEntryForComparison(entry)),
       deletedBaseIds: value.deletedBaseIds,

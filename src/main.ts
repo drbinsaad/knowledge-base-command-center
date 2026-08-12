@@ -105,6 +105,7 @@ import {
   semanticEntryFingerprint,
   semanticPluginDataProjection,
   nextSemanticHead,
+  normalizedNameKey,
   parseDeviceLocalPluginState,
   cleanLibraryNoteProfiles,
   resolveLibraryNoteProfile,
@@ -206,6 +207,46 @@ const MAX_INACTIVE_SEARCH_CACHED_RECORDS = 50_000;
 export const DEVICE_LOCAL_STATE_KEY = "ent-vault-command-center.device-state.v1";
 export const SYNC_RECOVERY_LOCAL_STATE_KEY = "ent-vault-command-center.sync-recovery-state.v1";
 const FOLLOW_UP_UNDO_WINDOW_MS = 5 * 60 * 1000;
+
+/**
+ * The single (root, filename prefix, kind) table for native clinical Library
+ * sources. Live record identity and the deterministic startup repair pass must
+ * agree here: two parallel if-chains that drift would make every startup
+ * "repair" what the live scan had just classified, churning synced data.
+ * Each caller keeps its own containment predicate — the live scan compares the
+ * physical vault path, while repair normalizes a persisted path first.
+ */
+const CLINICAL_LIBRARY_SOURCES: ReadonlyArray<{ root: string; prefix: string; kind: RecordKind }> = [
+  { root: PROCEDURE_ROOT, prefix: "Procedure - ", kind: "procedure" },
+  { root: MEDICATION_ROOT, prefix: "Drug - ", kind: "medication" },
+  { root: SYNDROME_ROOT, prefix: "Syndrome - ", kind: "syndrome" },
+];
+
+/**
+ * Total order over a base's cached records. The first three keys are the
+ * user-visible ordering; `path` is unique within a base and breaks every
+ * remaining tie so a single-record incremental splice lands in exactly the
+ * position a full rebuild-and-sort would have produced.
+ */
+function compareVaultRecords(left: VaultRecord, right: VaultRecord): number {
+  return left.role.localeCompare(right.role)
+    || (left.curriculumId || "ZZZ").localeCompare(right.curriculumId || "ZZZ", undefined, { numeric: true })
+    || left.title.localeCompare(right.title)
+    || (left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+}
+
+/** First index whose record does not sort before `record`. */
+function recordInsertionIndex(records: readonly VaultRecord[], record: VaultRecord): number {
+  let low = 0;
+  let high = records.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    const candidate = records[middle];
+    if (candidate && compareVaultRecords(candidate, record) < 0) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
 
 interface PluginDataLoadResult {
   recognizedStore: boolean;
@@ -398,7 +439,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   /** Stable search-only projections are bounded by retained records across bases. */
   private inactiveSearchRecordsCache = new Map<string, VaultRecord[]>();
   private inactiveSearchCachedRecordCount = 0;
-  private recordPathsCacheByBase = new Map<string, Set<string>>();
+  /**
+   * Path → record for the same projection held in `recordsCacheByBase` (or the
+   * retained inactive-search projection). Bulk operations look up hundreds of
+   * paths in one synchronous transaction, so the membership test and the
+   * record itself must both be O(1); a linear `getRecords().find` per item made
+   * those loops quadratic.
+   */
+  private recordsByPathCacheByBase = new Map<string, Map<string, VaultRecord>>();
   private librarySubjectCountsCacheByBase = new Map<string, ReadonlyMap<string, number>>();
   private referencedPathsCacheByBase = new Map<string, Set<string>>();
   private excludedPathsCacheByBase = new Map<string, Set<string>>();
@@ -626,21 +674,23 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         // index. Any metadata-link change can therefore invalidate that cache.
         this.backlinkIndex = null;
         this.invalidateKnowledgeBaseSearchSnapshot();
-        if (this.invalidateRecordCachesForPath(file.path)) this.scheduleRefresh(false);
+        if (this.invalidateRecordCachesForPath(file.path, { file })) this.scheduleRefresh(false);
         else if (this.app.workspace.getLeavesOfType(VIEW_TYPE).length > 0) this.scheduleRefresh(false);
       }));
       this.registerEvent(this.app.vault.on("create", (file) => {
         if (!(file instanceof TFile)) return;
         this.backlinkIndex = null;
         this.invalidateKnowledgeBaseSearchSnapshot();
-        if (this.invalidateRecordCachesForPath(file.path)) this.scheduleRefresh(false);
+        if (this.invalidateRecordCachesForPath(file.path, { file })) this.scheduleRefresh(false);
         else if (this.app.workspace.getLeavesOfType(VIEW_TYPE).length > 0) this.scheduleRefresh(false);
       }));
       this.registerEvent(this.app.vault.on("delete", (file) => {
         if (!(file instanceof TFile)) return;
         this.backlinkIndex = null;
         this.invalidateKnowledgeBaseSearchSnapshot();
-        if (this.invalidateRecordCachesForPath(file.path)) this.scheduleRefresh(false);
+        // The file is already gone; project the path as absent rather than
+        // asking the vault for an abstract file that no longer resolves.
+        if (this.invalidateRecordCachesForPath(file.path, { file: null })) this.scheduleRefresh(false);
         else if (this.app.workspace.getLeavesOfType(VIEW_TYPE).length > 0) this.scheduleRefresh(false);
       }));
       this.registerEvent(this.app.vault.on("rename", (file, oldPath) => this.handleVaultRenameEvent(file, oldPath)));
@@ -1375,6 +1425,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       return { recognizedStore: false, hasVaultId: false, identityNeedsWriteback: false, structuralRepairNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing, sourceVersion, compatible: false };
     }
     let structuralRepairNeedsWriteback = false;
+    /**
+     * The bootstrap rollback snapshot, retained while it still describes the
+     * live store. The commit block near the end of this method needs the very
+     * same neutral projection; reusing this one drops a whole redundant clone
+     * from the startup path and is discarded the moment repair edits the store.
+     */
+    let neutralBootstrapSnapshot: PluginStore | null = null;
     let legacyDeviceStateMigrationBlocked = false;
     let pendingLegacyDeviceState: DeviceLocalPluginState | undefined;
     let pendingLegacyHistoryTruncated = false;
@@ -1416,7 +1473,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         this.applyDeviceLocalState(this.store, pendingLegacyDeviceState ?? this.deviceLocalState);
       }
       this.useActiveData(this.requireActiveBase().data);
-      if (capturedRead === undefined) this.rollbackStoreSnapshot = this.neutralSyncedStore(this.store);
+      if (capturedRead === undefined) {
+        neutralBootstrapSnapshot = this.neutralSyncedStore(this.store);
+        this.rollbackStoreSnapshot = neutralBootstrapSnapshot;
+      }
     } catch (error) {
       this.useActiveData(structuredClone(DEFAULT_DATA));
       this.store = createDefaultStore(this.data);
@@ -1456,9 +1516,26 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         compatible: false,
       };
     }
-    const preRemediationStore = structuredClone(this.store);
-    const remediationNeedsWriteback = this.remediateInvalidClinicalIndexes();
+    // The pre-repair envelope is consumed only by the writeback paths below,
+    // all of which are inert on a steady-state startup. Cloning the whole
+    // multi-base store unconditionally made every launch pay for a repair that
+    // almost never runs, synchronously, before the plugin finished loading.
+    // Capture it at the instant repair first mutates anything instead.
+    let capturedPreRemediationStore: PluginStore | null = null;
+    const capturePreRemediationStore = (): void => {
+      capturedPreRemediationStore ??= structuredClone(this.store);
+      // The bootstrap projection is about to stop describing the live store.
+      neutralBootstrapSnapshot = null;
+    };
+    const remediationNeedsWriteback = this.remediateInvalidClinicalIndexes(this.store.bases, capturePreRemediationStore);
+    // With no repair mutation the live store still *is* its own pre-repair
+    // envelope, so a clone taken here is identical to one taken above.
+    const preRemediationStore = (): PluginStore => {
+      capturePreRemediationStore();
+      return capturedPreRemediationStore as PluginStore;
+    };
     if (remediationNeedsWriteback) {
+      const beforeRepair = preRemediationStore();
       // Migration identities fingerprint their pristine payload so two
       // devices upgrading the same old data can converge. ENT invariant
       // repair is deterministic and happens in the same atomic write, so
@@ -1466,7 +1543,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // while retaining the device's random nonce. The helper rejects normal
       // identities and any provisional store edited after migration.
       for (const entry of this.store.bases) {
-        const before = preRemediationStore.bases.find((candidate) => candidate.id === entry.id);
+        const before = beforeRepair.bases.find((candidate) => candidate.id === entry.id);
         const semanticHash = semanticEntryFingerprint(entry);
         if (before && semanticHash === before.semanticHash) continue;
         // Deterministic migration repair is a causal child of the parsed
@@ -1489,11 +1566,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // repaired payload, retaining the random nonce. The helper rejects
       // normal identities and any provisional store edited after migration.
       try {
+        const parentStore = preRemediationStore();
         rebaseProvisionalVaultIdAfterDeterministicRepair(
-          preMigrationStore ?? preRemediationStore,
+          preMigrationStore ?? parentStore,
           this.store,
           {
-            parentStore: preRemediationStore,
+            parentStore,
             reason: remediationNeedsWriteback ? "clinical-index-remediation" : undefined,
           },
         );
@@ -1515,7 +1593,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       }
     } catch (error) {
       if (remediationNeedsWriteback) {
-        this.store = preRemediationStore;
+        this.store = preRemediationStore();
         this.useActiveData(this.requireActiveBase().data);
         this.invalidateRecordCache();
         this.markPersistenceUncertain("Automatic startup repair was rejected while saving and may already have reached data.json. The pre-repair organization remains available in memory, but knowledge bases stay read-only until Obsidian is restarted after data.json and a same-vault recovery are preserved.");
@@ -1526,7 +1604,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     // empty store. Do not persist or commit it merely because this device
     // enabled the plugin before Obsidian Sync delivered the existing payload.
     if (capturedRead === undefined && !sourceWasMissing) {
-      this.committedStoreSnapshot = this.neutralSyncedStore(this.store);
+      this.committedStoreSnapshot = neutralBootstrapSnapshot ?? this.neutralSyncedStore(this.store);
       this.rollbackStoreSnapshot = structuredClone(this.committedStoreSnapshot);
     }
     // A recognized interim deterministic identity is usable after migrateStore
@@ -2764,10 +2842,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private knowledgeBaseNameExists(name: string, exceptId = ""): boolean {
-    const key = name.trim().normalize("NFC").toLowerCase();
+    const key = normalizedNameKey(name);
     return this.store.bases.some((entry) => entry.id !== exceptId
       && entry.archivedAt === null
-      && entry.data.settings.workspaceName.trim().normalize("NFC").toLowerCase() === key);
+      && normalizedNameKey(entry.data.settings.workspaceName) === key);
   }
 
   private createUniqueKnowledgeBaseEntry(data: PluginData): KnowledgeBaseEntry {
@@ -3285,10 +3363,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     else if (pathIsInsideFolder(normalized, data.settings.primaryFolder)) kind = "topic";
     else {
       const basename = normalized.split("/").at(-1)?.replace(/\.md$/i, "") ?? "";
-      if (pathIsInsideFolder(normalized, PROCEDURE_ROOT) && basename.startsWith("Procedure - ")) kind = "procedure";
-      else if (pathIsInsideFolder(normalized, MEDICATION_ROOT) && basename.startsWith("Drug - ")) kind = "medication";
-      else if (pathIsInsideFolder(normalized, SYNDROME_ROOT) && basename.startsWith("Syndrome - ")) kind = "syndrome";
-      else kind = "note";
+      kind = CLINICAL_LIBRARY_SOURCES.find((source) => pathIsInsideFolder(normalized, source.root)
+        && basename.startsWith(source.prefix))?.kind ?? "note";
     }
     return {
       kind,
@@ -3301,7 +3377,15 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
    * pass is deterministic, touches plugin data only, and covers active,
    * inactive, and archived bases before one store-level writeback.
    */
-  private remediateInvalidClinicalIndexes(entries: readonly KnowledgeBaseEntry[] = this.store.bases): boolean {
+  private remediateInvalidClinicalIndexes(
+    entries: readonly KnowledgeBaseEntry[] = this.store.bases,
+    /**
+     * Invoked (idempotently) immediately before the first mutation of any
+     * entry, so a caller that needs the pre-repair envelope can snapshot it
+     * without cloning the whole store on the far more common no-op startup.
+     */
+    beforeMutation?: () => void,
+  ): boolean {
     let storeChanged = false;
 
     for (const entry of entries) {
@@ -3320,6 +3404,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       let entryChanged = false;
 
       const rehome = (subject: PortableSubjectDefinition, path: string, kind: RecordKind): void => {
+        beforeMutation?.();
         const libraryId = isLibraryKind(kind) ? BUILTIN_LIBRARY_IDS[kind] : null;
         if (subject.indexed) { subject.indexed = false; entryChanged = true; }
         if (subject.parentId !== null) { subject.parentId = null; entryChanged = true; }
@@ -3368,11 +3453,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       }
       if (nextManualPaths.length !== data.manualIndexPaths.length
         || nextManualPaths.some((path, index) => path !== data.manualIndexPaths[index])) {
+        beforeMutation?.();
         data.manualIndexPaths = nextManualPaths;
         entryChanged = true;
       }
 
       if (!entryChanged) continue;
+      beforeMutation?.();
       // A subject leaving the Index cannot remain a curriculum parent or in a
       // stale custom Library layout. Reconciliation places protected records
       // in their built-in Library as explicit or durable Unplaced entries.
@@ -3405,19 +3492,43 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.remediateInvalidClinicalIndexes([this.requireActiveBase()]);
   }
 
+  /** Path → every portable identity resolved to it, built in one pass. */
+  private portableOwnerIdsByPath(): ReadonlyMap<string, string[]> {
+    const owners = new Map<string, string[]>();
+    for (const [subjectId, resolvedPath] of Object.entries(this.data.portableIndex.resolvedPathBySubjectId)) {
+      const existing = owners.get(resolvedPath);
+      if (existing) existing.push(subjectId);
+      else owners.set(resolvedPath, [subjectId]);
+    }
+    return owners;
+  }
+
+  /**
+   * `context` lets a bulk caller reuse one owner/subject index across every
+   * path it validates instead of rescanning the portable registry per item.
+   */
   private clinicalIndexClassificationForPath(
     path: string,
+    context?: {
+      ownerIdsByPath: ReadonlyMap<string, string[]>;
+      subjectById: ReadonlyMap<string, PortableSubjectDefinition>;
+    },
   ): { kind: RecordKind; indexEligible: boolean; title: string } | { error: string } {
     const placeholderId = portableSubjectIdFromPath(path);
     const ownerIds = placeholderId
       ? [placeholderId]
-      : Object.entries(this.data.portableIndex.resolvedPathBySubjectId)
-        .filter(([, resolvedPath]) => resolvedPath === path)
-        .map(([subjectId]) => subjectId);
+      : context
+        ? context.ownerIdsByPath.get(path) ?? []
+        : Object.entries(this.data.portableIndex.resolvedPathBySubjectId)
+          .filter(([, resolvedPath]) => resolvedPath === path)
+          .map(([subjectId]) => subjectId);
     if (ownerIds.length > 1) {
       return { error: "That Markdown note has more than one portable identity. Repair the duplicate path owner before moving it." };
     }
-    const subject = ownerIds[0] ? this.getPortableSubject(ownerIds[0]) : null;
+    const owner = ownerIds[0];
+    const subject = owner
+      ? (context ? context.subjectById.get(owner) ?? null : this.getPortableSubject(owner))
+      : null;
     if (placeholderId && !subject) return { error: "That portable subject is no longer available." };
     const file = placeholderId ? null : this.app.vault.getAbstractFileByPath(path);
     if (!placeholderId && (!(file instanceof TFile) || file.extension.toLowerCase() !== "md")) {
@@ -3436,9 +3547,15 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   /** Return why a record cannot enter the Index, without changing plugin data. */
-  getRecordIndexDestinationError(path: string): string | null {
+  getRecordIndexDestinationError(
+    path: string,
+    context?: {
+      ownerIdsByPath: ReadonlyMap<string, string[]>;
+      subjectById: ReadonlyMap<string, PortableSubjectDefinition>;
+    },
+  ): string | null {
     if (!this.isClinicalMode()) return null;
-    const classification = this.clinicalIndexClassificationForPath(path);
+    const classification = this.clinicalIndexClassificationForPath(path, context);
     if ("error" in classification) return classification.error;
     if (classification.indexEligible) return null;
     return `The ENT ${this.data.settings.indexLabel} accepts topic subjects only. “${classification.title}” is source-classified as ${classification.kind} and cannot be moved there.`;
@@ -3624,7 +3741,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.invalidateKnowledgeBaseSearchSnapshot();
     this.recordsCacheByBase.clear();
     this.clearInactiveSearchRecordsCache();
-    this.recordPathsCacheByBase.clear();
+    this.recordsByPathCacheByBase.clear();
     this.librarySubjectCountsCacheByBase.clear();
     if (membershipChanged) {
       this.referencedPathsCacheByBase.clear();
@@ -3671,7 +3788,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (!records) return;
     this.inactiveSearchRecordsCache.delete(baseId);
     this.inactiveSearchCachedRecordCount = Math.max(0, this.inactiveSearchCachedRecordCount - records.length);
-    if (!this.recordsCacheByBase.has(baseId)) this.recordPathsCacheByBase.delete(baseId);
+    if (!this.recordsCacheByBase.has(baseId)) this.recordsByPathCacheByBase.delete(baseId);
   }
 
   private getInactiveSearchRecords(baseId: string): VaultRecord[] | undefined {
@@ -3689,7 +3806,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.inactiveSearchRecordsCache.set(baseId, records);
     this.inactiveSearchCachedRecordCount += records.length;
     if (!this.recordsCacheByBase.has(baseId)) {
-      this.recordPathsCacheByBase.set(baseId, new Set(records.map((record) => record.path)));
+      this.recordsByPathCacheByBase.set(baseId, new Map(records.map((record) => [record.path, record])));
     }
   }
 
@@ -3877,18 +3994,24 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     for (const record of this.iterateRecordScanForEntry(entry, files, frontmatterByPath)) {
       if (record) records.push(record);
     }
-    records.sort((a, b) => a.role.localeCompare(b.role)
-      || (a.curriculumId || "ZZZ").localeCompare(b.curriculumId || "ZZZ", undefined, { numeric: true })
-      || a.title.localeCompare(b.title));
+    records.sort(compareVaultRecords);
     this.recordsCacheByBase.set(entry.id, records);
-    this.recordPathsCacheByBase.set(entry.id, new Set(records.map((record) => record.path)));
+    this.recordsByPathCacheByBase.set(entry.id, new Map(records.map((record) => [record.path, record])));
     return records;
   }
 
+  /**
+   * `restrictToPath` narrows the portable-placeholder pass to the one record
+   * that a single vault event can change. Every field of a record is derived
+   * from its own file plus plugin data, and a placeholder is suppressed only by
+   * a record at the identical path, so the restricted scan yields exactly the
+   * entry a full scan would have produced for that path.
+   */
   private *iterateRecordScanForEntry(
     entry: KnowledgeBaseEntry,
     files: readonly TFile[],
     frontmatterByPath?: ReadonlyMap<string, Record<string, unknown>>,
+    restrictToPath?: string,
   ): Generator<VaultRecord | null> {
     const data = entry.data;
     const clinicalMode = data.settings.workspaceMode === "ent-clinical";
@@ -4071,6 +4194,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         continue;
       }
       const path = resolvedPath || portablePlaceholderPath(subject.id);
+      // A subject at another path can neither create nor suppress the single
+      // record being rebuilt, so a restricted scan skips it without yielding.
+      if (restrictToPath !== undefined && path !== restrictToPath) continue;
       if (recordPaths.has(path)) {
         yield null;
         continue;
@@ -4150,9 +4276,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         ? { kind: "topic", role: "canonical" }
         : { kind: "topic", role: "supporting" };
     }
-    if (clinicalMode && file.path.startsWith(PROCEDURE_ROOT) && file.basename.startsWith("Procedure - ")) return { kind: "procedure", role: "library" };
-    if (clinicalMode && file.path.startsWith(MEDICATION_ROOT) && file.basename.startsWith("Drug - ")) return { kind: "medication", role: "library" };
-    if (clinicalMode && file.path.startsWith(SYNDROME_ROOT) && file.basename.startsWith("Syndrome - ")) return { kind: "syndrome", role: "library" };
+    if (clinicalMode) {
+      const source = CLINICAL_LIBRARY_SOURCES.find((candidate) => file.path.startsWith(candidate.root)
+        && file.basename.startsWith(candidate.prefix));
+      if (source) return { kind: source.kind, role: "library" };
+    }
     return referenced.has(file.path) ? { kind: "note", role: "vault-note" } : null;
   }
 
@@ -4204,7 +4332,21 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
   }
 
-  getRecord(path: string): VaultRecord | null { return this.getRecords().find((record) => record.path === path) ?? null; }
+  /**
+   * Path → record for the active projection. Bulk operations resolve hundreds
+   * of paths inside one synchronous transaction, so they take this map once
+   * instead of running a linear `find` per item.
+   */
+  private activeRecordsByPath(): ReadonlyMap<string, VaultRecord> {
+    const records = this.getRecords();
+    const byPath = this.recordsByPathCacheByBase.get(this.store.activeBaseId);
+    // Paths are unique within a projection, so an equal size is a sufficient
+    // check that the index still describes exactly these records.
+    if (byPath && byPath.size === records.length) return byPath;
+    return new Map(records.map((record) => [record.path, record]));
+  }
+
+  getRecord(path: string): VaultRecord | null { return this.activeRecordsByPath().get(path) ?? null; }
   getPortableSubject(subjectId: string) { return this.data.portableIndex.subjects.find((subject) => subject.id === subjectId) ?? null; }
   getPortableSubjectPath(subjectId: string): string { return portableSubjectPath(this.data, subjectId); }
 
@@ -4708,13 +4850,17 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
     await this.mutate(`Initialize editable ${library.name} headings`, () => {
       const currentLibrary = this.requireLibrary(libraryId, false);
+      // Adopting a large catalog mints one identity per record. Resolving each
+      // owner (and proving each new ID unused) through a linear subject scan
+      // made the whole adoption quadratic; keep one index, updated in step.
+      const subjectById = new Map(this.data.portableIndex.subjects.map((subject) => [subject.id, subject]));
       for (const record of recordsToInitialize) {
         const placeholderId = portableSubjectIdFromPath(record.path);
         const ownerId = record.portableId || placeholderId || ownerIdsByPath.get(record.path)?.[0] || "";
-        let subject = ownerId ? this.getPortableSubject(ownerId) : null;
+        let subject = ownerId ? subjectById.get(ownerId) ?? null : null;
         if (!subject) {
           let id = makeId("subject");
-          while (this.getPortableSubject(id)) id = makeId("subject");
+          while (subjectById.has(id)) id = makeId("subject");
           const groupId = this.ensureCatalogPortableGroup(libraryId, record.domain || currentLibrary.name);
           subject = {
             id,
@@ -4728,6 +4874,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
             libraryId,
           };
           this.data.portableIndex.subjects.push(subject);
+          subjectById.set(id, subject);
           if (!record.isPlaceholder) this.data.portableIndex.resolvedPathBySubjectId[id] = record.path;
         }
         if (currentLibrary.sourceKind && this.isClinicalMode() && subject.recordKind !== currentLibrary.sourceKind) {
@@ -4754,15 +4901,22 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   removeRecordsFromIndexState(paths: string[]): void {
     const removed = new Set(paths);
     this.data.manualIndexPaths = this.data.manualIndexPaths.filter((candidate) => !removed.has(candidate));
+    // A thousand-note removal runs synchronously with the UI frozen. Index the
+    // records, subjects, and hidden paths once instead of scanning all three
+    // linearly for every path in the loop below.
+    const recordsByPath = this.activeRecordsByPath();
+    const subjectById = new Map(this.data.portableIndex.subjects.map((subject) => [subject.id, subject]));
+    const excludedPaths = new Set(this.data.excludedIndexPaths);
     for (const path of removed) {
-      const record = this.getRecord(path);
+      const record = recordsByPath.get(path) ?? null;
       if (record?.portableId) {
-        const subject = this.getPortableSubject(record.portableId);
+        const subject = subjectById.get(record.portableId);
         if (subject) subject.indexed = false;
       }
       const requiresHiddenEntry = pathIsInsideFolder(path, this.data.settings.primaryFolder)
         || (this.isClinicalMode() && !isPortablePlaceholderPath(path));
-      if (requiresHiddenEntry && !this.data.excludedIndexPaths.includes(path)) {
+      if (requiresHiddenEntry && !excludedPaths.has(path)) {
+        excludedPaths.add(path);
         this.data.excludedIndexPaths.push(path);
       }
       delete this.data.indexGroupByPath[path];
@@ -4778,8 +4932,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   ): Promise<void> {
     const uniquePaths = [...new Set(paths)];
     if (uniquePaths.length === 0) return;
+    const destinationContext = {
+      ownerIdsByPath: this.portableOwnerIdsByPath(),
+      subjectById: new Map(this.data.portableIndex.subjects.map((subject) => [subject.id, subject])),
+    };
     const incompatible = uniquePaths
-      .map((path) => ({ path, error: this.getRecordIndexDestinationError(path) }))
+      .map((path) => ({ path, error: this.getRecordIndexDestinationError(path, destinationContext) }))
       .filter((item): item is { path: string; error: string } => item.error !== null);
     if (incompatible.length > 0) {
       const first = incompatible[0];
@@ -4790,14 +4948,21 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
     const cleanTargetGroup = targetGroup.trim();
     const portableIdByPath = new Map(Object.entries(this.data.portableIndex.resolvedPathBySubjectId).map(([id, path]) => [path, id]));
+    const restored = new Set(uniquePaths);
     await this.mutate(label, () => {
       if (cleanTargetGroup && !this.data.indexGroupOrder.includes(cleanTargetGroup)) {
         this.data.indexGroupOrder.push(cleanTargetGroup);
       }
+      // Index everything the loop consults so a bulk restore stays linear in
+      // the selection rather than quadratic in records × subjects × paths.
+      const recordsByPath = this.activeRecordsByPath();
+      const subjectById = new Map(this.data.portableIndex.subjects.map((subject) => [subject.id, subject]));
+      const manualPaths = new Set(this.data.manualIndexPaths);
+      this.data.excludedIndexPaths = this.data.excludedIndexPaths.filter((candidate) => !restored.has(candidate));
       for (const path of uniquePaths) {
-        const portableId = this.getRecord(path)?.portableId ?? portableIdByPath.get(path);
+        const portableId = recordsByPath.get(path)?.portableId ?? portableIdByPath.get(path);
         if (portableId) {
-          const subject = this.getPortableSubject(portableId);
+          const subject = subjectById.get(portableId);
           if (subject) {
             this.removePortableSubjectFromLibraryLayouts(subject.id);
             subject.libraryId = null;
@@ -4805,8 +4970,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
             if (cleanTargetGroup) subject.groupId = this.ensureTopicPortableGroup(cleanTargetGroup);
           }
         }
-        this.data.excludedIndexPaths = this.data.excludedIndexPaths.filter((candidate) => candidate !== path);
-        if (!pathIsInsideFolder(path, this.data.settings.primaryFolder) && !this.data.manualIndexPaths.includes(path)) {
+        if (!pathIsInsideFolder(path, this.data.settings.primaryFolder) && !manualPaths.has(path)) {
+          manualPaths.add(path);
           this.data.manualIndexPaths.push(path);
         }
         if (cleanTargetGroup) this.data.indexGroupByPath[path] = cleanTargetGroup;
@@ -5148,22 +5313,71 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return this.isRelevantToBase(path, this.data, this.store.activeBaseId);
   }
 
-  private invalidateRecordCachesForPath(path: string): boolean {
+  /**
+   * Rebuild the single record a vault event can have changed, in place, inside
+   * an already-cached base projection. Returns false when the projection cannot
+   * be patched safely; the caller then falls back to full invalidation.
+   *
+   * Dropping the whole projection instead made every keystroke pause re-scan
+   * every markdown file in the vault (plus a full three-key locale-aware sort)
+   * as soon as the view asked for records again.
+   */
+  private updateCachedRecordForPath(entry: KnowledgeBaseEntry, path: string, file: TFile | null): boolean {
+    const cached = this.recordsCacheByBase.get(entry.id);
+    const byPath = this.recordsByPathCacheByBase.get(entry.id);
+    // A mismatched pair can only come from a partially retained search
+    // projection; rebuilding from scratch is the correct answer there.
+    if (!cached || !byPath || byPath.size !== cached.length) return false;
+    // Only markdown files take part in a record scan, so a non-markdown event
+    // must be projected exactly as an absent file would be.
+    const scanFiles = file && file.extension.toLowerCase() === "md" ? [file] : [];
+    let next: VaultRecord | null = null;
+    for (const record of this.iterateRecordScanForEntry(entry, scanFiles, undefined, path)) {
+      if (record) { next = record; break; }
+    }
+    if (next && next.path !== path) return false;
+    const previous = byPath.get(path) ?? null;
+    if (!previous && !next) return true;
+    const removalIndex = previous ? cached.indexOf(previous) : -1;
+    if (previous && removalIndex < 0) return false;
+    // Publish a new array so a consumer still holding the previous projection
+    // keeps a coherent snapshot, exactly as full invalidation did.
+    const records = cached.slice();
+    if (removalIndex >= 0) records.splice(removalIndex, 1);
+    if (next) records.splice(recordInsertionIndex(records, next), 0, next);
+    this.recordsCacheByBase.set(entry.id, records);
+    if (next) byPath.set(path, next);
+    else byPath.delete(path);
+    return true;
+  }
+
+  /**
+   * `change` carries the file the event was delivered for (null when it was
+   * deleted). Supplying it enables the incremental path; omitting it keeps the
+   * conservative whole-projection invalidation.
+   */
+  private invalidateRecordCachesForPath(path: string, change?: { file: TFile | null }): boolean {
     let relevant = false;
     let activeBaseInvalidated = false;
-    const currentFile = this.app.vault.getAbstractFileByPath(path);
+    const currentFile = change ? change.file : this.app.vault.getAbstractFileByPath(path);
     const currentFrontmatter = currentFile instanceof TFile
       ? asUnknownRecord(this.app.metadataCache.getFileCache(currentFile)?.frontmatter)
       : {};
     const isCurrentClinicalProposal = currentFrontmatter.type === "topic-proposal";
     for (const entry of this.getKnowledgeBases()) {
-      const wasCachedRecord = this.recordPathsCacheByBase.get(entry.id)?.has(path) ?? false;
+      const wasCachedRecord = this.recordsByPathCacheByBase.get(entry.id)?.has(path) ?? false;
       const isClinicalProposal = entry.data.settings.workspaceMode === "ent-clinical" && isCurrentClinicalProposal;
       if (!wasCachedRecord && !isClinicalProposal && !this.isRelevantToBase(path, entry.data, entry.id)) continue;
       relevant = true;
-      this.recordsCacheByBase.delete(entry.id);
-      this.deleteInactiveSearchRecords(entry.id);
-      this.recordPathsCacheByBase.delete(entry.id);
+      if (!change || !this.updateCachedRecordForPath(entry, path, change.file)) {
+        this.recordsCacheByBase.delete(entry.id);
+        this.deleteInactiveSearchRecords(entry.id);
+        this.recordsByPathCacheByBase.delete(entry.id);
+      } else {
+        // The retained search projection is shadowed by the patched one but
+        // would otherwise go stale; it is cheap to rebuild during a search.
+        this.deleteInactiveSearchRecords(entry.id);
+      }
       this.librarySubjectCountsCacheByBase.delete(entry.id);
       if (entry.id === this.store.activeBaseId) activeBaseInvalidated = true;
     }

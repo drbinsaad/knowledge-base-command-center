@@ -13,6 +13,7 @@ import {
   createPersonalBackup,
   createWorkspaceConfig,
   curriculumContainerKey,
+  fingerprintText,
   isPortablePlaceholderPath,
   isSafeObjectKey,
   isValidLibraryId,
@@ -31,6 +32,7 @@ import {
   MAX_TRANSFER_COLLECTIONS,
   MAX_TRANSFER_LIST_ITEMS,
   MAX_TRANSFER_TOTAL_REFERENCES,
+  normalizedNameKey,
   parsePersonalBackup,
   parseWorkspaceConfig,
   pathIsInsideFolder,
@@ -49,6 +51,7 @@ import {
   WorkspaceConfig,
   WorkspaceMode,
 } from "./model";
+import { hasUnpairedSurrogate } from "./follow-up";
 
 export const PORTABLE_EXPORT_KIND = "knowledge-base-command-center-portable-export" as const;
 /**
@@ -268,10 +271,6 @@ export function serializePortableExport(value: PortableExportV1): string {
   return serialized;
 }
 
-function normalizeText(value: string): string {
-  return value.trim().normalize("NFC").toLowerCase();
-}
-
 function safeId(value: unknown, label: string): string {
   if (typeof value !== "string") throw new Error(`${label} must be text.`);
   const id = value.trim();
@@ -280,18 +279,6 @@ function safeId(value: unknown, label: string): string {
   }
   if (!/^[\p{L}\p{N}._:@+-]+$/u.test(id)) throw new Error(`${label} contains unsupported characters.`);
   return id;
-}
-
-function hasUnpairedSurrogate(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code >= 0xD800 && code <= 0xDBFF) {
-      const next = value.charCodeAt(index + 1);
-      if (!(next >= 0xDC00 && next <= 0xDFFF)) return true;
-      index += 1;
-    } else if (code >= 0xDC00 && code <= 0xDFFF) return true;
-  }
-  return false;
 }
 
 function safeTitle(value: unknown, label: string): string {
@@ -491,25 +478,16 @@ export function portableSubjectPath(data: PluginData, subjectId: string): string
   return resolved || portablePlaceholderPath(subjectId);
 }
 
-export function portableSubjectIdForPath(data: PluginData, path: string): string {
-  const placeholderId = portableSubjectIdFromPath(path);
-  if (placeholderId) return placeholderId;
-  for (const [subjectId, resolvedPath] of Object.entries(data.portableIndex.resolvedPathBySubjectId)) {
-    if (resolvedPath === path) return subjectId;
-  }
-  return "";
-}
-
 function portableGroupsWithTitle(data: PluginData, title: string): PortableGroupDefinition[] {
-  const normalized = normalizeText(title);
-  return data.portableIndex.groups.filter((group) => normalizeText(group.title) === normalized);
+  const normalized = normalizedNameKey(title);
+  return data.portableIndex.groups.filter((group) => normalizedNameKey(group.title) === normalized);
 }
 
 function makePortableGroup(data: PluginData, title: string): PortableGroupDefinition {
   let id = makeId("group");
   const existingIds = new Set(data.portableIndex.groups.map((group) => group.id));
   while (existingIds.has(id)) id = makeId("group");
-  const order = data.indexGroupOrder.findIndex((group) => normalizeText(group) === normalizeText(title));
+  const order = data.indexGroupOrder.findIndex((group) => normalizedNameKey(group) === normalizedNameKey(title));
   const group = {
     id,
     title,
@@ -660,14 +638,14 @@ export function synchronizePortableRegistry(data: PluginData, records: VaultReco
   const unclaimedGroupsByTitle = new Map<string, PortableGroupDefinition[]>();
   for (const group of data.portableIndex.groups) {
     groupById.set(group.id, group);
-    const key = normalizeText(group.title);
+    const key = normalizedNameKey(group.title);
     const candidates = unclaimedGroupsByTitle.get(key) ?? [];
     candidates.push(group);
     unclaimedGroupsByTitle.set(key, candidates);
   }
   const groupScopeById = new Map<string, PortableCatalogScope>();
   const groupByScopeAndTitle = new Map<string, PortableGroupDefinition>();
-  const scopedGroupKey = (scope: PortableCatalogScope, title: string): string => `${scope}\0${normalizeText(title)}`;
+  const scopedGroupKey = (scope: PortableCatalogScope, title: string): string => `${scope}\0${normalizedNameKey(title)}`;
   const claimGroup = (scope: PortableCatalogScope, group: PortableGroupDefinition): boolean => {
     const claimedScope = groupScopeById.get(group.id);
     if (claimedScope && claimedScope !== scope) return false;
@@ -690,7 +668,7 @@ export function synchronizePortableRegistry(data: PluginData, records: VaultReco
     const key = scopedGroupKey(scope, cleanTitle);
     const existing = groupByScopeAndTitle.get(key);
     if (existing) return existing;
-    const unclaimed = unclaimedGroupsByTitle.get(normalizeText(cleanTitle));
+    const unclaimed = unclaimedGroupsByTitle.get(normalizedNameKey(cleanTitle));
     let reusable: PortableGroupDefinition | undefined;
     while (unclaimed && unclaimed.length > 0 && !reusable) {
       const candidate = unclaimed.shift();
@@ -820,25 +798,25 @@ export function synchronizePortableRegistry(data: PluginData, records: VaultReco
   // `indexGroupOrder`, which is commonly empty. Persist the rendered order
   // first, followed by deliberately-created empty headings and then any
   // internal groups retained only for non-index organization.
-  const renderedGroupKeys = new Set(tree.domains.map((domain) => normalizeText(domain.domain)));
+  const renderedGroupKeys = new Set(tree.domains.map((domain) => normalizedNameKey(domain.domain)));
   const remainingGroups = [...data.portableIndex.groups]
     .sort((a, b) => a.order - b.order || a.title.localeCompare(b.title));
   const effectiveGroupTitles: string[] = [];
   const effectiveGroupKeys = new Set<string>();
   const addEffectiveGroup = (title: string): void => {
-    const key = normalizeText(title);
+    const key = normalizedNameKey(title);
     if (!key || effectiveGroupKeys.has(key)) return;
     effectiveGroupKeys.add(key);
     effectiveGroupTitles.push(title);
   };
   tree.domains.forEach((domain) => addEffectiveGroup(domain.domain));
   data.indexGroupOrder
-    .filter((title) => !renderedGroupKeys.has(normalizeText(title)))
+    .filter((title) => !renderedGroupKeys.has(normalizedNameKey(title)))
     .forEach(addEffectiveGroup);
   remainingGroups.forEach((group) => addEffectiveGroup(group.title));
-  const orderByTitle = new Map(effectiveGroupTitles.map((title, order) => [normalizeText(title), order]));
+  const orderByTitle = new Map(effectiveGroupTitles.map((title, order) => [normalizedNameKey(title), order]));
   data.portableIndex.groups.forEach((group, fallback) => {
-    group.order = orderByTitle.get(normalizeText(group.title)) ?? (effectiveGroupTitles.length + fallback);
+    group.order = orderByTitle.get(normalizedNameKey(group.title)) ?? (effectiveGroupTitles.length + fallback);
   });
   data.portableIndex.groups.sort((a, b) => a.order - b.order || a.title.localeCompare(b.title));
 
@@ -868,9 +846,9 @@ export function synchronizePortableRegistry(data: PluginData, records: VaultReco
     .filter((subjectId) => survivingSubjectIds.has(subjectId)
       && Boolean(data.portableIndex.resolvedPathBySubjectId[subjectId]));
   const retainedGroupIds = new Set(data.portableIndex.subjects.map((subject) => subject.groupId));
-  const retainedEmptyGroupTitles = new Set(data.indexGroupOrder.map(normalizeText));
+  const retainedEmptyGroupTitles = new Set(data.indexGroupOrder.map(normalizedNameKey));
   data.portableIndex.groups = data.portableIndex.groups.filter((group) => retainedGroupIds.has(group.id)
-    || retainedEmptyGroupTitles.has(normalizeText(group.title)));
+    || retainedEmptyGroupTitles.has(normalizedNameKey(group.title)));
   reconcilePortableLibraryLayouts(data.portableIndex);
   return before !== JSON.stringify(data.portableIndex);
 }
@@ -988,10 +966,10 @@ export function createPortableExport(
   const groupById = new Map(groups.map((group) => [group.id, group]));
   const groupIdByTitle = new Map(indexGroupIds.map((groupId) => {
     const group = groupById.get(groupId);
-    return [normalizeText(group?.title ?? ""), groupId] as const;
+    return [normalizedNameKey(group?.title ?? ""), groupId] as const;
   }));
   const collapsedGroupIds = unique(data.collapsed.curriculumDomains
-    .map((title) => groupIdByTitle.get(normalizeText(title)) ?? "")
+    .map((title) => groupIdByTitle.get(normalizedNameKey(title)) ?? "")
     .filter((id) => selection.index && indexGroupIdSet.has(id)));
   const collapsedSubjectIds = selection.index ? unique(data.collapsed.curriculumNodes
     .map((path) => pathToId.get(path) ?? "")
@@ -1806,18 +1784,6 @@ interface CollectionStructureOwner {
   node: LayoutHeading | LayoutSubheading;
 }
 
-function portableStructureFingerprint(value: string): string {
-  const hash = (seed: number): string => {
-    let result = seed >>> 0;
-    for (let index = 0; index < value.length; index += 1) {
-      result ^= value.charCodeAt(index);
-      result = Math.imul(result, 0x01000193) >>> 0;
-    }
-    return result.toString(16).padStart(8, "0");
-  };
-  return `${hash(0x811c9dc5)}${hash(0x9e3779b9)}`;
-}
-
 function mergeCollectionsLayout(existing: LayoutHeading[], incoming: LayoutHeading[]): LayoutHeading[] {
   const merged = cloneCollections(existing);
   const owners = new Map<string, CollectionStructureOwner>();
@@ -1830,7 +1796,7 @@ function mergeCollectionsLayout(existing: LayoutHeading[], incoming: LayoutHeadi
   };
   registerOwners(merged, null);
   for (const heading of merged) {
-    const headingTitle = normalizeText(heading.title);
+    const headingTitle = normalizedNameKey(heading.title);
     const headingIds = availableHeadingIdsByTitle.get(headingTitle) ?? new Set<string>();
     headingIds.add(heading.id);
     availableHeadingIdsByTitle.set(headingTitle, headingIds);
@@ -1844,20 +1810,20 @@ function mergeCollectionsLayout(existing: LayoutHeading[], incoming: LayoutHeadi
     const owner = owners.get(id);
     if (!owner) return;
     if (owner.parentId === null) {
-      availableHeadingIdsByTitle.get(normalizeText(owner.node.title))?.delete(id);
+      availableHeadingIdsByTitle.get(normalizedNameKey(owner.node.title))?.delete(id);
     }
   };
   // Compatibility is the same normalized title under the same resolved parent
   // node and therefore, through globally unique layout IDs, under the same
   // full ancestor path.
   const compatibleNode = (owner: CollectionStructureOwner, title: string, parentId: string | null): boolean => (
-    owner.parentId === parentId && normalizeText(owner.node.title) === normalizeText(title)
+    owner.parentId === parentId && normalizedNameKey(owner.node.title) === normalizedNameKey(title)
   );
   const deterministicFork = (
     seed: string,
     compatible: (owner: CollectionStructureOwner) => boolean,
   ): { owner?: CollectionStructureOwner; id?: string } => {
-    const base = `collection-import-${portableStructureFingerprint(seed)}`;
+    const base = `collection-import-${fingerprintText(seed)}`;
     for (let attempt = 1; ; attempt += 1) {
       const id = attempt === 1 ? base : `${base}-${attempt}`;
       // A generated fork must not consume (or weakly match through) the stable
@@ -1878,8 +1844,8 @@ function mergeCollectionsLayout(existing: LayoutHeading[], incoming: LayoutHeadi
    */
   const forkSeed = (incomingAncestorIds: readonly string[], node: LayoutHeading | LayoutSubheading): string => (
     incomingAncestorIds.length === 0
-      ? `heading\u0000${node.id}\u0000${normalizeText(node.title)}`
-      : `subheading\u0000${incomingAncestorIds.join("\u0000")}\u0000${node.id}\u0000${normalizeText(node.title)}`
+      ? `heading\u0000${node.id}\u0000${normalizedNameKey(node.title)}`
+      : `subheading\u0000${incomingAncestorIds.join("\u0000")}\u0000${node.id}\u0000${normalizedNameKey(node.title)}`
   );
 
   const mergeLevel = (
@@ -1925,7 +1891,7 @@ function mergeCollectionsLayout(existing: LayoutHeading[], incoming: LayoutHeadi
       if (!target && parentId === null) {
         // Weak title matching remains a top-level-only fallback to exactly one
         // unambiguous unclaimed pre-existing destination heading.
-        const candidateIds = availableHeadingIdsByTitle.get(normalizeText(incomingNode.title));
+        const candidateIds = availableHeadingIdsByTitle.get(normalizedNameKey(incomingNode.title));
         if (candidateIds?.size === 1) {
           const candidateId = candidateIds.values().next().value as string;
           const owner = owners.get(candidateId);
@@ -2014,9 +1980,9 @@ function mergeLibraryLayout(existing: LayoutHeading[], incoming: LayoutHeading[]
       return node.id;
     }
     const seed = incomingAncestorIds.length === 0
-      ? `library-heading\u0000${libraryId}\u0000${node.id}\u0000${normalizeText(node.title)}`
-      : `library-subheading\u0000${libraryId}\u0000${incomingAncestorIds.join("\u0000")}\u0000${node.id}\u0000${normalizeText(node.title)}`;
-    const base = `library-import-${portableStructureFingerprint(seed)}`;
+      ? `library-heading\u0000${libraryId}\u0000${node.id}\u0000${normalizedNameKey(node.title)}`
+      : `library-subheading\u0000${libraryId}\u0000${incomingAncestorIds.join("\u0000")}\u0000${node.id}\u0000${normalizedNameKey(node.title)}`;
+    const base = `library-import-${fingerprintText(seed)}`;
     for (let attempt = 1; ; attempt += 1) {
       const id = attempt === 1 ? base : `${base}-${attempt}`;
       if (usedStructureIds.has(id) || reservedIncomingIds.has(id)) continue;
@@ -2039,9 +2005,9 @@ function mergeLibraryLayout(existing: LayoutHeading[], incoming: LayoutHeading[]
     const byId = new Map(children.map((child) => [child.id, child]));
     const byTitle = new Map<string, LayoutSubheading[]>();
     for (const child of children) {
-      const candidates = byTitle.get(normalizeText(child.title)) ?? [];
+      const candidates = byTitle.get(normalizedNameKey(child.title)) ?? [];
       candidates.push(child);
-      byTitle.set(normalizeText(child.title), candidates);
+      byTitle.set(normalizedNameKey(child.title), candidates);
     }
     const claimedIds = new Set<string>();
     // Reserve every exact stable-ID match at this level before weaker title
@@ -2052,14 +2018,14 @@ function mergeLibraryLayout(existing: LayoutHeading[], incoming: LayoutHeading[]
     for (const incomingChild of incomingChildren) {
       const candidate = byId.get(incomingChild.id);
       if (!candidate || claimedIds.has(candidate.id)
-        || normalizeText(candidate.title) !== normalizeText(incomingChild.title)) continue;
+        || normalizedNameKey(candidate.title) !== normalizedNameKey(incomingChild.title)) continue;
       exactTargets.set(incomingChild.id, candidate);
       claimedIds.add(candidate.id);
     }
     for (const incomingChild of incomingChildren) {
       let target = exactTargets.get(incomingChild.id);
       if (!target) {
-        const candidates = (byTitle.get(normalizeText(incomingChild.title)) ?? [])
+        const candidates = (byTitle.get(normalizedNameKey(incomingChild.title)) ?? [])
           .filter((candidate) => !claimedIds.has(candidate.id));
         if (candidates.length === 1) target = candidates[0];
       }
@@ -2083,9 +2049,9 @@ function mergeLibraryLayout(existing: LayoutHeading[], incoming: LayoutHeading[]
   const byId = new Map(merged.map((heading) => [heading.id, heading]));
   const titleCandidates = new Map<string, LayoutHeading[]>();
   for (const heading of merged) {
-    const candidates = titleCandidates.get(normalizeText(heading.title)) ?? [];
+    const candidates = titleCandidates.get(normalizedNameKey(heading.title)) ?? [];
     candidates.push(heading);
-    titleCandidates.set(normalizeText(heading.title), candidates);
+    titleCandidates.set(normalizedNameKey(heading.title), candidates);
   }
   const claimedHeadingIds = new Set<string>();
   // The same reservation applies at the top level: exact stable-ID matches
@@ -2094,14 +2060,14 @@ function mergeLibraryLayout(existing: LayoutHeading[], incoming: LayoutHeading[]
   for (const incomingHeading of incoming) {
     const candidate = byId.get(incomingHeading.id);
     if (!candidate || claimedHeadingIds.has(candidate.id)
-      || normalizeText(candidate.title) !== normalizeText(incomingHeading.title)) continue;
+      || normalizedNameKey(candidate.title) !== normalizedNameKey(incomingHeading.title)) continue;
     exactHeadingTargets.set(incomingHeading.id, candidate);
     claimedHeadingIds.add(candidate.id);
   }
   for (const incomingHeading of incoming) {
     let target = exactHeadingTargets.get(incomingHeading.id);
     if (!target) {
-      const candidates = (titleCandidates.get(normalizeText(incomingHeading.title)) ?? [])
+      const candidates = (titleCandidates.get(normalizedNameKey(incomingHeading.title)) ?? [])
         .filter((candidate) => !claimedHeadingIds.has(candidate.id));
       if (candidates.length === 1) target = candidates[0];
     }
@@ -2487,7 +2453,7 @@ export function applyPortableExport(
     const groupById = new Map(localGroups.map((group) => [group.id, group]));
     const groupsByTitle = new Map<string, Set<string>>();
     for (const group of localGroups) {
-      const key = normalizeText(group.title);
+      const key = normalizedNameKey(group.title);
       const ids = groupsByTitle.get(key) ?? new Set<string>();
       ids.add(group.id);
       groupsByTitle.set(key, ids);
@@ -2495,7 +2461,7 @@ export function applyPortableExport(
     const claimedGroupIds = new Set<string>();
     const groupIdMap = new Map<string, string>();
     const addGroupTitleCandidate = (group: PortableGroupDefinition): void => {
-      const key = normalizeText(group.title);
+      const key = normalizedNameKey(group.title);
       const ids = groupsByTitle.get(key) ?? new Set<string>();
       ids.add(group.id);
       groupsByTitle.set(key, ids);
@@ -2505,7 +2471,7 @@ export function applyPortableExport(
       incomingGroupId: string,
     ): PortableGroupDefinition | undefined => {
       const expectedScopes = incomingGroupScopes.get(incomingGroupId);
-      const candidates = [...(groupsByTitle.get(normalizeText(title)) ?? [])]
+      const candidates = [...(groupsByTitle.get(normalizedNameKey(title)) ?? [])]
         .filter((id) => !claimedGroupIds.has(id)
           && groupScopesEqual(localGroupScopes.get(id), expectedScopes));
       return candidates.length === 1 ? groupById.get(candidates[0] ?? "") : undefined;
@@ -2523,7 +2489,7 @@ export function applyPortableExport(
       let local = groupById.get(incoming.id);
       if (local
         && groupsUsedByUnselectedSections.has(local.id)
-        && (normalizeText(local.title) !== normalizeText(incoming.title)
+        && (normalizedNameKey(local.title) !== normalizedNameKey(incoming.title)
           || !groupScopesEqual(localGroupScopes.get(local.id), incomingGroupScopes.get(incoming.id)))) {
         // A selective import must not rename a group still owned by an
         // unselected catalog or make two independent catalogs share one group.
@@ -2537,10 +2503,10 @@ export function applyPortableExport(
       if (!local) {
         local = createMappedGroup(incoming, true);
       } else if (!groupsUsedByUnselectedSections.has(local.id)) {
-        const previousTitleKey = normalizeText(local.title);
+        const previousTitleKey = normalizedNameKey(local.title);
         local.title = incoming.title;
         local.order = incoming.order;
-        const nextTitleKey = normalizeText(local.title);
+        const nextTitleKey = normalizedNameKey(local.title);
         if (previousTitleKey !== nextTitleKey) {
           groupsByTitle.get(previousTitleKey)?.delete(local.id);
           addGroupTitleCandidate(local);
@@ -2556,14 +2522,14 @@ export function applyPortableExport(
     const titlePools = new Map<string, Set<string>>();
     const incomingSubjectIds = new Set(incomingIndex.subjects.map((subject) => subject.id));
     const configuredKey = (subject: PortableSubjectDefinition): string => [
-      normalizeText(subject.configuredId),
+      normalizedNameKey(subject.configuredId),
       portableCatalogScope(subject),
-      normalizeText(localGroupTitle(subject.groupId)),
+      normalizedNameKey(localGroupTitle(subject.groupId)),
     ].join("\0");
     const titleKey = (subject: PortableSubjectDefinition): string => [
-      normalizeText(subject.title),
+      normalizedNameKey(subject.title),
       portableCatalogScope(subject),
-      normalizeText(localGroupTitle(subject.groupId)),
+      normalizedNameKey(localGroupTitle(subject.groupId)),
     ].join("\0");
     const addToPool = (pool: Map<string, Set<string>>, key: string, id: string): void => {
       const ids = pool.get(key) ?? new Set<string>();
