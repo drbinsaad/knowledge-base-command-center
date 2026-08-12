@@ -34,8 +34,23 @@ export const UPDATE_ANNOUNCEMENT_0_12_0: UpdateAnnouncement = {
   releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.12.0",
 };
 
+export const UPDATE_ANNOUNCEMENT_0_12_1: UpdateAnnouncement = {
+  version: "0.12.1",
+  title: "What’s new in Knowledge Base Command Center 0.12.1",
+  intro: "This update is entirely about protecting your organization. Your notes and knowledge bases stay exactly as they are.",
+  highlights: [
+    "Plugin data is now backed up on this device before every save and restored automatically if the file cannot be read.",
+    "Sync no longer discards edits made to a knowledge base that another device deleted; the newer copy is preserved in a private rescue.",
+    "Switching or creating a knowledge base can no longer freeze the Command Center.",
+    "Library drag-and-drop, group ordering, index health, and folder renames behave correctly again.",
+    "Right-to-left names display properly in settings, and exports are stamped with your local date.",
+  ],
+  releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.12.1",
+};
+
 const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_12_0.version, UPDATE_ANNOUNCEMENT_0_12_0],
+  [UPDATE_ANNOUNCEMENT_0_12_1.version, UPDATE_ANNOUNCEMENT_0_12_1],
 ]);
 
 function parseSemanticVersion(value: string): ParsedSemanticVersion | null {

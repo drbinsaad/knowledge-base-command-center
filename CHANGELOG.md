@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.12.1
+
+### Fixed
+
+- Prevented a permanent freeze when switching or creating a knowledge base while the Command Center was open. A view refresh could wait on the very transaction that started it, and because the stalled operation held an App-wide barrier, disabling and re-enabling the plugin did not recover it. Refreshes that run inside a base or organization transaction now save through that transaction instead of queueing behind it.
+- Stopped Sync from silently discarding work when a knowledge base deleted on one device had been restored and edited on another. A base whose edits are newer than the deletion is now preserved in a private conflict rescue before the deletion is adopted; unedited copies still disappear quietly.
+- Added an automatic same-device backup of plugin data. Obsidian rewrites `data.json` in place, so an interrupted write could leave no readable copy of any knowledge base. Every save now refreshes a parseable twin first, startup restores from it when `data.json` cannot be parsed, and the unreadable file is kept beside it for inspection.
+- Preserved an already-merged synced update that was followed by an identity-less payload from an older build. That combination entered protected read-only mode without keeping the merged organization, which was then lost at the next restart.
+- Stopped note titles containing `$&`, `` $` ``, `$'`, or `$$` from corrupting generated frontmatter through the YAML-safe creation-time template tokens. A title could previously inject a premature `---` line and break the note's properties.
+- Stopped an empty configured topic-proposal folder from reclassifying every resolved note as a proposal during startup repair, which dropped manual index entries and rehomed subjects. An empty setting once again means the proposal folder is simply unset.
+- Restored drag-and-drop arranging in Library tabs on desktop. Drop targets read their payload during `dragover`, where browsers deliberately withhold it, so drops were never accepted.
+- Kept saved manual ordering intact when a group name is entered or stored with different capitalization. The move could previously replace an entire group's arrangement with the single moved record and leave the destination collapsed.
+- Stopped a parent topic whose `curriculum_id` is stored in lower or mixed case from being reported as a permanent placement conflict in **Needs my decision**.
+- Refreshed the record inspector after a vault or Sync change that arrives while the search box is focused, instead of leaving a deleted or renamed note's details on screen.
+- Kept device-local Undo/Redo history, routes, and collapse state when a portable package legitimately contains collection headings whose stable IDs use an underscore or non-Latin characters.
+- Made Index health resolve parent links exactly as the hierarchy does, so an accent, tatweel, or Unicode-normalization difference is reported instead of silently flattening the tree while the report claims there is nothing to fix.
+- Migrated group aliases, ordering, collapse state, and manual arrangements when a folder outside the primary folder is renamed.
+- Neutralized Windows-reserved device names that carry an extension, such as `con.jpg`, when attaching files. Such an attachment could not be created on Windows and made a vault carrying it unsyncable to Windows devices.
+- Made the one-time envelope identity fingerprint independent of the device's language collation. Two devices with different system languages could otherwise compute different fingerprints for identical data and permanently reject a legitimate same-vault Sync; fingerprints written by earlier builds are still accepted.
+- Allowed a manually repaired `data.json` to load into protected read-only mode instead of preventing the plugin from being enabled at all, which had blocked even read-only export of the surviving data.
+- Cancelled the pending refresh timer on the window that created it, so unloading the plugin while a pop-out window has focus no longer leaves orphaned **Open Library** commands in the palette.
+- Allocated portable subject identities once and saved them before a portfolio export, so re-importing a portfolio matches existing subjects instead of duplicating every linked subject.
+- Stopped **Attach file** from rewriting every line ending in a note that mixes line-ending styles, and from refusing notes that quote a fenced code block inside an indented block.
+- Kept the Quick append category editor open, with the typed draft intact, when a duplicate category name is rejected.
+- Preserved the caret position while typing in the Taxonomy Health Center filter.
+- Added the same stale-data guard the other manager dialogs use to **Manage knowledge bases**, so a rename or archive cannot act on a list that Sync replaced while the dialog was open.
+- Made the bulk selection button in **Manage index** do what its label says, and cleared a stale selection when the search query changes.
+- Stamped export and backup filenames with the local date instead of the UTC date.
+- Set automatic text direction on every Settings text field so right-to-left names, including Arabic, are typed and displayed correctly.
+- Buffered the **Recent changes limit** slider so dragging it saves once at rest instead of rewriting the entire plugin store on every step.
+- Removed `versions.json` entries for versions 0.1.0 through 0.7.0, which have no published release. Obsidian 1.5 to 1.9 installations resolved those entries and failed with an opaque download error instead of a clear compatibility message.
+
 ## 0.12.0
 
 ### Added
