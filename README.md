@@ -180,9 +180,17 @@ Obsidian `.base` files can select the plugin's **Knowledge hierarchy** view (sta
 
 A `.base` file's own filters, limit, sort, and **Group by** remain authoritative; the fallback group applies only when no native Group by is configured. Large results are prepared in bounded slices, and **Previous**/**Next** replace one page at a time so offscreen rows never accumulate. Opening a row opens the Markdown file — it does not change frontmatter or plugin organization.
 
+### Behaviour in large vaults
+
+The index is built once and then maintained incrementally. Editing an indexed note rebuilds that note's record and places it back in the existing order, instead of re-reading every Markdown file in the vault; a regression test asserts the incremental result is identical to a full rebuild after create, modify, delete, cross-base, placeholder, and reclassification events. Renames deliberately keep the full path, because a rename reprojects every stored path.
+
+**Manage index** builds only the list its active tab displays and reuses it between keystrokes, so searching filters an existing snapshot rather than enumerating the vault per character. Bulk membership changes and Library adoption resolve records and portable subjects through per-base maps rather than scanning every record for every selected note, and startup copies the knowledge-base store once rather than repeatedly.
+
 ### Mobile and iPhone
 
 The manifest is mobile-compatible and the plugin ships mobile layouts throughout. Compact mode keys off the actual Obsidian leaf width — below 1050 px, including stacked tabs, side-by-side splits, and pop-out windows — and switches to a focused record-detail route with **Back to main page**, scroll-safe header actions, and 44-point touch targets. Creation and Library forms reconcile Obsidian's native keyboard inset with the visual viewport so the action footer stays reachable while the iPhone keyboard is open. Touch devices use labelled row action menus in place of drag-and-drop.
+
+The bundle is built to a 2018 JavaScript baseline so it can run on older mobile web views, and that baseline is enforced rather than assumed: the compiler is pinned to exactly that language level, so using a newer built-in method fails the build instead of shipping unpolyfilled. Version 0.13.1 fixed four such methods that had been reaching devices — the most serious ran while classifying note paths and needed iOS Safari 15.4 or newer.
 
 Physical-device claims are kept separate from automated coverage: see the [0.10.0 iPhone evidence note](docs/release-evidence/0.10.0-iphone.md) and the [manual iPhone release checklist](docs/manual-iphone-release-checklist.md) rather than assuming any release checklist passed.
 
@@ -199,7 +207,7 @@ A VoiceOver-with-Arabic pass across Quick entry, Quick append, taxonomy repair, 
 
 ### Local-first by construction
 
-No network requests, no analytics, no telemetry, no accounts, no advertising, no payments. A static verification step in CI asserts that neither the source nor the built bundle references `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `sendBeacon`, or Obsidian's `requestUrl` — and that the bundle contains exactly one clipboard writer and no clipboard reader.
+No network requests, no analytics, no telemetry, no accounts, no advertising, no payments. A static verification step in CI asserts that neither the source nor the built bundle references `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `sendBeacon`, or Obsidian's `requestUrl` — and that the bundle contains exactly one clipboard writer and no clipboard reader. The same pipeline runs the full test suite, the production build, and a release-metadata check on every push, and every published release carries GitHub build provenance attestation for its `main.js`, `manifest.json`, and `styles.css`.
 
 ## Generic and ENT profiles
 
@@ -315,6 +323,7 @@ Follow the complete [backup and restore procedure](docs/PORTABILITY_AND_RECOVERY
 - The Sync and recovery center cannot report network, provider queue, remote-device, or Obsidian Sync status.
 - Search retains at most the strongest 300 visible matches while reporting the full count. Browse rows and structural sections page in groups of 300.
 - Desktop offers drag-and-drop; touch devices use labelled row action menus.
+- The bundle targets a 2018 JavaScript baseline for older mobile web views. Newer built-in methods are rejected at build time rather than polyfilled, so a feature needing one has to be written differently or the baseline has to be raised deliberately.
 - Same-vault recovery is intentionally not portable between vaults.
 - Real-iPhone keyboard, safe-area, Dynamic Type, landscape, import/export, and destructive recovery behavior needs explicit physical-device evidence. Automated DOM checks are not a substitute, and the 0.12.0 physical-iPhone matrix was explicitly waived by the maintainer rather than executed.
 
