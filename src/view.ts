@@ -1255,9 +1255,16 @@ export class EntVaultCommandCenterView extends ItemView {
           });
         },
       },
-      validate: (value) => ownsBase()
-        ? this.plugin.validateGenericNote(value)
-        : "The active knowledge base changed. Close and reopen this form.",
+      validate: (value) => {
+        if (!ownsBase()) return "The active knowledge base changed. Close and reopen this form.";
+        // Inbox membership is derived purely from the note living inside the
+        // configured Inbox folder. A folder that drifts outside it would
+        // create a note that belongs to nothing — invisible to the Inbox,
+        // the Index, and search — so the mismatch must fail loudly here.
+        const inboxIssue = destination.kind === "inbox" ? this.quickCreateInboxFolderIssue(value.folder) : null;
+        if (inboxIssue) return inboxIssue;
+        return this.plugin.validateGenericNote(value);
+      },
       onSubmit: async (value) => {
         if (!ownsBase()) return;
         const tokenContext = this.quickCreateTokenContext(destination);
@@ -1272,6 +1279,22 @@ export class EntVaultCommandCenterView extends ItemView {
     }).open();
   }
 
+  /**
+   * Inbox membership requires the note to live inside the configured Inbox
+   * folder; returns the blocking explanation when the given form folder
+   * cannot satisfy that, and null when the destination is coherent.
+   */
+  private quickCreateInboxFolderIssue(folder: string): string | null {
+    const settings = this.plugin.data.settings;
+    const proposalFolder = settings.proposalFolder.trim().replace(/^\/+|\/+$/gu, "");
+    if (!proposalFolder) {
+      return `No ${settings.inboxLabel} folder is configured, so this knowledge base has no ${settings.inboxLabel}. Pick another destination with Change…, or set the ${settings.inboxLabel} folder in Settings first.`;
+    }
+    const cleanFolder = folder.trim().replace(/^\/+|\/+$/gu, "");
+    if (cleanFolder === proposalFolder || cleanFolder.startsWith(`${proposalFolder}/`)) return null;
+    return `The ${settings.inboxLabel} destination files notes inside ${proposalFolder}. Change the destination folder back, or pick another destination with Change….`;
+  }
+
   /** The form prefills each destination would open with in its dedicated legacy flow. */
   private quickCreateDestinationSeed(destination: QuickCreateDestination): NoteDestinationSeed {
     const settings = this.plugin.data.settings;
@@ -1282,7 +1305,7 @@ export class EntVaultCommandCenterView extends ItemView {
           folder: settings.proposalFolder,
           mode: settings.defaultNewNoteMode,
           templatePath: settings.defaultTemplatePath,
-          contextNotice: `Files into ${settings.inboxLabel} without joining ${settings.indexLabel}. Use Change… to pick ${settings.indexLabel}, a Collection, or a library instead.`,
+          contextNotice: `Files into ${settings.proposalFolder.trim() || `the unconfigured ${settings.inboxLabel} folder`} without joining ${settings.indexLabel}. Use Change… to pick ${settings.indexLabel}, a Collection, or a library instead.`,
           hideCollectionToggle: false,
         };
       case "index":
@@ -1342,6 +1365,22 @@ export class EntVaultCommandCenterView extends ItemView {
     try {
       switch (destination.kind) {
         case "inbox": {
+          // Safety net for drift the form validation cannot see (settings
+          // changed mid-form through Sync, or a case-insensitive filesystem
+          // merging differently-cased folders): a note outside the configured
+          // Inbox folder has no record at all, so rather than letting it
+          // silently vanish from the plugin, register it in the Index.
+          const proposalFolder = settings.proposalFolder.trim().replace(/^\/+|\/+$/gu, "");
+          if (!proposalFolder || !pathIsInsideFolder(file.path, proposalFolder)) {
+            await this.plugin.mutate(`Add created ${settings.itemSingular} to ${settings.indexLabel}`, () => {
+              this.plugin.data.excludedIndexPaths = this.plugin.data.excludedIndexPaths.filter((path) => path !== file.path);
+              if (!pathIsInsideFolder(file.path, settings.primaryFolder) && !this.plugin.data.manualIndexPaths.includes(file.path)) {
+                this.plugin.data.manualIndexPaths.push(file.path);
+              }
+              this.plugin.data.selectedPath = file.path;
+            });
+            return `${itemLabel} created at ${file.path}, which is outside the configured ${settings.inboxLabel} folder, so it was added to ${settings.indexLabel} to stay findable. Existing notes were not changed.`;
+          }
           this.plugin.data.selectedPath = file.path;
           await this.plugin.saveViewState();
           if (!ownsBase()) return null;

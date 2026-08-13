@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.14.1
+
+### Fixed
+
+- A note created through the new Inbox-default form could disappear from the plugin entirely — present in the vault but shown in no tab and found by no search — whenever it ended up outside the folder configured as the Inbox (for example when that setting names a different folder than expected, is empty, or the destination folder was edited in the form). Inbox membership is derived purely from the note living inside the configured Inbox folder, and a note outside it, outside the indexed folder, and not manually indexed belongs to nothing. The form now refuses to create an Inbox-destination note whose folder is not inside the configured Inbox folder and explains exactly what to change; the form's context line names the real folder; and if drift the form cannot see still lands the file elsewhere (a mid-form synced settings change, or a case-insensitive filesystem merging differently-cased folders), the note is added to the Index with an explanatory notice instead of vanishing.
+- If you already created a note that vanished this way, the file is intact in your vault: either move it into the folder your Inbox setting names, or use **Add existing note** to index it.
+
 ## 0.14.0
 
 ### Added

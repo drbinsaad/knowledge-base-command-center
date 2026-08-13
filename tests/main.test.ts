@@ -11227,3 +11227,18 @@ test("the post-merge view refresh can persist view state because the reload guar
     "the guard is released once the worker finishes",
   );
 });
+
+test("a note outside proposalFolder, primaryFolder, and manual paths has no record at all", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.primaryFolder = "Knowledge Base";
+  data.settings.proposalFolder = "00 Inbox";
+  const note = new TFile("Inbox/Rofenac and kidney.md");
+  const { plugin } = pluginWithFiles(createDefaultStore(data, 100, "vault-inbox-mismatch"), [note], { [note.path]: {} });
+  await plugin.loadPluginData(false);
+  const records = plugin.getRecords();
+  assert.equal(records.some((record) => record.path === note.path), false, "mismatched inbox note vanishes");
+  plugin.data.settings.proposalFolder = "Inbox";
+  plugin.invalidateRecordCache();
+  assert.equal(plugin.getRecords().some((record) => record.path === note.path && record.role === "proposal"), true, "exact match classifies as proposal");
+});
