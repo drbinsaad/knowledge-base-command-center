@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { Notice, Platform } from "obsidian";
+import { Menu, Notice, Platform } from "obsidian";
 import {
   libraryTabId,
   migrateData,
@@ -1188,4 +1188,115 @@ test("a depth-three nested subheading keeps 44px menu-driven controls on mobile"
   assert.match(styles, /\.ent-cc-subheading-row\s*\{[^{}]*padding-left:\s*calc\(42px \+ \(var\(--ent-cc-depth, 0\) \* 22px\)\);/s, "nested subheading rows indent through the shared depth variable");
   assert.match(styles, /\.ent-cc-level-3\s*\{\s*padding-left:\s*102px;/, "record rows gain indentation levels beyond two");
   assert.match(styles, /\.ent-cc-level-5\s*\{\s*padding-left:\s*154px;/, "record indentation reaches the depth cap");
+});
+
+test("touch subheading row menus offer the reparent actions that desktop reaches by dragging", () => {
+  const dom = createFakeDom();
+  const view = createView(dom.window) as unknown as MobileViewHarness & {
+    records: VaultRecord[];
+    recordByPath: Map<string, VaultRecord>;
+    parsedQuery: ReturnType<typeof parseQuery>;
+    editMode: boolean;
+    plugin: { data: PluginData };
+  };
+  const library = installCustomLibrary(view.plugin.data);
+  const reference: VaultRecord = {
+    ...record("Knowledge Base/Deep guideline.md", "Deep guideline"),
+    role: "library",
+    portableId: "subject-deep",
+    libraryId: library.id,
+  };
+  view.records = [reference];
+  view.recordByPath = new Map([[reference.path, reference]]);
+  view.parsedQuery = parseQuery("");
+  view.plugin.data.activeTab = libraryTabId(library.id);
+  view.plugin.data.portableIndex.libraryLayouts[library.id] = [{
+    id: "heading-deep",
+    title: "Airway",
+    collapsed: false,
+    subjects: [],
+    subheadings: [
+      {
+        id: "subheading-level-two",
+        title: "Intubation",
+        collapsed: false,
+        subjects: [],
+        subheadings: [{ id: "subheading-level-three", title: "Rapid sequence", collapsed: false, subjects: ["subject-deep"] }],
+      },
+      { id: "subheading-sibling", title: "Cricothyrotomy", collapsed: false, subjects: [] },
+    ],
+  }];
+  view.editMode = true;
+  const parent = dom.document.body.createDiv();
+
+  interface CapturedItem { title: string; disabled: boolean }
+  const shownMenus: CapturedItem[][] = [];
+  const itemsByMenu = new WeakMap<object, CapturedItem[]>();
+  const menuDescriptors = new Map(["addItem", "addSeparator", "showAtMouseEvent"].map((name) => [
+    name,
+    Object.getOwnPropertyDescriptor(Menu.prototype, name),
+  ]));
+  Object.defineProperty(Menu.prototype, "addItem", {
+    configurable: true,
+    value(this: object, configure: (item: unknown) => void): object {
+      const entries = itemsByMenu.get(this) ?? [];
+      itemsByMenu.set(this, entries);
+      const captured: CapturedItem = { title: "", disabled: false };
+      const item = {
+        setTitle(title: string) { captured.title = title; return item; },
+        setIcon() { return item; },
+        setDisabled(disabled: boolean) { captured.disabled = disabled; return item; },
+        onClick() { return item; },
+      };
+      configure(item);
+      entries.push(captured);
+      return this;
+    },
+  });
+  Object.defineProperty(Menu.prototype, "addSeparator", {
+    configurable: true,
+    value(this: object): object { return this; },
+  });
+  Object.defineProperty(Menu.prototype, "showAtMouseEvent", {
+    configurable: true,
+    value(this: object): void { shownMenus.push(itemsByMenu.get(this) ?? []); },
+  });
+
+  const mobilePlatform = Platform as unknown as { isMobile: boolean };
+  const previousMobile = mobilePlatform.isMobile;
+  mobilePlatform.isMobile = true;
+  try {
+    assert.equal(view.renderLibrary(asHtmlElement(parent), [reference]), 1);
+    assert.equal(parent.querySelectorAll(".ent-cc-drag-handle").length, 0, "touch never offers the desktop drag path");
+    const subheadingRows = parent.querySelectorAll(".ent-cc-library-subheading .ent-cc-subheading-row");
+    assert.equal(subheadingRows.length, 3);
+
+    const depthThreeMore = subheadingRows[1]?.querySelector(".ent-cc-row-more");
+    assert.ok(depthThreeMore, "the depth-three row keeps its ellipsis menu");
+    depthThreeMore.click();
+    const depthThree = shownMenus.at(-1) ?? [];
+    assert.equal(depthThree.some((item) => item.title === "Move under…"), true, "touch can reparent a subheading under another subheading");
+    assert.equal(
+      depthThree.find((item) => item.title === "Outdent one level")?.disabled,
+      false,
+      "a depth-three node can be promoted straight from the row menu",
+    );
+
+    const depthTwoMore = subheadingRows[0]?.querySelector(".ent-cc-row-more");
+    assert.ok(depthTwoMore);
+    depthTwoMore.click();
+    const depthTwo = shownMenus.at(-1) ?? [];
+    assert.equal(depthTwo.some((item) => item.title === "Move under…"), true);
+    assert.equal(
+      depthTwo.find((item) => item.title === "Outdent one level")?.disabled,
+      true,
+      "a node already directly under the heading has no level to lose",
+    );
+  } finally {
+    mobilePlatform.isMobile = previousMobile;
+    for (const [name, descriptor] of menuDescriptors) {
+      if (descriptor) Object.defineProperty(Menu.prototype, name, descriptor);
+      else Reflect.deleteProperty(Menu.prototype, name);
+    }
+  }
 });
