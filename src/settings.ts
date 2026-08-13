@@ -808,9 +808,13 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
               text.setPlaceholder(DEFAULT_PROPOSAL_FOLDER).setValue(settings.proposalFolder).setDisabled(readOnly).onChange((value) => {
                 if (!ownsConfiguredBase()) return;
                 const clean = value.trim().replace(/^\/+|\/+$/g, "");
-                const error = settings.workspaceMode === "ent-clinical"
-                  ? validateProposalFolderPath(clean, this.host.app.vault.configDir)
-                  : validateWritableFolderPath(clean, this.host.app.vault.configDir);
+                // An empty Inbox folder makes Inbox membership impossible:
+                // every captured note would classify to no record at all.
+                const error = !clean
+                  ? "Choose an Inbox folder. Without one, notes aimed at the Inbox would not appear anywhere in this plugin."
+                  : settings.workspaceMode === "ent-clinical"
+                    ? validateProposalFolderPath(clean, this.host.app.vault.configDir)
+                    : validateWritableFolderPath(clean, this.host.app.vault.configDir);
                 text.inputEl.toggleClass("is-error", Boolean(error));
                 row.setDesc(error ?? description);
                 if (error) return;

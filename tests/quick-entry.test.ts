@@ -970,6 +970,7 @@ test("the unified quick-create form defaults to the Inbox and re-targets the Ind
     getLibraries: (): LibraryDefinition[] => [],
     getTemplateFiles: (): TFile[] => [],
     getIndexGroups: () => ["Foundations"],
+    getRecord: () => null,
     isClinicalMode: () => false,
     validateGenericNote: () => null,
     async createKnowledgeNote(): Promise<TFile> { return createdFile; },
@@ -1198,4 +1199,116 @@ test("the Inbox destination cannot silently create a note the plugin would never
     if (noteOpen) Object.defineProperty(KnowledgeNoteModal.prototype, "open", noteOpen);
     else Reflect.deleteProperty(KnowledgeNoteModal.prototype, "open");
   }
+});
+
+test("clinical plain create seeds the proposal folder and refuses invisible destinations", () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 1,
+    getTemplateFiles: (): TFile[] => [],
+    isClinicalMode: () => true,
+    validateGenericNote: () => null,
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView & {
+    app: object;
+    plugin: typeof plugin;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 1;
+  view.staleViewNoticeShown = false;
+
+  const forms: KnowledgeNoteModalOptions[] = [];
+  const noteOpen = Object.getOwnPropertyDescriptor(KnowledgeNoteModal.prototype, "open");
+  KnowledgeNoteModal.prototype.open = function captureForm(): void {
+    forms.push((this as unknown as { options: KnowledgeNoteModalOptions }).options);
+  };
+  try {
+    view.startCreateKnowledgeNote();
+    const form = forms.shift();
+    assert.ok(form);
+    // The ENT default note folder "01 Inbox" is visible to no clinical
+    // classifier branch; a plain create must start inside the real Inbox.
+    assert.equal(form.initial.folder, data.settings.proposalFolder);
+    assert.match(
+      form.validate({ title: "Note", folder: "01 Inbox", mode: "empty", templatePath: "", addToCollection: false }) ?? "",
+      /only visible inside/,
+    );
+    assert.equal(
+      form.validate({ title: "Note", folder: data.settings.proposalFolder, mode: "empty", templatePath: "", addToCollection: false }),
+      null,
+    );
+    assert.equal(
+      form.validate({ title: "Note", folder: `${data.settings.primaryFolder}/03 Laryngology`, mode: "empty", templatePath: "", addToCollection: false }),
+      null,
+    );
+  } finally {
+    if (noteOpen) Object.defineProperty(KnowledgeNoteModal.prototype, "open", noteOpen);
+    else Reflect.deleteProperty(KnowledgeNoteModal.prototype, "open");
+  }
+});
+
+test("a failed filing step never orphans the created note", async () => {
+  Notice.messages.length = 0;
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const createdFile = new TFile("Reference notes/Orphan risk.md");
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 1,
+    getTemplateFiles: (): TFile[] => [],
+    getRecord: () => null,
+    isClinicalMode: () => false,
+    validateGenericNote: () => null,
+    async createKnowledgeNote(): Promise<TFile> { return createdFile; },
+    async mutate(_label: string, mutator: () => void): Promise<void> { mutator(); },
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView & {
+    app: object;
+    plugin: typeof plugin;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 1;
+  view.staleViewNoticeShown = false;
+
+  const forms: KnowledgeNoteModalOptions[] = [];
+  const noteOpen = Object.getOwnPropertyDescriptor(KnowledgeNoteModal.prototype, "open");
+  KnowledgeNoteModal.prototype.open = function captureForm(): void {
+    forms.push((this as unknown as { options: KnowledgeNoteModalOptions }).options);
+  };
+  try {
+    view.startCreateKnowledgeNote({}, false, async () => {
+      throw new Error("That library is archived. Restore it before adding records.");
+    });
+    const form = forms.shift();
+    assert.ok(form);
+    await form.onSubmit({ title: "Orphan risk", folder: "Reference notes", mode: "empty", templatePath: "", addToCollection: false });
+  } finally {
+    if (noteOpen) Object.defineProperty(KnowledgeNoteModal.prototype, "open", noteOpen);
+    else Reflect.deleteProperty(KnowledgeNoteModal.prototype, "open");
+  }
+
+  assert.deepEqual(data.manualIndexPaths, [createdFile.path], "the unfiled note is rescued into the Index");
+  assert.equal(Notice.messages.some((message) => message.includes(createdFile.path) && message.includes("could not be filed")), true);
+});
+
+test("the generic Inbox empty-state routes through the guarded unified form", () => {
+  const source = readFileSync(new URL("../src/view.ts", import.meta.url), "utf8");
+  // The legacy direct form bypassed the Inbox folder validation and safety
+  // net; the empty-state CTA must stay on the guarded entry point.
+  assert.doesNotMatch(source, /startCreateKnowledgeNote\(\{ folder: this\.plugin\.data\.settings\.proposalFolder \}, false\)/u);
+  assert.match(source, /: this\.openQuickCreateNoteForm\(\)\);/u);
 });

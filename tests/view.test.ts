@@ -6337,3 +6337,60 @@ test("guarded timers schedule on the window that owns the modal, not the focused
     else Reflect.deleteProperty(globalThis, "window");
   }
 });
+
+test("a collection move whose target vanished keeps the source membership and says so", async () => {
+  Notice.messages.length = 0;
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.collections.push(
+    { id: "col-source", title: "Source", collapsed: false, subjects: ["Notes/Kept.md"], subheadings: [] },
+    { id: "col-target", title: "Target", collapsed: false, subjects: [], subheadings: [] },
+  );
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 1,
+    async mutate(_label: string, mutator: () => void): Promise<void> { mutator(); },
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView & {
+    app: object;
+    plugin: typeof plugin;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    openCollectionPicker(path: string, source?: { headingId: string; subheadingId?: string }, move?: boolean): void;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 1;
+  view.staleViewNoticeShown = false;
+
+  const pickerOpen = Object.getOwnPropertyDescriptor(CollectionPickerModal.prototype, "open");
+  let submitted: Promise<void> = Promise.resolve();
+  CollectionPickerModal.prototype.open = function chooseVanishedTarget(): void {
+    const modal = this as unknown as {
+      onChooseItem(item: { headingId: string; subheadingId?: string; label: string }): void;
+    };
+    // The heading disappears between menu build and choice — a same-epoch
+    // deletion the base guard cannot see (second window, stale row).
+    data.collections = data.collections.filter((heading) => heading.id !== "col-target");
+    submitted = Promise.resolve(modal.onChooseItem({ headingId: "col-target", label: "Target" }));
+  };
+  try {
+    view.openCollectionPicker("Notes/Kept.md", { headingId: "col-source" }, true);
+    await submitted;
+    await settleMicrotasks();
+  } finally {
+    if (pickerOpen) Object.defineProperty(CollectionPickerModal.prototype, "open", pickerOpen);
+    else Reflect.deleteProperty(CollectionPickerModal.prototype, "open");
+  }
+
+  assert.deepEqual(
+    data.collections.find((heading) => heading.id === "col-source")?.subjects,
+    ["Notes/Kept.md"],
+    "a move to a vanished target must not remove the source membership",
+  );
+  assert.equal(Notice.messages.some((message) => message.includes("no longer exists")), true);
+  assert.equal(Notice.messages.some((message) => message.includes("Moved in My Collections")), false);
+});
