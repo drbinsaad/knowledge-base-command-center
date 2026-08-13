@@ -329,7 +329,7 @@ Follow the complete [backup and restore procedure](docs/PORTABILITY_AND_RECOVERY
 
 ## Troubleshooting
 
-- **Visual movement on iPhone:** choose **Arrange**, open a row's **…** menu, then use Move under, Indent, Outdent, Move up/down, or Make top-level.
+- **Visual movement on iPhone:** choose **Arrange**, open a row's **…** menu, then use Move under, Indent, Outdent, Move up/down, or Make top-level. To move a subheading itself, use **Move under…** or **Outdent one level** on that subheading's **…** menu.
 - **Missing note or unexpected Library:** check the active knowledge base, Index Manager membership, hidden records, and the record's primary Index/Library section.
 - **Read-only settings or salvage mode:** preserve `data.json` and do not force a downgrade.
 

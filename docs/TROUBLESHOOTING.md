@@ -59,6 +59,8 @@ Deleting a heading leaves its records under the explicit Unplaced section. It do
 
 Choose **Arrange**, tap the row's **…** button, then use Move under, Move to group, Indent, Outdent, Move up/down, or Make top-level. Desktop drag-and-drop is optional and is not expected on touch devices.
 
+To move a subheading itself rather than a record, tap that subheading's **…** button and use **Move under…** or **Outdent one level**. The move takes the subheading's records and everything nested inside it. If a destination you expect is missing, it is either inside the subheading you are moving or it would push the branch past the five-level limit; the plugin says so rather than showing an empty list.
+
 If controls clip or the software keyboard covers content, record the iPhone model, iOS version, Obsidian version, portrait/landscape orientation, Dynamic Type setting, and a sanitized screenshot. Check the current [physical-device evidence](release-evidence/0.10.0-iphone.md) before assuming the complete matrix passed.
 
 ## Broad search stops after 300 visible results
