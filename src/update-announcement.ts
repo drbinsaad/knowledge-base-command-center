@@ -86,12 +86,24 @@ export const UPDATE_ANNOUNCEMENT_0_13_2: UpdateAnnouncement = {
   releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.13.2",
 };
 
+export const UPDATE_ANNOUNCEMENT_0_13_3: UpdateAnnouncement = {
+  version: "0.13.3",
+  title: "What’s new in Knowledge Base Command Center 0.13.3",
+  intro: "A maintenance release. Nothing changes in how the plugin behaves — every message, command, and stored format is exactly as before.",
+  highlights: [
+    "Error messages are now produced in one place instead of about fifty, so future wording improvements reach every message at once. No message you can see changed.",
+    "Moving a subheading on a touch device, added in 0.13.2, is now described in the user guide and troubleshooting notes.",
+  ],
+  releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.13.3",
+};
+
 const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_12_0.version, UPDATE_ANNOUNCEMENT_0_12_0],
   [UPDATE_ANNOUNCEMENT_0_12_1.version, UPDATE_ANNOUNCEMENT_0_12_1],
   [UPDATE_ANNOUNCEMENT_0_13_0.version, UPDATE_ANNOUNCEMENT_0_13_0],
   [UPDATE_ANNOUNCEMENT_0_13_1.version, UPDATE_ANNOUNCEMENT_0_13_1],
   [UPDATE_ANNOUNCEMENT_0_13_2.version, UPDATE_ANNOUNCEMENT_0_13_2],
+  [UPDATE_ANNOUNCEMENT_0_13_3.version, UPDATE_ANNOUNCEMENT_0_13_3],
 ]);
 
 function parseSemanticVersion(value: string): ParsedSemanticVersion | null {
