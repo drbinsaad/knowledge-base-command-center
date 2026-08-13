@@ -372,7 +372,7 @@ Read [Contributing](CONTRIBUTING.md) before opening a pull request.
 Built by **Dr. Ali Alshahrani**.
 
 - GitHub: [@drbinsaad](https://github.com/drbinsaad)
-- X: [@_dali](https://x.com/_dali)
+- X: [@drali](https://x.com/drali)
 
 ## License
 
