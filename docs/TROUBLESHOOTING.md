@@ -15,7 +15,7 @@ Run **BRAT: Check for updates to all beta plugins and UPDATE** and verify that t
 
 ## The What’s New window did not appear
 
-The window appears automatically once per device only when a compatible Knowledge Base Command Center payload already existed before version 0.12.0 opened. It intentionally does not interrupt a fresh install, an incompatible/read-only startup, a downgrade, or a repeat reload. Run **Open what’s new** from the Command Palette to open the current release summary manually. Its GitHub link makes no request until you activate it.
+The window appears automatically once per device when an existing installation first opens a newer release that carries curated notes (every release since 0.12.0 does). It intentionally does not interrupt a fresh install, an incompatible/read-only startup, a downgrade, or a repeat reload. Run **Open what’s new** from the Command Palette to open the current release summary manually. Its GitHub link makes no request until you activate it.
 
 Before removing and re-adding the BRAT entry, export current organization and back up the vault.
 
@@ -100,11 +100,11 @@ Other sections may be available as a one-time salvage export. Newly generated po
 
 ## First upgrade differs across devices
 
-Install the same current 0.12.x build everywhere and stop organizing until Sync settles. Identical pristine upgrades can converge; two independently edited upgrades remain protected rather than being guessed together.
+Install the same current release everywhere and stop organizing until Sync settles. Identical pristine upgrades can converge; two independently edited upgrades remain protected rather than being guessed together.
 
 If a recovery was exported before identity convergence, export it again afterward. A file carrying a losing provisional identity is intentionally rejected.
 
-See [Getting started: Upgrade from the old single-base format](GETTING_STARTED.md#upgrade-from-the-old-single-base-format).
+See [Getting started: Upgrade and Sync compatibility](GETTING_STARTED.md#upgrade-and-sync-compatibility).
 
 ## Same-base changes were lost after Sync
 

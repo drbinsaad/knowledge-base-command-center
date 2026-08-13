@@ -7,6 +7,7 @@ import { ManageLibraryNoteProfilesModal } from "./library-profile-modal";
 import type EntVaultCommandCenterPlugin from "./main";
 import {
   asUnknownRecord,
+  cloneJsonValue,
   DEFAULT_PROPOSAL_FOLDER,
   errorMessage,
   libraryTabId,
@@ -183,7 +184,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
       || (this.host.getDataEpoch?.() ?? 0) !== openedDataEpoch
       || (this.host.getExternalChangeGeneration?.() ?? 0) !== openedExternalGeneration) {
       new Notice("The active knowledge base changed or synced data was replaced. Reopen this setting before continuing.", 8000);
-      this.persistedDataSnapshot = structuredClone(this.host.data);
+      this.persistedDataSnapshot = cloneJsonValue(this.host.data);
       this.update();
       return false;
     }
@@ -261,11 +262,11 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
     const attemptedDataEpoch = this.host.getDataEpoch?.() ?? 0;
     const attemptedExternalGeneration = this.host.getExternalChangeGeneration?.() ?? 0;
     const attemptedLiveData = this.host.data;
-    const fallbackRollback = structuredClone(this.persistedDataSnapshot ?? this.host.data);
+    const fallbackRollback = cloneJsonValue(this.persistedDataSnapshot ?? this.host.data);
     // Keep the exact attempted value independently from the host transaction:
     // a later input event may mutate the live object before this promise
     // settles, and three-way rollback must never read that newer value.
-    const attempted = structuredClone(this.host.data);
+    const attempted = cloneJsonValue(this.host.data);
     this.pendingSettingsSaves += 1;
     try {
       await this.host.savePluginData();
@@ -295,7 +296,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
       this.pendingSettingsSaves -= 1;
       this.settingsWriteUncertain = !compensated;
       if (compensated) {
-        this.persistedDataSnapshot = structuredClone(this.host.data);
+        this.persistedDataSnapshot = cloneJsonValue(this.host.data);
         this.persistedSettingsRevision = Math.max(this.persistedSettingsRevision, revision);
       }
       new Notice(
@@ -345,7 +346,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
     // Settings search can ask for definitions while an onChange save is still
     // pending. Never bless that uncommitted live value as the rollback point.
     if (this.pendingSettingsSaves === 0 && this.bufferedTextSaveTimer === null) {
-      this.persistedDataSnapshot = structuredClone(this.host.data);
+      this.persistedDataSnapshot = cloneJsonValue(this.host.data);
     }
     const settings = this.host.data.settings;
     const readOnly = this.host.isDataReadOnly();

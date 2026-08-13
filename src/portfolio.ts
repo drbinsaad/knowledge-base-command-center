@@ -2,6 +2,7 @@ import {
   boundedSemanticLineage,
   canonicalJsonString,
   childSubheadings,
+  cloneJsonValue,
   createKnowledgeBaseEntry,
   createPersonalBackup,
   DEFAULT_DATA,
@@ -353,7 +354,7 @@ export function createPortfolioExport(
     const selection = normalizedSelectionForManifest(request.selection);
     if (selection.recovery) throw new Error("Portfolio exports cannot include private same-vault recovery data.");
     if (!portableSelectionHasAny(selection)) throw new Error(`Choose at least one component for “${request.entry.data.settings.workspaceName}”.`);
-    const isolated = structuredClone(request.entry.data);
+    const isolated = cloneJsonValue(request.entry.data);
     const portable = createPortableExport(
       isolated,
       selectionUsesSubjects(selection) ? request.records : [],
@@ -864,8 +865,8 @@ function allocateDestinationId(sourceBaseId: string, planSeed: string, unavailab
 }
 
 function freshDestinationData(mode: WorkspaceMode, name: string): PluginData {
-  const data = structuredClone(DEFAULT_DATA);
-  data.settings = structuredClone(mode === "ent-clinical" ? ENT_CLINICAL_SETTINGS : DEFAULT_SETTINGS);
+  const data = cloneJsonValue(DEFAULT_DATA);
+  data.settings = cloneJsonValue(mode === "ent-clinical" ? ENT_CLINICAL_SETTINGS : DEFAULT_SETTINGS);
   data.settings.setupComplete = true;
   data.settings.workspaceMode = mode;
   data.settings.workspaceName = name;
@@ -975,14 +976,14 @@ function applyPlanUnchecked(store: PluginStore, operations: readonly PortfolioPl
       if (index >= 0 || Object.prototype.hasOwnProperty.call(store.deletedBaseIds, operation.destinationBaseId)) {
         throw new Error(`Destination knowledge base ${operation.destinationBaseId} is no longer available for creation.`);
       }
-      store.bases.push(structuredClone(operation.afterEntry));
+      store.bases.push(cloneJsonValue(operation.afterEntry));
       continue;
     }
     const current = index >= 0 ? store.bases[index] : undefined;
     if (!current || current.archivedAt !== null || entryGuard(current) !== operation.beforeEntryGuard) {
       throw new Error(`Destination knowledge base “${operation.destinationBaseName}” changed after the preview was prepared.`);
     }
-    store.bases[index] = structuredClone(operation.afterEntry);
+    store.bases[index] = cloneJsonValue(operation.afterEntry);
   }
 }
 
@@ -1056,7 +1057,7 @@ export function createPortfolioImportPlan(
         throw new Error(`“${manifest.sourceBaseName}” uses a different preset from “${beforeEntry.data.settings.workspaceName}”.`);
       }
       destinationBaseName = beforeEntry.data.settings.workspaceName;
-      working = structuredClone(beforeEntry);
+      working = cloneJsonValue(beforeEntry);
       if (mapping.mode === "replace") {
         recoveryPackages.push(buildRecoveryPackage(beforeEntry, store.vaultId, new Date(now).toISOString()));
       }
@@ -1070,7 +1071,7 @@ export function createPortfolioImportPlan(
       );
       mappedDestinations.add(destinationBaseId);
     }
-    const beforeData = structuredClone(working.data);
+    const beforeData = cloneJsonValue(working.data);
     const conflicts = conflictPreview(beforeData, portable, selection, destinationBaseName);
     const records = mapping.destination.kind === "existing"
       ? [...(options.recordsByBaseId?.get(destinationBaseId) ?? [])]
@@ -1170,7 +1171,7 @@ export function createPortfolioImportPlan(
   if (!Number.isSafeInteger(expectedExternalGeneration) || expectedExternalGeneration < 0) {
     throw new Error("The external-change generation is invalid.");
   }
-  const afterStore = structuredClone(store);
+  const afterStore = cloneJsonValue(store);
   applyPlanUnchecked(afterStore, operations);
   const withoutGuard: Omit<PortfolioImportPlan, "planGuard"> = {
     kind: "knowledge-base-command-center-portfolio-import-plan",
@@ -1215,7 +1216,7 @@ export function applyPortfolioImportPlan(
   if (storeGuard(store) !== plan.expectedStoreGuard) {
     throw new Error("Knowledge-base data changed after the portfolio preview was prepared.");
   }
-  const candidate = structuredClone(store);
+  const candidate = cloneJsonValue(store);
   applyPlanUnchecked(candidate, plan.operations);
   if (storeGuard(candidate) !== plan.expectedAfterStoreGuard) {
     throw new Error("The portfolio plan no longer produces its previewed exact result.");

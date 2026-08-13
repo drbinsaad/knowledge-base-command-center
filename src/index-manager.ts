@@ -1,37 +1,27 @@
 import { Menu, Modal, Notice, Setting, TFile, setIcon } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
 import {
-  cleanLibraryNoteProfiles,
-  createWorkspaceConfig,
   curriculumContainerKey,
   errorMessage,
   IndexDiagnostic,
   isSafeObjectKey,
   isPortablePlaceholderPath,
   normalizeSearchText,
-  parseWorkspaceConfig,
   resetCurriculumVisualPath,
-  resolveLibraryNoteProfile,
-  validateTemplateFilePath,
-  validateProposalFolderPath,
-  validateWritableFolderPath,
   VaultRecord,
-  objectFromEntries,
 } from "./model";
 import {
   clearGuardedTimer,
   ConfirmModal,
   createOpenedBaseGuard,
-  deliverJsonExport,
   type OpenedBaseGuard,
   IndexGroupModal,
   modalOwnerWindow,
-  requestJsonImport,
   setGuardedTimer,
   StringPickerModal,
   TextPromptModal,
 } from "./modals";
-import { MAX_PORTABLE_PACKAGE_BYTES, registerPortableGroup, removePortableGroup, renameOrMergePortableGroup } from "./portability";
+import { registerPortableGroup, removePortableGroup, renameOrMergePortableGroup } from "./portability";
 import { ExportImportCenterModal } from "./portability-modal";
 import { TaxonomyHealthModal } from "./taxonomy-health-modal";
 import { SyncRecoveryCenterModal } from "./sync-recovery-modal";
@@ -147,6 +137,12 @@ export class IndexManagerModal extends Modal {
   /** Re-read the vault, then paint. Every caller except the search debounce. */
   private render(): void {
     this.invalidateNoteLists();
+    // In-modal mutations change diagnostics inputs without bumping the data
+    // epoch, so no guard forces a recompute; dropping the cache on every
+    // deliberate refresh keeps the Diagnostics tab honest. Recomputation stays
+    // lazy: renderSnapshot only rebuilds diagnostics while that tab paints,
+    // and the search debounce bypasses this method entirely.
+    this.diagnosticsCache = null;
     this.renderSnapshot();
   }
 
@@ -714,7 +710,6 @@ export class IndexManagerModal extends Modal {
       this.run(async () => {
         await this.plugin.repairIndexOrganization();
         if (!this.guardOpenedBase()) return;
-        this.diagnosticsCache = null;
         this.render();
         new Notice("Safe plugin-state repairs completed. Note metadata was not changed.");
       });
@@ -766,155 +761,6 @@ export class IndexManagerModal extends Modal {
   private run(action: () => Promise<unknown>): void {
     if (!this.guardOpenedBase()) return;
     void action().catch((error) => {
-      if (!this.guardOpenedBase()) return;
-      new Notice(errorMessage(error));
-    });
-  }
-
-  private async exportWorkspace(): Promise<void> {
-    if (!this.guardOpenedBase()) return;
-    const now = new Date();
-    const config = createWorkspaceConfig(this.plugin.data, now.toISOString());
-    const delivery = await deliverJsonExport(this.plugin, "workspace", "knowledge-command-center-workspace", config, {
-      contentEl: this.contentEl,
-      date: now,
-    });
-    if (delivery.medium === "vault") {
-      if (!this.guardOpenedBase()) return;
-      new Notice("Workspace saved in the export folder inside the vault. No note contents included.");
-      return;
-    }
-    new Notice("Workspace configuration exported without note contents or note-specific memberships.");
-  }
-
-  private importWorkspace(): void {
-    requestJsonImport(this.app, this.plugin, {
-      title: "Choose a workspace configuration JSON",
-      maxBytes: MAX_PORTABLE_PACKAGE_BYTES,
-      oversizeMessage: "The selected JSON is larger than the 10 MB import limit.",
-      emptyVaultMessage: "No JSON files were found in the vault. Copy a workspace JSON into the vault, then try again.",
-      guard: () => this.guardOpenedBase(),
-      run: (task) => {
-        void task().catch((error: unknown) => {
-          if (!this.guardOpenedBase()) return;
-          new Notice(errorMessage(error));
-        });
-      },
-      onValue: (value) => { this.confirmWorkspaceImport(value); },
-    });
-  }
-
-  private confirmWorkspaceImport(input: unknown): void {
-    if (!this.guardOpenedBase()) return;
-    void Promise.resolve(input).then((value) => {
-      if (!this.guardOpenedBase()) return;
-      const config = parseWorkspaceConfig(value);
-      const destinationSettings = this.plugin.data.settings;
-      if (config.settings.workspaceMode !== destinationSettings.workspaceMode) {
-        throw new Error(`This configuration uses the ${config.settings.workspaceMode === "ent-clinical" ? "ENT clinical" : "Generic"} preset. Create or switch to a matching knowledge base before importing Workspace settings.`);
-      }
-      const importedSettings = {
-        ...config.settings,
-        workspaceName: destinationSettings.workspaceName,
-        workspaceMode: destinationSettings.workspaceMode,
-        ...(destinationSettings.workspaceMode === "ent-clinical"
-          ? { primaryFolder: destinationSettings.primaryFolder }
-          : {}),
-      };
-      const importedProfileCount = Object.keys(importedSettings.libraryNoteProfiles).length;
-      const destinationLibraryIds = new Set(this.plugin.getLibraries(true).map((library) => library.id));
-      importedSettings.libraryNoteProfiles = objectFromEntries(
-        Object.entries(importedSettings.libraryNoteProfiles)
-          .filter(([libraryId]) => destinationLibraryIds.has(libraryId))
-          .map(([libraryId, profile]) => [libraryId, { ...profile }]),
-      );
-      const droppedProfileCount = importedProfileCount - Object.keys(importedSettings.libraryNoteProfiles).length;
-      for (const folder of [importedSettings.primaryFolder, importedSettings.defaultNoteFolder, importedSettings.templatesFolder]) {
-        const error = validateWritableFolderPath(folder, this.app.vault.configDir);
-        if (error) throw new Error(error);
-      }
-      const inboxError = importedSettings.workspaceMode === "ent-clinical"
-        ? validateProposalFolderPath(importedSettings.proposalFolder, this.app.vault.configDir)
-        : validateWritableFolderPath(importedSettings.proposalFolder, this.app.vault.configDir);
-      if (inboxError) throw new Error(inboxError);
-      if (importedSettings.attachmentStorageMode === "fixed-folder") {
-        const attachmentError = validateWritableFolderPath(importedSettings.attachmentFolder, this.app.vault.configDir);
-        if (attachmentError) throw new Error(attachmentError);
-      }
-      const configuredTemplate = importedSettings.defaultTemplatePath ? this.app.vault.getAbstractFileByPath(importedSettings.defaultTemplatePath) : null;
-      const templateReset = importedSettings.defaultNewNoteMode === "template" && !(configuredTemplate instanceof TFile);
-      if (templateReset) {
-        importedSettings.defaultNewNoteMode = "empty";
-        importedSettings.defaultTemplatePath = "";
-      }
-      let profileTemplateResetCount = 0;
-      for (const [libraryId, profile] of Object.entries(importedSettings.libraryNoteProfiles)) {
-        if (profile.folder !== undefined) {
-          const cleanedFolder = cleanLibraryNoteProfiles(
-            { [libraryId]: { folder: profile.folder } },
-            new Set([libraryId]),
-          )[libraryId]?.folder;
-          if (cleanedFolder === undefined) {
-            throw new Error(`Library profile ${libraryId} contains an unsupported folder path.`);
-          }
-          const validation = validateWritableFolderPath(cleanedFolder, this.app.vault.configDir);
-          if (validation) throw new Error(validation);
-        }
-        if (profile.templatePath) {
-          const cleanedTemplate = cleanLibraryNoteProfiles(
-            { [libraryId]: { templatePath: profile.templatePath } },
-            new Set([libraryId]),
-          )[libraryId]?.templatePath;
-          const validation = cleanedTemplate === undefined ? "unsupported template path" : validateTemplateFilePath(
-            profile.templatePath,
-            importedSettings.templatesFolder,
-            this.app.vault.configDir,
-          );
-          if (validation) {
-            const resetProfile = { ...profile, mode: "empty" as const };
-            delete resetProfile.templatePath;
-            importedSettings.libraryNoteProfiles[libraryId] = resetProfile;
-            profileTemplateResetCount += 1;
-            continue;
-          }
-        }
-        const effective = resolveLibraryNoteProfile(importedSettings, libraryId);
-        if (effective.mode !== "template") continue;
-        const template = effective.templatePath
-          ? this.app.vault.getAbstractFileByPath(effective.templatePath)
-          : null;
-        if (template instanceof TFile && template.extension.toLowerCase() === "md") continue;
-        const resetProfile = { ...profile, mode: "empty" as const };
-        delete resetProfile.templatePath;
-        importedSettings.libraryNoteProfiles[libraryId] = resetProfile;
-        profileTemplateResetCount += 1;
-      }
-      importedSettings.libraryNoteProfiles = cleanLibraryNoteProfiles(
-        importedSettings.libraryNoteProfiles,
-        destinationLibraryIds,
-      );
-      const profileResetNotice = profileTemplateResetCount > 0
-        ? ` ${profileTemplateResetCount} Library ${profileTemplateResetCount === 1 ? "profile" : "profiles"} referenced unavailable templates and will use Empty note instead.`
-        : "";
-      const droppedProfileNotice = droppedProfileCount > 0
-        ? ` ${droppedProfileCount} Library ${droppedProfileCount === 1 ? "profile" : "profiles"} did not match a destination Library and will be omitted.`
-        : "";
-      new ConfirmModal(this.app, "Import workspace configuration?", `Replace the current labels, compatible folders, metadata mappings, behavior settings, and group order with the configuration from ${config.exportedAt || "an unknown date"}? The destination base name, preset, and protected ENT scope will stay unchanged. Note contents and note-specific memberships will not change.${templateReset ? " The configured template is unavailable in this vault, so new notes will default to Empty." : ""}${profileResetNotice}${droppedProfileNotice}`, "Import workspace", async () => {
-        if (!this.guardOpenedBase()) return;
-        await this.plugin.mutate("Import workspace configuration", () => {
-          this.plugin.data.settings = importedSettings;
-          this.plugin.data.indexGroupOrder = config.indexGroupOrder;
-          this.plugin.invalidateRecordCache();
-        }, { includeSettings: true, requireUndo: true });
-        if (!this.guardOpenedBase()) return;
-        this.diagnosticsCache = null;
-        this.invalidateNoteLists();
-        this.titleEl.setText(`Manage ${this.plugin.data.settings.indexLabel}`);
-        if (this.plugin.isClinicalMode() && this.tab === "available") this.tab = "indexed";
-        this.render();
-        new Notice(`Workspace configuration imported.${profileResetNotice}${droppedProfileNotice} Markdown notes were not changed.`);
-      }).open();
-    }).catch((error) => {
       if (!this.guardOpenedBase()) return;
       new Notice(errorMessage(error));
     });

@@ -2261,13 +2261,18 @@ export class EntVaultCommandCenterView extends ItemView {
       new Notice("This note has AI lock enabled and cannot be changed.");
       return;
     }
+    // The parent picker must never offer the topic itself or its own
+    // descendants: choosing one would write a parent cycle into frontmatter
+    // that the tree can only render by silently discarding the placement.
+    const descendants = curriculumDescendantPaths(this.curriculum, record.path);
     new TopicEditorModal(this.app, {
       mode: "placement",
       title: `Edit placement for “${record.title}”`,
       submitLabel: "Apply structural placement",
       proposalFolder: this.plugin.data.settings.proposalFolder,
       canonicalRoot,
-      canonicalRecords: this.plugin.getCanonicalTopics(),
+      canonicalRecords: this.plugin.getCanonicalTopics()
+        .filter((candidate) => candidate.path !== record.path && !descendants.has(candidate.path)),
       initial: {
         title: record.sourceTitle || record.title,
         domain: record.domain,
@@ -2324,7 +2329,9 @@ export class EntVaultCommandCenterView extends ItemView {
     if (compact && this.mobileInspectorOpen) {
       const currentBody = this.inspectorEl?.querySelector<HTMLElement>(".ent-cc-inspector-body");
       if (currentBody && !this.paneLayoutRenderInProgress) this.mobileInspectorScrollTop = currentBody.scrollTop;
-      this.mobileInspectorNeedsFocus = true;
+      // Scroll is restored on every re-render, but focus moves only when the
+      // route is actually entered (selectRecord); a background refresh must
+      // not pull focus away from whatever the user is doing.
     }
     this.contentEl.empty();
     this.contentEl.addClass("ent-cc-view");
@@ -3900,13 +3907,7 @@ export class EntVaultCommandCenterView extends ItemView {
       this.inspectorField(body, this.plugin.data.settings.groupLabel, record.domain || "Ungrouped");
       this.inspectorField(body, "Portable subject ID", record.portableId || "—");
       this.inspectorField(body, "Note status", "Not created or linked");
-      if (mobileOpen && this.mobileInspectorNeedsFocus) {
-        this.mobileInspectorNeedsFocus = false;
-        this.timerWindow.setTimeout(() => {
-          if (this.viewClosed || !this.mobileInspectorOpen || !this.inspectorEl?.contains(body)) return;
-          this.inspectorEl.querySelector<HTMLElement>(".ent-cc-inspector-close")?.focus();
-        }, 0);
-      }
+      if (mobileOpen) this.restoreMobileInspectorAfterRender(body);
       return;
     }
     if (this.plugin.isClinicalMode() || record.reviewStatus || record.safetyCritical) {
@@ -3987,14 +3988,32 @@ export class EntVaultCommandCenterView extends ItemView {
     if (record.role !== "vault-note") this.renderStudyActions(body, record);
     this.renderRelatedKnowledge(body, record);
 
-    if (mobileOpen && this.mobileInspectorNeedsFocus) {
-      this.mobileInspectorNeedsFocus = false;
-      this.timerWindow.setTimeout(() => {
-        if (this.viewClosed || !this.mobileInspectorOpen || !this.inspectorEl?.contains(body)) return;
-        body.scrollTop = this.mobileInspectorScrollTop;
-        this.inspectorEl.querySelector<HTMLElement>(".ent-cc-inspector-close")?.focus();
-      }, 0);
-    }
+    if (mobileOpen) this.restoreMobileInspectorAfterRender(body);
+  }
+
+  /**
+   * Restore the compact record route's scroll offset after its DOM was rebuilt.
+   * Focus moves to the Back button only when the route was just entered
+   * (selectRecord set the flag) and the active element still belongs to this
+   * view — a background reload while an Obsidian modal or another leaf holds
+   * focus must never steal it, mirroring renderPaneLayoutChange's check.
+   */
+  private restoreMobileInspectorAfterRender(body: HTMLElement): void {
+    const needsFocus = this.mobileInspectorNeedsFocus;
+    this.mobileInspectorNeedsFocus = false;
+    this.timerWindow.setTimeout(() => {
+      if (this.viewClosed || !this.mobileInspectorOpen || !this.inspectorEl?.contains(body)) return;
+      body.scrollTop = this.mobileInspectorScrollTop;
+      if (!needsFocus) return;
+      // Focus held by another attached surface (an open modal, another leaf)
+      // is never stolen. Null, body, this view, or an element this render just
+      // detached all mean the focus belongs here.
+      const ownerDocument = this.contentEl.ownerDocument;
+      const active = ownerDocument.activeElement;
+      if (active && active !== ownerDocument.body && !this.contentEl.contains(active)
+        && ownerDocument.body.contains(active)) return;
+      this.inspectorEl.querySelector<HTMLElement>(".ent-cc-inspector-close")?.focus();
+    }, 0);
   }
 
   private inspectorField(parent: HTMLElement, label: string, value: string, className = ""): void {
@@ -4215,12 +4234,18 @@ export class EntVaultCommandCenterView extends ItemView {
       submitLabel: "Create subheading",
       onSubmit: async (title) => {
         if (!ownsBase()) return;
+        const currentHeading = this.plugin.data.collections.find((item) => item.id === heading.id);
+        if (!currentHeading) throw new Error("That collection is no longer available. Reopen the action and try again.");
+        const currentParent = parent.id === heading.id
+          ? currentHeading
+          : subheadingChain(currentHeading, parent.id)?.node ?? null;
+        if (!currentParent) throw new Error("That subheading is no longer available. Reopen the action and try again.");
         await this.plugin.mutate(`Create subheading “${title}”`, () => {
           // New nodes are canonical leaves: the nested key appears only once
           // they gain children of their own.
-          ensureChildList(parent).push({ id: makeId("subheading"), title, collapsed: false, subjects: [] });
-          parent.collapsed = false;
-          heading.collapsed = false;
+          ensureChildList(currentParent).push({ id: makeId("subheading"), title, collapsed: false, subjects: [] });
+          currentParent.collapsed = false;
+          currentHeading.collapsed = false;
         });
       },
     }).open();
@@ -4734,10 +4759,15 @@ export class EntVaultCommandCenterView extends ItemView {
     const menu = new Menu();
     const index = this.plugin.data.collections.findIndex((item) => item.id === heading.id);
     menu.addItem((item) => item.setTitle("Move collection up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => {
-      if (ownsBase()) this.run(() => this.moveCollection(index, index - 1));
+      if (!ownsBase()) return;
+      const currentIndex = this.plugin.data.collections.findIndex((item) => item.id === heading.id);
+      if (currentIndex > 0) this.run(() => this.moveCollection(currentIndex, currentIndex - 1));
     }));
     menu.addItem((item) => item.setTitle("Move collection down").setIcon("arrow-down").setDisabled(index < 0 || index >= this.plugin.data.collections.length - 1).onClick(() => {
-      if (ownsBase()) this.run(() => this.moveCollection(index, index + 1));
+      if (!ownsBase()) return;
+      const collections = this.plugin.data.collections;
+      const currentIndex = collections.findIndex((item) => item.id === heading.id);
+      if (currentIndex >= 0 && currentIndex < collections.length - 1) this.run(() => this.moveCollection(currentIndex, currentIndex + 1));
     }));
     menu.addSeparator();
     menu.addItem((item) => item.setTitle("Add subheading").setIcon("folder-plus").onClick(() => {
@@ -4749,7 +4779,9 @@ export class EntVaultCommandCenterView extends ItemView {
         title: "Rename collection", placeholder: "Collection name", initialValue: heading.title,
         onSubmit: async (title) => {
           if (!ownsBase()) return;
-          await this.plugin.mutate(`Rename collection “${heading.title}”`, () => { heading.title = title; });
+          const currentHeading = this.plugin.data.collections.find((item) => item.id === heading.id);
+          if (!currentHeading) throw new Error("That collection is no longer available. Reopen the action and try again.");
+          await this.plugin.mutate(`Rename collection “${currentHeading.title}”`, () => { currentHeading.title = title; });
         },
       }).open();
     }));
@@ -4807,7 +4839,9 @@ export class EntVaultCommandCenterView extends ItemView {
         title: "Rename subheading", placeholder: "Subheading name", initialValue: subheading.title,
         onSubmit: async (title) => {
           if (!ownsBase()) return;
-          await this.plugin.mutate(`Rename subheading “${subheading.title}”`, () => { subheading.title = title; });
+          const current = locateCurrent();
+          if (!current) throw new Error("That subheading is no longer available. Reopen the action and try again.");
+          await this.plugin.mutate(`Rename subheading “${current.node.title}”`, () => { current.node.title = title; });
         },
       }).open();
     }));
@@ -5142,10 +5176,17 @@ export class EntVaultCommandCenterView extends ItemView {
       const list = this.membershipList(membership);
       const index = list.indexOf(record.path);
       menu.addItem((item) => item.setTitle("Move up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => {
-        if (ownsBase()) this.run(() => this.moveRecordWithin(membership, index, index - 1));
+        if (!ownsBase()) return;
+        const currentIndex = this.membershipList(membership).indexOf(record.path);
+        if (currentIndex > 0) this.run(() => this.moveRecordWithin(membership, currentIndex, currentIndex - 1));
       }));
       menu.addItem((item) => item.setTitle("Move down").setIcon("arrow-down").setDisabled(index < 0 || index >= list.length - 1).onClick(() => {
-        if (ownsBase()) this.run(() => this.moveRecordWithin(membership, index, index + 1));
+        if (!ownsBase()) return;
+        const currentList = this.membershipList(membership);
+        const currentIndex = currentList.indexOf(record.path);
+        if (currentIndex >= 0 && currentIndex < currentList.length - 1) {
+          this.run(() => this.moveRecordWithin(membership, currentIndex, currentIndex + 1));
+        }
       }));
       menu.addItem((item) => item.setTitle("Move this membership…").setIcon("folder-input").onClick(() => {
         if (ownsBase()) this.openCollectionPicker(record.path, membership, true);

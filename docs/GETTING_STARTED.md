@@ -128,7 +128,7 @@ Version 0.10 and later wrap earlier single-base organization into one knowledge 
 
 When upgrading a synced vault on several devices:
 
-1. Install the same current release line everywhere. For this release, every device that can edit the synced plugin data must run 0.12.x before organization work resumes.
+1. Install the same current release line everywhere. Every device that can edit the synced plugin data must run the same release as the newest device before organization work resumes.
 2. Let the plugin file and <code>data.json</code> finish syncing before organizing, importing, or exporting recovery.
 3. Confirm the same knowledge bases and counts on each device.
 4. Export new recovery files after identity convergence.
@@ -155,7 +155,7 @@ Let vault content and configuration Sync finish first. Avoid changing the same k
 
 After updating, confirm the plugin is enabled before opening its workspace. For a first multi-device upgrade, follow the earlier Sync precautions.
 
-An existing installation shows **What’s new in Knowledge Base Command Center 0.12.0** once on this device after the update. Its complete-release-notes action is a normal link to the exact 0.12.0 GitHub release and contacts GitHub only after you activate it; the plugin performs no background version check or network request. Fresh installs establish the local version marker without showing update news. Use **Open what’s new** in the Command Palette whenever you want to reopen the window.
+An existing installation shows **What’s new in Knowledge Base Command Center _version_** once on this device after the update, where _version_ is the newly installed release. Its complete-release-notes action is a normal link to that exact GitHub release and contacts GitHub only after you activate it; the plugin performs no background version check or network request. Fresh installs establish the local version marker without showing update news. Use **Open what’s new** in the Command Palette whenever you want to reopen the window.
 
 Current physical-iPhone evidence is recorded separately in [0.10.0 iPhone evidence](release-evidence/0.10.0-iphone.md).
 

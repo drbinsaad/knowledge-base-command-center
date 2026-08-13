@@ -23,6 +23,12 @@ for (const [label, content] of [["runtime source", runtime], ["built main.js", b
   assert.doesNotMatch(content, /\.innerHTML\s*=|insertAdjacentHTML\s*\(/, `${label} must use safe DOM construction`);
   assert.doesNotMatch(content, /navigator\.clipboard\.(?:read|readText)\s*\(/, `${label} clipboard access must remain write-only`);
   assert.equal((content.match(/\.writeText\s*\(/g) ?? []).length, 1, `${label} must contain exactly one clipboard writer`);
+  // The ES2018 baseline is enforced for library methods by tsconfig's pinned
+  // lib, but DOM-declared globals slip past both that pin and esbuild's
+  // syntax-only target. Ban the ones newer than the supported web-view floor
+  // (Chrome 73 / iOS 12.2); use cloneJsonValue from model.ts instead of
+  // structuredClone (Chrome 98 / iOS 15.4).
+  assert.doesNotMatch(content, /\bstructuredClone\s*\(/, `${label} must not call structuredClone (needs Chrome 98 / iOS 15.4, above the supported web-view floor)`);
 }
 
 assert.doesNotMatch(runtime, /\b(?:require\s*\(|from\s+["'](?:fs|node:|child_process|electron)|process\.)/, "runtime must not use Node or Electron APIs");
@@ -52,9 +58,13 @@ assert.match(runtime, /Platform\.isMobile/);
 assert.match(runtime, /writePortableJson\("backup"/);
 // Every JSON export reaches the vault through one audited helper: the mobile
 // branch writes through writePortableJson(kind, …) and the desktop branch only
-// hands a blob to the user. Assert both the helper and the workspace caller.
+// hands a blob to the user. Assert the helper and the surviving callers — the
+// portable package (which carries the workspace component; the standalone
+// workspace export was removed with the legacy Manage-index path) and the
+// same-vault recovery backup.
 assert.match(runtime, /await plugin\.writePortableJson\(kind, value\)/);
-assert.match(runtime, /deliverJsonExport\(this\.plugin, "workspace"/);
+assert.match(runtime, /deliverJsonExport\(\s*this\.plugin,\s*"portable"/);
+assert.match(runtime, /deliverJsonExport\(this\.plugin, "backup"/);
 
 const enumerationCalls = runtime.match(/\.get(?:MarkdownFiles|Files|AllLoadedFiles)\s*\(/g) ?? [];
 const bulkReads = runtime.match(/\.(?:read|cachedRead)\s*\(/g) ?? [];

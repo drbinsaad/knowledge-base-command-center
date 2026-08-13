@@ -29,6 +29,7 @@ import {
   canonicalIdIsValid,
   canonicalHierarchyIssue,
   canonicalPath,
+  cloneJsonValue,
   canonicalPathInputsUnchanged,
   capturePluginViewState,
   cleanDomainFolder,
@@ -43,6 +44,7 @@ import {
   DEFAULT_DATA,
   DEFAULT_SETTINGS,
   ENT_CLINICAL_SETTINGS,
+  enforceStoredTextBounds,
   errorMessage,
   genericNotePath,
   GenericNoteFormValue,
@@ -428,7 +430,7 @@ interface PendingVaultRename {
 }
 
 export default class EntVaultCommandCenterPlugin extends Plugin {
-  data: PluginData = structuredClone(DEFAULT_DATA);
+  data: PluginData = cloneJsonValue(DEFAULT_DATA);
   private store: PluginStore = createDefaultStore(this.data);
   private committedStoreSnapshot: PluginStore | null = null;
   /** Safe in-memory rollback point even while a missing data.json is uncommitted. */
@@ -777,6 +779,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
    * carry only the stable Library ID and revalidate the current base at use.
    */
   private syncLibraryCommands(): void {
+    // In-flight logical transactions deliberately survive onunload to finish
+    // their data compensation; their refreshViews call must not re-register
+    // the per-library commands the unload just removed.
+    if (this.unloaded) return;
     const desired = new Map<string, string>(
       this.getLibraries().map((library) => [`open-library-${library.id}`, library.name] as const),
     );
@@ -980,7 +986,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private neutralSyncedStore(source: PluginStore): PluginStore {
-    const snapshot = structuredClone(source);
+    const snapshot = cloneJsonValue(source);
     for (const entry of snapshot.bases) resetPluginViewState(entry.data);
     const available = snapshot.bases
       .filter((entry) => entry.archivedAt === null)
@@ -1414,7 +1420,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (recovered === null) {
         // A syntactically invalid data.json must not stop the plugin from loading.
         // Start from defaults and refuse to save so the original file survives.
-        this.useActiveData(structuredClone(DEFAULT_DATA));
+        this.useActiveData(cloneJsonValue(DEFAULT_DATA));
         this.store = createDefaultStore(this.data);
         this.dataCompatibilityWarning = `Plugin data could not be parsed (${errorMessage(error)}). Personal organization is read-only so the existing data.json is not overwritten; repair or remove that file to continue.`;
         new Notice(this.dataCompatibilityWarning, 10000);
@@ -1444,7 +1450,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       ? loaded as PluginStore
       : null;
     if (sourceVersion === 0 && Object.keys(loadedRecord).length > 0 && !isRecognizedPluginData(loaded) && !recognizedStore) {
-      this.useActiveData(structuredClone(DEFAULT_DATA));
+      this.useActiveData(cloneJsonValue(DEFAULT_DATA));
       this.store = createDefaultStore(this.data);
       this.dataCompatibilityWarning = "Plugin data has an unrecognized shape. Personal organization is read-only so the original data is not overwritten; export or repair data.json before continuing.";
       new Notice(this.dataCompatibilityWarning, 10000);
@@ -1456,7 +1462,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         this.store = createDefaultStore(this.data);
         this.dataCompatibilityWarning = `Plugin data version ${sourceVersion} is newer than this build (v${DATA_VERSION}). Personal organization is read-only to prevent data loss.`;
       } catch (error) {
-        this.useActiveData(structuredClone(DEFAULT_DATA));
+        this.useActiveData(cloneJsonValue(DEFAULT_DATA));
         this.store = createDefaultStore(this.data);
         this.dataCompatibilityWarning = `Newer plugin data could not be safely inspected (${errorMessage(error)}). Personal organization is read-only and the existing data.json was not overwritten.`;
       }
@@ -1517,7 +1523,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         this.rollbackStoreSnapshot = neutralBootstrapSnapshot;
       }
     } catch (error) {
-      this.useActiveData(structuredClone(DEFAULT_DATA));
+      this.useActiveData(cloneJsonValue(DEFAULT_DATA));
       this.store = createDefaultStore(this.data);
       this.dataCompatibilityWarning = `Knowledge-base data could not be migrated (${errorMessage(error)}). The existing data.json remains read-only and was not overwritten.`;
       new Notice(this.dataCompatibilityWarning, 10000);
@@ -1562,7 +1568,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     // Capture it at the instant repair first mutates anything instead.
     let capturedPreRemediationStore: PluginStore | null = null;
     const capturePreRemediationStore = (): void => {
-      capturedPreRemediationStore ??= structuredClone(this.store);
+      capturedPreRemediationStore ??= cloneJsonValue(this.store);
       // The bootstrap projection is about to stop describing the live store.
       neutralBootstrapSnapshot = null;
     };
@@ -1631,20 +1637,26 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         await this.saveStoreSnapshot();
       }
     } catch (error) {
+      // Degrade to the designed read-only state instead of rethrowing: a
+      // rejected startup writeback must not abort onload, or the view, every
+      // command, and the settings tab never register and the user cannot even
+      // reach the recovery guidance this warning gives them.
       if (remediationNeedsWriteback) {
         this.store = preRemediationStore();
         this.useActiveData(this.requireActiveBase().data);
         this.invalidateRecordCache();
         this.markPersistenceUncertain("Automatic startup repair was rejected while saving and may already have reached data.json. The pre-repair organization remains available in memory, but knowledge bases stay read-only until Obsidian is restarted after data.json and a same-vault recovery are preserved.");
+      } else {
+        this.markPersistenceUncertain(`Migrated knowledge-base data could not be written back (${errorMessage(error)}). The migrated organization remains available in memory, but knowledge bases stay read-only until Obsidian is restarted after data.json and a same-vault recovery are preserved.`);
       }
-      throw error;
+      console.error("Knowledge Base Command Center could not persist the startup migration writeback", error);
     }
     // A missing data.json is an untrusted bootstrap state, not an authoritative
     // empty store. Do not persist or commit it merely because this device
     // enabled the plugin before Obsidian Sync delivered the existing payload.
     if (capturedRead === undefined && !sourceWasMissing) {
       this.committedStoreSnapshot = neutralBootstrapSnapshot ?? this.neutralSyncedStore(this.store);
-      this.rollbackStoreSnapshot = structuredClone(this.committedStoreSnapshot);
+      this.rollbackStoreSnapshot = cloneJsonValue(this.committedStoreSnapshot);
     }
     // A recognized interim deterministic identity is usable after migrateStore
     // rotates it in memory. External Sync can therefore reconcile it with a
@@ -1705,7 +1717,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         ?.bases.find((candidate) => candidate.id === baseId);
       if (rollbackEntry) {
         const localView = capturePluginViewState(entry.data);
-        const restoredData = structuredClone(rollbackEntry.data);
+        const restoredData = cloneJsonValue(rollbackEntry.data);
         applyPluginViewState(restoredData, localView, true);
         entry.data = restoredData;
         entry.updatedAt = rollbackEntry.updatedAt;
@@ -1721,6 +1733,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     // switch bases while a previous adapter write is still pending; resolving
     // the active base later inside the queue could otherwise attach one base's
     // data object to another base.
+    enforceStoredTextBounds(this.data);
     entry.data = this.data;
     const attemptedSemanticData = JSON.stringify(semanticPluginDataProjection(this.data));
     // Organization/Undo transactions own a richer rollback boundary (including
@@ -1766,7 +1779,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         && ownsLiveCausality
         && JSON.stringify(semanticPluginDataProjection(liveEntry.data)) === attemptedSemanticData) {
         const localView = capturePluginViewState(liveEntry.data);
-        const restoredData = structuredClone(rollbackEntryBeforeAttempt.data);
+        const restoredData = cloneJsonValue(rollbackEntryBeforeAttempt.data);
         applyPluginViewState(restoredData, localView, true);
         liveEntry.data = restoredData;
         // The rejected queued attempt may have been based on an earlier
@@ -1890,7 +1903,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       || JSON.stringify(semanticPluginDataProjection(liveEntry.data)) !== committedSemantic) {
       throw new Error("An unsaved organization change is still pending. Its view state was not saved separately.");
     }
-    const verification = structuredClone(committedEntry.data);
+    const verification = cloneJsonValue(committedEntry.data);
     applyPluginViewState(verification, captured, true);
     if (JSON.stringify(semanticPluginDataProjection(verification)) !== committedSemantic) {
       throw new Error("The safe view-state whitelist changed semantic organization. Nothing was saved.");
@@ -1989,8 +2002,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         this.recordRejectedSemanticAttempts(snapshot);
         throw new ExternalSettingsSupersededError("Knowledge-base data changed through Sync while this edit was saving. The local edit was rolled back; try it again after the synced copy reloads.");
       }
-      this.committedStoreSnapshot = structuredClone(snapshot);
-      this.rollbackStoreSnapshot = structuredClone(snapshot);
+      this.committedStoreSnapshot = cloneJsonValue(snapshot);
+      this.rollbackStoreSnapshot = cloneJsonValue(snapshot);
       this.clearSupersededRejectedAttempts(snapshot);
       if (!allowDuringExternalReload) this.recordLocalSuccessfulSave();
       this.persistDeviceLocalStateSafely();
@@ -2119,7 +2132,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return (async (): Promise<ExternalPluginDataCapture> => {
       try {
         const value = await this.loadData() as unknown;
-        return { read: { value: structuredClone(value) }, adapterWriteGeneration };
+        return { read: { value: cloneJsonValue(value) }, adapterWriteGeneration };
       } catch (error) {
         return { read: { error }, adapterWriteGeneration };
       }
@@ -2140,7 +2153,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     expectedExternalGeneration: number,
   ): Promise<void> {
     if ("error" in capture.read) throw capture.read.error;
-    const snapshot = structuredClone(capture.read.value);
+    const snapshot = cloneJsonValue(capture.read.value);
     const save = async (): Promise<void> => {
       if (expectedExternalGeneration !== this.externalChangeGeneration) {
         throw new ExternalSettingsSupersededError("A newer synced settings file arrived before the captured file could be restored.");
@@ -2230,7 +2243,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         new Notice(`Fresh-device changes were preserved at ${rescuePath} before the established synced store was adopted.`, 12000);
       }
       return {
-        workingStore: structuredClone(incomingStore),
+        workingStore: cloneJsonValue(incomingStore),
         baselineTrust: recoverableLegacyCapture || loaded.identityNeedsWriteback
           ? "legacy-provisional"
           : "identified",
@@ -2244,7 +2257,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const incomingBootstrapOnly = freshStoreHasOnlyBootstrapChanges(incomingStore);
     // Sampled before any envelope is replaced so both devices compute the same
     // tiebreak from the same two identities.
-    const localWins = workingStore.vaultId.localeCompare(incomingStore.vaultId) <= 0;
+    // Code-unit comparison: both devices must pick the same winner regardless
+    // of their system locales, or each side keeps preferring its own store.
+    const localWins = workingStore.vaultId <= incomingStore.vaultId;
     if (workingStore.vaultId === incomingStore.vaultId) {
       const merged = await this.mergeStoresWithSemanticRescue(workingStore, incomingStore, preferredActiveId);
       // The schema-upgrade term is deliberately absent here; the caller applies
@@ -2258,7 +2273,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       };
     }
     if (localBootstrapOnly && !incomingBootstrapOnly) {
-      return { workingStore: structuredClone(incomingStore), baselineTrust: "fresh", needsWriteback: false };
+      return { workingStore: cloneJsonValue(incomingStore), baselineTrust: "fresh", needsWriteback: false };
     }
     if (!localBootstrapOnly && incomingBootstrapOnly) {
       // Local work is the only meaningful fresh-device payload. Keep it and
@@ -2268,7 +2283,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (localBootstrapOnly && incomingBootstrapOnly) {
       // Two empty devices converge symmetrically on one provisional identity;
       // their view-only differences are deliberately disposable.
-      const converged = structuredClone(localWins ? workingStore : incomingStore);
+      const converged = cloneJsonValue(localWins ? workingStore : incomingStore);
       return {
         workingStore: converged,
         baselineTrust: "fresh",
@@ -2289,7 +2304,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       "Two fresh devices contained independent changes before Sync converged; this is the non-authoritative local copy.",
     );
     if (!rescuePath) throw new Error("Independent fresh-device changes could not be preserved before convergence.");
-    const adopted = structuredClone(incomingStore);
+    const adopted = cloneJsonValue(incomingStore);
     new Notice(`Independent local changes were preserved at ${rescuePath} before the other fresh device became active.`, 12000);
     return { workingStore: adopted, baselineTrust: "fresh", needsWriteback: false };
   }
@@ -2315,7 +2330,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // adopt its migrated store directly instead of comparing it with the
       // random fallback identity.
       return {
-        workingStore: structuredClone(incomingStore),
+        workingStore: cloneJsonValue(incomingStore),
         baselineTrust: isFreshVaultId(incomingStore.vaultId)
           ? "fresh"
           : recoverableLegacyCapture || loaded.identityNeedsWriteback
@@ -2364,7 +2379,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // authoritative baseline and must supersede the provisional copy rather
       // than fail a cross-vault merge.
       return {
-        workingStore: structuredClone(incomingStore),
+        workingStore: cloneJsonValue(incomingStore),
         baselineTrust: "identified",
         needsWriteback: loaded.sourceVersion !== STORE_VERSION
           || loaded.identityNeedsWriteback
@@ -2429,7 +2444,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     // and must not be discarded by a later transient missing, incompatible, or
     // conflicting payload. All three snapshots must be taken before the load,
     // which replaces this.store, this.data and this.dataCompatibilityWarning.
-    const fallbackStore = structuredClone(workingStore);
+    const fallbackStore = cloneJsonValue(workingStore);
     const fallbackBaselineTrust: ExternalReloadBaselineTrust = baselineTrust;
     const localWarning = this.dataCompatibilityWarning;
     const loaded = await this.loadPluginData(false, capture.read);
@@ -2469,7 +2484,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // the incompatible file that must remain authoritative for a newer build.
       // Preserve it before this instance settles into read-only mode. The
       // rescue helper deduplicates identical stores.
-      const rescueStore = baselineTrust !== "none" ? structuredClone(fallbackStore) : null;
+      const rescueStore = baselineTrust !== "none" ? cloneJsonValue(fallbackStore) : null;
       this.dataCompatibilityWarning = blockingWarning;
       return publishOutcome({
         capture,
@@ -2489,7 +2504,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // Earlier captures in this batch may already be merged into the fallback;
       // the identity-less file stays authoritative on disk, so that merge
       // survives only through the rescue path.
-      const rescueStore = baselineTrust !== "none" ? structuredClone(fallbackStore) : null;
+      const rescueStore = baselineTrust !== "none" ? cloneJsonValue(fallbackStore) : null;
       this.dataCompatibilityWarning = blockingWarning;
       new Notice(this.dataCompatibilityWarning, 12000);
       return publishOutcome({
@@ -2553,7 +2568,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.store = fallbackStore;
       this.useActiveData(this.requireActiveBase().data);
       if ("value" in capture.read) {
-        this.retainedExternalSettingsPayload = structuredClone(capture.read.value);
+        this.retainedExternalSettingsPayload = cloneJsonValue(capture.read.value);
       }
       const semanticRescueFailed = error instanceof SemanticConflictRescueError;
       this.semanticConflictRescueFailed ||= semanticRescueFailed;
@@ -2600,7 +2615,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (!outcome.needsWriteback && !capturedFileMayHaveBeenOverwritten) {
       // The latest captured file already contains this payload.
       this.committedStoreSnapshot = this.neutralSyncedStore(workingStore);
-      this.rollbackStoreSnapshot = structuredClone(this.committedStoreSnapshot);
+      this.rollbackStoreSnapshot = cloneJsonValue(this.committedStoreSnapshot);
       this.persistDeviceLocalStateSafely();
       return "settled";
     }
@@ -2640,7 +2655,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const capturedFileMayHaveBeenOverwritten = this.adapterWriteGeneration !== outcome.capture.adapterWriteGeneration;
     const capturedRead = outcome.capture.read;
     if (!capturedFileMayHaveBeenOverwritten || !("value" in capturedRead)) return "settled";
-    this.retainedExternalSettingsPayload = structuredClone(capturedRead.value);
+    this.retainedExternalSettingsPayload = cloneJsonValue(capturedRead.value);
     const restoreGeneration = this.externalChangeGeneration;
     try {
       await this.restoreCapturedPluginData(outcome.capture, restoreGeneration);
@@ -2690,12 +2705,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       await Promise.resolve();
       try {
         const initialCommittedStore = this.committedStoreSnapshot
-          ? structuredClone(this.committedStoreSnapshot)
+          ? cloneJsonValue(this.committedStoreSnapshot)
           : null;
         // Sampled once for the whole worker: re-sampling per capture would let a
         // Sync-driven active-base change feed back into subsequent merges.
         const preferredActiveId = this.store.activeBaseId;
-        let workingStore = structuredClone(initialCommittedStore ?? this.store);
+        let workingStore = cloneJsonValue(initialCommittedStore ?? this.store);
         this.applyDeviceLocalState(workingStore);
         let baselineTrust: ExternalReloadBaselineTrust = initialCommittedStore
           ? isFreshVaultId(initialCommittedStore.vaultId) ? "fresh" : "identified"
@@ -2709,7 +2724,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
             const uncertainCaptures = await this.drainExternalPluginDataCaptures();
             const retained = uncertainCaptures.find((capture) => "value" in capture.read);
             if (retained && "value" in retained.read) {
-              this.retainedExternalSettingsPayload = structuredClone(retained.read.value);
+              this.retainedExternalSettingsPayload = cloneJsonValue(retained.read.value);
             }
             new Notice(this.dataCompatibilityWarning, 15000);
             return;
@@ -2725,7 +2740,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           // cannot win merely because its file callback arrived first.
           this.advanceRejectedSemanticAttempts();
           if (this.rejectedSemanticAttemptsByBase.size > 0) {
-            workingStore = structuredClone(this.store);
+            workingStore = cloneJsonValue(this.store);
             if (baselineTrust === "none") {
               baselineTrust = isFreshVaultId(workingStore.vaultId) ? "fresh" : "identified";
             }
@@ -2774,10 +2789,19 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
               : "blocked";
           }
           try {
+            // The batch's merge and writeback are complete: the refresh is
+            // presentation work over a committed store. Lower the busy flag
+            // first, or the view's reconcile-time saveViewState/savePluginData
+            // calls hit the reload guards and abort the refresh, leaving the
+            // open view on the pre-merge tree. Re-armed below so a capture
+            // that arrives mid-refresh drains under the guard again.
+            this.externalReloadBusy = false;
             await this.refreshViews(false);
           } catch (error) {
             console.error("Knowledge Base Command Center reloaded synced data but could not refresh its views", error);
             new Notice("Synced knowledge-base data was reloaded, but the view could not refresh. Reopen the command center to update it.", 8000);
+          } finally {
+            this.externalReloadBusy = true;
           }
         } while (this.externalReloadPending || this.externalReloadCaptures.length > 0);
       } finally {
@@ -2926,7 +2950,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (this.externalReloadBusy) throw new Error("Finish reloading synced knowledge-base data before applying a portfolio import.");
     // Validate every stale/confirmation/plan-integrity guard before creating
     // recovery files. The guarded transaction repeats this check after them.
-    const validationStore = structuredClone(this.store);
+    const validationStore = cloneJsonValue(this.store);
     applyPortfolioImportPlan(validationStore, plan, typedConfirmation, this.externalChangeGeneration);
     const recoveryPaths: string[] = [];
     for (const recovery of plan.recoveryPackages) {
@@ -3128,14 +3152,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (this.externalReloadBusy) throw new Error("Finish reloading synced knowledge-base data before switching bases.");
       await this.enqueueAppLogicalOperation(async () => {
         await this.saveQueue;
-        const backup = structuredClone(this.store);
+        const backup = cloneJsonValue(this.store);
         let attemptedStore: PluginStore | null = null;
         try {
           change();
           this.useActiveData(this.requireActiveBase().data);
           this.invalidateRecordCache();
           if (persistSyncedStore) {
-            attemptedStore = structuredClone(this.store);
+            attemptedStore = cloneJsonValue(this.store);
             await this.saveStoreSnapshot();
           } else {
             this.persistDeviceLocalState();
@@ -3201,8 +3225,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (this.store.bases.length >= MAX_KNOWLEDGE_BASES) throw new Error(`This installation already contains the maximum of ${MAX_KNOWLEDGE_BASES} knowledge bases, including archived bases.`);
     let created: KnowledgeBaseEntry | null = null;
     await this.commitBaseStoreChange(() => {
-      const next = structuredClone(DEFAULT_DATA);
-      next.settings = structuredClone(mode === "ent-clinical" ? ENT_CLINICAL_SETTINGS : DEFAULT_SETTINGS);
+      const next = cloneJsonValue(DEFAULT_DATA);
+      next.settings = cloneJsonValue(mode === "ent-clinical" ? ENT_CLINICAL_SETTINGS : DEFAULT_SETTINGS);
       next.settings.setupComplete = true;
       next.settings.workspaceName = cleanName;
       if (mode === "generic" && primaryFolder.trim()) {
@@ -3240,7 +3264,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (this.store.bases.length >= MAX_KNOWLEDGE_BASES) throw new Error(`This installation already contains the maximum of ${MAX_KNOWLEDGE_BASES} knowledge bases, including archived bases.`);
     let duplicate: KnowledgeBaseEntry | null = null;
     await this.commitBaseStoreChange(() => {
-      const copy = structuredClone(source.data);
+      const copy = cloneJsonValue(source.data);
       copy.settings.workspaceName = cleanName;
       copy.undoStack = [];
       copy.redoStack = [];
@@ -5713,12 +5737,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         semanticHash: this.requireActiveBase().semanticHash,
         semanticLineage: [...this.requireActiveBase().semanticLineage],
       };
-      const transactionBackup = options.requireUndo ? structuredClone(this.data) : null;
+      const transactionBackup = options.requireUndo ? cloneJsonValue(this.data) : null;
       const previousUndoStack = [...this.data.undoStack];
       const previousRedoStack = [...this.data.redoStack];
       const previousSelectedPath = this.data.selectedPath;
       const previousActiveTab = this.data.activeTab;
-      const previousCollapsed = structuredClone(this.data.collapsed);
+      const previousCollapsed = cloneJsonValue(this.data.collapsed);
       const snapshot = snapshotPersonal(
         this.data,
         label,
@@ -5757,7 +5781,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           this.data.collapsed = previousCollapsed;
           // Replace the restored object only on failure. This invalidates stale
           // dialogs without imposing a full-data clone on every small action.
-          this.replaceActiveData(structuredClone(this.data), transactionMetadata);
+          this.replaceActiveData(cloneJsonValue(this.data), transactionMetadata);
         }
         this.invalidateRecordCache();
         // If an external change interrupted the write, the incoming file was
@@ -5816,7 +5840,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       await this.enqueueAppLogicalOperation(async () => {
       // Clone after entering the guarded region so an allocation/serialization
       // failure cannot leave organization history permanently marked busy.
-      const storeBackup = structuredClone(this.store);
+      const storeBackup = cloneJsonValue(this.store);
       const snapshot = (direction === "undo" ? this.data.undoStack : this.data.redoStack).pop();
       if (!snapshot) return;
       try {
@@ -6546,7 +6570,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       || this.externalReloadBusy || this.externalReloadPromise !== null) return false;
 
     this.assertDataWritable();
-    const storeBackup = structuredClone(this.store);
+    const storeBackup = cloneJsonValue(this.store);
     const attemptExternalGeneration = this.externalChangeGeneration;
     this.baseOperationBusy = true;
     let retryAfterExternalReload = false;

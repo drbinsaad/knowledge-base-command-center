@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { Notice } from "obsidian";
+import { Notice, Setting } from "obsidian";
 import { migrateData, portablePlaceholderPath, type VaultRecord } from "../src/model.ts";
 import EntVaultCommandCenterPlugin from "../src/main.ts";
 import { IndexManagerModal } from "../src/index-manager.ts";
 import { ManageKnowledgeBasesModal } from "../src/knowledge-base-modal.ts";
-import { TextPromptModal } from "../src/modals.ts";
+import { ConfirmModal, TextPromptModal } from "../src/modals.ts";
 import { TaxonomyHealthModal, TaxonomyRepairPreviewModal } from "../src/taxonomy-health-modal.ts";
 import {
   applyTaxonomyRepairToData,
@@ -497,6 +497,118 @@ test("index manager bulk selection matches the notes the filter shows", () => {
   } finally {
     if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
     else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("in-modal mutations drop the cached diagnostics so the next Diagnostics view recomputes", async () => {
+  // In-modal mutations change diagnostics inputs without bumping the data
+  // epoch, so no stale-base guard can force a recompute; the modal must drop
+  // its own cache on every deliberate refresh while still computing lazily.
+  let issues = [{
+    kind: "invalid-visual-parent",
+    title: "Cross-group visual parent",
+    detail: "The visual parent lives in another group.",
+    path: "KB/Child.md",
+  }];
+  let indexRecords = [record("KB/Child.md", "Child", { domain: "Group A" })];
+  let computes = 0;
+  const plugin = {
+    data: {
+      settings: { indexLabel: "Index", groupLabel: "Group", itemSingular: "note", itemPlural: "notes" },
+      manualIndexPaths: [],
+      excludedIndexPaths: [],
+      displayNameByPath: {},
+    },
+    getIndexRecords: () => indexRecords,
+    getRecords: () => [],
+    getIndexCandidateFiles: () => [],
+    getIndexGroups: () => ["Group A"],
+    getIndexDiagnostics: () => { computes += 1; return [...issues]; },
+    async removeRecordsFromIndex(paths: string[]): Promise<void> {
+      indexRecords = indexRecords.filter((item) => !paths.includes(item.path));
+      issues = [];
+    },
+    isClinicalMode: () => false,
+    isDataReadOnly: () => false,
+    canVisuallyMoveAcrossGroups: () => true,
+  };
+  const dom = createFakeDom();
+  const manager = Object.create(IndexManagerModal.prototype) as {
+    app: unknown;
+    plugin: typeof plugin;
+    contentEl: HTMLElement;
+    tab: string;
+    query: string;
+    selected: Set<string>;
+    managerOpen: boolean;
+    openedBaseId: string;
+    searchTimer: number | null;
+    pendingTimers: Set<number>;
+    selectionButtons: unknown[];
+    noteListCache: Map<string, unknown>;
+    diagnosticsCache: unknown[] | null;
+    render(): void;
+    removeSelectedFromIndex(): void;
+  };
+  manager.app = { vault: { getAbstractFileByPath: () => null } };
+  manager.plugin = plugin;
+  manager.contentEl = asHtmlElement(dom.document.body.createDiv());
+  manager.tab = "diagnostics";
+  manager.query = "";
+  manager.selected = new Set();
+  manager.managerOpen = true;
+  manager.openedBaseId = "";
+  manager.searchTimer = null;
+  manager.pendingTimers = new Set();
+  manager.selectionButtons = [];
+  manager.noteListCache = new Map();
+  manager.diagnosticsCache = null;
+
+  const settingPrototype = Setting.prototype as unknown as Record<string, unknown>;
+  const settingButton = {
+    setButtonText: (): typeof settingButton => settingButton,
+    onClick: (): typeof settingButton => settingButton,
+    setCta: (): typeof settingButton => settingButton,
+    setDisabled: (): typeof settingButton => settingButton,
+  };
+  settingPrototype.addButton = function addButton(this: unknown, callback: (value: typeof settingButton) => void): unknown {
+    callback(settingButton);
+    return this;
+  };
+  settingPrototype.settingEl = { addClass: (): void => undefined };
+  const confirms: Array<{ onConfirm(): void | Promise<void> }> = [];
+  const confirmOpen = Object.getOwnPropertyDescriptor(ConfirmModal.prototype, "open");
+  ConfirmModal.prototype.open = function captureConfirm(): void {
+    confirms.push(this as unknown as { onConfirm(): void | Promise<void> });
+  };
+  try {
+    manager.render();
+    assert.equal(computes, 1, "opening the Diagnostics tab computes once");
+    assert.equal(manager.contentEl.querySelectorAll(".ent-cc-manager-diagnostic").length, 1);
+    assert.equal(manager.contentEl.querySelector('[data-manager-tab="diagnostics"]')?.textContent, "Diagnostics1");
+
+    const indexedTab = manager.contentEl.querySelector('[data-manager-tab="indexed"]');
+    assert.ok(indexedTab);
+    indexedTab.click();
+    assert.equal(computes, 1, "no other tab pays for a diagnostics recompute");
+
+    manager.selected = new Set(["KB/Child.md"]);
+    manager.removeSelectedFromIndex();
+    assert.equal(confirms.length, 1);
+    await confirms[0]?.onConfirm();
+    assert.equal(computes, 1, "the mutation itself does not recompute either");
+    const staleBadge = manager.contentEl.querySelector('[data-manager-tab="diagnostics"]');
+    assert.equal(staleBadge?.textContent, "Diagnostics—", "the badge no longer advertises the pre-mutation count");
+
+    staleBadge?.click();
+    assert.equal(computes, 2, "returning to Diagnostics recomputes instead of serving the stale list");
+    assert.equal(manager.contentEl.querySelectorAll(".ent-cc-manager-diagnostic").length, 0);
+    assert.match(manager.contentEl.querySelector(".ent-cc-manager-toolbar p")?.textContent ?? "", /No index-organization problems detected/u);
+  } finally {
+    Reflect.deleteProperty(settingPrototype, "addButton");
+    Reflect.deleteProperty(settingPrototype, "settingEl");
+    if (confirmOpen) Object.defineProperty(ConfirmModal.prototype, "open", confirmOpen);
+    else Reflect.deleteProperty(ConfirmModal.prototype, "open");
   }
 });
 
