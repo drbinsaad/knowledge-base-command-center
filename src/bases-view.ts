@@ -8,6 +8,7 @@ import type {
   QueryController,
   Value,
 } from "obsidian";
+import { errorMessage } from "./model";
 
 export const ENT_HIERARCHY_BASES_VIEW_TYPE = "ent-hierarchy";
 export const DEFAULT_HIERARCHY_BASES_PAGE_SIZE = 100;
@@ -434,10 +435,10 @@ export class EntHierarchyBasesView extends BasesView {
       if (generation !== this.renderGeneration || !this.containerEl.contains(row)) return;
       try {
         void this.app.workspace.getLeaf("tab").openFile(file).catch((error) => {
-          new Notice(error instanceof Error ? error.message : String(error));
+          new Notice(errorMessage(error));
         });
       } catch (error) {
-        new Notice(error instanceof Error ? error.message : String(error));
+        new Notice(errorMessage(error));
       }
     });
     return row;

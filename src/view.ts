@@ -23,6 +23,7 @@ import {
   CurriculumTreeResult,
   curriculumVisualHasChanges,
   emptyCurriculumTree,
+  errorMessage,
   expectedParentCurriculumId,
   GenericNoteFormValue,
   isExtensionCurriculumId,
@@ -584,7 +585,7 @@ export class EntVaultCommandCenterView extends ItemView {
         if (selectionSavePending) await this.saveSelectionState();
         else await this.selectionSavePromise;
       } catch (error) {
-        new Notice(error instanceof Error ? error.message : String(error));
+        new Notice(errorMessage(error));
       }
     }
   }
@@ -781,7 +782,7 @@ export class EntVaultCommandCenterView extends ItemView {
 
   /** Runs a fire-and-forget action, surfacing failures (for example read-only data) as a Notice. */
   private run(action: () => Promise<unknown>): void {
-    void action().catch((error) => new Notice(error instanceof Error ? error.message : String(error)));
+    void action().catch((error) => new Notice(errorMessage(error)));
   }
 
   /**
@@ -861,7 +862,7 @@ export class EntVaultCommandCenterView extends ItemView {
       if (cancelled()) return;
       this.globalSearchPendingKey = "";
       this.globalSearchErrorKey = key;
-      this.globalSearchErrorMessage = error instanceof Error ? error.message : String(error);
+      this.globalSearchErrorMessage = errorMessage(error);
       new Notice(this.globalSearchErrorMessage);
       // renderGlobalSearchResults recognizes the error key and will not retry
       // until the user explicitly chooses Retry or changes the query.
@@ -5177,7 +5178,7 @@ export class EntVaultCommandCenterView extends ItemView {
       this.plugin.recordRecoveryExport(now.getTime());
       new Notice("Organization backup exported. Source notes were not included.");
     } catch (error) {
-      if (ownsBase()) new Notice(error instanceof Error ? error.message : String(error));
+      if (ownsBase()) new Notice(errorMessage(error));
     }
   }
 
@@ -5191,7 +5192,7 @@ export class EntVaultCommandCenterView extends ItemView {
       guard: ownsBase,
       run: (task) => {
         void task().catch((error: unknown) => {
-          if (ownsBase()) new Notice(error instanceof Error ? error.message : String(error));
+          if (ownsBase()) new Notice(errorMessage(error));
         });
       },
       onValue: (value) => { this.confirmOrganizationImport(value, ownsBase); },
@@ -5275,7 +5276,7 @@ export class EntVaultCommandCenterView extends ItemView {
         () => openFinalConfirmation(),
       ).open();
     }).catch((error) => {
-      if (ownsBase()) new Notice(error instanceof Error ? error.message : String(error));
+      if (ownsBase()) new Notice(errorMessage(error));
     });
   }
 

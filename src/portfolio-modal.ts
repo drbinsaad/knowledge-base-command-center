@@ -1,5 +1,6 @@
 import { Modal, Notice, Setting } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
+import { errorMessage } from "./model";
 import { calculateModalViewportLayout, deliverJsonExport, requestJsonImport } from "./modals";
 import {
   EMPTY_PORTABLE_SELECTION,
@@ -53,10 +54,6 @@ const DIFF_LABELS: Record<keyof PortfolioPlanDiff, string> = {
 
 function cloneSelection(value: PortableExportSelection): PortableExportSelection {
   return normalizePortableSelection({ ...value, libraryIds: [...(value.libraryIds ?? [])] });
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 export class PortfolioTransferModal extends Modal {

@@ -1,6 +1,7 @@
 import { Modal, Notice, Setting, TFile, TFolder } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
 import {
+  errorMessage,
   resolveLibraryNoteProfile,
   type LibraryDefinition,
   type LibraryNoteProfile,
@@ -37,7 +38,7 @@ function fileLabel(path: string): string {
 
 function reportProfileError(error: unknown): void {
   console.error("Knowledge Base Command Center Library creation-profile action failed", error);
-  new Notice(error instanceof Error ? error.message : "The Library creation profile could not be saved.", 8000);
+  new Notice(errorMessage(error, "The Library creation profile could not be saved."), 8000);
 }
 
 /** Edit one optional base → Library note-creation override without touching notes. */
@@ -334,7 +335,7 @@ export class LibraryNoteProfileEditorModal extends Modal {
     } catch (error) {
       this.busy = false;
       this.syncControls();
-      this.errorEl?.setText(error instanceof Error ? error.message : String(error));
+      this.errorEl?.setText(errorMessage(error));
       reportProfileError(error);
     }
   }

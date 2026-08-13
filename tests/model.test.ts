@@ -39,6 +39,7 @@ import {
   DEVICE_LOCAL_STATE_VERSION,
   deterministicSemanticHead,
   curriculumContainerKey,
+  errorMessage,
   expectedParentCurriculumId,
   fingerprintText,
   genericNotePath,
@@ -7808,4 +7809,35 @@ test("one name key decides base, group, and heading uniqueness everywhere", () =
   assert.equal(normalizedNameKey("Café"), normalizedNameKey("Café"));
   assert.equal(normalizedNameKey("CAFÉ"), "café");
   assert.equal(normalizedNameKey(""), "");
+});
+
+test("one error-to-text helper reproduces every shape the call sites inlined", () => {
+  // The Error branch: the message alone, never the "Error: " prefix that
+  // String(error) would add, because notices show it as a whole sentence.
+  assert.equal(errorMessage(new Error("The export failed.")), "The export failed.");
+  assert.equal(errorMessage(new TypeError("Bad input.")), "Bad input.");
+  // A subclass that carries an empty message must stay empty rather than
+  // falling through to a fallback the old ternary would never have reached.
+  assert.equal(errorMessage(new Error("")), "");
+
+  // The coerced branch, for callers that inlined String(error).
+  assert.equal(errorMessage("plain string throw"), "plain string throw");
+  assert.equal(errorMessage(undefined), "undefined");
+  assert.equal(errorMessage(null), "null");
+  assert.equal(errorMessage(42), "42");
+  assert.equal(errorMessage({ toString: () => "coerced" }), "coerced");
+
+  // The custom branch: a non-Error throw takes the caller's sentence, and an
+  // Error still wins over it. Both are live user-visible strings.
+  assert.equal(
+    errorMessage(null, "The attachment could not be added."),
+    "The attachment could not be added.",
+  );
+  assert.equal(
+    errorMessage(new Error("Disk full."), "The attachment could not be added."),
+    "Disk full.",
+  );
+  // An omitted fallback must behave exactly like the String(error) sites, so
+  // undefined is not treated as a caller-supplied sentence.
+  assert.equal(errorMessage("boom", undefined), "boom");
 });

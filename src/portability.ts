@@ -13,6 +13,7 @@ import {
   createPersonalBackup,
   createWorkspaceConfig,
   curriculumContainerKey,
+  errorMessage,
   fingerprintText,
   isPortablePlaceholderPath,
   isSafeObjectKey,
@@ -265,7 +266,7 @@ export function serializePortableExport(value: PortableExportV1): string {
     // so the plugin never hands out a package its own importer will reject.
     parsePortableExport(JSON.parse(serialized) as unknown);
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = errorMessage(error);
     throw new Error(`This export cannot be safely re-imported: ${detail}`);
   }
   return serialized;
