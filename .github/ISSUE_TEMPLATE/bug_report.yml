@@ -17,14 +17,41 @@ body:
     attributes:
       label: Plugin version
       description: Copy the installed version from Settings → Community plugins.
-      placeholder: 0.10.0
+      placeholder: 0.13.3
     validations:
       required: true
   - type: input
-    id: obsidian-platform
+    id: obsidian-version
     attributes:
-      label: Obsidian version and platform
-      placeholder: Obsidian 1.13.x · macOS / Windows / Linux / iPhone / iPad / Android
+      label: Obsidian version
+      description: Settings → About, or the title bar on desktop.
+      placeholder: 1.13.x
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS
+        - Windows
+        - Linux
+        - iPhone
+        - iPad
+        - Android
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: os-version
+    attributes:
+      label: Operating system version
+      description: >-
+        Please be exact, especially on a phone or tablet. Some problems only
+        appear below a particular version, because the web view Obsidian runs in
+        supports fewer features there — one such bug was fixed in 0.13.1, and
+        "iPhone" alone would not have identified it.
+      placeholder: iOS 15.4 · Android 13 · macOS 15.2 · Windows 11
     validations:
       required: true
   - type: dropdown
@@ -120,7 +147,7 @@ body:
     attributes:
       label: Last version known to work
       description: Leave blank if unknown or if this never worked.
-      placeholder: 0.8.3
+      placeholder: 0.13.2
   - type: checkboxes
     id: privacy
     attributes:
