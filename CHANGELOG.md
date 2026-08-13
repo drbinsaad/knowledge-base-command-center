@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.13.3
+
+Maintenance release. Nothing changes in how the plugin behaves; every message, command, and stored format is exactly as in 0.13.2.
+
+### Changed
+
+- Consolidated error-message handling. The same expression that turns a failure into readable text was written out in about fifty places, so improving one message meant editing all of them. It now lives in one helper. Every message you can see is byte-for-byte unchanged, including the five places that show a specific sentence rather than the raw failure text — that was verified by comparing every text literal in the source before and after.
+- Documented moving a subheading itself on touch devices in the user guide, the troubleshooting notes, and the manual iPhone checklist. The feature shipped in 0.13.2, but the documentation still described moving records only, which is what made it look absent on iPhone in the first place.
+- Updated the author contact on the project page.
+
 ## 0.13.2
 
 ### Fixed
