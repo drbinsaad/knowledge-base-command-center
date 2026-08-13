@@ -1,11 +1,11 @@
 import { Modal, Notice, Setting, setIcon } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
-import { sanitizeFileName, type KnowledgeBaseEntry, type WorkspaceMode } from "./model";
+import { errorMessage, sanitizeFileName, type KnowledgeBaseEntry, type WorkspaceMode } from "./model";
 import { ConfirmModal, createOpenedBaseGuard, TextPromptModal, type OpenedBaseGuard } from "./modals";
 
 function reportError(error: unknown): void {
   console.error("Knowledge Base Command Center base action failed", error);
-  new Notice(error instanceof Error ? error.message : String(error), 8000);
+  new Notice(errorMessage(error), 8000);
 }
 
 export class CreateKnowledgeBaseModal extends Modal {
@@ -179,7 +179,7 @@ export class CreateKnowledgeBaseModal extends Modal {
       new Notice(`Created and opened “${entry.data.settings.workspaceName}”.`);
     } catch (error) {
       this.busy = false;
-      this.error = error instanceof Error ? error.message : String(error);
+      this.error = errorMessage(error);
       this.render();
       console.error("Knowledge Base Command Center could not create the base", error);
       window.setTimeout(() => this.nameInputEl?.focus(), 0);
@@ -276,7 +276,7 @@ class DeleteArchivedKnowledgeBaseModal extends Modal {
       new Notice(`Permanently deleted plugin organization for “${this.entryName}”. Markdown notes were not changed.`, 8000);
     } catch (error) {
       this.busy = false;
-      this.errorEl?.setText(error instanceof Error ? error.message : String(error));
+      this.errorEl?.setText(errorMessage(error));
       this.updateConfirmationState();
       console.error("Knowledge Base Command Center could not permanently delete the archived base", error);
     }

@@ -857,6 +857,20 @@ export function normalizedNameKey(value: string): string {
   return value.trim().normalize("NFC").toLowerCase();
 }
 
+/**
+ * User-visible text for a caught value.
+ *
+ * Every failure this plugin reports — notices, inline modal errors, wrapped
+ * rollback sentences — turns a throw into text here, so improving that decision
+ * is one edit rather than fifty. A non-Error throw carries no `.message`;
+ * callers that have a better sentence than the coerced value pass `fallback`,
+ * which keeps that wording at the call site where it is read in context.
+ */
+export function errorMessage(error: unknown, fallback?: string): string {
+  if (error instanceof Error) return error.message;
+  return fallback ?? String(error);
+}
+
 /** Whether a current persisted envelope differs from its safely cleaned form. */
 export function pluginStoreNeedsNormalization(input: unknown, normalized: PluginStore): boolean {
   const raw = asUnknownRecord(input);

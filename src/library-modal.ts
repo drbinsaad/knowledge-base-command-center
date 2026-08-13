@@ -6,12 +6,12 @@ import {
   type LibraryRemovalDestination,
 } from "./main";
 import { resolveLibraryIconId } from "./library-icons";
-import type { LibraryDefinition } from "./model";
+import { errorMessage, type LibraryDefinition } from "./model";
 import { ConfirmModal } from "./modals";
 
 function reportLibraryError(error: unknown): void {
   console.error("Knowledge Base Command Center library action failed", error);
-  new Notice(error instanceof Error ? error.message : String(error), 8000);
+  new Notice(errorMessage(error), 8000);
 }
 
 function readableIconName(icon: string): string {
@@ -250,7 +250,7 @@ export class LibraryEditorModal extends Modal {
       new Notice(`${this.existingId ? "Updated" : "Created"} library “${input.name.trim()}”. Markdown notes were not changed.`);
     } catch (error) {
       this.busy = false;
-      this.error = error instanceof Error ? error.message : String(error);
+      this.error = errorMessage(error);
       this.focusNameAfterRender = true;
       this.render();
       reportLibraryError(error);
@@ -377,7 +377,7 @@ export class DeleteArchivedLibraryModal extends Modal {
       new Notice(`Deleted archived library “${this.library.name}”. Markdown notes were not changed.`);
     } catch (error) {
       this.busy = false;
-      this.error = error instanceof Error ? error.message : String(error);
+      this.error = errorMessage(error);
       this.render();
       reportLibraryError(error);
     }

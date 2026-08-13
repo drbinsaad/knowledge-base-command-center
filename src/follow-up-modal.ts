@@ -6,6 +6,7 @@ import {
   MAX_FOLLOW_UP_CATEGORIES,
   type FollowUpCategoryDefinition,
 } from "./follow-up";
+import { errorMessage } from "./model";
 import { calculateModalViewportLayout, ConfirmModal } from "./modals";
 
 interface QuickAppendFormValue {
@@ -182,7 +183,7 @@ export class QuickAppendModal extends FollowUpResponsiveModal {
       this.close();
     } catch (error) {
       this.busy = false;
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       this.errorEl?.setText(message);
       new Notice(message, 8000);
     }
@@ -357,7 +358,7 @@ export class FollowUpCategoryManagerModal extends Modal {
       this.close();
     } catch (error) {
       this.saving = false;
-      new Notice(error instanceof Error ? error.message : String(error), 8000);
+      new Notice(errorMessage(error), 8000);
     }
   }
 }

@@ -43,6 +43,7 @@ import {
   DEFAULT_DATA,
   DEFAULT_SETTINGS,
   ENT_CLINICAL_SETTINGS,
+  errorMessage,
   genericNotePath,
   GenericNoteFormValue,
   freshStoreHasOnlyBootstrapChanges,
@@ -763,7 +764,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     try {
       await action(await this.activateView());
     } catch (error) {
-      new Notice(error instanceof Error ? error.message : String(error));
+      new Notice(errorMessage(error));
     }
   }
 
@@ -805,7 +806,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private run(action: () => Promise<unknown>): void {
-    void action().catch((error) => new Notice(error instanceof Error ? error.message : String(error)));
+    void action().catch((error) => new Notice(errorMessage(error)));
   }
 
   private requireActiveBase(store = this.store): KnowledgeBaseEntry {
@@ -1412,7 +1413,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         // Start from defaults and refuse to save so the original file survives.
         this.useActiveData(structuredClone(DEFAULT_DATA));
         this.store = createDefaultStore(this.data);
-        this.dataCompatibilityWarning = `Plugin data could not be parsed (${error instanceof Error ? error.message : String(error)}). Personal organization is read-only so the existing data.json is not overwritten; repair or remove that file to continue.`;
+        this.dataCompatibilityWarning = `Plugin data could not be parsed (${errorMessage(error)}). Personal organization is read-only so the existing data.json is not overwritten; repair or remove that file to continue.`;
         new Notice(this.dataCompatibilityWarning, 10000);
         return { recognizedStore: false, hasVaultId: false, identityNeedsWriteback: false, structuralRepairNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing: false, sourceVersion: 0, compatible: false };
       }
@@ -1454,7 +1455,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       } catch (error) {
         this.useActiveData(structuredClone(DEFAULT_DATA));
         this.store = createDefaultStore(this.data);
-        this.dataCompatibilityWarning = `Newer plugin data could not be safely inspected (${error instanceof Error ? error.message : String(error)}). Personal organization is read-only and the existing data.json was not overwritten.`;
+        this.dataCompatibilityWarning = `Newer plugin data could not be safely inspected (${errorMessage(error)}). Personal organization is read-only and the existing data.json was not overwritten.`;
       }
       new Notice(this.dataCompatibilityWarning, 10000);
       return { recognizedStore: false, hasVaultId: false, identityNeedsWriteback: false, structuralRepairNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing, sourceVersion, compatible: false };
@@ -1515,7 +1516,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     } catch (error) {
       this.useActiveData(structuredClone(DEFAULT_DATA));
       this.store = createDefaultStore(this.data);
-      this.dataCompatibilityWarning = `Knowledge-base data could not be migrated (${error instanceof Error ? error.message : String(error)}). The existing data.json remains read-only and was not overwritten.`;
+      this.dataCompatibilityWarning = `Knowledge-base data could not be migrated (${errorMessage(error)}). The existing data.json remains read-only and was not overwritten.`;
       new Notice(this.dataCompatibilityWarning, 10000);
       return { recognizedStore, hasVaultId: hadFinalVaultId, identityNeedsWriteback: false, structuralRepairNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing, sourceVersion, compatible: false };
     }
@@ -1783,7 +1784,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           } catch (rollbackError) {
             console.error("Knowledge Base Command Center could not persist a rejected direct-save rollback", rollbackError);
             this.markPersistenceUncertain("A rejected knowledge-base edit may have reached Sync, and its compensating rollback could not be saved. Knowledge bases remain read-only until Obsidian is restarted after the plugin data.json is copied or a same-vault recovery is exported.");
-            throw new Error(`${error instanceof Error ? error.message : String(error)} The compensating rollback also failed; organization is now read-only.`);
+            throw new Error(`${errorMessage(error)} The compensating rollback also failed; organization is now read-only.`);
           }
         }
       }
@@ -2557,11 +2558,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         ? ""
         : await this.writeConflictRescueStore(
           fallbackStore,
-          `Synced knowledge-base data could not be merged: ${error instanceof Error ? error.message : String(error)}`,
+          `Synced knowledge-base data could not be merged: ${errorMessage(error)}`,
         );
       const blockingWarning = semanticRescueFailed
         ? "Concurrent knowledge-base edits could not be preserved before conflict resolution. Local bases remain read-only, the captured synced payload is retained in memory, and no conflict winner was adopted. Export every base or copy the plugin data.json before restarting Obsidian."
-        : `Synced knowledge-base data could not be merged (${error instanceof Error ? error.message : String(error)}). Local bases remain read-only and the captured synced payload will be preserved.${rescuePath ? ` A private local rescue was saved at ${rescuePath}.` : " Automatic local rescue failed; export every base before restarting Obsidian."}`;
+        : `Synced knowledge-base data could not be merged (${errorMessage(error)}). Local bases remain read-only and the captured synced payload will be preserved.${rescuePath ? ` A private local rescue was saved at ${rescuePath}.` : " Automatic local rescue failed; export every base before restarting Obsidian."}`;
       this.dataCompatibilityWarning = blockingWarning;
       new Notice(this.dataCompatibilityWarning, 12000);
       // `rescueStore` stays null on purpose: this arm has already written its
@@ -2605,7 +2606,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       await this.saveStoreSnapshot(true, writebackGeneration);
     } catch (error) {
       if (error instanceof ExternalSettingsSupersededError) return "superseded";
-      this.markPersistenceUncertain(`Synced knowledge bases were merged in memory, but the merged data could not be saved (${error instanceof Error ? error.message : String(error)}). The attempted write may have reached data.json; organization remains read-only until Obsidian is restarted after every base and data.json are preserved.`);
+      this.markPersistenceUncertain(`Synced knowledge bases were merged in memory, but the merged data could not be saved (${errorMessage(error)}). The attempted write may have reached data.json; organization remains read-only until Obsidian is restarted after every base and data.json are preserved.`);
     }
     return "settled";
   }
@@ -2643,7 +2644,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.retainedExternalSettingsPayload = null;
     } catch (error) {
       if (error instanceof ExternalSettingsSupersededError) return "superseded";
-      this.markPersistenceUncertain(`${outcome.blockingWarning} The captured file is retained in memory, but restoring it to data.json failed (${error instanceof Error ? error.message : String(error)}). The file may now contain an uncertain partial write; do not restart Obsidian until data.json and every base are preserved.`);
+      this.markPersistenceUncertain(`${outcome.blockingWarning} The captured file is retained in memory, but restoring it to data.json failed (${errorMessage(error)}). The file may now contain an uncertain partial write; do not restart Obsidian until data.json and every base are preserved.`);
     }
     return "settled";
   }
@@ -2962,7 +2963,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       }
       this.openQuickAppendForFile(file);
     } catch (error) {
-      new Notice(error instanceof Error ? error.message : String(error), 8000);
+      new Notice(errorMessage(error), 8000);
     }
   }
 
@@ -2986,7 +2987,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         this.openQuickAppendForFile(file);
       }).open();
     } catch (error) {
-      new Notice(error instanceof Error ? error.message : String(error), 8000);
+      new Notice(errorMessage(error), 8000);
     }
   }
 
@@ -6454,13 +6455,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     try {
       await this.app.vault.process(file, () => originalContent);
     } catch (error) {
-      failures.push(`content restore failed (${error instanceof Error ? error.message : String(error)})`);
+      failures.push(`content restore failed (${errorMessage(error)})`);
     }
     if (file.path !== originalPath) {
       try {
         await this.app.fileManager.renameFile(file, originalPath);
       } catch (error) {
-        failures.push(`path restore failed (${error instanceof Error ? error.message : String(error)})`);
+        failures.push(`path restore failed (${errorMessage(error)})`);
       }
     }
     if (failures.length > 0) throw new Error(failures.join("; "));
@@ -6473,8 +6474,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     originalPath: string,
     destination: string,
   ): Error {
-    const operationMessage = error instanceof Error ? error.message : String(error);
-    const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+    const operationMessage = errorMessage(error);
+    const rollbackMessage = errorMessage(rollbackError);
     return new Error(`${operationMessage} Automatic ${operation} rollback also failed (${rollbackMessage}). Inspect “${originalPath}” and “${destination}” before retrying; no further automatic changes were attempted.`);
   }
 

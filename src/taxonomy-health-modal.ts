@@ -1,5 +1,6 @@
 import { Modal, Notice, TFile, setIcon } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
+import { errorMessage } from "./model";
 import { createOpenedBaseGuard } from "./modals";
 import type { TaxonomyHealthFinding } from "./taxonomy-health";
 
@@ -54,7 +55,7 @@ export class TaxonomyRepairPreviewModal extends Modal {
       }).catch((error: unknown) => {
         apply.disabled = false;
         cancel.disabled = false;
-        new Notice(error instanceof Error ? error.message : "The taxonomy repair failed.", 8000);
+        new Notice(errorMessage(error, "The taxonomy repair failed."), 8000);
       });
     });
   }

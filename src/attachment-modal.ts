@@ -1,5 +1,5 @@
 import { Modal, Notice, Setting, type App } from "obsidian";
-import type { AttachmentInsertionMode, AttachmentStorageMode } from "./model";
+import { errorMessage, type AttachmentInsertionMode, type AttachmentStorageMode } from "./model";
 import { StringPickerModal } from "./modals";
 
 export interface AttachmentImportValue {
@@ -144,7 +144,7 @@ export class AttachmentImportModal extends Modal {
       });
       this.close();
     } catch (error) {
-      new Notice(error instanceof Error ? error.message : "The attachment could not be added.", 9000);
+      new Notice(errorMessage(error, "The attachment could not be added."), 9000);
       this.submitButton?.removeAttribute("disabled");
     }
   }

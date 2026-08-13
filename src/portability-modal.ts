@@ -3,6 +3,7 @@ import type EntVaultCommandCenterPlugin from "./main";
 import {
   assertPersonalBackupMatchesVault,
   cleanLibraryNoteProfiles,
+  errorMessage,
   resolveLibraryNoteProfile,
   subjectLibraryId,
   validateProposalFolderPath,
@@ -164,10 +165,6 @@ function selectionWithLibraryIds(selection: PortableExportSelection, libraryIds:
     medications: false,
     syndromes: false,
   });
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 export class ExportImportCenterModal extends Modal {

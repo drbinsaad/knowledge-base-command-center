@@ -4,6 +4,7 @@ import {
   cleanLibraryNoteProfiles,
   createWorkspaceConfig,
   curriculumContainerKey,
+  errorMessage,
   IndexDiagnostic,
   isSafeObjectKey,
   isPortablePlaceholderPath,
@@ -766,7 +767,7 @@ export class IndexManagerModal extends Modal {
     if (!this.guardOpenedBase()) return;
     void action().catch((error) => {
       if (!this.guardOpenedBase()) return;
-      new Notice(error instanceof Error ? error.message : String(error));
+      new Notice(errorMessage(error));
     });
   }
 
@@ -796,7 +797,7 @@ export class IndexManagerModal extends Modal {
       run: (task) => {
         void task().catch((error: unknown) => {
           if (!this.guardOpenedBase()) return;
-          new Notice(error instanceof Error ? error.message : String(error));
+          new Notice(errorMessage(error));
         });
       },
       onValue: (value) => { this.confirmWorkspaceImport(value); },
@@ -915,7 +916,7 @@ export class IndexManagerModal extends Modal {
       }).open();
     }).catch((error) => {
       if (!this.guardOpenedBase()) return;
-      new Notice(error instanceof Error ? error.message : String(error));
+      new Notice(errorMessage(error));
     });
   }
 

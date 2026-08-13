@@ -8,6 +8,7 @@ import type EntVaultCommandCenterPlugin from "./main";
 import {
   asUnknownRecord,
   DEFAULT_PROPOSAL_FOLDER,
+  errorMessage,
   libraryTabId,
   pathIsInsideFolder,
   validateProposalFolderPath,
@@ -299,8 +300,8 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
       }
       new Notice(
         compensated
-          ? `The setting was not saved and its prior value was restored: ${error instanceof Error ? error.message : String(error)}`
-          : `The setting write could not be confirmed: ${error instanceof Error ? error.message : String(error)}`,
+          ? `The setting was not saved and its prior value was restored: ${errorMessage(error)}`
+          : `The setting write could not be confirmed: ${errorMessage(error)}`,
         8000,
       );
       try {
@@ -394,7 +395,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
                     await this.host.switchKnowledgeBase(value);
                     this.update();
                   } catch (error) {
-                    new Notice(error instanceof Error ? error.message : "Could not switch knowledge bases.", 8000);
+                    new Notice(errorMessage(error, "Could not switch knowledge bases."), 8000);
                     dropdown.setValue(activeBaseId).setDisabled(readOnly || knowledgeBases.length < 2);
                   }
                 });

@@ -6035,6 +6035,84 @@ test("the shared stale-base guard blocks every later action and notices exactly 
   }
 });
 
+// The two Library surfaces keep hand-rolled guards. These tests pin the exact
+// behaviours createOpenedBaseGuard cannot express, so a later consolidation
+// pass can see what it would have to break before it tries.
+test("the Library editor answers every stale Save, unlike the latched shared guard", () => {
+  Notice.messages.length = 0;
+  let epoch = 0;
+  const plugin = {
+    app: {},
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => epoch,
+  };
+  const modal = new LibraryEditorModal(
+    plugin as unknown as ConstructorParameters<typeof LibraryEditorModal>[0],
+    null,
+  );
+  const harness = modal as unknown as { isCurrent(): boolean };
+
+  assert.equal(harness.isCurrent(), true);
+  assert.deepEqual(Notice.messages, []);
+
+  // A synced write bumped the epoch under the open editor.
+  epoch += 1;
+  assert.equal(harness.isCurrent(), false);
+  assert.equal(harness.isCurrent(), false);
+  assert.equal(harness.isCurrent(), false);
+
+  // Every rejected Save answers the user. createOpenedBaseGuard latches its
+  // notice to exactly one for the guard's lifetime, so adopting it here would
+  // leave the Save button silently dead from the second press onward.
+  assert.equal(
+    Notice.messages.filter((message) => /Reopen this dialog before continuing/.test(message)).length,
+    3,
+  );
+});
+
+test("Manage Libraries re-baselines its epoch after its own write and re-arms the stale notice", async () => {
+  Notice.messages.length = 0;
+  let epoch = 0;
+  const plugin = {
+    app: {},
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => epoch,
+  };
+  const modal = new ManageLibrariesModal(
+    plugin as unknown as ConstructorParameters<typeof ManageLibrariesModal>[0],
+  );
+  const harness = modal as unknown as {
+    isCurrent(): boolean;
+    render(): void;
+    run(action: () => Promise<void>): Promise<void>;
+    afterNestedMutation(): void;
+  };
+  harness.render = () => undefined;
+
+  // Its own archive/reorder advances the epoch. The guard follows it, because
+  // the modal must not read its own mutation as someone else's staleness.
+  await harness.run(async () => { epoch += 1; });
+  assert.equal(harness.isCurrent(), true);
+  assert.deepEqual(Notice.messages, []);
+
+  // A foreign write is still stale, and still notices only once.
+  epoch += 1;
+  assert.equal(harness.isCurrent(), false);
+  assert.equal(harness.isCurrent(), false);
+  assert.equal(Notice.messages.length, 1);
+
+  // A nested editor's save re-baselines from the stale state and re-arms the
+  // latch, so the next foreign write is announced again. The shared factory
+  // captures its epoch in a closure const and latches its notice permanently;
+  // neither can be re-armed without rebuilding the guard and losing the
+  // identity it was constructed to hold.
+  harness.afterNestedMutation();
+  assert.equal(harness.isCurrent(), true);
+  epoch += 1;
+  assert.equal(harness.isCurrent(), false);
+  assert.equal(Notice.messages.length, 2);
+});
+
 test("guarded timers schedule on the window that owns the modal, not the focused one", () => {
   const owner = createFakeDom();
   const focused = createFakeDom();

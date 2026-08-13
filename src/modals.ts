@@ -3,6 +3,7 @@ import {
   canonicalPath,
   childSubheadings,
   DOMAIN_DEFINITIONS,
+  errorMessage,
   expectedParentCurriculumId,
   GenericNoteFormValue,
   genericNotePath,
@@ -61,7 +62,7 @@ export function localDateStamp(date = new Date()): string {
 
 function reportAsyncError(error: unknown): void {
   console.error("ENT Command Center action failed", error);
-  new Notice(error instanceof Error ? error.message : String(error));
+  new Notice(errorMessage(error));
 }
 
 /** Obsidian's DOM `Window` type omits `URL`, which the download path needs. */
@@ -846,7 +847,7 @@ export class KnowledgeNoteModal extends Modal {
       await this.options.onSubmit({ ...this.value });
       this.close();
     } catch (error) {
-      this.errorEl?.setText(error instanceof Error ? error.message : String(error));
+      this.errorEl?.setText(errorMessage(error));
     }
   }
 }
@@ -973,7 +974,7 @@ export class WorkspaceSetupModal extends Modal {
       await this.onSubmit({ ...this.value });
       this.close();
     } catch (error) {
-      this.errorEl?.setText(error instanceof Error ? error.message : String(error));
+      this.errorEl?.setText(errorMessage(error));
     }
   }
 }
@@ -1201,7 +1202,7 @@ export class TopicEditorModal extends Modal {
       await this.options.onSubmit({ ...this.value });
       this.close();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       this.errorEl?.setText(message);
     }
   }
