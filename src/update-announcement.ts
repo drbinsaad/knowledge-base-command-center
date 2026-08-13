@@ -111,6 +111,18 @@ export const UPDATE_ANNOUNCEMENT_0_14_0: UpdateAnnouncement = {
   releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.14.0",
 };
 
+export const UPDATE_ANNOUNCEMENT_0_14_1: UpdateAnnouncement = {
+  version: "0.14.1",
+  title: "What’s new in Knowledge Base Command Center 0.14.1",
+  intro: "A fix for the new create-note form: a note aimed at the Inbox can no longer end up invisible to the plugin.",
+  highlights: [
+    "The Inbox shows exactly the notes inside the folder configured as your Inbox. If the form's folder drifted outside that folder, the created note appeared in no tab and no search even though the file was safe in your vault.",
+    "The form now refuses that mismatch with a clear explanation, names the real Inbox folder, and — if a change it cannot see still lands the file elsewhere — adds the note to the Index instead of losing track of it.",
+    "If a note already vanished this way, the file is intact: move it into your configured Inbox folder, or use Add existing note to index it.",
+  ],
+  releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.14.1",
+};
+
 const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_12_0.version, UPDATE_ANNOUNCEMENT_0_12_0],
   [UPDATE_ANNOUNCEMENT_0_12_1.version, UPDATE_ANNOUNCEMENT_0_12_1],
@@ -119,6 +131,7 @@ const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_13_2.version, UPDATE_ANNOUNCEMENT_0_13_2],
   [UPDATE_ANNOUNCEMENT_0_13_3.version, UPDATE_ANNOUNCEMENT_0_13_3],
   [UPDATE_ANNOUNCEMENT_0_14_0.version, UPDATE_ANNOUNCEMENT_0_14_0],
+  [UPDATE_ANNOUNCEMENT_0_14_1.version, UPDATE_ANNOUNCEMENT_0_14_1],
 ]);
 
 function parseSemanticVersion(value: string): ParsedSemanticVersion | null {

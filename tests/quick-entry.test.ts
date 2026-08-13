@@ -1123,3 +1123,79 @@ test("the clinical profile keeps the protected proposal picker for quick note cr
   assert.equal(forms.length, 0, "clinical mode must never open the generic destination form");
   assert.equal(menus[0]?.[0]?.id, "proposal", "the protected proposal workflow stays first in clinical mode");
 });
+
+test("the Inbox destination cannot silently create a note the plugin would never show", async () => {
+  Notice.messages.length = 0;
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const createdFile = new TFile("Elsewhere/Stray capture.md");
+  let created = 0;
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 1,
+    getLibraries: (): LibraryDefinition[] => [],
+    getTemplateFiles: (): TFile[] => [],
+    isClinicalMode: () => false,
+    validateGenericNote: () => null,
+    async createKnowledgeNote(): Promise<TFile> { created += 1; return createdFile; },
+    async mutate(_label: string, mutator: () => void): Promise<void> { mutator(); },
+    async saveViewState(): Promise<void> { /* not under test */ },
+    async openFile(): Promise<void> { /* not under test */ },
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView & {
+    app: object;
+    plugin: typeof plugin;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    reload(): Promise<void>;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 1;
+  view.staleViewNoticeShown = false;
+  view.reload = async () => { /* not under test */ };
+
+  const forms: KnowledgeNoteModalOptions[] = [];
+  const noteOpen = Object.getOwnPropertyDescriptor(KnowledgeNoteModal.prototype, "open");
+  KnowledgeNoteModal.prototype.open = function captureForm(): void {
+    forms.push((this as unknown as { options: KnowledgeNoteModalOptions }).options);
+  };
+  try {
+    view.startQuickCreateNote();
+    const form = forms.shift();
+    assert.ok(form?.destination);
+
+    // Validation: a folder outside the configured Inbox folder fails loudly.
+    assert.match(
+      form.validate({ title: "Stray capture", folder: "Elsewhere", mode: "empty", templatePath: "", addToCollection: false }) ?? "",
+      /files notes inside Inbox/,
+    );
+    assert.equal(
+      form.validate({ title: "Stray capture", folder: "Inbox/Deep", mode: "empty", templatePath: "", addToCollection: false }),
+      null,
+      "subfolders of the Inbox folder remain valid",
+    );
+
+    // An unconfigured Inbox folder blocks the default destination with guidance.
+    data.settings.proposalFolder = "";
+    assert.match(
+      form.validate({ title: "Stray capture", folder: "", mode: "empty", templatePath: "", addToCollection: false }) ?? "",
+      /No Inbox folder is configured/,
+    );
+    data.settings.proposalFolder = "Inbox";
+
+    // Safety net: if drift the form cannot see still lands the file outside
+    // the Inbox folder, the note is registered in the Index instead of
+    // belonging to nothing.
+    await form.onSubmit({ title: "Stray capture", folder: "Elsewhere", mode: "empty", templatePath: "", addToCollection: false });
+    assert.equal(created, 1);
+    assert.deepEqual(data.manualIndexPaths, [createdFile.path]);
+    assert.equal(Notice.messages.some((message) => message.includes("outside the configured Inbox folder")), true);
+  } finally {
+    if (noteOpen) Object.defineProperty(KnowledgeNoteModal.prototype, "open", noteOpen);
+    else Reflect.deleteProperty(KnowledgeNoteModal.prototype, "open");
+  }
+});
