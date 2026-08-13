@@ -74,11 +74,24 @@ export const UPDATE_ANNOUNCEMENT_0_13_1: UpdateAnnouncement = {
   releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.13.1",
 };
 
+export const UPDATE_ANNOUNCEMENT_0_13_2: UpdateAnnouncement = {
+  version: "0.13.2",
+  title: "What’s new in Knowledge Base Command Center 0.13.2",
+  intro: "Nested subheadings can now be rearranged on iPhone and iPad, not only on desktop.",
+  highlights: [
+    "Every subheading menu gains Move under…, which lists the destinations it can move to by their full path, and Outdent one level for the common case.",
+    "A move carries the subheading's notes and everything nested inside it, and destinations that would exceed the five-level limit or sit inside the subheading itself are not offered.",
+    "These actions also appear on desktop, where a precise menu move is often easier than dragging.",
+  ],
+  releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.13.2",
+};
+
 const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_12_0.version, UPDATE_ANNOUNCEMENT_0_12_0],
   [UPDATE_ANNOUNCEMENT_0_12_1.version, UPDATE_ANNOUNCEMENT_0_12_1],
   [UPDATE_ANNOUNCEMENT_0_13_0.version, UPDATE_ANNOUNCEMENT_0_13_0],
   [UPDATE_ANNOUNCEMENT_0_13_1.version, UPDATE_ANNOUNCEMENT_0_13_1],
+  [UPDATE_ANNOUNCEMENT_0_13_2.version, UPDATE_ANNOUNCEMENT_0_13_2],
 ]);
 
 function parseSemanticVersion(value: string): ParsedSemanticVersion | null {
