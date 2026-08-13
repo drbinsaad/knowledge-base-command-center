@@ -31,6 +31,19 @@ Choose **Arrange** to create a separate visual hierarchy. On desktop, drag recor
 - Make top-level; or
 - Reset placement.
 
+A subheading's own **…** menu moves the subheading itself, with the same two
+actions on desktop and touch:
+
+- **Move under…** lists every place the subheading can go, each shown with its
+  full path, plus the heading itself for the top level; and
+- **Outdent one level** lifts it beside its current parent.
+
+A move carries the subheading's records and everything nested inside it. A
+destination is offered only when it is neither the subheading nor something
+already inside it, and only when the moved branch still fits the five-level
+limit — so a tall branch is refused a destination that a single subheading is
+offered.
+
 Visual arrangement stays in plugin data. It does not change note paths or frontmatter.
 
 ### Index membership
@@ -90,7 +103,7 @@ Open the Library and choose **New heading** or **Arrange**. Library structure ca
 
 Any heading or subheading below the depth cap offers **Add subheading**. One branch can hold up to five levels, counting the top heading as level 1. Pickers show a nested destination with its full path, such as **Heading / Sub / Sub-sub**.
 
-Deleting a heading does not delete its records or notes. The records remain Unplaced until deliberately moved. Removing a nested subheading moves its records and child subheadings up under its parent. Desktop supports drag-and-drop; touch devices use labelled heading, subheading, and row menus.
+Deleting a heading does not delete its records or notes. The records remain Unplaced until deliberately moved. Removing a nested subheading moves its records and child subheadings up under its parent. Desktop supports drag-and-drop; touch devices use labelled heading, subheading, and row menus, and **Move under…** and **Outdent one level** on a subheading menu rearrange the nesting itself without dragging.
 
 ### Classify records
 
