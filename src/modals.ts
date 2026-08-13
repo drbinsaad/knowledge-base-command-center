@@ -1,4 +1,5 @@
 import { App, FuzzyMatch, FuzzySuggestModal, Modal, Notice, Platform, prepareFuzzySearch, Setting, TFile, setIcon } from "obsidian";
+import type { DropdownComponent, TextComponent, ToggleComponent } from "obsidian";
 import {
   canonicalPath,
   childSubheadings,
@@ -594,6 +595,27 @@ export class IndexGroupModal extends Modal {
   }
 }
 
+/**
+ * One destination choice applied to the create-note form. The view owns what a
+ * destination means; the form only re-seeds its fields from the chosen values,
+ * so a destination switch behaves exactly like reopening the matching legacy
+ * flow with its own prefills.
+ */
+export interface NoteDestinationSeed {
+  /** Short human label for the Destination row, such as “Inbox” or “Reference Sets / Guidelines”. */
+  label: string;
+  folder: string;
+  mode: NewNoteMode;
+  templatePath: string;
+  /** Replaces the context notice line. An empty string hides the notice. */
+  contextNotice: string;
+  /**
+   * Hides the “Add to a collection after creation” toggle when the destination
+   * itself is a collection, so one submission cannot add the note twice.
+   */
+  hideCollectionToggle: boolean;
+}
+
 export interface KnowledgeNoteModalOptions {
   itemSingular: string;
   /** Optional workflow-specific label, such as Medication, while still creating a Markdown note. */
@@ -602,6 +624,16 @@ export interface KnowledgeNoteModalOptions {
   contextNotice?: string;
   templates: TFile[];
   initial: GenericNoteFormValue;
+  /**
+   * Optional Destination row. `onEdit` opens the view's destination pickers on
+   * top of this form (the same stacking the template picker already uses) and
+   * calls `apply` with the chosen seed. `apply` is ignored once the form has
+   * closed, because the picker outcome may resolve after dismissal.
+   */
+  destination?: {
+    label: string;
+    onEdit: (apply: (seed: NoteDestinationSeed) => void) => void;
+  };
   validate: (value: GenericNoteFormValue) => string | null;
   onSubmit: (value: GenericNoteFormValue) => void | Promise<void>;
 }
@@ -648,6 +680,13 @@ export class KnowledgeNoteModal extends Modal {
   private errorEl: HTMLElement | null = null;
   private viewportWindow: Window | null = null;
   private viewportSyncTimers: number[] = [];
+  private destinationValueEl: HTMLElement | null = null;
+  private contextNoticeEl: HTMLElement | null = null;
+  private folderInput: TextComponent | null = null;
+  private modeDropdown: DropdownComponent | null = null;
+  private collectionToggle: ToggleComponent | null = null;
+  private collectionToggleSettingEl: HTMLElement | null = null;
+  private sessionOpen = false;
 
   private readonly syncViewportLayout = (): void => {
     const viewWindow = this.viewportWindow;
@@ -683,6 +722,7 @@ export class KnowledgeNoteModal extends Modal {
   }
 
   onOpen(): void {
+    this.sessionOpen = true;
     this.contentEl.empty();
     this.modalEl.addClass("ent-cc-topic-editor-modal", "ent-cc-knowledge-note-modal");
     this.contentEl.addClass("ent-cc-modal", "ent-cc-topic-editor", "ent-cc-knowledge-note-content");
@@ -693,12 +733,26 @@ export class KnowledgeNoteModal extends Modal {
       cls: "ent-cc-modal-lead",
       text: "Choose a destination and start with a truly empty note or a copied Markdown template. Existing files are never overwritten.",
     });
-    if (this.options.contextNotice) {
-      formBody.createDiv({
+    if (this.options.contextNotice || this.options.destination) {
+      this.contextNoticeEl = formBody.createDiv({
         cls: "ent-cc-catalog-context",
-        text: this.options.contextNotice,
+        text: this.options.contextNotice ?? "",
         attr: { role: "note" },
       });
+      this.contextNoticeEl.toggleClass("is-hidden", !this.options.contextNotice);
+    }
+
+    const destination = this.options.destination;
+    if (destination) {
+      const destinationSetting = new Setting(formBody)
+        .setName("Destination")
+        .addButton((button) => {
+          button.setButtonText("Change…").onClick(() => destination.onEdit((seed) => this.applyDestinationSeed(seed)));
+          button.buttonEl.setAttribute("aria-label", "Change destination");
+        });
+      destinationSetting.settingEl.addClass("ent-cc-destination-setting");
+      this.destinationValueEl = destinationSetting.descEl;
+      this.destinationValueEl.setText(destination.label);
     }
 
     new Setting(formBody)
@@ -722,6 +776,7 @@ export class KnowledgeNoteModal extends Modal {
       .setName("Destination folder")
       .setDesc("Vault-relative folder. Leave empty to create at the vault root.")
       .addText((text) => {
+        this.folderInput = text;
         text.setPlaceholder("Vault root").setValue(this.value.folder).onChange((value) => {
           this.value.folder = value;
           this.updatePreview();
@@ -732,6 +787,7 @@ export class KnowledgeNoteModal extends Modal {
     new Setting(formBody)
       .setName("Starting content")
       .addDropdown((dropdown) => {
+        this.modeDropdown = dropdown;
         dropdown
           .addOptions({ empty: "Empty note", template: "Copy a template" })
           .setValue(this.value.mode)
@@ -766,12 +822,15 @@ export class KnowledgeNoteModal extends Modal {
     this.templateSettingEl.addClass("ent-cc-template-setting");
     this.updateTemplateButton();
 
-    new Setting(formBody)
+    const collectionSetting = new Setting(formBody)
       .setName("Add to a collection after creation")
       .addToggle((toggle) => {
+        this.collectionToggle = toggle;
         toggle.setValue(this.value.addToCollection).onChange((value) => { this.value.addToCollection = value; });
         toggle.toggleEl.setAttribute("aria-label", "Add to a collection after creation");
       });
+    this.collectionToggleSettingEl = collectionSetting.settingEl;
+    this.collectionToggleSettingEl.addClass("ent-cc-collection-toggle-setting");
 
     const preview = formBody.createDiv({ cls: "ent-cc-path-preview" });
     preview.createDiv({ cls: "ent-cc-path-preview-label", text: "New note path" });
@@ -791,6 +850,7 @@ export class KnowledgeNoteModal extends Modal {
   }
 
   onClose(): void {
+    this.sessionOpen = false;
     const viewWindow = this.viewportWindow;
     const viewport = viewWindow?.visualViewport;
     viewport?.removeEventListener("resize", this.syncViewportLayout);
@@ -803,6 +863,33 @@ export class KnowledgeNoteModal extends Modal {
     this.modalEl.style.removeProperty("--ent-cc-modal-visual-height");
     this.modalEl.style.removeProperty("--ent-cc-modal-visual-shift");
     this.modalEl.removeClass("is-virtual-keyboard-open");
+  }
+
+  /**
+   * Re-seed the form for a newly chosen destination. Overwrites folder, mode,
+   * and template with the destination's own defaults — the same values the
+   * matching dedicated flow would have opened with — while the title and any
+   * later manual edits stay untouched.
+   */
+  private applyDestinationSeed(seed: NoteDestinationSeed): void {
+    if (!this.sessionOpen) return;
+    this.value.folder = seed.folder;
+    this.value.mode = seed.mode;
+    this.value.templatePath = seed.templatePath;
+    if (seed.hideCollectionToggle) {
+      this.value.addToCollection = false;
+      this.collectionToggle?.setValue(false);
+    }
+    this.destinationValueEl?.setText(seed.label);
+    this.folderInput?.setValue(seed.folder);
+    this.modeDropdown?.setValue(seed.mode);
+    if (this.contextNoticeEl) {
+      this.contextNoticeEl.setText(seed.contextNotice);
+      this.contextNoticeEl.toggleClass("is-hidden", !seed.contextNotice);
+    }
+    this.collectionToggleSettingEl?.toggleClass("is-hidden", seed.hideCollectionToggle);
+    this.updateTemplateButton();
+    this.updatePreview();
   }
 
   private bindViewportLayout(): void {

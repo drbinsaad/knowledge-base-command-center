@@ -156,7 +156,13 @@ Queues are views over existing records and plugin state. They do not create dupl
 
 ## Create notes
 
-Use **Add → Create note** or **Create note from template or empty note…**. The form supports:
+Use **Add → Create note** or **Create note from template or empty note…**. In the generic profile the form opens aimed at your **Inbox** by default — type a title, press Create, and the note lands in the configured Inbox folder without joining the Index. A **Destination** row at the top shows the current target, and **Change…** re-targets the same form at:
+
+- the **Index**, after choosing a visual group;
+- a **Collection** heading or subheading, picked by its full path; or
+- any **Library**, after choosing its heading or subheading.
+
+Switching the destination re-seeds the folder, content mode, and template with that destination's own defaults — the same values its dedicated flow always used — and everything stays editable for a one-note exception. The form supports:
 
 - a title;
 - a vault-relative destination;
@@ -179,7 +185,7 @@ When creation has an explicit Library context, templates may also use these quot
 
 The <code>yaml:</code> prefix is deliberate. Values are emitted as YAML-compatible double-quoted scalars, including escaping quotes, line breaks, and control characters. A template can safely write <code>category: {{yaml:category}}</code>. Tokens resolve only during explicit note creation; they are not reevaluated when a note opens, a Library is renamed, or organization changes. Plain <code>{{id}}</code>, <code>{{category}}</code>, and other third-party template syntax remain untouched. Legacy title/date/time behavior is unchanged.
 
-Notes created through the primary action join the active Index or Library as requested, even when their destination is outside the automatically indexed folder and the profile permits manual membership.
+Notes created through the primary action join the chosen destination — the Inbox by default, or the Index, a Collection, or a Library when selected — even when their folder is outside the automatically indexed folder and the profile permits manual membership. If a synced change removes the chosen Collection or Library while the form is open, the note is still created and the plugin explains that it was left unfiled instead of placing it somewhere wrong.
 
 ## Quick entry and shortcuts
 
@@ -189,7 +195,7 @@ Open Quick entry from the lightning-bolt desktop ribbon action or the Command Ce
 - create a portable **No note** subject;
 - create an Index group, Collection heading, or Library heading;
 - create a nested Index subject, or a Collection or Library subheading under any heading or subheading below the five-level cap;
-- create a note after choosing its Index/Library destination, visual group, destination folder, and empty or template content;
+- create a note that files into the Inbox by default, with a Destination row that can re-target the Index, a Collection, or a Library before creation;
 - add the note that was active when Quick entry opened; and
 - choose and add another existing Markdown note;
 - append a categorized follow-up item to the current note; and

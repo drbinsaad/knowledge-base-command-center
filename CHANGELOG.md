@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Creating a note now opens one unified form that files into the **Inbox by default** — type a title, press Create, done. A new **Destination** row at the top of the form shows where the note will go, and **Change…** re-targets the same form at the **Index** (choose a visual group), a **Collection** heading or subheading (chosen by full path, with a prompt to create the first heading when none exist), or any **Library** (choosing its heading or subheading first, exactly as before). Switching the destination re-seeds the folder, content mode, and template with that destination's own defaults, and every field stays editable for a one-note exception. Collections join note creation for the first time — previously a note could only be added to a Collection after it existed.
+- If a synced change removes the chosen Collection or Library while the form is open, the note is still created and a notice explains it was left unfiled, rather than placing it under the wrong heading or failing after the file already exists.
+
+### Changed
+
+- **Quick entry: Create note…**, **Add → Create note**, **Create note from template or empty note…**, and the `obsidian://kbcc-create-note` URL all open the unified form directly in the generic profile; none of them ask for a destination up front anymore. The ENT clinical profile is unchanged: its protected proposal workflow and native-library restrictions are untouched.
+- The separate **Create in Inbox** entry was removed from the Add menu because Create note now defaults to the Inbox. The empty-Index call to action still creates directly into the Index, where filing into the Inbox would look like nothing happened.
+
 ## 0.13.3
 
 Maintenance release. Nothing changes in how the plugin behaves; every message, command, and stored format is exactly as in 0.13.2.
