@@ -97,6 +97,20 @@ export const UPDATE_ANNOUNCEMENT_0_13_3: UpdateAnnouncement = {
   releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.13.3",
 };
 
+export const UPDATE_ANNOUNCEMENT_0_14_0: UpdateAnnouncement = {
+  version: "0.14.0",
+  title: "What’s new in Knowledge Base Command Center 0.14.0",
+  intro: "Creating a note is now one step: the form opens aimed at your Inbox, and a Destination row can send it anywhere else. A full review pass also hardens syncing, older-device support, and data safety.",
+  highlights: [
+    "Create note opens one form that files into the Inbox by default — type a title and press Create. The Destination row re-targets the same form at the Index, a Collection heading or subheading, or a Library, and a Collection can now be chosen at creation time.",
+    "Very long pasted text can no longer make the knowledge-base store open read-only on the next launch; every entry point now applies the same length bound the loader enforces.",
+    "Restored compatibility with older mobile web views a second time: a platform API newer than the supported floor was in use, once while the plugin was still loading. The build now fails if it returns.",
+    "Devices with different system languages can no longer disagree about the order of tied names, which could quietly reset sync history; stored ordering is now language-independent.",
+    "Smaller fixes: focus no longer jumps while a synced change refreshes the compact view, collection menus act on the live items, Manage index Diagnostics recompute after in-modal changes, and upgrade documentation no longer names an outdated version.",
+  ],
+  releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.14.0",
+};
+
 const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_12_0.version, UPDATE_ANNOUNCEMENT_0_12_0],
   [UPDATE_ANNOUNCEMENT_0_12_1.version, UPDATE_ANNOUNCEMENT_0_12_1],
@@ -104,6 +118,7 @@ const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_13_1.version, UPDATE_ANNOUNCEMENT_0_13_1],
   [UPDATE_ANNOUNCEMENT_0_13_2.version, UPDATE_ANNOUNCEMENT_0_13_2],
   [UPDATE_ANNOUNCEMENT_0_13_3.version, UPDATE_ANNOUNCEMENT_0_13_3],
+  [UPDATE_ANNOUNCEMENT_0_14_0.version, UPDATE_ANNOUNCEMENT_0_14_0],
 ]);
 
 function parseSemanticVersion(value: string): ParsedSemanticVersion | null {
