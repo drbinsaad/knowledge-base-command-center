@@ -7747,6 +7747,97 @@ test("portable linking rejects configured-ID and record-kind mismatches before m
   assert.equal(plugin.data.undoStack.length, 0);
 });
 
+test("placeholder create preflight reports the exact linking error resolve would throw, before any file exists", async () => {
+  // Clinical custom-library placeholder: a note freshly created at the profile
+  // folder ("01 Inbox") gets no vault record, so linking a recordKind "topic"
+  // subject would throw AFTER the file existed, orphaning it. The preflight
+  // must surface that same message with nothing created, and stay silent for
+  // subjects the resolve step would accept.
+  const inboxNote = new TFile("01 Inbox/Airway evidence review.md");
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  data.settings.primaryFolder = "03 Clinical Topics";
+  data.settings.proposalFolder = "01 Inbox/Topic Proposals";
+  data.portableIndex.libraries = [{
+    id: "library-evidence", name: "Evidence", singularName: "Paper", icon: "book-open",
+    order: 0, sourceKind: null, archivedAt: null,
+  }];
+  data.portableIndex.groups = [{ id: "group-guidelines", title: "Guidelines", order: 0 }];
+  data.portableIndex.subjects = [
+    {
+      id: "subject-parked-topic", title: "Parked topic", groupId: "group-guidelines", parentId: null,
+      order: 0, indexed: false, configuredId: "", recordKind: "topic", libraryId: "library-evidence",
+    },
+    {
+      id: "subject-paper", title: "Evidence paper", groupId: "group-guidelines", parentId: null,
+      order: 1, indexed: false, configuredId: "", recordKind: "note", libraryId: "library-evidence",
+    },
+  ];
+  const { plugin, sourceMutationCount } = pluginWithFiles(data, [inboxNote], { [inboxNote.path]: {} });
+  await plugin.loadPluginData();
+
+  const issue = plugin.placeholderNoteCompatibilityIssue("subject-parked-topic", "01 Inbox");
+  assert.equal(issue, "This note note cannot be linked to a portable topic subject.");
+  await assert.rejects(plugin.resolvePortableSubject("subject-parked-topic", inboxNote.path), (error: Error) => {
+    assert.equal(error.message, issue, "the preflight and the resolve throw the same message");
+    return true;
+  });
+
+  // A profile folder inside a classified clinical root would produce a note
+  // the resolve step accepts, so the preflight must not refuse it.
+  assert.equal(plugin.placeholderNoteCompatibilityIssue("subject-parked-topic", "03 Clinical Topics/01 Pediatric"), null);
+  assert.equal(plugin.placeholderNoteCompatibilityIssue("subject-parked-topic", "01 Inbox/Topic Proposals"), null);
+
+  assert.equal(plugin.placeholderNoteCompatibilityIssue("subject-paper", "01 Inbox"), null);
+  await plugin.resolvePortableSubject("subject-paper", inboxNote.path);
+  assert.equal(plugin.data.portableIndex.resolvedPathBySubjectId["subject-paper"], inboxNote.path);
+
+  assert.equal(plugin.placeholderNoteCompatibilityIssue("subject-gone", "01 Inbox"), "The portable subject no longer exists.");
+  assert.equal(sourceMutationCount(), 0);
+});
+
+test("previewIndexRepair reports missing-note registrations as a dry run; the repair itself prunes them", async () => {
+  const existingNote = new TFile("Knowledge Base/Existing.md");
+  const data = migrateData(null);
+  data.settings.primaryFolder = "Knowledge Base";
+  data.manualIndexPaths = [
+    "Notes/Outside missing.md",
+    "Knowledge Base/Existing.md",
+    "Knowledge Base/Existing.md",
+    "Knowledge Base/Missing.md",
+  ];
+  data.pinnedPaths = ["Knowledge Base/Existing.md", "Knowledge Base/Missing.md"];
+  data.nextStudyPaths = ["Knowledge Base/Missing.md"];
+  data.excludedIndexPaths = ["Knowledge Base/Hidden missing.md"];
+  data.collections = [{
+    id: "heading-board", title: "Board review", collapsed: false,
+    subjects: ["Knowledge Base/Existing.md", "Knowledge Base/Missing.md"], subheadings: [],
+  }];
+  const { plugin, sourceMutationCount } = pluginWithFiles(data, [existingNote], { [existingNote.path]: {} });
+  await plugin.loadPluginData();
+  const before = structuredClone(plugin.data);
+
+  const preview = plugin.previewIndexRepair();
+  assert.deepEqual(preview.prunedPaths, [
+    "Knowledge Base/Hidden missing.md",
+    "Knowledge Base/Missing.md",
+    "Notes/Outside missing.md",
+  ], "every registration whose file is absent on this device is reported once");
+  assert.ok(preview.otherFixCount >= 1, "the duplicate manual membership counts as a non-prune fix");
+  assert.deepEqual(plugin.data, before, "the preview mutates nothing");
+
+  await plugin.repairIndexOrganization();
+  assert.deepEqual(plugin.data.manualIndexPaths, ["Knowledge Base/Existing.md"]);
+  assert.deepEqual(plugin.data.pinnedPaths, ["Knowledge Base/Existing.md"]);
+  assert.deepEqual(plugin.data.nextStudyPaths, []);
+  assert.deepEqual(plugin.data.excludedIndexPaths, []);
+  assert.deepEqual(plugin.data.collections[0]?.subjects, ["Knowledge Base/Existing.md"]);
+
+  assert.deepEqual(plugin.previewIndexRepair(), { prunedPaths: [], otherFixCount: 0 },
+    "after the repair there is nothing left to prune or fix");
+  assert.equal(sourceMutationCount(), 0);
+});
+
 test("identity merge deterministically preserves the surviving parent and appends owner children", async () => {
   const ownerFile = new TFile("Knowledge Base/Airway/Owner.md");
   const app = {

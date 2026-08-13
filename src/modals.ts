@@ -1,4 +1,4 @@
-import { App, FuzzyMatch, FuzzySuggestModal, Modal, Notice, Platform, prepareFuzzySearch, Setting, TFile, setIcon } from "obsidian";
+import { App, FuzzyMatch, FuzzySuggestModal, Modal, Notice, Platform, prepareFuzzySearch, Setting, TFile, TFolder, normalizePath, setIcon } from "obsidian";
 import type { DropdownComponent, TextComponent, ToggleComponent } from "obsidian";
 import {
   canonicalPath,
@@ -958,6 +958,29 @@ export interface WorkspaceSetupValue {
   defaultTemplatePath: string;
 }
 
+/**
+ * An empty Inbox folder makes Inbox membership impossible: every captured note
+ * would classify to no record at all. Wording mirrors the Settings tab's Inbox
+ * folder validator ("Inbox" is this plugin's proper name for that tab).
+ */
+export const INBOX_FOLDER_REQUIRED_MESSAGE = "Choose an Inbox folder. Without one, notes aimed at the Inbox would not appear anywhere in this plugin.";
+
+/**
+ * Non-blocking hint shown while a setup-wizard folder field names a folder the
+ * vault does not have yet. First-run setup must accept fresh-vault folder
+ * names, so a missing folder informs instead of failing validation. The
+ * consequence clause names what stays invisible for that specific field.
+ */
+export function missingSetupFolderHint(
+  folder: string,
+  consequence: string,
+  folderExists: (path: string) => boolean,
+): string | null {
+  const clean = folder.trim().replace(/^\/+|\/+$/g, "");
+  if (!clean || folderExists(clean)) return null;
+  return `“${clean}” does not exist yet — it will be created empty, and ${consequence} until they live inside it.`;
+}
+
 export class WorkspaceSetupModal extends Modal {
   private value: WorkspaceSetupValue;
   private errorEl: HTMLElement | null = null;
@@ -1002,8 +1025,29 @@ export class WorkspaceSetupModal extends Modal {
     textField("Item singular", "For example: note, project, paper.", "itemSingular", "note");
     textField("Item plural", "For example: notes, projects, papers.", "itemPlural", "notes");
     textField("Group name", "For example: Category, Area, Course, or Department.", "groupLabel", "Group");
-    textField("Indexed notes folder", "All Markdown notes below it appear in the index.", "primaryFolder", "Knowledge Base");
-    textField("Inbox folder", "Notes here appear in the separate Inbox section.", "proposalFolder", "Inbox");
+    const folderExists = (path: string): boolean => this.app.vault.getAbstractFileByPath(normalizePath(path)) instanceof TFolder;
+    const folderField = (
+      name: string,
+      description: string,
+      key: "primaryFolder" | "proposalFolder",
+      placeholder: string,
+      consequence: string,
+    ): void => {
+      const row = new Setting(this.contentEl).setName(name);
+      const updateHint = (value: string): void => {
+        row.setDesc(missingSetupFolderHint(value, consequence, folderExists) ?? description);
+      };
+      row.addText((text) => text
+        .setPlaceholder(placeholder)
+        .setValue(this.value[key])
+        .onChange((value) => {
+          this.value[key] = value;
+          updateHint(value);
+        }));
+      updateHint(this.value[key]);
+    };
+    folderField("Indexed notes folder", "All Markdown notes below it appear in the index.", "primaryFolder", "Knowledge Base", "existing notes will not be indexed");
+    folderField("Inbox folder", "Notes here appear in the separate Inbox section.", "proposalFolder", "Inbox", "existing notes will not appear in the Inbox");
     textField("Inbox name", "Name shown on the Inbox tab.", "inboxLabel", "Inbox");
     textField("Default new-note folder", "Initial destination when creating a note.", "defaultNoteFolder", "Knowledge Base");
     textField("ID property", "Optional property shown beside each indexed note.", "idProperty", "id");
@@ -1051,6 +1095,10 @@ export class WorkspaceSetupModal extends Modal {
     }
     this.value.workspaceSubtitle = this.value.workspaceSubtitle.trim();
     for (const key of ["primaryFolder", "proposalFolder", "defaultNoteFolder", "templatesFolder"] as const) this.value[key] = this.value[key].trim().replace(/^\/+|\/+$/g, "");
+    if (!this.value.proposalFolder) {
+      this.errorEl?.setText(INBOX_FOLDER_REQUIRED_MESSAGE);
+      return;
+    }
     for (const key of ["idProperty", "groupProperty", "parentProperty"] as const) this.value[key] = this.value[key].trim();
     this.value.defaultTemplatePath = this.value.defaultTemplatePath.trim().replace(/^\/+/, "");
     if (this.value.defaultNewNoteMode === "template" && !this.value.defaultTemplatePath) {

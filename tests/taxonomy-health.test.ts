@@ -612,6 +612,131 @@ test("in-modal mutations drop the cached diagnostics so the next Diagnostics vie
   }
 });
 
+test("Repair safe issues confirms before pruning missing-note registrations and runs immediately when nothing would be pruned", async () => {
+  // On a device whose file sync is still catching up, "missing" registrations
+  // may belong to perfectly valid notes. The one-click repair must therefore
+  // ask before dropping them, and stay one-click when nothing would be dropped.
+  const missingPaths = [
+    "KB/Missing 1.md", "KB/Missing 2.md", "KB/Missing 3.md", "KB/Missing 4.md",
+    "KB/Missing 5.md", "KB/Missing 6.md", "KB/Missing 7.md", "KB/Missing 8.md",
+    "KB/Missing 9.md",
+  ];
+  let preview = { prunedPaths: missingPaths, otherFixCount: 1 };
+  let repairs = 0;
+  const plugin = {
+    data: {
+      settings: { indexLabel: "Index", groupLabel: "Group", itemSingular: "note", itemPlural: "notes" },
+      manualIndexPaths: [],
+      excludedIndexPaths: [],
+      displayNameByPath: {},
+    },
+    getIndexRecords: () => [],
+    getRecords: () => [],
+    getIndexCandidateFiles: () => [],
+    getIndexGroups: () => [],
+    getIndexDiagnostics: () => [{
+      kind: "missing-note",
+      title: "Missing note reference",
+      detail: "A registered note no longer exists.",
+      path: "KB/Missing 1.md",
+    }],
+    previewIndexRepair: () => ({ ...preview, prunedPaths: [...preview.prunedPaths] }),
+    async repairIndexOrganization(): Promise<void> { repairs += 1; },
+    isClinicalMode: () => false,
+    isDataReadOnly: () => false,
+    canVisuallyMoveAcrossGroups: () => true,
+  };
+  const dom = createFakeDom();
+  const manager = Object.create(IndexManagerModal.prototype) as {
+    app: unknown;
+    plugin: typeof plugin;
+    contentEl: HTMLElement;
+    tab: string;
+    query: string;
+    selected: Set<string>;
+    managerOpen: boolean;
+    openedBaseId: string;
+    searchTimer: number | null;
+    pendingTimers: Set<number>;
+    selectionButtons: unknown[];
+    noteListCache: Map<string, unknown>;
+    diagnosticsCache: unknown[] | null;
+    render(): void;
+  };
+  manager.app = { vault: { getAbstractFileByPath: () => null } };
+  manager.plugin = plugin;
+  manager.contentEl = asHtmlElement(dom.document.body.createDiv());
+  manager.tab = "diagnostics";
+  manager.query = "";
+  manager.selected = new Set();
+  manager.managerOpen = true;
+  manager.openedBaseId = "";
+  manager.searchTimer = null;
+  manager.pendingTimers = new Set();
+  manager.selectionButtons = [];
+  manager.noteListCache = new Map();
+  manager.diagnosticsCache = null;
+
+  const settingPrototype = Setting.prototype as unknown as Record<string, unknown>;
+  const settingButton = {
+    setButtonText: (): typeof settingButton => settingButton,
+    onClick: (): typeof settingButton => settingButton,
+    setCta: (): typeof settingButton => settingButton,
+    setDisabled: (): typeof settingButton => settingButton,
+  };
+  settingPrototype.addButton = function addButton(this: unknown, callback: (value: typeof settingButton) => void): unknown {
+    callback(settingButton);
+    return this;
+  };
+  settingPrototype.settingEl = { addClass: (): void => undefined };
+  const confirms: Array<{ titleText: string; message: string; confirmLabel: string; onConfirm(): void | Promise<void> }> = [];
+  const confirmOpen = Object.getOwnPropertyDescriptor(ConfirmModal.prototype, "open");
+  ConfirmModal.prototype.open = function captureConfirm(): void {
+    confirms.push(this as unknown as (typeof confirms)[number]);
+  };
+  // run() fires the repair without awaiting it; drain the task queue so the
+  // completion notice and re-render have happened before asserting.
+  const drainRepair = async (): Promise<void> => new Promise((resolve) => { globalThis.setTimeout(resolve, 0); });
+  const repairButton = (): FakeElement => {
+    const button = (manager.contentEl.querySelectorAll(".ent-cc-manager-toolbar button") as unknown as FakeElement[])
+      .find((candidate) => /Repair safe issues/u.test(candidate.textContent));
+    assert.ok(button);
+    return button;
+  };
+  Notice.messages.length = 0;
+  try {
+    manager.render();
+    repairButton().click();
+    assert.equal(confirms.length, 1, "missing-note registrations demand a confirmation");
+    assert.equal(repairs, 0, "nothing is pruned before the user confirms");
+    const confirm = confirms[0];
+    assert.ok(confirm);
+    assert.equal(confirm.titleText, "Remove registrations for missing notes?");
+    assert.equal(confirm.confirmLabel, "Repair and remove");
+    assert.match(confirm.message, /9 registered notes are missing on this device/u);
+    assert.ok(confirm.message.includes("KB/Missing 8.md"), "the first eight paths are listed");
+    assert.ok(!confirm.message.includes("KB/Missing 9.md"), "the ninth path folds into the overflow count");
+    assert.match(confirm.message, /…and 1 more/u);
+    assert.match(confirm.message, /have not synced yet, cancel and wait for Sync/u);
+    assert.match(confirm.message, /index memberships, collection memberships, and pins/u);
+    await confirm.onConfirm();
+    await drainRepair();
+    assert.equal(repairs, 1, "confirming runs the existing repair");
+    assert.equal(Notice.messages.filter((message) => /Safe plugin-state repairs completed/u.test(message)).length, 1);
+
+    preview = { prunedPaths: [], otherFixCount: 3 };
+    repairButton().click();
+    await drainRepair();
+    assert.equal(confirms.length, 1, "a repair with nothing to prune never asks");
+    assert.equal(repairs, 2, "it runs immediately, exactly as before");
+  } finally {
+    Reflect.deleteProperty(settingPrototype, "addButton");
+    Reflect.deleteProperty(settingPrototype, "settingEl");
+    if (confirmOpen) Object.defineProperty(ConfirmModal.prototype, "open", confirmOpen);
+    else Reflect.deleteProperty(ConfirmModal.prototype, "open");
+  }
+});
+
 test("health center flags an empty depth-3 node without flagging its subject-bearing ancestor chain", () => {
   const data = migrateData(null);
   const memberPath = "Knowledge Base/member.md";

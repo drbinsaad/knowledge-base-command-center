@@ -707,12 +707,35 @@ export class IndexManagerModal extends Modal {
     const repairableKinds = new Set<IndexDiagnostic["kind"]>(["missing-note", "duplicate-membership", "orphaned-group", "invalid-visual-parent"]);
     const repairable = diagnostics.some((item) => repairableKinds.has(item.kind));
     this.actionButton(toolbar, "wrench", "Repair safe issues", () => {
-      this.run(async () => {
-        await this.plugin.repairIndexOrganization();
-        if (!this.guardOpenedBase()) return;
-        this.render();
-        new Notice("Safe plugin-state repairs completed. Note metadata was not changed.");
-      });
+      const repair = (): void => {
+        this.run(async () => {
+          await this.plugin.repairIndexOrganization();
+          if (!this.guardOpenedBase()) return;
+          this.render();
+          new Notice("Safe plugin-state repairs completed. Note metadata was not changed.");
+        });
+      };
+      // Registrations for notes missing from THIS device may belong to notes
+      // that simply have not synced yet; dropping them silently would erase
+      // manual index memberships, collection memberships, and pins on every
+      // device. Repair those only after an explicit confirmation.
+      const { prunedPaths } = this.plugin.previewIndexRepair();
+      if (prunedPaths.length === 0) {
+        repair();
+        return;
+      }
+      const shown = prunedPaths.slice(0, 8);
+      const remainder = prunedPaths.length - shown.length;
+      const listed = shown.join(", ") + (remainder > 0 ? `, …and ${remainder} more` : "");
+      new ConfirmModal(
+        this.app,
+        "Remove registrations for missing notes?",
+        `${prunedPaths.length === 1
+          ? "1 registered note is missing on this device"
+          : `${prunedPaths.length} registered notes are missing on this device`}: ${listed}. If these notes simply have not synced yet, cancel and wait for Sync to deliver them first — repairing now removes their index memberships, collection memberships, and pins, and that removal syncs to every device. Markdown notes are never changed.`,
+        "Repair and remove",
+        () => { repair(); },
+      ).open();
     }, !repairable);
     const list = this.contentEl.createDiv({ cls: "ent-cc-manager-list" });
     for (const diagnostic of diagnostics) {

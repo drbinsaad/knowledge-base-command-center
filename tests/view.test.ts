@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Menu, Notice, Platform, Setting, TFile } from "obsidian";
-import { AddActionModal, calculateModalViewportLayout, CollectionPickerModal, type CollectionTarget, ConfirmModal, IndexGroupModal, KnowledgeNoteModal, localDateStamp, RecordPickerModal, TextPromptModal, TopicEditorModal, VaultFilePickerModal } from "../src/modals.ts";
+import { Menu, Notice, Platform, Setting, TFile, TFolder } from "obsidian";
+import { AddActionModal, calculateModalViewportLayout, CollectionPickerModal, type CollectionTarget, ConfirmModal, IndexGroupModal, KnowledgeNoteModal, localDateStamp, missingSetupFolderHint, RecordPickerModal, TextPromptModal, TopicEditorModal, VaultFilePickerModal, WorkspaceSetupModal, type WorkspaceSetupValue } from "../src/modals.ts";
 import {
   canRelinkPortableRecord,
   calculateSearchViewportLayout,
@@ -13,6 +13,7 @@ import {
 import { IndexManagerModal } from "../src/index-manager.ts";
 import {
   ExportImportCenterModal,
+  missingImportedFolderNoticeText,
   portabilityLibraryUnavailableText,
   preparePortableExport,
 } from "../src/portability-modal.ts";
@@ -1171,6 +1172,7 @@ test("an ENT custom-Library placeholder uses its profile while protected built-i
     domain: "Guidelines",
     topicKind: "note",
   });
+  let compatibilityIssue: string | null = null;
   const plugin = {
     data,
     getActiveKnowledgeBaseId: () => "base-a",
@@ -1194,6 +1196,8 @@ test("an ENT custom-Library placeholder uses its profile while protected built-i
       recordKind: "note" as const,
       libraryId: custom.id,
     }),
+    placeholderNoteCompatibilityIssue: (subjectId: string, destinationFolder: string) =>
+      subjectId === "paper" && destinationFolder === "Evidence" ? compatibilityIssue : "unexpected preflight arguments",
   };
   let created: {
     initial: Record<string, unknown>;
@@ -1234,6 +1238,19 @@ test("an ENT custom-Library placeholder uses its profile while protected built-i
     const empty = modalItems.find((item) => item.id === "empty");
     assert.ok(empty);
     chooseModalItem?.(empty);
+
+    // An incompatible subject is refused BEFORE the note form opens: the
+    // compatibility preflight surfaces the linking error as a notice, so no
+    // orphan-to-be file can ever be created.
+    compatibilityIssue = "This note note cannot be linked to a portable topic subject.";
+    Notice.messages.length = 0;
+    const createdBeforeRefusal = created;
+    view.openPlaceholderActions(placeholder);
+    const refusedEmpty = modalItems.find((item) => item.id === "empty");
+    assert.ok(refusedEmpty);
+    chooseModalItem?.(refusedEmpty);
+    assert.equal(created, createdBeforeRefusal, "the note form never opens for an incompatible subject");
+    assert.deepEqual(Notice.messages, [compatibilityIssue]);
   } finally {
     if (hadOwnOpen && originalOpen) Object.defineProperty(AddActionModal.prototype, "open", originalOpen);
     else Reflect.deleteProperty(AddActionModal.prototype, "open");
@@ -3835,6 +3852,159 @@ test("portability center rejects an indexed non-topic ENT package before mutate 
   await assert.rejects(center.importSelected(), /ENT knowledge index accepts topic subjects only/i);
   assert.equal(mutateCalls, 0);
   assert.deepEqual(plugin.data, before);
+});
+
+test("missing imported workspace folders are named without blocking or falling back", () => {
+  const existing = new Set(["Knowledge Base", "Inbox"]);
+  const folderExists = (path: string): boolean => existing.has(path);
+  const incoming = { primaryFolder: "KB", proposalFolder: "Triage" };
+
+  assert.equal(
+    missingImportedFolderNoticeText(incoming, "generic", folderExists),
+    " The imported indexed notes folder “KB” does not exist in this vault yet, so the index will not show existing notes until it is created or the setting is changed."
+      + " The imported Inbox folder “Triage” does not exist in this vault yet, so the Inbox will be empty until it is created or the setting is changed.",
+  );
+  assert.equal(
+    missingImportedFolderNoticeText({ primaryFolder: "Knowledge Base", proposalFolder: "Inbox" }, "generic", folderExists),
+    "",
+    "existing folders add nothing to the notice",
+  );
+  assert.equal(
+    missingImportedFolderNoticeText(incoming, "ent-clinical", folderExists),
+    " The imported Inbox folder “Triage” does not exist in this vault yet, so the Inbox will be empty until it is created or the setting is changed.",
+    "an ent-clinical destination keeps its own primary folder, so only the Inbox is named",
+  );
+  assert.equal(
+    missingImportedFolderNoticeText({ primaryFolder: "", proposalFolder: "Inbox" }, "generic", folderExists),
+    "",
+    "the empty primary folder means the vault root, which always exists",
+  );
+});
+
+test("workspace import completion notice names imported folders missing from this vault", async () => {
+  Notice.messages.length = 0;
+  const source = migrateData(null);
+  source.settings.workspaceMode = "generic";
+  source.settings.primaryFolder = "KB";
+  source.settings.proposalFolder = "Triage";
+  const value = parsePortableExport(createPortableExport(
+    source,
+    [],
+    { ...EMPTY_PORTABLE_SELECTION, workspace: true },
+    "2026-08-13T00:00:00.000Z",
+  ));
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const plugin = {
+    data,
+    isDataReadOnly: () => false,
+    async mutate(_name: string, action: () => void): Promise<void> { action(); },
+    invalidateRecordCache: (): void => {},
+    assertClinicalIndexEligibility: (): void => {},
+    getRecords: (): VaultRecord[] => [],
+  };
+  const vaultFolder = new TFolder("Knowledge Base");
+  const center = Object.create(ExportImportCenterModal.prototype) as {
+    app: { vault: { configDir: string; getAbstractFileByPath(path: string): unknown } };
+    plugin: typeof plugin;
+    importValue: typeof value;
+    importSelection: typeof EMPTY_PORTABLE_SELECTION;
+    importMode: "merge" | "replace";
+    recoveryConfirmed: boolean;
+    crossBaseRecoveryConfirmed: boolean;
+    dataChanged: boolean;
+    openedBaseId: string;
+    centerOpen: boolean;
+    close(): void;
+    importSelected(): Promise<void>;
+  };
+  center.app = {
+    vault: {
+      configDir: ".obsidian",
+      getAbstractFileByPath: (path: string) => path === "Knowledge Base" ? vaultFolder : null,
+    },
+  };
+  center.plugin = plugin;
+  center.importValue = value;
+  center.importSelection = { ...EMPTY_PORTABLE_SELECTION, workspace: true };
+  center.importMode = "merge";
+  center.recoveryConfirmed = false;
+  center.crossBaseRecoveryConfirmed = false;
+  center.dataChanged = false;
+  center.openedBaseId = "";
+  center.centerOpen = true;
+  center.close = () => { center.centerOpen = false; };
+
+  await center.importSelected();
+
+  assert.equal(data.settings.primaryFolder, "KB", "the imported value is applied, not silently replaced");
+  assert.equal(data.settings.proposalFolder, "Triage");
+  const notice = Notice.messages.find((message) => message.startsWith("Import complete."));
+  assert.ok(notice);
+  assert.ok(notice.includes("The imported indexed notes folder “KB” does not exist in this vault yet, so the index will not show existing notes until it is created or the setting is changed."));
+  assert.ok(notice.includes("The imported Inbox folder “Triage” does not exist in this vault yet, so the Inbox will be empty until it is created or the setting is changed."));
+  assert.match(notice, /Markdown notes were not changed\.$/u);
+});
+
+test("setup wizard hints inline when a typed folder does not exist yet", () => {
+  const folderExists = (path: string): boolean => path === "Knowledge Base";
+  assert.equal(
+    missingSetupFolderHint("Knowledg Base", "existing notes will not be indexed", folderExists),
+    "“Knowledg Base” does not exist yet — it will be created empty, and existing notes will not be indexed until they live inside it.",
+  );
+  assert.equal(
+    missingSetupFolderHint("Triage", "existing notes will not appear in the Inbox", folderExists),
+    "“Triage” does not exist yet — it will be created empty, and existing notes will not appear in the Inbox until they live inside it.",
+  );
+  assert.equal(missingSetupFolderHint("Knowledge Base", "existing notes will not be indexed", folderExists), null, "an existing folder needs no hint");
+  assert.equal(missingSetupFolderHint(" /Knowledge Base/ ", "existing notes will not be indexed", folderExists), null, "the hint trims the way submit does");
+  assert.equal(missingSetupFolderHint("   ", "existing notes will not be indexed", folderExists), null, "emptiness is the submit validator's concern, not the hint's");
+});
+
+test("setup wizard requires an Inbox folder with the Settings tab's message", async () => {
+  const submitted: WorkspaceSetupValue[] = [];
+  let errorText = "";
+  const modal = Object.create(WorkspaceSetupModal.prototype) as {
+    value: WorkspaceSetupValue;
+    errorEl: { setText(text: string): void } | null;
+    onSubmit(value: WorkspaceSetupValue): void;
+    closed: boolean;
+    close(): void;
+    submit(): Promise<void>;
+  };
+  modal.value = {
+    workspaceName: "My Knowledge Base",
+    workspaceSubtitle: "",
+    indexLabel: "Knowledge Index",
+    itemSingular: "note",
+    itemPlural: "notes",
+    groupLabel: "Group",
+    primaryFolder: "Knowledge Base",
+    proposalFolder: " / ",
+    inboxLabel: "Inbox",
+    defaultNoteFolder: "Knowledge Base",
+    idProperty: "id",
+    groupProperty: "category",
+    parentProperty: "parent",
+    templatesFolder: "",
+    defaultNewNoteMode: "empty",
+    defaultTemplatePath: "",
+  };
+  modal.errorEl = { setText: (text: string) => { errorText = text; } };
+  modal.onSubmit = (value) => { submitted.push(value); };
+  modal.closed = false;
+  modal.close = () => { modal.closed = true; };
+
+  await modal.submit();
+  assert.equal(errorText, "Choose an Inbox folder. Without one, notes aimed at the Inbox would not appear anywhere in this plugin.");
+  assert.equal(submitted.length, 0, "an empty Inbox folder never reaches onSubmit");
+  assert.equal(modal.closed, false);
+
+  modal.value.proposalFolder = "Inbox";
+  await modal.submit();
+  assert.equal(submitted.length, 1);
+  assert.equal(submitted[0]?.proposalFolder, "Inbox");
+  assert.equal(modal.closed, true);
 });
 
 test("portability center rejects cross-vault recovery before mutate starts", async () => {
