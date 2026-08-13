@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.13.2
+
+### Fixed
+
+- Restored the ability to rearrange nested subheadings on iPhone, iPad, and other touch devices. Nesting arrived in 0.13.0, but touch devices use labelled row action menus instead of drag-and-drop, and the subheading menu only ever offered moves between siblings — so a subheading could be created inside another one but never moved into or out of one without a desktop. Both the Collection and Library subheading menus now offer **Move under…**, which lists every valid destination by its full path together with an explicit top-level entry, and **Outdent one level** for the common case. Both actions also appear on desktop, where a precise menu move is often easier than a drag.
+- A subheading move carries its notes and every nested subheading with it, in order. A destination is offered only when it is neither the subheading itself nor anything already inside it, and only when the moved branch still fits the five-level limit — so a tall branch is correctly refused a destination that a single subheading is offered. If a synced change replaces the layout while the destination list is open, the move is refused rather than applied to the wrong place, and if nothing qualifies the plugin explains why instead of showing an empty list.
+
 ## 0.13.1
 
 ### Fixed
