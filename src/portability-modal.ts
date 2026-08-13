@@ -1,4 +1,4 @@
-import { Modal, Notice, Platform, Setting, TFile, normalizePath } from "obsidian";
+import { Modal, Notice, Platform, Setting, TFile, TFolder, normalizePath } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
 import {
   assertPersonalBackupMatchesVault,
@@ -14,6 +14,7 @@ import {
   type PluginData,
   type PortableIndexLocalState,
   type VaultRecord,
+  type WorkspaceMode,
 } from "./model";
 import {
   createOpenedBaseGuard,
@@ -52,6 +53,31 @@ interface WorkspaceImportValidation {
   defaultTemplateReset: boolean;
   libraryTemplateResetIds: string[];
   droppedLibraryProfileIds: string[];
+  missingFolderText: string;
+}
+
+/**
+ * Completion-notice sentences naming imported workspace folders the vault does
+ * not have. Deliberate design: a fresh-vault import legitimately references
+ * folders that do not exist yet, so a missing folder neither blocks the import
+ * nor silently falls back to the previous value — the notice names it instead.
+ * An ent-clinical destination keeps its own primaryFolder (applyPortableExport
+ * protects it), so only the Inbox folder can go missing there. The empty
+ * primary folder means the vault root, which always exists.
+ */
+export function missingImportedFolderNoticeText(
+  settings: { primaryFolder: string; proposalFolder: string },
+  destinationMode: WorkspaceMode,
+  folderExists: (path: string) => boolean,
+): string {
+  const sentences: string[] = [];
+  if (destinationMode !== "ent-clinical" && settings.primaryFolder && !folderExists(settings.primaryFolder)) {
+    sentences.push(`The imported indexed notes folder “${settings.primaryFolder}” does not exist in this vault yet, so the index will not show existing notes until it is created or the setting is changed.`);
+  }
+  if (settings.proposalFolder && !folderExists(settings.proposalFolder)) {
+    sentences.push(`The imported Inbox folder “${settings.proposalFolder}” does not exist in this vault yet, so the Inbox will be empty until it is created or the setting is changed.`);
+  }
+  return sentences.map((sentence) => ` ${sentence}`).join("");
 }
 
 const CENTER_MODES: readonly CenterMode[] = ["export", "import"];
@@ -988,9 +1014,14 @@ export class ExportImportCenterModal extends Modal {
   ): WorkspaceImportValidation {
     const workspace = selection.workspace ? value.components.workspace : undefined;
     if (!workspace) {
-      return { defaultTemplateReset: false, libraryTemplateResetIds: [], droppedLibraryProfileIds: [] };
+      return { defaultTemplateReset: false, libraryTemplateResetIds: [], droppedLibraryProfileIds: [], missingFolderText: "" };
     }
     const settings = workspace.settings;
+    const missingFolderText = missingImportedFolderNoticeText(
+      settings,
+      this.plugin.data.settings.workspaceMode,
+      (path) => this.app.vault.getAbstractFileByPath(normalizePath(path)) instanceof TFolder,
+    );
     for (const folder of [settings.primaryFolder, settings.defaultNoteFolder, settings.templatesFolder]) {
       const validation = validateWritableFolderPath(folder, this.app.vault.configDir);
       if (validation) throw new Error(validation);
@@ -1070,7 +1101,7 @@ export class ExportImportCenterModal extends Modal {
         libraryTemplateResetIds.push(libraryId);
       }
     }
-    return { defaultTemplateReset, libraryTemplateResetIds, droppedLibraryProfileIds };
+    return { defaultTemplateReset, libraryTemplateResetIds, droppedLibraryProfileIds, missingFolderText };
   }
 
   private async importSelected(): Promise<void> {
@@ -1203,7 +1234,7 @@ export class ExportImportCenterModal extends Modal {
     const droppedProfileText = workspaceValidation.droppedLibraryProfileIds.length > 0
       ? ` ${workspaceValidation.droppedLibraryProfileIds.length} Library ${workspaceValidation.droppedLibraryProfileIds.length === 1 ? "profile was" : "profiles were"} omitted because the destination has no matching Library.`
       : "";
-    new Notice(`Import complete.${subjectText}${workspaceValidation.defaultTemplateReset ? " The missing source template was reset to Empty note." : ""}${profileResetText}${droppedProfileText} Markdown notes were not changed.`, 10000);
+    new Notice(`Import complete.${subjectText}${workspaceValidation.defaultTemplateReset ? " The missing source template was reset to Empty note." : ""}${profileResetText}${droppedProfileText}${workspaceValidation.missingFolderText} Markdown notes were not changed.`, 10000);
     this.close();
   }
 

@@ -5261,6 +5261,76 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
   }
 
+  /**
+   * The kind/configured-ID/clinical-group compatibility rules a candidate
+   * note must satisfy before it can resolve a portable subject. Shared
+   * between resolvePortableSubject (which throws the returned message) and
+   * placeholderNoteCompatibilityIssue (which reports it before any file is
+   * created), so the preflight and the real resolve can never drift.
+   */
+  private portableSubjectCompatibilityIssue(
+    subject: PortableSubjectDefinition,
+    existingOwner: PortableSubjectDefinition | null,
+    candidateKind: RecordKind,
+    rawCandidateConfiguredId: string,
+    rawCandidateDomain: string,
+  ): string | null {
+    const compatibleKinds = subject.recordKind === candidateKind
+      || (subject.recordKind === "topic" && candidateKind === "proposal")
+      || (!this.isClinicalMode() && !existingOwner && (candidateKind === "topic" || candidateKind === "note"));
+    if (!compatibleKinds) {
+      return `This ${candidateKind} note cannot be linked to a portable ${subject.recordKind} subject.`;
+    }
+    const candidateConfiguredId = rawCandidateConfiguredId.trim();
+    if (subject.configuredId.trim() && candidateConfiguredId && subject.configuredId.trim() !== candidateConfiguredId) {
+      return `Configured ID mismatch: ${subject.configuredId.trim()} cannot be linked to ${candidateConfiguredId}.`;
+    }
+    const subjectGroupTitle = this.data.portableIndex.groups.find((group) => group.id === subject.groupId)?.title ?? "";
+    const candidateDomain = rawCandidateDomain.trim();
+    if (this.isClinicalMode() && !this.canVisuallyMoveAcrossGroups() && subjectGroupTitle && candidateDomain
+      && this.normalizedOrganizationLabel(subjectGroupTitle) !== this.normalizedOrganizationLabel(candidateDomain)) {
+      return `Clinical group mismatch: this subject belongs to ${subjectGroupTitle}, but the selected note belongs to ${candidateDomain}.`;
+    }
+    return null;
+  }
+
+  /**
+   * The kind a note created in `folder` would classify as, using the same
+   * folder rules identityForFile applies. A note landing outside every
+   * classified root gets no record at all, which is exactly the case
+   * resolvePortableSubject falls back on.
+   */
+  private createdNoteKindForFolder(subject: PortableSubjectDefinition, folder: string): RecordKind {
+    const path = `${normalizePath(folder).replace(/^\/+|\/+$/gu, "")}/placeholder.md`;
+    const proposalFolder = normalizePath(this.data.settings.proposalFolder).replace(/^\/+|\/+$/gu, "");
+    if (proposalFolder && pathIsInsideFolder(path, proposalFolder)) return "proposal";
+    if (this.data.settings.primaryFolder && pathIsInsideFolder(path, this.data.settings.primaryFolder)) return "topic";
+    return !this.isClinicalMode() && subject.recordKind === "topic" ? "topic" : "note";
+  }
+
+  /**
+   * Preflight for the placeholder "Create empty note" / "Create from
+   * template" actions: would a note created at `destinationFolder` — with no
+   * portable owner, no configured ID, and no frontmatter yet — pass
+   * resolvePortableSubject's compatibility checks? Returns the exact message
+   * resolve would throw AFTER the file already existed, so callers can refuse
+   * up front instead of orphaning a just-created file on the linking step.
+   * Deliberately conservative: checks that depend on frontmatter the new note
+   * does not have yet cannot fire here, and the onCreated failure path stays
+   * the backstop for them.
+   */
+  placeholderNoteCompatibilityIssue(subjectId: string, destinationFolder = ""): string | null {
+    const subject = this.getPortableSubject(subjectId);
+    if (!subject) return "The portable subject no longer exists.";
+    return this.portableSubjectCompatibilityIssue(
+      subject,
+      null,
+      this.createdNoteKindForFolder(subject, destinationFolder),
+      "",
+      "",
+    );
+  }
+
   async resolvePortableSubject(subjectId: string, path: string, mergeExistingIdentity = false): Promise<void> {
     this.assertDataWritable();
     const subject = this.getPortableSubject(subjectId);
@@ -5275,22 +5345,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const candidateKind: RecordKind = existingOwner?.recordKind
       ?? candidateRecord?.kind
       ?? (!this.isClinicalMode() && subject.recordKind === "topic" ? "topic" : "note");
-    const compatibleKinds = subject.recordKind === candidateKind
-      || (subject.recordKind === "topic" && candidateKind === "proposal")
-      || (!this.isClinicalMode() && !existingOwner && (candidateKind === "topic" || candidateKind === "note"));
-    if (!compatibleKinds) {
-      throw new Error(`This ${candidateKind} note cannot be linked to a portable ${subject.recordKind} subject.`);
-    }
-    const candidateConfiguredId = (existingOwner?.configuredId || candidateRecord?.curriculumId || "").trim();
-    if (subject.configuredId.trim() && candidateConfiguredId && subject.configuredId.trim() !== candidateConfiguredId) {
-      throw new Error(`Configured ID mismatch: ${subject.configuredId.trim()} cannot be linked to ${candidateConfiguredId}.`);
-    }
-    const subjectGroupTitle = this.data.portableIndex.groups.find((group) => group.id === subject.groupId)?.title ?? "";
-    const candidateDomain = candidateRecord?.domain.trim() ?? "";
-    if (this.isClinicalMode() && !this.canVisuallyMoveAcrossGroups() && subjectGroupTitle && candidateDomain
-      && this.normalizedOrganizationLabel(subjectGroupTitle) !== this.normalizedOrganizationLabel(candidateDomain)) {
-      throw new Error(`Clinical group mismatch: this subject belongs to ${subjectGroupTitle}, but the selected note belongs to ${candidateDomain}.`);
-    }
+    const compatibilityIssue = this.portableSubjectCompatibilityIssue(
+      subject,
+      existingOwner,
+      candidateKind,
+      existingOwner?.configuredId || candidateRecord?.curriculumId || "",
+      candidateRecord?.domain ?? "",
+    );
+    if (compatibilityIssue) throw new Error(compatibilityIssue);
     if (existingOwnerId && !mergeExistingIdentity) {
       throw new Error("That Markdown note already has a portable identity. Confirm identity reassignment before linking it to this subject.");
     }
@@ -5444,6 +5506,41 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return this.getRecords().filter((record) => recordBelongsToIndex(record, topicsOnly));
   }
 
+  /**
+   * How many currently visible Inbox notes would classify to NO record after
+   * the Inbox folder changes to `nextFolder` — not merely leave the Inbox,
+   * but disappear from every tab and search. Settings shows this before the
+   * change is applied, because folder-derived membership makes the change
+   * silent otherwise.
+   */
+  countOrphanedByProposalFolderChange(nextFolder: string): number {
+    const clean = nextFolder.trim().replace(/^\/+|\/+$/gu, "");
+    const referenced = this.referencedPaths();
+    const manual = new Set(this.data.manualIndexPaths);
+    return this.getRecords().filter((record) => record.role === "proposal"
+      && !(clean && pathIsInsideFolder(record.path, clean))
+      && !manual.has(record.path)
+      && !referenced.has(record.path)
+      && !pathIsInsideFolder(record.path, this.data.settings.primaryFolder)).length;
+  }
+
+  /** The primary-folder counterpart of countOrphanedByProposalFolderChange. */
+  countOrphanedByPrimaryFolderChange(nextFolder: string): number {
+    const clean = nextFolder.trim().replace(/^\/+|\/+$/gu, "");
+    const settings = this.data.settings;
+    const proposalFolder = settings.proposalFolder.trim().replace(/^\/+|\/+$/gu, "");
+    const referenced = this.referencedPaths();
+    const manual = new Set(this.data.manualIndexPaths);
+    // An empty next folder indexes the whole vault, so nothing can orphan;
+    // pathIsInsideFolder treats "" as all-inclusive, matching the classifier.
+    return this.getRecords().filter((record) => (record.role === "canonical" || record.role === "supporting")
+      && pathIsInsideFolder(record.path, settings.primaryFolder)
+      && !pathIsInsideFolder(record.path, clean)
+      && !manual.has(record.path)
+      && !referenced.has(record.path)
+      && !(proposalFolder && pathIsInsideFolder(record.path, proposalFolder))).length;
+  }
+
   getIndexCandidateFiles(): TFile[] {
     if (this.isClinicalMode()) return [];
     const indexed = new Set(this.getIndexRecords().map((record) => record.path));
@@ -5511,36 +5608,90 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }, { includePortableIndex: repair.kind === "clear-portable-parent", requireUndo: true });
   }
 
-  async repairIndexOrganization(): Promise<void> {
+  /**
+   * The one implementation of "Repair safe issues", applied to either the
+   * live data (repairIndexOrganization) or a throwaway clone
+   * (previewIndexRepair) so the preview can never drift from the repair.
+   * `prunedPaths` are registrations for real Markdown notes that are missing
+   * from THIS device's vault — the ones that may merely not have synced yet,
+   * so the caller must confirm before dropping them. Everything else
+   * (duplicates, stale placeholder paths, orphaned group entries, visual
+   * reconciliation) is counted in `otherFixCount` and stays safe to apply
+   * without confirmation.
+   */
+  private applyIndexRepairToData(data: PluginData): { prunedPaths: string[]; otherFixCount: number } {
     const existing = new Set(this.app.vault.getMarkdownFiles().map((file) => file.path));
-    for (const subject of this.data.portableIndex.subjects) existing.add(portableSubjectPath(this.data, subject.id));
+    for (const subject of data.portableIndex.subjects) existing.add(portableSubjectPath(data, subject.id));
     const indexed = new Set(this.getIndexRecords().map((record) => record.path));
+    const prunedPaths = new Set<string>();
+    let otherFixCount = 0;
+    const dropMissing = (path: string): void => {
+      if (isPortablePlaceholderPath(path)) otherFixCount += 1;
+      else prunedPaths.add(path);
+    };
     const uniqueExisting = (paths: string[]): string[] => {
       const seen = new Set<string>();
       return paths.filter((path) => {
-        if (!existing.has(path) || seen.has(path)) return false;
+        if (!existing.has(path)) {
+          dropMissing(path);
+          return false;
+        }
+        if (seen.has(path)) {
+          otherFixCount += 1;
+          return false;
+        }
         seen.add(path);
         return true;
       });
     };
-    await this.mutate("Repair safe index organization issues", () => {
-      this.data.manualIndexPaths = uniqueExisting(this.data.manualIndexPaths);
-      const manual = new Set(this.data.manualIndexPaths);
-      this.data.excludedIndexPaths = uniqueExisting(this.data.excludedIndexPaths).filter((path) => !manual.has(path));
-      this.data.pinnedPaths = uniqueExisting(this.data.pinnedPaths);
-      this.data.nextStudyPaths = uniqueExisting(this.data.nextStudyPaths);
-      forEachLayoutNode(this.data.collections, (node) => { node.subjects = uniqueExisting(node.subjects); });
-      const excluded = new Set(this.data.excludedIndexPaths);
-      for (const path of Object.keys(this.data.indexGroupByPath)) {
-        if (!existing.has(path) || (!indexed.has(path) && !excluded.has(path))) delete this.data.indexGroupByPath[path];
+    data.manualIndexPaths = uniqueExisting(data.manualIndexPaths);
+    const manual = new Set(data.manualIndexPaths);
+    data.excludedIndexPaths = uniqueExisting(data.excludedIndexPaths).filter((path) => {
+      if (!manual.has(path)) return true;
+      otherFixCount += 1;
+      return false;
+    });
+    data.pinnedPaths = uniqueExisting(data.pinnedPaths);
+    data.nextStudyPaths = uniqueExisting(data.nextStudyPaths);
+    forEachLayoutNode(data.collections, (node) => { node.subjects = uniqueExisting(node.subjects); });
+    const excluded = new Set(data.excludedIndexPaths);
+    for (const path of Object.keys(data.indexGroupByPath)) {
+      if (!existing.has(path)) {
+        dropMissing(path);
+        delete data.indexGroupByPath[path];
+      } else if (!indexed.has(path) && !excluded.has(path)) {
+        otherFixCount += 1;
+        delete data.indexGroupByPath[path];
       }
-      this.data.indexGroupOrder = [...new Set(this.data.indexGroupOrder.map((group) => group.trim()).filter(Boolean))];
-      reconcileCurriculumVisual(
-        this.data.curriculumVisual,
-        this.getRecords(),
-        this.data.indexGroupByPath,
-        this.isClinicalMode(),
-      );
+    }
+    const cleanGroupOrder = [...new Set(data.indexGroupOrder.map((group) => group.trim()).filter(Boolean))];
+    otherFixCount += data.indexGroupOrder.length - cleanGroupOrder.length;
+    data.indexGroupOrder = cleanGroupOrder;
+    const visualBefore = JSON.stringify(data.curriculumVisual);
+    reconcileCurriculumVisual(
+      data.curriculumVisual,
+      this.getRecords(),
+      data.indexGroupByPath,
+      this.isClinicalMode(),
+    );
+    if (JSON.stringify(data.curriculumVisual) !== visualBefore) otherFixCount += 1;
+    return { prunedPaths: [...prunedPaths].sort((a, b) => a.localeCompare(b)), otherFixCount };
+  }
+
+  /**
+   * Dry-run of repairIndexOrganization: reports what the repair would do
+   * without touching live data, so the index manager can require an explicit
+   * confirmation before registrations for missing files are dropped — on a
+   * device where those files simply have not synced yet, the drop would be
+   * permanent and would propagate to every device.
+   */
+  previewIndexRepair(): { prunedPaths: string[]; otherFixCount: number } {
+    return this.applyIndexRepairToData(cloneJsonValue(this.data));
+  }
+
+  async repairIndexOrganization(): Promise<void> {
+    await this.mutate("Repair safe index organization issues", () => {
+      this.applyIndexRepairToData(this.data);
     });
   }
 

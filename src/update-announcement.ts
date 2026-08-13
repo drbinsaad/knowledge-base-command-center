@@ -123,6 +123,18 @@ export const UPDATE_ANNOUNCEMENT_0_14_1: UpdateAnnouncement = {
   releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.14.1",
 };
 
+export const UPDATE_ANNOUNCEMENT_0_14_2: UpdateAnnouncement = {
+  version: "0.14.2",
+  title: "What’s new in Knowledge Base Command Center 0.14.2",
+  intro: "Guard rails around the places where notes could quietly drop out of view.",
+  highlights: [
+    "Changing the Inbox folder or the indexed-notes folder now tells you how many notes would stop appearing anywhere in the plugin, and asks before applying the change.",
+    "Diagnostics “Repair safe issues” asks before removing registrations for notes that are missing on this device — protecting notes that simply have not synced yet.",
+    "Importing workspace settings names any referenced folder that does not exist in this vault, the setup wizard hints when a typed folder does not exist yet, and a clinical placeholder refuses to create a note it could not link.",
+  ],
+  releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.14.2",
+};
+
 const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_12_0.version, UPDATE_ANNOUNCEMENT_0_12_0],
   [UPDATE_ANNOUNCEMENT_0_12_1.version, UPDATE_ANNOUNCEMENT_0_12_1],
@@ -132,6 +144,7 @@ const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_13_3.version, UPDATE_ANNOUNCEMENT_0_13_3],
   [UPDATE_ANNOUNCEMENT_0_14_0.version, UPDATE_ANNOUNCEMENT_0_14_0],
   [UPDATE_ANNOUNCEMENT_0_14_1.version, UPDATE_ANNOUNCEMENT_0_14_1],
+  [UPDATE_ANNOUNCEMENT_0_14_2.version, UPDATE_ANNOUNCEMENT_0_14_2],
 ]);
 
 function parseSemanticVersion(value: string): ParsedSemanticVersion | null {

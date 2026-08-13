@@ -1987,10 +1987,23 @@ export class EntVaultCommandCenterView extends ItemView {
         contextNotice: `This note will resolve “${record.title}” in ${library.name} without rewriting any existing Markdown note.`,
         tokenContext,
       } : { tokenContext };
-      if (action.id === "empty") {
-        this.startCreateKnowledgeNote({ title: record.title, folder: profile.folder, mode: "empty", templatePath: profile.templatePath }, false, resolve, undefined, formContext);
-      } else if (action.id === "template") {
-        this.startCreateKnowledgeNote({ title: record.title, folder: profile.folder, mode: "template", templatePath: profile.templatePath }, false, resolve, undefined, formContext);
+      if (action.id === "empty" || action.id === "template") {
+        // Preflight the linking step BEFORE the note form opens: a freshly
+        // created note would be orphaned if resolvePortableSubject rejected
+        // it after the file already existed. The onCreated rescue remains
+        // as the backstop for failures this check cannot foresee.
+        const compatibilityIssue = this.plugin.placeholderNoteCompatibilityIssue(record.portableId ?? "", profile.folder);
+        if (compatibilityIssue) {
+          new Notice(compatibilityIssue);
+          return;
+        }
+        this.startCreateKnowledgeNote(
+          { title: record.title, folder: profile.folder, mode: action.id === "empty" ? "empty" : "template", templatePath: profile.templatePath },
+          false,
+          resolve,
+          undefined,
+          formContext,
+        );
       } else if (action.id === "proposal") {
         this.startCreateProposal({ title: record.title, domain: record.domain, topicKind: "condition", priority: "P2", safetyCritical: false }, resolve);
       } else if (action.id === "link") {

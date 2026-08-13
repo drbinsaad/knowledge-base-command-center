@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.14.2
+
+### Added
+
+- Changing the **Inbox folder** or the **Indexed notes folder** in Settings now commits on Enter, leaving the field, or Browse — and when the change would make notes stop appearing anywhere in the plugin, it first asks with the real count: "N notes in 'X' will leave the Inbox and no longer appear anywhere in this plugin." Cancelling leaves the setting untouched. Previously the change applied silently, and every note in the old folder vanished from all tabs and search without a word.
+- Importing workspace settings now names any referenced folder that does not exist in this vault — "The imported Inbox folder “X” does not exist in this vault yet, so the Inbox will be empty until it is created or the setting is changed" — instead of silently importing a configuration whose views come up empty. The import itself is unchanged: referencing a not-yet-created folder is legitimate for a fresh vault.
+- The setup wizard hints inline when a typed folder does not exist yet ("it will be created empty, and existing notes will not be indexed until they live inside it") and now requires an Inbox folder, matching the Settings rule.
+- Diagnostics **Repair safe issues** now distinguishes "this note is gone" from "this note has not synced to this device yet". When registered notes are missing from this device, it lists them (up to 8, then a count) and asks before repairing, because the repair removes their index memberships, collection memberships, and pins — and that removal syncs everywhere. If nothing would be pruned, repair runs immediately with no dialog, exactly as before.
+- A clinical custom-library placeholder now refuses **Create empty note / Create from template** up front when linking the created note would fail its compatibility checks, showing the exact reason instead of creating a file and then failing to link it. The same rules now live in one place for both the preflight and the real linking step, so they cannot drift apart.
+
 ## 0.14.1
 
 ### Fixed

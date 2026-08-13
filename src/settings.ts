@@ -8,7 +8,6 @@ import type EntVaultCommandCenterPlugin from "./main";
 import {
   asUnknownRecord,
   cloneJsonValue,
-  DEFAULT_PROPOSAL_FOLDER,
   errorMessage,
   libraryTabId,
   pathIsInsideFolder,
@@ -24,7 +23,7 @@ import {
   type PluginData,
   objectFromEntries,
 } from "./model";
-import { createOpenedBaseGuard, StringPickerModal, TextPromptModal, VaultFilePickerModal } from "./modals";
+import { ConfirmModal, createOpenedBaseGuard, StringPickerModal, TextPromptModal, VaultFilePickerModal } from "./modals";
 
 interface SettingsHost extends Plugin {
   data: PluginData;
@@ -35,6 +34,8 @@ interface SettingsHost extends Plugin {
   getTemplateFiles(): TFile[];
   getIndexGroups(): string[];
   getIndexRecords(): Array<{ path: string }>;
+  countOrphanedByProposalFolderChange(nextFolder: string): number;
+  countOrphanedByPrimaryFolderChange(nextFolder: string): number;
   isDataReadOnly(): boolean;
   dataCompatibilityWarning: string;
   getKnowledgeBases(includeArchived?: boolean): KnowledgeBaseEntry[];
@@ -509,6 +510,71 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
       }));
     }, ["folder", "path"]);
 
+    /**
+     * A folder whose change can silently remove notes from every view commits
+     * on Enter/blur (or Browse) instead of per keystroke, and when the change
+     * would orphan visible notes it asks first with the real count. Cancel
+     * restores the stored value.
+     */
+    const guardedFolderSetting = (
+      name: string,
+      description: string,
+      read: () => string,
+      apply: (value: string) => void,
+      validateFolder: (clean: string) => string | null,
+      impact: (clean: string) => string | null,
+    ): SettingDefinitionRender => renderSetting(name, description, (row) => {
+      let pending: string | null = null;
+      const commit = (inputEl: HTMLInputElement, value: string): void => {
+        if (!ownsConfiguredBase()) return;
+        if (value === read()) { pending = null; return; }
+        const warning = impact(value);
+        const applyChange = async (): Promise<void> => {
+          if (!ownsConfiguredBase()) return;
+          apply(value);
+          pending = null;
+          await this.save();
+          if (!ownsConfiguredBase()) return;
+          this.update();
+        };
+        if (!warning) { void applyChange(); return; }
+        // Show the stored value while the question is open; a dismissed
+        // dialog therefore leaves the setting visibly unchanged.
+        inputEl.value = read();
+        pending = null;
+        new ConfirmModal(this.host.app, `Change ${name.toLowerCase()}?`, warning, "Change folder", applyChange).open();
+      };
+      row.addText((text) => {
+        text.setPlaceholder("Folder/path").setValue(read()).setDisabled(readOnly).onChange((value) => {
+          if (!ownsConfiguredBase()) return;
+          const clean = value.trim().replace(/^\/+|\/+$/g, "");
+          const error = validateFolder(clean);
+          text.inputEl.toggleClass("is-error", Boolean(error));
+          row.setDesc(error ?? description);
+          pending = error === null ? clean : null;
+        });
+        text.inputEl.dir = "auto";
+        text.inputEl.addEventListener("blur", () => { if (pending !== null) commit(text.inputEl, pending); });
+        text.inputEl.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter") return;
+          if (pending !== null) commit(text.inputEl, pending);
+          text.inputEl.blur();
+        });
+      });
+      row.addButton((button) => button.setButtonText("Browse…").setDisabled(readOnly).onClick(() => {
+        if (!ownsConfiguredBase()) return;
+        const folders = folderPaths();
+        if (folders.length === 0) return;
+        new StringPickerModal(this.host.app, folders, `Choose ${name.toLowerCase()}`, "Search vault folders…", (path) => {
+          if (!ownsConfiguredBase()) return;
+          const error = validateFolder(path);
+          if (error) { new Notice(error); return; }
+          const input = row.settingEl.querySelector("input");
+          if (input instanceof HTMLInputElement) { input.value = path; commit(input, path); }
+        }).open();
+      }));
+    }, ["folder", "path"]);
+
     const propertyNames = (): string[] => {
       const names = new Set<string>();
       const manual = new Set(this.host.data.manualIndexPaths);
@@ -671,7 +737,18 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
                   text.inputEl.dir = "auto";
                 });
               }, ["folder", "path", "clinical scope"])
-            : folderSetting("Indexed notes folder", "Every Markdown note in this folder and its subfolders appears in the main index.", settings.primaryFolder, (value) => { settings.primaryFolder = value; }, false),
+            : guardedFolderSetting(
+              "Indexed notes folder",
+              "Every Markdown note in this folder and its subfolders appears in the main index.",
+              () => settings.primaryFolder,
+              (value) => { settings.primaryFolder = value; },
+              (clean) => validateWritableFolderPath(clean, this.host.app.vault.configDir) || (!clean ? "Choose a folder." : null),
+              (clean) => {
+                const orphaned = this.host.countOrphanedByPrimaryFolderChange(clean);
+                if (orphaned === 0) return null;
+                return `${orphaned} note${orphaned === 1 ? "" : "s"} under “${settings.primaryFolder}” will leave ${settings.indexLabel} and no longer appear anywhere in this plugin. The files stay in the vault; use Add existing note to index any you still need.`;
+              },
+            ),
           folderSetting("Default new-note folder", "Initial destination in Create note. It can still be changed for each note.", settings.defaultNoteFolder, (value) => { settings.defaultNoteFolder = value; }),
           folderSetting("Templates folder", "Markdown templates offered by the per-note template picker. Leave empty to allow any Markdown file.", settings.templatesFolder, (value) => { settings.templatesFolder = value; }),
           renderSetting("Default starting content", "Every new note can override this choice.", (row) => {
@@ -802,43 +879,25 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
               this.bindBufferedTextCommit(text.inputEl);
             });
           }, ["attachment heading"]),
-          renderSetting("Inbox folder", settings.workspaceMode === "ent-clinical" ? "Clinical proposals must stay inside 01 Inbox." : "Notes in this folder appear in the Inbox section.", (row) => {
-            const description = settings.workspaceMode === "ent-clinical" ? "Clinical proposals must stay inside 01 Inbox." : "Notes in this folder appear in the Inbox section.";
-            row.addText((text) => {
-              text.setPlaceholder(DEFAULT_PROPOSAL_FOLDER).setValue(settings.proposalFolder).setDisabled(readOnly).onChange((value) => {
-                if (!ownsConfiguredBase()) return;
-                const clean = value.trim().replace(/^\/+|\/+$/g, "");
-                // An empty Inbox folder makes Inbox membership impossible:
-                // every captured note would classify to no record at all.
-                const error = !clean
-                  ? "Choose an Inbox folder. Without one, notes aimed at the Inbox would not appear anywhere in this plugin."
-                  : settings.workspaceMode === "ent-clinical"
-                    ? validateProposalFolderPath(clean, this.host.app.vault.configDir)
-                    : validateWritableFolderPath(clean, this.host.app.vault.configDir);
-                text.inputEl.toggleClass("is-error", Boolean(error));
-                row.setDesc(error ?? description);
-                if (error) return;
-                settings.proposalFolder = clean;
-                this.scheduleTextSave();
-              });
-              text.inputEl.dir = "auto";
-              this.bindBufferedTextCommit(text.inputEl);
-            });
-            row.addButton((button) => button.setButtonText("Browse…").setDisabled(readOnly).onClick(() => {
-              if (!ownsConfiguredBase()) return;
-              new StringPickerModal(this.host.app, folderPaths(), "Choose inbox folder", "Search vault folders…", async (path) => {
-                if (!ownsConfiguredBase()) return;
-                const error = settings.workspaceMode === "ent-clinical"
-                  ? validateProposalFolderPath(path, this.host.app.vault.configDir)
-                  : validateWritableFolderPath(path, this.host.app.vault.configDir);
-                if (error) return;
-                settings.proposalFolder = path;
-                await this.save();
-                if (!ownsConfiguredBase()) return;
-                this.update();
-              }).open();
-            }));
-          }, ["proposal folder"]),
+          guardedFolderSetting(
+            "Inbox folder",
+            settings.workspaceMode === "ent-clinical" ? "Clinical proposals must stay inside 01 Inbox." : "Notes in this folder appear in the Inbox section.",
+            () => settings.proposalFolder,
+            (value) => { settings.proposalFolder = value; },
+            (clean) => {
+              // An empty Inbox folder makes Inbox membership impossible:
+              // every captured note would classify to no record at all.
+              if (!clean) return "Choose an Inbox folder. Without one, notes aimed at the Inbox would not appear anywhere in this plugin.";
+              return settings.workspaceMode === "ent-clinical"
+                ? validateProposalFolderPath(clean, this.host.app.vault.configDir)
+                : validateWritableFolderPath(clean, this.host.app.vault.configDir);
+            },
+            (clean) => {
+              const orphaned = this.host.countOrphanedByProposalFolderChange(clean);
+              if (orphaned === 0) return null;
+              return `${orphaned} note${orphaned === 1 ? "" : "s"} in “${settings.proposalFolder}” will leave ${settings.inboxLabel} and no longer appear anywhere in this plugin. The files stay in the vault; use Add existing note to index any you still need.`;
+            },
+          ),
           renderSetting("Inbox name", "Label used for the Inbox section.", (row) => {
             row.addText((text) => {
               text.setPlaceholder("Inbox").setValue(settings.inboxLabel).setDisabled(readOnly).onChange((value) => {
