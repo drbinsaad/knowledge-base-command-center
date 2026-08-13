@@ -1269,9 +1269,17 @@ export class EntVaultCommandCenterView extends ItemView {
         if (!ownsBase()) return;
         const tokenContext = this.quickCreateTokenContext(destination);
         const file = await this.plugin.createKnowledgeNote(value, tokenContext);
-        if (!ownsBase()) return;
+        if (!ownsBase()) {
+          // The file exists but no registration can safely run against the
+          // replaced knowledge base; the user must at least learn its path.
+          new Notice(`The note was created at ${file.path}, but the active knowledge base changed before it could be filed. Use Add existing note to place it.`, 10000);
+          return;
+        }
         const notice = await this.applyQuickCreateDestination(file, destination, ownsBase);
-        if (!ownsBase()) return;
+        if (!ownsBase()) {
+          new Notice(`The note was created at ${file.path}. The active knowledge base changed while it was being filed; verify its placement.`, 10000);
+          return;
+        }
         if (notice) new Notice(notice);
         if (value.addToCollection && destination.kind !== "collection") this.openCollectionPicker(file.path);
         await this.plugin.openFile(file);
@@ -1396,7 +1404,10 @@ export class EntVaultCommandCenterView extends ItemView {
           const subheadingExists = !destination.subheadingId
             || (heading !== undefined && subheadingChain(heading, destination.subheadingId) !== null);
           if (!heading || !subheadingExists) {
-            return `${itemLabel} created at ${file.path}, but the chosen collection destination no longer exists. Use Add to a collection to place it.`;
+            // Without the collection link the note may sit outside every
+            // visibility root; index it so it cannot vanish from the plugin.
+            const rescued = await this.rescueUnfiledCreatedNote(file, ownsBase);
+            return `${itemLabel} created at ${file.path}, but the chosen collection destination no longer exists${rescued ? `, so it was added to ${settings.indexLabel}` : ""}. Use Add to a collection to place it.`;
           }
           await this.plugin.mutate("Add created note to collection", () => {
             this.addMembership(file.path, { headingId: destination.headingId, subheadingId: destination.subheadingId });
@@ -1406,13 +1417,15 @@ export class EntVaultCommandCenterView extends ItemView {
         case "library": {
           const library = this.plugin.getLibrary(destination.libraryId);
           if (!library || library.archivedAt !== null) {
-            return `${itemLabel} created at ${file.path}, but the chosen library is no longer available. Classify it from the record's actions menu.`;
+            const rescued = await this.rescueUnfiledCreatedNote(file, ownsBase);
+            return `${itemLabel} created at ${file.path}, but the chosen library is no longer available${rescued ? `, so it was added to ${settings.indexLabel}` : ""}. Classify it from the record's actions menu.`;
           }
           await this.plugin.assignRecordToLibrary(file.path, destination.libraryId, destination.target);
           return `${library.singularName} created and added to ${library.name}. The Markdown note was not rewritten.`;
         }
       }
     } catch (error) {
+      await this.rescueUnfiledCreatedNote(file, ownsBase);
       return `${itemLabel} created at ${file.path}, but it could not be filed: ${errorMessage(error)}`;
     }
   }
@@ -1988,6 +2001,24 @@ export class EntVaultCommandCenterView extends ItemView {
     }, `Complete “${record.title}”`).open();
   }
 
+  /**
+   * A clinical note is visible only inside the proposal folder (Inbox), the
+   * primary clinical folder, or a native source root. Returns the blocking
+   * explanation for a folder the clinical classifier would never surface —
+   * the ENT default note folder "01 Inbox" is such a folder, which orphaned
+   * every plain clinical create until this guard existed.
+   */
+  private clinicalCreateFolderIssue(folder: string): string | null {
+    if (!this.plugin.isClinicalMode()) return null;
+    const settings = this.plugin.data.settings;
+    const cleanFolder = folder.trim().replace(/^\/+|\/+$/gu, "");
+    const roots = [settings.proposalFolder, settings.primaryFolder]
+      .map((root) => root.trim().replace(/^\/+|\/+$/gu, ""))
+      .filter(Boolean);
+    if (roots.some((root) => cleanFolder === root || cleanFolder.startsWith(`${root}/`))) return null;
+    return `In the clinical profile, a plain note is only visible inside ${roots.join(" or ")}. Choose one of those folders, or use the protected proposal workflow.`;
+  }
+
   public startCreateKnowledgeNote(
     initial: Partial<GenericNoteFormValue> = {},
     indexAfterCreate = !this.plugin.isClinicalMode(),
@@ -1998,28 +2029,54 @@ export class EntVaultCommandCenterView extends ItemView {
     if (!this.guardLoadedBase()) return;
     const ownsBase = this.createOpenedBaseGuard();
     const settings = this.plugin.data.settings;
+    const clinicalMode = this.plugin.isClinicalMode();
+    // The ENT default note folder is "01 Inbox", which no clinical classifier
+    // branch surfaces (the proposal folder is a SUBfolder of it). A plain
+    // clinical create must start inside the Inbox it will actually appear in.
+    const seededFolder = initial.folder
+      ?? (clinicalMode && !onCreated ? settings.proposalFolder : settings.defaultNoteFolder);
     new KnowledgeNoteModal(this.app, {
       itemSingular: settings.itemSingular,
       ...formContext,
       templates: this.plugin.getTemplateFiles(),
       initial: {
         title: initial.title ?? "",
-        folder: initial.folder ?? settings.defaultNoteFolder,
+        folder: seededFolder,
         mode: initial.mode ?? settings.defaultNewNoteMode,
         templatePath: initial.templatePath ?? settings.defaultTemplatePath,
         addToCollection: initial.addToCollection ?? false,
       },
-      validate: (value) => ownsBase()
-        ? this.plugin.validateGenericNote(value)
-        : "The active knowledge base changed. Close and reopen this form.",
+      validate: (value) => {
+        if (!ownsBase()) return "The active knowledge base changed. Close and reopen this form.";
+        if (!onCreated) {
+          const clinicalIssue = this.clinicalCreateFolderIssue(value.folder);
+          if (clinicalIssue) return clinicalIssue;
+        }
+        return this.plugin.validateGenericNote(value);
+      },
       onSubmit: async (value) => {
         if (!ownsBase()) return;
         const file = await this.plugin.createKnowledgeNote(value, formContext?.tokenContext);
-        if (!ownsBase()) return;
+        if (!ownsBase()) {
+          // The base changed under the form after the file was written; no
+          // registration can safely run against the replacement data, so the
+          // user must at least learn where the file is.
+          new Notice(`The note was created at ${file.path}, but the active knowledge base changed before it could be filed. Use Add existing note to place it.`, 10000);
+          return;
+        }
         if (onCreated) {
-          await onCreated(file);
-          if (!ownsBase()) return;
-        } else if (indexAfterCreate && !this.plugin.isClinicalMode()) {
+          try {
+            await onCreated(file);
+          } catch (error) {
+            await this.rescueUnfiledCreatedNote(file, ownsBase);
+            new Notice(`The note was created at ${file.path}, but it could not be filed: ${errorMessage(error)}`, 10000);
+            return;
+          }
+          if (!ownsBase()) {
+            new Notice(`The note was created at ${file.path}. The active knowledge base changed while it was being filed; verify its placement.`, 10000);
+            return;
+          }
+        } else if (indexAfterCreate && !clinicalMode) {
           await this.plugin.mutate(`Add created ${settings.itemSingular} to ${settings.indexLabel}`, () => {
             this.plugin.data.excludedIndexPaths = this.plugin.data.excludedIndexPaths.filter((path) => path !== file.path);
             if (!pathIsInsideFolder(file.path, settings.primaryFolder) && !this.plugin.data.manualIndexPaths.includes(file.path)) {
@@ -2034,14 +2091,47 @@ export class EntVaultCommandCenterView extends ItemView {
           if (!ownsBase()) return;
           await this.reload();
           if (!ownsBase()) return;
+          // Belt over the validation braces: if the note still classified to
+          // no record (settings changed mid-form, case-folded folders), make
+          // it findable instead of letting it vanish from every tab.
+          if (!clinicalMode && !this.plugin.getRecord(file.path)) {
+            await this.rescueUnfiledCreatedNote(file, ownsBase);
+            if (!ownsBase()) return;
+            new Notice(`${settings.itemSingular[0]?.toUpperCase() ?? "N"}${settings.itemSingular.slice(1)} created at ${file.path}, which is outside every visible area, so it was added to ${settings.indexLabel} to stay findable.`, 10000);
+            if (value.addToCollection) this.openCollectionPicker(file.path);
+            await this.plugin.openFile(file);
+            return;
+          }
         }
         new Notice(completionMessage ?? (onCreated
           ? `${settings.itemSingular[0]?.toUpperCase() ?? "N"}${settings.itemSingular.slice(1)} created and linked to the imported subject.`
-          : `${settings.itemSingular[0]?.toUpperCase() ?? "N"}${settings.itemSingular.slice(1)} created${indexAfterCreate && !this.plugin.isClinicalMode() ? ` and added to ${settings.indexLabel}` : ""}. Existing notes were not changed.`));
+          : `${settings.itemSingular[0]?.toUpperCase() ?? "N"}${settings.itemSingular.slice(1)} created${indexAfterCreate && !clinicalMode ? ` and added to ${settings.indexLabel}` : ""}. Existing notes were not changed.`));
         if (value.addToCollection) this.openCollectionPicker(file.path);
         await this.plugin.openFile(file);
       },
     }).open();
+  }
+
+  /**
+   * Last-resort registration for a note that exists on disk but would appear
+   * in no tab: generic mode indexes it manually; clinical mode never receives
+   * silent manual membership (startup repair would prune it), so clinical
+   * callers surface the path in their notice instead. A note that already
+   * classifies to a visible record (its folder makes it a proposal or topic)
+   * is left exactly where it is — reports false so notices stay truthful.
+   */
+  private async rescueUnfiledCreatedNote(file: TFile, ownsBase: () => boolean): Promise<boolean> {
+    if (this.plugin.isClinicalMode() || !ownsBase()) return false;
+    if (this.plugin.getRecord(file.path)) return false;
+    const settings = this.plugin.data.settings;
+    await this.plugin.mutate(`Add created ${settings.itemSingular} to ${settings.indexLabel}`, () => {
+      this.plugin.data.excludedIndexPaths = this.plugin.data.excludedIndexPaths.filter((path) => path !== file.path);
+      if (!pathIsInsideFolder(file.path, settings.primaryFolder) && !this.plugin.data.manualIndexPaths.includes(file.path)) {
+        this.plugin.data.manualIndexPaths.push(file.path);
+      }
+      this.plugin.data.selectedPath = file.path;
+    });
+    return true;
   }
 
   public openSetupWizard(): void {
@@ -3036,7 +3126,10 @@ export class EntVaultCommandCenterView extends ItemView {
       button.createSpan({ text: this.plugin.isClinicalMode() ? "Create topic proposal" : `Create ${this.plugin.data.settings.itemSingular}` });
       button.addEventListener("click", () => this.plugin.isClinicalMode()
         ? this.startCreateProposal()
-        : this.startCreateKnowledgeNote({ folder: this.plugin.data.settings.proposalFolder }, false));
+        // The guarded unified form already defaults to the Inbox destination;
+        // the legacy direct form here bypassed its folder validation and
+        // created notes the plugin would never show.
+        : this.openQuickCreateNoteForm());
       return 0;
     }
     if (!this.beginBrowseStructure(proposals.length)) return proposals.length;
@@ -4241,11 +4334,14 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     new CollectionPickerModal(this.app, targets, "Add", async (target) => {
       if (!ownsBase()) return;
+      let placed = 0;
       await this.plugin.mutate(`Add ${records.length} matching records from ${baseName} to collection`, () => {
-        for (const path of paths) this.addMembership(path, target);
+        for (const path of paths) placed += Number(this.addMembership(path, target));
       });
       if (!ownsBase()) return;
-      new Notice(`Added ${records.length} matching records from ${baseName}. Source notes stayed in place.`);
+      new Notice(placed === 0
+        ? "That collection destination no longer exists. Reopen the picker and choose again."
+        : `Added ${placed} matching records from ${baseName}. Source notes stayed in place.`);
     }, `collection in ${baseName} (${records.length} current-base matches)`).open();
   }
 
@@ -4708,28 +4804,44 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     new CollectionPickerModal(this.app, targets, move ? "Move" : "Add", async (target) => {
       if (!ownsBase()) return;
+      let placed = false;
       await this.plugin.mutate(`${move ? "Move" : "Add"} record in collection`, () => {
-        if (move && source) this.removeMembership(path, source);
-        this.addMembership(path, target);
+        // Resolve the target before touching the source: removing first and
+        // then failing to add would drop the membership entirely.
+        placed = this.addMembership(path, target);
+        if (!placed || !move || !source) return;
+        const samePlace = source.headingId === target.headingId && source.subheadingId === target.subheadingId;
+        if (!samePlace) this.removeMembership(path, source);
       });
       if (!ownsBase()) return;
+      if (!placed) {
+        new Notice("That collection destination no longer exists. Reopen the picker and choose again.");
+        return;
+      }
       new Notice(`${move ? "Moved" : "Added"} in My Collections. The source note stayed in place.`);
     }).open();
   }
 
-  private addMembership(path: string, target: Membership): void {
+  /**
+   * Reports whether the target still existed. A heading or subheading can be
+   * deleted by a same-epoch actor the base guard cannot see (a second window,
+   * or a stale row inside the refresh debounce); callers must not tell the
+   * user "Added" when nothing was.
+   */
+  private addMembership(path: string, target: Membership): boolean {
     const heading = this.plugin.data.collections.find((item) => item.id === target.headingId);
-    if (!heading) return;
+    if (!heading) return false;
     let list = heading.subjects;
     if (target.subheadingId) {
       // The target may sit at any depth under this heading; ids are unique.
       const located = subheadingChain(heading, target.subheadingId);
-      if (!located) return;
+      if (!located) return false;
       list = located.node.subjects;
       for (const node of located.chain) node.collapsed = false;
     }
     if (!list.includes(path)) list.push(path);
     heading.collapsed = false;
+    return true;
   }
 
   private removeMembership(path: string, membership: Membership): void {
@@ -5890,8 +6002,11 @@ export class EntVaultCommandCenterView extends ItemView {
       const payload = this.readDrag(event);
       if (!payload) return;
       this.run(() => this.plugin.mutate("Move record membership", () => {
-        this.removeMembership(payload.path, payload);
-        this.addMembership(payload.path, target);
+        // Resolve the drop target before touching the source; a vanished
+        // target must not turn a move into a silent removal.
+        const samePlace = payload.headingId === target.headingId && payload.subheadingId === target.subheadingId;
+        if (!this.addMembership(payload.path, target)) return;
+        if (!samePlace) this.removeMembership(payload.path, payload);
       }));
     });
   }
