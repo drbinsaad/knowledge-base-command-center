@@ -27,7 +27,6 @@ import {
   buildCurriculumTree,
   createDefaultStore,
   createPersonalBackup,
-  createWorkspaceConfig,
   emptyCurriculumTree,
   libraryTabId,
   migrateData,
@@ -1885,6 +1884,354 @@ test("library modal callbacks reject replaced layouts and removed IDs without to
   }
 
   assert.equal(mutations, 3, "removed targets must reject before starting a mutation");
+});
+
+test("collections rename and add-subheading target the live nodes, not menu-time captures", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const originalHeading: LayoutHeading = {
+    id: "heading-a",
+    title: "Original collection",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{ id: "sub-a", title: "Original subheading", collapsed: false, subjects: [] }],
+  };
+  data.collections = [originalHeading];
+  let mutations = 0;
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    isClinicalMode: () => false,
+    async mutate(_label: string, action: () => void): Promise<void> {
+      mutations += 1;
+      action();
+    },
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: object;
+    plugin: typeof plugin;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    promptNewSubheading(heading: LayoutHeading, parent?: LayoutHeading | LayoutSubheading): void;
+    showHeadingMenu(event: MouseEvent, heading: LayoutHeading): void;
+    showSubheadingMenu(event: MouseEvent, heading: LayoutHeading, subheading: LayoutSubheading): void;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+
+  type PromptSubmit = (value: string) => void | Promise<void>;
+  interface CapturedMenuItem { title: string; click?: () => void }
+  const prompts: PromptSubmit[] = [];
+  const shownMenus: CapturedMenuItem[][] = [];
+  const itemsByMenu = new WeakMap<object, CapturedMenuItem[]>();
+  const promptOpen = Object.getOwnPropertyDescriptor(TextPromptModal.prototype, "open");
+  const menuDescriptors = new Map(["addItem", "addSeparator", "showAtMouseEvent"].map((name) => [
+    name,
+    Object.getOwnPropertyDescriptor(Menu.prototype, name),
+  ]));
+  TextPromptModal.prototype.open = function capturePrompt(): void {
+    const modal = this as unknown as { options: { onSubmit(value: string): void | Promise<void> } };
+    prompts.push((value) => modal.options.onSubmit(value));
+  };
+  Object.defineProperty(Menu.prototype, "addItem", {
+    configurable: true,
+    value(this: object, configure: (item: unknown) => void): object {
+      const entries = itemsByMenu.get(this) ?? [];
+      itemsByMenu.set(this, entries);
+      const captured: CapturedMenuItem = { title: "" };
+      const item = {
+        setTitle(title: string) { captured.title = title; return item; },
+        setIcon() { return item; },
+        setDisabled() { return item; },
+        onClick(callback: () => void) { captured.click = callback; return item; },
+      };
+      configure(item);
+      entries.push(captured);
+      return this;
+    },
+  });
+  Object.defineProperty(Menu.prototype, "addSeparator", {
+    configurable: true,
+    value(this: object): object { return this; },
+  });
+  Object.defineProperty(Menu.prototype, "showAtMouseEvent", {
+    configurable: true,
+    value(this: object): void { shownMenus.push(itemsByMenu.get(this) ?? []); },
+  });
+
+  const takePrompt = (): PromptSubmit => {
+    const submit = prompts.shift();
+    assert.ok(submit, "expected a collections prompt callback");
+    return submit;
+  };
+  const choose = (title: string): void => {
+    const item = shownMenus[shownMenus.length - 1]?.find((candidate) => candidate.title === title);
+    assert.ok(item, `missing menu item ${title}`);
+    item.click?.();
+  };
+
+  try {
+    view.showHeadingMenu({} as MouseEvent, originalHeading);
+    choose("Rename collection");
+    const renameHeading = takePrompt();
+    const liveHeading = structuredClone(originalHeading);
+    data.collections = [liveHeading];
+    await renameHeading("Renamed collection");
+    assert.equal(liveHeading.title, "Renamed collection");
+    assert.equal(originalHeading.title, "Original collection", "the detached menu-time capture stays untouched");
+    assert.equal(mutations, 1);
+
+    view.showHeadingMenu({} as MouseEvent, liveHeading);
+    choose("Rename collection");
+    const renameRemovedHeading = takePrompt();
+    data.collections = [];
+    await assert.rejects(Promise.resolve(renameRemovedHeading("Must not apply")), /collection is no longer available/i);
+    assert.equal(liveHeading.title, "Renamed collection");
+    assert.equal(mutations, 1);
+
+    data.collections = [liveHeading];
+    const capturedSubheading = liveHeading.subheadings[0];
+    assert.ok(capturedSubheading);
+    view.showSubheadingMenu({} as MouseEvent, liveHeading, capturedSubheading);
+    choose("Rename subheading");
+    const renameSubheading = takePrompt();
+    const replacementHeading = structuredClone(liveHeading);
+    data.collections = [replacementHeading];
+    await renameSubheading("Renamed subheading");
+    assert.equal(replacementHeading.subheadings[0]?.title, "Renamed subheading");
+    assert.equal(capturedSubheading.title, "Original subheading", "the detached subheading stays untouched");
+    assert.equal(mutations, 2);
+
+    const liveSubheading = replacementHeading.subheadings[0];
+    assert.ok(liveSubheading);
+    view.showSubheadingMenu({} as MouseEvent, replacementHeading, liveSubheading);
+    choose("Rename subheading");
+    const renameRemovedSubheading = takePrompt();
+    replacementHeading.subheadings = [];
+    await assert.rejects(Promise.resolve(renameRemovedSubheading("Must not apply")), /subheading is no longer available/i);
+    assert.equal(liveSubheading.title, "Renamed subheading");
+    assert.equal(mutations, 2);
+
+    replacementHeading.subheadings = [liveSubheading];
+    view.promptNewSubheading(replacementHeading, liveSubheading);
+    const createNested = takePrompt();
+    const secondReplacement = structuredClone(replacementHeading);
+    data.collections = [secondReplacement];
+    await createNested("Nested under live parent");
+    const liveParent = secondReplacement.subheadings[0];
+    assert.ok(liveParent);
+    assert.equal(liveParent.subheadings?.some((item) => item.title === "Nested under live parent"), true);
+    assert.equal((liveSubheading.subheadings ?? []).length, 0, "the detached parent gains nothing");
+    assert.equal(mutations, 3);
+
+    view.promptNewSubheading(secondReplacement, liveParent);
+    const createUnderRemoved = takePrompt();
+    secondReplacement.subheadings = [];
+    await assert.rejects(Promise.resolve(createUnderRemoved("Must not apply")), /subheading is no longer available/i);
+
+    view.promptNewSubheading(secondReplacement);
+    const createInRemoved = takePrompt();
+    data.collections = [];
+    await assert.rejects(Promise.resolve(createInRemoved("Must not apply")), /collection is no longer available/i);
+    assert.equal(mutations, 3, "removed targets must reject before starting a mutation");
+  } finally {
+    if (promptOpen) Object.defineProperty(TextPromptModal.prototype, "open", promptOpen);
+    else Reflect.deleteProperty(TextPromptModal.prototype, "open");
+    for (const [name, descriptor] of menuDescriptors) {
+      if (descriptor) Object.defineProperty(Menu.prototype, name, descriptor);
+      else Reflect.deleteProperty(Menu.prototype, name);
+    }
+  }
+});
+
+test("collection reorder clicks recompute their index against the mutated live lists", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const heading = (id: string, title: string): LayoutHeading => ({ id, title, collapsed: false, subjects: [], subheadings: [] });
+  const first = heading("h1", "Heading 1");
+  const second = heading("h2", "Heading 2");
+  const third = heading("h3", "Heading 3");
+  const membershipHeading: LayoutHeading = {
+    id: "membership-heading",
+    title: "Membership",
+    collapsed: false,
+    subjects: ["Knowledge Base/A.md", "Knowledge Base/B.md", "Knowledge Base/C.md"],
+    subheadings: [],
+  };
+  data.collections = [first, second, third, membershipHeading];
+  let mutations = 0;
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    isClinicalMode: () => false,
+    canVisuallyMoveAcrossGroups: () => false,
+    getLibrary: () => null,
+    async mutate(_label: string, action: () => void): Promise<void> {
+      mutations += 1;
+      action();
+    },
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: object;
+    plugin: typeof plugin;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    curriculumArrangeMode: boolean;
+    showHeadingMenu(event: MouseEvent, heading: LayoutHeading): void;
+    showRecordMenu(event: MouseEvent, item: VaultRecord, membership: { headingId: string; subheadingId?: string }): void;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+  view.curriculumArrangeMode = false;
+
+  interface CapturedMenuItem { title: string; click?: () => void }
+  const shownMenus: CapturedMenuItem[][] = [];
+  const itemsByMenu = new WeakMap<object, CapturedMenuItem[]>();
+  const menuDescriptors = new Map(["addItem", "addSeparator", "showAtMouseEvent"].map((name) => [
+    name,
+    Object.getOwnPropertyDescriptor(Menu.prototype, name),
+  ]));
+  Object.defineProperty(Menu.prototype, "addItem", {
+    configurable: true,
+    value(this: object, configure: (item: unknown) => void): object {
+      const entries = itemsByMenu.get(this) ?? [];
+      itemsByMenu.set(this, entries);
+      const captured: CapturedMenuItem = { title: "" };
+      const item = {
+        setTitle(title: string) { captured.title = title; return item; },
+        setIcon() { return item; },
+        setDisabled() { return item; },
+        onClick(callback: () => void) { captured.click = callback; return item; },
+      };
+      configure(item);
+      entries.push(captured);
+      return this;
+    },
+  });
+  Object.defineProperty(Menu.prototype, "addSeparator", {
+    configurable: true,
+    value(this: object): object { return this; },
+  });
+  Object.defineProperty(Menu.prototype, "showAtMouseEvent", {
+    configurable: true,
+    value(this: object): void { shownMenus.push(itemsByMenu.get(this) ?? []); },
+  });
+  const choose = (items: CapturedMenuItem[], title: string): void => {
+    const item = items.find((candidate) => candidate.title === title);
+    assert.ok(item, `missing menu item ${title}`);
+    item.click?.();
+  };
+
+  try {
+    view.showHeadingMenu({} as MouseEvent, second);
+    const headingMenu = shownMenus[shownMenus.length - 1] ?? [];
+    data.collections = [second, first, third, membershipHeading];
+
+    choose(headingMenu, "Move collection up");
+    await Promise.resolve();
+    assert.deepEqual(data.collections.map((item) => item.id), ["h2", "h1", "h3", "membership-heading"]);
+    assert.equal(mutations, 0, "a stale click at the live boundary is a no-op, not a wrong-target move");
+
+    choose(headingMenu, "Move collection down");
+    await Promise.resolve();
+    assert.deepEqual(data.collections.map((item) => item.id), ["h1", "h2", "h3", "membership-heading"]);
+    assert.equal(mutations, 1, "the intended collection moves relative to its current position");
+
+    const target = record("Knowledge Base/B.md", "Beta");
+    view.showRecordMenu({} as MouseEvent, target, { headingId: membershipHeading.id });
+    const recordMenu = shownMenus[shownMenus.length - 1] ?? [];
+    membershipHeading.subjects = ["Knowledge Base/B.md", "Knowledge Base/A.md", "Knowledge Base/C.md"];
+
+    choose(recordMenu, "Move down");
+    await Promise.resolve();
+    assert.deepEqual(
+      membershipHeading.subjects,
+      ["Knowledge Base/A.md", "Knowledge Base/B.md", "Knowledge Base/C.md"],
+      "the record whose menu was opened moves, not whichever record drifted into its old slot",
+    );
+    assert.equal(mutations, 2);
+
+    choose(recordMenu, "Move up");
+    await Promise.resolve();
+    assert.deepEqual(membershipHeading.subjects, ["Knowledge Base/B.md", "Knowledge Base/A.md", "Knowledge Base/C.md"]);
+    assert.equal(mutations, 3);
+  } finally {
+    for (const [name, descriptor] of menuDescriptors) {
+      if (descriptor) Object.defineProperty(Menu.prototype, name, descriptor);
+      else Reflect.deleteProperty(Menu.prototype, name);
+    }
+  }
+});
+
+test("edit-placement parent candidates exclude the edited topic and its descendants", () => {
+  const data = migrateData(null);
+  data.settings.enableAdvancedCanonicalActions = true;
+  const canonicalTopic = (path: string, title: string, curriculumId: string, parentTopic: string): VaultRecord => ({
+    ...record(path, title),
+    role: "canonical",
+    domain: "Laryngology",
+    curriculumId,
+    parentTopic,
+  });
+  const edited = canonicalTopic("Knowledge Base/Topic A.md", "Topic A", "ENT-LAR-EXT-001", "");
+  const child = canonicalTopic("Knowledge Base/Topic B.md", "Topic B", "ENT-LAR-EXT-002", "[[Topic A]]");
+  const grandchild = canonicalTopic("Knowledge Base/Topic C.md", "Topic C", "ENT-LAR-EXT-003", "[[Topic B]]");
+  const unrelated = canonicalTopic("Knowledge Base/Topic D.md", "Topic D", "ENT-LAR-EXT-004", "");
+  const topics = [edited, child, grandchild, unrelated];
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    getCanonicalTopics: () => topics,
+    resolveLink: () => null,
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: object;
+    plugin: typeof plugin;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    curriculum: ReturnType<typeof buildCurriculumTree>;
+    recordByPath: Map<string, VaultRecord>;
+    startEditCanonicalPlacement(record: VaultRecord): void;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+  view.curriculum = buildCurriculumTree(topics, data.curriculumVisual, true);
+  view.recordByPath = new Map(topics.map((item) => [item.path, item]));
+
+  const openDescriptor = Object.getOwnPropertyDescriptor(TopicEditorModal.prototype, "open");
+  let captured: { canonicalRecords: VaultRecord[] } | null = null;
+  TopicEditorModal.prototype.open = function captureOptions(): void {
+    captured = (this as unknown as { options: { canonicalRecords: VaultRecord[] } }).options;
+  };
+  try {
+    view.startEditCanonicalPlacement(edited);
+  } finally {
+    if (openDescriptor) Object.defineProperty(TopicEditorModal.prototype, "open", openDescriptor);
+    else Reflect.deleteProperty(TopicEditorModal.prototype, "open");
+  }
+
+  assert.ok(captured, "edit placement must reach the topic editor");
+  const offered = (captured as { canonicalRecords: VaultRecord[] }).canonicalRecords;
+  assert.deepEqual(
+    offered.map((item) => item.path),
+    [unrelated.path],
+    "the topic itself and its whole descendant chain are never offered as parents",
+  );
 });
 
 test("reload returns to the index when the active dynamic library tab no longer exists", async () => {
@@ -3850,139 +4197,6 @@ test("workspace-only export omits archived Library profiles and descriptors so i
   assert.equal(destination.settings.libraryNoteProfiles[archived.id], undefined);
 });
 
-test("standalone workspace import resets invalid templates and reports omitted Library profiles", async () => {
-  Notice.messages.length = 0;
-  const source = migrateData(null);
-  const library = installLibrary(source);
-  source.settings.templatesFolder = "Templates";
-  source.settings.libraryNoteProfiles[library.id] = {
-    folder: "Reference notes",
-    mode: "empty",
-    templatePath: "Outside Templates/Private.md",
-  };
-  const config = createWorkspaceConfig(source, "2026-08-11T00:00:00.000Z");
-  config.settings.libraryNoteProfiles[library.id] = {
-    folder: "Reference notes",
-    mode: "template",
-    templatePath: "../Private.md",
-  };
-  config.settings.libraryNoteProfiles["missing-library"] = {
-    folder: "Missing Library",
-    mode: "empty",
-  };
-
-  const destination = migrateData(null);
-  installLibrary(destination, { ...library });
-  let mutateOptions: { includeSettings?: boolean; requireUndo?: boolean } | null = null;
-  const plugin = {
-    data: destination,
-    getLibraries: () => destination.portableIndex.libraries,
-    isClinicalMode: () => false,
-    invalidateRecordCache(): void {},
-    async mutate(
-      _label: string,
-      action: () => void,
-      options: { includeSettings?: boolean; requireUndo?: boolean },
-    ): Promise<void> {
-      mutateOptions = options;
-      action();
-    },
-  };
-  const manager = Object.create(IndexManagerModal.prototype) as {
-    app: { vault: { configDir: string; getAbstractFileByPath(path: string): null } };
-    plugin: typeof plugin;
-    diagnosticsCache: unknown;
-    titleEl: { setText(value: string): void };
-    tab: "indexed" | "available";
-    guardOpenedBase(): boolean;
-    ownsOpenedBase(): boolean;
-    render(): void;
-    confirmWorkspaceImport(input: Promise<unknown>): void;
-  };
-  manager.app = { vault: { configDir: ".obsidian", getAbstractFileByPath: () => null } };
-  manager.plugin = plugin;
-  manager.diagnosticsCache = null;
-  manager.titleEl = { setText: () => undefined };
-  manager.tab = "indexed";
-  manager.guardOpenedBase = () => true;
-  manager.ownsOpenedBase = () => true;
-  manager.render = () => undefined;
-
-  const opened: Array<{ onConfirm(): void | Promise<void> }> = [];
-  const originalOpen = Object.getOwnPropertyDescriptor(ConfirmModal.prototype, "open");
-  ConfirmModal.prototype.open = function captureConfirm(): void {
-    opened.push(this);
-  };
-  try {
-    manager.confirmWorkspaceImport(Promise.resolve(config));
-    await Promise.resolve();
-    await Promise.resolve();
-    assert.equal(opened.length, 1);
-    await opened[0]?.onConfirm();
-  } finally {
-    if (originalOpen) Object.defineProperty(ConfirmModal.prototype, "open", originalOpen);
-    else Reflect.deleteProperty(ConfirmModal.prototype, "open");
-  }
-
-  assert.deepEqual(destination.settings.libraryNoteProfiles[library.id], {
-    folder: "Reference notes",
-    mode: "empty",
-  });
-  assert.equal(destination.settings.libraryNoteProfiles["missing-library"], undefined);
-  assert.deepEqual(mutateOptions, { includeSettings: true, requireUndo: true });
-  assert.ok(Notice.messages.some((message) => /1 Library profile referenced unavailable templates/i.test(message)));
-  assert.ok(Notice.messages.some((message) => /1 Library profile did not match a destination Library/i.test(message)));
-});
-
-test("standalone workspace import rejects a lossy-invalid Library folder before confirmation or mutation", async () => {
-  Notice.messages.length = 0;
-  const source = migrateData(null);
-  const library = installLibrary(source);
-  const config = createWorkspaceConfig(source, "2026-08-11T00:00:00.000Z");
-  config.settings.libraryNoteProfiles[library.id] = {
-    folder: "../Escaped notes",
-    mode: "empty",
-  };
-  const destination = migrateData(null);
-  installLibrary(destination, { ...library });
-  let mutationCount = 0;
-  const plugin = {
-    data: destination,
-    getLibraries: () => destination.portableIndex.libraries,
-    isClinicalMode: () => false,
-    invalidateRecordCache(): void {},
-    async mutate(): Promise<void> { mutationCount += 1; },
-  };
-  const manager = Object.create(IndexManagerModal.prototype) as {
-    app: { vault: { configDir: string; getAbstractFileByPath(path: string): null } };
-    plugin: typeof plugin;
-    guardOpenedBase(): boolean;
-    ownsOpenedBase(): boolean;
-    confirmWorkspaceImport(input: Promise<unknown>): void;
-  };
-  manager.app = { vault: { configDir: ".obsidian", getAbstractFileByPath: () => null } };
-  manager.plugin = plugin;
-  manager.guardOpenedBase = () => true;
-  manager.ownsOpenedBase = () => true;
-
-  const opened: unknown[] = [];
-  const originalOpen = Object.getOwnPropertyDescriptor(ConfirmModal.prototype, "open");
-  ConfirmModal.prototype.open = function captureConfirm(): void { opened.push(this); };
-  try {
-    manager.confirmWorkspaceImport(Promise.resolve(config));
-    await Promise.resolve();
-    await Promise.resolve();
-  } finally {
-    if (originalOpen) Object.defineProperty(ConfirmModal.prototype, "open", originalOpen);
-    else Reflect.deleteProperty(ConfirmModal.prototype, "open");
-  }
-
-  assert.equal(opened.length, 0);
-  assert.equal(mutationCount, 0);
-  assert.ok(Notice.messages.some((message) => /unsupported folder path/i.test(message)));
-  assert.equal(destination.settings.libraryNoteProfiles[library.id], undefined);
-});
-
 test("Index Manager refreshes stale state after a child portability mutation", () => {
   let renders = 0;
   let title = "";
@@ -5911,39 +6125,9 @@ test("index manager keystrokes filter one cached vault snapshot instead of resca
   }
 });
 
-test("oversized JSON is refused before it is read at both the workspace and backup import sites", async () => {
+test("oversized JSON is refused before it is read at the backup import site", async () => {
   const dom = createFakeDom();
   const oversized = { size: 10 * 1024 * 1024 + 1, text: async (): Promise<string> => "{}" };
-
-  Notice.messages.length = 0;
-  let workspaceValues = 0;
-  const manager = Object.create(IndexManagerModal.prototype) as {
-    app: unknown;
-    plugin: unknown;
-    openedBaseId: string;
-    managerOpen: boolean;
-    close(): void;
-    importWorkspace(): void;
-    confirmWorkspaceImport(value: unknown): void;
-  };
-  manager.app = {};
-  manager.plugin = { getActiveKnowledgeBaseId: () => "base-a", getDataEpoch: () => 1 };
-  manager.openedBaseId = "";
-  manager.managerOpen = true;
-  manager.close = () => undefined;
-  manager.confirmWorkspaceImport = () => { workspaceValues += 1; };
-
-  await withCreateEl(dom.document, async (created) => {
-    manager.importWorkspace();
-    const input = created.find((element) => element.tagName === "input");
-    assert.ok(input);
-    (input as unknown as { files: unknown[] }).files = [oversized];
-    input.dispatch("change");
-    await settleMicrotasks();
-  });
-
-  assert.equal(workspaceValues, 0, "the workspace import never parsed the oversized file");
-  assert.equal(Notice.messages.filter((message) => message.includes("larger than the 10 MB import limit")).length, 1);
 
   Notice.messages.length = 0;
   let backupValues = 0;

@@ -14,6 +14,9 @@ import {
   canonicalIdIsValid,
   canonicalJsonString,
   canonicalHierarchyIssue,
+  clampStoredText,
+  cloneJsonValue,
+  codeUnitCompare,
   canonicalPath,
   canonicalPathInputsUnchanged,
   capturePluginViewState,
@@ -27,6 +30,7 @@ import {
   cleanLibraryNoteProfiles,
   cloneLibraryLayouts,
   emptyLibraryLayouts,
+  enforceStoredTextBounds,
   ensureSystemLibraries,
   configuredGroupFromPath,
   createDefaultStore,
@@ -7840,4 +7844,123 @@ test("one error-to-text helper reproduces every shape the call sites inlined", (
   // An omitted fallback must behave exactly like the String(error) sites, so
   // undefined is not treated as a caller-supplied sentence.
   assert.equal(errorMessage("boom", undefined), "boom");
+});
+
+test("oversized text is clamped at every writer, so a paste can never brick the store read-only", () => {
+  const oversized = "x".repeat(MAX_TRANSFER_TEXT_LENGTH + 1);
+  const workspace = parseWorkspaceConfig({
+    kind: "knowledge-base-command-center-workspace",
+    version: 2,
+    settings: { workspaceSubtitle: oversized },
+    indexGroupOrder: [oversized],
+  });
+  assert.equal(workspace.settings.workspaceSubtitle.length, MAX_TRANSFER_TEXT_LENGTH);
+  assert.equal(workspace.indexGroupOrder[0]?.length, MAX_TRANSFER_TEXT_LENGTH);
+
+  // The Settings tab and setup wizard assign pasted text to live settings
+  // without the cleaners; the save-path bound must clamp it before serialize.
+  const data = migrateData(null);
+  data.settings.workspaceSubtitle = oversized;
+  data.settings.attachmentHeading = oversized;
+  data.indexGroupOrder = [oversized];
+  data.indexGroupAliases[oversized] = oversized;
+  data.settings.libraryNoteProfiles = { "library-a": { folder: oversized } };
+  enforceStoredTextBounds(data);
+  assert.equal(data.settings.workspaceSubtitle.length, MAX_TRANSFER_TEXT_LENGTH);
+  assert.equal(data.settings.attachmentHeading.length, MAX_TRANSFER_TEXT_LENGTH);
+  assert.equal(data.indexGroupOrder[0]?.length, MAX_TRANSFER_TEXT_LENGTH);
+  assert.equal(data.settings.libraryNoteProfiles["library-a"]?.folder?.length, MAX_TRANSFER_TEXT_LENGTH);
+  for (const [key, value] of Object.entries(data.indexGroupAliases)) {
+    assert.equal(key.length <= MAX_TRANSFER_TEXT_LENGTH, true);
+    assert.equal(value.length <= MAX_TRANSFER_TEXT_LENGTH, true);
+  }
+  // The loader that previously refused the poisoned payload accepts the
+  // clamped one: the exact failure was a hard throw at next launch.
+  const reloaded = migrateData(JSON.parse(JSON.stringify(data)));
+  assert.equal(reloaded.settings.workspaceSubtitle.length, MAX_TRANSFER_TEXT_LENGTH);
+  assert.equal(clampStoredText(oversized).length, MAX_TRANSFER_TEXT_LENGTH);
+});
+
+test("cloneJsonValue deep-clones plugin JSON, including an own __proto__ key, without structuredClone", () => {
+  const source = {
+    settings: { workspaceName: "Clinic" },
+    list: [1, "two", null, { nested: true }],
+    undefinedValue: undefined,
+  } as Record<string, unknown>;
+  Object.defineProperty(source, "__proto__", { value: { sneaky: 1 }, enumerable: true, writable: true, configurable: true });
+  const clone = cloneJsonValue(source);
+  assert.notEqual(clone, source);
+  assert.deepEqual(clone.settings, { workspaceName: "Clinic" });
+  assert.notEqual(clone.settings, source.settings);
+  assert.notEqual(clone.list, source.list);
+  (clone.settings).workspaceName = "Changed";
+  assert.equal((source.settings as { workspaceName: string }).workspaceName, "Clinic");
+  assert.equal(Object.prototype.hasOwnProperty.call(clone, "__proto__"), true);
+  assert.equal(Object.getPrototypeOf(clone), Object.prototype);
+  assert.deepEqual(Object.getOwnPropertyDescriptor(clone, "__proto__")?.value, { sneaky: 1 });
+});
+
+test("persisted library order ties break by code units, not the host locale", () => {
+  // Under any Latin locale collation "édition" sorts before "zebra" (base
+  // letter e < z); by code units "zebra" (0x7A) sorts before "édition"
+  // (0xE9). Persisted ordering must take the locale-independent answer, or
+  // two synced devices reorder the same store and reset each other's sync
+  // ancestry.
+  assert.equal(codeUnitCompare("zebra", "édition") < 0, true);
+  const state = {
+    version: 3 as const,
+    groups: [],
+    subjects: [],
+    resolvedPathBySubjectId: {},
+    libraries: [
+      { id: "library-b", name: "édition", singularName: "Item", icon: "book", order: 5, sourceKind: null, archivedAt: null },
+      { id: "library-a", name: "zebra", singularName: "Item", icon: "book", order: 5, sourceKind: null, archivedAt: null },
+    ],
+    libraryLayouts: {},
+  };
+  ensureSystemLibraries(state);
+  const names = state.libraries.map((library) => library.name);
+  assert.equal(names.indexOf("zebra") < names.indexOf("édition"), true);
+});
+
+test("an extension topic refuses its own descendants as parent, at any depth", () => {
+  const topicA = record({
+    path: "Topics/ENT-LAR-EXT-001 - Alpha.md", title: "Alpha", domain: "Laryngology",
+    curriculumId: "ENT-LAR-EXT-001", role: "canonical",
+  });
+  const topicB = record({
+    path: "Topics/ENT-LAR-EXT-002 - Beta.md", title: "Beta", domain: "Laryngology",
+    curriculumId: "ENT-LAR-EXT-002", role: "canonical", parentTopic: "[[Alpha]]",
+  });
+  const topicC = record({
+    path: "Topics/ENT-LAR-EXT-003 - Gamma.md", title: "Gamma", domain: "Laryngology",
+    curriculumId: "ENT-LAR-EXT-003", role: "canonical", parentTopic: "[[Beta]]",
+  });
+  const unrelated = record({
+    path: "Topics/ENT-LAR-EXT-004 - Delta.md", title: "Delta", domain: "Laryngology",
+    curriculumId: "ENT-LAR-EXT-004", role: "canonical",
+  });
+  const records = [topicA, topicB, topicC, unrelated];
+  const value = {
+    title: "Alpha", domain: "Laryngology", curriculumId: "ENT-LAR-EXT-001", parentPath: topicB.path,
+    topicKind: "condition", priority: "P2", safetyCritical: false, addToCollection: false,
+  };
+  assert.match(canonicalHierarchyIssue(value, records, topicA.path) ?? "", /own descendant/);
+  assert.match(canonicalHierarchyIssue({ ...value, parentPath: topicC.path }, records, topicA.path) ?? "", /own descendant/);
+  assert.equal(canonicalHierarchyIssue({ ...value, parentPath: unrelated.path }, records, topicA.path), null);
+  // Already-broken circular data terminates instead of hanging the validator.
+  const loopedB = { ...topicB, parentTopic: "[[Gamma]]" };
+  assert.equal(canonicalHierarchyIssue({ ...value, parentPath: unrelated.path }, [topicA, loopedB, topicC, unrelated], topicA.path), null);
+});
+
+test("folder fields refuse the same characters note titles fold away", () => {
+  assert.match(validateWritableFolderPath("Notes #1", ".obsidian") ?? "", /cannot contain/);
+  assert.match(validateWritableFolderPath("Ideas [drafts]", ".obsidian") ?? "", /cannot contain/);
+  assert.match(validateWritableFolderPath("Deep/Bad^Segment", ".obsidian") ?? "", /cannot contain/);
+  assert.match(validateWritableFolderPath("Notes.", ".obsidian") ?? "", /cannot end/);
+  assert.match(validateWritableFolderPath("Trailing /Child", ".obsidian") ?? "", /cannot end/);
+  assert.match(validateWritableFolderPath("CON", ".obsidian") ?? "", /reserved/);
+  assert.match(validateWritableFolderPath("Archive/com1.backup", ".obsidian") ?? "", /reserved/);
+  assert.equal(validateWritableFolderPath("Normal/Sub-folder (2)", ".obsidian"), null);
+  assert.equal(validateWritableFolderPath("", ".obsidian"), null);
 });

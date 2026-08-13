@@ -23,6 +23,12 @@ for (const [label, content] of [["runtime source", runtime], ["built main.js", b
   assert.doesNotMatch(content, /\.innerHTML\s*=|insertAdjacentHTML\s*\(/, `${label} must use safe DOM construction`);
   assert.doesNotMatch(content, /navigator\.clipboard\.(?:read|readText)\s*\(/, `${label} clipboard access must remain write-only`);
   assert.equal((content.match(/\.writeText\s*\(/g) ?? []).length, 1, `${label} must contain exactly one clipboard writer`);
+  // The ES2018 baseline is enforced for library methods by tsconfig's pinned
+  // lib, but DOM-declared globals slip past both that pin and esbuild's
+  // syntax-only target. Ban the ones newer than the supported web-view floor
+  // (Chrome 73 / iOS 12.2); use cloneJsonValue from model.ts instead of
+  // structuredClone (Chrome 98 / iOS 15.4).
+  assert.doesNotMatch(content, /\bstructuredClone\s*\(/, `${label} must not call structuredClone (needs Chrome 98 / iOS 15.4, above the supported web-view floor)`);
 }
 
 assert.doesNotMatch(runtime, /\b(?:require\s*\(|from\s+["'](?:fs|node:|child_process|electron)|process\.)/, "runtime must not use Node or Electron APIs");

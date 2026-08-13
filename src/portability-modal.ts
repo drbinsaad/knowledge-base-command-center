@@ -3,6 +3,7 @@ import type EntVaultCommandCenterPlugin from "./main";
 import {
   assertPersonalBackupMatchesVault,
   cleanLibraryNoteProfiles,
+  cloneJsonValue,
   errorMessage,
   resolveLibraryNoteProfile,
   subjectLibraryId,
@@ -73,7 +74,7 @@ function isolatedExportData(data: PluginData): PluginData {
   // undo and named-snapshot histories shared and read-only during preparation.
   return {
     ...data,
-    portableIndex: structuredClone(data.portableIndex),
+    portableIndex: cloneJsonValue(data.portableIndex),
   };
 }
 
@@ -894,7 +895,7 @@ export class ExportImportCenterModal extends Modal {
       this.currentBaseId(),
       this.plugin.data.settings.workspaceName,
     );
-    const previousPortableIndex = structuredClone(exportData.portableIndex);
+    const previousPortableIndex = cloneJsonValue(exportData.portableIndex);
     let commitStarted = false;
     try {
       // The validated clone already contains the synchronized stable registry;
@@ -1017,7 +1018,7 @@ export class ExportImportCenterModal extends Modal {
         || !(template instanceof TFile)
         || template.extension.toLocaleLowerCase() !== "md";
     }
-    const effectiveSettings = structuredClone(settings);
+    const effectiveSettings = cloneJsonValue(settings);
     if (defaultTemplateReset) {
       effectiveSettings.defaultNewNoteMode = "empty";
       effectiveSettings.defaultTemplatePath = "";

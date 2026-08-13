@@ -670,13 +670,13 @@ export function capturePluginViewState(data: PluginData): PluginViewState {
   return {
     selectedPath: data.selectedPath,
     activeTab: data.activeTab,
-    collapsed: structuredClone(data.collapsed),
+    collapsed: cloneJsonValue(data.collapsed),
     collections: captureCollapsedLayout(data.collections),
     libraryLayouts: Object.entries(data.portableIndex.libraryLayouts ?? {})
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([libraryId, headings]) => ({ libraryId, headings: captureCollapsedLayout(headings) })),
-    undoStack: structuredClone(data.undoStack),
-    redoStack: structuredClone(data.redoStack),
+    undoStack: cloneJsonValue(data.undoStack),
+    redoStack: cloneJsonValue(data.redoStack),
   };
 }
 
@@ -691,21 +691,21 @@ export function applyPluginViewState(
 ): void {
   data.selectedPath = state.selectedPath;
   data.activeTab = state.activeTab;
-  data.collapsed = structuredClone(state.collapsed);
+  data.collapsed = cloneJsonValue(state.collapsed);
   applyCollapsedLayout(data.collections, state.collections);
   const libraryStateById = new Map(state.libraryLayouts.map((library) => [library.libraryId, library.headings]));
   for (const [libraryId, layout] of Object.entries(data.portableIndex.libraryLayouts)) {
     applyCollapsedLayout(layout, libraryStateById.get(libraryId) ?? []);
   }
-  data.undoStack = preserveHistory ? structuredClone(state.undoStack) : [];
-  data.redoStack = preserveHistory ? structuredClone(state.redoStack) : [];
+  data.undoStack = preserveHistory ? cloneJsonValue(state.undoStack) : [];
+  data.redoStack = preserveHistory ? cloneJsonValue(state.redoStack) : [];
 }
 
 /** Give a base first opened on this device a neutral route and empty history. */
 export function resetPluginViewState(data: PluginData): void {
   data.selectedPath = "";
   data.activeTab = data.settings.defaultTab;
-  data.collapsed = structuredClone(DEFAULT_DATA.collapsed);
+  data.collapsed = cloneJsonValue(DEFAULT_DATA.collapsed);
   applyCollapsedLayout(data.collections, []);
   for (const layout of Object.values(data.portableIndex.libraryLayouts ?? {})) applyCollapsedLayout(layout, []);
   data.undoStack = [];
@@ -718,10 +718,10 @@ export function resetPluginViewState(data: PluginData): void {
  * intentionally untouched: their collapse fields are user-authored content.
  */
 export function semanticPluginDataProjection(data: PluginData): PluginData {
-  const projected = structuredClone(data);
+  const projected = cloneJsonValue(data);
   projected.selectedPath = "";
   projected.activeTab = "curriculum";
-  projected.collapsed = structuredClone(DEFAULT_DATA.collapsed);
+  projected.collapsed = cloneJsonValue(DEFAULT_DATA.collapsed);
   projected.undoStack = [];
   projected.redoStack = [];
   applyCollapsedLayout(projected.collections, []);
@@ -779,7 +779,7 @@ export function boundedSemanticLineage(
 }
 
 export function createDefaultStore(
-  data: PluginData = structuredClone(DEFAULT_DATA),
+  data: PluginData = cloneJsonValue(DEFAULT_DATA),
   now = Date.now(),
   vaultId = makeId("vault"),
 ): PluginStore {
@@ -1200,13 +1200,83 @@ export function rebaseProvisionalVaultIdAfterDeterministicRepair(
   return false;
 }
 
+/**
+ * Deep clone for the plugin's own JSON-safe data (plain objects, arrays,
+ * primitives; acyclic because everything cloned here round-trips through
+ * data.json). Exists because the platform structuredClone requires Chrome 98 /
+ * iOS 15.4, far above the ES2018-era web views this plugin still supports —
+ * the same floor the 0.13.1 release restored by removing Array.prototype.at.
+ * scripts/verify-community.mjs fails the build if structuredClone reappears
+ * in the bundle.
+ */
+let cloneJsonValueObserver: ((value: unknown) => void) | null = null;
+
+/**
+ * Test-only seam: the startup clone-budget test used to spy on the global
+ * structuredClone to prove a settled launch never deep-clones the whole
+ * multi-base store; with the in-house clone it observes here instead.
+ */
+export function setCloneJsonValueObserver(observer: ((value: unknown) => void) | null): void {
+  cloneJsonValueObserver = observer;
+}
+
+export function cloneJsonValue<T>(value: T): T {
+  if (cloneJsonValueObserver) cloneJsonValueObserver(value);
+  return cloneJsonValueWorker(value);
+}
+
+function cloneJsonValueWorker<T>(value: T): T {
+  if (Array.isArray(value)) {
+    const clone: unknown[] = new Array(value.length);
+    for (let index = 0; index < value.length; index += 1) clone[index] = cloneJsonValueWorker<unknown>(value[index]);
+    return clone as unknown as T;
+  }
+  if (value !== null && typeof value === "object") {
+    const source = value as Record<string, unknown>;
+    const clone: Record<string, unknown> = {};
+    for (const key in source) {
+      if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+      const cloned = cloneJsonValueWorker(source[key]);
+      // A literal "__proto__" key must stay an own data property (as
+      // structuredClone and JSON.parse keep it); bracket assignment would
+      // silently rewrite the clone's prototype instead.
+      if (key === "__proto__") Object.defineProperty(clone, key, { value: cloned, enumerable: true, writable: true, configurable: true });
+      else clone[key] = cloned;
+    }
+    return clone as T;
+  }
+  return value;
+}
+
+/**
+ * Locale-independent string comparison for every ordering that reaches
+ * persisted bytes or decides a cross-device tiebreak. Bare localeCompare
+ * collates under the HOST locale, so two synced devices can order the same
+ * tied pair differently — which changes semantic fingerprints, resets sync
+ * ancestry, or flips vault-identity winners. UI-only display sorts may keep
+ * locale collation; persisted or deterministic ordering must use this.
+ */
+export function codeUnitCompare(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/**
+ * The loader hard-rejects any persisted string longer than
+ * MAX_TRANSFER_TEXT_LENGTH, so no writer may emit one: a single oversized
+ * value reaching data.json makes the next launch refuse the whole multi-base
+ * store read-only, on every synced device.
+ */
+export function clampStoredText(value: string): string {
+  return value.length > MAX_TRANSFER_TEXT_LENGTH ? value.slice(0, MAX_TRANSFER_TEXT_LENGTH) : value;
+}
+
 export function asText(value: unknown, fallback = ""): string {
-  return typeof value === "string" ? value.trim() : fallback;
+  return clampStoredText(typeof value === "string" ? value.trim() : fallback);
 }
 
 export function asStringList(value: unknown): string[] {
-  if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean);
-  if (typeof value === "string" && value.trim()) return [value.trim()];
+  if (Array.isArray(value)) return value.map((item) => clampStoredText(String(item).trim())).filter(Boolean);
+  if (typeof value === "string" && value.trim()) return [clampStoredText(value.trim())];
   return [];
 }
 
@@ -1383,7 +1453,9 @@ export function cleanLibraryDefinitions(
       ids.add(id);
     }
   }
-  return definitions.sort((left, right) => left.order - right.order || left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+  // Persisted order: locale-independent tiebreaks, or two devices disagree
+  // about the same store and reset each other's sync ancestry.
+  return definitions.sort((left, right) => left.order - right.order || codeUnitCompare(left.name, right.name) || codeUnitCompare(left.id, right.id));
 }
 
 /** Ensure the ENT preset exposes all three system libraries without touching layouts or Markdown. */
@@ -1397,7 +1469,7 @@ export function ensureSystemLibraries(state: PortableIndexLocalState): void {
     }
     state.libraryLayouts[id] ??= [];
   }
-  state.libraries.sort((left, right) => left.order - right.order || left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+  state.libraries.sort((left, right) => left.order - right.order || codeUnitCompare(left.name, right.name) || codeUnitCompare(left.id, right.id));
 }
 
 function deterministicLayoutId(
@@ -1424,7 +1496,7 @@ function deterministicLayoutId(
 function librarySubjectsById(subjects: PortableSubjectDefinition[], libraryId: string): PortableSubjectDefinition[] {
   return subjects
     .filter((subject) => subjectLibraryId(subject) === libraryId)
-    .sort((left, right) => left.order - right.order || left.title.localeCompare(right.title) || left.id.localeCompare(right.id));
+    .sort((left, right) => left.order - right.order || codeUnitCompare(left.title, right.title) || codeUnitCompare(left.id, right.id));
 }
 
 function deriveFlatLibraryLayout(
@@ -1444,8 +1516,8 @@ function deriveFlatLibraryLayout(
       const left = groupById.get(leftId);
       const right = groupById.get(rightId);
       return (left?.order ?? Number.MAX_SAFE_INTEGER) - (right?.order ?? Number.MAX_SAFE_INTEGER)
-        || (left?.title ?? "Ungrouped").localeCompare(right?.title ?? "Ungrouped")
-        || leftId.localeCompare(rightId);
+        || codeUnitCompare(left?.title ?? "Ungrouped", right?.title ?? "Ungrouped")
+        || codeUnitCompare(leftId, rightId);
     })
     .map(([groupId, values]) => ({
       id: `library-${libraryId}-${groupId}`,
@@ -2188,9 +2260,9 @@ export function snapshotPersonal(
     ...clonePersonalOrganization(data),
   };
   if (includeActiveTab) snapshot.activeTab = data.activeTab;
-  if (includeSettings) snapshot.settings = structuredClone(data.settings);
+  if (includeSettings) snapshot.settings = cloneJsonValue(data.settings);
   if (includePortableIndex) snapshot.portableIndex = clonePortableIndex(data.portableIndex);
-  if (includeLayoutSnapshots) snapshot.layoutSnapshots = data.layoutSnapshots.map((item) => structuredClone(item));
+  if (includeLayoutSnapshots) snapshot.layoutSnapshots = data.layoutSnapshots.map((item) => cloneJsonValue(item));
   return snapshot;
 }
 
@@ -2198,8 +2270,8 @@ export function restoreSnapshot(data: PluginData, snapshot: PersonalSnapshot): v
   if (snapshot.activeTab !== undefined) data.activeTab = snapshot.activeTab;
   Object.assign(data, clonePersonalOrganization(snapshot));
   if (snapshot.portableIndex) data.portableIndex = clonePortableIndex(snapshot.portableIndex);
-  if (snapshot.settings) data.settings = structuredClone(snapshot.settings);
-  if (snapshot.layoutSnapshots) data.layoutSnapshots = snapshot.layoutSnapshots.map((item) => structuredClone(item));
+  if (snapshot.settings) data.settings = cloneJsonValue(snapshot.settings);
+  if (snapshot.layoutSnapshots) data.layoutSnapshots = snapshot.layoutSnapshots.map((item) => cloneJsonValue(item));
 }
 
 function recoveredLegacyId(prefix: string, parts: unknown[]): string {
@@ -2852,6 +2924,38 @@ function cleanSettings(input: unknown, legacyEnt = false): PluginSettings {
   };
 }
 
+/**
+ * Clamp every user-editable text the load validator hard-caps, immediately
+ * before a save serializes it. The Settings tab and the setup wizard assign
+ * pasted text to the live settings object without going through the cleaners,
+ * so without this bound one oversized paste persists, and the next launch
+ * refuses the entire store read-only on every synced device. Runs before the
+ * semantic projection is computed so hashes always match the saved payload.
+ */
+export function enforceStoredTextBounds(data: PluginData): void {
+  const settings = data.settings;
+  for (const key of [
+    "workspaceName", "workspaceSubtitle", "indexLabel", "itemSingular", "itemPlural", "groupLabel",
+    "primaryFolder", "inboxLabel", "idProperty", "groupProperty", "parentProperty", "templatesFolder",
+    "defaultNoteFolder", "defaultTemplatePath", "attachmentFolder", "attachmentMarker",
+    "attachmentHeading", "proposalFolder",
+  ] as const) settings[key] = clampStoredText(settings[key]);
+  for (const profile of Object.values(settings.libraryNoteProfiles)) {
+    if (profile.folder !== undefined) profile.folder = clampStoredText(profile.folder);
+    if (profile.templatePath !== undefined) profile.templatePath = clampStoredText(profile.templatePath);
+  }
+  for (const category of settings.followUpCategories) {
+    category.label = clampStoredText(category.label);
+  }
+  data.indexGroupOrder = data.indexGroupOrder.map(clampStoredText);
+  for (const key of Object.keys(data.indexGroupAliases)) {
+    const clampedKey = clampStoredText(key);
+    const value = clampStoredText(data.indexGroupAliases[key] ?? "");
+    if (clampedKey !== key) delete data.indexGroupAliases[key];
+    data.indexGroupAliases[clampedKey] = value;
+  }
+}
+
 function parseExplicitVersion(input: Record<string, unknown>, label: string): number {
   if (!Object.prototype.hasOwnProperty.call(input, "version")) return 0;
   const rawVersion = input.version;
@@ -3158,7 +3262,7 @@ function migrateDataWithBudget(
   validationBudget = createPluginLoadValidationBudget(),
   preserveLegacyDeviceHistory = false,
 ): PluginData {
-  if (!input || typeof input !== "object") return structuredClone(DEFAULT_DATA);
+  if (!input || typeof input !== "object") return cloneJsonValue(DEFAULT_DATA);
   if (!isPlainRecord(input)) throw new Error("Plugin data must be an object.");
   const loaded = input;
   const loadedVersion = parseExplicitVersion(loaded, "Plugin data");
@@ -3245,7 +3349,7 @@ function migrateDataWithBudget(
     return normalizeKnowledgeBaseLibrariesAndNavigation(data);
   }
 
-  if (loadedVersion !== 1 || !Array.isArray(loaded.headings)) return structuredClone(DEFAULT_DATA);
+  if (loadedVersion !== 1 || !Array.isArray(loaded.headings)) return cloneJsonValue(DEFAULT_DATA);
 
   const oldHeadings = loaded.headings;
   const custom = oldHeadings.filter((raw) => {
@@ -3255,7 +3359,7 @@ function migrateDataWithBudget(
     return heading.kind === "custom" || (!id.startsWith("auto-") && id !== "ent-cc-inbox");
   });
   const data: PluginData = {
-    ...structuredClone(DEFAULT_DATA),
+    ...cloneJsonValue(DEFAULT_DATA),
     collections: cleanLayout(custom),
     selectedPath: asText(loaded.selectedPath),
     settings: {
@@ -3709,6 +3813,29 @@ export function resolveExpectedParentPath(curriculumId: string, domain: string, 
   return records.find((record) => record.role === "canonical" && record.domain === domain && record.curriculumId.toUpperCase() === expectedId)?.path ?? "";
 }
 
+/**
+ * A canonical record's semantic parent: numbered children derive it from the
+ * curriculum ID, extension topics from the configured parent link (title,
+ * basename, or alias — the same resolution defaultCurriculumParent uses).
+ */
+function canonicalParentOf(record: VaultRecord, records: VaultRecord[]): VaultRecord | null {
+  const expectedId = expectedParentCurriculumId(record.curriculumId);
+  if (expectedId) {
+    return records.find((candidate) => candidate.path !== record.path
+      && candidate.role === "canonical"
+      && candidate.domain === record.domain
+      && candidate.curriculumId.toUpperCase() === expectedId) ?? null;
+  }
+  if (!record.parentTopic) return null;
+  const normalized = normalizeWikiLink(record.parentTopic).toLowerCase();
+  if (!normalized) return null;
+  return records.find((candidate) => candidate.path !== record.path
+    && candidate.role === "canonical"
+    && candidate.domain === record.domain
+    && [candidate.title, candidate.path.split("/").pop()?.replace(/\.md$/, "") ?? "", ...candidate.aliases]
+      .some((link) => link.toLowerCase() === normalized)) ?? null;
+}
+
 export function canonicalHierarchyIssue(value: TopicFormValue, records: VaultRecord[], currentPath = ""): string | null {
   const curriculumId = value.curriculumId.trim().toUpperCase();
   const expectedId = expectedParentCurriculumId(curriculumId);
@@ -3718,7 +3845,18 @@ export function canonicalHierarchyIssue(value: TopicFormValue, records: VaultRec
       const extensionParent = records.find((record) => record.path === value.parentPath);
       if (!extensionParent || extensionParent.role !== "canonical") return "The selected extension-topic parent is no longer canonical.";
       if (extensionParent.path === currentPath) return "A topic cannot be its own parent.";
-      return extensionParent.domain === value.domain ? null : "An extension topic can only use a parent from the same ENT domain.";
+      if (extensionParent.domain !== value.domain) return "An extension topic can only use a parent from the same ENT domain.";
+      // Walk the chosen parent's own ancestry: accepting a descendant would
+      // create a parent cycle that detaches the whole branch from its root.
+      // The visited set terminates the walk over already-broken data.
+      const visited = new Set<string>();
+      let ancestor: VaultRecord | null = extensionParent;
+      while (ancestor && !visited.has(ancestor.path)) {
+        visited.add(ancestor.path);
+        ancestor = canonicalParentOf(ancestor, records);
+        if (ancestor && ancestor.path === currentPath) return "A topic cannot be moved under its own descendant.";
+      }
+      return null;
     }
     return value.parentPath ? `Root curriculum ID ${curriculumId} cannot have a parent topic.` : null;
   }
@@ -3832,6 +3970,18 @@ export function validateWritableFolderPath(folder: string, configDir: string): s
   if (comparable.some((segment) => segment === "." || segment === "..")) return "The folder cannot contain . or .. path segments.";
   if (comparableConfig.every((segment, index) => comparable[index] === segment)) return `The folder cannot be inside ${cleanConfig}.`;
   if (comparable[0] === ".trash") return "The folder cannot be inside Obsidian's trash folder.";
+  // Hold folder segments to the same character rules sanitizeFileName enforces
+  // for note titles: the OS-rejected set plus `#^[]`, which are file-system
+  // legal but break the wikilinks Obsidian builds from the full path.
+  if (clean && segments.some((segment) => /[\\:*?"<>|#^[\]]/.test(segment))) {
+    return "Folder names cannot contain \\ : * ? \" < > | # ^ [ or ].";
+  }
+  if (clean && segments.some((segment) => /[. ]$/.test(segment))) {
+    return "Folder names cannot end with a period or a space.";
+  }
+  if (clean && segments.some((segment) => RESERVED_BASENAMES.test(segment.split(".")[0] ?? ""))) {
+    return "That folder name is reserved by the operating system.";
+  }
   return null;
 }
 
@@ -4195,7 +4345,7 @@ export interface WorkspaceConfig {
 }
 
 export function createWorkspaceConfig(data: PluginData, exportedAt: string): WorkspaceConfig {
-  const settings = structuredClone(data.settings);
+  const settings = cloneJsonValue(data.settings);
   settings.libraryNoteProfiles = cleanLibraryNoteProfiles(
     settings.libraryNoteProfiles,
     new Set(data.portableIndex.libraries
@@ -5195,7 +5345,7 @@ export function createDeviceLocalPluginStateWithReport(store: PluginStore): Devi
   }
   if (active) {
     active.view.selectedPath = "";
-    active.view.collapsed = structuredClone(DEFAULT_DATA.collapsed);
+    active.view.collapsed = cloneJsonValue(DEFAULT_DATA.collapsed);
     active.view.collections = [];
     active.view.libraryLayouts = [];
   }

@@ -23,6 +23,7 @@ import {
   MAX_TRANSFER_TEXT_LENGTH,
   migrateData,
   migrateStore,
+  setCloneJsonValueObserver,
   nextSemanticHead,
   isFreshVaultId,
   parseQuery,
@@ -1486,7 +1487,12 @@ test("a failed ENT startup remediation write restores the complete pre-remediati
     throw new Error("disk full");
   };
 
-  await assert.rejects(plugin.loadPluginData(), /disk full/i);
+  // The rejected writeback degrades to the read-only uncertainty state and
+  // returns: onload must keep registering the view, commands, and settings
+  // tab, or the recovery guidance in the warning is unreachable.
+  await plugin.loadPluginData();
+  assert.equal(plugin.persistenceUncertain, true);
+  assert.match(plugin.dataCompatibilityWarning, /startup repair was rejected/i);
 
   const restored = plugin.data.portableIndex.subjects.find((subject) => subject.id === "legacy-medication");
   assert.equal(saveAttempts, 1);
@@ -10254,15 +10260,11 @@ test("a steady-state startup takes no speculative pre-repair clone of the whole 
   const plugin = pluginWith(structuredClone(migrateStore(structuredClone(store))));
 
   const clonedInputs: unknown[] = [];
-  const originalStructuredClone = globalThis.structuredClone;
-  globalThis.structuredClone = <T,>(value: T, options?: StructuredSerializeOptions): T => {
-    clonedInputs.push(value);
-    return originalStructuredClone(value, options);
-  };
+  setCloneJsonValueObserver((value) => clonedInputs.push(value));
   try {
     await plugin.loadPluginData();
   } finally {
-    globalThis.structuredClone = originalStructuredClone;
+    setCloneJsonValueObserver(null);
   }
 
   const internal = plugin as unknown as {
@@ -10296,7 +10298,11 @@ test("a startup that does repair still restores the pre-repair store when its wr
   (plugin as unknown as { saveData(value: unknown): Promise<void> }).saveData = () =>
     Promise.reject(new Error("simulated startup writeback failure"));
 
-  await assert.rejects(plugin.loadPluginData(), /simulated startup writeback failure/u);
+  // Degrades to read-only instead of rejecting: a throw here used to abort
+  // onload before any UI was registered.
+  await plugin.loadPluginData();
+  assert.equal(plugin.persistenceUncertain, true);
+  assert.match(plugin.dataCompatibilityWarning, /startup repair was rejected/i);
 
   const subject = plugin.data.portableIndex.subjects.find((candidate) => candidate.id === "legacy-medication");
   assert.equal(subject?.indexed, true, "the in-memory store returns to its pre-repair shape");
@@ -11179,5 +11185,45 @@ test("two pristine bootstrap devices publish the winning identity so the losing 
     (plugin.savedData[0] as PluginStore).vaultId,
     "vault-fresh-aaaaaaaaaaaa",
     "data.json carries the winning identity so the other device stops re-running the tiebreak",
+  );
+});
+
+test("the post-merge view refresh can persist view state because the reload guard lowers first", async () => {
+  const localData = migrateData(null);
+  localData.settings.workspaceMode = "generic";
+  const local = createDefaultStore(localData, 100, "vault-post-merge-refresh");
+  const plugin = pluginWith(structuredClone(local));
+  await plugin.loadPluginData(false);
+  plugin.savedData.length = 0;
+
+  // The real view's reload() re-validates the route and persists the result;
+  // while the external-reload guard was still armed during the worker's final
+  // refresh, that persist always threw and the open view kept the pre-merge
+  // tree. The fake view reproduces exactly the persist call.
+  const reloadOutcomes: string[] = [];
+  const fakeView = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView;
+  (fakeView as unknown as { reload(withinOperation?: boolean): Promise<void> }).reload = async () => {
+    await plugin.saveViewState(false);
+    reloadOutcomes.push("rendered-and-saved");
+  };
+  (plugin.app.workspace as unknown as { getLeavesOfType(type: string): unknown[] }).getLeavesOfType =
+    () => [{ view: fakeView }];
+
+  const incoming = structuredClone(local);
+  const incomingBase = incoming.bases[0];
+  assert.ok(incomingBase);
+  incomingBase.updatedAt = 200;
+  incomingBase.data.settings.workspaceName = "Synced name";
+  incomingBase.semanticRevision += 1;
+  plugin.loadedData = incoming;
+
+  await plugin.onExternalSettingsChange();
+
+  assert.deepEqual(reloadOutcomes, ["rendered-and-saved"], "the refresh must render and persist without hitting the reload guard");
+  assert.equal(plugin.data.settings.workspaceName, "Synced name");
+  assert.equal(
+    (plugin as unknown as { externalReloadBusy: boolean }).externalReloadBusy,
+    false,
+    "the guard is released once the worker finishes",
   );
 });

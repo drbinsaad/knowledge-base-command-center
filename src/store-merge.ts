@@ -4,6 +4,8 @@ import {
   canonicalInterimEnvelopeString,
   canonicalJsonString,
   capturePluginViewState,
+  cloneJsonValue,
+  codeUnitCompare,
   deterministicSemanticHead,
   MAX_DELETED_KNOWLEDGE_BASE_IDS,
   MAX_KNOWLEDGE_BASES,
@@ -120,7 +122,7 @@ function mergeMatchingEntry(
     winner = deterministicWinner(local, incoming, localFingerprint, incomingFingerprint);
   }
 
-  const merged = structuredClone(winner === "local" ? local : incoming);
+  const merged = cloneJsonValue(winner === "local" ? local : incoming);
   if (semanticsEqual) {
     // Legacy v11-v13 builds advanced updatedAt for UI-only saves. Preserve the
     // greater timestamp deterministically while the v14 projection discards
@@ -182,7 +184,7 @@ function semanticEntryForComparison(entry: KnowledgeBaseEntry): unknown {
 }
 
 function sortedEntries(entries: Iterable<KnowledgeBaseEntry>): KnowledgeBaseEntry[] {
-  return [...entries].sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+  return [...entries].sort((left, right) => left.createdAt - right.createdAt || codeUnitCompare(left.id, right.id));
 }
 
 function makeAvailableNamesUnique(entries: KnowledgeBaseEntry[]): boolean {
@@ -244,8 +246,8 @@ export function mergeKnowledgeBaseStores(
       // from the complete-envelope migration below.
       const fullIds = [local.vaultId, incoming.vaultId]
         .filter((id) => provisionalMigratedVaultFingerprint(id) !== null)
-        .sort((left, right) => left.localeCompare(right));
-      vaultId = fullIds[0] ?? [local.vaultId, incoming.vaultId].sort((left, right) => left.localeCompare(right))[0];
+        .sort(codeUnitCompare);
+      vaultId = fullIds[0] ?? [local.vaultId, incoming.vaultId].sort(codeUnitCompare)[0];
     } else if (localLegacyOrigin
       && localLegacyOrigin === incomingLegacyOrigin
       && Boolean(localLegacyFingerprint) !== Boolean(incomingLegacyFingerprint)) {
@@ -272,15 +274,15 @@ export function mergeKnowledgeBaseStores(
       // identity symmetrically.
       const fullIds = [local.vaultId, incoming.vaultId]
         .filter((id) => provisionalInterimEnvelopeVaultFingerprint(id) !== null)
-        .sort((left, right) => left.localeCompare(right));
-      vaultId = fullIds[0] ?? [local.vaultId, incoming.vaultId].sort((left, right) => left.localeCompare(right))[0];
+        .sort(codeUnitCompare);
+      vaultId = fullIds[0] ?? [local.vaultId, incoming.vaultId].sort(codeUnitCompare)[0];
     }
   }
   const deletedTimestamps = new Map(Object.entries(local.deletedBaseIds));
   for (const [id, deletedAt] of Object.entries(incoming.deletedBaseIds)) {
     deletedTimestamps.set(id, Math.max(deletedTimestamps.get(id) ?? 0, deletedAt));
   }
-  const deletedBaseIds = objectFromEntries([...deletedTimestamps.entries()].sort(([left], [right]) => left.localeCompare(right)));
+  const deletedBaseIds = objectFromEntries([...deletedTimestamps.entries()].sort(([left], [right]) => codeUnitCompare(left, right)));
   if (Object.keys(deletedBaseIds).length > MAX_DELETED_KNOWLEDGE_BASE_IDS) {
     throw new Error(`Synced knowledge-base changes contain more than ${MAX_DELETED_KNOWLEDGE_BASE_IDS.toLocaleString()} permanent-deletion tombstones. No tombstone was discarded.`);
   }
@@ -325,7 +327,7 @@ export function mergeKnowledgeBaseStores(
       byId.set(entry.id, merged.entry);
       if (merged.conflict) semanticConflicts.push(merged.conflict);
     } else {
-      const firstOnDevice = structuredClone(entry);
+      const firstOnDevice = cloneJsonValue(entry);
       resetPluginViewState(firstOnDevice.data);
       byId.set(entry.id, firstOnDevice);
     }
@@ -334,7 +336,7 @@ export function mergeKnowledgeBaseStores(
     throw new Error(`Synced knowledge-base changes contain ${byId.size} bases, above the safe limit of ${MAX_KNOWLEDGE_BASES}. No base was discarded.`);
   }
 
-  const bases = sortedEntries(byId.values()).map((entry) => structuredClone(entry));
+  const bases = sortedEntries(byId.values()).map((entry) => cloneJsonValue(entry));
   const namesChanged = makeAvailableNamesUnique(bases);
   const isAvailable = (id: string): boolean => bases.some((entry) => entry.id === id && entry.archivedAt === null);
   const activeBaseId = isAvailable(preferredActiveId)

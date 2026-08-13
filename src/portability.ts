@@ -10,6 +10,8 @@ import {
   cleanLibraryNoteProfiles,
   cloneCollections,
   cloneCurriculumVisual,
+  cloneJsonValue,
+  codeUnitCompare,
   createPersonalBackup,
   createWorkspaceConfig,
   curriculumContainerKey,
@@ -952,7 +954,10 @@ export function createPortableExport(
         ? subject.configuredId.trim().toUpperCase()
         : "",
     }))
-    .sort((a, b) => a.groupId.localeCompare(b.groupId) || a.parentId?.localeCompare(b.parentId ?? "") || a.order - b.order || a.title.localeCompare(b.title));
+    // codeUnitCompare keeps the comparator consistent (a null parentId used to
+    // short-circuit to the next term on one side only, so sort order depended
+    // on input order and engine) and keeps exported bytes locale-independent.
+    .sort((a, b) => codeUnitCompare(a.groupId, b.groupId) || codeUnitCompare(a.parentId ?? "", b.parentId ?? "") || a.order - b.order || codeUnitCompare(a.title, b.title));
   const includedGroupIds = new Set(subjects.map((subject) => subject.groupId));
   const selectedIndexGroupIds = selection.index ? portableIndexGroupIdsForExport(data) : new Set<string>();
   const groups = data.portableIndex.groups
@@ -2234,8 +2239,8 @@ function applyRecovery(data: PluginData, backup: PersonalBackup): void {
   data.displayNameByPath = { ...backup.displayNameByPath };
   data.indexGroupAliases = { ...backup.indexGroupAliases };
   data.indexGroupOrder = [...backup.indexGroupOrder];
-  data.layoutSnapshots = backup.layoutSnapshots.map((snapshot) => structuredClone(snapshot));
-  data.portableIndex = structuredClone(backup.portableIndex);
+  data.layoutSnapshots = backup.layoutSnapshots.map((snapshot) => cloneJsonValue(snapshot));
+  data.portableIndex = cloneJsonValue(backup.portableIndex);
 }
 
 /** Applies already-validated components to plugin-owned state. It never touches Markdown files. */
@@ -2371,7 +2376,7 @@ export function applyPortableExport(
     const destinationWorkspaceName = data.settings.workspaceName;
     const destinationMode = data.settings.workspaceMode;
     const protectedPrimaryFolder = data.settings.primaryFolder;
-    const incomingSettings = structuredClone(incomingWorkspace.settings);
+    const incomingSettings = cloneJsonValue(incomingWorkspace.settings);
     incomingSettings.libraryNoteProfiles = cleanLibraryNoteProfiles(
       incomingSettings.libraryNoteProfiles,
       new Set(state.libraries.map((library) => library.id)),

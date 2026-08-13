@@ -1300,3 +1300,67 @@ test("touch subheading row menus offer the reparent actions that desktop reaches
     }
   }
 });
+
+test("compact record route re-renders restore scroll without stealing focus from other surfaces", async () => {
+  const dom = createFakeDom();
+  const selected = record("Knowledge Base/Airway.md", "Airway");
+  const source = searchSource("base-route-focus", "Focus base", [selected]);
+  source.data.settings.setupComplete = true;
+  source.data.selectedPath = selected.path;
+  const view = createView(dom.window, [source]);
+  const content = dom.document.body.createDiv({ cls: "view-content" });
+  const harness = view as unknown as {
+    contentEl: HTMLElement;
+    mobileInspectorNeedsFocus: boolean;
+    paneLayout: string;
+    render(preserveBrowseLimits?: boolean): void;
+    selectRecord(path: string): void;
+  };
+  harness.contentEl = asHtmlElement(content);
+  harness.paneLayout = "narrow";
+  await view.reload();
+
+  harness.selectRecord(selected.path);
+  assert.equal(
+    dom.document.activeElement?.hasClass("ent-cc-inspector-close"),
+    true,
+    "entering the route focuses the Back button once",
+  );
+
+  const routeBody = content.querySelector(".ent-cc-inspector-body");
+  assert.ok(routeBody);
+  routeBody.scrollTop = 64;
+  const openNoteButton = content.querySelector(".ent-cc-inspector-actions button");
+  assert.ok(openNoteButton);
+  openNoteButton.focus();
+  harness.render();
+  assert.equal(
+    dom.document.activeElement === openNoteButton,
+    true,
+    "a background refresh keeps focus where the user put it instead of re-focusing the Back button",
+  );
+  assert.equal(content.querySelector(".ent-cc-inspector-body")?.scrollTop, 64, "scroll restoration still runs on background refreshes");
+
+  const modalInput = dom.document.body.createEl("input", { type: "text" });
+  modalInput.focus();
+  harness.mobileInspectorNeedsFocus = true;
+  harness.render();
+  assert.equal(harness.mobileInspectorNeedsFocus, false, "the entry flag is consumed even when focusing is refused");
+  assert.equal(
+    dom.document.activeElement === modalInput,
+    true,
+    "focus never leaves an open modal for the Back button",
+  );
+
+  modalInput.remove();
+  const inViewControl = content.querySelector(".ent-cc-inspector-actions button");
+  assert.ok(inViewControl);
+  inViewControl.focus();
+  harness.mobileInspectorNeedsFocus = true;
+  harness.render();
+  assert.equal(
+    dom.document.activeElement?.hasClass("ent-cc-inspector-close"),
+    true,
+    "route entry still moves focus to the Back button while no other surface holds focus",
+  );
+});
