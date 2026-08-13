@@ -78,6 +78,7 @@ import {
   deliverJsonExport,
   IndexGroupModal,
   KnowledgeNoteModal,
+  type NoteDestinationSeed,
   requestJsonImport,
   RecordPickerModal,
   TextPromptModal,
@@ -97,6 +98,18 @@ interface Membership {
   headingId: string;
   subheadingId?: string;
 }
+
+/**
+ * Where the unified quick-create form will file the note after creation. The
+ * Inbox is the default and stores nothing: the note simply lives in the
+ * configured Inbox folder. Layout ids are re-resolved at submit time because
+ * Sync can replace collections and library layouts while the form is open.
+ */
+type QuickCreateDestination =
+  | { kind: "inbox" }
+  | { kind: "index"; group: string }
+  | { kind: "collection"; headingId: string; subheadingId?: string; label: string }
+  | { kind: "library"; libraryId: string; target: CatalogPlacementTarget; label: string };
 
 type CatalogDestination = "topic" | { libraryId: string };
 
@@ -915,7 +928,14 @@ export class EntVaultCommandCenterView extends ItemView {
         icon: "library-big",
       }] : []),
       { id: "create-subject", title: "Create subject without a note", description: `Add a portable No note subject to ${settings.indexLabel}; create or link its Markdown note later.`, icon: "bookmark-plus" },
-      { id: "create-note", title: "Create note", description: "Choose the Index or a Library, a visual group, and empty or template-based content.", icon: "file-plus-2" },
+      {
+        id: "create-note",
+        title: "Create note",
+        description: this.plugin.isClinicalMode()
+          ? "Choose the protected proposal workflow or a custom Library, then empty or template-based content."
+          : `Files into ${settings.inboxLabel} by default; the form can re-target ${settings.indexLabel}, a Collection, or a library.`,
+        icon: "file-plus-2",
+      },
       { id: "add-current", title: "Add current note", description: "Use the note that was active when Quick Entry opened; its file is not moved or rewritten.", icon: "panel-top" },
       { id: "add-existing", title: "Add existing note", description: "Choose an existing Markdown note, then its Index, Library, or Collection destination.", icon: "list-plus" },
       { id: "append-current", title: "Quick Append to current note", description: "Add a source, question, thought, lecture, reading item, or other follow-up under its managed category.", icon: "list-end" },
@@ -1170,39 +1190,29 @@ export class EntVaultCommandCenterView extends ItemView {
 
   public startQuickCreateNote(): void {
     if (!this.guardLoadedBase()) return;
+    if (!this.plugin.isClinicalMode()) {
+      this.openQuickCreateNoteForm();
+      return;
+    }
     const ownsBase = this.createOpenedBaseGuard();
-    const libraries = this.plugin.getLibraries()
-      .filter((library) => !this.plugin.isClinicalMode() || library.sourceKind === null);
+    const libraries = this.plugin.getLibraries().filter((library) => library.sourceKind === null);
     const actions = [
-      ...(!this.plugin.isClinicalMode() ? [{
-        id: "index",
-        title: `Create in ${this.plugin.data.settings.indexLabel}`,
-        description: `Choose a ${this.plugin.data.settings.groupLabel.toLocaleLowerCase()}, destination folder, and empty or template content.`,
-        icon: "library",
-      }] : [{
+      {
         id: "proposal",
         title: "Create unverified topic proposal",
         description: "Use the protected clinical Inbox workflow; Quick Entry never bypasses review safeguards.",
         icon: "shield-alert",
-      }]),
+      },
       ...libraries.map((library) => ({
         id: `library:${library.id}`,
         title: `Create ${library.singularName}`,
         description: `Create a note and classify it in ${library.name}.`,
         icon: libraryIcon(library),
       })),
-      ...(!this.plugin.isClinicalMode() ? [{
-        id: "inbox",
-        title: `Create in ${this.plugin.data.settings.inboxLabel}`,
-        description: "Create an empty or template-based note without adding it to the Index.",
-        icon: "inbox",
-      }] : []),
     ];
     new AddActionModal(this.app, actions, (action) => {
       if (!ownsBase()) return;
-      if (action.id === "index") this.openQuickCreateIndexNote();
-      else if (action.id === "proposal") this.startCreateProposal();
-      else if (action.id === "inbox") this.startCreateKnowledgeNote({ folder: this.plugin.data.settings.proposalFolder }, false);
+      if (action.id === "proposal") this.startCreateProposal();
       else {
         const libraryId = action.id.slice("library:".length);
         this.openQuickLibraryPlacementPicker(libraryId, (target) => this.startCreateLibraryNote(libraryId, target));
@@ -1210,22 +1220,256 @@ export class EntVaultCommandCenterView extends ItemView {
     }, "Quick create note").open();
   }
 
-  private openQuickCreateIndexNote(): void {
+  /**
+   * The unified create-note form for the generic profile. The note files into
+   * the Inbox by default; the Destination row re-targets the same form at an
+   * Index group, a Collection heading or subheading, or a Library placement
+   * without reopening it. Clinical mode never reaches here — its protected
+   * proposal workflow is preserved in startQuickCreateNote.
+   */
+  public openQuickCreateNoteForm(): void {
+    if (!this.guardLoadedBase()) return;
     const ownsBase = this.createOpenedBaseGuard();
-    new IndexGroupModal(this.app, {
-      title: `Choose ${this.plugin.data.settings.groupLabel.toLocaleLowerCase()}`,
-      groupLabel: this.plugin.data.settings.groupLabel,
-      initialValue: this.plugin.getIndexGroups()[0] ?? "Ungrouped",
-      existingGroups: this.plugin.getIndexGroups(),
-      submitLabel: "Continue to note",
-      onSubmit: (group) => {
-        if (!ownsBase()) return;
-        this.startCreateKnowledgeNote({}, false, async (file) => {
+    const settings = this.plugin.data.settings;
+    let destination: QuickCreateDestination = { kind: "inbox" };
+    const initialSeed = this.quickCreateDestinationSeed(destination);
+    new KnowledgeNoteModal(this.app, {
+      itemSingular: settings.itemSingular,
+      contextNotice: initialSeed.contextNotice,
+      templates: this.plugin.getTemplateFiles(),
+      initial: {
+        title: "",
+        folder: initialSeed.folder,
+        mode: initialSeed.mode,
+        templatePath: initialSeed.templatePath,
+        addToCollection: false,
+      },
+      destination: {
+        label: initialSeed.label,
+        onEdit: (apply) => {
           if (!ownsBase()) return;
-          await this.plugin.assignRecordToCatalog(file.path, "topic", { headingTitle: group });
-        }, `${this.plugin.data.settings.itemSingular} created in ${this.plugin.data.settings.indexLabel} under ${group}. Existing notes were not changed.`);
+          this.openQuickCreateDestinationPicker((chosen) => {
+            if (!ownsBase()) return;
+            destination = chosen;
+            apply(this.quickCreateDestinationSeed(chosen));
+          });
+        },
+      },
+      validate: (value) => ownsBase()
+        ? this.plugin.validateGenericNote(value)
+        : "The active knowledge base changed. Close and reopen this form.",
+      onSubmit: async (value) => {
+        if (!ownsBase()) return;
+        const tokenContext = this.quickCreateTokenContext(destination);
+        const file = await this.plugin.createKnowledgeNote(value, tokenContext);
+        if (!ownsBase()) return;
+        const notice = await this.applyQuickCreateDestination(file, destination, ownsBase);
+        if (!ownsBase()) return;
+        if (notice) new Notice(notice);
+        if (value.addToCollection && destination.kind !== "collection") this.openCollectionPicker(file.path);
+        await this.plugin.openFile(file);
       },
     }).open();
+  }
+
+  /** The form prefills each destination would open with in its dedicated legacy flow. */
+  private quickCreateDestinationSeed(destination: QuickCreateDestination): NoteDestinationSeed {
+    const settings = this.plugin.data.settings;
+    switch (destination.kind) {
+      case "inbox":
+        return {
+          label: settings.inboxLabel,
+          folder: settings.proposalFolder,
+          mode: settings.defaultNewNoteMode,
+          templatePath: settings.defaultTemplatePath,
+          contextNotice: `Files into ${settings.inboxLabel} without joining ${settings.indexLabel}. Use Change… to pick ${settings.indexLabel}, a Collection, or a library instead.`,
+          hideCollectionToggle: false,
+        };
+      case "index":
+        return {
+          label: `${settings.indexLabel} / ${destination.group}`,
+          folder: settings.defaultNoteFolder,
+          mode: settings.defaultNewNoteMode,
+          templatePath: settings.defaultTemplatePath,
+          contextNotice: `Will be added to ${settings.indexLabel} under ${destination.group} after creation. Existing notes are never changed.`,
+          hideCollectionToggle: false,
+        };
+      case "collection":
+        return {
+          label: `Collections / ${destination.label}`,
+          folder: settings.defaultNoteFolder,
+          mode: settings.defaultNewNoteMode,
+          templatePath: settings.defaultTemplatePath,
+          contextNotice: `Will be linked under ${destination.label} in My Collections after creation. The note file stays at the destination folder below.`,
+          hideCollectionToggle: true,
+        };
+      case "library": {
+        const library = this.plugin.getLibrary(destination.libraryId);
+        const profile = this.plugin.getEffectiveLibraryNoteProfile(destination.libraryId);
+        return {
+          label: destination.label,
+          folder: profile.folder,
+          mode: profile.mode,
+          templatePath: profile.templatePath,
+          contextNotice: `Will be classified in ${library?.name ?? "the selected library"} after creation. The Markdown note is not rewritten.`,
+          hideCollectionToggle: false,
+        };
+      }
+    }
+  }
+
+  private quickCreateTokenContext(destination: QuickCreateDestination): TemplateTokenContext {
+    if (destination.kind !== "library") return {};
+    const library = this.plugin.getLibrary(destination.libraryId);
+    if (!library) return {};
+    return this.libraryTemplateTokenContext(library, destination.target);
+  }
+
+  /**
+   * Files the freshly created note into the chosen destination and returns the
+   * completion notice. Every layout id is re-resolved here because Sync can
+   * replace collections, layouts, or libraries while the form was open; a
+   * vanished destination leaves the note in its folder and says so instead of
+   * failing the submission after the file already exists.
+   */
+  private async applyQuickCreateDestination(
+    file: TFile,
+    destination: QuickCreateDestination,
+    ownsBase: () => boolean,
+  ): Promise<string | null> {
+    const settings = this.plugin.data.settings;
+    const itemLabel = `${settings.itemSingular[0]?.toUpperCase() ?? "N"}${settings.itemSingular.slice(1)}`;
+    try {
+      switch (destination.kind) {
+        case "inbox": {
+          this.plugin.data.selectedPath = file.path;
+          await this.plugin.saveViewState();
+          if (!ownsBase()) return null;
+          await this.reload();
+          return `${itemLabel} created in ${settings.inboxLabel}. Existing notes were not changed.`;
+        }
+        case "index": {
+          await this.plugin.assignRecordToCatalog(file.path, "topic", { headingTitle: destination.group });
+          return `${itemLabel} created in ${settings.indexLabel} under ${destination.group}. Existing notes were not changed.`;
+        }
+        case "collection": {
+          const heading = this.plugin.data.collections.find((item) => item.id === destination.headingId);
+          const subheadingExists = !destination.subheadingId
+            || (heading !== undefined && subheadingChain(heading, destination.subheadingId) !== null);
+          if (!heading || !subheadingExists) {
+            return `${itemLabel} created at ${file.path}, but the chosen collection destination no longer exists. Use Add to a collection to place it.`;
+          }
+          await this.plugin.mutate("Add created note to collection", () => {
+            this.addMembership(file.path, { headingId: destination.headingId, subheadingId: destination.subheadingId });
+          });
+          return `${itemLabel} created and linked under ${destination.label} in My Collections. The note file was not changed.`;
+        }
+        case "library": {
+          const library = this.plugin.getLibrary(destination.libraryId);
+          if (!library || library.archivedAt !== null) {
+            return `${itemLabel} created at ${file.path}, but the chosen library is no longer available. Classify it from the record's actions menu.`;
+          }
+          await this.plugin.assignRecordToLibrary(file.path, destination.libraryId, destination.target);
+          return `${library.singularName} created and added to ${library.name}. The Markdown note was not rewritten.`;
+        }
+      }
+    } catch (error) {
+      return `${itemLabel} created at ${file.path}, but it could not be filed: ${errorMessage(error)}`;
+    }
+  }
+
+  /**
+   * Destination picker for the unified create-note form: Inbox first as the
+   * default, then the Index (group prompt), Collections (full-path targets,
+   * with a first-heading prompt when none exist), then each library through
+   * the same placement picker Quick Entry already uses.
+   */
+  private openQuickCreateDestinationPicker(onChosen: (destination: QuickCreateDestination) => void): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const settings = this.plugin.data.settings;
+    const itemLower = settings.itemSingular.toLocaleLowerCase();
+    const actions = [
+      {
+        id: "inbox",
+        title: settings.inboxLabel,
+        description: `Default. File the new ${itemLower} in ${settings.inboxLabel} without adding it to ${settings.indexLabel}.`,
+        icon: "inbox",
+      },
+      {
+        id: "index",
+        title: settings.indexLabel,
+        description: `Choose a ${settings.groupLabel.toLocaleLowerCase()}; the new ${itemLower} joins ${settings.indexLabel} after creation.`,
+        icon: "library",
+      },
+      {
+        id: "collection",
+        title: "Collection",
+        description: "Choose a Collection heading or subheading; the new note is linked there after creation.",
+        icon: "folders",
+      },
+      ...this.plugin.getLibraries().map((library) => ({
+        id: `library:${library.id}`,
+        title: library.name,
+        description: `Create a ${library.singularName.toLocaleLowerCase()} and classify it in ${library.name}.`,
+        icon: libraryIcon(library),
+      })),
+    ];
+    new AddActionModal(this.app, actions, (action) => {
+      if (!ownsBase()) return;
+      if (action.id === "inbox") onChosen({ kind: "inbox" });
+      else if (action.id === "index") {
+        new IndexGroupModal(this.app, {
+          title: `Choose ${settings.groupLabel.toLocaleLowerCase()}`,
+          groupLabel: settings.groupLabel,
+          initialValue: this.plugin.getIndexGroups()[0] ?? "Ungrouped",
+          existingGroups: this.plugin.getIndexGroups(),
+          submitLabel: "Use this destination",
+          onSubmit: (group) => {
+            if (!ownsBase()) return;
+            onChosen({ kind: "index", group });
+          },
+        }).open();
+      } else if (action.id === "collection") {
+        const targets = collectionTargets(this.plugin.data.collections);
+        if (targets.length === 0) {
+          new TextPromptModal(this.app, {
+            title: "Create your first collection",
+            placeholder: "Collection name",
+            submitLabel: "Create heading",
+            onSubmit: async (title) => {
+              if (!ownsBase()) return;
+              const headingId = await this.plugin.createQuickEntryCollectionHeading(title);
+              if (!ownsBase()) return;
+              const heading = this.plugin.data.collections.find((item) => item.id === headingId);
+              if (!heading) return;
+              onChosen({ kind: "collection", headingId, label: heading.title });
+            },
+          }).open();
+          return;
+        }
+        new CollectionPickerModal(this.app, targets, "Add", (target) => {
+          if (!ownsBase()) return;
+          onChosen({ kind: "collection", headingId: target.headingId, subheadingId: target.subheadingId, label: target.label });
+        }).open();
+      } else {
+        const libraryId = action.id.slice("library:".length);
+        const library = this.plugin.getLibrary(libraryId);
+        if (!library) return;
+        this.openQuickLibraryPlacementPicker(libraryId, (target) => {
+          const layout = this.plugin.data.portableIndex.libraryLayouts[libraryId] ?? [];
+          const targetLabel = collectionTargets(layout)
+            .find((candidate) => candidate.headingId === target.headingId && candidate.subheadingId === target.subheadingId)
+            ?.label;
+          onChosen({
+            kind: "library",
+            libraryId,
+            target,
+            label: targetLabel ? `${library.name} / ${targetLabel}` : library.name,
+          });
+        });
+      }
+    }, "Choose destination").open();
   }
 
   public startQuickAddExistingNote(): void {
@@ -1345,7 +1589,14 @@ export class EntVaultCommandCenterView extends ItemView {
         { id: "existing-active-library", title: `Add existing note to ${libraryLabel(activeLibrary, true)}`, description: "Classify an existing Markdown note without moving or rewriting it.", icon: "list-plus" },
         { id: "current-active-library", title: `Add current note to ${libraryLabel(activeLibrary, true)}`, description: "Classify the open Markdown note without changing its file.", icon: "panel-top" },
       ] : []),
-      { id: "create-note", title: `Create ${settings.itemSingular}`, description: "Start with an empty note or choose a Markdown template and destination folder.", icon: "file-plus-2" },
+      {
+        id: "create-note",
+        title: `Create ${settings.itemSingular}`,
+        description: this.plugin.isClinicalMode()
+          ? "Start with an empty note or choose a Markdown template and destination folder."
+          : `Files into ${settings.inboxLabel} by default; the form can re-target ${settings.indexLabel}, a Collection, or a library.`,
+        icon: "file-plus-2",
+      },
       ...(!this.plugin.isClinicalMode() ? [{ id: "index-existing", title: `Add existing note to ${settings.indexLabel}`, description: `Index any eligible Markdown note without moving or editing its file.`, icon: "list-plus" }] : []),
       ...(!activeLibraryAcceptsManualAdd && addableLibraries.length > 0 ? [
         { id: "choose-library", title: "Add to library…", description: "Choose a library, then create, select, or use the current note without changing Markdown.", icon: "library" },
@@ -1356,7 +1607,6 @@ export class EntVaultCommandCenterView extends ItemView {
       { id: "current-note", title: "Add current note", description: "Place the currently open note in a collection.", icon: "panel-top" },
     ];
     if (this.plugin.isClinicalMode()) actions.push({ id: "proposal", title: "Create topic proposal", description: "Capture an unverified clinical scaffold in the Topic Inbox for later promotion.", icon: "inbox" });
-    else actions.push({ id: "inbox-note", title: `Create in ${settings.inboxLabel}`, description: "Create an empty or template-based note directly in the configured Inbox folder.", icon: "inbox" });
     if (this.plugin.isClinicalMode() && settings.enableAdvancedCanonicalActions) {
       actions.push(
         { id: "canonical", title: "Create canonical topic (advanced)", description: "Create an empty unverified topic directly at a validated curriculum ID and path.", icon: "shield-alert" },
@@ -1370,13 +1620,15 @@ export class EntVaultCommandCenterView extends ItemView {
       else if (action.id === "current-active-library" && activeLibrary) this.startAddCurrentToLibrary(activeLibrary.id);
       else if (action.id === "choose-library") this.openLibraryAddPicker();
       else if (action.id === "new-library") new LibraryEditorModal(this.plugin, null, () => this.render()).open();
-      else if (action.id === "create-note") this.startCreateKnowledgeNote();
+      else if (action.id === "create-note") {
+        if (this.plugin.isClinicalMode()) this.startCreateKnowledgeNote();
+        else this.openQuickCreateNoteForm();
+      }
       else if (action.id === "index-existing") this.startAddExistingToIndex();
       else if (action.id === "existing-topic") this.startAddExistingTopic();
       else if (action.id === "vault-note") this.startLinkVaultNote(false);
       else if (action.id === "current-note") this.startAddCurrentNote();
       else if (action.id === "proposal") this.startCreateProposal();
-      else if (action.id === "inbox-note") this.startCreateKnowledgeNote({ folder: settings.proposalFolder }, false);
       else if (action.id === "canonical") this.startCreateCanonical();
       else if (action.id === "any-note") this.startLinkVaultNote(true);
     }, `Add to ${settings.workspaceName}`).open();

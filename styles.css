@@ -2372,6 +2372,16 @@
   display: none;
 }
 
+.ent-cc-topic-editor .ent-cc-collection-toggle-setting.is-hidden,
+.ent-cc-topic-editor .ent-cc-catalog-context.is-hidden {
+  display: none;
+}
+
+.ent-cc-topic-editor .ent-cc-destination-setting .setting-item-description {
+  color: var(--text-normal);
+  font-weight: 600;
+}
+
 .ent-cc-compatibility-warning,
 .ent-cc-settings-warning {
   padding: 9px 14px;

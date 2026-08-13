@@ -16,7 +16,7 @@ import {
   runQuickEntryFocusedProtocolAction,
 } from "../src/quick-entry.ts";
 import { createQuickEntryButton, EntVaultCommandCenterView } from "../src/view.ts";
-import { AddActionModal, CollectionPickerModal, collectionTargets, localDateStamp, TextPromptModal, VaultFilePickerModal } from "../src/modals.ts";
+import { AddActionModal, CollectionPickerModal, collectionTargets, IndexGroupModal, KnowledgeNoteModal, type KnowledgeNoteModalOptions, localDateStamp, type NoteDestinationSeed, TextPromptModal, VaultFilePickerModal } from "../src/modals.ts";
 import { migrateData, portablePlaceholderPath, type LibraryDefinition, type VaultRecord } from "../src/model.ts";
 import { createFakeDom, asHtmlElement } from "./support/fake-dom.ts";
 
@@ -240,6 +240,7 @@ test("Quick Entry delayed menus reject base switches and same-base data replacem
       { id: "base-b", data: { ...data, settings: { ...data.settings, workspaceName: "Base B" } } },
     ],
     getLibraries: (): LibraryDefinition[] => [],
+    getTemplateFiles: (): TFile[] => [],
     isClinicalMode: () => false,
   };
   const calls: string[] = [];
@@ -267,10 +268,16 @@ test("Quick Entry delayed menus reject base switches and same-base data replacem
     getItems(): Array<{ id: string }>;
     onChooseItem(item: { id: string }): void;
   }> = [];
+  const pendingForms: KnowledgeNoteModalOptions[] = [];
   const addOpen = Object.getOwnPropertyDescriptor(AddActionModal.prototype, "open");
+  const noteOpen = Object.getOwnPropertyDescriptor(KnowledgeNoteModal.prototype, "open");
   AddActionModal.prototype.open = function captureMenu(): void {
     pending.push(this);
   };
+  KnowledgeNoteModal.prototype.open = function captureForm(): void {
+    pendingForms.push((this as unknown as { options: KnowledgeNoteModalOptions }).options);
+  };
+  let destinationApplies = 0;
   try {
     view.startQuickCreateNote = () => calls.push("hub-create");
     view.openQuickEntry(current.path);
@@ -284,14 +291,12 @@ test("Quick Entry delayed menus reject base switches and same-base data replacem
     dataEpoch = 2;
     view.loadedBaseId = activeBaseId;
     view.loadedDataEpoch = dataEpoch;
-    view.startCreateKnowledgeNote = () => calls.push("create-note");
     view.startQuickCreateNote = EntVaultCommandCenterView.prototype.startQuickCreateNote.bind(view);
     view.startQuickCreateNote();
     dataEpoch = 3;
-    const createMenu = pending.shift();
-    const inbox = createMenu?.getItems().find((item) => item.id === "inbox");
-    assert.ok(createMenu && inbox);
-    createMenu.onChooseItem(inbox);
+    const createForm = pendingForms.shift();
+    assert.ok(createForm?.destination, "the generic quick-create form must carry a destination row");
+    createForm.destination.onEdit(() => { destinationApplies += 1; });
 
     view.loadedDataEpoch = dataEpoch;
     view.startLinkVaultNote = () => calls.push("add-existing");
@@ -316,9 +321,13 @@ test("Quick Entry delayed menus reject base switches and same-base data replacem
   } finally {
     if (addOpen) Object.defineProperty(AddActionModal.prototype, "open", addOpen);
     else Reflect.deleteProperty(AddActionModal.prototype, "open");
+    if (noteOpen) Object.defineProperty(KnowledgeNoteModal.prototype, "open", noteOpen);
+    else Reflect.deleteProperty(KnowledgeNoteModal.prototype, "open");
   }
 
   assert.deepEqual(calls, []);
+  assert.equal(destinationApplies, 0, "a stale create form must not apply a destination change");
+  assert.equal(pending.length, 0, "a stale create form must not open the destination picker");
   assert.equal(Notice.messages.filter((message) => message.includes("active knowledge base changed")).length >= 4, true);
 });
 
@@ -421,13 +430,28 @@ test("Quick Entry asks for and forwards the selected Library heading or subheadi
     subheadings: [{ id: "subheading-a", title: "Pediatric", collapsed: false, subjects: [] }],
   }];
   const current = new TFile("Notes/Current.md");
+  const createdFile = new TFile("Reading notes/New item.md");
+  const assignments: Array<{ path: string; libraryId: string; target: CatalogPlacementTarget }> = [];
   const plugin = {
     data,
     getActiveKnowledgeBaseId: () => "base-a",
     getDataEpoch: () => 1,
     getLibraries: () => [library],
     getLibrary: (id: string) => id === library.id ? library : null,
+    getTemplateFiles: (): TFile[] => [],
+    getEffectiveLibraryNoteProfile: () => ({
+      folder: "Reading notes",
+      mode: "empty" as const,
+      templatePath: "",
+      inherited: { folder: false, mode: true, templatePath: true },
+    }),
     isClinicalMode: () => false,
+    validateGenericNote: () => null,
+    async createKnowledgeNote(): Promise<TFile> { return createdFile; },
+    async assignRecordToLibrary(path: string, libraryId: string, target: CatalogPlacementTarget = {}): Promise<void> {
+      assignments.push({ path, libraryId, target });
+    },
+    async openFile(): Promise<void> { /* opening is not under test */ },
   };
   const routed: Array<{ flow: string; libraryId: string; path?: string; target: CatalogPlacementTarget }> = [];
   const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView & {
@@ -437,7 +461,6 @@ test("Quick Entry asks for and forwards the selected Library heading or subheadi
     loadedBaseId: string;
     loadedDataEpoch: number;
     staleViewNoticeShown: boolean;
-    startCreateLibraryNote(libraryId: string, target?: CatalogPlacementTarget): void;
     startAddExistingToLibrary(libraryId: string, target?: CatalogPlacementTarget): void;
     startAddCurrentToLibrary(libraryId: string, path?: string, target?: CatalogPlacementTarget): void;
   };
@@ -450,12 +473,14 @@ test("Quick Entry asks for and forwards the selected Library heading or subheadi
   view.loadedBaseId = "base-a";
   view.loadedDataEpoch = 1;
   view.staleViewNoticeShown = false;
-  view.startCreateLibraryNote = (libraryId, target = {}) => routed.push({ flow: "create", libraryId, target });
   view.startAddExistingToLibrary = (libraryId, target = {}) => routed.push({ flow: "existing", libraryId, target });
   view.startAddCurrentToLibrary = (libraryId, path, target = {}) => routed.push({ flow: "current", libraryId, path, target });
 
+  const forms: KnowledgeNoteModalOptions[] = [];
+  const seeds: NoteDestinationSeed[] = [];
   const addOpen = Object.getOwnPropertyDescriptor(AddActionModal.prototype, "open");
   const collectionOpen = Object.getOwnPropertyDescriptor(CollectionPickerModal.prototype, "open");
+  const noteOpen = Object.getOwnPropertyDescriptor(KnowledgeNoteModal.prototype, "open");
   AddActionModal.prototype.open = function chooseLibrary(): void {
     const modal = this as unknown as { getItems(): Array<{ id: string }>; onChooseItem(item: { id: string }): void };
     const action = modal.getItems().find((item) => item.id === `library:${library.id}`);
@@ -471,8 +496,20 @@ test("Quick Entry asks for and forwards the selected Library heading or subheadi
     assert.ok(target);
     modal.onChooseItem(target);
   };
+  KnowledgeNoteModal.prototype.open = function captureForm(): void {
+    forms.push((this as unknown as { options: KnowledgeNoteModalOptions }).options);
+  };
   try {
     view.startQuickCreateNote();
+    const form = forms.shift();
+    assert.ok(form?.destination, "the generic quick-create form must carry a destination row");
+    assert.equal(form.destination.label, data.settings.inboxLabel);
+    assert.equal(form.initial.folder, data.settings.proposalFolder);
+    form.destination.onEdit((seed) => seeds.push(seed));
+    assert.deepEqual(seeds.map((seed) => seed.label), ["Reading / Airway / Pediatric"]);
+    assert.equal(seeds[0]?.folder, "Reading notes");
+    await form.onSubmit({ title: "New item", folder: "Reading notes", mode: "empty", templatePath: "", addToCollection: false });
+
     view.startQuickAddExistingNote();
     view.startQuickAddCurrentNote(current.path);
     await Promise.resolve();
@@ -481,10 +518,14 @@ test("Quick Entry asks for and forwards the selected Library heading or subheadi
     else Reflect.deleteProperty(AddActionModal.prototype, "open");
     if (collectionOpen) Object.defineProperty(CollectionPickerModal.prototype, "open", collectionOpen);
     else Reflect.deleteProperty(CollectionPickerModal.prototype, "open");
+    if (noteOpen) Object.defineProperty(KnowledgeNoteModal.prototype, "open", noteOpen);
+    else Reflect.deleteProperty(KnowledgeNoteModal.prototype, "open");
   }
 
+  assert.deepEqual(assignments, [
+    { path: createdFile.path, libraryId: library.id, target: { headingId: "heading-a", subheadingId: "subheading-a" } },
+  ]);
   assert.deepEqual(routed, [
-    { flow: "create", libraryId: library.id, target: { headingId: "heading-a", subheadingId: "subheading-a" } },
     { flow: "existing", libraryId: library.id, target: { headingId: "heading-a", subheadingId: "subheading-a" } },
     { flow: "current", libraryId: library.id, path: current.path, target: { headingId: "heading-a", subheadingId: "subheading-a" } },
   ]);
@@ -505,18 +546,32 @@ test("Quick Entry creates a first Library heading before continuing an empty-Lib
   data.portableIndex.libraries.push(library);
   data.portableIndex.libraryLayouts[library.id] = [];
   const created: string[] = [];
-  const routed: CatalogPlacementTarget[] = [];
+  const createdFile = new TFile("Reading notes/Captured.md");
+  const assignments: Array<{ path: string; libraryId: string; target: CatalogPlacementTarget }> = [];
   const plugin = {
     data,
     getActiveKnowledgeBaseId: () => "base-a",
     getDataEpoch: () => 1,
     getLibraries: () => [library],
     getLibrary: (id: string) => id === library.id ? library : null,
+    getTemplateFiles: (): TFile[] => [],
+    getEffectiveLibraryNoteProfile: () => ({
+      folder: "Reading notes",
+      mode: "empty" as const,
+      templatePath: "",
+      inherited: { folder: false, mode: true, templatePath: true },
+    }),
     isClinicalMode: () => false,
+    validateGenericNote: () => null,
     async createQuickEntryLibraryHeading(_libraryId: string, title: string): Promise<string> {
       created.push(title);
       return "first-heading";
     },
+    async createKnowledgeNote(): Promise<TFile> { return createdFile; },
+    async assignRecordToLibrary(path: string, libraryId: string, target: CatalogPlacementTarget = {}): Promise<void> {
+      assignments.push({ path, libraryId, target });
+    },
+    async openFile(): Promise<void> { /* opening is not under test */ },
   };
   const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView & {
     app: object;
@@ -524,18 +579,19 @@ test("Quick Entry creates a first Library heading before continuing an empty-Lib
     loadedBaseId: string;
     loadedDataEpoch: number;
     staleViewNoticeShown: boolean;
-    startCreateLibraryNote(libraryId: string, target?: CatalogPlacementTarget): void;
   };
   view.app = {};
   view.plugin = plugin;
   view.loadedBaseId = "base-a";
   view.loadedDataEpoch = 1;
   view.staleViewNoticeShown = false;
-  view.startCreateLibraryNote = (_libraryId, target = {}) => routed.push(target);
 
+  const forms: KnowledgeNoteModalOptions[] = [];
+  const seeds: NoteDestinationSeed[] = [];
   let submitted: Promise<void> = Promise.resolve();
   const addOpen = Object.getOwnPropertyDescriptor(AddActionModal.prototype, "open");
   const textOpen = Object.getOwnPropertyDescriptor(TextPromptModal.prototype, "open");
+  const noteOpen = Object.getOwnPropertyDescriptor(KnowledgeNoteModal.prototype, "open");
   AddActionModal.prototype.open = function chooseLibrary(): void {
     const modal = this as unknown as { getItems(): Array<{ id: string }>; onChooseItem(item: { id: string }): void };
     const action = modal.getItems().find((item) => item.id === `library:${library.id}`);
@@ -546,18 +602,30 @@ test("Quick Entry creates a first Library heading before continuing an empty-Lib
     const options = (this as unknown as { options: { onSubmit(title: string): void | Promise<void> } }).options;
     submitted = Promise.resolve(options.onSubmit("Quick captures"));
   };
+  KnowledgeNoteModal.prototype.open = function captureForm(): void {
+    forms.push((this as unknown as { options: KnowledgeNoteModalOptions }).options);
+  };
   try {
     view.startQuickCreateNote();
+    const form = forms.shift();
+    assert.ok(form?.destination, "the generic quick-create form must carry a destination row");
+    form.destination.onEdit((seed) => seeds.push(seed));
     await submitted;
+    assert.deepEqual(seeds.map((seed) => seed.label), ["Reading"]);
+    await form.onSubmit({ title: "Captured", folder: "Reading notes", mode: "empty", templatePath: "", addToCollection: false });
   } finally {
     if (addOpen) Object.defineProperty(AddActionModal.prototype, "open", addOpen);
     else Reflect.deleteProperty(AddActionModal.prototype, "open");
     if (textOpen) Object.defineProperty(TextPromptModal.prototype, "open", textOpen);
     else Reflect.deleteProperty(TextPromptModal.prototype, "open");
+    if (noteOpen) Object.defineProperty(KnowledgeNoteModal.prototype, "open", noteOpen);
+    else Reflect.deleteProperty(KnowledgeNoteModal.prototype, "open");
   }
 
   assert.deepEqual(created, ["Quick captures"]);
-  assert.deepEqual(routed, [{ headingId: "first-heading" }]);
+  assert.deepEqual(assignments, [
+    { path: createdFile.path, libraryId: library.id, target: { headingId: "first-heading" } },
+  ]);
 });
 
 test("Library create and add services preserve the Quick Entry placement target", async () => {
@@ -869,4 +937,180 @@ test("minted subheading ids are checked against nodes at every depth", async () 
   const directIds = (heading?.subheadings ?? []).map((node) => node.id);
   assert.ok(directIds.includes(minted));
   assert.equal(directIds.filter((id) => id === collidingId).length, 0, "the colliding id stays unique to the deep node");
+});
+
+test("the unified quick-create form defaults to the Inbox and re-targets the Index or a Collection", async () => {
+  Notice.messages.length = 0;
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.collections.push({
+    id: "col-h",
+    title: "Board review",
+    collapsed: true,
+    subjects: [],
+    subheadings: [{ id: "col-s", title: "Airway", collapsed: true, subjects: [] }],
+  });
+  const createdFile = new TFile("Inbox/Quick capture.md");
+  const catalogAssignments: Array<{ path: string; kind: string; target: CatalogPlacementTarget }> = [];
+  let savedViewState = 0;
+  let reloads = 0;
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 1,
+    getLibraries: (): LibraryDefinition[] => [],
+    getTemplateFiles: (): TFile[] => [],
+    getIndexGroups: () => ["Foundations"],
+    isClinicalMode: () => false,
+    validateGenericNote: () => null,
+    async createKnowledgeNote(): Promise<TFile> { return createdFile; },
+    async assignRecordToCatalog(path: string, kind: string, target: CatalogPlacementTarget = {}): Promise<void> {
+      catalogAssignments.push({ path, kind, target });
+    },
+    async mutate(_label: string, mutator: () => void): Promise<void> { mutator(); },
+    async saveViewState(): Promise<void> { savedViewState += 1; },
+    async openFile(): Promise<void> { /* opening is not under test */ },
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView & {
+    app: object;
+    plugin: typeof plugin;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    reload(): Promise<void>;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 1;
+  view.staleViewNoticeShown = false;
+  view.reload = async () => { reloads += 1; };
+
+  const forms: KnowledgeNoteModalOptions[] = [];
+  const seeds: NoteDestinationSeed[] = [];
+  let pickAction = "index";
+  const addOpen = Object.getOwnPropertyDescriptor(AddActionModal.prototype, "open");
+  const groupOpen = Object.getOwnPropertyDescriptor(IndexGroupModal.prototype, "open");
+  const collectionOpen = Object.getOwnPropertyDescriptor(CollectionPickerModal.prototype, "open");
+  const noteOpen = Object.getOwnPropertyDescriptor(KnowledgeNoteModal.prototype, "open");
+  AddActionModal.prototype.open = function chooseDestination(): void {
+    const modal = this as unknown as { getItems(): Array<{ id: string }>; onChooseItem(item: { id: string }): void };
+    const items = modal.getItems();
+    assert.equal(items[0]?.id, "inbox", "the Inbox must be the first destination offered");
+    const action = items.find((item) => item.id === pickAction);
+    assert.ok(action);
+    modal.onChooseItem(action);
+  };
+  IndexGroupModal.prototype.open = function chooseGroup(): void {
+    const options = (this as unknown as { options: { onSubmit(group: string): void | Promise<void> } }).options;
+    void options.onSubmit("Foundations");
+  };
+  CollectionPickerModal.prototype.open = function chooseSubheading(): void {
+    const modal = this as unknown as {
+      getItems(): Array<{ headingId: string; subheadingId?: string }>;
+      onChooseItem(item: { headingId: string; subheadingId?: string }): void;
+    };
+    const target = modal.getItems().find((item) => item.subheadingId === "col-s");
+    assert.ok(target);
+    modal.onChooseItem(target);
+  };
+  KnowledgeNoteModal.prototype.open = function captureForm(): void {
+    forms.push((this as unknown as { options: KnowledgeNoteModalOptions }).options);
+  };
+  try {
+    view.startQuickCreateNote();
+    const form = forms.shift();
+    assert.ok(form?.destination, "the generic quick-create form must carry a destination row");
+
+    // Default: the Inbox, seeded from the configured Inbox folder, no registration anywhere.
+    assert.equal(form.destination.label, data.settings.inboxLabel);
+    assert.equal(form.initial.folder, data.settings.proposalFolder);
+    await form.onSubmit({ title: "Quick capture", folder: data.settings.proposalFolder, mode: "empty", templatePath: "", addToCollection: false });
+    assert.equal(data.selectedPath, createdFile.path);
+    assert.equal(savedViewState, 1);
+    assert.equal(reloads, 1);
+    assert.deepEqual(catalogAssignments, []);
+    assert.equal(Notice.messages.some((message) => message.includes(`created in ${data.settings.inboxLabel}`)), true);
+
+    // Re-target the Index: seeds the default note folder and assigns the chosen group.
+    pickAction = "index";
+    form.destination.onEdit((seed) => seeds.push(seed));
+    assert.equal(seeds[0]?.label, `${data.settings.indexLabel} / Foundations`);
+    assert.equal(seeds[0]?.folder, data.settings.defaultNoteFolder);
+    await form.onSubmit({ title: "Quick capture", folder: data.settings.defaultNoteFolder, mode: "empty", templatePath: "", addToCollection: false });
+    assert.deepEqual(catalogAssignments, [
+      { path: createdFile.path, kind: "topic", target: { headingTitle: "Foundations" } },
+    ]);
+
+    // Re-target a Collection subheading: the note path joins it and the chain un-collapses.
+    pickAction = "collection";
+    form.destination.onEdit((seed) => seeds.push(seed));
+    assert.equal(seeds[1]?.label, "Collections / Board review / Airway");
+    assert.equal(seeds[1]?.hideCollectionToggle, true, "a collection destination must hide the add-to-collection toggle");
+    await form.onSubmit({ title: "Quick capture", folder: data.settings.defaultNoteFolder, mode: "empty", templatePath: "", addToCollection: false });
+    assert.deepEqual(data.collections[0]?.subheadings[0]?.subjects, [createdFile.path]);
+    assert.equal(data.collections[0]?.collapsed, false, "placement must un-collapse the destination chain");
+
+    // A destination replaced by Sync mid-form: the note survives and the failure is explained.
+    Notice.messages.length = 0;
+    data.collections.length = 0;
+    await form.onSubmit({ title: "Quick capture", folder: data.settings.defaultNoteFolder, mode: "empty", templatePath: "", addToCollection: false });
+    assert.equal(Notice.messages.some((message) => message.includes("no longer exists")), true);
+  } finally {
+    if (addOpen) Object.defineProperty(AddActionModal.prototype, "open", addOpen);
+    else Reflect.deleteProperty(AddActionModal.prototype, "open");
+    if (groupOpen) Object.defineProperty(IndexGroupModal.prototype, "open", groupOpen);
+    else Reflect.deleteProperty(IndexGroupModal.prototype, "open");
+    if (collectionOpen) Object.defineProperty(CollectionPickerModal.prototype, "open", collectionOpen);
+    else Reflect.deleteProperty(CollectionPickerModal.prototype, "open");
+    if (noteOpen) Object.defineProperty(KnowledgeNoteModal.prototype, "open", noteOpen);
+    else Reflect.deleteProperty(KnowledgeNoteModal.prototype, "open");
+  }
+});
+
+test("the clinical profile keeps the protected proposal picker for quick note creation", () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 1,
+    getLibraries: (): LibraryDefinition[] => [],
+    getTemplateFiles: (): TFile[] => [],
+    isClinicalMode: () => true,
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView & {
+    app: object;
+    plugin: typeof plugin;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 1;
+  view.staleViewNoticeShown = false;
+
+  const menus: Array<Array<{ id: string }>> = [];
+  const forms: KnowledgeNoteModalOptions[] = [];
+  const addOpen = Object.getOwnPropertyDescriptor(AddActionModal.prototype, "open");
+  const noteOpen = Object.getOwnPropertyDescriptor(KnowledgeNoteModal.prototype, "open");
+  AddActionModal.prototype.open = function captureMenu(): void {
+    menus.push((this as unknown as { getItems(): Array<{ id: string }> }).getItems());
+  };
+  KnowledgeNoteModal.prototype.open = function captureForm(): void {
+    forms.push((this as unknown as { options: KnowledgeNoteModalOptions }).options);
+  };
+  try {
+    view.startQuickCreateNote();
+  } finally {
+    if (addOpen) Object.defineProperty(AddActionModal.prototype, "open", addOpen);
+    else Reflect.deleteProperty(AddActionModal.prototype, "open");
+    if (noteOpen) Object.defineProperty(KnowledgeNoteModal.prototype, "open", noteOpen);
+    else Reflect.deleteProperty(KnowledgeNoteModal.prototype, "open");
+  }
+
+  assert.equal(forms.length, 0, "clinical mode must never open the generic destination form");
+  assert.equal(menus[0]?.[0]?.id, "proposal", "the protected proposal workflow stays first in clinical mode");
 });
