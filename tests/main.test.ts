@@ -12,15 +12,18 @@ import {
   buildCurriculumTree,
   createDefaultStore,
   createDeviceLocalPluginState,
+  createDeviceLocalPluginStateWithReport,
   createKnowledgeBaseEntry,
   curriculumContainerKey,
   DATA_VERSION,
   DEVICE_LOCAL_STATE_VERSION,
   libraryTabId,
   MAX_DELETED_KNOWLEDGE_BASE_IDS,
+  MAX_DEVICE_LOCAL_STATE_BYTES,
   MAX_KNOWLEDGE_BASES,
   MAX_LIBRARIES,
   MAX_TRANSFER_TEXT_LENGTH,
+  MAX_UNDO_BYTES,
   migrateData,
   DEFAULT_EXPORTS_FOLDER,
   migrateStore,
@@ -57,7 +60,11 @@ import { QuickAppendModal } from "../src/follow-up-modal.ts";
 import { AttachmentImportModal } from "../src/attachment-modal.ts";
 import { Notice, Plugin, TFile, TFolder, type TAbstractFile } from "obsidian";
 import { mergeKnowledgeBaseStores } from "../src/store-merge.ts";
-import { createPortfolioExport, type PortfolioExportV1 } from "../src/portfolio.ts";
+import {
+  createPortfolioExport,
+  type PortfolioExportV1,
+  type PortfolioImportMapping,
+} from "../src/portfolio.ts";
 import { EntVaultCommandCenterView, VIEW_TYPE } from "../src/view.ts";
 
 interface TestPluginBase {
@@ -188,6 +195,17 @@ function emptyWritableTestVault(): {
   };
 }
 
+function testDeviceLocalStorage(): {
+  loadLocalStorage: () => unknown;
+  saveLocalStorage: (_key: string, value: unknown) => void;
+} {
+  let value: unknown = null;
+  return {
+    loadLocalStorage: () => structuredClone(value),
+    saveLocalStorage: (_key, next) => { value = structuredClone(next); },
+  };
+}
+
 function pluginWith(data: unknown, initialDeviceState: unknown = null): EntVaultCommandCenterPlugin & TestPluginBase {
   const deviceLocalWrites: unknown[] = [];
   let deviceState = structuredClone(initialDeviceState);
@@ -233,6 +251,62 @@ function pluginWithKeyedLocalStorage(
   plugin.loadedData = data;
   plugin.deviceLocalWrites = localWrites.map(([, value]) => value);
   return { plugin, localValues, localWrites };
+}
+
+function portfolioJournalFixture(vaultId: string): {
+  store: PluginStore;
+  bundle: PortfolioExportV1;
+  mappings: PortfolioImportMapping[];
+} {
+  const first = migrateData(null);
+  first.settings.workspaceName = "Portfolio destination one";
+  first.undoStack = [snapshotPersonal(first, "Destination one prior Undo")];
+  first.redoStack = [snapshotPersonal(first, "Destination one prior Redo")];
+  const store = createDefaultStore(first, 100, vaultId);
+  const firstId = store.bases[0]?.id ?? "";
+
+  const second = migrateData(null);
+  second.settings.workspaceName = "Portfolio destination two";
+  second.undoStack = [snapshotPersonal(second, "Destination two prior Undo")];
+  second.redoStack = [snapshotPersonal(second, "Destination two prior Redo")];
+  const secondEntry = createKnowledgeBaseEntry(second, "base-portfolio-destination-two", 110);
+  store.bases.push(secondEntry);
+
+  const sourceEntries = Array.from({ length: 3 }, (_, index) => {
+    const data = migrateData(null);
+    data.settings.workspaceName = `Portfolio source ${index + 1}`;
+    data.indexGroupOrder = [`Imported portfolio group ${index + 1}`];
+    data.portableIndex.groups = [{
+      id: `portfolio-group-${index + 1}`,
+      title: `Imported portfolio group ${index + 1}`,
+      order: 0,
+    }];
+    return createKnowledgeBaseEntry(data, `base-portfolio-source-${index + 1}`, 200 + index);
+  });
+  const selection = { ...EMPTY_PORTABLE_SELECTION, index: true };
+  const bundle = createPortfolioExport(
+    sourceEntries.map((entry) => ({ entry, records: [], selection })),
+    "2026-08-14T00:00:00.000Z",
+    vaultId,
+  );
+  const mappings: PortfolioImportMapping[] = [
+    {
+      sourceBaseId: sourceEntries[0]?.id ?? "",
+      destination: { kind: "existing", baseId: firstId },
+      mode: "merge",
+    },
+    {
+      sourceBaseId: sourceEntries[1]?.id ?? "",
+      destination: { kind: "existing", baseId: secondEntry.id },
+      mode: "merge",
+    },
+    {
+      sourceBaseId: sourceEntries[2]?.id ?? "",
+      destination: { kind: "new", name: "Portfolio destination three" },
+      mode: "merge",
+    },
+  ];
+  return { store, bundle, mappings };
 }
 
 test("active Library commands are stable, refreshed after rename/archive, and revalidate at use", async () => {
@@ -2920,6 +2994,55 @@ test("transient missing startup retains and later applies the matching establish
   assert.equal(plugin.data.selectedPath, "Knowledge/Retain.md");
   assert.equal(plugin.data.activeTab, "collections");
   assert.equal(plugin.data.undoStack.at(-1)?.label, "Retained undo");
+});
+
+test("transient missing startup retains a foreign pending Undo journal until matching Sync authority is accepted", async () => {
+  const established = createDefaultStore(migrateData(null), 100, "vault-established-pending-journal");
+  const establishedEntry = established.bases[0];
+  assert.ok(establishedEntry);
+  establishedEntry.data.redoStack = [snapshotPersonal(establishedEntry.data, "Redo before pending Sync")];
+  const requiredUndo = snapshotPersonal(establishedEntry.data, "Pending Sync undo");
+  const staged = structuredClone(established);
+  const stagedEntry = staged.bases[0];
+  assert.ok(stagedEntry);
+  stagedEntry.data.undoStack.push(requiredUndo);
+  const incoming = structuredClone(established);
+  const incomingEntry = incoming.bases[0];
+  assert.ok(incomingEntry);
+  const parentSemanticHead = incomingEntry.semanticHead;
+  advanceStoreEntry(incomingEntry, () => {
+    incomingEntry.data.pinnedPaths = ["Knowledge/Accepted from Sync.md"];
+  });
+  const pending = {
+    baseId: incomingEntry.id,
+    parentSemanticHead,
+    candidateSemanticRevision: incomingEntry.semanticRevision,
+    candidateSemanticHead: incomingEntry.semanticHead,
+    candidateSemanticHash: incomingEntry.semanticHash,
+    undoSnapshotAt: requiredUndo.at,
+    undoSnapshotFingerprint: migrationFingerprintForTest(requiredUndo),
+  };
+  const pendingLocal = createDeviceLocalPluginStateWithReport(staged, pending).state;
+  resetPluginViewState(incomingEntry.data);
+  const { plugin, localValues } = pluginWithKeyedLocalStorage(
+    null,
+    new Map([[DEVICE_LOCAL_STATE_KEY, pendingLocal]]),
+  );
+
+  await plugin.loadPluginData(false);
+  assert.notEqual(plugin.getVaultId(), established.vaultId);
+  const retained = localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
+  assert.deepEqual(retained?.pendingRequiredUndoCommit, pending, "the random fallback cannot resolve another vault's journal");
+
+  plugin.loadedData = incoming;
+  await plugin.onExternalSettingsChange();
+
+  assert.equal(plugin.getVaultId(), established.vaultId);
+  assert.deepEqual(plugin.data.pinnedPaths, ["Knowledge/Accepted from Sync.md"]);
+  assert.equal(plugin.data.undoStack.at(-1)?.label, "Pending Sync undo");
+  assert.deepEqual(plugin.data.redoStack, []);
+  const promoted = localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
+  assert.equal(promoted?.pendingRequiredUndoCommit, undefined);
 });
 
 test("transient missing startup migrates route and Undo when the established v13 store arrives through Sync", async () => {
@@ -6256,6 +6379,480 @@ test("portfolio Replace writes strict recovery first and rolls every base back w
   assert.equal(plugin.data.indexGroupOrder.includes("Imported empty heading"), false);
 });
 
+test("portfolio batch Undo finalizes every existing and new destination marker-free and restart-safe", async () => {
+  const fixture = portfolioJournalFixture("vault-portfolio-batch-normal");
+  const live = pluginWithKeyedLocalStorage(
+    fixture.store,
+    new Map([[DEVICE_LOCAL_STATE_KEY, createDeviceLocalPluginState(fixture.store)]]),
+  );
+  await live.plugin.loadPluginData(false);
+  const plan = live.plugin.createPortfolioImportPlan(fixture.bundle, fixture.mappings);
+
+  await live.plugin.applyPortfolioImportPlan(plan);
+
+  const local = live.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
+  assert.equal(local?.pendingRequiredUndoBatchCommit, undefined);
+  for (const operation of plan.operations) {
+    const entry = live.plugin.getKnowledgeBases(true).find((candidate) => candidate.id === operation.destinationBaseId);
+    const localBase = local?.bases.find((candidate) => candidate.baseId === operation.destinationBaseId);
+    assert.ok(entry);
+    assert.ok(localBase);
+    assert.match(localBase.view.undoStack.at(-1)?.label ?? "", /portfolio source/i);
+    assert.deepEqual(localBase.view.redoStack, []);
+    if (operation.destinationKind === "new") assert.equal(entry.semanticRevision, 0);
+  }
+  const committed = live.plugin.savedData.at(-1);
+  assert.ok(committed);
+  const restarted = pluginWithKeyedLocalStorage(
+    committed,
+    new Map([[DEVICE_LOCAL_STATE_KEY, structuredClone(local)]]),
+  );
+  await restarted.plugin.loadPluginData(false);
+  for (const operation of plan.operations) {
+    const entry = restarted.plugin.getKnowledgeBases(true).find((candidate) => candidate.id === operation.destinationBaseId);
+    assert.match(entry?.data.undoStack.at(-1)?.label ?? "", /portfolio source/i);
+    assert.deepEqual(entry?.data.redoStack, []);
+  }
+});
+
+test("portfolio batch Undo resolves pre-primary, exact, and mixed newer-head crash windows per base", async () => {
+  const fixture = portfolioJournalFixture("vault-portfolio-batch-crash");
+  const live = pluginWithKeyedLocalStorage(
+    structuredClone(fixture.store),
+    new Map([[DEVICE_LOCAL_STATE_KEY, createDeviceLocalPluginState(fixture.store)]]),
+  );
+  await live.plugin.loadPluginData(false);
+  const plan = live.plugin.createPortfolioImportPlan(fixture.bundle, fixture.mappings);
+  const enteredPrimary = deferred();
+  const releasePrimary = deferred();
+  let candidatePrimary: PluginStore | null = null;
+  live.plugin.saveData = async (value: unknown) => {
+    candidatePrimary = structuredClone(value) as PluginStore;
+    enteredPrimary.resolve();
+    await releasePrimary.promise;
+    live.plugin.savedData.push(structuredClone(value));
+  };
+  const operation = live.plugin.applyPortfolioImportPlan(plan);
+  await enteredPrimary.promise;
+  try {
+    const pending = live.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
+    assert.equal(pending?.pendingRequiredUndoBatchCommit?.entries.length, 3);
+    assert.deepEqual(
+      pending?.pendingRequiredUndoBatchCommit?.entries.map((entry) => entry.baseId),
+      [...(pending?.pendingRequiredUndoBatchCommit?.entries.map((entry) => entry.baseId) ?? [])].sort(),
+    );
+    const newOperation = plan.operations.find((candidate) => candidate.destinationKind === "new");
+    assert.ok(newOperation);
+    const stagedNew = pending?.bases.find((base) => base.baseId === newOperation.destinationBaseId);
+    assert.equal(stagedNew?.view.undoStack.length, 1);
+    assert.deepEqual(stagedNew?.view.redoStack, []);
+
+    const beforePrimary = pluginWithKeyedLocalStorage(
+      structuredClone(fixture.store),
+      new Map([[DEVICE_LOCAL_STATE_KEY, structuredClone(pending)]]),
+    );
+    await beforePrimary.plugin.loadPluginData(false);
+    assert.equal(beforePrimary.plugin.getKnowledgeBases(true).length, 2);
+    assert.equal(
+      (beforePrimary.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState>)
+        .bases.some((base) => base.baseId === newOperation.destinationBaseId),
+      false,
+    );
+    for (const entry of beforePrimary.plugin.getKnowledgeBases(true)) {
+      assert.match(entry.data.undoStack.at(-1)?.label ?? "", /prior Undo/);
+      assert.match(entry.data.redoStack.at(-1)?.label ?? "", /prior Redo/);
+    }
+
+    assert.ok(candidatePrimary);
+    const afterPrimary = pluginWithKeyedLocalStorage(
+      structuredClone(candidatePrimary),
+      new Map([[DEVICE_LOCAL_STATE_KEY, structuredClone(pending)]]),
+    );
+    await afterPrimary.plugin.loadPluginData(false);
+    for (const mapped of plan.operations) {
+      const entry = afterPrimary.plugin.getKnowledgeBases(true)
+        .find((candidate) => candidate.id === mapped.destinationBaseId);
+      assert.match(entry?.data.undoStack.at(-1)?.label ?? "", /portfolio source/i);
+      assert.deepEqual(entry?.data.redoStack, []);
+    }
+
+    const mixed = structuredClone(candidatePrimary);
+    const mismatchedOperation = plan.operations.find((candidate) => candidate.destinationKind === "existing");
+    assert.ok(mismatchedOperation);
+    const mismatchedEntry = mixed.bases.find((entry) => entry.id === mismatchedOperation.destinationBaseId);
+    assert.ok(mismatchedEntry);
+    advanceStoreEntry(mismatchedEntry, () => {
+      mismatchedEntry.data.pinnedPaths = ["Knowledge Base/Newer portfolio Sync.md"];
+    });
+    const mixedRestart = pluginWithKeyedLocalStorage(
+      mixed,
+      new Map([[DEVICE_LOCAL_STATE_KEY, structuredClone(pending)]]),
+    );
+    await mixedRestart.plugin.loadPluginData(false);
+    for (const mapped of plan.operations) {
+      const entry = mixedRestart.plugin.getKnowledgeBases(true)
+        .find((candidate) => candidate.id === mapped.destinationBaseId);
+      assert.ok(entry);
+      if (mapped.destinationBaseId === mismatchedOperation.destinationBaseId) {
+        assert.match(entry.data.undoStack.at(-1)?.label ?? "", /prior Undo/);
+        assert.match(entry.data.redoStack.at(-1)?.label ?? "", /prior Redo/);
+      } else {
+        assert.match(entry.data.undoStack.at(-1)?.label ?? "", /portfolio source/i);
+        assert.deepEqual(entry.data.redoStack, []);
+      }
+    }
+    assert.equal(
+      (mixedRestart.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState>)
+        .pendingRequiredUndoBatchCommit,
+      undefined,
+    );
+  } finally {
+    releasePrimary.resolve();
+    await operation;
+  }
+});
+
+test("failed portfolio batch finalization keeps its journal through view saves, external capture, and blocked edits", async () => {
+  const fixture = portfolioJournalFixture("vault-portfolio-batch-finalizer-barrier");
+  const live = pluginWithKeyedLocalStorage(
+    structuredClone(fixture.store),
+    new Map([[DEVICE_LOCAL_STATE_KEY, createDeviceLocalPluginState(fixture.store)]]),
+  );
+  await live.plugin.loadPluginData(false);
+  const plan = live.plugin.createPortfolioImportPlan(fixture.bundle, fixture.mappings);
+  let deviceWrites = 0;
+  (live.plugin.app as unknown as {
+    saveLocalStorage(key: string, value: unknown): void;
+  }).saveLocalStorage = (key, value) => {
+    if (key !== DEVICE_LOCAL_STATE_KEY) {
+      live.localValues.set(key, structuredClone(value));
+      return;
+    }
+    deviceWrites += 1;
+    if (deviceWrites > 1) throw new Error("simulated portfolio journal cleanup failure");
+    live.localValues.set(key, structuredClone(value));
+  };
+
+  await live.plugin.applyPortfolioImportPlan(plan);
+
+  const committed = live.plugin.savedData.at(-1) as PluginStore | undefined;
+  assert.ok(committed);
+  const durablePending = structuredClone(
+    live.localValues.get(DEVICE_LOCAL_STATE_KEY),
+  ) as ReturnType<typeof createDeviceLocalPluginState>;
+  assert.equal(durablePending.pendingRequiredUndoBatchCommit?.entries.length, 3);
+  assert.equal(live.plugin.isDataReadOnly(), true);
+  const protectedSnapshot = live.plugin.getSyncRecoveryCenterSnapshot();
+  assert.equal(protectedSnapshot.readOnly, true);
+  assert.equal(protectedSnapshot.stickyUntilRestart, true);
+  assert.match(protectedSnapshot.readOnlyReason, /portfolio import.*undo finalization.*restart/i);
+  assert.equal(deviceWrites, 2, "preflight succeeds and the marker-free finalizer is the first rejected write");
+
+  live.plugin.data.selectedPath = "Knowledge Base/View while portfolio journal is pending.md";
+  await live.plugin.saveViewState();
+  assert.equal(deviceWrites, 2, "a view save cannot attempt to replace the pending journal");
+  assert.deepEqual(live.localValues.get(DEVICE_LOCAL_STATE_KEY), durablePending);
+
+  let followUpRan = false;
+  await assert.rejects(
+    live.plugin.mutate("Must stay blocked", () => { followUpRan = true; }),
+    /Portfolio undo finalization is pending/i,
+  );
+  assert.equal(followUpRan, false);
+  assert.equal(live.plugin.savedData.length, 1, "a blocked follow-up edit never enters the primary writer");
+
+  const committedActive = committed.bases.find((entry) => entry.id === committed.activeBaseId);
+  assert.ok(committedActive);
+  live.plugin.data.pinnedPaths = ["Knowledge Base/Unsaved direct edit while journal is pending.md"];
+  await assert.rejects(
+    live.plugin.savePluginData(),
+    /Portfolio undo finalization is pending/i,
+  );
+  assert.deepEqual(
+    live.plugin.data.pinnedPaths,
+    committedActive.data.pinnedPaths,
+    "a direct semantic writer restores committed authority before failing closed",
+  );
+  assert.equal(live.plugin.savedData.length, 1);
+  assert.deepEqual(live.localValues.get(DEVICE_LOCAL_STATE_KEY), durablePending);
+
+  // Both capture points in the external reload must preserve the staged
+  // journal. Reconciliation may resolve its projection in memory, but its
+  // failed cleanup must keep the durable marker and synchronous barrier.
+  live.plugin.loadedData = structuredClone(committed);
+  await live.plugin.onExternalSettingsChange();
+  assert.equal(deviceWrites, 3, "accepted external authority retries only the explicit journal cleanup");
+  assert.deepEqual(live.localValues.get(DEVICE_LOCAL_STATE_KEY), durablePending);
+  assert.equal(live.plugin.isDataReadOnly(), true);
+
+  live.plugin.data.selectedPath = "Knowledge Base/View after failed reconciliation.md";
+  await live.plugin.saveViewState();
+  assert.equal(deviceWrites, 3, "a reconciliation cleanup failure also keeps view persistence fenced");
+  assert.deepEqual(live.localValues.get(DEVICE_LOCAL_STATE_KEY), durablePending);
+
+  // A replacement on the same Obsidian App must see the old instance's
+  // durable journal through the shared lifecycle barrier and reconcile it
+  // before exposing organization as writable.
+  (live.plugin.app as unknown as {
+    saveLocalStorage(key: string, value: unknown): void;
+  }).saveLocalStorage = (key, value) => {
+    live.localValues.set(key, structuredClone(value));
+  };
+  live.plugin.onunload();
+  const replacement = new EntVaultCommandCenterPlugin(
+    live.plugin.app,
+    {} as never,
+  ) as EntVaultCommandCenterPlugin & TestPluginBase;
+  replacement.loadData = async () => structuredClone(committed);
+  await replacement.loadPluginData(false);
+  const finalized = live.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState>;
+  assert.equal(finalized.pendingRequiredUndoBatchCommit, undefined);
+  assert.equal(replacement.isDataReadOnly(), false);
+  for (const operation of plan.operations) {
+    const entry = replacement.getKnowledgeBases(true)
+      .find((candidate) => candidate.id === operation.destinationBaseId);
+    assert.match(entry?.data.undoStack.at(-1)?.label ?? "", /portfolio source/i);
+    assert.deepEqual(entry?.data.redoStack, []);
+  }
+});
+
+test("portfolio finalization conforms view-pressure reductions before ordinary view persistence resumes", async () => {
+  Notice.messages.length = 0;
+  const fixture = portfolioJournalFixture("vault-portfolio-batch-view-pressure");
+  for (const index of [1, 2]) {
+    const pressure = migrateData(null);
+    pressure.settings.workspaceName = `Unmapped pressure ${index}`;
+    fixture.store.bases.push(createKnowledgeBaseEntry(
+      pressure,
+      `base-unmapped-pressure-${index}`,
+      300 + index,
+    ));
+  }
+  const live = pluginWithKeyedLocalStorage(
+    structuredClone(fixture.store),
+    new Map([[DEVICE_LOCAL_STATE_KEY, createDeviceLocalPluginState(fixture.store)]]),
+  );
+  await live.plugin.loadPluginData(false);
+  const liveStore = (live.plugin as unknown as { store: PluginStore }).store;
+  for (const entry of liveStore.bases.filter((candidate) => candidate.id.startsWith("base-unmapped-pressure-"))) {
+    entry.data.collapsed.curriculumNodes = Array.from(
+      { length: 8_000 },
+      (_, index) => `${entry.id}-collapsed-${index}-${"x".repeat(260)}`,
+    );
+  }
+  assert.equal(
+    createDeviceLocalPluginStateWithReport(liveStore).viewStateTruncated,
+    true,
+    "the fixture must require base/view reduction under the four-megabyte limit",
+  );
+  live.localWrites.length = 0;
+  const plan = live.plugin.createPortfolioImportPlan(fixture.bundle, fixture.mappings);
+
+  await live.plugin.applyPortfolioImportPlan(plan);
+
+  const finalized = live.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState>;
+  assert.equal(finalized.pendingRequiredUndoBatchCommit, undefined);
+  for (const operation of plan.operations) {
+    const local = finalized.bases.find((candidate) => candidate.baseId === operation.destinationBaseId);
+    assert.match(local?.view.undoStack.at(-1)?.label ?? "", /portfolio source/i);
+  }
+  for (const entry of live.plugin.getKnowledgeBases(true)
+    .filter((candidate) => candidate.id.startsWith("base-unmapped-pressure-"))) {
+    assert.deepEqual(
+      entry.data.collapsed.curriculumNodes,
+      [],
+      "the live projection adopts the finalized bounded view state",
+    );
+  }
+  assert.ok(Notice.messages.some((message) => /inactive route and layout state was reduced/i.test(message)));
+
+  live.plugin.data.selectedPath = "Knowledge Base/Immediate post-portfolio view.md";
+  await live.plugin.saveViewState();
+  const afterViewSave = live.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState>;
+  assert.equal(afterViewSave.pendingRequiredUndoBatchCommit, undefined);
+  for (const operation of plan.operations) {
+    const local = afterViewSave.bases.find((candidate) => candidate.baseId === operation.destinationBaseId);
+    assert.match(
+      local?.view.undoStack.at(-1)?.label ?? "",
+      /portfolio source/i,
+      "an ordinary view save cannot drop a non-active mapped base's required Undo",
+    );
+  }
+});
+
+test("failed portfolio primary reports any device-local reduction already made by its preflight", async () => {
+  Notice.messages.length = 0;
+  const fixture = portfolioJournalFixture("vault-portfolio-batch-failed-reduction-notice");
+  const pressure = migrateData(null);
+  pressure.settings.workspaceName = "Unmapped failed-import pressure";
+  fixture.store.bases.push(createKnowledgeBaseEntry(
+    pressure,
+    "base-unmapped-failed-import-pressure",
+    350,
+  ));
+  const live = pluginWithKeyedLocalStorage(
+    structuredClone(fixture.store),
+    new Map([[DEVICE_LOCAL_STATE_KEY, createDeviceLocalPluginState(fixture.store)]]),
+  );
+  await live.plugin.loadPluginData(false);
+  const pressureEntry = (live.plugin as unknown as { store: PluginStore }).store.bases
+    .find((entry) => entry.id === "base-unmapped-failed-import-pressure");
+  assert.ok(pressureEntry);
+  pressureEntry.data.collapsed.curriculumNodes = Array.from(
+    { length: 15_000 },
+    (_, index) => `failed-import-pressure-${index}-${"x".repeat(260)}`,
+  );
+  assert.equal(
+    createDeviceLocalPluginStateWithReport(
+      (live.plugin as unknown as { store: PluginStore }).store,
+    ).viewStateTruncated,
+    true,
+  );
+  const plan = live.plugin.createPortfolioImportPlan(fixture.bundle, fixture.mappings);
+  let primaryWrites = 0;
+  live.plugin.saveData = async (value: unknown) => {
+    primaryWrites += 1;
+    if (primaryWrites === 1) throw new Error("simulated portfolio primary rejection after local reduction");
+    live.plugin.savedData.push(structuredClone(value));
+  };
+
+  await assert.rejects(
+    live.plugin.applyPortfolioImportPlan(plan),
+    /simulated portfolio primary rejection after local reduction/i,
+  );
+
+  assert.equal(primaryWrites, 2, "the rejected candidate receives one causal compensation");
+  assert.equal(live.plugin.isDataReadOnly(), false);
+  assert.equal(
+    (live.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState>)
+      .pendingRequiredUndoBatchCommit,
+    undefined,
+  );
+  assert.ok(Notice.messages.some((message) => /inactive route and layout state was reduced/i.test(message)));
+});
+
+test("portfolio batch journal quota rejection restores every destination before primary", async () => {
+  const fixture = portfolioJournalFixture("vault-portfolio-batch-quota");
+  const initialLocal = createDeviceLocalPluginState(fixture.store);
+  const live = pluginWithKeyedLocalStorage(
+    structuredClone(fixture.store),
+    new Map([[DEVICE_LOCAL_STATE_KEY, initialLocal]]),
+  );
+  await live.plugin.loadPluginData(false);
+  const plan = live.plugin.createPortfolioImportPlan(fixture.bundle, fixture.mappings);
+  const before = structuredClone(live.plugin.getKnowledgeBases(true));
+  let primaryWrites = 0;
+  live.plugin.saveData = async () => { primaryWrites += 1; };
+  (live.plugin.app as unknown as {
+    saveLocalStorage(key: string, value: unknown): void;
+  }).saveLocalStorage = (key, value) => {
+    if (key === DEVICE_LOCAL_STATE_KEY) throw new Error("simulated portfolio batch journal quota rejection");
+    live.localValues.set(key, structuredClone(value));
+  };
+  const originalConsoleError = console.error;
+  console.error = () => {};
+  try {
+    await assert.rejects(
+      live.plugin.applyPortfolioImportPlan(plan),
+      /simulated portfolio batch journal quota rejection/i,
+    );
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.equal(primaryWrites, 0);
+  assert.deepEqual(live.plugin.getKnowledgeBases(true), before);
+  assert.deepEqual(live.localValues.get(DEVICE_LOCAL_STATE_KEY), initialLocal);
+  assert.equal(live.plugin.isDataReadOnly(), false);
+});
+
+test("aggregate oversized portfolio batch Undo fails closed before primary and preserves the prior local profile byte-for-byte", async () => {
+  const destinationData = (baseIndex: number): PluginData => {
+    const destination = migrateData(null);
+    destination.settings.workspaceName = `Aggregate destination ${baseIndex}`;
+    destination.portableIndex.groups = [{
+      id: `aggregate-destination-${baseIndex}`,
+      title: `Aggregate destination ${baseIndex}`,
+      order: 0,
+    }];
+    destination.portableIndex.subjects = Array.from({ length: 5_000 }, (_, subjectIndex) => ({
+      id: `aggregate-${baseIndex}-subject-${subjectIndex}`,
+      title: `${"x".repeat(180)}${subjectIndex}`,
+      groupId: `aggregate-destination-${baseIndex}`,
+      parentId: null,
+      order: subjectIndex,
+      indexed: false,
+      configuredId: "",
+      recordKind: "topic" as const,
+      libraryId: null,
+    }));
+    return destination;
+  };
+  const store = createDefaultStore(destinationData(1), 100, "vault-portfolio-batch-oversize");
+  for (const baseIndex of [2, 3]) {
+    store.bases.push(createKnowledgeBaseEntry(
+      destinationData(baseIndex),
+      `base-aggregate-destination-${baseIndex}`,
+      100 + baseIndex,
+    ));
+  }
+  const sourceEntries = [1, 2, 3].map((baseIndex) => {
+    const source = migrateData(null);
+    source.settings.workspaceName = `Small portfolio source ${baseIndex}`;
+    source.indexGroupOrder = [`Small imported group ${baseIndex}`];
+    source.portableIndex.groups = [{
+      id: `small-imported-group-${baseIndex}`,
+      title: `Small imported group ${baseIndex}`,
+      order: 0,
+    }];
+    return createKnowledgeBaseEntry(source, `base-small-portfolio-source-${baseIndex}`, 200 + baseIndex);
+  });
+  const bundle = createPortfolioExport(sourceEntries.map((entry) => ({
+    entry,
+    records: [],
+    selection: { ...EMPTY_PORTABLE_SELECTION, index: true },
+  })), "2026-08-14T00:00:00.000Z", store.vaultId);
+  const initialLocal = createDeviceLocalPluginState(store);
+  const live = pluginWithKeyedLocalStorage(
+    structuredClone(store),
+    new Map([[DEVICE_LOCAL_STATE_KEY, initialLocal]]),
+  );
+  await live.plugin.loadPluginData(false);
+  const plan = live.plugin.createPortfolioImportPlan(bundle, sourceEntries.map((entry, index) => ({
+    sourceBaseId: entry.id,
+    destination: { kind: "existing" as const, baseId: store.bases[index]?.id ?? "" },
+    mode: "merge" as const,
+  })));
+  const plannedUndoBytes = plan.operations.map((operation) => {
+    const undo = operation.afterEntry.data.undoStack.at(-1);
+    assert.ok(undo);
+    return new TextEncoder().encode(JSON.stringify(undo)).byteLength;
+  });
+  assert.ok(
+    plannedUndoBytes.every((bytes) => bytes < MAX_DEVICE_LOCAL_STATE_BYTES),
+    "every mapped base must be individually journalable",
+  );
+  assert.ok(
+    plannedUndoBytes.reduce((total, bytes) => total + bytes, 0) > MAX_DEVICE_LOCAL_STATE_BYTES,
+    "only the protected aggregate may exceed the complete device-local journal budget",
+  );
+  const before = structuredClone(live.plugin.getKnowledgeBases(true));
+  const beforeLocalBytes = JSON.stringify(live.localValues.get(DEVICE_LOCAL_STATE_KEY));
+  let primaryWrites = 0;
+  live.plugin.saveData = async () => { primaryWrites += 1; };
+
+  await assert.rejects(
+    live.plugin.applyPortfolioImportPlan(plan),
+    /cannot keep every mapped base's required Undo within the 4 MiB device-local limit/i,
+  );
+
+  assert.equal(primaryWrites, 0);
+  assert.deepEqual(live.plugin.getKnowledgeBases(true), before);
+  assert.deepEqual(live.localValues.get(DEVICE_LOCAL_STATE_KEY), initialLocal);
+  assert.equal(JSON.stringify(live.localValues.get(DEVICE_LOCAL_STATE_KEY)), beforeLocalBytes);
+  assert.equal(live.plugin.isDataReadOnly(), false);
+});
+
 test("two consecutive portfolio exports mint identical stable subject IDs and persist them", async () => {
   const data = migrateData(null);
   data.settings.workspaceName = "Portfolio stable IDs";
@@ -6266,8 +6863,8 @@ test("two consecutive portfolio exports mint identical stable subject IDs and pe
 
   const selection = { ...EMPTY_PORTABLE_SELECTION, study: true };
   const baseId = plugin.getActiveKnowledgeBaseId();
-  const first = plugin.createPortfolioExport([{ baseId, selection }], "2026-08-12T00:00:00.000Z");
-  const second = plugin.createPortfolioExport([{ baseId, selection }], "2026-08-12T00:00:00.000Z");
+  const first = await plugin.createPortfolioExport([{ baseId, selection }], "2026-08-12T00:00:00.000Z");
+  const second = await plugin.createPortfolioExport([{ baseId, selection }], "2026-08-12T00:00:00.000Z");
 
   const pinnedIds = (bundle: PortfolioExportV1): readonly string[] => (
     bundle.packages[0]?.package.components.study?.pinnedSubjectIds ?? []
@@ -6280,16 +6877,147 @@ test("two consecutive portfolio exports mint identical stable subject IDs and pe
     "the exported subject ID was allocated on the live registry",
   );
 
-  await bounded(
-    (plugin as unknown as { directSaveTransactionQueue: Promise<void> }).directSaveTransactionQueue,
-    "portfolio registry allocation save",
-  );
   assert.equal(plugin.savedData.length, 1, "both exports share one allocation save");
   const saved = plugin.savedData[0] as PluginStore;
   assert.ok(
     saved.bases[0]?.data.portableIndex.subjects.some((subject) => subject.id === allocatedId),
     "the allocated subject ID reaches data.json",
   );
+
+  const restarted = pluginWith(saved);
+  await restarted.loadPluginData(false);
+  restarted.savedData.length = 0;
+  const afterRestart = await restarted.createPortfolioExport(
+    [{ baseId, selection }],
+    "2026-08-12T00:00:00.000Z",
+  );
+  assert.deepEqual(pinnedIds(afterRestart), pinnedIds(first), "restart reuses the durably committed ID");
+  assert.equal(restarted.savedData.length, 0, "a persisted registry needs no repair save after restart");
+});
+
+test("portfolio export waits for stable-ID durability and cancels delivery data on rejection", async () => {
+  const data = migrateData(null);
+  data.pinnedPaths = ["Notes/Durable portfolio topic.md"];
+  const selection = { ...EMPTY_PORTABLE_SELECTION, study: true };
+  const plugin = pluginWith(createDefaultStore(data, 100, "vault-portfolio-durable-boundary"));
+  await plugin.loadPluginData(false);
+  const saveStarted = deferred();
+  const releaseSave = deferred();
+  plugin.saveData = async (value: unknown) => {
+    saveStarted.resolve();
+    await releaseSave.promise;
+    plugin.savedData.push(structuredClone(value));
+  };
+  let delivered = false;
+  const pending = plugin.createPortfolioExport(
+    [{ baseId: plugin.getActiveKnowledgeBaseId(), selection }],
+    "2026-08-12T00:00:00.000Z",
+  ).then((bundle) => {
+    delivered = true;
+    return bundle;
+  });
+
+  await saveStarted.promise;
+  await Promise.resolve();
+  assert.equal(delivered, false, "no bundle reaches its caller while the stable-ID save is pending");
+  releaseSave.resolve();
+  const bundle = await pending;
+  assert.equal(delivered, true);
+  assert.equal(bundle.packages[0]?.package.components.study?.pinnedSubjectIds.length, 1);
+
+  const rejectedData = migrateData(null);
+  rejectedData.pinnedPaths = ["Notes/Rejected portfolio topic.md"];
+  const rejected = pluginWith(createDefaultStore(rejectedData, 100, "vault-portfolio-rejected-boundary"));
+  await rejected.loadPluginData(false);
+  const registryBefore = structuredClone(rejected.data.portableIndex);
+  let writes = 0;
+  rejected.saveData = async (value: unknown) => {
+    writes += 1;
+    if (writes === 1) throw new Error("stable-ID primary save rejected");
+    rejected.savedData.push(structuredClone(value));
+  };
+
+  await assert.rejects(
+    rejected.createPortfolioExport(
+      [{ baseId: rejected.getActiveKnowledgeBaseId(), selection }],
+      "2026-08-12T00:00:00.000Z",
+    ),
+    /stable-ID primary save rejected/i,
+  );
+  assert.deepEqual(rejected.data.portableIndex, registryBefore, "a rejected export restores the live registry");
+  assert.equal(writes, 2, "a potentially reached allocation is followed by one causal rollback");
+  const compensated = (rejected.savedData.at(-1) as PluginStore | undefined)?.bases[0];
+  const live = rejected.getActiveKnowledgeBase();
+  assert.equal(live.semanticHead, compensated?.semanticHead, "memory retains the causal rollback that reached data.json");
+  assert.equal(live.semanticHash, compensated?.semanticHash);
+  assert.equal(live.semanticRevision, compensated?.semanticRevision);
+});
+
+test("portfolio allocation rolls back before saveData when its prerequisite backup fails", async () => {
+  const data = migrateData(null);
+  data.pinnedPaths = ["Notes/Preflight portfolio topic.md"];
+  const plugin = pluginWith(createDefaultStore(data, 100, "vault-portfolio-backup-prerequisite"));
+  await plugin.loadPluginData(false);
+  const before = structuredClone(plugin.getKnowledgeBases(true));
+  const events: string[] = [];
+  const app = plugin.app as unknown as {
+    vault: ReturnType<typeof emptyWritableTestVault> & {
+      adapter: { write(path: string, content: string): Promise<void> };
+    };
+  };
+  app.vault.adapter = {
+    async write(): Promise<void> {
+      events.push("backup");
+      throw new Error("portfolio prerequisite backup rejected");
+    },
+  };
+  (plugin.manifest as { dir?: string }).dir = ".obsidian/plugins/knowledge-base-command-center";
+  plugin.saveData = async (): Promise<void> => { events.push("primary"); };
+
+  await assert.rejects(
+    plugin.createPortfolioExport([{
+      baseId: plugin.getActiveKnowledgeBaseId(),
+      selection: { ...EMPTY_PORTABLE_SELECTION, study: true },
+    }]),
+    /primary store was not written/i,
+  );
+
+  assert.deepEqual(events, ["backup"], "a failed prerequisite never starts primary or compensation writes");
+  assert.deepEqual(plugin.getKnowledgeBases(true), before, "registry allocation and semantic metadata roll back exactly");
+  assert.equal(plugin.isDataReadOnly(), false);
+});
+
+test("portfolio allocation preparation failure restores the registry and semantic head", async () => {
+  const data = migrateData(null);
+  data.pinnedPaths = ["Notes/Preparation portfolio topic.md"];
+  const plugin = pluginWith(createDefaultStore(data, 100, "vault-portfolio-preparation-rollback"));
+  await plugin.loadPluginData(false);
+  const before = structuredClone(plugin.getKnowledgeBases(true));
+  let injected = false;
+  setCloneJsonValueObserver((value) => {
+    if (injected || typeof value !== "object" || value === null || !("bases" in value)) return;
+    const candidate = value as PluginStore;
+    const entry = candidate.bases[0];
+    if ((entry?.data.portableIndex.subjects.length ?? 0) === 0 || (entry?.semanticRevision ?? 0) === 0) return;
+    injected = true;
+    throw new Error("injected attempted-store clone failure");
+  });
+  try {
+    await assert.rejects(
+      plugin.createPortfolioExport([{
+        baseId: plugin.getActiveKnowledgeBaseId(),
+        selection: { ...EMPTY_PORTABLE_SELECTION, study: true },
+      }]),
+      /injected attempted-store clone failure/i,
+    );
+  } finally {
+    setCloneJsonValueObserver(null);
+  }
+
+  assert.equal(injected, true, "the failure occurs after registry and causal metadata preparation");
+  assert.deepEqual(plugin.getKnowledgeBases(true), before);
+  assert.equal(plugin.savedData.length, 0);
+  assert.equal(plugin.isDataReadOnly(), false);
 });
 
 test("a read-only portfolio export still succeeds without persisting subject IDs", async () => {
@@ -6304,7 +7032,7 @@ test("a read-only portfolio export still succeeds without persisting subject IDs
   const registryBefore = structuredClone(plugin.data.portableIndex);
 
   const selection = { ...EMPTY_PORTABLE_SELECTION, study: true };
-  const bundle = plugin.createPortfolioExport(
+  const bundle = await plugin.createPortfolioExport(
     [{ baseId: plugin.getActiveKnowledgeBaseId(), selection }],
     "2026-08-12T00:00:00.000Z",
   );
@@ -6564,6 +7292,7 @@ test("an ordinary mutate save failure restores personal state and existing histo
 test("resolving a portable placeholder preserves placement and Undo only unlinks the note", async () => {
   const linkedFile = new TFile("Knowledge Base/Airway/Laryngeal Cleft.md");
   const app = {
+    ...testDeviceLocalStorage(),
     vault: {
       configDir: ".obsidian",
       getAbstractFileByPath: (path: string) => path === linkedFile.path ? linkedFile : null,
@@ -6616,6 +7345,7 @@ test("resolving a portable placeholder preserves placement and Undo only unlinks
 
 test("Undo invalidates cached placeholder metadata", async () => {
   const app = {
+    ...testDeviceLocalStorage(),
     vault: { configDir: ".obsidian", getAbstractFileByPath: () => null, getMarkdownFiles: () => [] },
     workspace: { getLeavesOfType: () => [] },
     metadataCache: { getFileCache: () => null, resolvedLinks: {} },
@@ -6648,6 +7378,7 @@ test("Undo invalidates cached placeholder metadata", async () => {
 test("confirmed identity reassignment merges bindings without duplicate organization paths and Undo restores both", async () => {
   const linkedFile = new TFile("Knowledge Base/Airway/Local renamed note.md");
   const app = {
+    ...testDeviceLocalStorage(),
     vault: {
       configDir: ".obsidian",
       getAbstractFileByPath: (path: string) => path === linkedFile.path ? linkedFile : null,
@@ -6727,6 +7458,7 @@ test("identity reassignment refuses ancestor and descendant merges that would cr
 test("unlinking a resolved portable subject restores its placeholder without changing the Markdown file", async () => {
   const linkedFile = new TFile("Knowledge Base/Airway/Laryngeal Cleft.md");
   const app = {
+    ...testDeviceLocalStorage(),
     vault: {
       configDir: ".obsidian",
       getAbstractFileByPath: (path: string) => path === linkedFile.path ? linkedFile : null,
@@ -6917,6 +7649,7 @@ test("Index Manager rename and merge preserve collapsed visual group state", asy
 
 test("adding an available portable placeholder restores membership and captures it in Undo", async () => {
   const app = {
+    ...testDeviceLocalStorage(),
     vault: { configDir: ".obsidian", getMarkdownFiles: () => [], getAbstractFileByPath: () => null },
     workspace: { getLeavesOfType: () => [] },
     metadataCache: { getFileCache: () => null, resolvedLinks: {} },
@@ -6995,6 +7728,7 @@ test("adding an available portable placeholder restores membership and captures 
 test("an indexed clinical subject linked to an unverified proposal remains in both the index and Inbox export", async () => {
   const proposal = new TFile("01 Inbox/Topic Proposals/Proposal - Laryngeal Cleft.md");
   const app = {
+    ...testDeviceLocalStorage(),
     vault: {
       configDir: ".obsidian",
       getAbstractFileByPath: (path: string) => path === proposal.path ? proposal : null,
@@ -7056,6 +7790,7 @@ test("an indexed clinical subject linked to an unverified proposal remains in bo
 test("a collection-only generic placeholder can link a new in-folder note without entering the index", async () => {
   const created = new TFile("Knowledge Base/Reference material.md");
   const app = {
+    ...testDeviceLocalStorage(),
     vault: {
       configDir: ".obsidian",
       getAbstractFileByPath: (path: string) => path === created.path ? created : null,
@@ -7594,7 +8329,7 @@ test("a failed custom-library deletion save restores the exact definition, subje
   assert.equal(sourceMutationCount(), 0);
 });
 
-test("deleting a 50,000-subject custom library removes layout memberships in linear time", async () => {
+test("a 50,000-subject library deletion fails before commit when required Undo exceeds 4 MiB", async () => {
   const subjectCount = 50_000;
   const libraryId = "library-bulk-delete";
   const groupId = "bulk";
@@ -7630,15 +8365,597 @@ test("deleting a 50,000-subject custom library removes layout memberships in lin
   }];
   const plugin = pluginWith(data);
   await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+  const before = structuredClone(plugin.data);
 
   const start = performance.now();
-  await plugin.deleteLibrary(libraryId, "unassigned");
+  await assert.rejects(
+    plugin.deleteLibrary(libraryId, "unassigned"),
+    /required Undo snapshot.*4 MiB device-local limit/i,
+  );
   const elapsed = performance.now() - start;
 
-  assert.equal(plugin.getLibrary(libraryId), null);
-  assert.equal(plugin.data.portableIndex.subjects.filter((subject) => subject.libraryId === libraryId).length, 0);
-  assert.equal(plugin.data.portableIndex.libraryLayouts[libraryId], undefined);
-  assert.ok(elapsed < 2_500, `deleting ${subjectCount} layout memberships took ${elapsed.toFixed(1)} ms`);
+  assert.deepEqual(plugin.data, before, "the oversized deletion is rolled back before data.json is attempted");
+  assert.equal(plugin.savedData.length, 0);
+  assert.ok(elapsed < 2_500, `preflighting ${subjectCount} layout memberships took ${elapsed.toFixed(1)} ms`);
+});
+
+test("required Undo fails before data.json when device-local storage rejects the snapshot", async () => {
+  const store = createDefaultStore(migrateData(null), 100, "vault-required-undo-storage-failure");
+  let primaryWrites = 0;
+  let localWrites = 0;
+  const app = {
+    vault: emptyWritableTestVault(),
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null },
+    fileManager: {},
+    loadLocalStorage: () => null,
+    saveLocalStorage: () => {
+      localWrites += 1;
+      throw new Error("simulated localStorage quota failure");
+    },
+  };
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never);
+  plugin.loadedData = store;
+  plugin.saveData = async () => { primaryWrites += 1; };
+  await plugin.loadPluginData(false);
+  const before = structuredClone(plugin.data);
+
+  await assert.rejects(
+    plugin.mutate("Required local Undo", () => {
+      plugin.data.pinnedPaths = ["Knowledge Base/Must rollback.md"];
+    }, { requireUndo: true }),
+    /simulated localStorage quota failure/i,
+  );
+
+  assert.deepEqual(plugin.data, before);
+  assert.equal(primaryWrites, 0, "the semantic writer is never entered without durable required Undo");
+  assert.ok(localWrites >= 1);
+  assert.equal(plugin.isDataReadOnly(), false, "a pre-commit local failure does not invent primary-write uncertainty");
+});
+
+test("required Undo journal resolves both hard-crash windows against exact committed authority", async () => {
+  const data = migrateData(null);
+  data.undoStack = [snapshotPersonal(data, "Earlier undo")];
+  data.redoStack = [snapshotPersonal(data, "Earlier redo")];
+  const baseline = createDefaultStore(data, 100, "vault-required-undo-crash-window");
+  const live = pluginWithKeyedLocalStorage(
+    structuredClone(baseline),
+    new Map([[DEVICE_LOCAL_STATE_KEY, createDeviceLocalPluginState(baseline)]]),
+  );
+  await live.plugin.loadPluginData(false);
+
+  const enteredPrimary = deferred();
+  const releasePrimary = deferred();
+  let candidatePrimary: PluginStore | null = null;
+  live.plugin.saveData = async (value: unknown) => {
+    candidatePrimary = structuredClone(value) as PluginStore;
+    enteredPrimary.resolve();
+    await releasePrimary.promise;
+    live.plugin.savedData.push(structuredClone(value));
+  };
+  const mutation = live.plugin.mutate("Crash-guarded change", () => {
+    live.plugin.data.pinnedPaths = ["Knowledge Base/Committed only with authority.md"];
+  }, { requireUndo: true });
+  await enteredPrimary.promise;
+
+  const pendingState = live.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
+  assert.ok(pendingState?.pendingRequiredUndoCommit, "preflight writes one durable pending journal before primary commit");
+  assert.equal(pendingState.bases[0]?.view.redoStack[0]?.label, "Earlier redo", "the pending journal retains pre-transaction Redo");
+  const crashLocalValues = new Map([[DEVICE_LOCAL_STATE_KEY, structuredClone(pendingState)]]);
+
+  const beforePrimary = pluginWithKeyedLocalStorage(structuredClone(baseline), crashLocalValues);
+  await beforePrimary.plugin.loadPluginData(false);
+  assert.deepEqual(beforePrimary.plugin.data.pinnedPaths, []);
+  assert.deepEqual(beforePrimary.plugin.data.undoStack.map((snapshot) => snapshot.label), ["Earlier undo"]);
+  assert.deepEqual(beforePrimary.plugin.data.redoStack.map((snapshot) => snapshot.label), ["Earlier redo"]);
+  const discarded = beforePrimary.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
+  assert.equal(discarded?.pendingRequiredUndoCommit, undefined);
+
+  assert.ok(candidatePrimary);
+  const afterPrimary = pluginWithKeyedLocalStorage(
+    structuredClone(candidatePrimary),
+    new Map([[DEVICE_LOCAL_STATE_KEY, structuredClone(pendingState)]]),
+  );
+  await afterPrimary.plugin.loadPluginData(false);
+  assert.deepEqual(afterPrimary.plugin.data.pinnedPaths, ["Knowledge Base/Committed only with authority.md"]);
+  assert.deepEqual(
+    afterPrimary.plugin.data.undoStack.map((snapshot) => snapshot.label),
+    ["Earlier undo", "Crash-guarded change"],
+  );
+  assert.deepEqual(afterPrimary.plugin.data.redoStack, []);
+  const promoted = afterPrimary.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
+  assert.equal(promoted?.pendingRequiredUndoCommit, undefined);
+
+  releasePrimary.resolve();
+  await mutation;
+});
+
+test("normal required Undo commit finalizes marker-free and remains restart-safe", async () => {
+  const store = createDefaultStore(migrateData(null), 100, "vault-required-undo-normal-finalization");
+  const live = pluginWithKeyedLocalStorage(store);
+  await live.plugin.loadPluginData(false);
+
+  await live.plugin.mutate("Normal required undo", () => {
+    live.plugin.data.nextStudyPaths = ["Knowledge Base/Restart safe.md"];
+  }, { requireUndo: true });
+
+  const local = live.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
+  assert.equal(local?.pendingRequiredUndoCommit, undefined);
+  assert.equal(local?.bases[0]?.view.undoStack.at(-1)?.label, "Normal required undo");
+  const committed = live.plugin.savedData.at(-1);
+  assert.ok(committed);
+  const restarted = pluginWithKeyedLocalStorage(committed, new Map([[DEVICE_LOCAL_STATE_KEY, local]]));
+  await restarted.plugin.loadPluginData(false);
+  assert.deepEqual(restarted.plugin.data.nextStudyPaths, ["Knowledge Base/Restart safe.md"]);
+  assert.equal(restarted.plugin.data.undoStack.at(-1)?.label, "Normal required undo");
+});
+
+test("no-op required Undo uses marker-free local history and does not invent a primary commit", async () => {
+  const data = migrateData(null);
+  data.redoStack = [snapshotPersonal(data, "Redo before no-op")];
+  const store = createDefaultStore(data, 100, "vault-required-undo-no-op");
+  const live = pluginWithKeyedLocalStorage(
+    store,
+    new Map([[DEVICE_LOCAL_STATE_KEY, createDeviceLocalPluginState(store)]]),
+  );
+  await live.plugin.loadPluginData(false);
+  assert.equal(live.plugin.data.redoStack[0]?.label, "Redo before no-op");
+  let primaryWrites = 0;
+  live.plugin.saveData = async () => { primaryWrites += 1; };
+
+  await live.plugin.mutate("No-op required undo", () => {}, { requireUndo: true });
+
+  const local = live.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
+  assert.equal(primaryWrites, 0);
+  assert.equal(local?.pendingRequiredUndoCommit, undefined);
+  assert.equal(local?.bases[0]?.view.undoStack.at(-1)?.label, "No-op required undo");
+  assert.deepEqual(local?.bases[0]?.view.redoStack, []);
+});
+
+test("postcommit required Undo local failure keeps the pending journal durable for restart promotion", async () => {
+  const data = migrateData(null);
+  data.redoStack = [snapshotPersonal(data, "Redo before commit")];
+  const store = createDefaultStore(data, 100, "vault-required-undo-finalize-retry");
+  const live = pluginWithKeyedLocalStorage(
+    store,
+    new Map([[DEVICE_LOCAL_STATE_KEY, createDeviceLocalPluginState(store)]]),
+  );
+  await live.plugin.loadPluginData(false);
+  let requiredUndoLocalWrites = 0;
+  (live.plugin.app as unknown as {
+    saveLocalStorage(key: string, value: unknown): void;
+  }).saveLocalStorage = (key, value) => {
+    if (key !== DEVICE_LOCAL_STATE_KEY) {
+      live.localValues.set(key, structuredClone(value));
+      return;
+    }
+    requiredUndoLocalWrites += 1;
+    if (requiredUndoLocalWrites > 1) throw new Error("simulated postcommit local failure");
+    live.localValues.set(key, structuredClone(value));
+  };
+
+  await live.plugin.mutate("Pending until restart", () => {
+    live.plugin.data.pinnedPaths = ["Knowledge Base/Pending journal.md"];
+  }, { requireUndo: true });
+
+  assert.ok(requiredUndoLocalWrites >= 3, "ordinary postcommit persistence and explicit finalization both retry");
+  const durablePending = live.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
+  assert.ok(durablePending?.pendingRequiredUndoCommit, "failed promotion never overwrites the preflight journal");
+  assert.equal(durablePending.bases[0]?.view.redoStack[0]?.label, "Redo before commit");
+  const committed = live.plugin.savedData.at(-1);
+  assert.ok(committed);
+
+  const restarted = pluginWithKeyedLocalStorage(
+    committed,
+    new Map([[DEVICE_LOCAL_STATE_KEY, structuredClone(durablePending)]]),
+  );
+  await restarted.plugin.loadPluginData(false);
+  assert.deepEqual(restarted.plugin.data.pinnedPaths, ["Knowledge Base/Pending journal.md"]);
+  assert.equal(restarted.plugin.data.undoStack.at(-1)?.label, "Pending until restart");
+  assert.deepEqual(restarted.plugin.data.redoStack, []);
+  const finalized = restarted.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
+  assert.equal(finalized?.pendingRequiredUndoCommit, undefined);
+});
+
+test("required Undo journals fingerprint the bounded payload that actually commits", async () => {
+  const store = createDefaultStore(migrateData(null), 100, "vault-required-undo-bounded-payload");
+  const live = pluginWithKeyedLocalStorage(
+    store,
+    new Map([[DEVICE_LOCAL_STATE_KEY, createDeviceLocalPluginState(store)]]),
+  );
+  await live.plugin.loadPluginData(false);
+  let localWrites = 0;
+  (live.plugin.app as unknown as {
+    saveLocalStorage(key: string, value: unknown): void;
+  }).saveLocalStorage = (key, value) => {
+    if (key !== DEVICE_LOCAL_STATE_KEY) {
+      live.localValues.set(key, structuredClone(value));
+      return;
+    }
+    localWrites += 1;
+    if (localWrites > 1) throw new Error("simulated bounded-payload finalization failure");
+    live.localValues.set(key, structuredClone(value));
+  };
+
+  await live.plugin.mutate("Bounded required undo", () => {
+    live.plugin.data.settings.workspaceName = "x".repeat(MAX_TRANSFER_TEXT_LENGTH + 1);
+  }, { includeSettings: true, requireUndo: true });
+
+  assert.equal(live.plugin.data.settings.workspaceName.length, MAX_TRANSFER_TEXT_LENGTH);
+  const pending = live.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
+  assert.ok(pending?.pendingRequiredUndoCommit, "failed postcommit writes leave the exact precommit journal durable");
+  const committed = live.plugin.savedData[live.plugin.savedData.length - 1];
+  assert.ok(committed);
+  const restarted = pluginWithKeyedLocalStorage(
+    committed,
+    new Map([[DEVICE_LOCAL_STATE_KEY, structuredClone(pending)]]),
+  );
+  await restarted.plugin.loadPluginData(false);
+
+  assert.equal(restarted.plugin.data.settings.workspaceName.length, MAX_TRANSFER_TEXT_LENGTH);
+  const latestUndo = restarted.plugin.data.undoStack[restarted.plugin.data.undoStack.length - 1];
+  assert.equal(latestUndo?.label, "Bounded required undo");
+  assert.equal(
+    (restarted.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState>)
+      .pendingRequiredUndoCommit,
+    undefined,
+  );
+});
+
+test("Undo and Redo journals resolve pre-primary, committed, and newer-head crash windows exactly", async () => {
+  for (const direction of ["undo", "redo"] as const) {
+    const stateA = migrateData(null);
+    const stateB = migrateData(null);
+    stateB.pinnedPaths = ["Knowledge Base/State B.md"];
+    const label = direction === "undo" ? "Restore state A" : "Restore state B";
+    const current = direction === "undo" ? stateB : stateA;
+    const destination = direction === "undo" ? stateA : stateB;
+    const sourceSnapshot = snapshotPersonal(destination, label);
+    if (direction === "undo") current.undoStack = [sourceSnapshot];
+    else current.redoStack = [sourceSnapshot];
+    const baseline = createDefaultStore(
+      current,
+      100,
+      `vault-${direction}-history-crash-window`,
+    );
+    const live = pluginWithKeyedLocalStorage(
+      structuredClone(baseline),
+      new Map([[DEVICE_LOCAL_STATE_KEY, createDeviceLocalPluginState(baseline)]]),
+    );
+    await live.plugin.loadPluginData(false);
+    const enteredPrimary = deferred();
+    const releasePrimary = deferred();
+    let candidatePrimary: PluginStore | null = null;
+    live.plugin.saveData = async (value: unknown) => {
+      candidatePrimary = structuredClone(value) as PluginStore;
+      enteredPrimary.resolve();
+      await releasePrimary.promise;
+      live.plugin.savedData.push(structuredClone(value));
+    };
+    const operation = direction === "undo" ? live.plugin.undo() : live.plugin.redo();
+    await enteredPrimary.promise;
+    try {
+      const pending = live.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
+      assert.equal(pending?.pendingHistoryTransitionCommit?.direction, direction);
+      assert.deepEqual(pending?.bases[0]?.view.undoStack.map((snapshot) => snapshot.label), direction === "undo" ? [label] : []);
+      assert.deepEqual(pending?.bases[0]?.view.redoStack.map((snapshot) => snapshot.label), direction === "redo" ? [label] : []);
+
+      const beforePrimary = pluginWithKeyedLocalStorage(
+        structuredClone(baseline),
+        new Map([[DEVICE_LOCAL_STATE_KEY, structuredClone(pending)]]),
+      );
+      await beforePrimary.plugin.loadPluginData(false);
+      assert.deepEqual(beforePrimary.plugin.data.pinnedPaths, current.pinnedPaths);
+      assert.deepEqual(beforePrimary.plugin.data.undoStack.map((snapshot) => snapshot.label), direction === "undo" ? [label] : []);
+      assert.deepEqual(beforePrimary.plugin.data.redoStack.map((snapshot) => snapshot.label), direction === "redo" ? [label] : []);
+
+      assert.ok(candidatePrimary);
+      const afterPrimary = pluginWithKeyedLocalStorage(
+        structuredClone(candidatePrimary),
+        new Map([[DEVICE_LOCAL_STATE_KEY, structuredClone(pending)]]),
+      );
+      await afterPrimary.plugin.loadPluginData(false);
+      assert.deepEqual(afterPrimary.plugin.data.pinnedPaths, destination.pinnedPaths);
+      assert.deepEqual(afterPrimary.plugin.data.undoStack.map((snapshot) => snapshot.label), direction === "redo" ? [label] : []);
+      assert.deepEqual(afterPrimary.plugin.data.redoStack.map((snapshot) => snapshot.label), direction === "undo" ? [label] : []);
+      assert.equal(
+        (afterPrimary.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState>)
+          .pendingHistoryTransitionCommit,
+        undefined,
+      );
+
+      const newer = structuredClone(candidatePrimary);
+      const newerEntry = newer.bases[0];
+      assert.ok(newerEntry);
+      advanceStoreEntry(newerEntry, () => {
+        newerEntry.data.pinnedPaths = ["Knowledge Base/Newer synced state.md"];
+      });
+      const newerRestart = pluginWithKeyedLocalStorage(
+        newer,
+        new Map([[DEVICE_LOCAL_STATE_KEY, structuredClone(pending)]]),
+      );
+      await newerRestart.plugin.loadPluginData(false);
+      assert.deepEqual(newerRestart.plugin.data.pinnedPaths, ["Knowledge Base/Newer synced state.md"]);
+      assert.deepEqual(newerRestart.plugin.data.undoStack.map((snapshot) => snapshot.label), direction === "undo" ? [label] : []);
+      assert.deepEqual(newerRestart.plugin.data.redoStack.map((snapshot) => snapshot.label), direction === "redo" ? [label] : []);
+      assert.equal(
+        (newerRestart.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState>)
+          .pendingHistoryTransitionCommit,
+        undefined,
+      );
+    } finally {
+      releasePrimary.resolve();
+      await operation;
+    }
+  }
+});
+
+test("Undo and Redo fail before any write when their exact inverse exceeds the applicable history cap", async () => {
+  for (const direction of ["undo", "redo"] as const) {
+    const current = migrateData(null);
+    current.collections = Array.from({ length: 3_000 }, (_, index) => ({
+      id: `oversized-inverse-${index}`,
+      title: `Collection ${index} ${"x".repeat(150)}`,
+      collapsed: false,
+      subjects: [],
+      subheadings: [],
+    }));
+    const inverseProof = snapshotPersonal(current, `Oversized ${direction} inverse`);
+    assert.equal(inverseProof.portableIndex, undefined);
+    assert.ok(
+      new TextEncoder().encode(JSON.stringify(inverseProof)).byteLength > MAX_UNDO_BYTES,
+      "the regression must exceed the ordinary 512 KiB history cap",
+    );
+    const destination = migrateData(null);
+    const sourceSnapshot = snapshotPersonal(destination, `Reject oversized ${direction} inverse`);
+    if (direction === "undo") current.undoStack = [sourceSnapshot];
+    else current.redoStack = [sourceSnapshot];
+    const store = createDefaultStore(
+      current,
+      100,
+      `vault-${direction}-oversized-inverse`,
+    );
+    const initialLocal = createDeviceLocalPluginState(store);
+    const live = pluginWithKeyedLocalStorage(
+      store,
+      new Map([[DEVICE_LOCAL_STATE_KEY, initialLocal]]),
+    );
+    await live.plugin.loadPluginData(false);
+    const beforeData = structuredClone(live.plugin.data);
+    const beforeLocal = structuredClone(live.localValues.get(DEVICE_LOCAL_STATE_KEY));
+    const localWriteCount = live.localWrites.length;
+    let primaryWrites = 0;
+    live.plugin.saveData = async () => { primaryWrites += 1; };
+
+    await assert.rejects(
+      direction === "undo" ? live.plugin.undo() : live.plugin.redo(),
+      new RegExp(`${direction}.*exact inverse snapshot.*history limit`, "i"),
+    );
+
+    assert.equal(primaryWrites, 0);
+    assert.equal(live.localWrites.length, localWriteCount, "the rejected transition never stages local history");
+    assert.deepEqual(live.localValues.get(DEVICE_LOCAL_STATE_KEY), beforeLocal);
+    assert.deepEqual(live.plugin.data, beforeData);
+    assert.equal(live.plugin.isDataReadOnly(), false);
+  }
+});
+
+test("normal Undo and Redo commits finalize marker-free post-transition history", async () => {
+  for (const direction of ["undo", "redo"] as const) {
+    const stateA = migrateData(null);
+    const stateB = migrateData(null);
+    stateB.nextStudyPaths = ["Knowledge Base/State B.md"];
+    const label = `Normal ${direction} transition`;
+    const current = direction === "undo" ? stateB : stateA;
+    const destination = direction === "undo" ? stateA : stateB;
+    const sourceSnapshot = snapshotPersonal(destination, label);
+    if (direction === "undo") current.undoStack = [sourceSnapshot];
+    else current.redoStack = [sourceSnapshot];
+    const store = createDefaultStore(current, 100, `vault-normal-${direction}-transition`);
+    const live = pluginWithKeyedLocalStorage(
+      store,
+      new Map([[DEVICE_LOCAL_STATE_KEY, createDeviceLocalPluginState(store)]]),
+    );
+    await live.plugin.loadPluginData(false);
+
+    if (direction === "undo") await live.plugin.undo();
+    else await live.plugin.redo();
+
+    const local = live.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
+    assert.equal(local?.pendingHistoryTransitionCommit, undefined);
+    assert.deepEqual(local?.bases[0]?.view.undoStack.map((snapshot) => snapshot.label), direction === "redo" ? [label] : []);
+    assert.deepEqual(local?.bases[0]?.view.redoStack.map((snapshot) => snapshot.label), direction === "undo" ? [label] : []);
+    assert.deepEqual(live.plugin.data.nextStudyPaths, destination.nextStudyPaths);
+  }
+});
+
+test("postcommit history-local failure leaves a durable transition for restart promotion", async () => {
+  const destination = migrateData(null);
+  const current = migrateData(null);
+  current.pinnedPaths = ["Knowledge Base/Before undo.md"];
+  current.undoStack = [snapshotPersonal(destination, "Pending history promotion")];
+  const store = createDefaultStore(current, 100, "vault-history-finalize-retry");
+  const live = pluginWithKeyedLocalStorage(
+    store,
+    new Map([[DEVICE_LOCAL_STATE_KEY, createDeviceLocalPluginState(store)]]),
+  );
+  await live.plugin.loadPluginData(false);
+  let deviceWrites = 0;
+  (live.plugin.app as unknown as {
+    saveLocalStorage(key: string, value: unknown): void;
+  }).saveLocalStorage = (key, value) => {
+    if (key !== DEVICE_LOCAL_STATE_KEY) {
+      live.localValues.set(key, structuredClone(value));
+      return;
+    }
+    deviceWrites += 1;
+    if (deviceWrites > 1) throw new Error("simulated postcommit history-local failure");
+    live.localValues.set(key, structuredClone(value));
+  };
+  const originalConsoleError = console.error;
+  console.error = () => {};
+  try {
+    await live.plugin.undo();
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.ok(deviceWrites >= 3, "ordinary postcommit persistence and explicit finalization both retry");
+  const durablePending = live.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
+  assert.equal(durablePending?.pendingHistoryTransitionCommit?.direction, "undo");
+  assert.equal(durablePending?.bases[0]?.view.undoStack.at(-1)?.label, "Pending history promotion");
+  assert.deepEqual(durablePending?.bases[0]?.view.redoStack, []);
+  const committed = live.plugin.savedData.at(-1);
+  assert.ok(committed);
+
+  const restarted = pluginWithKeyedLocalStorage(
+    committed,
+    new Map([[DEVICE_LOCAL_STATE_KEY, structuredClone(durablePending)]]),
+  );
+  await restarted.plugin.loadPluginData(false);
+  assert.deepEqual(restarted.plugin.data.pinnedPaths, []);
+  assert.deepEqual(restarted.plugin.data.undoStack, []);
+  assert.equal(restarted.plugin.data.redoStack.at(-1)?.label, "Pending history promotion");
+  assert.equal(
+    (restarted.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState>)
+      .pendingHistoryTransitionCommit,
+    undefined,
+  );
+});
+
+test("semantic no-op Undo and Redo persist marker-free history without a primary write", async () => {
+  for (const direction of ["undo", "redo"] as const) {
+    const data = migrateData(null);
+    const label = `No-op ${direction}`;
+    const sourceSnapshot = snapshotPersonal(data, label);
+    if (direction === "undo") data.undoStack = [sourceSnapshot];
+    else data.redoStack = [sourceSnapshot];
+    const store = createDefaultStore(data, 100, `vault-no-op-${direction}-transition`);
+    const live = pluginWithKeyedLocalStorage(
+      store,
+      new Map([[DEVICE_LOCAL_STATE_KEY, createDeviceLocalPluginState(store)]]),
+    );
+    await live.plugin.loadPluginData(false);
+    let primaryWrites = 0;
+    live.plugin.saveData = async () => { primaryWrites += 1; };
+
+    if (direction === "undo") await live.plugin.undo();
+    else await live.plugin.redo();
+
+    const local = live.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
+    assert.equal(primaryWrites, 0);
+    assert.equal(local?.pendingHistoryTransitionCommit, undefined);
+    assert.deepEqual(local?.bases[0]?.view.undoStack.map((snapshot) => snapshot.label), direction === "redo" ? [label] : []);
+    assert.deepEqual(local?.bases[0]?.view.redoStack.map((snapshot) => snapshot.label), direction === "undo" ? [label] : []);
+  }
+});
+
+test("history journal storage rejection fails before primary without persistence uncertainty", async () => {
+  const destination = migrateData(null);
+  const current = migrateData(null);
+  current.pinnedPaths = ["Knowledge Base/Current.md"];
+  current.undoStack = [snapshotPersonal(destination, "Quota-protected undo")];
+  const store = createDefaultStore(current, 100, "vault-history-journal-quota");
+  const live = pluginWithKeyedLocalStorage(
+    store,
+    new Map([[DEVICE_LOCAL_STATE_KEY, createDeviceLocalPluginState(store)]]),
+  );
+  await live.plugin.loadPluginData(false);
+  let primaryWrites = 0;
+  live.plugin.saveData = async () => { primaryWrites += 1; };
+  (live.plugin.app as unknown as {
+    saveLocalStorage(key: string, value: unknown): void;
+  }).saveLocalStorage = (key, value) => {
+    if (key === DEVICE_LOCAL_STATE_KEY) throw new Error("simulated history journal quota failure");
+    live.localValues.set(key, structuredClone(value));
+  };
+  const originalConsoleError = console.error;
+  console.error = () => {};
+  try {
+    await assert.rejects(live.plugin.undo(), /simulated history journal quota failure/i);
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.equal(primaryWrites, 0);
+  assert.deepEqual(live.plugin.data.pinnedPaths, ["Knowledge Base/Current.md"]);
+  assert.equal(live.plugin.data.undoStack.at(-1)?.label, "Quota-protected undo");
+  assert.equal(live.plugin.isDataReadOnly(), false);
+});
+
+test("oversized exact history transition fails before primary instead of truncating the active stacks", async () => {
+  const destination = migrateData(null);
+  destination.portableIndex.groups = [{ id: "large", title: "Destination", order: 0 }];
+  destination.portableIndex.subjects = Array.from({ length: 7_000 }, (_, index) => ({
+    id: `large-history-${index}`,
+    title: `${"x".repeat(180)}${index}`,
+    groupId: "large",
+    parentId: null,
+    order: index,
+    indexed: false,
+    configuredId: "",
+    recordKind: "topic" as const,
+    libraryId: null,
+  }));
+  const current = structuredClone(destination);
+  const group = current.portableIndex.groups[0];
+  assert.ok(group);
+  group.title = "Current";
+  current.undoStack = [snapshotPersonal(destination, "Oversized exact undo", false, true)];
+  const store = createDefaultStore(current, 100, "vault-history-journal-oversize");
+  const live = pluginWithKeyedLocalStorage(
+    store,
+    new Map([[DEVICE_LOCAL_STATE_KEY, createDeviceLocalPluginState(store)]]),
+  );
+  await live.plugin.loadPluginData(false);
+  let primaryWrites = 0;
+  live.plugin.saveData = async () => { primaryWrites += 1; };
+
+  await assert.rejects(
+    live.plugin.undo(),
+    /exact crash-safe history transition.*4 MiB device-local limit/i,
+  );
+
+  assert.equal(primaryWrites, 0);
+  assert.equal(live.plugin.data.portableIndex.groups[0]?.title, "Current");
+  assert.equal(live.plugin.data.undoStack.at(-1)?.label, "Oversized exact undo");
+  assert.equal(live.plugin.data.redoStack.length, 0);
+  assert.equal(live.plugin.isDataReadOnly(), false);
+});
+
+test("required Undo retains the newest snapshot and reports older local-history truncation", async () => {
+  Notice.messages.length = 0;
+  const data = migrateData(null);
+  data.portableIndex.groups = [{ id: "large-history", title: "Large history", order: 0 }];
+  data.portableIndex.subjects = Array.from({ length: 1_500 }, (_, index) => ({
+    id: `history-${index}`,
+    title: `${"x".repeat(180)}${index}`,
+    groupId: "large-history",
+    parentId: null,
+    order: index,
+    indexed: false,
+    configuredId: "",
+    recordKind: "topic" as const,
+  }));
+  const plugin = pluginWith(createDefaultStore(data, 100, "vault-required-undo-truncation"));
+  await plugin.loadPluginData(false);
+  plugin.data.undoStack = Array.from({ length: 20 }, (_, index) => {
+    const snapshot = snapshotPersonal(plugin.data, `older-${index}`, false, true);
+    return snapshot;
+  });
+
+  await plugin.mutate("Restart-safe newest", () => {
+    const group = plugin.data.portableIndex.groups[0];
+    assert.ok(group);
+    group.title = "Updated large history";
+  }, { includePortableIndex: true, requireUndo: true });
+
+  const local = plugin.deviceLocalWrites.at(-1) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
+  const labels = local?.bases[0]?.view.undoStack.map((snapshot) => snapshot.label) ?? [];
+  assert.ok(labels.includes("Restart-safe newest"), "the required newest snapshot survives the 4 MiB reduction");
+  assert.ok(labels.length < 20, "older device-local history is actually reduced");
+  assert.ok(Notice.messages.some((message) => /Older undo or redo entries were removed.*restart-safe.*four-megabyte/i.test(message)));
 });
 
 test("custom-library definitions are isolated per knowledge base", async () => {
@@ -8698,6 +10015,7 @@ test("bulk index removal and restoration opt into hard Undo preflight", async ()
 test("identity merge deterministically preserves the surviving parent and appends owner children", async () => {
   const ownerFile = new TFile("Knowledge Base/Airway/Owner.md");
   const app = {
+    ...testDeviceLocalStorage(),
     vault: {
       configDir: ".obsidian",
       getAbstractFileByPath: (path: string) => path === ownerFile.path ? ownerFile : null,
@@ -8803,6 +10121,7 @@ test("identity merge rejects owner children that would become cross-group descen
 test("cross-group identity merge without descendants keeps the surviving target group through export", async () => {
   const ownerFile = new TFile("Knowledge Base/Group B/Owner.md");
   const app = {
+    ...testDeviceLocalStorage(),
     vault: {
       configDir: ".obsidian",
       getAbstractFileByPath: (path: string) => path === ownerFile.path ? ownerFile : null,
@@ -8894,6 +10213,7 @@ test("linking refuses to mutate when a full portable Undo snapshot exceeds the s
 test("unlink rolls back in memory and on disk when its first save fails", async () => {
   const linkedFile = new TFile("Knowledge Base/Airway/Linked.md");
   const app = {
+    ...testDeviceLocalStorage(),
     vault: {
       configDir: ".obsidian",
       getAbstractFileByPath: (path: string) => path === linkedFile.path ? linkedFile : null,
@@ -8937,6 +10257,79 @@ test("unlink rolls back in memory and on disk when its first save fails", async 
   } | undefined;
   const persistedActive = persisted?.bases?.find((entry) => entry.id === persisted.activeBaseId);
   assert.equal(persistedActive?.data?.portableIndex?.resolvedPathBySubjectId?.subject, linkedFile.path);
+});
+
+test("proposal and canonical creation return the committed file when view refresh fails", async () => {
+  Notice.messages.length = 0;
+  const entries = new Map<string, TFile | TFolder>();
+  const createdContent = new Map<string, string>();
+  const app = {
+    ...testDeviceLocalStorage(),
+    vault: {
+      configDir: ".obsidian",
+      getMarkdownFiles: () => [...entries.values()].filter((entry): entry is TFile => entry instanceof TFile),
+      getAbstractFileByPath: (path: string) => entries.get(path) ?? null,
+      createFolder: async (path: string) => {
+        const folder = new TFolder(path);
+        entries.set(path, folder);
+        return folder;
+      },
+      create: async (path: string, content: string) => {
+        const file = new TFile(path);
+        entries.set(path, file);
+        createdContent.set(path, content);
+        return file;
+      },
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+    fileManager: { trashFile: async () => {} },
+  };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  data.settings.primaryFolder = "03 Clinical Topics";
+  data.settings.proposalFolder = "01 Inbox/ENT Topic Proposals";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never);
+  plugin.loadedData = createDefaultStore(data, 100, "vault-create-refresh-boundary");
+  await plugin.loadPluginData(false);
+  plugin.refreshViews = async () => { throw new Error("simulated post-create refresh failure"); };
+  const logged: unknown[][] = [];
+  const originalConsoleError = console.error;
+  console.error = (...values: unknown[]): void => { logged.push(values); };
+  let proposal: TFile;
+  let canonical: TFile;
+  try {
+    proposal = await plugin.createProposal({
+      title: "Laryngeal cleft proposal",
+      domain: "Laryngology",
+      parentPath: "",
+      topicKind: "condition",
+      priority: "P2",
+      safetyCritical: false,
+      curriculumId: "",
+      addToCollection: false,
+    });
+    canonical = await plugin.createCanonical({
+      title: "Laryngeal cleft",
+      domain: "Laryngology",
+      parentPath: "",
+      topicKind: "condition",
+      priority: "P2",
+      safetyCritical: false,
+      curriculumId: "ENT-LAR-010",
+      addToCollection: false,
+    });
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.equal(entries.get(proposal.path), proposal);
+  assert.equal(entries.get(canonical.path), canonical);
+  assert.match(createdContent.get(proposal.path) ?? "", /type: topic-proposal/);
+  assert.match(createdContent.get(canonical.path) ?? "", /curriculum_id: "ENT-LAR-010"/);
+  assert.ok(Notice.messages.some((message) => message.includes(proposal.path) && /created.*view could not refresh/i.test(message)));
+  assert.ok(Notice.messages.some((message) => message.includes(canonical.path) && /created.*view could not refresh/i.test(message)));
+  assert.equal(logged.filter((values) => String(values[0]).includes("created the")).length, 2);
 });
 
 test("note creation applies explicit YAML-safe Library tokens without rewriting the template", async () => {
@@ -11085,10 +12478,10 @@ test("a mutate whose action leaves duplicate pins completes with an open view", 
   }), "follow-up mutate", 3000);
 });
 
-// --- data.json backup safety net: every store save writes a parseable twin
-// --- first, and a torn data.json is recovered from it at startup.
+// --- data.json backup safety net: every store save preserves the last
+// --- committed authority first, then advances the twin only after commit.
 
-test("a store save writes the data.json backup twin before the primary write", async () => {
+test("a store save preserves committed backup authority before primary and advances it after commit", async () => {
   const events: string[] = [];
   const adapterWrites: Array<{ path: string; content: string }> = [];
   const legacy = migrateData(null);
@@ -11125,9 +12518,14 @@ test("a store save writes the data.json backup twin before the primary write", a
   await plugin.loadPluginData();
 
   assert.equal(savedData.length, 1, "legacy data triggers one migration writeback");
-  assert.deepEqual(events, ["backup", "save"], "the twin must be durable before data.json is replaced");
+  assert.deepEqual(events, ["backup", "save", "backup"], "the twin brackets the primary commit");
   assert.equal(adapterWrites[0]?.path, ".obsidian/plugins/knowledge-base-command-center/data.json.bak");
-  assert.deepEqual(JSON.parse(adapterWrites[0]?.content ?? "null"), JSON.parse(JSON.stringify(savedData[0])));
+  assert.deepEqual(
+    JSON.parse(adapterWrites[0]?.content ?? "null"),
+    JSON.parse(JSON.stringify(legacy)),
+    "the prerequisite twin is the exact committed flat authority, not its uncommitted migration candidate",
+  );
+  assert.deepEqual(JSON.parse(adapterWrites.at(-1)?.content ?? "null"), JSON.parse(JSON.stringify(savedData[0])));
 });
 
 test("a failed backup-twin write never calls the primary saveData writer", async () => {
@@ -11179,15 +12577,133 @@ test("a failed backup-twin write never calls the primary saveData writer", async
   assert.ok(loggedErrors.some((values) => String(values[0]).includes("could not refresh the data.json backup")));
 });
 
+test("a direct save whose prerequisite backup fails rolls back without a false compensation or read-only state", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceName = "Committed name";
+  const store = createDefaultStore(data, 100, "vault-direct-backup-prerequisite");
+  const plugin = pluginWith(store);
+  await plugin.loadPluginData();
+  const events: string[] = [];
+  let rejectBackup = true;
+  const app = plugin.app as unknown as {
+    vault: ReturnType<typeof emptyWritableTestVault> & {
+      adapter: { write(path: string, content: string): Promise<void> };
+    };
+  };
+  app.vault.adapter = {
+    async write(): Promise<void> {
+      events.push("backup");
+      if (rejectBackup) throw new Error("simulated prerequisite backup failure");
+    },
+  };
+  (plugin.manifest as { dir?: string }).dir = ".obsidian/plugins/knowledge-base-command-center";
+  plugin.saveData = async (): Promise<void> => { events.push("primary"); };
+
+  plugin.data.settings.workspaceName = "Rejected edit";
+  await assert.rejects(plugin.savePluginData(), /backup could not be refreshed.*primary store was not written/is);
+  assert.deepEqual(events, ["backup"], "a proven pre-primary failure must not attempt a compensating primary write");
+  assert.equal(plugin.data.settings.workspaceName, "Committed name");
+  assert.equal(plugin.isDataReadOnly(), false, "a failed prerequisite is retryable and never marks persistence uncertain");
+
+  rejectBackup = false;
+  plugin.data.settings.workspaceName = "Successful retry";
+  await plugin.savePluginData();
+  assert.deepEqual(events, ["backup", "backup", "primary", "backup"]);
+  assert.equal(plugin.data.settings.workspaceName, "Successful retry");
+  assert.equal(plugin.isDataReadOnly(), false);
+});
+
+test("a base lifecycle prerequisite-backup failure restores the envelope without false uncertainty", async () => {
+  const first = migrateData(null);
+  first.settings.workspaceName = "Committed first base";
+  const second = migrateData(null);
+  second.settings.workspaceName = "Committed second base";
+  const store = createDefaultStore(first, 100, "vault-base-backup-prerequisite");
+  store.bases.push(createKnowledgeBaseEntry(second, "base-second", 200));
+  const plugin = pluginWith(store);
+  await plugin.loadPluginData(false);
+  const before = structuredClone(plugin.getKnowledgeBases(true));
+  const events: string[] = [];
+  const app = plugin.app as unknown as {
+    vault: ReturnType<typeof emptyWritableTestVault> & {
+      adapter: { write(path: string, content: string): Promise<void> };
+    };
+  };
+  app.vault.adapter = {
+    async write(): Promise<void> {
+      events.push("backup");
+      throw new Error("base prerequisite backup rejected");
+    },
+  };
+  (plugin.manifest as { dir?: string }).dir = ".obsidian/plugins/knowledge-base-command-center";
+  plugin.saveData = async (): Promise<void> => { events.push("primary"); };
+
+  await assert.rejects(
+    plugin.archiveKnowledgeBase("base-default"),
+    /primary store was not written/i,
+  );
+
+  assert.deepEqual(events, ["backup"], "no primary or compensating write follows a proven prerequisite failure");
+  assert.deepEqual(plugin.getKnowledgeBases(true), before);
+  assert.equal(plugin.getActiveKnowledgeBaseId(), "base-default");
+  assert.equal(plugin.isDataReadOnly(), false);
+});
+
+test("a vault-rename prerequisite-backup failure restores paths without false compensation", async () => {
+  const data = migrateData(null);
+  data.pinnedPaths = ["Old/Topic.md"];
+  const plugin = pluginWith(createDefaultStore(data, 100, "vault-rename-backup-prerequisite"));
+  await plugin.loadPluginData(false);
+  const events: string[] = [];
+  const app = plugin.app as unknown as {
+    vault: ReturnType<typeof emptyWritableTestVault> & {
+      adapter: { write(path: string, content: string): Promise<void> };
+    };
+  };
+  app.vault.adapter = {
+    async write(): Promise<void> {
+      events.push("backup");
+      throw new Error("rename prerequisite backup rejected");
+    },
+  };
+  (plugin.manifest as { dir?: string }).dir = ".obsidian/plugins/knowledge-base-command-center";
+  plugin.saveData = async (): Promise<void> => { events.push("primary"); };
+  const originalWindow = globalThis.window;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { activeWindow: { clearTimeout: () => {}, setTimeout: () => 1 } },
+  });
+  try {
+    const handler = plugin as unknown as {
+      handleRename(oldPath: string, newPath: string, folderRename: boolean): Promise<void>;
+    };
+    await assert.rejects(
+      handler.handleRename("Old", "New", true),
+      /primary store was not written/i,
+    );
+  } finally {
+    Object.defineProperty(globalThis, "window", { configurable: true, value: originalWindow });
+  }
+
+  assert.deepEqual(events, ["backup"]);
+  assert.deepEqual(plugin.data.pinnedPaths, ["Old/Topic.md"]);
+  assert.equal(plugin.isDataReadOnly(), false);
+});
+
 test("a Sync generation arriving during the backup write fences the primary store writer", async () => {
   const store = createDefaultStore(migrateData(null), 100, "vault-backup-generation-fence");
+  const committedEntry = store.bases[0];
+  assert.ok(committedEntry);
+  committedEntry.data.settings.workspaceName = "Committed authority";
+  const backupWrites: unknown[] = [];
   const app = {
     vault: {
       ...emptyWritableTestVault(),
       adapter: {
         exists: async () => false,
         read: async () => { throw new Error("missing"); },
-        write: async () => {
+        write: async (_path: string, content: string) => {
+          backupWrites.push(JSON.parse(content));
           (plugin as unknown as { externalChangeGeneration: number }).externalChangeGeneration += 1;
         },
       },
@@ -11209,12 +12725,89 @@ test("a Sync generation arriving during the backup write fences the primary stor
   const internal = plugin as unknown as {
     saveExplicitStoreSnapshot(snapshot: PluginStore): Promise<void>;
   };
+  const attempted = structuredClone(store);
+  const attemptedEntry = attempted.bases[0];
+  assert.ok(attemptedEntry);
+  advanceStoreEntry(attemptedEntry, () => {
+    attemptedEntry.data.settings.workspaceName = "Fenced uncommitted candidate";
+  });
 
   await assert.rejects(
-    internal.saveExplicitStoreSnapshot(store),
+    internal.saveExplicitStoreSnapshot(attempted),
     /Sync while the backup was being refreshed.*primary store was not written/is,
   );
   assert.deepEqual(primaryWrites, [], "saveData is fenced after the awaited backup boundary");
+  assert.equal(
+    (backupWrites[0] as PluginStore).bases[0]?.data.settings.workspaceName,
+    "Committed authority",
+    "a fenced candidate never replaces the last committed recovery authority",
+  );
+});
+
+test("restart recovery after a torn rejected save restores only the last committed authority", async () => {
+  const baselineData = migrateData(null);
+  baselineData.settings.workspaceName = "Committed before crash";
+  const baseline = createDefaultStore(baselineData, 100, "vault-rejected-backup-restart");
+  const pluginDir = ".obsidian/plugins/knowledge-base-command-center";
+  const primaryPath = `${pluginDir}/data.json`;
+  const backupPath = `${primaryPath}.bak`;
+  const files = new Map<string, string>([[primaryPath, JSON.stringify(baseline)]]);
+  const app = {
+    ...testDeviceLocalStorage(),
+    vault: {
+      ...emptyWritableTestVault(),
+      adapter: {
+        exists: async (path: string) => files.has(path),
+        read: async (path: string) => {
+          const value = files.get(path);
+          if (value === undefined) throw new Error("missing");
+          return value;
+        },
+        write: async (path: string, content: string) => { files.set(path, content); },
+      },
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null },
+    fileManager: {},
+  };
+  const first = new EntVaultCommandCenterPlugin(
+    app as never,
+    { dir: pluginDir } as never,
+  );
+  first.loadData = async () => JSON.parse(files.get(primaryPath) ?? "null") as unknown;
+  await first.loadPluginData(false);
+  const attempted = structuredClone(baseline);
+  const attemptedEntry = attempted.bases[0];
+  assert.ok(attemptedEntry);
+  advanceStoreEntry(attemptedEntry, () => {
+    attemptedEntry.data.settings.workspaceName = "Rejected crash candidate";
+  });
+  first.saveData = async () => {
+    files.set(primaryPath, '{"version":15,"kind":');
+    throw new Error("adapter rejected after tearing data.json");
+  };
+  const internal = first as unknown as {
+    saveExplicitStoreSnapshot(snapshot: PluginStore): Promise<void>;
+  };
+
+  await assert.rejects(internal.saveExplicitStoreSnapshot(attempted), /rejected after tearing/i);
+  assert.equal(
+    (JSON.parse(files.get(backupPath) ?? "null") as PluginStore).bases[0]?.data.settings.workspaceName,
+    "Committed before crash",
+  );
+  first.onunload();
+
+  const restarted = new EntVaultCommandCenterPlugin(
+    app as never,
+    { dir: pluginDir } as never,
+  );
+  restarted.loadData = async () => JSON.parse(files.get(primaryPath) ?? "null") as unknown;
+  restarted.saveData = async (value: unknown) => { files.set(primaryPath, JSON.stringify(value)); };
+  const result = await restarted.loadPluginData();
+
+  assert.equal(result.compatible, true);
+  assert.equal(restarted.data.settings.workspaceName, "Committed before crash");
+  assert.notEqual(restarted.data.settings.workspaceName, "Rejected crash candidate");
 });
 
 test("captured-store restoration rechecks Sync generation after its backup write", async () => {

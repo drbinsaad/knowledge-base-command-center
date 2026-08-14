@@ -53,6 +53,8 @@ The setup wizard asks for:
 
 Most choices can be changed later in **Settings → Community plugins → Knowledge Base Command Center**. Settings change the plugin view; they do not move existing notes.
 
+The settings page keeps **Index membership**, **Note storage and creation**, and **Portable blueprint and link progress** in separate groups. A linked folder is membership authority; an Inbox, default creation, template, attachment, export, or Library creation folder is a location/workflow choice only.
+
 ### Choose a profile
 
 **Generic knowledge base** is the default. Use it for research, projects, courses, reading, or another Markdown knowledge system. Its direct note memberships, optional linked-folder rules, labels, metadata mappings, and Libraries are configurable. The default new-note folder controls only where creation starts; it never adds existing or future notes to the Index.
@@ -77,6 +79,8 @@ Generic Index membership has two explicit sources:
 
 The Inbox, default new-note, template, export, attachment, and per-Library creation folders do not become Index sources. If a note inside the Inbox is also added directly or matched by an explicit linked-folder rule, that explicit Index choice wins over its storage location unless you deliberately classify the note in a Library. Generic organization changes plugin data only and never edits note bodies, frontmatter, filenames, or folder locations. Creating a new note is a separate explicit file-writing action.
 
+When a note's presence is surprising, open its row or inspector and choose **Why this appears**. The explanation lists every active membership authority and then shows the Markdown path separately as storage location. For a whole-base audit, open **Manage Index… → Why included** to compare direct memberships, linked folders, protected sources, imported placeholders, exclusions, and location-only folders before changing a rule.
+
 ## Create or add notes
 
 Use **Add → Create note** or **Create note from template or empty note…**. For each note, choose:
@@ -92,6 +96,8 @@ Templates can use <code>{{title}}</code>, <code>{{date}}</code>, and <code>{{tim
 In a Generic base, **Add → Add existing note to Index** records durable direct membership without moving or rewriting the note, regardless of its folder. In a Library, Add actions can classify an existing note, the current note, or a newly created note in that Library; classification is likewise plugin-owned organization.
 
 Creating a note in the default new-note folder does not enroll it in the Index unless the creation flow explicitly targets the Index or another selected organization destination. Storage and membership are separate choices.
+
+An imported path-free subject can remain as **No note** until you create or link a note deliberately. Open Smart queues → **Imported placeholders needing notes**, run **Open imported placeholder queue**, or run **Resolve next imported placeholder…**. Exact normalized title and configured-ID candidates are review hints only; the plugin never chooses or links one automatically.
 
 ## Set up Quick entry
 
@@ -168,7 +174,7 @@ After updating, confirm the plugin is enabled before opening its workspace. For 
 
 An existing installation shows **What’s new in Knowledge Base Command Center _version_** once on this device after the update, where _version_ is the newly installed release. Its complete-release-notes action is a normal link to that exact GitHub release and contacts GitHub only after you activate it; the plugin performs no background version check or network request. Fresh installs establish the local version marker without showing update news. Use **Open what’s new** in the Command Palette whenever you want to reopen the window.
 
-Current physical-iPhone evidence is recorded separately in [0.10.0 iPhone evidence](release-evidence/0.10.0-iphone.md).
+The sanitized [0.10.0 iPhone evidence](release-evidence/0.10.0-iphone.md) remains the latest completed device record. The [0.17.0 evidence record](release-evidence/0.17.0-iphone.md) and [current manual checklist](manual-iphone-release-checklist.md) record its physical-iPhone matrix as maintainer-waived and unverified, not Passed.
 
 ## Uninstall
 

@@ -39,6 +39,7 @@ import {
   createDefaultStore,
   createDeviceLocalPluginState,
   createDeviceLocalPluginStateWithReport,
+  deviceHistoryStackFingerprint,
   createKnowledgeBaseEntry,
   createLegacyPrimaryFolderSource,
   createPersonalBackup,
@@ -91,6 +92,7 @@ import {
   PERSONAL_ORGANIZATION_FIELDS,
   parsePersonalBackup,
   parseDeviceLocalPluginState,
+  projectPendingHistoryTransition,
   parseWorkspaceConfig,
   pathIsInsideFolder,
   pathIsInIndexFolderSources,
@@ -7185,7 +7187,7 @@ test("device-local state round-trips active base, routes, collapse, and bounded 
   assert.equal(parsed.historyIndexFolderSourcesIncluded, true);
 });
 
-test("v3 device-local history requires canonical membership provenance while v2 remains migratable", () => {
+test("v3 and v4 device-local history require canonical membership provenance while v2 remains migratable", () => {
   const data = migrateData(null);
   const history = snapshotPersonal(data, "History provenance");
   history.layoutSnapshots = [snapshotPersonal(data, "Nested history provenance")];
@@ -7230,11 +7232,234 @@ test("v3 device-local history requires canonical membership provenance while v2 
     /named snapshot 1 linked index folder 1 has an empty path/i,
   );
 
+  const v3 = createDeviceLocalPluginState(createDefaultStore(data, 100, "vault-device-v3")) as unknown as typeof raw;
+  v3.version = 3;
+  const migratedV3 = parseDeviceLocalPluginState(v3);
+  assert.equal(migratedV3.version, DEVICE_LOCAL_STATE_VERSION);
+  assert.equal(migratedV3.historyIndexFolderSourcesIncluded, true);
+
   raw.version = 2;
   delete raw.historyIndexFolderSourcesIncluded;
   const legacy = parseDeviceLocalPluginState(raw);
   assert.equal(legacy.historyIndexFolderSourcesIncluded, false);
   assert.deepEqual(legacy.bases[0]?.view.undoStack[0]?.indexFolderSources, []);
+});
+
+test("v4 pending required Undo journals are exact, strict, and bounded with their newest snapshot", () => {
+  const data = migrateData(null);
+  data.undoStack = [
+    snapshotPersonal(data, "Earlier journal history"),
+    snapshotPersonal(data, "Pending journal newest"),
+  ];
+  const store = createDefaultStore(data, 100, "vault-pending-required-undo");
+  const required = data.undoStack[data.undoStack.length - 1];
+  assert.ok(required);
+  const entry = store.bases[0];
+  assert.ok(entry);
+  const pending = {
+    baseId: entry.id,
+    parentSemanticHead: entry.semanticHead,
+    candidateSemanticRevision: entry.semanticRevision + 1,
+    candidateSemanticHead: fingerprintText("pending-candidate-head"),
+    candidateSemanticHash: fingerprintText("pending-candidate-hash"),
+    undoSnapshotAt: required.at,
+    undoSnapshotFingerprint: fingerprintText(canonicalJsonString(required)),
+  };
+
+  const built = createDeviceLocalPluginStateWithReport(store, pending);
+  const parsed = parseDeviceLocalPluginState(built.state);
+  assert.deepEqual(parsed.pendingRequiredUndoCommit, pending);
+  assert.equal(
+    parsed.bases[0]?.view.undoStack[parsed.bases[0].view.undoStack.length - 1]?.label,
+    required.label,
+  );
+  assert.ok(new TextEncoder().encode(JSON.stringify(built.state)).byteLength <= MAX_DEVICE_LOCAL_STATE_BYTES);
+
+  const legacyWithJournal = structuredClone(built.state) as unknown as { version: number };
+  legacyWithJournal.version = 3;
+  assert.throws(
+    () => parseDeviceLocalPluginState(legacyWithJournal),
+    /legacy device-local state cannot contain a pending required Undo/i,
+  );
+
+  const extraField = structuredClone(built.state) as unknown as {
+    pendingRequiredUndoCommit: Record<string, unknown>;
+  };
+  extraField.pendingRequiredUndoCommit.untrusted = true;
+  assert.throws(
+    () => parseDeviceLocalPluginState(extraField),
+    /unsupported shape/i,
+  );
+
+  const coercedRevision = structuredClone(built.state) as unknown as {
+    pendingRequiredUndoCommit: { candidateSemanticRevision: unknown };
+  };
+  coercedRevision.pendingRequiredUndoCommit.candidateSemanticRevision = String(pending.candidateSemanticRevision);
+  assert.throws(
+    () => parseDeviceLocalPluginState(coercedRevision),
+    /invalid causal metadata/i,
+  );
+
+  const wrongSnapshot = structuredClone(built.state);
+  assert.ok(wrongSnapshot.pendingRequiredUndoCommit);
+  wrongSnapshot.pendingRequiredUndoCommit.undoSnapshotFingerprint = fingerprintText("another snapshot");
+  assert.throws(
+    () => parseDeviceLocalPluginState(wrongSnapshot),
+    /does not identify the newest Undo snapshot exactly/i,
+  );
+});
+
+test("v4 multi-base required Undo batches are sorted, strict, and preserve new-base staging semantics", () => {
+  const existingData = migrateData(null);
+  existingData.undoStack = [snapshotPersonal(existingData, "Existing portfolio Undo")];
+  existingData.redoStack = [snapshotPersonal(existingData, "Existing retained Redo")];
+  const store = createDefaultStore(existingData, 100, "vault-required-undo-batch");
+  const existing = store.bases[0];
+  assert.ok(existing);
+  existing.semanticRevision += 1;
+  existing.semanticHash = semanticEntryFingerprint(existing);
+  existing.semanticHead = fingerprintText("existing portfolio candidate");
+
+  const newData = migrateData(null);
+  newData.undoStack = [snapshotPersonal(newData, "New portfolio Undo")];
+  const created = createKnowledgeBaseEntry(newData, "base-new-portfolio", 200);
+  store.bases.push(created);
+  const markerEntry = (
+    entry: typeof existing,
+    baseExistedBefore: boolean,
+  ) => {
+    const undo = entry.data.undoStack.at(-1);
+    assert.ok(undo);
+    return {
+      baseId: entry.id,
+      baseExistedBefore,
+      candidateSemanticRevision: entry.semanticRevision,
+      candidateSemanticHead: entry.semanticHead,
+      candidateSemanticHash: entry.semanticHash,
+      undoSnapshotAt: undo.at,
+      undoSnapshotFingerprint: fingerprintText(canonicalJsonString(undo)),
+    };
+  };
+  const pending = {
+    entries: [markerEntry(existing, true), markerEntry(created, false)]
+      .sort((left, right) => codeUnitCompare(left.baseId, right.baseId)),
+  };
+
+  const built = createDeviceLocalPluginStateWithReport(store, undefined, undefined, pending);
+  const parsed = parseDeviceLocalPluginState(built.state);
+  assert.deepEqual(parsed.pendingRequiredUndoBatchCommit, pending);
+  assert.ok(new TextEncoder().encode(JSON.stringify(built.state)).byteLength <= MAX_DEVICE_LOCAL_STATE_BYTES);
+
+  const legacy = structuredClone(built.state) as unknown as { version: number };
+  legacy.version = 3;
+  assert.throws(() => parseDeviceLocalPluginState(legacy), /legacy device-local state cannot contain a pending required Undo batch/i);
+
+  const extra = structuredClone(built.state);
+  assert.ok(extra.pendingRequiredUndoBatchCommit);
+  (extra.pendingRequiredUndoBatchCommit.entries[0] as unknown as Record<string, unknown>).untrusted = true;
+  assert.throws(() => parseDeviceLocalPluginState(extra), /unsupported shape/i);
+
+  const unsorted = structuredClone(built.state);
+  assert.ok(unsorted.pendingRequiredUndoBatchCommit);
+  unsorted.pendingRequiredUndoBatchCommit.entries.reverse();
+  assert.throws(() => parseDeviceLocalPluginState(unsorted), /unique, sorted knowledge-base IDs/i);
+
+  const invalidNewRevision = structuredClone(built.state);
+  assert.ok(invalidNewRevision.pendingRequiredUndoBatchCommit);
+  const newMarker = invalidNewRevision.pendingRequiredUndoBatchCommit.entries
+    .find((entry) => !entry.baseExistedBefore);
+  assert.ok(newMarker);
+  newMarker.candidateSemanticRevision = 1;
+  assert.throws(() => parseDeviceLocalPluginState(invalidNewRevision), /invalid causal metadata/i);
+
+  const invalidNewHistory = structuredClone(built.state);
+  const newLocal = invalidNewHistory.bases.find((base) => base.baseId === created.id);
+  assert.ok(newLocal);
+  newLocal.view.redoStack = [snapshotPersonal(newData, "Invalid new-base Redo")];
+  assert.throws(() => parseDeviceLocalPluginState(invalidNewHistory), /invalid staged history for a new knowledge base/i);
+
+  const multiple = structuredClone(built.state);
+  const required = existing.data.undoStack.at(-1);
+  assert.ok(required);
+  multiple.pendingRequiredUndoCommit = {
+    baseId: existing.id,
+    parentSemanticHead: fingerprintText("batch parent"),
+    candidateSemanticRevision: existing.semanticRevision,
+    candidateSemanticHead: existing.semanticHead,
+    candidateSemanticHash: existing.semanticHash,
+    undoSnapshotAt: required.at,
+    undoSnapshotFingerprint: fingerprintText(canonicalJsonString(required)),
+  };
+  assert.throws(() => parseDeviceLocalPluginState(multiple), /multiple pending history commits/i);
+});
+
+test("v4 pending history transitions strictly derive their exact post-Undo stacks", () => {
+  const before = migrateData(null);
+  before.pinnedPaths = ["Knowledge/Before.md"];
+  const restored = migrateData(null);
+  const sourceSnapshot = snapshotPersonal(restored, "Restore prior organization");
+  const inverseSnapshot = snapshotPersonal(before, "Restore prior organization");
+  const priorUndoStack = [sourceSnapshot];
+  const priorRedoStack: typeof priorUndoStack = [];
+  const postUndoStack: typeof priorUndoStack = [];
+  const postRedoStack = limitSnapshotStack([inverseSnapshot]);
+  before.undoStack = priorUndoStack;
+  before.redoStack = priorRedoStack;
+  const store = createDefaultStore(before, 100, "vault-pending-history-transition");
+  const entry = store.bases[0];
+  assert.ok(entry);
+  const pending = {
+    baseId: entry.id,
+    direction: "undo" as const,
+    parentSemanticHead: entry.semanticHead,
+    candidateSemanticRevision: entry.semanticRevision + 1,
+    candidateSemanticHead: fingerprintText("pending-history-head"),
+    candidateSemanticHash: fingerprintText("pending-history-hash"),
+    sourceSnapshotAt: sourceSnapshot.at,
+    sourceSnapshotFingerprint: fingerprintText(canonicalJsonString(sourceSnapshot)),
+    inverseSnapshot,
+    inverseSnapshotFingerprint: fingerprintText(canonicalJsonString(inverseSnapshot)),
+    priorUndoStackFingerprint: deviceHistoryStackFingerprint(priorUndoStack),
+    priorRedoStackFingerprint: deviceHistoryStackFingerprint(priorRedoStack),
+    postUndoStackFingerprint: deviceHistoryStackFingerprint(postUndoStack),
+    postRedoStackFingerprint: deviceHistoryStackFingerprint(postRedoStack),
+  };
+
+  const built = createDeviceLocalPluginStateWithReport(store, undefined, pending);
+  const parsed = parseDeviceLocalPluginState(built.state);
+  assert.equal(
+    canonicalJsonString(parsed.pendingHistoryTransitionCommit),
+    canonicalJsonString(pending),
+  );
+  assert.equal(
+    canonicalJsonString(projectPendingHistoryTransition(
+      parsed.bases[0]?.view.undoStack ?? [],
+      parsed.bases[0]?.view.redoStack ?? [],
+      parsed.pendingHistoryTransitionCommit!,
+    )),
+    canonicalJsonString({ undoStack: postUndoStack, redoStack: postRedoStack }),
+  );
+
+  const legacyWithTransition = structuredClone(built.state) as unknown as { version: number };
+  legacyWithTransition.version = 3;
+  assert.throws(
+    () => parseDeviceLocalPluginState(legacyWithTransition),
+    /legacy device-local state cannot contain a pending history transition/i,
+  );
+
+  const extraField = structuredClone(built.state) as unknown as {
+    pendingHistoryTransitionCommit: Record<string, unknown>;
+  };
+  extraField.pendingHistoryTransitionCommit.untrusted = true;
+  assert.throws(() => parseDeviceLocalPluginState(extraField), /unsupported shape/i);
+
+  const wrongPostStack = structuredClone(built.state);
+  assert.ok(wrongPostStack.pendingHistoryTransitionCommit);
+  wrongPostStack.pendingHistoryTransitionCommit.postRedoStackFingerprint = fingerprintText("wrong post stack");
+  assert.throws(
+    () => parseDeviceLocalPluginState(wrongPostStack),
+    /does not derive its post-transition stacks exactly/i,
+  );
 });
 
 test("device-local state keeps imported and hand-authored layout IDs instead of wiping every base", () => {

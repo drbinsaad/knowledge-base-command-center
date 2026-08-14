@@ -21,7 +21,9 @@ export const MAX_LIBRARIES = 50;
 export const MAX_SEMANTIC_LINEAGE = 64;
 /** Device-local routes, disclosure state, and bounded history must fit comfortably in localStorage. */
 export const MAX_DEVICE_LOCAL_STATE_BYTES = 4 * 1024 * 1024;
-export const DEVICE_LOCAL_STATE_VERSION = 3;
+export const DEVICE_LOCAL_STATE_VERSION = 4;
+/** v3 first required canonical linked-folder provenance in local Undo/Redo. */
+const DEVICE_HISTORY_PROVENANCE_VERSION = 3;
 /** Permanent base-deletion tombstones are small, but remain bounded and are never silently evicted. */
 export const MAX_DELETED_KNOWLEDGE_BASE_IDS = 10_000;
 export const DEFAULT_KNOWLEDGE_BASE_ID = "base-default";
@@ -525,6 +527,65 @@ export interface DeviceLocalKnowledgeBaseState {
   view: PluginViewState;
 }
 
+/**
+ * A required-Undo snapshot durably staged before its synced semantic commit.
+ * Startup promotes or removes it only after comparing the exact causal head.
+ */
+export interface PendingRequiredUndoCommit {
+  baseId: string;
+  parentSemanticHead: string;
+  candidateSemanticRevision: number;
+  candidateSemanticHead: string;
+  candidateSemanticHash: string;
+  undoSnapshotAt: number;
+  undoSnapshotFingerprint: string;
+}
+
+export interface PendingRequiredUndoBatchEntry {
+  baseId: string;
+  /** False only when the portfolio candidate creates this base atomically. */
+  baseExistedBefore: boolean;
+  candidateSemanticRevision: number;
+  candidateSemanticHead: string;
+  candidateSemanticHash: string;
+  undoSnapshotAt: number;
+  undoSnapshotFingerprint: string;
+}
+
+/**
+ * Required Undo snapshots for one atomic multi-base portfolio commit. The
+ * staged local bases carry the snapshots themselves; this compact marker owns
+ * only the exact per-base causal identities needed to promote or discard them.
+ */
+export interface PendingRequiredUndoBatchCommit {
+  entries: PendingRequiredUndoBatchEntry[];
+}
+
+export type DeviceHistoryDirection = "undo" | "redo";
+
+/**
+ * A user-invoked Undo/Redo transition staged before its semantic payload is
+ * committed. The device-local base retains the exact pre-transition stacks;
+ * this marker carries the inverse snapshot needed to derive and verify the
+ * exact post-transition stacks when (and only when) the candidate head wins.
+ */
+export interface PendingHistoryTransitionCommit {
+  baseId: string;
+  direction: DeviceHistoryDirection;
+  parentSemanticHead: string;
+  candidateSemanticRevision: number;
+  candidateSemanticHead: string;
+  candidateSemanticHash: string;
+  sourceSnapshotAt: number;
+  sourceSnapshotFingerprint: string;
+  inverseSnapshot: PersonalSnapshot;
+  inverseSnapshotFingerprint: string;
+  priorUndoStackFingerprint: string;
+  priorRedoStackFingerprint: string;
+  postUndoStackFingerprint: string;
+  postRedoStackFingerprint: string;
+}
+
 /** Stored through App.saveLocalStorage, never through plugin data.json. */
 export interface DeviceLocalPluginState {
   version: typeof DEVICE_LOCAL_STATE_VERSION;
@@ -534,6 +595,12 @@ export interface DeviceLocalPluginState {
   vaultId: string;
   activeBaseId: string;
   bases: DeviceLocalKnowledgeBaseState[];
+  /** Present only across the crash window between required-Undo preflight and commit finalization. */
+  pendingRequiredUndoCommit?: PendingRequiredUndoCommit;
+  /** Present only across one atomic multi-base required-Undo commit. */
+  pendingRequiredUndoBatchCommit?: PendingRequiredUndoBatchCommit;
+  /** Present only across the crash window of a user-invoked Undo/Redo transition. */
+  pendingHistoryTransitionCommit?: PendingHistoryTransitionCommit;
 }
 
 export const DEFAULT_SETTINGS: PluginSettings = {
@@ -1962,6 +2029,48 @@ export function limitSnapshotStack(
     bytes += snapshotBytes;
   }
   return kept;
+}
+
+/** Stable proof for one complete device-local history stack. */
+export function deviceHistoryStackFingerprint(snapshots: readonly PersonalSnapshot[]): string {
+  return fingerprintText(canonicalJsonString(snapshots));
+}
+
+/**
+ * Derive the post-Undo/Redo stacks from the exact pre-transition state carried
+ * in device-local storage. Fingerprints make this both the runtime projection
+ * and the strict parser's integrity check.
+ */
+export function projectPendingHistoryTransition(
+  priorUndoStack: readonly PersonalSnapshot[],
+  priorRedoStack: readonly PersonalSnapshot[],
+  pending: PendingHistoryTransitionCommit,
+): { undoStack: PersonalSnapshot[]; redoStack: PersonalSnapshot[] } {
+  if (deviceHistoryStackFingerprint(priorUndoStack) !== pending.priorUndoStackFingerprint
+    || deviceHistoryStackFingerprint(priorRedoStack) !== pending.priorRedoStackFingerprint) {
+    throw new Error("Pending history transition does not identify its prior history stacks exactly.");
+  }
+  const sourceStack = pending.direction === "undo" ? priorUndoStack : priorRedoStack;
+  const source = sourceStack[sourceStack.length - 1];
+  if (!source
+    || source.at !== pending.sourceSnapshotAt
+    || fingerprintText(canonicalJsonString(source)) !== pending.sourceSnapshotFingerprint) {
+    throw new Error("Pending history transition does not identify its source snapshot exactly.");
+  }
+  if (fingerprintText(canonicalJsonString(pending.inverseSnapshot)) !== pending.inverseSnapshotFingerprint) {
+    throw new Error("Pending history transition does not identify its inverse snapshot exactly.");
+  }
+  const undoStack = pending.direction === "undo"
+    ? [...priorUndoStack.slice(0, -1)]
+    : limitSnapshotStack([...priorUndoStack, cloneJsonValue(pending.inverseSnapshot)]);
+  const redoStack = pending.direction === "redo"
+    ? [...priorRedoStack.slice(0, -1)]
+    : limitSnapshotStack([...priorRedoStack, cloneJsonValue(pending.inverseSnapshot)]);
+  if (deviceHistoryStackFingerprint(undoStack) !== pending.postUndoStackFingerprint
+    || deviceHistoryStackFingerprint(redoStack) !== pending.postRedoStackFingerprint) {
+    throw new Error("Pending history transition does not derive its post-transition stacks exactly.");
+  }
+  return { undoStack, redoStack };
 }
 
 /**
@@ -5852,19 +5961,249 @@ function parseDeviceHistory(
   return cleaned;
 }
 
+function parsePendingRequiredUndoCommit(
+  input: unknown,
+  bases: readonly DeviceLocalKnowledgeBaseState[],
+): PendingRequiredUndoCommit {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("Pending required Undo commit is malformed.");
+  }
+  const value = input as Record<string, unknown>;
+  const expectedKeys = [
+    "baseId",
+    "candidateSemanticHash",
+    "candidateSemanticHead",
+    "candidateSemanticRevision",
+    "parentSemanticHead",
+    "undoSnapshotAt",
+    "undoSnapshotFingerprint",
+  ];
+  if (Object.keys(value).sort().join("\u0000") !== expectedKeys.sort().join("\u0000")) {
+    throw new Error("Pending required Undo commit has an unsupported shape.");
+  }
+  const baseId = cleanKnowledgeBaseId(value.baseId, "Pending required Undo knowledge base");
+  const candidateSemanticRevision = value.candidateSemanticRevision;
+  const undoSnapshotAt = value.undoSnapshotAt;
+  if (typeof candidateSemanticRevision !== "number"
+    || !Number.isSafeInteger(candidateSemanticRevision) || candidateSemanticRevision <= 0
+    || typeof undoSnapshotAt !== "number"
+    || !Number.isSafeInteger(undoSnapshotAt) || undoSnapshotAt <= 0
+    || !isSemanticFingerprint(value.parentSemanticHead)
+    || !isSemanticFingerprint(value.candidateSemanticHead)
+    || value.candidateSemanticHead === value.parentSemanticHead
+    || !isSemanticFingerprint(value.candidateSemanticHash)
+    || !isSemanticFingerprint(value.undoSnapshotFingerprint)) {
+    throw new Error("Pending required Undo commit has invalid causal metadata.");
+  }
+  const localBase = bases.find((base) => base.baseId === baseId);
+  const localUndoStack = localBase?.view.undoStack ?? [];
+  const newestUndo = localUndoStack[localUndoStack.length - 1];
+  if (!newestUndo
+    || newestUndo.at !== undoSnapshotAt
+    || fingerprintText(canonicalJsonString(newestUndo)) !== value.undoSnapshotFingerprint) {
+    throw new Error("Pending required Undo commit does not identify the newest Undo snapshot exactly.");
+  }
+  return {
+    baseId,
+    parentSemanticHead: value.parentSemanticHead,
+    candidateSemanticRevision,
+    candidateSemanticHead: value.candidateSemanticHead,
+    candidateSemanticHash: value.candidateSemanticHash,
+    undoSnapshotAt,
+    undoSnapshotFingerprint: value.undoSnapshotFingerprint,
+  };
+}
+
+function parsePendingRequiredUndoBatchCommit(
+  input: unknown,
+  bases: readonly DeviceLocalKnowledgeBaseState[],
+): PendingRequiredUndoBatchCommit {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("Pending required Undo batch is malformed.");
+  }
+  const value = input as Record<string, unknown>;
+  if (Object.keys(value).length !== 1 || !Object.prototype.hasOwnProperty.call(value, "entries")
+    || !Array.isArray(value.entries)
+    || value.entries.length < 1
+    || value.entries.length > MAX_KNOWLEDGE_BASES) {
+    throw new Error("Pending required Undo batch has an unsupported shape.");
+  }
+  const expectedEntryKeys = [
+    "baseExistedBefore",
+    "baseId",
+    "candidateSemanticHash",
+    "candidateSemanticHead",
+    "candidateSemanticRevision",
+    "undoSnapshotAt",
+    "undoSnapshotFingerprint",
+  ];
+  let previousBaseId = "";
+  const entries = value.entries.map((raw, index): PendingRequiredUndoBatchEntry => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new Error(`Pending required Undo batch entry ${index + 1} is malformed.`);
+    }
+    const entry = raw as Record<string, unknown>;
+    if (Object.keys(entry).sort().join("\u0000") !== expectedEntryKeys.join("\u0000")) {
+      throw new Error(`Pending required Undo batch entry ${index + 1} has an unsupported shape.`);
+    }
+    const baseId = cleanKnowledgeBaseId(entry.baseId, `Pending required Undo batch entry ${index + 1} knowledge base`);
+    if (previousBaseId && codeUnitCompare(previousBaseId, baseId) >= 0) {
+      throw new Error("Pending required Undo batch entries must have unique, sorted knowledge-base IDs.");
+    }
+    previousBaseId = baseId;
+    const baseExistedBefore = entry.baseExistedBefore;
+    const candidateSemanticRevision = entry.candidateSemanticRevision;
+    const undoSnapshotAt = entry.undoSnapshotAt;
+    if (typeof baseExistedBefore !== "boolean"
+      || typeof candidateSemanticRevision !== "number"
+      || !Number.isSafeInteger(candidateSemanticRevision)
+      || (baseExistedBefore ? candidateSemanticRevision <= 0 : candidateSemanticRevision !== 0)
+      || typeof undoSnapshotAt !== "number"
+      || !Number.isSafeInteger(undoSnapshotAt) || undoSnapshotAt <= 0
+      || !isSemanticFingerprint(entry.candidateSemanticHead)
+      || !isSemanticFingerprint(entry.candidateSemanticHash)
+      || (!baseExistedBefore && entry.candidateSemanticHead !== entry.candidateSemanticHash)
+      || !isSemanticFingerprint(entry.undoSnapshotFingerprint)) {
+      throw new Error(`Pending required Undo batch entry ${index + 1} has invalid causal metadata.`);
+    }
+    const localBase = bases.find((base) => base.baseId === baseId);
+    const undoStack = localBase?.view.undoStack ?? [];
+    const newestUndo = undoStack[undoStack.length - 1];
+    if (!localBase
+      || !newestUndo
+      || newestUndo.at !== undoSnapshotAt
+      || fingerprintText(canonicalJsonString(newestUndo)) !== entry.undoSnapshotFingerprint) {
+      throw new Error(`Pending required Undo batch entry ${index + 1} does not identify its newest Undo snapshot exactly.`);
+    }
+    if (!baseExistedBefore && (undoStack.length !== 1 || localBase.view.redoStack.length !== 0)) {
+      throw new Error(`Pending required Undo batch entry ${index + 1} has invalid staged history for a new knowledge base.`);
+    }
+    return {
+      baseId,
+      baseExistedBefore,
+      candidateSemanticRevision,
+      candidateSemanticHead: entry.candidateSemanticHead,
+      candidateSemanticHash: entry.candidateSemanticHash,
+      undoSnapshotAt,
+      undoSnapshotFingerprint: entry.undoSnapshotFingerprint,
+    };
+  });
+  return { entries };
+}
+
+function parsePendingHistoryTransitionCommit(
+  input: unknown,
+  bases: readonly DeviceLocalKnowledgeBaseState[],
+): PendingHistoryTransitionCommit {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("Pending history transition is malformed.");
+  }
+  const value = input as Record<string, unknown>;
+  const expectedKeys = [
+    "baseId",
+    "candidateSemanticHash",
+    "candidateSemanticHead",
+    "candidateSemanticRevision",
+    "direction",
+    "inverseSnapshot",
+    "inverseSnapshotFingerprint",
+    "parentSemanticHead",
+    "postRedoStackFingerprint",
+    "postUndoStackFingerprint",
+    "priorRedoStackFingerprint",
+    "priorUndoStackFingerprint",
+    "sourceSnapshotAt",
+    "sourceSnapshotFingerprint",
+  ];
+  if (Object.keys(value).sort().join("\u0000") !== expectedKeys.sort().join("\u0000")) {
+    throw new Error("Pending history transition has an unsupported shape.");
+  }
+  const baseId = cleanKnowledgeBaseId(value.baseId, "Pending history transition knowledge base");
+  const candidateSemanticRevision = value.candidateSemanticRevision;
+  const sourceSnapshotAt = value.sourceSnapshotAt;
+  const direction = value.direction;
+  if ((direction !== "undo" && direction !== "redo")
+    || typeof candidateSemanticRevision !== "number"
+    || !Number.isSafeInteger(candidateSemanticRevision) || candidateSemanticRevision <= 0
+    || typeof sourceSnapshotAt !== "number"
+    || !Number.isSafeInteger(sourceSnapshotAt) || sourceSnapshotAt <= 0
+    || !isSemanticFingerprint(value.parentSemanticHead)
+    || !isSemanticFingerprint(value.candidateSemanticHead)
+    || value.candidateSemanticHead === value.parentSemanticHead
+    || !isSemanticFingerprint(value.candidateSemanticHash)
+    || !isSemanticFingerprint(value.sourceSnapshotFingerprint)
+    || !isSemanticFingerprint(value.inverseSnapshotFingerprint)
+    || !isSemanticFingerprint(value.priorUndoStackFingerprint)
+    || !isSemanticFingerprint(value.priorRedoStackFingerprint)
+    || !isSemanticFingerprint(value.postUndoStackFingerprint)
+    || !isSemanticFingerprint(value.postRedoStackFingerprint)) {
+    throw new Error("Pending history transition has invalid causal or stack metadata.");
+  }
+  const inverseSnapshot = parseDeviceHistory(
+    [value.inverseSnapshot],
+    "Pending history transition inverse snapshot",
+    true,
+  )[0];
+  if (!inverseSnapshot
+    || fingerprintText(canonicalJsonString(inverseSnapshot)) !== value.inverseSnapshotFingerprint) {
+    throw new Error("Pending history transition does not identify its inverse snapshot exactly.");
+  }
+  const localBase = bases.find((base) => base.baseId === baseId);
+  if (!localBase) throw new Error("Pending history transition refers to an unavailable knowledge base.");
+  const pending: PendingHistoryTransitionCommit = {
+    baseId,
+    direction,
+    parentSemanticHead: value.parentSemanticHead,
+    candidateSemanticRevision,
+    candidateSemanticHead: value.candidateSemanticHead,
+    candidateSemanticHash: value.candidateSemanticHash,
+    sourceSnapshotAt,
+    sourceSnapshotFingerprint: value.sourceSnapshotFingerprint,
+    inverseSnapshot,
+    inverseSnapshotFingerprint: value.inverseSnapshotFingerprint,
+    priorUndoStackFingerprint: value.priorUndoStackFingerprint,
+    priorRedoStackFingerprint: value.priorRedoStackFingerprint,
+    postUndoStackFingerprint: value.postUndoStackFingerprint,
+    postRedoStackFingerprint: value.postRedoStackFingerprint,
+  };
+  projectPendingHistoryTransition(
+    localBase.view.undoStack,
+    localBase.view.redoStack,
+    pending,
+  );
+  return pending;
+}
+
 /** Strictly parse one device's state; malformed input is discarded by the caller. */
 export function parseDeviceLocalPluginState(input: unknown): DeviceLocalPluginState {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Device-local state is malformed.");
   if (serializedUtf8Bytes(input) > MAX_DEVICE_LOCAL_STATE_BYTES) throw new Error("Device-local state is too large.");
   const value = input as Record<string, unknown>;
   const sourceVersion = Number(value.version);
-  if (![2, DEVICE_LOCAL_STATE_VERSION].includes(sourceVersion)
+  if (![2, DEVICE_HISTORY_PROVENANCE_VERSION, DEVICE_LOCAL_STATE_VERSION].includes(sourceVersion)
     || !Array.isArray(value.bases)
     || value.bases.length > MAX_KNOWLEDGE_BASES) {
     throw new Error("Device-local state has an unsupported or malformed shape.");
   }
-  if (sourceVersion >= DEVICE_LOCAL_STATE_VERSION && value.historyIndexFolderSourcesIncluded !== true) {
+  if (sourceVersion >= DEVICE_HISTORY_PROVENANCE_VERSION && value.historyIndexFolderSourcesIncluded !== true) {
     throw new Error("Device-local state is missing its linked-folder history marker.");
+  }
+  if (sourceVersion < DEVICE_LOCAL_STATE_VERSION && value.pendingRequiredUndoCommit !== undefined) {
+    throw new Error("Legacy device-local state cannot contain a pending required Undo commit.");
+  }
+  if (sourceVersion < DEVICE_LOCAL_STATE_VERSION && value.pendingRequiredUndoBatchCommit !== undefined) {
+    throw new Error("Legacy device-local state cannot contain a pending required Undo batch.");
+  }
+  if (sourceVersion < DEVICE_LOCAL_STATE_VERSION && value.pendingHistoryTransitionCommit !== undefined) {
+    throw new Error("Legacy device-local state cannot contain a pending history transition.");
+  }
+  const pendingCommitCount = [
+    value.pendingRequiredUndoCommit,
+    value.pendingRequiredUndoBatchCommit,
+    value.pendingHistoryTransitionCommit,
+  ].filter((pending) => pending !== undefined).length;
+  if (pendingCommitCount > 1) {
+    throw new Error("Device-local state cannot contain multiple pending history commits.");
   }
   const vaultId = cleanKnowledgeBaseId(value.vaultId, "Device-local vault");
   const activeBaseId = cleanKnowledgeBaseId(value.activeBaseId, "Device-local active knowledge base");
@@ -5916,22 +6255,34 @@ export function parseDeviceLocalPluginState(input: unknown): DeviceLocalPluginSt
         undoStack: parseDeviceHistory(
           view.undoStack,
           `Device-local base ${baseId} Undo history`,
-          sourceVersion >= DEVICE_LOCAL_STATE_VERSION,
+          sourceVersion >= DEVICE_HISTORY_PROVENANCE_VERSION,
         ),
         redoStack: parseDeviceHistory(
           view.redoStack,
           `Device-local base ${baseId} Redo history`,
-          sourceVersion >= DEVICE_LOCAL_STATE_VERSION,
+          sourceVersion >= DEVICE_HISTORY_PROVENANCE_VERSION,
         ),
       },
     };
   });
+  const pendingRequiredUndoCommit = value.pendingRequiredUndoCommit === undefined
+    ? undefined
+    : parsePendingRequiredUndoCommit(value.pendingRequiredUndoCommit, bases);
+  const pendingRequiredUndoBatchCommit = value.pendingRequiredUndoBatchCommit === undefined
+    ? undefined
+    : parsePendingRequiredUndoBatchCommit(value.pendingRequiredUndoBatchCommit, bases);
+  const pendingHistoryTransitionCommit = value.pendingHistoryTransitionCommit === undefined
+    ? undefined
+    : parsePendingHistoryTransitionCommit(value.pendingHistoryTransitionCommit, bases);
   return {
     version: DEVICE_LOCAL_STATE_VERSION,
-    historyIndexFolderSourcesIncluded: sourceVersion >= DEVICE_LOCAL_STATE_VERSION,
+    historyIndexFolderSourcesIncluded: sourceVersion >= DEVICE_HISTORY_PROVENANCE_VERSION,
     vaultId,
     activeBaseId,
     bases,
+    ...(pendingRequiredUndoCommit ? { pendingRequiredUndoCommit } : {}),
+    ...(pendingRequiredUndoBatchCommit ? { pendingRequiredUndoBatchCommit } : {}),
+    ...(pendingHistoryTransitionCommit ? { pendingHistoryTransitionCommit } : {}),
   };
 }
 
@@ -5947,7 +6298,19 @@ export interface DeviceLocalPluginStateBuildResult {
  * each stack's newest entries. Ties are deterministic and favor retaining the
  * active base. Route/collapse data is reduced only after all history is gone.
  */
-export function createDeviceLocalPluginStateWithReport(store: PluginStore): DeviceLocalPluginStateBuildResult {
+export function createDeviceLocalPluginStateWithReport(
+  store: PluginStore,
+  pendingRequiredUndoCommit?: PendingRequiredUndoCommit,
+  pendingHistoryTransitionCommit?: PendingHistoryTransitionCommit,
+  pendingRequiredUndoBatchCommit?: PendingRequiredUndoBatchCommit,
+): DeviceLocalPluginStateBuildResult {
+  if ([
+    pendingRequiredUndoCommit,
+    pendingRequiredUndoBatchCommit,
+    pendingHistoryTransitionCommit,
+  ].filter(Boolean).length > 1) {
+    throw new Error("Device-local state cannot contain multiple pending history commits.");
+  }
   const available = store.bases.filter((entry) => entry.archivedAt === null);
   const activeBaseId = available.some((entry) => entry.id === store.activeBaseId)
     ? store.activeBaseId
@@ -5958,7 +6321,57 @@ export function createDeviceLocalPluginStateWithReport(store: PluginStore): Devi
     vaultId: store.vaultId,
     activeBaseId,
     bases: store.bases.map((entry) => ({ baseId: entry.id, view: capturePluginViewState(entry.data) })),
+    ...(pendingRequiredUndoCommit
+      ? { pendingRequiredUndoCommit: cloneJsonValue(pendingRequiredUndoCommit) }
+      : {}),
+    ...(pendingRequiredUndoBatchCommit
+      ? { pendingRequiredUndoBatchCommit: cloneJsonValue(pendingRequiredUndoBatchCommit) }
+      : {}),
+    ...(pendingHistoryTransitionCommit
+      ? { pendingHistoryTransitionCommit: cloneJsonValue(pendingHistoryTransitionCommit) }
+      : {}),
   };
+  const protectedUndo = pendingRequiredUndoCommit
+    ? (() => {
+      const undoStack = state.bases
+        .find((base) => base.baseId === pendingRequiredUndoCommit.baseId)
+        ?.view.undoStack ?? [];
+      return undoStack[undoStack.length - 1];
+    })()
+    : undefined;
+  const validatePendingCommits = (): void => {
+    if (pendingRequiredUndoCommit && (!protectedUndo
+      || protectedUndo.at !== pendingRequiredUndoCommit.undoSnapshotAt
+      || fingerprintText(canonicalJsonString(protectedUndo)) !== pendingRequiredUndoCommit.undoSnapshotFingerprint)) {
+      throw new Error("Pending required Undo commit does not identify the newest Undo snapshot exactly.");
+    }
+    for (const [index, entry] of (state.pendingRequiredUndoBatchCommit?.entries
+      ?? pendingRequiredUndoBatchCommit?.entries
+      ?? []).entries()) {
+      const local = state.bases.find((base) => base.baseId === entry.baseId);
+      const undoStack = local?.view.undoStack ?? [];
+      const newestUndo = undoStack[undoStack.length - 1];
+      if (!local
+        || !newestUndo
+        || newestUndo.at !== entry.undoSnapshotAt
+        || fingerprintText(canonicalJsonString(newestUndo)) !== entry.undoSnapshotFingerprint) {
+        throw new Error(`Pending required Undo batch entry ${index + 1} does not identify its newest Undo snapshot exactly.`);
+      }
+      if (!entry.baseExistedBefore && (undoStack.length !== 1 || local.view.redoStack.length !== 0)) {
+        throw new Error(`Pending required Undo batch entry ${index + 1} has invalid staged history for a new knowledge base.`);
+      }
+    }
+    if (pendingHistoryTransitionCommit) {
+      const local = state.bases.find((base) => base.baseId === pendingHistoryTransitionCommit.baseId);
+      if (!local) throw new Error("Pending history transition refers to an unavailable knowledge base.");
+      projectPendingHistoryTransition(
+        local.view.undoStack,
+        local.view.redoStack,
+        state.pendingHistoryTransitionCommit ?? pendingHistoryTransitionCommit,
+      );
+    }
+  };
+  validatePendingCommits();
   if (serializedUtf8Bytes(state) <= MAX_DEVICE_LOCAL_STATE_BYTES) {
     return { state, historyTruncated: false, viewStateTruncated: false };
   }
@@ -5972,6 +6385,18 @@ export function createDeviceLocalPluginStateWithReport(store: PluginStore): Devi
     stack: "redo" | "undo";
   };
   const candidates: HistoryCandidate[] = [];
+  const protectedHistory = new Set<PersonalSnapshot>();
+  if (protectedUndo) protectedHistory.add(protectedUndo);
+  for (const entry of pendingRequiredUndoBatchCommit?.entries ?? []) {
+    const undoStack = state.bases.find((base) => base.baseId === entry.baseId)?.view.undoStack ?? [];
+    const newestUndo = undoStack[undoStack.length - 1];
+    if (newestUndo) protectedHistory.add(newestUndo);
+  }
+  if (pendingHistoryTransitionCommit) {
+    const local = state.bases.find((base) => base.baseId === pendingHistoryTransitionCommit.baseId);
+    for (const snapshot of local?.view.undoStack ?? []) protectedHistory.add(snapshot);
+    for (const snapshot of local?.view.redoStack ?? []) protectedHistory.add(snapshot);
+  }
   const originalHistory = new Map(state.bases.map((base) => [base.baseId, {
     undo: [...base.view.undoStack],
     redo: [...base.view.redoStack],
@@ -5981,14 +6406,17 @@ export function createDeviceLocalPluginStateWithReport(store: PluginStore): Devi
       ["undo", base.view.undoStack],
       ["redo", base.view.redoStack],
     ] as const) {
-      snapshots.forEach((snapshot, index) => candidates.push({
-        activeRank: base.baseId === activeBaseId ? 1 : 0,
-        baseId: base.baseId,
-        index,
-        recencyDepth: snapshots.length - index,
-        snapshot,
-        stack,
-      }));
+      snapshots.forEach((snapshot, index) => {
+        if (protectedHistory.has(snapshot)) return;
+        candidates.push({
+          activeRank: base.baseId === activeBaseId ? 1 : 0,
+          baseId: base.baseId,
+          index,
+          recencyDepth: snapshots.length - index,
+          snapshot,
+          stack,
+        });
+      });
     }
   }
   candidates.sort((left, right) => right.recencyDepth - left.recencyDepth
@@ -6015,22 +6443,29 @@ export function createDeviceLocalPluginStateWithReport(store: PluginStore): Devi
   applyHistoryDropCount(low);
   const historyTruncated = low > 0;
   if (serializedUtf8Bytes(state) <= MAX_DEVICE_LOCAL_STATE_BYTES) {
+    validatePendingCommits();
     return { state, historyTruncated, viewStateTruncated: false };
   }
 
-  const active = state.bases.find((base) => base.baseId === activeBaseId);
-  const viewStateTruncated = state.bases.length > (active ? 1 : 0);
-  state.bases = active ? [active] : [];
+  const retainedBaseIds = new Set<string>([activeBaseId]);
+  if (pendingRequiredUndoCommit) retainedBaseIds.add(pendingRequiredUndoCommit.baseId);
+  if (pendingHistoryTransitionCommit) retainedBaseIds.add(pendingHistoryTransitionCommit.baseId);
+  for (const entry of pendingRequiredUndoBatchCommit?.entries ?? []) retainedBaseIds.add(entry.baseId);
+  const retainedBases = state.bases.filter((base) => retainedBaseIds.has(base.baseId));
+  const viewStateTruncated = state.bases.length > retainedBases.length;
+  state.bases = retainedBases;
   if (serializedUtf8Bytes(state) <= MAX_DEVICE_LOCAL_STATE_BYTES) {
+    validatePendingCommits();
     return { state, historyTruncated, viewStateTruncated };
   }
-  if (active) {
-    active.view.selectedPath = "";
-    active.view.collapsed = cloneJsonValue(DEFAULT_DATA.collapsed);
-    active.view.collections = [];
-    active.view.libraryLayouts = [];
+  for (const base of state.bases) {
+    base.view.selectedPath = "";
+    base.view.collapsed = cloneJsonValue(DEFAULT_DATA.collapsed);
+    base.view.collections = [];
+    base.view.libraryLayouts = [];
   }
   if (serializedUtf8Bytes(state) > MAX_DEVICE_LOCAL_STATE_BYTES) throw new Error("Device-local state could not be bounded safely.");
+  validatePendingCommits();
   return { state, historyTruncated, viewStateTruncated: true };
 }
 

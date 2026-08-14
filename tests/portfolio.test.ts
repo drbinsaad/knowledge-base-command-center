@@ -58,6 +58,18 @@ function entry(id: string, name: string, createdAt = 100): KnowledgeBaseEntry {
   return createKnowledgeBaseEntry(data(name), id, createdAt);
 }
 
+function alignDestinationRecordProjection(destination: KnowledgeBaseEntry, source: KnowledgeBaseEntry): void {
+  destination.data.settings.primaryFolder = source.data.settings.primaryFolder;
+  destination.data.settings.proposalFolder = source.data.settings.proposalFolder;
+  destination.data.settings.inboxLabel = source.data.settings.inboxLabel;
+  destination.data.settings.idProperty = source.data.settings.idProperty;
+  destination.data.settings.groupProperty = source.data.settings.groupProperty;
+  destination.data.settings.parentProperty = source.data.settings.parentProperty;
+  destination.data.settings.templatesFolder = source.data.settings.templatesFolder;
+  destination.data.settings.allowClinicalVisualGroupMoves = source.data.settings.allowClinicalVisualGroupMoves;
+  destination.data.indexGroupOrder = [...source.data.indexGroupOrder];
+}
+
 function storeWith(entries: KnowledgeBaseEntry[], vaultId = "vault-local"): PluginStore {
   const store = createDefaultStore(structuredClone(entries[0]?.data ?? data("Fallback")), 1, vaultId);
   store.bases = entries.map((item) => structuredClone(item));
@@ -232,6 +244,7 @@ test("one immutable mutation plan drives exact preview and exact apply", () => {
   addPortableFixtures(source.data, "identity");
   const bundle = deepFreeze(bundleFor([source], "vault-local"));
   const destination = entry("base-destination", "Destination", 10);
+  alignDestinationRecordProjection(destination, source);
   destination.data.portableIndex.libraries = [{
     id: "library-local-only",
     name: "Local only",
@@ -288,6 +301,8 @@ test("multi-base mapping is collision-safe and rejects two sources targeting one
   const bundle = bundleFor([first, second], "vault-different");
   const destinationOne = entry("base-dest-one", "Destination One", 10);
   const destinationTwo = entry("base-dest-two", "Destination Two", 20);
+  alignDestinationRecordProjection(destinationOne, first);
+  alignDestinationRecordProjection(destinationTwo, second);
   destinationOne.data.portableIndex.groups = structuredClone(first.data.portableIndex.groups);
   destinationOne.data.portableIndex.subjects = [{ ...structuredClone(first.data.portableIndex.subjects[0]), title: "Local meaning" }];
   const store = storeWith([destinationOne, destinationTwo], "vault-local");
@@ -312,6 +327,7 @@ test("cross-vault Replace is separately gated while Merge and new-base import re
   const source = entry("base-source", "Source");
   const bundle = bundleFor([source], "vault-elsewhere");
   const destination = entry("base-destination", "Destination");
+  alignDestinationRecordProjection(destination, source);
   const store = storeWith([destination], "vault-here");
   const replace: PortfolioImportMapping = {
     sourceBaseId: source.id,
@@ -340,6 +356,104 @@ test("cross-vault Replace is separately gated while Merge and new-base import re
     destination: { kind: "new", name: "Imported Source" },
     mode: "replace",
   }], { now: 1_700_000_000_301 }), /new knowledge base is initialized with Merge/i);
+});
+
+test("existing portfolio destinations require a two-step import when Workspace changes note projection", () => {
+  const cases: Array<{ label: string; change(source: KnowledgeBaseEntry): void }> = [
+    {
+      label: "configured-ID property",
+      change: (source) => { source.data.settings.idProperty = "portable_id"; },
+    },
+    {
+      label: "group property",
+      change: (source) => { source.data.settings.groupProperty = "portable_group"; },
+    },
+    {
+      label: "parent property",
+      change: (source) => { source.data.settings.parentProperty = "portable_parent"; },
+    },
+    {
+      label: "folder grouping root",
+      change: (source) => { source.data.settings.primaryFolder = "Portable Notes"; },
+    },
+  ];
+
+  for (const [index, scenario] of cases.entries()) {
+    const source = entry(`base-projection-source-${index}`, "Source");
+    const destination = entry(`base-projection-destination-${index}`, "Destination");
+    alignDestinationRecordProjection(destination, source);
+    scenario.change(source);
+    const bundle = bundleFor([source], "vault-local");
+    const store = storeWith([destination], "vault-local");
+    const before = structuredClone(store);
+
+    assert.throws(() => createPortfolioImportPlan(store, bundle, [{
+      sourceBaseId: source.id,
+      destination: { kind: "existing", baseId: destination.id },
+      mode: "merge",
+    }], { now: 1_700_000_000_320 + index }), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.ok(error.message.includes(scenario.label), error.message);
+      assert.ok(error.message.includes("Import only Workspace settings into “Destination” first."), error.message);
+      assert.ok(error.message.includes("prepare this portfolio again"), error.message);
+      assert.ok(error.message.includes("without Workspace settings"), error.message);
+      return true;
+    }, scenario.label);
+    assert.deepEqual(store, before, `${scenario.label} must fail before mutating the destination`);
+  }
+});
+
+test("portfolio projection guard permits unchanged, single-side, and new-base imports", () => {
+  const source = entry("base-safe-source", "Source");
+  const destination = entry("base-safe-destination", "Destination");
+  alignDestinationRecordProjection(destination, source);
+  source.data.settings.workspaceSubtitle = "Harmless imported subtitle";
+  const bundle = bundleFor([source], "vault-local");
+  const store = storeWith([destination], "vault-local");
+  const combined = createPortfolioImportPlan(store, bundle, [{
+    sourceBaseId: source.id,
+    destination: { kind: "existing", baseId: destination.id },
+    mode: "merge",
+  }], { now: 1_700_000_000_330 });
+  assert.equal(combined.operations[0]?.workspaceCatalogProjectionGuard, "existing-projection-unchanged");
+
+  const tamperedStore = structuredClone(store);
+  const tamperedBefore = structuredClone(tamperedStore);
+  const tamperedPlan = structuredClone(combined);
+  tamperedPlan.operations[0].workspaceCatalogProjectionGuard = "not-applicable";
+  assert.throws(() => applyPortfolioImportPlan(tamperedStore, tamperedPlan), /plan changed after preview/i);
+  assert.deepEqual(tamperedStore, tamperedBefore, "a changed safety proof cannot bypass the immutable plan");
+
+  const changedSource = entry("base-one-side-source", "Source");
+  const oneSideDestination = entry("base-one-side-destination", "Destination");
+  alignDestinationRecordProjection(oneSideDestination, changedSource);
+  changedSource.data.settings.idProperty = "portable_id";
+  const changedBundle = bundleFor([changedSource], "vault-local");
+  const oneSideStore = storeWith([oneSideDestination], "vault-local");
+  const workspaceOnly = createPortfolioImportPlan(oneSideStore, changedBundle, [{
+    sourceBaseId: changedSource.id,
+    destination: { kind: "existing", baseId: oneSideDestination.id },
+    mode: "merge",
+    selection: selection({ workspace: true }),
+  }], { now: 1_700_000_000_331 });
+  assert.equal(workspaceOnly.operations[0]?.workspaceCatalogProjectionGuard, "not-applicable");
+
+  const catalogOnly = createPortfolioImportPlan(oneSideStore, changedBundle, [{
+    sourceBaseId: changedSource.id,
+    destination: { kind: "existing", baseId: oneSideDestination.id },
+    mode: "merge",
+    selection: selection({ index: true }),
+  }], { now: 1_700_000_000_332 });
+  assert.equal(catalogOnly.operations[0]?.workspaceCatalogProjectionGuard, "not-applicable");
+
+  const newBaseStore = storeWith([entry("base-existing", "Existing")], "vault-local");
+  const newBase = createPortfolioImportPlan(newBaseStore, changedBundle, [{
+    sourceBaseId: changedSource.id,
+    destination: { kind: "new", name: "Imported Source" },
+    mode: "merge",
+  }], { now: 1_700_000_000_333 });
+  assert.equal(newBase.operations[0]?.workspaceCatalogProjectionGuard, "new-empty-destination");
+  assert.doesNotThrow(() => applyPortfolioImportPlan(newBaseStore, newBase));
 });
 
 test("selective Replace preserves unselected Libraries and reports only selected conflicts", () => {
@@ -400,6 +514,7 @@ test("unavailable folders and templates are exact plan fallbacks", () => {
     sourceBaseId: source.id,
     destination: { kind: "existing", baseId: destination.id },
     mode: "merge",
+    selection: selection({ workspace: true }),
   }], {
     now: 1_700_000_000_400,
     resources: {
@@ -468,6 +583,7 @@ test("stale or tampered plans leave the store byte-for-byte unchanged", () => {
   const source = entry("base-source", "Source");
   const bundle = bundleFor([source], "vault-local");
   const destination = entry("base-destination", "Destination");
+  alignDestinationRecordProjection(destination, source);
   const store = storeWith([destination], "vault-local");
   const plan = createPortfolioImportPlan(store, bundle, [{
     sourceBaseId: source.id,
@@ -725,6 +841,7 @@ test("portfolio transfers nested organization with recursive budgets and full pa
   assert.equal(manifestEntry.references, 2, "each nested placement counts as one reference");
 
   const destination = entry("base-destination", "Destination", 10);
+  alignDestinationRecordProjection(destination, source);
   const store = storeWith([destination], "vault-local");
   const plan = createPortfolioImportPlan(store, bundle, [{
     sourceBaseId: source.id,
@@ -781,6 +898,7 @@ test("plan previews key layout structures collision-proof against crafted local 
   // collapse into one preview key.
   const NUL = String.fromCharCode(0);
   const destination = entry("base-destination", "Destination", 10);
+  alignDestinationRecordProjection(destination, source);
   destination.data.portableIndex.libraries = structuredClone(source.data.portableIndex.libraries);
   destination.data.portableIndex.libraryLayouts = {
     "library-x": [

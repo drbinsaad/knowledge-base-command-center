@@ -50,6 +50,7 @@ import {
   type PortableImportMode,
   type PortableImportResult,
 } from "./portability";
+import { workspaceImportRecordProjectionChanges } from "./portable-import-preview";
 
 export const PORTFOLIO_EXPORT_KIND = "knowledge-base-command-center-portfolio-export" as const;
 export const PORTFOLIO_EXPORT_VERSION = 1 as const;
@@ -155,6 +156,10 @@ export interface PortfolioPlanOperation {
   destinationBaseName: string;
   mode: PortableImportMode;
   selection: PortableExportSelection;
+  workspaceCatalogProjectionGuard:
+    | "not-applicable"
+    | "new-empty-destination"
+    | "existing-projection-unchanged";
   beforeEntryGuard: string;
   afterEntry: KnowledgeBaseEntry;
   result: PortableImportResult;
@@ -971,7 +976,27 @@ function planPayload(plan: Omit<PortfolioImportPlan, "planGuard">): unknown {
   return plan;
 }
 
+function expectedWorkspaceCatalogProjectionGuard(
+  destinationKind: PortfolioDestination["kind"],
+  selection: PortableExportSelection,
+): PortfolioPlanOperation["workspaceCatalogProjectionGuard"] {
+  const normalized = normalizePortableSelection(selection);
+  if (!normalized.workspace || !selectionUsesSubjects(normalized)) return "not-applicable";
+  return destinationKind === "new" ? "new-empty-destination" : "existing-projection-unchanged";
+}
+
 function applyPlanUnchecked(store: PluginStore, operations: readonly PortfolioPlanOperation[]): void {
+  // A plan that combines Workspace settings with a subject catalog is safe
+  // only when planning proved that an existing destination's note projection
+  // stays unchanged, or when the destination is a new empty base. Validate all
+  // proofs before mutating the candidate store so a stale/legacy operation can
+  // never partly apply.
+  for (const operation of operations) {
+    const expected = expectedWorkspaceCatalogProjectionGuard(operation.destinationKind, operation.selection);
+    if (operation.workspaceCatalogProjectionGuard !== expected) {
+      throw new Error("The portfolio plan is missing its Workspace/catalog projection safety check. Prepare it again.");
+    }
+  }
   for (const operation of operations) {
     const index = store.bases.findIndex((entry) => entry.id === operation.destinationBaseId);
     if (operation.destinationKind === "new") {
@@ -1078,8 +1103,20 @@ export function createPortfolioImportPlan(
     const records = mapping.destination.kind === "existing"
       ? [...(options.recordsByBaseId?.get(destinationBaseId) ?? [])]
       : [];
-    if (selectionUsesSubjects(selection)) synchronizePortableRegistry(working.data, records);
     assertPortableImportDestinationCompatible(portable, selection, working.data.settings.workspaceMode);
+    const workspaceCatalogProjectionGuard = expectedWorkspaceCatalogProjectionGuard(
+      mapping.destination.kind,
+      selection,
+    );
+    if (beforeEntry && workspaceCatalogProjectionGuard === "existing-projection-unchanged") {
+      const projectionChanges = workspaceImportRecordProjectionChanges(beforeData, portable, selection);
+      if (projectionChanges.length > 0) {
+        throw new Error(
+          `Cannot prepare “${manifest.sourceBaseName}” for existing knowledge base “${destinationBaseName}” with Workspace settings and subject catalogs together because Workspace would change ${projectionChanges.join(", ")}, which determine how local Markdown notes are interpreted. Import only Workspace settings into “${destinationBaseName}” first. After KBCC refreshes the vault, prepare this portfolio again and import the Index, Libraries, Collections, or Study state without Workspace settings.`,
+        );
+      }
+    }
+    if (selectionUsesSubjects(selection)) synchronizePortableRegistry(working.data, records);
     const undo = snapshotPersonal(
       beforeData,
       `${mapping.mode === "merge" ? "Merge" : "Replace"} portfolio source “${manifest.sourceBaseName}”`,
@@ -1157,6 +1194,7 @@ export function createPortfolioImportPlan(
       destinationBaseName,
       mode: mapping.mode,
       selection,
+      workspaceCatalogProjectionGuard,
       beforeEntryGuard: beforeEntry ? entryGuard(beforeEntry) : "",
       afterEntry: working,
       result,

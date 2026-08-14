@@ -162,6 +162,8 @@ test("rendered Index rows expose exact desktop text, compact text, and full ARIA
   assert.equal(compact?.getAttribute("data-membership-kind"), "linked-folder");
   assert.equal(compact?.getAttribute("aria-label"), "Index membership: Linked folder");
   assert.match(title?.getAttribute("aria-label") ?? "", /Index membership: Linked folder/u);
+  assert.equal(title?.getAttribute("aria-keyshortcuts"), "Enter Space M P");
+  assert.doesNotMatch(title?.getAttribute("aria-label") ?? "", /Space selects|P pins/u);
 
   const placeholder = record("kbcc-placeholder:missing-note", "Missing note");
   placeholder.isPlaceholder = true;
@@ -172,8 +174,16 @@ test("rendered Index rows expose exact desktop text, compact text, and full ARIA
     source: { baseId: "base-a", baseName: "Main", data, records: [placeholder] },
     showIndexProvenance: true,
   });
-  assert.equal(placeholderParent.querySelector(".ent-cc-placeholder-badge")?.textContent, "No note");
-  assert.equal(placeholderParent.querySelector(".ent-cc-membership-badge")?.textContent, "Imported");
+  assert.equal(placeholderParent.querySelector(".ent-cc-subject-id-value")?.textContent, "No linked note");
+  assert.equal(placeholderParent.querySelector(".ent-cc-membership-provenance")?.textContent, "Imported placeholder");
+  assert.equal(placeholderParent.querySelector(".ent-cc-placeholder-badge")?.textContent, "No linked note");
+  assert.equal(
+    placeholderParent.querySelector(".ent-cc-placeholder-badge")?.getAttribute("aria-label"),
+    "No linked note. Index membership: Imported placeholder.",
+  );
+  assert.equal(placeholderParent.querySelector(".ent-cc-membership-badge"), null, "compact panes expose one canonical placeholder badge");
+  assert.match(placeholderParent.querySelector(".ent-cc-subject-title")?.getAttribute("aria-label") ?? "", /No linked note/u);
+  assert.doesNotMatch(placeholderParent.textContent, /No note yet/u);
 
   const clinicalData = migrateData(null);
   clinicalData.settings.workspaceMode = "ent-clinical";
@@ -181,6 +191,11 @@ test("rendered Index rows expose exact desktop text, compact text, and full ARIA
   const clinical = record("03 Clinical Topics/ENT-PED-003.04.md", "Laryngeal web");
   clinical.curriculumId = "ENT-PED-003.04";
   clinical.portableIndexed = true;
+  clinical.priority = "P1";
+  clinical.safetyCritical = true;
+  clinical.aiLock = true;
+  clinicalData.settings.showSafetyBadges = true;
+  clinicalData.pinnedPaths = [clinical.path];
   const clinicalParent = dom.document.body.createDiv();
   view.plugin.data = clinicalData;
   view.renderRecordRow(asHtmlElement(clinicalParent), clinical, 1, undefined, {
@@ -189,6 +204,16 @@ test("rendered Index rows expose exact desktop text, compact text, and full ARIA
   });
   assert.equal(clinicalParent.querySelector(".ent-cc-subject-id-value")?.textContent, "ENT-PED-003.04");
   assert.equal(clinicalParent.querySelector(".ent-cc-membership-provenance")?.textContent, "Protected source");
+  for (const [selector, label] of [
+    [".ent-cc-safety-badge", "Safety-critical"],
+    [".ent-cc-pin-badge", "Pinned"],
+    [".ent-cc-lock-badge", "AI locked"],
+  ] as const) {
+    const status = clinicalParent.querySelector(selector);
+    assert.equal(status?.getAttribute("role"), "img");
+    assert.equal(status?.getAttribute("aria-label"), label);
+    assert.equal(status?.getAttribute("title"), label);
+  }
 });
 
 test("persistent main-view warning opens the narrow legacy review entry point", () => {

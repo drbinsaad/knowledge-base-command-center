@@ -17,7 +17,7 @@ import {
 } from "../src/quick-entry.ts";
 import { createQuickEntryButton, EntVaultCommandCenterView } from "../src/view.ts";
 import { AddActionModal, CollectionPickerModal, collectionTargets, IndexGroupModal, KnowledgeNoteModal, type KnowledgeNoteModalOptions, localDateStamp, type NoteDestinationSeed, TextPromptModal, VaultFilePickerModal } from "../src/modals.ts";
-import { migrateData, portablePlaceholderPath, type LibraryDefinition, type VaultRecord } from "../src/model.ts";
+import { MAX_DEVICE_LOCAL_STATE_BYTES, migrateData, portablePlaceholderPath, type LibraryDefinition, type VaultRecord } from "../src/model.ts";
 import { createFakeDom, asHtmlElement } from "./support/fake-dom.ts";
 
 function quickEntryPlugin(): {
@@ -25,11 +25,19 @@ function quickEntryPlugin(): {
   sourceMutationCount: () => number;
 } {
   let sourceMutations = 0;
+  let deviceState: unknown = null;
   const forbiddenSourceMutation = (): never => {
     sourceMutations += 1;
     throw new Error("Quick Entry attempted to mutate a Markdown file.");
   };
   const app = {
+    loadLocalStorage: () => structuredClone(deviceState),
+    saveLocalStorage: (_key: string, value: unknown) => {
+      if (new TextEncoder().encode(JSON.stringify(value)).byteLength > MAX_DEVICE_LOCAL_STATE_BYTES) {
+        throw new Error("Quick Entry test device-local state exceeded the production limit.");
+      }
+      deviceState = structuredClone(value);
+    },
     vault: {
       configDir: ".obsidian",
       getMarkdownFiles: () => [],

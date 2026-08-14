@@ -719,6 +719,119 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
       queues: "Smart Queues",
     };
     for (const library of activeLibraries) defaultTabs[libraryTabId(library.id)] = library.name;
+    const portableSubjectCount = this.host.data.portableIndex.subjects.length;
+    const unresolvedPortableCount = this.host.data.portableIndex.subjects
+      .filter((subject) => !this.host.data.portableIndex.resolvedPathBySubjectId[subject.id]).length;
+
+    const membershipItems: SettingDefinitionRender[] = [
+      renderSetting(
+        "Membership rule",
+        settings.workspaceMode === "ent-clinical"
+          ? "Protected clinical source rules, direct membership, and imported placeholders decide what appears. Storage location is not an additional authority."
+          : "A note appears only when you add it directly, deliberately link its folder, or import it as a placeholder. Merely creating or moving a note into a storage folder does not add it.",
+        () => undefined,
+        ["why included", "direct", "linked folder", "placeholder", "storage only"],
+      ),
+      ...(settings.workspaceMode === "ent-clinical" ? [
+        renderSetting("Protected indexed-notes folder", "Canonical clinical creation and protected Index discovery follow this folder. This ENT safeguard is distinct from Generic linked-folder membership.", (row) => {
+          row.addText((text) => {
+            text.setValue(settings.primaryFolder).setDisabled(true);
+            text.inputEl.dir = "auto";
+          });
+        }, ["folder", "path", "clinical scope"]),
+      ] : [
+        renderSetting(
+          "Linked Index folders",
+          this.host.data.indexFolderSources.length === 0
+            ? "None. Notes enter this Index only when you explicitly add them. Linking a folder is opt-in and includes its current and future Markdown notes without moving or editing them."
+            : `${this.host.data.indexFolderSources.length} folder ${this.host.data.indexFolderSources.length === 1 ? "source is" : "sources are"} linked. An inherited legacy source remains automatic until you review it; the default new-note folder itself remains storage-only.`,
+          (row) => {
+            row.addButton((button) => button
+              .setButtonText("Link folder…")
+              .setIcon("folder-plus")
+              .setDisabled(readOnly)
+              .onClick(() => {
+                if (!ownsConfiguredBase()) return;
+                const linked = new Set(this.host.data.indexFolderSources.map((source) => source.path));
+                const candidates = folderPaths().filter((path) => !linked.has(path));
+                if (candidates.length === 0) {
+                  new Notice("No additional writable vault folder is available to link.");
+                  return;
+                }
+                new StringPickerModal(this.host.app, candidates, "Link folder to this Index", "Search vault folders…", async (path) => {
+                  if (!ownsConfiguredBase()) return;
+                  await this.host.linkIndexFolder(path);
+                  if (!ownsConfiguredBase()) return;
+                  this.update();
+                }).open();
+              }));
+          },
+          ["membership", "source", "include folder", "automatic notes"],
+        ),
+        ...this.host.data.indexFolderSources.map((source) => renderSetting(
+          source.path,
+          source.origin === "legacy-primary-folder"
+            ? "Legacy linked source preserved during upgrade. Review exact notes before unlinking it or intentionally keeping it dynamic; Markdown files remain untouched."
+            : "Explicit linked source. Notes below this folder join dynamically; the folder is never moved or edited.",
+          (row) => {
+            if (source.origin === "legacy-primary-folder") {
+              row.settingEl.addClass("ent-cc-legacy-warning");
+              row.addButton((button) => button
+                .setButtonText("Review…")
+                .setIcon("list-checks")
+                .setCta()
+                .setDisabled(readOnly)
+                .onClick(() => {
+                  if (!ownsConfiguredBase()) return;
+                  openLegacyReview(source.id);
+                }));
+              if (legacyReviewPreparationError) {
+                row.addButton((button) => button
+                  .setButtonText("Keep linked")
+                  .setIcon("link")
+                  .setDisabled(readOnly)
+                  .onClick(() => {
+                    if (!ownsConfiguredBase()) return;
+                    new ConfirmModal(
+                      this.host.app,
+                      "Keep this folder linked to the Index?",
+                      `“${source.path}” will become an intentional dynamic source. Its current and future Markdown notes will continue to join the Index automatically. No Markdown file will be changed.`,
+                      "Keep linked",
+                      async () => {
+                        if (!ownsConfiguredBase()) return;
+                        await this.host.keepLegacyIndexSourceById(source.id, source.path);
+                        if (!ownsConfiguredBase()) return;
+                        this.update();
+                      },
+                    ).open();
+                  }));
+              }
+            } else {
+              row.addButton((button) => button
+                .setButtonText("Unlink")
+                .setIcon("unlink")
+                .setDisabled(readOnly)
+                .onClick(() => {
+                  if (!ownsConfiguredBase()) return;
+                  new ConfirmModal(
+                    this.host.app,
+                    "Unlink folder from this Index?",
+                    `Notes supplied only by “${source.path}” will leave the Index. Notes explicitly added one by one, supplied by another linked folder, or used in Collections remain available. No Markdown file will be changed.`,
+                    "Unlink folder",
+                    async () => {
+                      if (!ownsConfiguredBase()) return;
+                      await this.host.unlinkIndexFolder(source.id);
+                      if (!ownsConfiguredBase()) return;
+                      this.update();
+                    },
+                  ).open();
+                }));
+            }
+          },
+          ["membership", "legacy", "unlink folder"],
+        )),
+      ]),
+    ];
 
     definitions.push(
       {
@@ -818,113 +931,19 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
       },
       {
         type: "group",
-        heading: "Folders and templates",
+        heading: "Index membership",
+        items: membershipItems,
+      },
+      {
+        type: "group",
+        heading: "Note storage and creation",
         items: [
-          settings.workspaceMode === "ent-clinical"
-            ? renderSetting("Indexed notes folder", "Protected ENT scope. Canonical creation and index discovery both follow this folder; its path updates automatically when the folder is renamed in the vault.", (row) => {
-                row.addText((text) => {
-                  text.setValue(settings.primaryFolder).setDisabled(true);
-                  text.inputEl.dir = "auto";
-                });
-              }, ["folder", "path", "clinical scope"])
-            : folderSetting(
-              "Folder grouping root",
-              "Optional fallback for deriving visual groups from subfolders. This path never adds notes to the Index.",
-              settings.primaryFolder,
-              (value) => { settings.primaryFolder = value; },
-            ),
-          ...(settings.workspaceMode === "generic" ? [
-            renderSetting(
-              "Linked Index folders",
-              this.host.data.indexFolderSources.length === 0
-                ? "None. Notes enter this Index only when you explicitly add them. Linking a folder is opt-in and includes its current and future Markdown notes without moving or editing them."
-                : `${this.host.data.indexFolderSources.length} folder ${this.host.data.indexFolderSources.length === 1 ? "source is" : "sources are"} linked. An inherited legacy source remains automatic until you review it; the default new-note folder itself remains storage-only.`,
-              (row) => {
-                row.addButton((button) => button
-                  .setButtonText("Link folder…")
-                  .setIcon("folder-plus")
-                  .setDisabled(readOnly)
-                  .onClick(() => {
-                    if (!ownsConfiguredBase()) return;
-                    const linked = new Set(this.host.data.indexFolderSources.map((source) => source.path));
-                    const candidates = folderPaths().filter((path) => !linked.has(path));
-                    if (candidates.length === 0) {
-                      new Notice("No additional writable vault folder is available to link.");
-                      return;
-                    }
-                    new StringPickerModal(this.host.app, candidates, "Link folder to this Index", "Search vault folders…", async (path) => {
-                      if (!ownsConfiguredBase()) return;
-                      await this.host.linkIndexFolder(path);
-                      if (!ownsConfiguredBase()) return;
-                      this.update();
-                    }).open();
-                  }));
-              },
-              ["membership", "source", "include folder", "automatic notes"],
-            ),
-            ...this.host.data.indexFolderSources.map((source) => renderSetting(
-              source.path,
-              source.origin === "legacy-primary-folder"
-                ? "Legacy linked source preserved during upgrade. Review exact notes before unlinking it or intentionally keeping it dynamic; Markdown files remain untouched."
-                : "Explicit linked source. Notes below this folder join dynamically; the folder is never moved or edited.",
-              (row) => {
-                if (source.origin === "legacy-primary-folder") {
-                  row.settingEl.addClass("ent-cc-legacy-warning");
-                  row.addButton((button) => button
-                    .setButtonText("Review…")
-                    .setIcon("list-checks")
-                    .setCta()
-                    .setDisabled(readOnly)
-                    .onClick(() => {
-                      if (!ownsConfiguredBase()) return;
-                      openLegacyReview(source.id);
-                    }));
-                  if (legacyReviewPreparationError) {
-                    row.addButton((button) => button
-                      .setButtonText("Keep linked")
-                      .setIcon("link")
-                      .setDisabled(readOnly)
-                      .onClick(() => {
-                        if (!ownsConfiguredBase()) return;
-                        new ConfirmModal(
-                          this.host.app,
-                          "Keep this folder linked to the Index?",
-                          `“${source.path}” will become an intentional dynamic source. Its current and future Markdown notes will continue to join the Index automatically. No Markdown file will be changed.`,
-                          "Keep linked",
-                          async () => {
-                            if (!ownsConfiguredBase()) return;
-                            await this.host.keepLegacyIndexSourceById(source.id, source.path);
-                            if (!ownsConfiguredBase()) return;
-                            this.update();
-                          },
-                        ).open();
-                      }));
-                  }
-                } else {
-                  row.addButton((button) => button
-                    .setButtonText("Unlink")
-                    .setIcon("unlink")
-                    .setDisabled(readOnly)
-                    .onClick(() => {
-                      if (!ownsConfiguredBase()) return;
-                      new ConfirmModal(
-                        this.host.app,
-                        "Unlink folder from this Index?",
-                        `Notes supplied only by “${source.path}” will leave the Index. Notes explicitly added one by one, supplied by another linked folder, or used in Collections remain available. No Markdown file will be changed.`,
-                        "Unlink folder",
-                        async () => {
-                          if (!ownsConfiguredBase()) return;
-                          await this.host.unlinkIndexFolder(source.id);
-                          if (!ownsConfiguredBase()) return;
-                          this.update();
-                        },
-                      ).open();
-                    }));
-                }
-              },
-              ["membership", "legacy", "unlink folder"],
-            )),
-          ] : []),
+          ...(settings.workspaceMode === "generic" ? [folderSetting(
+            "Folder grouping root",
+            "Optional fallback for deriving visual groups from subfolders. This path never adds notes to the Index.",
+            settings.primaryFolder,
+            (value) => { settings.primaryFolder = value; },
+          )] : []),
           folderSetting("Default new-note folder", "Initial storage destination in Create note. Saving a note there does not add it to the Index.", settings.defaultNoteFolder, (value) => { settings.defaultNoteFolder = value; }),
           folderSetting("Templates folder", "Markdown templates offered by the per-note template picker. Leave empty to allow any Markdown file.", settings.templatesFolder, (value) => { settings.templatesFolder = value; }),
           renderSetting("Default starting content", "Every new note can override this choice.", (row) => {
@@ -1087,6 +1106,27 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
               this.bindBufferedTextCommit(text.inputEl);
             });
           }, ["proposal inbox"]),
+        ],
+      },
+      {
+        type: "group",
+        heading: "Portable blueprint and link progress",
+        items: [
+          {
+            name: "Portable subjects",
+            desc: `${portableSubjectCount.toLocaleString()} subject ${portableSubjectCount === 1 ? "identity is" : "identities are"} stored in this knowledge base; ${unresolvedPortableCount.toLocaleString()} still ${unresolvedPortableCount === 1 ? "needs" : "need"} a Markdown note. Placeholders are plugin blueprint entries, not files or folder membership.`,
+            aliases: ["placeholder", "no note", "import", "link progress"],
+          },
+          {
+            name: "Safe linking policy",
+            desc: "Exact title or configured-ID matches may be suggested for review, but KBCC never links a note automatically or uses fuzzy matching as identity. Create or link each placeholder deliberately from Smart Queues or its row action.",
+            aliases: ["candidate", "resolve", "exact match", "automatic link"],
+          },
+          {
+            name: "Import outcome preview",
+            desc: "The Export / import center simulates selected sections against an isolated copy before Apply, reports predicted placeholders and exact local candidates, and requires confirmation for large placeholder imports. Markdown notes remain unchanged.",
+            aliases: ["portable", "preview", "merge", "replace"],
+          },
         ],
       },
       {

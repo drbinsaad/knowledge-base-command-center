@@ -496,19 +496,23 @@ export class VaultFilePickerModal extends NormalizedFuzzySuggestModal<TFile> {
     private readonly files: TFile[],
     private readonly titleText: string,
     private readonly onChoose: (file: TFile) => void | Promise<void>,
+    private readonly itemAnnotation?: (file: TFile) => string,
   ) {
     super(app);
     this.setPlaceholder("Search Markdown notes by name or path…");
   }
 
   getItems(): TFile[] { return this.files; }
-  getItemText(item: TFile): string { return `${item.basename} ${item.path}`; }
+  getItemText(item: TFile): string { return `${item.basename} ${this.itemAnnotation?.(item) ?? ""} ${item.path}`; }
   onChooseItem(item: TFile): void { void Promise.resolve(this.onChoose(item)).catch(reportAsyncError); }
 
   renderSuggestion(match: FuzzyMatch<TFile>, element: HTMLElement): void {
     const item = match.item;
     element.createDiv({ text: item.basename });
-    element.createDiv({ cls: "ent-cc-picker-meta", text: item.path });
+    element.createDiv({
+      cls: "ent-cc-picker-meta",
+      text: [this.itemAnnotation?.(item), item.path].filter(Boolean).join(" · "),
+    });
   }
 
   onOpen(): void {

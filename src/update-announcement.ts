@@ -174,6 +174,20 @@ export const UPDATE_ANNOUNCEMENT_0_16_1: UpdateAnnouncement = {
   releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.16.1",
 };
 
+export const UPDATE_ANNOUNCEMENT_0_17_0: UpdateAnnouncement = {
+  version: "0.17.0",
+  title: "What’s new in Knowledge Base Command Center 0.17.0",
+  intro: "It is now much easier to see why a subject appears, resolve imported subjects safely, and keep storage folders separate from Index membership.",
+  highlights: [
+    "Why this appears explains every membership authority for one subject, while Manage index → Why included summarizes direct members, linked folders, protected sources, placeholders, exclusions, and location-only storage folders.",
+    "Smart queues now include every imported placeholder awaiting a note, show exact local title or configured-ID candidates, let you resolve the next subject deliberately, and never link automatically.",
+    "Single-base import predicts additions, matches, unresolved subjects, and the complete post-import placeholder queue; large placeholder imports require an extra confirmation.",
+    "After import, review the resulting queue or undo the import directly from its completion screen. Markdown notes are never changed by the import or resolver queue itself.",
+    "Index rows no longer let long status text collide with badges or actions, and save, backup, Undo, creation, and portfolio identity boundaries have been hardened.",
+  ],
+  releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.17.0",
+};
+
 const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_12_0.version, UPDATE_ANNOUNCEMENT_0_12_0],
   [UPDATE_ANNOUNCEMENT_0_12_1.version, UPDATE_ANNOUNCEMENT_0_12_1],
@@ -187,6 +201,7 @@ const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_15_0.version, UPDATE_ANNOUNCEMENT_0_15_0],
   [UPDATE_ANNOUNCEMENT_0_16_0.version, UPDATE_ANNOUNCEMENT_0_16_0],
   [UPDATE_ANNOUNCEMENT_0_16_1.version, UPDATE_ANNOUNCEMENT_0_16_1],
+  [UPDATE_ANNOUNCEMENT_0_17_0.version, UPDATE_ANNOUNCEMENT_0_17_0],
 ]);
 
 function parseSemanticVersion(value: string): ParsedSemanticVersion | null {

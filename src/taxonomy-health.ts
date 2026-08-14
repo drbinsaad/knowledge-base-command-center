@@ -546,6 +546,9 @@ function addBindingFindings(findings: TaxonomyHealthFinding[], data: PluginData,
   }
 
   const localRecords = records.filter((record) => !record.isPlaceholder && !isPortablePlaceholderPath(record.path));
+  const projectedPlaceholderSubjectIds = new Set(records
+    .filter((record) => record.isPlaceholder && record.portableId)
+    .map((record) => record.portableId as string));
   const byTitle = new Map<string, VaultRecord[]>();
   const byConfiguredId = new Map<string, VaultRecord[]>();
   for (const record of localRecords) {
@@ -561,7 +564,8 @@ function addBindingFindings(findings: TaxonomyHealthFinding[], data: PluginData,
     }
   }
   for (const subject of data.portableIndex.subjects) {
-    if (data.portableIndex.resolvedPathBySubjectId[subject.id]) continue;
+    if (data.portableIndex.resolvedPathBySubjectId[subject.id]
+      && !projectedPlaceholderSubjectIds.has(subject.id)) continue;
     const candidates = new Map<string, VaultRecord>();
     for (const record of byTitle.get(localeInvariantTaxonomyKey(subject.title)) ?? []) candidates.set(record.path, record);
     if (subject.configuredId) for (const record of byConfiguredId.get(localeInvariantTaxonomyKey(subject.configuredId)) ?? []) candidates.set(record.path, record);
