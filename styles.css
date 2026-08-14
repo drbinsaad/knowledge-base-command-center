@@ -2488,6 +2488,18 @@
 
 .ent-cc-manager-tabs::-webkit-scrollbar { display: none; }
 
+.ent-cc-manager-panel {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ent-cc-manager-panel[hidden] {
+  display: none;
+}
+
 .ent-cc-manager-tab {
   display: inline-flex;
   min-height: 38px;

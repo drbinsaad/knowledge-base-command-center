@@ -306,6 +306,35 @@ test("default Bases rendering uses entry values, fallback groups, and user resul
   assert.equal(harness.opened[0]?.path, "01 Airway/Second.md");
 });
 
+test("Bases record opening can follow the command center's configured note behavior", async () => {
+  const fixture = entryFixture("Research/Configured.md", { "note.title": "Configured" });
+  const window = new QueuedFakeWindow();
+  const document = new FakeDocument(window);
+  const parent = document.body.createDiv();
+  const opened: TFile[] = [];
+  const view = new EntHierarchyBasesView(
+    {} as QueryController,
+    asHtmlElement(parent),
+    async (file) => { opened.push(file); },
+  );
+  Object.assign(view, {
+    app: {
+      workspace: {
+        getLeaf: () => { throw new Error("the hard-coded tab fallback must not run"); },
+      },
+    },
+    config: config(),
+    data: result([fixture.entry], [group([fixture.entry])]),
+  });
+
+  view.onDataUpdated();
+  window.flushTimeouts();
+  parent.querySelector("button.ent-cc-base-record")?.click();
+  await Promise.resolve();
+
+  assert.deepEqual(opened.map((file) => file.path), ["Research/Configured.md"]);
+});
+
 test("a single native NullValue group stays authoritative and receives an Unassigned heading", () => {
   const fixture = entryFixture("Notes/Null group.md", {
     "note.custom_group": "Must not replace native group",

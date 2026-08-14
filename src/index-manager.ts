@@ -7,6 +7,7 @@ import {
   isSafeObjectKey,
   isPortablePlaceholderPath,
   normalizeSearchText,
+  pathIsInIndexFolderSources,
   resetCurriculumVisualPath,
   VaultRecord,
 } from "./model";
@@ -36,7 +37,11 @@ interface ManagerNote {
   meta: string;
 }
 
+let nextIndexManagerInstanceId = 0;
+const INDEX_MANAGER_PAGE_SIZE = 300;
+
 export class IndexManagerModal extends Modal {
+  private readonly instanceId = ++nextIndexManagerInstanceId;
   private tab: ManagerTab = "indexed";
   private query = "";
   private selected = new Set<string>();
@@ -50,6 +55,7 @@ export class IndexManagerModal extends Modal {
   private openedDataEpoch = 0;
   private ownsBase: OpenedBaseGuard | null = null;
   private pendingTimers = new Set<number>();
+  private visibleRowLimits = { diagnostics: INDEX_MANAGER_PAGE_SIZE, groups: INDEX_MANAGER_PAGE_SIZE };
   /**
    * Vault-derived note lists are memoized for the lifetime of one rendered
    * snapshot. Search re-renders on a 150 ms debounce, and recomputing
@@ -68,6 +74,7 @@ export class IndexManagerModal extends Modal {
     this.openedDataEpoch = this.plugin.getDataEpoch();
     this.ownsBase = this.createBaseGuard();
     this.invalidateNoteLists();
+    this.visibleRowLimits = { diagnostics: INDEX_MANAGER_PAGE_SIZE, groups: INDEX_MANAGER_PAGE_SIZE };
     this.managerOpen = true;
     this.modalEl.addClass("ent-cc-index-manager-modal");
     this.contentEl.addClass("ent-cc-modal", "ent-cc-index-manager");
@@ -127,11 +134,22 @@ export class IndexManagerModal extends Modal {
     return computed;
   }
 
-  private switchTab(tab: ManagerTab): void {
+  private tabElementId(tab: ManagerTab): string {
+    return `ent-cc-index-manager-${this.instanceId}-tab-${tab}`;
+  }
+
+  private panelElementId(tab: ManagerTab): string {
+    return `ent-cc-index-manager-${this.instanceId}-panel-${tab}`;
+  }
+
+  private switchTab(tab: ManagerTab, focusTab = false): void {
     this.tab = tab;
     this.query = "";
     this.selected.clear();
     this.render();
+    if (focusTab) {
+      this.contentEl.querySelector<HTMLElement>(`[data-manager-tab="${tab}"]`)?.focus();
+    }
   }
 
   /** Re-read the vault, then paint. Every caller except the search debounce. */
@@ -167,45 +185,105 @@ export class IndexManagerModal extends Modal {
     this.actionButton(portability, "download", "Export…", () => this.openPortabilityCenter("export"));
     this.actionButton(portability, "upload", "Import…", () => this.openPortabilityCenter("import"));
 
-    const tabs = this.contentEl.createDiv({ cls: "ent-cc-manager-tabs", attr: { role: "tablist" } });
-    // Counts stay lazy: a tab hidden by the clinical preset must not pay for
-    // the vault scan that its list would need.
+    const tabs = this.contentEl.createDiv({
+      cls: "ent-cc-manager-tabs",
+      attr: { role: "tablist", "aria-label": "Index manager sections" },
+    });
+    // Inactive note badges stay lazy. Rendering one tab must not enumerate the
+    // vault and build all three full note projections merely to show counts.
+    const noteCount = (tab: NoteListTab): number | string => this.tab === tab
+      ? this.noteList(tab).length
+      : this.noteListCache.get(tab)?.length ?? "—";
     const definitions: Array<{ id: ManagerTab; label: string; count: () => number | string; genericOnly?: boolean }> = [
-      { id: "indexed", label: "Indexed", count: () => this.noteList("indexed").length },
-      { id: "available", label: "Available", count: () => this.noteList("available").length, genericOnly: true },
-      { id: "hidden", label: "Hidden", count: () => this.noteList("hidden").length },
+      { id: "indexed", label: "Indexed", count: () => noteCount("indexed") },
+      { id: "available", label: "Available", count: () => noteCount("available"), genericOnly: true },
+      { id: "hidden", label: "Hidden", count: () => noteCount("hidden") },
       { id: "groups", label: "Index headings", count: () => groups.length },
       { id: "diagnostics", label: "Diagnostics", count: () => this.diagnosticsCache?.length ?? "—" },
     ];
-    for (const definition of definitions.filter((item) => !item.genericOnly || !this.plugin.isClinicalMode())) {
+    const visibleDefinitions = definitions.filter((item) => !item.genericOnly || !this.plugin.isClinicalMode());
+    if (!visibleDefinitions.some((definition) => definition.id === this.tab)) this.tab = "indexed";
+    for (const definition of visibleDefinitions) {
       const active = this.tab === definition.id;
       const button = tabs.createEl("button", {
         cls: `ent-cc-manager-tab ${active ? "is-active" : ""}`,
-        attr: { role: "tab", "aria-selected": String(active), tabindex: active ? "0" : "-1", "data-manager-tab": definition.id },
+        attr: {
+          id: this.tabElementId(definition.id),
+          type: "button",
+          role: "tab",
+          "aria-controls": this.panelElementId(definition.id),
+          "aria-selected": String(active),
+          tabindex: active ? "0" : "-1",
+          "data-manager-tab": definition.id,
+        },
       });
       button.createSpan({ text: definition.label });
       button.createSpan({ cls: "ent-cc-manager-tab-count", text: String(definition.count()) });
-      button.addEventListener("click", () => this.switchTab(definition.id));
+      button.addEventListener("click", () => this.switchTab(definition.id, true));
+      button.addEventListener("keydown", (event) => {
+        const index = visibleDefinitions.findIndex((candidate) => candidate.id === definition.id);
+        let nextIndex: number | null = null;
+        if (event.key === "Home") nextIndex = 0;
+        else if (event.key === "End") nextIndex = visibleDefinitions.length - 1;
+        else if (event.key === "ArrowRight") nextIndex = (index + 1) % visibleDefinitions.length;
+        else if (event.key === "ArrowLeft") nextIndex = (index - 1 + visibleDefinitions.length) % visibleDefinitions.length;
+        if (nextIndex === null) return;
+        event.preventDefault();
+        const next = visibleDefinitions[nextIndex];
+        if (next) this.switchTab(next.id, true);
+      });
     }
     this.revealActiveTab(tabs);
 
+    const panels = new Map<ManagerTab, HTMLElement>();
+    for (const definition of visibleDefinitions) {
+      const active = this.tab === definition.id;
+      const panel = this.contentEl.createDiv({
+        cls: "ent-cc-manager-panel",
+        attr: {
+          id: this.panelElementId(definition.id),
+          role: "tabpanel",
+          "aria-labelledby": this.tabElementId(definition.id),
+          tabindex: active ? "0" : "-1",
+          ...(active ? {} : { hidden: "" }),
+        },
+      });
+      panel.hidden = !active;
+      panels.set(definition.id, panel);
+    }
+    const activePanel = panels.get(this.tab);
+    if (!activePanel) return;
+
     if (this.tab === "indexed" || this.tab === "available" || this.tab === "hidden") {
-      this.renderNoteManager(this.noteList(this.tab), () => this.noteList("available").length);
+      this.renderNoteManager(this.noteList(this.tab), () => this.noteList("available").length, activePanel);
     } else if (this.tab === "groups") {
-      this.renderGroups(groups);
+      this.renderGroups(groups, activePanel);
     } else {
-      this.renderDiagnostics(diagnostics);
+      this.renderDiagnostics(diagnostics, activePanel);
     }
 
     new Setting(this.contentEl).addButton((button) => button.setButtonText("Close").onClick(() => this.close())).settingEl.addClass("ent-cc-manager-footer");
   }
 
   private indexedNotes(): ManagerNote[] {
-    const manualPaths = new Set(this.plugin.data.manualIndexPaths);
+    const directPaths = new Set([
+      ...(this.plugin.data.directIndexPaths ?? []),
+      ...(this.plugin.data.manualIndexPaths ?? []),
+    ]);
     return this.plugin.getIndexRecords().map((record) => ({
       path: record.path,
       title: record.title,
-      meta: [record.domain, manualPaths.has(record.path) ? "manual membership" : "folder index", record.path].join(" · "),
+      meta: [
+        record.domain,
+        directPaths.has(record.path)
+          ? "direct membership"
+          : pathIsInIndexFolderSources(record.path, this.plugin.data.indexFolderSources ?? [])
+            ? "linked folder"
+            : this.plugin.isClinicalMode()
+              ? "protected clinical source"
+              : "portable membership",
+        record.path,
+      ].join(" · "),
     }));
   }
 
@@ -217,7 +295,13 @@ export class IndexManagerModal extends Modal {
       .map((record) => record.path));
     const vaultNotes = this.plugin.getIndexCandidateFiles()
       .filter((file) => !hidden.has(file.path) && !libraryPaths.has(file.path))
-      .map((file) => ({ path: file.path, title: file.basename, meta: file.path }));
+      .map((file) => ({
+        path: file.path,
+        title: file.basename,
+        meta: pathIsInIndexFolderSources(file.path, this.plugin.data.indexFolderSources ?? [])
+          ? `linked-folder member · add direct membership · ${file.path}`
+          : file.path,
+      }));
     const portablePlaceholders = this.plugin.getRecords()
       .filter((record) => record.role === "placeholder"
         && record.portableIndexed === false
@@ -262,8 +346,8 @@ export class IndexManagerModal extends Modal {
     return [...hidden, ...placeholders];
   }
 
-  private renderNoteManager(notes: ManagerNote[], availableCount: () => number): void {
-    const toolbar = this.contentEl.createDiv({ cls: "ent-cc-manager-toolbar" });
+  private renderNoteManager(notes: ManagerNote[], availableCount: () => number, parent = this.contentEl): void {
+    const toolbar = parent.createDiv({ cls: "ent-cc-manager-toolbar" });
     const search = toolbar.createEl("input", { type: "search", placeholder: "Search note title or path…", attr: { "aria-label": "Search index manager notes" } });
     search.value = this.query;
     search.addEventListener("input", () => {
@@ -300,7 +384,7 @@ export class IndexManagerModal extends Modal {
       this.renderSnapshot();
     }, filtered.length === 0);
 
-    const actions = this.contentEl.createDiv({ cls: `ent-cc-manager-bulk-actions ${this.selected.size === 0 ? "is-idle" : ""} ${filtered.length === 0 ? "is-empty-list" : ""}` });
+    const actions = parent.createDiv({ cls: `ent-cc-manager-bulk-actions ${this.selected.size === 0 ? "is-idle" : ""} ${filtered.length === 0 ? "is-empty-list" : ""}` });
     this.selectionActionsEl = actions;
     this.selectionCountEl = actions.createSpan({ text: `${this.selected.size} selected`, cls: "ent-cc-muted", attr: { role: "status", "aria-live": "polite" } });
     this.selectionButtons = [];
@@ -313,8 +397,8 @@ export class IndexManagerModal extends Modal {
       this.selectionButtons.push({ el: this.actionButton(actions, "rotate-ccw", "Restore selected…", () => this.chooseGroupForSelection("restore"), this.selected.size === 0), enabled: () => this.selected.size > 0 });
     }
 
-    const list = this.contentEl.createDiv({ cls: "ent-cc-manager-list" });
-    const visible = filtered.slice(0, 300);
+    const list = parent.createDiv({ cls: "ent-cc-manager-list" });
+    const visible = filtered.slice(0, INDEX_MANAGER_PAGE_SIZE);
     for (const note of visible) this.renderNoteRow(list, note);
     if (filtered.length > visible.length) list.createDiv({ cls: "ent-cc-manager-limit", text: `Showing the first ${visible.length} matches. Narrow the search to reach the remaining ${filtered.length - visible.length}.` });
     if (filtered.length === 0) {
@@ -325,7 +409,7 @@ export class IndexManagerModal extends Modal {
         empty.createEl("strong", { text: `Start your ${this.plugin.data.settings.indexLabel.toLowerCase()}` });
         empty.createEl("p", { text: `${available} existing note${available === 1 ? " is" : "s are"} available to add. Their files will not be moved or rewritten.` });
         const browse = empty.createEl("button", { cls: "ent-cc-button ent-cc-add-button", text: `Browse ${available} available` });
-        browse.addEventListener("click", () => this.switchTab("available"));
+        browse.addEventListener("click", () => this.switchTab("available", true));
       } else {
         list.createDiv({ cls: "ent-cc-empty", text: this.query ? "No notes match this search." : "Nothing in this section." });
       }
@@ -441,10 +525,10 @@ export class IndexManagerModal extends Modal {
     }).open();
   }
 
-  private renderGroups(groups: string[]): void {
+  private renderGroups(groups: string[], parent = this.contentEl): void {
     const canMove = this.plugin.canVisuallyMoveAcrossGroups();
     const readOnly = this.plugin.isDataReadOnly();
-    const toolbar = this.contentEl.createDiv({ cls: "ent-cc-manager-toolbar" });
+    const toolbar = parent.createDiv({ cls: "ent-cc-manager-toolbar" });
     toolbar.createEl("p", { text: canMove
       ? "Group changes are visual-only and do not rewrite note properties or folders."
       : "Display labels and base membership remain editable. Cross-domain movement, group creation, merging, and reordering are disabled by the ENT clinical safeguard." });
@@ -455,8 +539,9 @@ export class IndexManagerModal extends Modal {
       members.push(record);
       membersByGroup.set(record.domain, members);
     }
-    const list = this.contentEl.createDiv({ cls: "ent-cc-manager-list ent-cc-manager-groups" });
-    groups.forEach((group, index) => {
+    const list = parent.createDiv({ cls: "ent-cc-manager-list ent-cc-manager-groups" });
+    const visibleGroups = groups.slice(0, this.visibleRowLimits?.groups ?? INDEX_MANAGER_PAGE_SIZE);
+    visibleGroups.forEach((group, index) => {
       const members = membersByGroup.get(group) ?? [];
       const row = list.createDiv({ cls: "ent-cc-manager-group" });
       const text = row.createDiv({ cls: "ent-cc-manager-note-text" });
@@ -472,6 +557,7 @@ export class IndexManagerModal extends Modal {
       actions.disabled = readOnly;
       actions.addEventListener("click", (event) => this.showGroupActions(event, group, members, index, groups, canMove));
     });
+    this.renderShowMore(list, "groups", visibleGroups.length, groups.length);
     if (groups.length === 0) list.createDiv({ cls: "ent-cc-empty", text: `No ${this.plugin.data.settings.groupLabel.toLowerCase()}s yet.` });
   }
 
@@ -694,8 +780,8 @@ export class IndexManagerModal extends Modal {
     if (sourceKey !== targetKey) delete state[sourceKey];
   }
 
-  private renderDiagnostics(diagnostics: IndexDiagnostic[]): void {
-    const toolbar = this.contentEl.createDiv({ cls: "ent-cc-manager-toolbar" });
+  private renderDiagnostics(diagnostics: IndexDiagnostic[], parent = this.contentEl): void {
+    const toolbar = parent.createDiv({ cls: "ent-cc-manager-toolbar" });
     toolbar.createEl("p", { text: diagnostics.length === 0 ? "No index-organization problems detected." : `${diagnostics.length} issue${diagnostics.length === 1 ? "" : "s"} detected. Safe repair removes only stale or duplicate plugin references; configured parent properties are never rewritten.` });
     this.actionButton(toolbar, "scan-search", "Open taxonomy health…", () => {
       if (!this.guardOpenedBase()) return;
@@ -707,9 +793,10 @@ export class IndexManagerModal extends Modal {
     const repairableKinds = new Set<IndexDiagnostic["kind"]>(["missing-note", "duplicate-membership", "orphaned-group", "invalid-visual-parent"]);
     const repairable = diagnostics.some((item) => repairableKinds.has(item.kind));
     this.actionButton(toolbar, "wrench", "Repair safe issues", () => {
+      const preview = this.plugin.previewIndexRepair();
       const repair = (): void => {
         this.run(async () => {
-          await this.plugin.repairIndexOrganization();
+          await this.plugin.repairIndexOrganization(preview);
           if (!this.guardOpenedBase()) return;
           this.render();
           new Notice("Safe plugin-state repairs completed. Note metadata was not changed.");
@@ -719,7 +806,7 @@ export class IndexManagerModal extends Modal {
       // that simply have not synced yet; dropping them silently would erase
       // manual index memberships, collection memberships, and pins on every
       // device. Repair those only after an explicit confirmation.
-      const { prunedPaths } = this.plugin.previewIndexRepair();
+      const { prunedPaths } = preview;
       if (prunedPaths.length === 0) {
         repair();
         return;
@@ -737,8 +824,9 @@ export class IndexManagerModal extends Modal {
         () => { repair(); },
       ).open();
     }, !repairable);
-    const list = this.contentEl.createDiv({ cls: "ent-cc-manager-list" });
-    for (const diagnostic of diagnostics) {
+    const list = parent.createDiv({ cls: "ent-cc-manager-list" });
+    const visibleDiagnostics = diagnostics.slice(0, this.visibleRowLimits?.diagnostics ?? INDEX_MANAGER_PAGE_SIZE);
+    for (const diagnostic of visibleDiagnostics) {
       const row = list.createDiv({ cls: "ent-cc-manager-diagnostic" });
       const icon = row.createSpan({ cls: "ent-cc-manager-diagnostic-icon" });
       setIcon(icon, diagnostic.kind === "broken-parent" ? "link-2-off" : diagnostic.kind === "missing-note" ? "file-question" : "triangle-alert");
@@ -748,7 +836,30 @@ export class IndexManagerModal extends Modal {
       const file = diagnostic.path ? this.app.vault.getAbstractFileByPath(diagnostic.path) : null;
       if (file instanceof TFile) this.iconAction(row, "external-link", `Open ${file.basename}`, () => this.run(() => this.plugin.openFile(file)));
     }
+    this.renderShowMore(list, "diagnostics", visibleDiagnostics.length, diagnostics.length);
     if (diagnostics.length === 0) list.createDiv({ cls: "ent-cc-empty", text: "Index organization is healthy." });
+  }
+
+  private renderShowMore(
+    parent: HTMLElement,
+    tab: "groups" | "diagnostics",
+    shown: number,
+    total: number,
+  ): void {
+    if (shown >= total) return;
+    const remaining = total - shown;
+    const limit = parent.createDiv({ cls: "ent-cc-manager-limit" });
+    limit.createSpan({ text: `Showing ${shown} of ${total}.` });
+    const button = limit.createEl("button", {
+      cls: "ent-cc-button",
+      text: `Show ${Math.min(INDEX_MANAGER_PAGE_SIZE, remaining)} more`,
+      attr: { type: "button" },
+    });
+    button.addEventListener("click", () => {
+      this.visibleRowLimits ??= { diagnostics: INDEX_MANAGER_PAGE_SIZE, groups: INDEX_MANAGER_PAGE_SIZE };
+      this.visibleRowLimits[tab] = Math.min(total, this.visibleRowLimits[tab] + INDEX_MANAGER_PAGE_SIZE);
+      this.renderSnapshot();
+    });
   }
 
   private createBaseGuard(): OpenedBaseGuard {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Menu, Notice, Platform, Setting, TFile, TFolder } from "obsidian";
-import { AddActionModal, calculateModalViewportLayout, CollectionPickerModal, type CollectionTarget, ConfirmModal, IndexGroupModal, KnowledgeNoteModal, localDateStamp, missingSetupFolderHint, nestSetupFoldersUnderHome, RecordPickerModal, TextPromptModal, TopicEditorModal, VaultFilePickerModal, WorkspaceSetupModal, type WorkspaceSetupValue } from "../src/modals.ts";
+import { AddActionModal, calculateModalViewportLayout, CollectionPickerModal, type CollectionTarget, ConfirmModal, IndexGroupModal, KnowledgeNoteModal, localDateStamp, missingSetupFolderHint, nestSetupFoldersUnderHome, RecordPickerModal, StringPickerModal, TextPromptModal, TopicEditorModal, VaultFilePickerModal, WorkspaceSetupModal, type WorkspaceSetupValue } from "../src/modals.ts";
 import {
   canRelinkPortableRecord,
   calculateSearchViewportLayout,
@@ -620,6 +620,66 @@ test("the active-library Add menu dispatches both existing-note and current-note
     { path: existing.path, libraryId: library.id },
     { path: current.path, libraryId: library.id },
   ]);
+});
+
+test("Add existing routes a folder-only or Library note through the Index placement transition", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const folderOnly = new TFile("Linked/Folder only.md");
+  const libraryNote = new TFile("Reference/Library note.md");
+  const candidates = [folderOnly, libraryNote];
+  const assignments: Array<{ path: string; kind: string; group: string }> = [];
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    isClinicalMode: () => false,
+    getIndexCandidateFiles: () => candidates,
+    suggestedIndexGroup: () => "Research",
+    getIndexGroups: () => ["Research"],
+    async assignRecordToCatalog(path: string, kind: string, options: { headingTitle: string }): Promise<void> {
+      assignments.push({ path, kind, group: options.headingTitle });
+    },
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: object;
+    plugin: typeof plugin;
+    loadedBaseId: string;
+    loadedDataEpoch: number;
+    staleViewNoticeShown: boolean;
+    startAddExistingToIndex(): void;
+  };
+  view.app = {};
+  view.plugin = plugin;
+  view.loadedBaseId = "base-a";
+  view.loadedDataEpoch = 0;
+  view.staleViewNoticeShown = false;
+
+  let submitted: Promise<void> = Promise.resolve();
+  const pickerOpen = Object.getOwnPropertyDescriptor(VaultFilePickerModal.prototype, "open");
+  const groupOpen = Object.getOwnPropertyDescriptor(IndexGroupModal.prototype, "open");
+  VaultFilePickerModal.prototype.open = function chooseLibraryNote(): void {
+    const modal = this as unknown as { getItems(): TFile[]; onChooseItem(file: TFile): void };
+    assert.deepEqual(modal.getItems(), candidates, "folder-derived and Library-classified notes remain eligible");
+    modal.onChooseItem(libraryNote);
+  };
+  IndexGroupModal.prototype.open = function submitPlacement(): void {
+    const options = (this as unknown as {
+      options: { onSubmit(group: string): void | Promise<void> };
+    }).options;
+    submitted = Promise.resolve(options.onSubmit("Research"));
+  };
+  try {
+    view.startAddExistingToIndex();
+    await submitted;
+  } finally {
+    if (pickerOpen) Object.defineProperty(VaultFilePickerModal.prototype, "open", pickerOpen);
+    else Reflect.deleteProperty(VaultFilePickerModal.prototype, "open");
+    if (groupOpen) Object.defineProperty(IndexGroupModal.prototype, "open", groupOpen);
+    else Reflect.deleteProperty(IndexGroupModal.prototype, "open");
+  }
+
+  assert.deepEqual(assignments, [{ path: libraryNote.path, kind: "topic", group: "Research" }]);
 });
 
 test("record and vault-file pickers use the command center's normalized multilingual search", () => {
@@ -2480,11 +2540,11 @@ test("selecting an inactive-base search result switches bases and restores the g
   assert.equal(selectedPath, searchedRecord.path);
 });
 
-test("Index Manager normalizes Arabic variants and indexes manual membership once per projection", () => {
-  const manualIndexPaths = ["Knowledge Base/Manual.md"];
+test("Index Manager normalizes Arabic variants and indexes direct membership once per projection", () => {
+  const directIndexPaths = ["Knowledge Base/Manual.md"];
   let linearProbes = 0;
-  const includes = manualIndexPaths.includes.bind(manualIndexPaths);
-  manualIndexPaths.includes = (path, fromIndex) => {
+  const includes = directIndexPaths.includes.bind(directIndexPaths);
+  directIndexPaths.includes = (path, fromIndex) => {
     linearProbes += 1;
     return includes(path, fromIndex);
   };
@@ -2495,17 +2555,30 @@ test("Index Manager normalizes Arabic variants and indexes manual membership onc
   const manager = Object.create(IndexManagerModal.prototype) as {
     query: string;
     plugin: {
-      data: { manualIndexPaths: string[] };
+      data: {
+        directIndexPaths: string[];
+        manualIndexPaths: string[];
+        indexFolderSources: Array<{ id: string; path: string; origin: "user" }>;
+      };
       getIndexRecords(): VaultRecord[];
+      isClinicalMode(): boolean;
     };
     indexedNotes(): Array<{ path: string; title: string; meta: string }>;
     filterNotes(notes: Array<{ path: string; title: string; meta: string }>): Array<{ path: string; title: string; meta: string }>;
   };
-  manager.plugin = { data: { manualIndexPaths }, getIndexRecords: () => records };
+  manager.plugin = {
+    data: {
+      directIndexPaths,
+      manualIndexPaths: [],
+      indexFolderSources: [{ id: "source-kb", path: "Knowledge Base", origin: "user" }],
+    },
+    getIndexRecords: () => records,
+    isClinicalMode: () => false,
+  };
 
   const notes = manager.indexedNotes();
-  assert.match(notes[0]?.meta ?? "", /manual membership/);
-  assert.match(notes[1]?.meta ?? "", /folder index/);
+  assert.match(notes[0]?.meta ?? "", /direct membership/);
+  assert.match(notes[1]?.meta ?? "", /linked folder/);
   assert.equal(linearProbes, 0);
 
   manager.query = "مستشفي";
@@ -3431,6 +3504,108 @@ test("Library creation profiles are discoverable through Obsidian settings searc
   assert.ok(libraries.items.some((item) => "name" in item && item.name === "Library creation profiles"));
 });
 
+test("Settings Browse commits a folder selected from a pop-out window input realm", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.proposalFolder = "Old Inbox";
+  const folders = [new TFolder("Old Inbox"), new TFolder("New Inbox")];
+  let saves = 0;
+  const host = {
+    app: {
+      vault: {
+        configDir: ".obsidian",
+        getAllLoadedFiles: () => folders,
+        getMarkdownFiles: () => [],
+      },
+      metadataCache: { getFileCache: () => null },
+    },
+    data,
+    dataCompatibilityWarning: "",
+    isDataReadOnly: () => false,
+    getKnowledgeBases: () => [{ id: "base-a", data }],
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 0,
+    getExternalChangeGeneration: () => 0,
+    getIndexRecords: () => [],
+    getLibraries: () => [],
+    librarySubjectCount: () => 0,
+    getTemplateFiles: () => [],
+    getIndexGroups: () => [],
+    getFollowUpCategories: () => [],
+    replaceFollowUpCategories: async () => undefined,
+    countOrphanedByPrimaryFolderChange: () => 0,
+    countOrphanedByProposalFolderChange: () => 0,
+    savePluginData: async () => { saves += 1; },
+    saveCompensatingRollback: async () => undefined,
+    markPersistenceUncertain: () => undefined,
+    refreshViews: async () => undefined,
+    switchKnowledgeBase: async () => undefined,
+    renameKnowledgeBase: async () => undefined,
+  };
+  const tab = new EntCommandCenterSettingsTab(host.app as never, host as never);
+  tab.update = () => undefined;
+  const group = tab.getSettingDefinitions().find((definition) => (
+    "heading" in definition && definition.heading === "Folders and templates"
+  ));
+  assert.ok(group && "items" in group);
+  const definition = group.items.find((item) => "name" in item && item.name === "Inbox folder");
+  assert.ok(definition && "render" in definition);
+
+  class PopoutInput {
+    value = "Old Inbox";
+    dir = "";
+    readonly ownerDocument = { defaultView: { HTMLInputElement: PopoutInput } };
+    addEventListener(): void {}
+    blur(): void {}
+    toggleClass(): void {}
+  }
+  class MainWindowInput {}
+  const input = new PopoutInput();
+  let browse: (() => void) | null = null;
+  const text = {
+    inputEl: input,
+    setPlaceholder(): typeof text { return this; },
+    setValue(value: string): typeof text { input.value = value; return this; },
+    setDisabled(): typeof text { return this; },
+    onChange(): typeof text { return this; },
+  };
+  const button = {
+    setButtonText(): typeof button { return this; },
+    setDisabled(): typeof button { return this; },
+    onClick(callback: () => void): typeof button { browse = callback; return this; },
+  };
+  const row = {
+    settingEl: {
+      addClass: () => undefined,
+      querySelector: () => input,
+    },
+    setDesc: () => row,
+    addText(callback: (component: typeof text) => void): typeof row { callback(text); return this; },
+    addButton(callback: (component: typeof button) => void): typeof row { callback(button); return this; },
+  };
+
+  const priorInput = Object.getOwnPropertyDescriptor(globalThis, "HTMLInputElement");
+  const priorPickerOpen = Object.getOwnPropertyDescriptor(StringPickerModal.prototype, "open");
+  Object.defineProperty(globalThis, "HTMLInputElement", { configurable: true, value: MainWindowInput });
+  StringPickerModal.prototype.open = function choosePopoutFolder(): void {
+    void (this as unknown as { onChoose(value: string): void | Promise<void> }).onChoose("New Inbox");
+  };
+  try {
+    definition.render(row as never);
+    assert.ok(browse);
+    browse();
+    await new Promise((resolve) => { globalThis.setTimeout(resolve, 0); });
+    assert.equal(input.value, "New Inbox");
+    assert.equal(data.settings.proposalFolder, "New Inbox");
+    assert.equal(saves, 1);
+  } finally {
+    if (priorInput) Object.defineProperty(globalThis, "HTMLInputElement", priorInput);
+    else Reflect.deleteProperty(globalThis, "HTMLInputElement");
+    if (priorPickerOpen) Object.defineProperty(StringPickerModal.prototype, "open", priorPickerOpen);
+    else Reflect.deleteProperty(StringPickerModal.prototype, "open");
+  }
+});
+
 test("attachment text settings use the buffered non-refresh save pipeline", () => {
   const data = migrateData(null);
   const host = {
@@ -3862,7 +4037,7 @@ test("missing imported workspace folders are named without blocking or falling b
 
   assert.equal(
     missingImportedFolderNoticeText(incoming, "generic", folderExists),
-    " The imported indexed notes folder “KB” does not exist in this vault yet, so the index will not show existing notes until it is created or the setting is changed."
+    " The imported folder grouping root “KB” does not exist in this vault yet, so folder-based group fallbacks will remain unavailable until it is created or the setting is changed. Index membership is unchanged."
       + " The imported Inbox folder “Triage” does not exist in this vault yet, so the Inbox will be empty until it is created or the setting is changed.",
   );
   assert.equal(
@@ -3942,7 +4117,7 @@ test("workspace import completion notice names imported folders missing from thi
   assert.equal(data.settings.proposalFolder, "Triage");
   const notice = Notice.messages.find((message) => message.startsWith("Import complete."));
   assert.ok(notice);
-  assert.ok(notice.includes("The imported indexed notes folder “KB” does not exist in this vault yet, so the index will not show existing notes until it is created or the setting is changed."));
+  assert.ok(notice.includes("The imported folder grouping root “KB” does not exist in this vault yet, so folder-based group fallbacks will remain unavailable until it is created or the setting is changed. Index membership is unchanged."));
   assert.ok(notice.includes("The imported Inbox folder “Triage” does not exist in this vault yet, so the Inbox will be empty until it is created or the setting is changed."));
   assert.match(notice, /Markdown notes were not changed\.$/u);
 });
@@ -3951,11 +4126,11 @@ test("setup wizard hints inline when a typed folder does not exist yet", () => {
   const folderExists = (path: string): boolean => path === "Knowledge Base";
   assert.equal(
     missingSetupFolderHint("Knowledg Base", "existing notes will not be indexed", folderExists),
-    "“Knowledg Base” does not exist yet — it will be created empty, and existing notes will not be indexed until they live inside it.",
+    "“Knowledg Base” does not exist yet — it will be created empty. Existing notes will not be indexed.",
   );
   assert.equal(
     missingSetupFolderHint("Triage", "existing notes will not appear in the Inbox", folderExists),
-    "“Triage” does not exist yet — it will be created empty, and existing notes will not appear in the Inbox until they live inside it.",
+    "“Triage” does not exist yet — it will be created empty. Existing notes will not appear in the Inbox.",
   );
   assert.equal(missingSetupFolderHint("Knowledge Base", "existing notes will not be indexed", folderExists), null, "an existing folder needs no hint");
   assert.equal(missingSetupFolderHint(" /Knowledge Base/ ", "existing notes will not be indexed", folderExists), null, "the hint trims the way submit does");
@@ -4145,6 +4320,73 @@ test("direct organization recovery refuses to apply when safe Undo cannot be gua
   }
 });
 
+test("standalone v10 recovery preserves linked sources and repairs portable membership in saved snapshots", async () => {
+  const source = migrateData(null);
+  source.settings.workspaceMode = "generic";
+  source.settings.workspaceName = "Research";
+  source.portableIndex.groups = [{ id: "top-group", title: "Top", order: 0 }];
+  source.portableIndex.subjects = [{ id: "top", title: "Top", groupId: "top-group", parentId: null, order: 0, indexed: true, configuredId: "", recordKind: "topic" }];
+  source.portableIndex.resolvedPathBySubjectId = { top: "Outside/Top.md" };
+  source.directIndexPaths = [];
+  const snapshotData = migrateData(null);
+  snapshotData.settings.workspaceMode = "generic";
+  snapshotData.settings.primaryFolder = "Saved Root";
+  snapshotData.portableIndex.groups = [{ id: "saved-group", title: "Saved", order: 0 }];
+  snapshotData.portableIndex.subjects = [{ id: "saved", title: "Saved", groupId: "saved-group", parentId: null, order: 0, indexed: true, configuredId: "", recordKind: "topic" }];
+  snapshotData.portableIndex.resolvedPathBySubjectId = { saved: "Outside/Saved.md" };
+  source.layoutSnapshots = [snapshotPersonal(snapshotData, "Saved", true, true)];
+  const raw = structuredClone(createPersonalBackup(
+    source,
+    "2026-08-08T00:00:00.000Z",
+    "vault-shared",
+    "base-research",
+    "Research",
+  )) as unknown as Record<string, unknown>;
+  raw.version = 10;
+  delete raw.indexFolderSourcesIncluded;
+  delete raw.indexFolderSources;
+  raw.directIndexPaths = [];
+  const rawSnapshot = (raw.layoutSnapshots as Array<Record<string, unknown>>)[0];
+  delete rawSnapshot.indexFolderSources;
+  rawSnapshot.directIndexPaths = [];
+
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.workspaceName = "Research";
+  data.indexFolderSources = [{ id: "destination", path: "Destination", origin: "user" }];
+  const plugin = {
+    data,
+    getVaultId: () => "vault-shared",
+    getActiveKnowledgeBaseId: () => "base-research",
+    async mutate(_label: string, action: () => void): Promise<void> { action(); },
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    app: { vault: { getAbstractFileByPath(path: string): null } };
+    plugin: typeof plugin;
+    confirmOrganizationImport(input: Promise<unknown>, ownsBase: () => boolean): void;
+  };
+  view.app = { vault: { getAbstractFileByPath: () => null } };
+  view.plugin = plugin;
+  const opened: Array<{ onConfirm(): void | Promise<void> }> = [];
+  const originalOpen = Object.getOwnPropertyDescriptor(ConfirmModal.prototype, "open");
+  ConfirmModal.prototype.open = function captureConfirm(): void { opened.push(this); };
+  try {
+    view.confirmOrganizationImport(Promise.resolve(raw), () => true);
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(opened.length, 1);
+    await opened[0]?.onConfirm();
+  } finally {
+    if (originalOpen) Object.defineProperty(ConfirmModal.prototype, "open", originalOpen);
+    else Reflect.deleteProperty(ConfirmModal.prototype, "open");
+  }
+
+  assert.deepEqual(data.indexFolderSources.map((sourceEntry) => sourceEntry.path), ["Destination"]);
+  assert.deepEqual(data.directIndexPaths, ["Outside/Top.md"]);
+  assert.deepEqual(data.layoutSnapshots[0]?.indexFolderSources.map((sourceEntry) => sourceEntry.path), ["Saved Root"]);
+  assert.deepEqual(data.layoutSnapshots[0]?.directIndexPaths, ["Outside/Saved.md"]);
+});
+
 test("template fallback stays transactional and does not mutate the selected import package", async () => {
   const data = migrateData(null);
   data.settings.defaultNewNoteMode = "template";
@@ -4294,6 +4536,34 @@ test("workspace import preflight rejects an unsafe fixed attachment folder", () 
     () => center.validateWorkspaceComponent(value, { ...EMPTY_PORTABLE_SELECTION, workspace: true }),
     /\.\./u,
   );
+});
+
+test("workspace import preflight rejects every restricted exports folder class", () => {
+  for (const exportsFolder of ["../Outside", ".obsidian/Private exports", ".trash/Rescues"]) {
+    const data = migrateData(null);
+    const rawValue = createPortableExport(
+      data,
+      [],
+      { ...EMPTY_PORTABLE_SELECTION, workspace: true },
+      "2026-08-14T00:00:00.000Z",
+    );
+    assert.ok(rawValue.components.workspace);
+    rawValue.components.workspace.settings.exportsFolder = exportsFolder;
+    const value = parsePortableExport(rawValue);
+    const center = Object.create(ExportImportCenterModal.prototype) as {
+      app: { vault: { configDir: string; getAbstractFileByPath(path: string): null } };
+      plugin: { data: typeof data };
+      validateWorkspaceComponent(input: typeof value, selection: typeof EMPTY_PORTABLE_SELECTION): unknown;
+    };
+    center.app = { vault: { configDir: ".obsidian", getAbstractFileByPath: () => null } };
+    center.plugin = { data: migrateData(null) };
+
+    assert.throws(
+      () => center.validateWorkspaceComponent(value, { ...EMPTY_PORTABLE_SELECTION, workspace: true }),
+      /cannot/iu,
+      exportsFolder,
+    );
+  }
 });
 
 test("portable-v4 preflight retains and atomically resets every unsafe Library template class", () => {
@@ -6284,12 +6554,19 @@ test("index manager keystrokes filter one cached vault snapshot instead of resca
     assert.equal(manager.query, "alp");
     assert.equal(manager.contentEl.querySelectorAll(".ent-cc-manager-note").length, 1, "the filter still narrowed the list");
 
-    // A deliberate refresh must still re-read: vault files can appear or
-    // disappear without any plugin data epoch change.
+    // Switching to another list builds only that list. It must not enumerate
+    // Available notes merely to fill an inactive badge.
     const hidden = manager.contentEl.querySelector('[data-manager-tab="hidden"]');
     assert.ok(hidden);
     hidden.click();
-    assert.equal(scans(), 2, "switching tabs re-reads the vault");
+    assert.equal(scans(), 1, "the Hidden tab does not enumerate Available notes");
+
+    // Returning to Available deliberately refreshes its vault-derived list:
+    // files may have appeared without advancing plugin data state.
+    const available = manager.contentEl.querySelector('[data-manager-tab="available"]');
+    assert.ok(available);
+    available.click();
+    assert.equal(scans(), 2, "opening Available again re-reads the vault");
   }));
   } finally {
     if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);

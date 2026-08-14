@@ -27,7 +27,7 @@ The single-base center operates on the active knowledge base. A portfolio can in
 | **Collections** | Collection heading and nested subheading structure with membership stored by portable subject identity. |
 | **Study state** | Pins and the personal Next list stored by portable subject identity. |
 | **Saved views** | Named sections and literal search queries. A query can contain a path if it was typed. |
-| **Same-vault recovery** | Private restoration data for the active base, including exact vault-relative note paths. |
+| **Same-vault recovery** | Private restoration data for the active base, including exact direct-note memberships, linked-folder rules, exclusions, and other vault-relative paths. |
 
 The default **Portable set** selects workspace settings, the Index blueprint, every active Library, Collections, study state, and saved views. Each Library can be deselected independently, including an empty Library whose identity and hierarchy must be preserved.
 
@@ -38,6 +38,8 @@ Collections and study state carry only the portable identities they reference. T
 **All + private recovery** adds same-vault recovery. Selecting it does not make that recovery portable. The Export button remains disabled until the separate private-path confirmation is accepted, and the summary names every selected Library before JSON is created.
 
 The complete Portable set is not necessarily path-free. Deselect Workspace settings when configured vault-relative folders should not be shared, and deselect Saved views when literal queries may disclose a private term or path.
+
+In a Generic base, a default new-note or Library creation folder is only a storage setting. It does not become Index membership when Workspace settings are exported or imported. Direct note membership and explicit linked-folder rules are distinct organization state: portable blueprints omit their vault paths, while private same-vault recovery retains them exactly.
 
 ## Multi-base portfolio transfer
 
@@ -75,7 +77,7 @@ The Index blueprint and Libraries can recreate:
 - group labels, collapse state, and visual order; and
 - selected Collection and study references.
 
-They do not carry the original Markdown filenames or folder paths.
+They do not carry the original Markdown filenames or folder paths. Consequently, a portable Index blueprint carries neither direct note bindings nor linked-folder source paths. Those destination-vault relationships must be created explicitly after import, or restored only from a compatible private same-vault recovery.
 
 Only a valid canonical-format ENT curriculum ID from the preset's fixed clinical mapping is retained. Generic or customized ID-property values are omitted because they may contain a path or private identifier.
 
@@ -93,7 +95,7 @@ The current release writes portable format version 5. It adds nested Collection 
 
 The current release continues to read versions 1–4, so older flat packages still import. Legacy Procedures, Medications, and Syndromes catalogs migrate to reserved stable Library IDs. Non-topic identities in version 1 files are treated conservatively as Collection or study dependencies rather than authoritative complete Libraries. Imported content nested deeper than five levels keeps its records by merging them into the nearest allowed level.
 
-Older plugin builds reject version 5 rather than guessing destructively, and an older build that encounters a synced version-15 store with version-14 knowledge-base data preserves it read-only instead of rewriting it. Update every importing and syncing device before applying a new export.
+Older plugin builds reject version 5 rather than guessing destructively, and an older build that encounters a synced version-15 store with version-15 knowledge-base data preserves it read-only instead of rewriting it. Update every importing and syncing device before applying a new export.
 
 ## Review an import
 
@@ -104,7 +106,7 @@ After choosing a JSON file, select only the available sections to apply and choo
 
 When source and destination use different Generic/ENT presets, Workspace settings is automatically excluded. Path-free Index, Library, Collection, and study components can still transfer without changing the destination's name or preset.
 
-Workspace folders and Library-profile paths are validated against the destination vault. A portable workspace includes dependency descriptors for every Library referenced by a creation profile, even when that Library's subject catalog was not selected. An existing local archive decision remains authoritative. Legacy standalone workspace-configuration files cannot declare custom Library dependencies, so import retains only profiles whose stable Library IDs already exist in the destination and reports how many unmatched profiles were omitted. If an imported base or Library template is unavailable, restricted, or outside the configured templates folder, that creation default safely falls back to an empty note inside the same Undo-protected import; an invalid destination folder still blocks the import. The selected JSON package is not modified.
+Workspace folders and Library-profile paths are validated against the destination vault. They remain creation and workflow settings, not implicit Index sources. A portable workspace includes dependency descriptors for every Library referenced by a creation profile, even when that Library's subject catalog was not selected. An existing local archive decision remains authoritative. Legacy standalone workspace-configuration files cannot declare custom Library dependencies, so import retains only profiles whose stable Library IDs already exist in the destination and reports how many unmatched profiles were omitted. If an imported base or Library template is unavailable, restricted, or outside the configured templates folder, that creation default safely falls back to an empty note inside the same Undo-protected import; an invalid destination folder, including the exports folder, blocks the import. The selected JSON package is not modified.
 
 Workspace settings can disclose Library-specific vault-relative folder and template paths. Deselect **Workspace settings** before sharing when those paths are private. Profiles contain no note bodies or attachments and never cause import to create or rewrite a Markdown note.
 
@@ -124,12 +126,13 @@ Single-base import and export enforce a 10 MB ceiling plus per-list and aggregat
 
 Same-vault recovery starts unselected when an import file is opened. It must be selected and confirmed separately, is restored by itself, and is never described or executed as a merge with portable sections.
 
-Current version-10 recovery files embed:
+Current version-11 recovery files embed:
 
 - source vault identity;
 - source knowledge-base ID and name;
 - Generic/ENT preset identity;
 - dynamic Library definitions and layouts, including nested subheadings;
+- direct Index memberships and linked-folder source provenance, including nested organization snapshots;
 - exact local note bindings and paths; and
 - the base's plugin-owned organization.
 
@@ -137,7 +140,8 @@ Before an Undo snapshot or mutation starts, the plugin verifies that the source 
 
 ### Recovery versions
 
-- **Version 10:** current format with nested Collection and Library subheading layouts, dynamic Library definitions, and source vault/base/preset locks.
+- **Version 11:** current format with explicit direct Index membership, linked-folder source provenance, nested Collection and Library subheading layouts, dynamic Library definitions, and source vault/base/preset locks.
+- **Version 10:** nested Collection and Library subheading layouts, dynamic Library definitions, and source vault/base/preset locks, but no trusted linked-folder provenance. When restored, the destination's linked sources are preserved and legacy membership is migrated conservatively.
 - **Version 9:** dynamic Library definitions and layouts plus the same identity locks, but its subheadings stay a single level deep.
 - **Version 8:** same identity locks and fixed clinical Library layouts, but predates arbitrary Library definitions.
 - **Version 7:** predates nested Library-layout recovery but carries current-style vault/base/preset identity.

@@ -10,10 +10,10 @@ import { LibraryEditorModal, ManageLibrariesModal } from "./library-modal";
 import { resolveLibraryIconId } from "./library-icons";
 import {
   assertPersonalBackupMatchesVault,
+  applyPersonalBackupToData,
   buildCurriculumTree,
   canonicalPath,
   childSubheadings,
-  clonePersonalOrganization,
   curriculumChildPaths,
   createPersonalBackup,
   curriculumDescendantPaths,
@@ -1381,10 +1381,7 @@ export class EntVaultCommandCenterView extends ItemView {
           const proposalFolder = settings.proposalFolder.trim().replace(/^\/+|\/+$/gu, "");
           if (!proposalFolder || !pathIsInsideFolder(file.path, proposalFolder)) {
             await this.plugin.mutate(`Add created ${settings.itemSingular} to ${settings.indexLabel}`, () => {
-              this.plugin.data.excludedIndexPaths = this.plugin.data.excludedIndexPaths.filter((path) => path !== file.path);
-              if (!pathIsInsideFolder(file.path, settings.primaryFolder) && !this.plugin.data.manualIndexPaths.includes(file.path)) {
-                this.plugin.data.manualIndexPaths.push(file.path);
-              }
+              this.plugin.setDirectIndexMembershipState(file.path, true);
               this.plugin.data.selectedPath = file.path;
             });
             return `${itemLabel} created at ${file.path}, which is outside the configured ${settings.inboxLabel} folder, so it was added to ${settings.indexLabel} to stay findable. Existing notes were not changed.`;
@@ -2091,10 +2088,7 @@ export class EntVaultCommandCenterView extends ItemView {
           }
         } else if (indexAfterCreate && !clinicalMode) {
           await this.plugin.mutate(`Add created ${settings.itemSingular} to ${settings.indexLabel}`, () => {
-            this.plugin.data.excludedIndexPaths = this.plugin.data.excludedIndexPaths.filter((path) => path !== file.path);
-            if (!pathIsInsideFolder(file.path, settings.primaryFolder) && !this.plugin.data.manualIndexPaths.includes(file.path)) {
-              this.plugin.data.manualIndexPaths.push(file.path);
-            }
+            this.plugin.setDirectIndexMembershipState(file.path, true);
             this.plugin.data.selectedPath = file.path;
           });
           if (!ownsBase()) return;
@@ -2138,10 +2132,7 @@ export class EntVaultCommandCenterView extends ItemView {
     if (this.plugin.getRecord(file.path)) return false;
     const settings = this.plugin.data.settings;
     await this.plugin.mutate(`Add created ${settings.itemSingular} to ${settings.indexLabel}`, () => {
-      this.plugin.data.excludedIndexPaths = this.plugin.data.excludedIndexPaths.filter((path) => path !== file.path);
-      if (!pathIsInsideFolder(file.path, settings.primaryFolder) && !this.plugin.data.manualIndexPaths.includes(file.path)) {
-        this.plugin.data.manualIndexPaths.push(file.path);
-      }
+      this.plugin.setDirectIndexMembershipState(file.path, true);
       this.plugin.data.selectedPath = file.path;
     });
     return true;
@@ -2187,7 +2178,7 @@ export class EntVaultCommandCenterView extends ItemView {
     if (!this.guardLoadedBase()) return;
     const ownsBase = this.createOpenedBaseGuard();
     if (this.plugin.isClinicalMode()) {
-      new Notice("Manual index membership is available in the generic knowledge-base profile.");
+      new Notice("Direct index membership is available in the generic knowledge-base profile.");
       return;
     }
     const files = this.plugin.getIndexCandidateFiles();
@@ -2206,14 +2197,7 @@ export class EntVaultCommandCenterView extends ItemView {
         submitLabel: `Add to ${settings.indexLabel}`,
         onSubmit: async (group) => {
           if (!ownsBase()) return;
-          await this.plugin.mutate(`Add “${file.basename}” to ${settings.indexLabel}`, () => {
-            this.plugin.data.excludedIndexPaths = this.plugin.data.excludedIndexPaths.filter((path) => path !== file.path);
-            if (!pathIsInsideFolder(file.path, settings.primaryFolder) && !this.plugin.data.manualIndexPaths.includes(file.path)) {
-              this.plugin.data.manualIndexPaths.push(file.path);
-            }
-            this.plugin.data.indexGroupByPath[file.path] = group;
-            this.plugin.data.selectedPath = file.path;
-          });
+          await this.plugin.assignRecordToCatalog(file.path, "topic", { headingTitle: group });
           if (!ownsBase()) return;
           new Notice(`Added to ${settings.indexLabel} under ${group}. The note stayed at ${file.path}.`);
         },
@@ -3090,7 +3074,7 @@ export class EntVaultCommandCenterView extends ItemView {
     empty.createEl("strong", { text: `Start your ${settings.indexLabel.toLowerCase()}` });
     empty.createEl("p", { text: availableCount > 0
       ? `${availableCount} existing note${availableCount === 1 ? " is" : "s are"} ready to add without moving or rewriting files.`
-      : `Create your first ${settings.itemSingular}, or change the indexed folder in Settings.` });
+      : `Add your first ${settings.itemSingular}, or explicitly link a folder in Settings.` });
     const button = empty.createEl("button", { cls: "ent-cc-button ent-cc-add-button" });
     setIcon(button.createSpan(), availableCount > 0 ? "list-plus" : "plus");
     button.createSpan({ text: availableCount > 0 ? `Add existing ${settings.itemPlural}` : `Create ${settings.itemSingular}` });
@@ -5701,11 +5685,7 @@ export class EntVaultCommandCenterView extends ItemView {
               allowBaseOverride,
             );
             await this.plugin.mutate("Import organization backup", () => {
-              // The shared field list keeps this import in step with the
-              // snapshot, restore, and backup paths.
-              Object.assign(this.plugin.data, clonePersonalOrganization(backup));
-              this.plugin.data.layoutSnapshots = limitSnapshotStack(backup.layoutSnapshots, 10);
-              this.plugin.data.portableIndex = backup.portableIndex;
+              applyPersonalBackupToData(this.plugin.data, backup);
             }, {
               includePortableIndex: true,
               includeLayoutSnapshots: true,

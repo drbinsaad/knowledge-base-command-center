@@ -1,5 +1,6 @@
 import {
   asUnknownRecord,
+  applyPersonalBackupToData,
   assertPersonalBackupMatchesVault,
   BUILTIN_LIBRARY_DEFINITIONS,
   BUILTIN_LIBRARY_IDS,
@@ -9,7 +10,6 @@ import {
   cleanLibraryLayouts,
   cleanLibraryNoteProfiles,
   cloneCollections,
-  cloneCurriculumVisual,
   cloneJsonValue,
   codeUnitCompare,
   createPersonalBackup,
@@ -38,7 +38,7 @@ import {
   normalizedNameKey,
   parsePersonalBackup,
   parseWorkspaceConfig,
-  pathIsInsideFolder,
+  pathIsInIndexFolderSources,
   PersonalBackup,
   PluginData,
   PortableGroupDefinition,
@@ -605,7 +605,9 @@ export function synchronizePortableRegistry(data: PluginData, records: VaultReco
   const recordByPath = new Map(records.map((record) => [record.path, record]));
   const topicsOnly = data.settings.workspaceMode === "ent-clinical";
   const indexedPaths = new Set(records.filter((record) => recordBelongsToIndex(record, topicsOnly)).map((record) => record.path));
-  for (const path of data.manualIndexPaths) if (isPortablePlaceholderPath(path)) indexedPaths.add(path);
+  for (const path of [...data.directIndexPaths, ...data.manualIndexPaths]) {
+    if (isPortablePlaceholderPath(path)) indexedPaths.add(path);
+  }
   const requiredPaths = new Set<string>([
     ...indexedPaths,
     ...records
@@ -2228,19 +2230,7 @@ export function assertPortableImportDestinationCompatible(
 }
 
 function applyRecovery(data: PluginData, backup: PersonalBackup): void {
-  data.collections = cloneCollections(backup.collections);
-  data.pinnedPaths = [...backup.pinnedPaths];
-  data.nextStudyPaths = [...backup.nextStudyPaths];
-  data.savedViews = backup.savedViews.map((view) => ({ ...view }));
-  data.curriculumVisual = cloneCurriculumVisual(backup.curriculumVisual);
-  data.manualIndexPaths = [...backup.manualIndexPaths];
-  data.excludedIndexPaths = [...backup.excludedIndexPaths];
-  data.indexGroupByPath = { ...backup.indexGroupByPath };
-  data.displayNameByPath = { ...backup.displayNameByPath };
-  data.indexGroupAliases = { ...backup.indexGroupAliases };
-  data.indexGroupOrder = [...backup.indexGroupOrder];
-  data.layoutSnapshots = backup.layoutSnapshots.map((snapshot) => cloneJsonValue(snapshot));
-  data.portableIndex = cloneJsonValue(backup.portableIndex);
+  applyPersonalBackupToData(data, backup);
 }
 
 /** Applies already-validated components to plugin-owned state. It never touches Markdown files. */
@@ -2663,6 +2653,7 @@ export function applyPortableExport(
 
     if (mode === "replace") {
       const oldSet = new Set(replacedOldPaths);
+      data.directIndexPaths = data.directIndexPaths.filter((path) => !oldSet.has(path));
       data.manualIndexPaths = data.manualIndexPaths.filter((path) => !oldSet.has(path));
       const nextExcluded = new Set(data.excludedIndexPaths.filter((path) => !isPortablePlaceholderPath(path) && !oldSet.has(path)));
       const survivingById = new Map(localSubjects.map((subject) => [subject.id, subject]));
@@ -2670,10 +2661,10 @@ export function applyPortableExport(
         const resolvedPath = oldResolvedPathById.get(subject.id);
         const surviving = survivingById.get(subject.id);
         // Replace never deletes Markdown. A local note that remains inside the
-        // generic auto-index folder must be explicitly hidden when its old
+        // generic linked folder must be explicitly hidden when its old
         // subject is absent or non-indexed, or it would immediately reappear.
         if (data.settings.workspaceMode === "generic" && resolvedPath
-          && pathIsInsideFolder(resolvedPath, data.settings.primaryFolder) && !surviving?.indexed) {
+          && pathIsInIndexFolderSources(resolvedPath, data.indexFolderSources) && !surviving?.indexed) {
           nextExcluded.add(resolvedPath);
         }
       }
@@ -2688,7 +2679,7 @@ export function applyPortableExport(
     }
 
     const importedContainers = new Map<string, Array<{ path: string; order: number }>>();
-    const manualIndexPaths = new Set(data.manualIndexPaths);
+    const directIndexPaths = new Set([...data.directIndexPaths, ...data.manualIndexPaths]);
     const excludedIndexPaths = new Set(data.excludedIndexPaths);
     for (const incoming of incomingIndex.subjects) {
       const localId = subjectIdMap.get(incoming.id);
@@ -2703,9 +2694,7 @@ export function applyPortableExport(
       if (local.indexed) {
         data.indexGroupByPath[path] = groupTitle;
         excludedIndexPaths.delete(path);
-        if (isPortablePlaceholderPath(path) || !pathIsInsideFolder(path, data.settings.primaryFolder)) {
-          manualIndexPaths.add(path);
-        }
+        directIndexPaths.add(path);
         const parentPath = local.parentId ? portableSubjectPath(data, local.parentId) : null;
         data.curriculumVisual.parentByPath[path] = parentPath;
         const container = curriculumContainerKey(groupTitle, parentPath);
@@ -2713,7 +2702,7 @@ export function applyPortableExport(
         siblings.push({ path, order: local.order });
         importedContainers.set(container, siblings);
       } else if (mode === "replace" && data.settings.workspaceMode === "generic"
-        && !isPortablePlaceholderPath(path) && pathIsInsideFolder(path, data.settings.primaryFolder)) {
+        && !isPortablePlaceholderPath(path) && pathIsInIndexFolderSources(path, data.indexFolderSources)) {
         excludedIndexPaths.add(path);
         delete data.indexGroupByPath[path];
         delete data.curriculumVisual.parentByPath[path];
@@ -2723,7 +2712,8 @@ export function applyPortableExport(
       }
       if (isPortablePlaceholderPath(path)) result.unresolvedSubjects += 1;
     }
-    data.manualIndexPaths = [...manualIndexPaths];
+    data.directIndexPaths = [...directIndexPaths];
+    data.manualIndexPaths = [];
     data.excludedIndexPaths = [...excludedIndexPaths];
     for (const [container, entries] of importedContainers) {
       const incomingPaths = entries.sort((a, b) => a.order - b.order).map((entry) => entry.path);

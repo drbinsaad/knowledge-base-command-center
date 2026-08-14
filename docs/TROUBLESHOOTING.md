@@ -22,13 +22,13 @@ Before removing and re-adding the BRAT entry, export current organization and ba
 ## A note is missing from the Index
 
 1. Confirm the intended knowledge base is active.
-2. Review its configured indexed folder.
-3. Open **Manage Index… → Hidden** and restore the record if present.
-4. In a Generic base, check **Available** for an eligible note outside automatic scope.
+2. In a Generic base, confirm the note was explicitly added or is below a folder you explicitly linked. The default new-note folder is storage only.
+3. Open **Manage Index… → Hidden** and restore the record if present. A hidden note stays excluded even while a linked-folder rule matches it.
+4. Check **Available** for an eligible note that has no direct membership, then use **Add existing note to Index** for durable one-note membership. A note supplied only by a linked folder also appears here so you can preserve it directly before unlinking the folder.
 5. Check whether the subject is primarily classified in a Library rather than the Index.
 6. Run **Diagnostics** for stale or missing plugin references.
 
-Restoring membership does not move or rewrite the Markdown file.
+Adding, restoring, hiding, or unlinking membership does not move or rewrite the Markdown file. Generic organization lives in plugin data. A pre-v15 Generic base may show its former `primaryFolder` as a removable legacy linked-folder source so its pre-upgrade notes do not disappear.
 
 ## A subject appears in the wrong Index or Library
 
@@ -90,7 +90,7 @@ The plugin detected unrecognized, damaged, or newer plugin data and intentionall
 5. Update every device to the same current plugin version.
 6. Report the issue without attaching private plugin data publicly.
 
-An older device can describe the version-15 store with schema-14 knowledge-base data as a migration failure. That is expected downgrade protection. Update every synced device to the same current release before editing again.
+An older device can describe the version-15 store with schema-15 knowledge-base data as a migration failure. That is expected downgrade protection. Update every synced device to the same current release before editing again.
 
 ## Export/import center is in salvage mode
 

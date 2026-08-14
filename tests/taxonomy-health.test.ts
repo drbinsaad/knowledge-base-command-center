@@ -215,6 +215,21 @@ test("health center finds empty structure, unavailable configuration, and possib
   assert.ok(findings.some((item) => item.kind === "placeholder-match" && item.path === local.path));
 });
 
+test("health center reports unavailable linked Index folders but accepts the vault-root source", () => {
+  const data = migrateData(null);
+  data.indexFolderSources = [
+    { id: "index-folder-missing", path: "Research/Missing", origin: "user" },
+    { id: "index-folder-root", path: "/", origin: "legacy-primary-folder" },
+  ];
+
+  const findings = analyze(data, []);
+  const linkedFolderFindings = findings.filter((item) => item.title === "Linked Index folder is unavailable");
+  assert.equal(linkedFolderFindings.length, 1);
+  assert.match(linkedFolderFindings[0]?.detail ?? "", /Research\/Missing/u);
+  assert.doesNotMatch(linkedFolderFindings[0]?.detail ?? "", /vault root|“\/”/iu);
+  assert.equal(linkedFolderFindings[0]?.repair, undefined, "a potentially syncing source is report-only");
+});
+
 test("health center reports a damaged template-mode Library profile without a template", () => {
   const data = migrateData(null);
   data.settings.defaultNewNoteMode = "empty";
@@ -500,6 +515,145 @@ test("index manager bulk selection matches the notes the filter shows", () => {
   }
 });
 
+test("index manager tabs expose linked panels and support arrow, Home, and End keys", () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const plugin = {
+    app: { vault: { getAbstractFileByPath: () => null } },
+    data,
+    getIndexRecords: (): VaultRecord[] => [],
+    getRecords: (): VaultRecord[] => [],
+    getIndexCandidateFiles: () => [],
+    getIndexGroups: () => [],
+    getIndexDiagnostics: () => [],
+    previewIndexRepair: () => ({ prunedPaths: [], otherFixCount: 0, fingerprint: "healthy" }),
+    async repairIndexOrganization(): Promise<void> {},
+    isClinicalMode: () => false,
+    isDataReadOnly: () => false,
+    canVisuallyMoveAcrossGroups: () => true,
+  };
+  const dom = createFakeDom();
+  const manager = new IndexManagerModal(plugin as never) as unknown as {
+    contentEl: HTMLElement;
+    managerOpen: boolean;
+    openedBaseId: string;
+    pendingTimers: Set<number>;
+    render(): void;
+  };
+  manager.contentEl = asHtmlElement(dom.document.body.createDiv());
+  manager.managerOpen = true;
+  manager.openedBaseId = "";
+  manager.pendingTimers = new Set();
+
+  const settingPrototype = Setting.prototype as unknown as Record<string, unknown>;
+  const priorAddButton = Object.getOwnPropertyDescriptor(Setting.prototype, "addButton");
+  const priorSettingEl = Object.getOwnPropertyDescriptor(Setting.prototype, "settingEl");
+  const settingButton = {
+    setButtonText: (): typeof settingButton => settingButton,
+    onClick: (): typeof settingButton => settingButton,
+  };
+  settingPrototype.addButton = function addButton(this: unknown, callback: (value: typeof settingButton) => void): unknown {
+    callback(settingButton);
+    return this;
+  };
+  settingPrototype.settingEl = { addClass: (): void => undefined };
+
+  const tab = (id: string): FakeElement => {
+    const element = manager.contentEl.querySelector(`[data-manager-tab="${id}"]`) as unknown as FakeElement | null;
+    assert.ok(element);
+    return element;
+  };
+  const activeTab = (): FakeElement => {
+    const element = manager.contentEl.querySelector('[role="tab"][aria-selected="true"]') as unknown as FakeElement | null;
+    assert.ok(element);
+    return element;
+  };
+  try {
+    manager.render();
+    const tablist = manager.contentEl.querySelector('[role="tablist"]');
+    assert.equal(tablist?.getAttribute("aria-label"), "Index manager sections");
+    assert.equal(manager.contentEl.querySelectorAll('[role="tab"]').length, 5);
+    const panels = manager.contentEl.querySelectorAll('[role="tabpanel"]') as unknown as FakeElement[];
+    assert.equal(panels.length, 5, "every tab controls a real panel, including lazy hidden panels");
+    assert.equal(panels.filter((panel) => !panel.hidden).length, 1);
+
+    const indexed = tab("indexed");
+    const indexedPanelId = indexed.getAttribute("aria-controls");
+    assert.ok(indexedPanelId);
+    const indexedPanel = manager.contentEl.querySelector(`[id="${indexedPanelId}"]`);
+    assert.equal(indexedPanel?.getAttribute("aria-labelledby"), indexed.getAttribute("id"));
+
+    const right = indexed.dispatch("keydown", { key: "ArrowRight" });
+    assert.equal(right.defaultPrevented, true);
+    assert.equal(activeTab().getAttribute("data-manager-tab"), "available");
+    assert.equal(dom.document.activeElement, activeTab(), "focus follows the newly activated tab after re-render");
+
+    tab("available").dispatch("keydown", { key: "Home" });
+    assert.equal(activeTab().getAttribute("data-manager-tab"), "indexed");
+    tab("indexed").dispatch("keydown", { key: "End" });
+    assert.equal(activeTab().getAttribute("data-manager-tab"), "diagnostics");
+    tab("diagnostics").dispatch("keydown", { key: "ArrowRight" });
+    assert.equal(activeTab().getAttribute("data-manager-tab"), "indexed", "ArrowRight wraps at the end");
+    tab("indexed").dispatch("keydown", { key: "ArrowLeft" });
+    assert.equal(activeTab().getAttribute("data-manager-tab"), "diagnostics", "ArrowLeft wraps at the start");
+  } finally {
+    if (priorAddButton) Object.defineProperty(Setting.prototype, "addButton", priorAddButton);
+    else Reflect.deleteProperty(settingPrototype, "addButton");
+    if (priorSettingEl) Object.defineProperty(Setting.prototype, "settingEl", priorSettingEl);
+    else Reflect.deleteProperty(settingPrototype, "settingEl");
+  }
+});
+
+test("Index Manager bounds large heading and diagnostic DOM until Show more is requested", () => {
+  const dom = createFakeDom();
+  const manager = Object.create(IndexManagerModal.prototype) as {
+    app: unknown;
+    plugin: unknown;
+    openedBaseId: string;
+    visibleRowLimits: { diagnostics: number; groups: number };
+    renderSnapshot(): void;
+    renderGroups(groups: string[], parent: HTMLElement): void;
+    renderDiagnostics(diagnostics: Array<{ kind: string; title: string; detail: string; path?: string }>, parent: HTMLElement): void;
+  };
+  manager.app = { vault: { getAbstractFileByPath: () => null } };
+  manager.openedBaseId = "";
+  manager.visibleRowLimits = { diagnostics: 300, groups: 300 };
+  manager.plugin = {
+    data: { settings: { groupLabel: "Heading", itemPlural: "notes" } },
+    canVisuallyMoveAcrossGroups: () => true,
+    isDataReadOnly: () => false,
+    getIndexRecords: () => [],
+    previewIndexRepair: () => ({ prunedPaths: [] }),
+    repairIndexOrganization: async () => undefined,
+  };
+  let renders = 0;
+  manager.renderSnapshot = () => { renders += 1; };
+
+  const groups = Array.from({ length: 650 }, (_, index) => `Heading ${String(index)}`);
+  const groupsPanel = asHtmlElement(dom.document.body.createDiv());
+  manager.renderGroups(groups, groupsPanel);
+  assert.equal(groupsPanel.querySelectorAll(".ent-cc-manager-group").length, 300);
+  const groupsMore = groupsPanel.querySelectorAll("button").find((button) => button.textContent === "Show 300 more");
+  assert.ok(groupsMore);
+  groupsMore.click();
+  assert.equal(manager.visibleRowLimits.groups, 600);
+  assert.equal(renders, 1);
+
+  const diagnostics = Array.from({ length: 650 }, (_, index) => ({
+    kind: "broken-parent",
+    title: `Issue ${String(index)}`,
+    detail: "Synthetic issue",
+  }));
+  const diagnosticsPanel = asHtmlElement(dom.document.body.createDiv());
+  manager.renderDiagnostics(diagnostics, diagnosticsPanel);
+  assert.equal(diagnosticsPanel.querySelectorAll(".ent-cc-manager-diagnostic").length, 300);
+  const diagnosticsMore = diagnosticsPanel.querySelectorAll("button").find((button) => button.textContent === "Show 300 more");
+  assert.ok(diagnosticsMore);
+  diagnosticsMore.click();
+  assert.equal(manager.visibleRowLimits.diagnostics, 600);
+  assert.equal(renders, 2);
+});
+
 test("in-modal mutations drop the cached diagnostics so the next Diagnostics view recomputes", async () => {
   // In-modal mutations change diagnostics inputs without bumping the data
   // epoch, so no stale-base guard can force a recompute; the modal must drop
@@ -621,8 +775,9 @@ test("Repair safe issues confirms before pruning missing-note registrations and 
     "KB/Missing 5.md", "KB/Missing 6.md", "KB/Missing 7.md", "KB/Missing 8.md",
     "KB/Missing 9.md",
   ];
-  let preview = { prunedPaths: missingPaths, otherFixCount: 1 };
+  let preview = { prunedPaths: missingPaths, otherFixCount: 1, fingerprint: "preview-with-prunes" };
   let repairs = 0;
+  const repairPreviews: typeof preview[] = [];
   const plugin = {
     data: {
       settings: { indexLabel: "Index", groupLabel: "Group", itemSingular: "note", itemPlural: "notes" },
@@ -641,7 +796,10 @@ test("Repair safe issues confirms before pruning missing-note registrations and 
       path: "KB/Missing 1.md",
     }],
     previewIndexRepair: () => ({ ...preview, prunedPaths: [...preview.prunedPaths] }),
-    async repairIndexOrganization(): Promise<void> { repairs += 1; },
+    async repairIndexOrganization(expected: typeof preview): Promise<void> {
+      repairs += 1;
+      repairPreviews.push(expected);
+    },
     isClinicalMode: () => false,
     isDataReadOnly: () => false,
     canVisuallyMoveAcrossGroups: () => true,
@@ -722,13 +880,15 @@ test("Repair safe issues confirms before pruning missing-note registrations and 
     await confirm.onConfirm();
     await drainRepair();
     assert.equal(repairs, 1, "confirming runs the existing repair");
+    assert.deepEqual(repairPreviews[0], preview, "confirmation applies the exact preview the user reviewed");
     assert.equal(Notice.messages.filter((message) => /Safe plugin-state repairs completed/u.test(message)).length, 1);
 
-    preview = { prunedPaths: [], otherFixCount: 3 };
+    preview = { prunedPaths: [], otherFixCount: 3, fingerprint: "preview-without-prunes" };
     repairButton().click();
     await drainRepair();
     assert.equal(confirms.length, 1, "a repair with nothing to prune never asks");
     assert.equal(repairs, 2, "it runs immediately, exactly as before");
+    assert.deepEqual(repairPreviews[1], preview, "one-click repair also applies its captured preview");
   } finally {
     Reflect.deleteProperty(settingPrototype, "addButton");
     Reflect.deleteProperty(settingPrototype, "settingEl");

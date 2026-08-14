@@ -11,6 +11,7 @@ import {
   errorMessage,
   libraryTabId,
   pathIsInsideFolder,
+  pathIsInIndexFolderSources,
   validateProposalFolderPath,
   validateWritableFolderPath,
   type LibraryDefinition,
@@ -34,6 +35,8 @@ interface SettingsHost extends Plugin {
   getTemplateFiles(): TFile[];
   getIndexGroups(): string[];
   getIndexRecords(): Array<{ path: string }>;
+  linkIndexFolder(path: string): Promise<void>;
+  unlinkIndexFolder(sourceId: string): Promise<void>;
   countOrphanedByProposalFolderChange(nextFolder: string): number;
   countOrphanedByPrimaryFolderChange(nextFolder: string): number;
   isDataReadOnly(): boolean;
@@ -569,17 +572,24 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
           if (!ownsConfiguredBase()) return;
           const error = validateFolder(path);
           if (error) { new Notice(error); return; }
-          const input = row.settingEl.querySelector("input");
-          if (input instanceof HTMLInputElement) { input.value = path; commit(input, path); }
+          // Settings can live in an Obsidian pop-out window. A main-window
+          // instanceof check rejects that window's otherwise-valid input.
+          const input = row.settingEl.querySelector<HTMLInputElement>("input");
+          if (input) { input.value = path; commit(input, path); }
         }).open();
       }));
     }, ["folder", "path"]);
 
     const propertyNames = (): string[] => {
       const names = new Set<string>();
-      const manual = new Set(this.host.data.manualIndexPaths);
+      const direct = new Set([
+        ...(this.host.data.directIndexPaths ?? []),
+        ...(this.host.data.manualIndexPaths ?? []),
+      ]);
       const files = this.host.app.vault.getMarkdownFiles()
-        .filter((file) => pathIsInsideFolder(file.path, settings.primaryFolder) || manual.has(file.path))
+        .filter((file) => direct.has(file.path)
+          || pathIsInIndexFolderSources(file.path, this.host.data.indexFolderSources ?? [])
+          || (settings.workspaceMode === "ent-clinical" && pathIsInsideFolder(file.path, settings.primaryFolder)))
         .slice(0, 2000);
       for (const file of files) {
         const frontmatter = asUnknownRecord(this.host.app.metadataCache.getFileCache(file)?.frontmatter);
@@ -737,19 +747,71 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
                   text.inputEl.dir = "auto";
                 });
               }, ["folder", "path", "clinical scope"])
-            : guardedFolderSetting(
-              "Indexed notes folder",
-              "Every Markdown note in this folder and its subfolders appears in the main index.",
-              () => settings.primaryFolder,
+            : folderSetting(
+              "Folder grouping root",
+              "Optional fallback for deriving visual groups from subfolders. This path never adds notes to the Index.",
+              settings.primaryFolder,
               (value) => { settings.primaryFolder = value; },
-              (clean) => validateWritableFolderPath(clean, this.host.app.vault.configDir) || (!clean ? "Choose a folder." : null),
-              (clean) => {
-                const orphaned = this.host.countOrphanedByPrimaryFolderChange(clean);
-                if (orphaned === 0) return null;
-                return `${orphaned} note${orphaned === 1 ? "" : "s"} under “${settings.primaryFolder}” will leave ${settings.indexLabel} and no longer appear anywhere in this plugin. The files stay in the vault; use Add existing note to index any you still need.`;
-              },
             ),
-          folderSetting("Default new-note folder", "Initial destination in Create note. It can still be changed for each note.", settings.defaultNoteFolder, (value) => { settings.defaultNoteFolder = value; }),
+          ...(settings.workspaceMode === "generic" ? [
+            renderSetting(
+              "Linked Index folders",
+              this.host.data.indexFolderSources.length === 0
+                ? "None. Notes enter this Index only when you explicitly add them. Linking a folder is opt-in and includes its current and future Markdown notes without moving or editing them."
+                : `${this.host.data.indexFolderSources.length} folder${this.host.data.indexFolderSources.length === 1 ? " is" : "s are"} explicitly linked. The default new-note folder remains storage-only.`,
+              (row) => {
+                row.addButton((button) => button
+                  .setButtonText("Link folder…")
+                  .setIcon("folder-plus")
+                  .setDisabled(readOnly)
+                  .onClick(() => {
+                    if (!ownsConfiguredBase()) return;
+                    const linked = new Set(this.host.data.indexFolderSources.map((source) => source.path));
+                    const candidates = folderPaths().filter((path) => !linked.has(path));
+                    if (candidates.length === 0) {
+                      new Notice("No additional writable vault folder is available to link.");
+                      return;
+                    }
+                    new StringPickerModal(this.host.app, candidates, "Link folder to this Index", "Search vault folders…", async (path) => {
+                      if (!ownsConfiguredBase()) return;
+                      await this.host.linkIndexFolder(path);
+                      if (!ownsConfiguredBase()) return;
+                      this.update();
+                    }).open();
+                  }));
+              },
+              ["membership", "source", "include folder", "automatic notes"],
+            ),
+            ...this.host.data.indexFolderSources.map((source) => renderSetting(
+              source.path,
+              source.origin === "legacy-primary-folder"
+                ? "Legacy linked source preserved during upgrade. Unlink it to make this base fully note-by-note; Markdown files remain untouched."
+                : "Explicit linked source. Notes below this folder join dynamically; the folder is never moved or edited.",
+              (row) => {
+                row.addButton((button) => button
+                  .setButtonText("Unlink")
+                  .setIcon("unlink")
+                  .setDisabled(readOnly)
+                  .onClick(() => {
+                    if (!ownsConfiguredBase()) return;
+                    new ConfirmModal(
+                      this.host.app,
+                      "Unlink folder from this Index?",
+                      `Notes supplied only by “${source.path}” will leave the Index. Notes explicitly added one by one, supplied by another linked folder, or used in Collections remain available. No Markdown file will be changed.`,
+                      "Unlink folder",
+                      async () => {
+                        if (!ownsConfiguredBase()) return;
+                        await this.host.unlinkIndexFolder(source.id);
+                        if (!ownsConfiguredBase()) return;
+                        this.update();
+                      },
+                    ).open();
+                  }));
+              },
+              ["membership", "legacy", "unlink folder"],
+            )),
+          ] : []),
+          folderSetting("Default new-note folder", "Initial storage destination in Create note. Saving a note there does not add it to the Index.", settings.defaultNoteFolder, (value) => { settings.defaultNoteFolder = value; }),
           folderSetting("Templates folder", "Markdown templates offered by the per-note template picker. Leave empty to allow any Markdown file.", settings.templatesFolder, (value) => { settings.templatesFolder = value; }),
           renderSetting("Default starting content", "Every new note can override this choice.", (row) => {
             row.addDropdown((dropdown) => dropdown
@@ -919,11 +981,11 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
         items: [
           {
             name: "Metadata mapping behavior",
-            desc: "Property names are vault-specific. Suggestions sample up to 2,000 notes inside the indexed folder (plus manual members); notes without properties still appear and folders provide safe fallbacks.",
+            desc: "Property names are vault-specific. Suggestions sample up to 2,000 direct or linked-folder Index members; notes without properties still appear and folders provide safe fallbacks.",
             aliases: ["frontmatter", "properties"],
           },
           propertySetting("ID property", "Optional identifier shown beside each indexed note. Leave empty to disable it.", "id", settings.idProperty, (value) => { settings.idProperty = value; }),
-          propertySetting("Group property", "If empty or absent on a note, the first subfolder under the indexed folder becomes the group.", "category", settings.groupProperty, (value) => { settings.groupProperty = value; }),
+          propertySetting("Group property", "If empty or absent, the first subfolder under the grouping root or linked source becomes the visual group.", "category", settings.groupProperty, (value) => { settings.groupProperty = value; }),
           propertySetting("Parent property", "A wikilink or note title used for default nesting. Leave empty to use only visual arrangement.", "parent", settings.parentProperty, (value) => { settings.parentProperty = value; }),
         ],
       },

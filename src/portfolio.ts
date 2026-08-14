@@ -893,6 +893,8 @@ function sanitizeWorkspaceResources(
       fallbacks.push(`${destinationName}: unavailable ${key} “${unavailable}” falls back to “${settings[key]}”.`);
     }
   }
+  const exportsValidation = validateWritableFolderPath(settings.exportsFolder, configDir);
+  if (exportsValidation) throw new Error(exportsValidation);
   const proposalValidation = settings.workspaceMode === "ent-clinical"
     ? validateProposalFolderPath(settings.proposalFolder, configDir)
     : validateWritableFolderPath(settings.proposalFolder, configDir);

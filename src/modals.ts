@@ -328,7 +328,7 @@ export class TextPromptModal extends Modal {
     new Setting(this.contentEl)
       .addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()))
       .addButton((button) => button.setButtonText(this.options.submitLabel ?? "Save").setCta().onClick(() => void this.submit(value)));
-    window.activeWindow.setTimeout(() => input?.focus(), 40);
+    modalOwnerWindow(this.contentEl).setTimeout(() => input?.focus(), 40);
   }
 
   private async submit(raw: string): Promise<void> {
@@ -581,7 +581,7 @@ export class IndexGroupModal extends Modal {
     new Setting(this.contentEl)
       .addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()))
       .addButton((button) => button.setButtonText(this.options.submitLabel).setCta().onClick(() => void this.submit(value)));
-    window.activeWindow.setTimeout(() => input?.focus(), 40);
+    modalOwnerWindow(this.contentEl).setTimeout(() => input?.focus(), 40);
   }
 
   private async submit(raw: string): Promise<void> {
@@ -770,7 +770,7 @@ export class KnowledgeNoteModal extends Modal {
           event.preventDefault();
           void this.submit();
         });
-        window.activeWindow.setTimeout(() => text.inputEl.focus(), 40);
+        modalOwnerWindow(this.contentEl).setTimeout(() => text.inputEl.focus(), 40);
       });
 
     new Setting(formBody)
@@ -994,7 +994,7 @@ export function nestSetupFoldersUnderHome(value: WorkspaceSetupValue, home: stri
  * Hoisted because obsidianmd/ui/sentence-case would rewrite the folder
  * examples (KB/Inbox, KB/Exports) when the literal sits at a UI call site.
  */
-export const HOME_FOLDER_FIELD_DESCRIPTION = "Type a parent folder and press Apply: every plugin folder below nests under it — for example KB/Inbox, KB/Templates, and KB/Exports. Each folder stays editable afterwards.";
+export const HOME_FOLDER_FIELD_DESCRIPTION = "Type a parent folder and press Apply: every plugin working folder below nests under it — for example KB/Inbox, KB/Templates, and KB/Exports. Storage remains separate from Index membership, and each folder stays editable afterwards.";
 
 export const INBOX_FOLDER_REQUIRED_MESSAGE = "Choose an Inbox folder. Without one, notes aimed at the Inbox would not appear anywhere in this plugin.";
 
@@ -1011,7 +1011,7 @@ export function missingSetupFolderHint(
 ): string | null {
   const clean = folder.trim().replace(/^\/+|\/+$/g, "");
   if (!clean || folderExists(clean)) return null;
-  return `“${clean}” does not exist yet — it will be created empty, and ${consequence} until they live inside it.`;
+  return `“${clean}” does not exist yet — it will be created empty. ${consequence.charAt(0).toUpperCase()}${consequence.slice(1)}.`;
 }
 
 export class WorkspaceSetupModal extends Modal {
@@ -1046,7 +1046,7 @@ export class WorkspaceSetupModal extends Modal {
     this.modalEl.addClass("ent-cc-topic-editor-modal");
     this.contentEl.addClass("ent-cc-modal", "ent-cc-topic-editor");
     this.titleEl.setText("Set up your knowledge base");
-    this.contentEl.createEl("p", { cls: "ent-cc-modal-lead", text: "This configures only the plugin view. Existing notes stay exactly where they are." });
+    this.contentEl.createEl("p", { cls: "ent-cc-modal-lead", text: "This configures only the plugin view. Existing notes stay exactly where they are, and the index starts empty until you add a note or explicitly link a folder." });
     const textField = (name: string, description: string, key: Exclude<keyof WorkspaceSetupValue, "defaultNewNoteMode">, placeholder: string): void => {
       new Setting(this.contentEl).setName(name).setDesc(description).addText((text) => text
         .setPlaceholder(placeholder)
@@ -1097,10 +1097,10 @@ export class WorkspaceSetupModal extends Modal {
         }));
       updateHint(this.value[key]);
     };
-    folderField("Indexed notes folder", "All Markdown notes below it appear in the index.", "primaryFolder", "Knowledge Base", "existing notes will not be indexed");
+    folderField("Folder grouping root", "Optional path used only as a folder-based grouping fallback. It never adds notes to the Index.", "primaryFolder", "Knowledge Base", "folder-based grouping will remain empty");
     folderField("Inbox folder", "Notes here appear in the separate Inbox section.", "proposalFolder", "Inbox", "existing notes will not appear in the Inbox");
     textField("Inbox name", "Name shown on the Inbox tab.", "inboxLabel", "Inbox");
-    textField("Default new-note folder", "Initial destination when creating a note.", "defaultNoteFolder", "Knowledge Base");
+    textField("Default new-note folder", "Initial storage destination when creating a note. Saving there does not add the note to the Index.", "defaultNoteFolder", "Knowledge Base");
     textField("ID property", "Optional property shown beside each indexed note.", "idProperty", "id");
     textField("Group property", "Falls back to the first subfolder when absent.", "groupProperty", "category");
     textField("Parent property", "Optional wikilink/title used for default nesting.", "parentProperty", "parent");
@@ -1240,7 +1240,7 @@ export class TopicEditorModal extends Modal {
           this.value.title = value;
           this.updatePreview();
         });
-        window.activeWindow.setTimeout(() => text.inputEl.focus(), 40);
+        modalOwnerWindow(this.contentEl).setTimeout(() => text.inputEl.focus(), 40);
       });
 
     new Setting(this.contentEl)

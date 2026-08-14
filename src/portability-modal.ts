@@ -62,8 +62,9 @@ interface WorkspaceImportValidation {
  * folders that do not exist yet, so a missing folder neither blocks the import
  * nor silently falls back to the previous value — the notice names it instead.
  * An ent-clinical destination keeps its own primaryFolder (applyPortableExport
- * protects it), so only the Inbox folder can go missing there. The empty
- * primary folder means the vault root, which always exists.
+ * protects it), so only the Inbox folder can go missing there. In a generic
+ * base primaryFolder is grouping-only; linked-folder membership is personal
+ * organization and is not inferred from this imported setting.
  */
 export function missingImportedFolderNoticeText(
   settings: { primaryFolder: string; proposalFolder: string },
@@ -72,7 +73,7 @@ export function missingImportedFolderNoticeText(
 ): string {
   const sentences: string[] = [];
   if (destinationMode !== "ent-clinical" && settings.primaryFolder && !folderExists(settings.primaryFolder)) {
-    sentences.push(`The imported indexed notes folder “${settings.primaryFolder}” does not exist in this vault yet, so the index will not show existing notes until it is created or the setting is changed.`);
+    sentences.push(`The imported folder grouping root “${settings.primaryFolder}” does not exist in this vault yet, so folder-based group fallbacks will remain unavailable until it is created or the setting is changed. Index membership is unchanged.`);
   }
   if (settings.proposalFolder && !folderExists(settings.proposalFolder)) {
     sentences.push(`The imported Inbox folder “${settings.proposalFolder}” does not exist in this vault yet, so the Inbox will be empty until it is created or the setting is changed.`);
@@ -1022,7 +1023,12 @@ export class ExportImportCenterModal extends Modal {
       this.plugin.data.settings.workspaceMode,
       (path) => this.app.vault.getAbstractFileByPath(normalizePath(path)) instanceof TFolder,
     );
-    for (const folder of [settings.primaryFolder, settings.defaultNoteFolder, settings.templatesFolder]) {
+    for (const folder of [
+      settings.primaryFolder,
+      settings.defaultNoteFolder,
+      settings.templatesFolder,
+      settings.exportsFolder,
+    ]) {
       const validation = validateWritableFolderPath(folder, this.app.vault.configDir);
       if (validation) throw new Error(validation);
     }
@@ -1284,4 +1290,3 @@ export class ExportImportCenterModal extends Modal {
       });
   }
 }
-

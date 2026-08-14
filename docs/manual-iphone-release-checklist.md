@@ -6,25 +6,26 @@ Do not use private notes, patient information, or copyrighted source material in
 
 ## Test record
 
-- Candidate version and commit:
-- Date:
-- Tester:
-- iPhone model:
-- iOS version:
-- Obsidian version:
-- Sync method:
-- Vault note count:
-- Knowledge-base count:
-- Dynamic Type settings tested:
-- Portrait CSS viewport width(s) tested:
-- Landscape CSS viewport width(s) tested (include at least one width between 844 and 1024 px):
-- Portrait result:
-- Landscape result:
+- Candidate version and commit: 0.16.0 / release tag target `0.16.0`
+- Date: 2026-08-14
+- Tester: Automated release review by Codex; no physical-device tester
+- iPhone model: Unverified — no physical iPhone was connected
+- iOS version: Unverified
+- Obsidian version: Unverified on physical iPhone
+- Sync method: Unverified
+- Vault note count: Unverified
+- Knowledge-base count: Unverified
+- Dynamic Type settings tested: Unverified
+- Portrait CSS viewport width(s) tested: Unverified
+- Landscape CSS viewport width(s) tested (include at least one width between 844 and 1024 px): Unverified
+- Portrait result: Unverified — not executed on a physical iPhone
+- Landscape result: Unverified — not executed on a physical iPhone
 
 ## Prerequisites
 
 - Use a disposable or backed-up vault containing at least 8,000 Markdown notes.
 - Configure at least two available knowledge bases, with a uniquely named searchable note-backed record in the second base, plus one archived base.
+- Prepare a new Generic base whose default new-note folder already contains one synthetic Markdown note, a different folder that can be linked and unlinked, one note added directly from elsewhere, and a disposable pre-v15 Generic-data fixture whose former `primaryFolder` contains a note.
 - Include Index, Inbox, Collections, the built-in Procedures/Medications/Syndromes Libraries where the profile supports them, and at least two custom Libraries with distinct icons and long names.
 - Prepare a synthetic multi-base portfolio with at least two source bases, more than 50 preview rows in one category, an empty Library, an empty heading, a depth-3 nested subheading, a placeholder, an unplaced subject, one unavailable template, and one unavailable destination folder. Keep a second-vault copy for the cross-vault gate cases.
 - Export a same-vault recovery for every test base and make a complete vault backup before starting.
@@ -41,13 +42,13 @@ Record **Pass**, **Fail**, or **Not applicable** plus a short observation for ev
 5. Confirm results are grouped by knowledge base and then library section. The active base must appear first; other available bases must be ordered by workspace name; the archived base must not appear.
 6. Select the uniquely named note-backed result from the other available base. Confirm every open Command Center view switches to that base, the record is selected, and its focused inspector opens.
 7. Use **Back to main page** from the record inspector. Confirm the previous search and scroll position remain usable, then dismiss the keyboard and confirm the active tab scrolls back into view.
-8. Open **Manage index…**. Record initial-render time and the response while typing five characters; confirm Indexed, Available, Hidden, Groups, and Diagnostics remain usable.
+8. Open **Manage index…**. First verify the explicit-membership contract: the note merely stored under the new base's default new-note folder must remain Available rather than Indexed; adding it explicitly must create durable direct membership that survives moving the file to another eligible folder; linking the prepared folder must add its eligible descendants; and a linked-folder-only descendant must appear in both Indexed and Available with guidance that Available can add durable direct membership. Add that direct membership from Available, then unlink the folder and confirm the note stays Indexed while a folder-only peer leaves. Upgrade the pre-v15 fixture and confirm its former `primaryFolder` appears as a removable legacy linked source without moving or rewriting a note. Then record initial-render time and the response while typing five characters; confirm Indexed, Available, Hidden, Groups, and Diagnostics remain usable. Finally open an Obsidian `.base` using **Knowledge hierarchy** and confirm it neither creates a Command Center knowledge base nor changes membership.
 9. Open **Create note from template or empty note…** with the keyboard visible. Confirm every field and action button is reachable by scrolling inside the modal.
 10. Create notes with an Arabic title and with literal replacement characters such as `$&` and `` $` ``. Confirm filenames and `{{title}}` substitutions preserve the intended text and do not overwrite an existing note.
 11. Enter Arrange mode and use the row **…** menu to Move under, Indent, Outdent, Move up/down, and Make top-level. Confirm each action works by touch and ordinary arrangement does not move or rewrite the Markdown file.
 12. Open a custom Library. Use **Add → Add existing note** to classify a disposable Index topic, confirm it leaves the active base's Knowledge Index, then use the record **…** menu to move it to another custom Library and back. Confirm the Markdown path, file contents, Collection membership, pin, and Next status do not change. Repeat once with a valid built-in clinical destination where the source kind permits it.
 13. Open **Manage libraries**. Create a custom Library, edit its plural/singular labels and icon, reorder it, archive it, and restore it. In that Library create a heading and nested subheading, rename and reorder both, move a record between them, then use **Add subheading** on the subheading to create a depth-3 subheading, counting the heading as level 1. Move a record onto the depth-3 subheading—drag it there where drag-and-drop is available, otherwise use the record **…** menu—and confirm pickers show it with its full path, such as **Heading / Sub / Sub-sub**. Collapse the depth-3 subheading, leave and reopen the Library, and confirm the collapse state and placement persist. Then, from the depth-3 subheading's **…** menu, use **Move under…** to move it beneath a different subheading — confirm the destination list shows full paths, omits the subheading itself and anything inside it, and that the move carries its records and nested subheadings — and use **Outdent one level** to lift it back, confirming that action is unavailable directly under the heading. Remove the depth-3 subheading and confirm its records and any child subheadings move up under its parent, then delete the non-empty heading. Confirm the record remains under the explicit Unplaced section after leaving and reopening Arrange. Archive the Library again and verify permanent deletion requires an explicit record destination. Repeat the menu actions at the largest Dynamic Type setting and confirm nested subheading titles and their **…** menus keep 44 × 44 point targets at every depth.
-14. Export a portable format v5 package containing two selected custom Libraries, one unselected Library, an empty Library, empty headings, nested subheadings including one depth-3 branch, placed records, and an unplaced record. Import it into another disposable base using Merge and then Replace; confirm only the selected Library IDs and exact layouts change and the nested branch arrives at the same depth. Export and restore a same-vault recovery v10 on the source base; confirm both files land under `Knowledge Base Command Center Exports/` and privacy warnings are visible.
+14. Export a portable format v5 package containing two selected custom Libraries, one unselected Library, an empty Library, empty headings, nested subheadings including one depth-3 branch, placed records, and an unplaced record. Import it into another disposable base using Merge and then Replace; confirm only the selected Library IDs and exact layouts change and the nested branch arrives at the same depth. Export and restore a same-vault recovery v11 on the source base; confirm both files land under `Knowledge Base Command Center Exports/` and privacy warnings are visible.
 15. With base A active on the phone and base B active on desktop, make one organization edit in each after Sync is settled. Confirm both survive the next Sync. Do not use this test to imply that simultaneous edits to the same base are field-merged.
 16. Open base management, archive and restore a disposable base, and confirm long names, confirmations, safe areas, and the 50-base-limit message do not clip.
 17. Use Accessibility Inspector to confirm interactive controls meet a 44 × 44 point target, including Library tabs, Library-manager controls, heading/subheading titles at every nesting depth, and their **…** menus; labels and modal focus are meaningful, and layout remains operable at the largest Dynamic Type setting.
@@ -74,11 +75,11 @@ Record **Pass**, **Fail**, or **Not applicable** plus a short observation for ev
 38. Open **Taxonomy health center** with enough synthetic findings to require **Show 200 more**. In portrait, landscape, and largest Dynamic Type, confirm the findings list is the only scrolling region and the toolbar/footer remain reachable. Open **Review repair…** and verify the repair details scroll independently while Cancel and Apply repair remain visible, wrap without clipping, and stay at least 44 points high. Cancel once, then apply one disposable repair and confirm Undo reverses only plugin-owned organization.
 39. Open **Settings → Quick Append → Manage categories** in portrait and landscape at default and largest Dynamic Type. Add, edit, archive, restore, reorder, and reset disposable categories. Confirm labels, entry-style controls, and every footer action wrap without horizontal overflow; Cancel changes nothing; saving with no active category is refused; and all controls have meaningful VoiceOver names and 44-point targets.
 40. Turn on VoiceOver and set the iPhone language/layout direction to Arabic for a pass across Quick Entry, Quick Append and its category manager, Taxonomy health and repair preview, Multi-base portfolio transfer, and Sync & recovery. Confirm dialog titles and explanatory context are announced before footer actions, tab arrow/swipe order is coherent, dynamic Arabic/Latin names use their own readable direction, logical start/end accents mirror, descriptions wrap instead of ellipsizing, and focus remains on the source toggle, destination selector, cross-vault acknowledgement, or Show more control after each portfolio rerender.
-41. Upgrade a disposable existing installation to 0.12.0 in portrait and landscape, then repeat at the largest Dynamic Type size with VoiceOver. Confirm the **What’s new** title and context are announced before its actions, all five highlights wrap without horizontal overflow, and the scroll region and both 44-point actions remain reachable. Before tagging, confirm **Read complete release notes** navigates to the exact `https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.12.0` URL and returns safely to Obsidian; an unavailable/404 page is expected until that tag exists. Reload the plugin twice and confirm the automatic window does not repeat; run **Open what’s new** and confirm one manual window opens without stacking duplicates. In a separate fresh disposable vault, enable 0.12.0 and confirm no automatic update window appears. After tagging, repeat the link action and confirm that exact URL resolves to the published 0.12.0 release.
+41. Upgrade a disposable existing installation to 0.16.0 in portrait and landscape, then repeat at the largest Dynamic Type size with VoiceOver. Confirm the **What’s new** title and context are announced before its actions, all five highlights wrap without horizontal overflow, and the scroll region and both 44-point actions remain reachable. Before tagging, confirm **Read complete release notes** navigates to the exact `https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.16.0` URL and returns safely to Obsidian; an unavailable/404 page is expected until that tag exists. Reload the plugin twice and confirm the automatic window does not repeat; run **Open what’s new** and confirm one manual window opens without stacking duplicates. In a separate fresh disposable vault, enable 0.16.0 and confirm no automatic update window appears. After tagging, repeat the link action and confirm that exact URL resolves to the published 0.16.0 release.
 
 ## Sign-off
 
-- Blocking failures and issue links:
-- Retest evidence:
-- Final result: Pass / Fail
-- Tester signature or initials:
+- Blocking failures and issue links: The physical-iPhone matrix was not executed because no physical iPhone was connected; only simulators were available. The maintainer directed push and tag with this scope explicitly unverified.
+- Retest evidence: `npm run release:bundle` passed on 2026-08-14 with 888/888 runtime tests, TypeScript, zero-warning lint, production build, Community and release verification. The Obsidian plugin validator reported 0 errors and 0 warnings; `npm audit --audit-level=high` reported 0 vulnerabilities. Release ZIP SHA-256: `3fdf9c844cc5ba2295880866e54409981216f6dc1961c90c622c9bd0a3e0d68d`.
+- Final result: Fail — automated gates passed, but the mandatory physical-iPhone gate remains unverified
+- Tester signature or initials: Unsigned — no physical-device tester

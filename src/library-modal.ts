@@ -7,7 +7,7 @@ import {
 } from "./main";
 import { resolveLibraryIconId } from "./library-icons";
 import { errorMessage, type LibraryDefinition } from "./model";
-import { ConfirmModal } from "./modals";
+import { ConfirmModal, modalOwnerWindow } from "./modals";
 
 function reportLibraryError(error: unknown): void {
   console.error("Knowledge Base Command Center library action failed", error);
@@ -179,7 +179,7 @@ export class LibraryEditorModal extends Modal {
     this.updateState();
     if (!this.busy && this.focusNameAfterRender) {
       this.focusNameAfterRender = false;
-      window.setTimeout(() => this.nameInputEl?.focus(), 40);
+      modalOwnerWindow(this.contentEl).setTimeout(() => this.nameInputEl?.focus(), 40);
     }
   }
 

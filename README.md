@@ -11,7 +11,7 @@
 
 _Abstract AI-generated concept artwork, not a product screenshot. Real, sanitized captures appear below; see [asset provenance](docs/assets/README.md)._
 
-Point the plugin at a folder and it builds a searchable visual index of the notes inside it. From there you arrange, group, nest, pin, and classify those notes into Libraries and Collections — and all of that organization lives in the plugin's own data, not in your Markdown. Your files stay exactly where you put them, with the frontmatter you wrote. One installation can hold several independent knowledge bases, so research, study, and project work never bleed into each other. Everything is local: the plugin makes no network request, has no account, and sends no telemetry.
+Build each Index from notes you explicitly add and, when you want dynamic folder membership, folders you explicitly link. A default new-note folder controls storage only: putting a note there never enrolls it in the Index by itself. From there you arrange, group, nest, pin, and classify records into Libraries and Collections — and all of that organization lives in the plugin's own data, not in your Markdown. Your files stay exactly where you put them, with the frontmatter you wrote. One installation can hold several independent knowledge bases, so research, study, and project work never bleed into each other. Everything is local: the plugin makes no network request, has no account, and sends no telemetry.
 
 **Quick links:** [Getting started](docs/GETTING_STARTED.md) · [User guide](docs/USER_GUIDE.md) · [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Apple Shortcuts](docs/APPLE_SHORTCUT.md) · [Templates](templates/README.md) · [Support](SUPPORT.md)
 
@@ -19,7 +19,7 @@ Point the plugin at a folder and it builds a searchable visual index of the note
 
 ![Diagram: an unchanged vault of Markdown notes on the left, an arrow labelled “reads paths and frontmatter only”, and the plugin’s own data on the right holding the index, nested collections, libraries and queues](docs/assets/how-it-works.svg)
 
-_Diagram, not a screenshot._ You point the plugin at a folder; it reads note paths and frontmatter and builds structure in **its own data**. Collections can nest up to five levels, notes can sit in several places at once, and none of it touches your Markdown. Uninstall and every file is exactly where you left it.
+_Diagram, not a screenshot._ The plugin reads paths and cached frontmatter for direct note memberships and explicit linked-folder rules, then builds structure in **its own data**. A note's storage folder is otherwise irrelevant to Index membership. Collections can nest up to five levels, records can sit in several places at once, and Generic organization never rewrites your Markdown. Uninstall and every file is exactly where you left it.
 
 ### In the app
 
@@ -76,8 +76,8 @@ The plugin folder contains `data.json` with synced knowledge bases, settings, Li
 
 ## Quick start
 
-1. **Create a knowledge base.** Choose **Generic knowledge base** and select the folder holding the notes you want to index. (The ENT clinical preset is optional and is described below.)
-2. **Review the Index.** Every Markdown note below that folder appears automatically. Use **Add → Add existing note to Index** to pull in an eligible note from elsewhere in the vault.
+1. **Create a knowledge base.** Choose **Generic knowledge base** and select the default folder for notes you create later. This is a storage default, not an Index rule. (The ENT clinical preset is optional and is described below.)
+2. **Choose membership deliberately.** Use **Add → Add existing note to Index** for durable one-note membership. When you deliberately link a folder, its eligible Markdown descendants join through that named rule; no other folder is scanned as Index authority.
 3. **Shape the view.** Choose **Arrange**, then group, nest, and reorder records. Drag on desktop; use each row's **…** menu on touch devices. Nothing on disk changes.
 4. **Add Libraries and Collections.** Libraries are primary categories such as Papers or Projects. Collections are reusable lists that cut across them — a note can belong to many Collections at once.
 5. **Export a recovery package.** Create a same-vault recovery export for each knowledge base and keep it private. This is what restores your organization if plugin data is ever lost.
@@ -88,7 +88,7 @@ Then read the [Getting started guide](docs/GETTING_STARTED.md).
 
 | Concept | What it is | Membership |
 | --- | --- | --- |
-| **Knowledge base** | An independent Command Center index profile with its own folder scope, labels, Libraries, collections, queues, templates, history, and settings. It is not an Obsidian `.base` file or a saved Workspace layout. | The same Markdown note can be organized independently in more than one knowledge base. |
+| **Knowledge base** | An independent Command Center index profile with its own direct members, linked-folder rules, labels, Libraries, collections, queues, templates, history, and settings. It is not an Obsidian `.base` file or a saved Workspace layout. | The same Markdown note can be organized independently in more than one knowledge base. |
 | **Library** | A top-level category inside one knowledge base, with its own icon, headings, subheadings, order, and unplaced section. The Knowledge Index is the base's default primary section. | A subject has one primary Index/Library section per knowledge base. |
 | **Collection** | A reusable personal list that can span the Index and Libraries, with optional headings and nested subheadings. | A subject can belong to several Collections without being duplicated, moved, or reclassified. |
 
@@ -96,7 +96,11 @@ Then read the [Getting started guide](docs/GETTING_STARTED.md).
 
 ### Visual index and Index Manager
 
-The index starts from a configured folder plus optional ID, group, and parent properties. Choose **Arrange** to build a separate visual hierarchy — group, nest, reorder, indent, pin — that changes only plugin-owned organization.
+The Index starts empty in a new Generic base. **Add existing note to Index** records direct membership that does not depend on where the note is stored. An explicit linked-folder rule can instead supply eligible current and future descendants dynamically. The default new-note folder, Inbox folder, template folder, and per-Library creation folders are storage or workflow settings; none becomes an Index source merely because it is configured.
+
+Generic bases loaded from pre-v15 plugin data retain their former `primaryFolder` behavior as one removable legacy linked-folder source. This compatibility migration preserves what appeared before the upgrade without making that folder authoritative again. Unlinking a folder removes only membership supplied by that rule; an explicitly added note remains a direct member, and no Markdown file is moved, deleted, or rewritten.
+
+Choose **Arrange** to build a separate visual hierarchy — group, nest, reorder, indent, pin — that changes only plugin-owned organization.
 
 **Manage Index…** provides Indexed, Available, Hidden, Groups, and Diagnostics views for bulk membership work and safe integrity repair. Removing or hiding membership never deletes the Markdown file; it can be restored from the Hidden tab.
 
@@ -213,8 +217,8 @@ No network requests, no analytics, no telemetry, no accounts, no advertising, no
 
 | | Generic knowledge base | ENT clinical preset |
 | --- | --- | --- |
-| Best for | Research, study, projects, courses, and other folder-based knowledge bases | The original protected ENT study workflow |
-| Index scope | Configurable | Canonical clinical scope is protected |
+| Best for | Research, study, projects, courses, and other Markdown knowledge bases | The original protected ENT study workflow |
+| Index membership | Direct note memberships plus folders the user explicitly links; creation/storage folders never enroll notes | Canonical clinical source scope is protected |
 | Libraries | User-defined | User-defined plus protected Procedures, Medications, and Syndromes |
 | File-changing workflows | Explicit note creation only | Note creation plus two separately disclosed, confirmation-gated canonical workflows |
 | Clinical approval | Not applicable | The plugin never grants clinical review approval and respects `ai_lock: true` |
@@ -299,7 +303,7 @@ See [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md) for the exact e
 
 Same-vault recovery protects plugin-owned organization for one knowledge base; it is not a backup of Markdown notes or attachments. Back up the complete vault, including `.obsidian`, and export one current private recovery per available base. Archived bases must be restored temporarily before export.
 
-Recovery is a standalone replacement, never a merge with portable sections. Current v10 files carry the nested Collection and Library subheading layout, dynamic Library definitions, and locks to their source vault, base, and preset, all of which are verified before mutation. Older identity-less formats require additional overrides and conservative path checks.
+Recovery is a standalone replacement, never a merge with portable sections. Current v11 files carry the nested Collection and Library subheading layout, dynamic Library definitions, explicit Index membership and linked-folder provenance, and locks to their source vault, base, and preset, all of which are verified before mutation. Older identity-less formats require additional overrides and conservative path checks.
 
 Follow the complete [backup and restore procedure](docs/PORTABILITY_AND_RECOVERY.md#backup-and-restore) before restoring anything.
 

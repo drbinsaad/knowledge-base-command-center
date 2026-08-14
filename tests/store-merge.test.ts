@@ -45,6 +45,8 @@ function historySnapshot(label: string): PersonalSnapshot {
     nextStudyPaths: [],
     savedViews: [],
     curriculumVisual: { parentByPath: {}, orderByContainer: {} },
+    directIndexPaths: [],
+    indexFolderSources: [],
     manualIndexPaths: [],
     excludedIndexPaths: [],
     indexGroupByPath: {},
@@ -541,6 +543,31 @@ test("UI-only state cannot outrank a structural edit in either merge direction, 
   assert.equal(uiLocal.store.bases[0]?.data.selectedPath, "Knowledge/Viewed.md");
   assert.equal(structuralLocal.semanticConflicts.length, 0);
   assert.equal(uiLocal.semanticConflicts.length, 0);
+});
+
+test("direct-note and linked-folder membership are semantic and follow causal merges", () => {
+  const ancestor = entry("base-a", "Research", 100);
+  const edited = structuredClone(ancestor);
+  advanceEntry(edited, () => {
+    edited.data.directIndexPaths = ["Notes/Explicit.md"];
+    edited.data.indexFolderSources = [{
+      id: "index-folder-projects",
+      path: "Projects",
+      origin: "user",
+    }];
+  }, 200);
+
+  const forward = mergeKnowledgeBaseStores(store([ancestor]), store([edited]), "base-a");
+  const reverse = mergeKnowledgeBaseStores(store([edited]), store([ancestor]), "base-a");
+  for (const result of [forward, reverse]) {
+    assert.equal(result.semanticConflicts.length, 0);
+    assert.deepEqual(result.store.bases[0]?.data.directIndexPaths, ["Notes/Explicit.md"]);
+    assert.deepEqual(result.store.bases[0]?.data.indexFolderSources, [{
+      id: "index-folder-projects",
+      path: "Projects",
+      origin: "user",
+    }]);
+  }
 });
 
 test("equal semantic revisions report deterministic conflict metadata and converge semantically", () => {

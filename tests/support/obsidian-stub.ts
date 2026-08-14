@@ -134,7 +134,9 @@ export function parseYaml(yaml: string): unknown {
     else if (/^(?:null|~)$/iu.test(rawValue)) result[key] = null;
     else if (/^(?:true|yes|on)$/iu.test(rawValue)) result[key] = true;
     else if (/^(?:no|off)$/iu.test(rawValue)) result[key] = false;
-    else if (/^".*"$/u.test(rawValue)) result[key] = JSON.parse(rawValue) as unknown;
+    else if (/^(?:".*"|\[.*\]|\{.*\}|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?)$/u.test(rawValue)) {
+      result[key] = JSON.parse(rawValue) as unknown;
+    }
     else result[key] = rawValue;
   }
   return result;

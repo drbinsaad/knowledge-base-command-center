@@ -69,9 +69,21 @@ test("public repository metadata is present", async () => {
   assert.ok(portableVersion, "src/portability.ts must declare PORTABLE_EXPORT_VERSION");
   const model = await readFile(path.join(root, "src", "model.ts"), "utf8");
   const backupVersion = /export interface PersonalBackup extends PersonalOrganizationState \{[\s\S]*?\n {2}version: (\d+);/u.exec(model)?.[1];
+  const dataVersion = /export const DATA_VERSION = (\d+);/u.exec(model)?.[1];
+  const storeVersion = /export const STORE_VERSION = (\d+);/u.exec(model)?.[1];
   assert.ok(backupVersion, "src/model.ts must declare the PersonalBackup version");
+  assert.ok(dataVersion, "src/model.ts must declare DATA_VERSION");
+  assert.ok(storeVersion, "src/model.ts must declare STORE_VERSION");
+  const recoveryGuide = await readFile(path.join(root, "docs", "PORTABILITY_AND_RECOVERY.md"), "utf8");
+  const gettingStarted = await readFile(path.join(root, "docs", "GETTING_STARTED.md"), "utf8");
+  const troubleshooting = await readFile(path.join(root, "docs", "TROUBLESHOOTING.md"), "utf8");
   assert.match(readme, new RegExp(`Portable packages created by version .* use format version ${portableVersion}`, "iu"));
   assert.match(readme, new RegExp(`Current v${backupVersion} (?:snapshots|files)`, "iu"));
+  assert.match(recoveryGuide, new RegExp(`Current version-${backupVersion} recovery files`, "iu"));
+  assert.match(recoveryGuide, new RegExp(`\\*\\*Version ${backupVersion}:\\*\\* current format`, "iu"));
+  assert.match(gettingStarted, new RegExp(`version-${storeVersion} store and schema-${dataVersion} knowledge-base data`, "iu"));
+  assert.match(recoveryGuide, new RegExp(`version-${storeVersion} store with version-${dataVersion} knowledge-base data`, "iu"));
+  assert.match(troubleshooting, new RegExp(`version-${storeVersion} store with schema-${dataVersion} knowledge-base data`, "iu"));
   assert.match(readme, /obsidian:\/\/kbcc-quick-entry/);
   assert.match(readme, /obsidian:\/\/kbcc-create-subject/);
   assert.match(readme, /obsidian:\/\/kbcc-create-heading/);
@@ -95,7 +107,7 @@ test("public repository metadata is present", async () => {
   assert.match(iphoneChecklist, /Manage categories/);
   assert.match(iphoneChecklist, /Turn on VoiceOver/);
   assert.match(iphoneChecklist, /What’s new/);
-  assert.match(iphoneChecklist, /releases\/tag\/0\.12\.0/);
+  assert.match(iphoneChecklist, /releases\/tag\/0\.16\.0/);
   const commandAppendix = userGuide.slice(userGuide.indexOf("\n## Commands\n"), userGuide.indexOf("\n## Safety boundary\n"));
   for (const command of [
     "Quick append: Add to current note…",

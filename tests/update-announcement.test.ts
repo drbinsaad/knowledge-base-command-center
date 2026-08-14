@@ -8,6 +8,7 @@ import {
   isSemanticVersion,
   planUpdateAnnouncement,
   UPDATE_ANNOUNCEMENT_0_12_0,
+  UPDATE_ANNOUNCEMENT_0_16_0,
   type UpdateAnnouncement,
 } from "../src/update-announcement.ts";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
@@ -50,6 +51,20 @@ test("existing installs see each catalogued upgrade once and receive the exact r
   const fromEarlierRelease = planUpdateAnnouncement("0.12.0", "0.11.0", true);
   assert.equal(fromEarlierRelease.announcement?.version, "0.12.0");
   assert.equal(fromEarlierRelease.nextHighestObservedVersion, "0.12.0");
+});
+
+test("0.16.0 has curated explicit-membership and safety news", () => {
+  const upgrade = planUpdateAnnouncement("0.16.0", "0.15.0", true);
+  assert.equal(upgrade.announcement, UPDATE_ANNOUNCEMENT_0_16_0);
+  assert.equal(UPDATE_ANNOUNCEMENT_0_16_0.highlights.length, 5);
+  assert.match(UPDATE_ANNOUNCEMENT_0_16_0.highlights.join("\n"), /default new-note folder/u);
+  assert.match(UPDATE_ANNOUNCEMENT_0_16_0.highlights.join("\n"), /direct membership/u);
+  assert.match(UPDATE_ANNOUNCEMENT_0_16_0.highlights.join("\n"), /linked folder is a named, removable Index source/u);
+  assert.match(UPDATE_ANNOUNCEMENT_0_16_0.highlights.join("\n"), /rechecks the exact preview/u);
+  assert.equal(
+    UPDATE_ANNOUNCEMENT_0_16_0.releaseUrl,
+    "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.16.0",
+  );
 });
 
 test("downgrades never replay an announcement and prerelease precedence stays deterministic", () => {
@@ -224,6 +239,7 @@ test("onLayoutReady owns automatic presentation and unload prevents a late or du
   const createLifecycle = () => {
     const localStorage = new Map<string, unknown>();
     let layoutReady: (() => void) | null = null;
+    let subscriptions = 0;
     const app = {
       vault: {
         configDir: ".obsidian",
@@ -231,7 +247,7 @@ test("onLayoutReady owns automatic presentation and unload prevents a late or du
         getAbstractFileByPath: () => null,
         createFolder: async () => {},
         create: async () => null,
-        on: () => ({ unsubscribe: () => {} }),
+        on: () => { subscriptions += 1; return { unsubscribe: () => {} }; },
       },
       workspace: {
         getActiveFile: () => null,
@@ -240,7 +256,7 @@ test("onLayoutReady owns automatic presentation and unload prevents a late or du
       },
       metadataCache: {
         getFileCache: () => null,
-        on: () => ({ unsubscribe: () => {} }),
+        on: () => { subscriptions += 1; return { unsubscribe: () => {} }; },
       },
       fileManager: {},
       loadLocalStorage: (key: string) => structuredClone(localStorage.get(key) ?? null),
@@ -258,7 +274,7 @@ test("onLayoutReady owns automatic presentation and unload prevents a late or du
     plugin.registerObsidianProtocolHandler = () => {};
     const opened: UpdateAnnouncement[] = [];
     plugin.openUpdateAnnouncement = (announcement) => { opened.push(announcement); };
-    return { plugin, opened, ready: () => layoutReady?.() };
+    return { plugin, opened, ready: () => layoutReady?.(), subscriptions: () => subscriptions };
   };
 
   const active = createLifecycle();
@@ -267,12 +283,14 @@ test("onLayoutReady owns automatic presentation and unload prevents a late or du
   active.ready();
   active.ready();
   assert.equal(active.opened.length, 1);
+  assert.equal(active.subscriptions(), 4, "layout readiness installs one owned listener set");
 
   const unloaded = createLifecycle();
   await unloaded.plugin.onload();
   unloaded.plugin.onunload();
   unloaded.ready();
   assert.equal(unloaded.opened.length, 0);
+  assert.equal(unloaded.subscriptions(), 0, "a late layout callback installs no post-unload listeners");
 });
 
 test("What’s New modal is semantic, owner-document local, touch-sized, and safely links to the exact release", () => {

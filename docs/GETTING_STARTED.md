@@ -1,11 +1,11 @@
 # Getting started
 
-Knowledge Base Command Center is an Obsidian plugin for building independent visual indexes over folder-based Markdown knowledge bases. This guide covers installation, first-run setup, note creation, device updates, and safe migration from earlier plugin versions.
+Knowledge Base Command Center is an Obsidian plugin for building independent visual indexes over Markdown notes without making their storage folders authoritative. This guide covers installation, first-run setup, note creation, device updates, and safe migration from earlier plugin versions.
 
 ## Requirements
 
 - Obsidian 1.13.0 or newer.
-- A vault with one or more folders of Markdown notes.
+- A vault with one or more Markdown notes.
 - A complete vault backup before importing recovery data or upgrading the old single-base format across several synced devices.
 
 The visible product name is **Knowledge Base Command Center**. Its stable plugin ID remains <code>ent-vault-command-center</code> so existing installations retain the same plugin folder and <code>data.json</code>.
@@ -47,7 +47,7 @@ The setup wizard asks for:
 
 - the Command Center name and description;
 - Index, item, group, and Inbox labels;
-- the indexed folder, Inbox folder, default note folder, and templates folder;
+- the Inbox folder, default new-note storage folder, templates folder, and export folder;
 - optional ID, group, and parent frontmatter property names; and
 - whether new notes start empty or from a chosen default template.
 
@@ -55,7 +55,7 @@ Most choices can be changed later in **Settings → Community plugins → Knowle
 
 ### Choose a profile
 
-**Generic knowledge base** is the default. Use it for research, projects, courses, reading, or another folder-based knowledge system. Its folder scope, labels, metadata mappings, and Libraries are configurable.
+**Generic knowledge base** is the default. Use it for research, projects, courses, reading, or another Markdown knowledge system. Its direct note memberships, optional linked-folder rules, labels, metadata mappings, and Libraries are configurable. The default new-note folder controls only where creation starts; it never adds existing or future notes to the Index.
 
 **ENT clinical preset** preserves the original protected study workflow. Its canonical indexed folder and source-derived clinical classifications are guarded so organization cannot silently rewrite clinical structure. It remains a study workflow, not a medical record or autonomous clinical decision-support system.
 
@@ -70,6 +70,13 @@ The profile is fixed after a knowledge base is created. Create or duplicate anot
 
 A single Markdown note can be organized in several knowledge bases. Within one knowledge base, a subject has one primary Index/Library classification but can belong to several Collections.
 
+Generic Index membership has two explicit sources:
+
+- **Direct membership:** **Add existing note to Index**, **Add current note**, or an explicit Index creation flow records the exact note in plugin data. Moving that note to another eligible vault folder does not cancel the membership.
+- **Linked-folder membership:** a folder contributes eligible descendants only after it is deliberately linked. Unlinking it removes the rule, not the files; direct memberships remain direct.
+
+The Inbox, default new-note, template, export, attachment, and per-Library creation folders do not become Index sources. If a note inside the Inbox is also added directly or matched by an explicit linked-folder rule, that explicit Index choice wins over its storage location unless you deliberately classify the note in a Library. Generic organization changes plugin data only and never edits note bodies, frontmatter, filenames, or folder locations. Creating a new note is a separate explicit file-writing action.
+
 ## Create or add notes
 
 Use **Add → Create note** or **Create note from template or empty note…**. For each note, choose:
@@ -82,7 +89,9 @@ Use **Add → Create note** or **Create note from template or empty note…**. F
 
 Templates can use <code>{{title}}</code>, <code>{{date}}</code>, and <code>{{time}}</code>. Other template text is copied unchanged. The plugin previews the destination, creates missing folders safely, and refuses to overwrite an existing file.
 
-In a Generic base, **Add → Add existing note to Index** can include an eligible note from elsewhere in the vault without moving it. In a Library, Add actions can classify an existing note, the current note, or a newly created note in that Library.
+In a Generic base, **Add → Add existing note to Index** records durable direct membership without moving or rewriting the note, regardless of its folder. In a Library, Add actions can classify an existing note, the current note, or a newly created note in that Library; classification is likewise plugin-owned organization.
+
+Creating a note in the default new-note folder does not enroll it in the Index unless the creation flow explicitly targets the Index or another selected organization destination. Storage and membership are separate choices.
 
 ## Set up Quick entry
 
@@ -126,6 +135,8 @@ Permanent deletion is available only for an archived base and requires typed con
 
 Version 0.10 and later wrap earlier single-base organization into one knowledge base without intentionally resetting it. The first upgraded copy receives a random full vault identity plus a non-secret fingerprint of its legacy organization.
 
+When a Generic base stored in pre-v15 plugin data is upgraded, its former `primaryFolder` becomes one deterministic **legacy linked-folder source**. This preserves the notes that appeared under the old folder-authoritative behavior. The source can be unlinked later like any other folder rule; doing so never deletes or moves Markdown, and notes explicitly added directly remain members.
+
 When upgrading a synced vault on several devices:
 
 1. Install the same current release line everywhere. Every device that can edit the synced plugin data must run the same release as the newest device before organization work resumes.
@@ -135,7 +146,7 @@ When upgrading a synced vault on several devices:
 
 Identical pristine upgrades can converge through Sync. If exactly one same-origin copy was edited before convergence, that edited copy wins because the other has no unique work. Two independently edited copies are not guessed together; the plugin preserves data and enters a protected read-only state.
 
-An older device that encounters the version-15 store and schema-14 knowledge-base data preserves it read-only. It may describe the event as a migration failure because it cannot faithfully save the newer settings and causal Sync metadata. That is downgrade protection, not proof of corruption. Update every synced device before editing; do not keep working with an older build.
+An older device that encounters the version-15 store and schema-15 knowledge-base data preserves it read-only. It may describe the event as a migration failure because it cannot faithfully save the newer settings, membership provenance, and causal Sync metadata. That is downgrade protection, not proof of corruption. Update every synced device before editing; do not keep working with an older build.
 
 Recovery exported before first-upgrade identity convergence may carry the losing provisional identity and is intentionally rejected afterward. Export it again once Sync has settled.
 

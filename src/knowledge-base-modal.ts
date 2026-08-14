@@ -1,7 +1,7 @@
 import { Modal, Notice, Setting, setIcon } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
 import { errorMessage, sanitizeFileName, type KnowledgeBaseEntry, type WorkspaceMode } from "./model";
-import { ConfirmModal, createOpenedBaseGuard, TextPromptModal, type OpenedBaseGuard } from "./modals";
+import { ConfirmModal, createOpenedBaseGuard, modalOwnerWindow, TextPromptModal, type OpenedBaseGuard } from "./modals";
 
 function reportError(error: unknown): void {
   console.error("Knowledge Base Command Center base action failed", error);
@@ -39,7 +39,7 @@ export class CreateKnowledgeBaseModal extends Modal {
     this.contentEl.empty();
     this.titleEl.setText("New knowledge base");
     this.contentEl.createEl("p", {
-      text: "Create an independent index with its own folders, headings, subjects, collections, templates, study state, and history. Existing notes are never moved.",
+      text: "Create an independent index with its own headings, subjects, collections, templates, study state, and history. Existing notes are never moved or added automatically.",
     });
     this.contentEl.createDiv({
       cls: "ent-cc-base-terminology-note",
@@ -76,7 +76,7 @@ export class CreateKnowledgeBaseModal extends Modal {
       .setName("Preset")
       .setDesc(this.mode === "ent-clinical"
         ? "Uses the protected ENT proposal and clinical review workflow."
-        : "Works with any folder-based collection of Markdown notes.")
+        : "Works with explicitly added Markdown notes and folders you choose to link.")
       .addDropdown((dropdown) => dropdown
         .addOptions({ generic: "Generic knowledge base", "ent-clinical": "ENT clinical preset" })
         .setValue(this.mode)
@@ -87,8 +87,8 @@ export class CreateKnowledgeBaseModal extends Modal {
 
     if (this.mode === "generic") {
       new Setting(this.contentEl)
-        .setName("Indexed notes folder")
-        .setDesc("This is the base's automatic index scope. Use a separate folder for an independent index, or intentionally overlap another base to share notes.")
+        .setName("Default new-note folder")
+        .setDesc("New notes start here. Storage never adds a note to the index; use add existing note or explicitly link a folder after creating the base.")
         .addText((text) => {
           this.folderInputEl = text.inputEl;
           text.setPlaceholder("Knowledge bases/research")
@@ -140,20 +140,11 @@ export class CreateKnowledgeBaseModal extends Modal {
     if (!warning || this.mode !== "generic") return;
     const folder = this.folder.trim().replace(/^\/+|\/+$/g, "");
     if (!folder) {
-      warning.setText("Choose a folder for this base's automatic index. You can still add notes from other folders manually.");
+      warning.setText("Choose where newly created notes should be stored.");
       warning.removeClass("is-hidden");
       return;
     }
-    const overlap = this.plugin.getKnowledgeBases().find((entry) => {
-      const existing = entry.data.settings.primaryFolder.trim().replace(/^\/+|\/+$/g, "");
-      return !existing || folder === existing || folder.startsWith(`${existing}/`) || existing.startsWith(`${folder}/`);
-    });
-    if (!overlap) {
-      warning.setText("");
-      warning.addClass("is-hidden");
-      return;
-    }
-    warning.setText(`This scope overlaps “${overlap.data.settings.workspaceName}” (${overlap.data.settings.primaryFolder || "Vault root"}). Shared notes are allowed, but choose a separate folder if you want an empty independent index.`);
+    warning.setText("This base will start with an empty index. Notes in this folder remain outside it until you explicitly add them or link the folder.");
     warning.removeClass("is-hidden");
   }
 
@@ -166,7 +157,7 @@ export class CreateKnowledgeBaseModal extends Modal {
       return;
     }
     if (this.mode === "generic" && !this.folder.trim()) {
-      this.error = "Choose an indexed notes folder so this base has an explicit scope.";
+      this.error = "Choose a default folder for newly created notes.";
       this.updateNameFeedback();
       return;
     }
@@ -182,7 +173,7 @@ export class CreateKnowledgeBaseModal extends Modal {
       this.error = errorMessage(error);
       this.render();
       console.error("Knowledge Base Command Center could not create the base", error);
-      window.setTimeout(() => this.nameInputEl?.focus(), 0);
+      modalOwnerWindow(this.contentEl).setTimeout(() => this.nameInputEl?.focus(), 0);
     }
   }
 }

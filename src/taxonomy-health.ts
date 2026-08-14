@@ -1,5 +1,6 @@
 import {
   childSubheadings,
+  INDEX_FOLDER_VAULT_ROOT,
   isPortablePlaceholderPath,
   normalizeWikiLink,
   pathIsInsideFolder,
@@ -449,6 +450,17 @@ function addPathFindings(findings: TaxonomyHealthFinding[], input: TaxonomyHealt
       id: findingId("unavailable-path", "folder", label, path), kind: "unavailable-path", severity: "warning",
       title: `${label} is unavailable`, scope: "Settings",
       detail: `The configured vault-relative folder “${path}” is not currently available. It may still be arriving through Sync, so the health center will not clear it automatically.`,
+    });
+  }
+  for (const source of data.indexFolderSources) {
+    if (source.path === INDEX_FOLDER_VAULT_ROOT || existingFolderPaths.has(source.path)) continue;
+    findings.push({
+      id: findingId("unavailable-path", "index-folder-source", source.id, source.path),
+      kind: "unavailable-path",
+      severity: "warning",
+      title: "Linked Index folder is unavailable",
+      scope: "Index membership",
+      detail: `The linked vault-relative folder “${source.path}” is not currently available. Its notes may still be arriving through Sync, so the health center will not unlink it automatically.`,
     });
   }
   const template = data.settings.defaultTemplatePath;

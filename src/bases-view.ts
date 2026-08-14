@@ -1,4 +1,4 @@
-import { BasesView, Notice, NullValue, setIcon } from "obsidian";
+import { BasesView, Notice, NullValue, setIcon, TFile } from "obsidian";
 import type {
   BasesAllOptions,
   BasesEntry,
@@ -172,7 +172,11 @@ export class EntHierarchyBasesView extends BasesView {
 
   private readonly containerEl: HTMLElement;
 
-  constructor(controller: QueryController, parentEl: HTMLElement) {
+  constructor(
+    controller: QueryController,
+    parentEl: HTMLElement,
+    private readonly openRecord?: (file: TFile) => Promise<void>,
+  ) {
     super(controller);
     this.containerEl = parentEl.createDiv({ cls: "ent-cc-bases-view" });
     this.renderWindow = this.containerEl.ownerDocument.defaultView;
@@ -434,7 +438,10 @@ export class EntHierarchyBasesView extends BasesView {
     row.addEventListener("click", () => {
       if (generation !== this.renderGeneration || !this.containerEl.contains(row)) return;
       try {
-        void this.app.workspace.getLeaf("tab").openFile(file).catch((error) => {
+        const open = this.openRecord
+          ? this.openRecord(file)
+          : this.app.workspace.getLeaf("tab").openFile(file);
+        void open.catch((error) => {
           new Notice(errorMessage(error));
         });
       } catch (error) {

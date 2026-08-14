@@ -27,6 +27,7 @@ import {
   setCloneJsonValueObserver,
   nextSemanticHead,
   isFreshVaultId,
+  INDEX_FOLDER_VAULT_ROOT,
   parseQuery,
   portablePlaceholderPath,
   provisionalInterimEnvelopeVaultFingerprint,
@@ -53,6 +54,7 @@ import { IndexManagerModal } from "../src/index-manager.ts";
 import { ConfirmModal, IndexGroupModal, StringPickerModal, TextPromptModal, VaultFilePickerModal } from "../src/modals.ts";
 import { EntCommandCenterSettingsTab } from "../src/settings.ts";
 import { QuickAppendModal } from "../src/follow-up-modal.ts";
+import { AttachmentImportModal } from "../src/attachment-modal.ts";
 import { Notice, Plugin, TFile, TFolder, type TAbstractFile } from "obsidian";
 import { mergeKnowledgeBaseStores } from "../src/store-merge.ts";
 import { createPortfolioExport, type PortfolioExportV1 } from "../src/portfolio.ts";
@@ -68,6 +70,23 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve: () => void = () => {};
   const promise = new Promise<void>((done) => { resolve = done; });
   return { promise, resolve };
+}
+
+/** Production processFrontMatter rewrites the Markdown; note-operation mocks
+ * keep their raw content and metadata in lockstep so transaction-token checks
+ * exercise the same boundary. */
+function replaceTestFrontmatter(content: string, metadata: Record<string, unknown>): string {
+  const normalized = content.startsWith("\uFEFF") ? content.slice(1) : content;
+  const lines = normalized.split(/\r\n|\n|\r/u);
+  const closingIndex = /^---[ \t]*$/u.test(lines[0] ?? "")
+    ? lines.findIndex((line, index) => index > 0 && /^(?:---|\.\.\.)[ \t]*$/u.test(line))
+    : -1;
+  const body = closingIndex >= 0 ? lines.slice(closingIndex + 1).join("\n") : normalized;
+  const properties = Object.entries(metadata)
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => `${JSON.stringify(key)}: ${JSON.stringify(value)}`)
+    .join("\n");
+  return `---\n${properties}\n---\n${body}`;
 }
 
 function migrationFingerprintForTest(value: unknown): string {
@@ -339,6 +358,7 @@ function pluginWithFiles(
   files: TFile[],
   frontmatterByPath: Record<string, Record<string, unknown>>,
   initialDeviceState: unknown = null,
+  folders: TFolder[] = [],
 ): {
   plugin: EntVaultCommandCenterPlugin & TestPluginBase;
   metadataReadCount: () => number;
@@ -361,7 +381,9 @@ function pluginWithFiles(
         vaultEnumerations += 1;
         return files;
       },
-      getAbstractFileByPath: (path: string) => files.find((file) => file.path === path) ?? null,
+      getAbstractFileByPath: (path: string) => (
+        files.find((file) => file.path === path) ?? folders.find((folder) => folder.path === path) ?? null
+      ),
       modify: forbiddenSourceMutation,
       process: forbiddenSourceMutation,
       create: forbiddenSourceMutation,
@@ -397,6 +419,15 @@ function pluginWithFiles(
   };
 }
 
+/** Give a generic test base explicit folder-derived Index membership. */
+function setLinkedIndexFolders(data: PluginData, ...paths: string[]): void {
+  data.indexFolderSources = paths.map((path, index) => ({
+    id: `test-index-folder-${index + 1}`,
+    path,
+    origin: "user",
+  }));
+}
+
 function invalidEntMedicationIndexData(file: TFile): ReturnType<typeof migrateData> {
   const data = migrateData(null);
   data.settings.workspaceMode = "ent-clinical";
@@ -414,7 +445,7 @@ function invalidEntMedicationIndexData(file: TFile): ReturnType<typeof migrateDa
     libraryId: null,
   }];
   data.portableIndex.resolvedPathBySubjectId = { "legacy-medication": file.path };
-  data.manualIndexPaths = [file.path];
+  data.directIndexPaths = [file.path];
   data.indexGroupByPath = { [file.path]: "Legacy Index" };
   return data;
 }
@@ -465,7 +496,7 @@ function diverseLegacyEntIndexData(): {
       .filter(([, path]) => !path.startsWith("kbcc-placeholder:"))
       .map(([id, path]) => [id, path]),
   );
-  data.manualIndexPaths = definitions.map(([, path]) => path);
+  data.directIndexPaths = definitions.map(([, path]) => path);
   const files = Object.values(paths)
     .filter((path) => !path.startsWith("kbcc-placeholder:"))
     .map((path) => new TFile(path));
@@ -907,7 +938,7 @@ test("an empty proposal folder never reclassifies notes during clinical repair",
     libraryId: null,
   }];
   data.portableIndex.resolvedPathBySubjectId = { "topic-subject": topic.path };
-  data.manualIndexPaths = [topic.path, plain.path];
+  data.directIndexPaths = [topic.path, plain.path];
   const store = createDefaultStore(data, 100, "vault-empty-proposal-folder");
   const { plugin } = pluginWithFiles(store, [topic, plain], {
     [topic.path]: { title: "Vocal fold palsy" },
@@ -916,7 +947,7 @@ test("an empty proposal folder never reclassifies notes during clinical repair",
 
   await plugin.loadPluginData();
 
-  assert.deepEqual(plugin.data.manualIndexPaths, [topic.path, plain.path]);
+  assert.deepEqual(plugin.data.directIndexPaths, [topic.path, plain.path]);
   const subject = plugin.data.portableIndex.subjects.find((entry) => entry.id === "topic-subject");
   assert.equal(subject?.indexed, true);
   assert.equal(subject?.recordKind, "topic");
@@ -966,7 +997,7 @@ test("startup atomically rehomes invalid ENT Index data across every base and wr
   ];
   active.portableIndex.resolvedPathBySubjectId = { "medication-collision": medication.path };
   const syndromePlaceholder = portablePlaceholderPath("syndrome-placeholder");
-  active.manualIndexPaths = [medication.path, syndromePlaceholder];
+  active.directIndexPaths = [medication.path, syndromePlaceholder];
   active.indexGroupByPath = { [medication.path]: "Legacy Index", [syndromePlaceholder]: "Legacy Index" };
   active.curriculumVisual.parentByPath[portablePlaceholderPath("topic-child")] = medication.path;
 
@@ -987,7 +1018,7 @@ test("startup atomically rehomes invalid ENT Index data across every base and wr
     libraryId: null,
   }];
   inactive.portableIndex.resolvedPathBySubjectId = { "legacy-procedure": procedure.path };
-  inactive.manualIndexPaths = [procedure.path];
+  inactive.directIndexPaths = [procedure.path];
 
   const generic = migrateData(null);
   generic.settings.workspaceMode = "generic";
@@ -1027,7 +1058,7 @@ test("startup atomically rehomes invalid ENT Index data across every base and wr
     { indexed: syndromeSubject?.indexed, kind: syndromeSubject?.recordKind, libraryId: syndromeSubject?.libraryId },
     { indexed: false, kind: "syndrome", libraryId: "syndrome" },
   );
-  assert.deepEqual(plugin.data.manualIndexPaths, []);
+  assert.deepEqual(plugin.data.directIndexPaths, []);
   assert.equal(plugin.data.portableIndex.subjects.find((subject) => subject.id === "topic-child")?.parentId, null);
   assert.equal(plugin.data.curriculumVisual.parentByPath[portablePlaceholderPath("topic-child")], null);
   assert.equal(plugin.data.indexGroupByPath[medication.path], undefined);
@@ -1038,7 +1069,7 @@ test("startup atomically rehomes invalid ENT Index data across every base and wr
     { indexed: procedureSubject?.indexed, kind: procedureSubject?.recordKind, libraryId: procedureSubject?.libraryId },
     { indexed: false, kind: "procedure", libraryId: "procedure" },
   );
-  assert.deepEqual(remediatedArchived?.data.manualIndexPaths, []);
+  assert.deepEqual(remediatedArchived?.data.directIndexPaths, []);
   const genericSubject = plugin.getKnowledgeBases(true)
     .find((entry) => entry.id === "base-generic")?.data.portableIndex.subjects[0];
   assert.equal(genericSubject?.indexed, true, "Generic knowledge bases remain unrestricted");
@@ -1259,7 +1290,7 @@ test("Undo repairs a historical ENT snapshot before persisting it", async () => 
     { indexed: subject?.indexed, kind: subject?.recordKind, libraryId: subject?.libraryId },
     { indexed: false, kind: "medication", libraryId: "medication" },
   );
-  assert.deepEqual(plugin.data.manualIndexPaths, []);
+  assert.deepEqual(plugin.data.directIndexPaths, []);
   assert.equal(plugin.savedData.length, 0, "normalization returned to the committed semantics; only local history changed");
   assert.ok(plugin.deviceLocalWrites.length > 0);
 });
@@ -1296,7 +1327,7 @@ test("organization snapshot restoration repairs historical ENT Index membership 
   assert.equal(restored?.indexed, false);
   assert.equal(restored?.recordKind, "medication");
   assert.equal(restored?.libraryId, "medication");
-  assert.deepEqual(plugin.data.manualIndexPaths, []);
+  assert.deepEqual(plugin.data.directIndexPaths, []);
   assert.equal(plugin.savedData.length, 1);
 });
 
@@ -1513,6 +1544,18 @@ test("unrecognized versionless data enters read-only mode and is never overwritt
   assert.equal(Notice.messages.some((message) => /read-only/i.test(message)), true);
   await plugin.savePluginData();
   assert.equal(plugin.savedData.length, 0);
+});
+
+test("primitive and array plugin payloads fail closed instead of being migrated to saved defaults", async () => {
+  for (const original of [42, []] as const) {
+    const plugin = pluginWith(original);
+    const result = await plugin.loadPluginData();
+    assert.equal(result.compatible, false);
+    assert.match(plugin.dataCompatibilityWarning, /unrecognized shape/i);
+    assert.equal(plugin.savedData.length, 0);
+    await plugin.savePluginData();
+    assert.equal(plugin.savedData.length, 0, `the original ${JSON.stringify(original)} payload stays untouched`);
+  }
 });
 
 test("future data versions enter read-only mode rather than being downgraded", async () => {
@@ -2438,7 +2481,7 @@ test("replacement waits for an old external-Sync writeback to fail closed after 
       recordKind: "topic",
     }];
     invalidEntry.data.portableIndex.resolvedPathBySubjectId = { "remote-medication": medication.path };
-    invalidEntry.data.manualIndexPaths = [medication.path];
+    invalidEntry.data.directIndexPaths = [medication.path];
   }, 200);
   disk = invalidIncoming;
   const writeStarted = deferred();
@@ -2665,6 +2708,49 @@ test("safe view-state saves do not advance semantic revision or the semantic tim
   assert.equal(persisted?.bases[0]?.view.activeTab, "collections");
 });
 
+test("a view-only save never clones a 50,000-subject semantic graph", async () => {
+  const subjectCount = 50_000;
+  const data = migrateData(null);
+  data.portableIndex.groups = [{ id: "large-group", title: "Large group", order: 0 }];
+  data.portableIndex.subjects = Array.from({ length: subjectCount }, (_, index) => ({
+    id: `large-subject-${index}`,
+    title: `Large subject ${index}`,
+    groupId: "large-group",
+    parentId: null,
+    order: index,
+    indexed: true,
+    configuredId: "",
+    recordKind: "topic" as const,
+    libraryId: null,
+  }));
+  const plugin = pluginWith(createDefaultStore(data, 100, "vault-large-view-save"));
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+  const internal = plugin as unknown as { committedStoreSnapshot: PluginStore | null };
+  const committedData = internal.committedStoreSnapshot?.bases[0]?.data;
+  assert.ok(committedData);
+  plugin.data.selectedPath = "Knowledge/Viewed.md";
+
+  const clonedInputs: unknown[] = [];
+  setCloneJsonValueObserver((value) => clonedInputs.push(value));
+  try {
+    await plugin.saveViewState();
+  } finally {
+    setCloneJsonValueObserver(null);
+  }
+
+  assert.equal(
+    clonedInputs.some((value) => value === plugin.data || value === committedData),
+    false,
+    "the safety guard compares semantic data in place instead of projecting full clones",
+  );
+  assert.equal(plugin.data.portableIndex.subjects.length, subjectCount);
+  assert.equal(plugin.getActiveKnowledgeBase().semanticRevision, 0);
+  assert.equal(plugin.savedData.length, 0);
+  const local = plugin.deviceLocalWrites.at(-1) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
+  assert.equal(local?.bases[0]?.view.selectedPath, "Knowledge/Viewed.md");
+});
+
 test("cold start never adopts synced route or Undo history when device-local state is absent", async () => {
   const data = migrateData(null);
   data.selectedPath = "Other device.md";
@@ -2703,6 +2789,47 @@ test("cold start restores strictly parsed per-vault state by stable base ID", as
   assert.equal(plugin.data.selectedPath, "Second/Local.md");
   assert.equal(plugin.data.activeTab, "collections");
   assert.equal(plugin.data.undoStack[0]?.label, "Local undo");
+});
+
+test("v2 device-local Undo inherits the matching base's migrated legacy folder source", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.primaryFolder = "Legacy Knowledge";
+  data.indexFolderSources = [];
+  data.undoStack = [snapshotPersonal(data, "Legacy local undo")];
+  const currentStore = createDefaultStore(data, 100, "vault-v2-local-folder-source");
+  const legacyLocal = createDeviceLocalPluginState(currentStore) as unknown as {
+    version: number;
+    historyIndexFolderSourcesIncluded?: boolean;
+    bases: Array<{ view: { undoStack: Array<Record<string, unknown>> } }>;
+  };
+  legacyLocal.version = 2;
+  delete legacyLocal.historyIndexFolderSourcesIncluded;
+  for (const snapshot of legacyLocal.bases[0]?.view.undoStack ?? []) delete snapshot.indexFolderSources;
+
+  const rawStore = structuredClone(currentStore) as unknown as PluginStore & { version: number };
+  rawStore.version = 14;
+  const rawData = rawStore.bases[0]?.data as unknown as Record<string, unknown>;
+  rawData.version = 14;
+  rawData.undoStack = [];
+  rawData.redoStack = [];
+  delete rawData.indexFolderSources;
+  delete rawData.directIndexPaths;
+  const plugin = pluginWith(rawStore, legacyLocal);
+
+  await plugin.loadPluginData(false);
+
+  const migratedSource = plugin.data.indexFolderSources[0];
+  assert.equal(migratedSource?.path, "Legacy Knowledge");
+  assert.equal(migratedSource?.origin, "legacy-primary-folder");
+  assert.deepEqual(plugin.data.undoStack[0]?.indexFolderSources, [migratedSource]);
+
+  await plugin.undo();
+
+  assert.deepEqual(plugin.data.indexFolderSources, [migratedSource], "Undo cannot silently unlink the migrated folder rule");
+  const rewrittenLocal = plugin.deviceLocalWrites.at(-1) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
+  assert.equal(rewrittenLocal?.version, DEVICE_LOCAL_STATE_VERSION);
+  assert.equal(rewrittenLocal?.historyIndexFolderSourcesIncluded, true);
 });
 
 test("a retained device profile never attaches after data.json was removed and reinstalled", async () => {
@@ -2836,8 +2963,8 @@ test("oversized v13 history arriving through Sync keeps newest entries and repor
 
 test("malformed or oversized device-local state is discarded to safe defaults", async () => {
   for (const local of [
-    { version: DEVICE_LOCAL_STATE_VERSION, vaultId: "vault-malformed-local", activeBaseId: "base-default", bases: [{ baseId: "base-default", view: { activeTab: "bad" } }] },
-    { version: DEVICE_LOCAL_STATE_VERSION, vaultId: "vault-malformed-local", activeBaseId: "base-default", bases: [], padding: "x".repeat(4 * 1024 * 1024 + 1) },
+    { version: DEVICE_LOCAL_STATE_VERSION, historyIndexFolderSourcesIncluded: true, vaultId: "vault-malformed-local", activeBaseId: "base-default", bases: [{ baseId: "base-default", view: { activeTab: "bad" } }] },
+    { version: DEVICE_LOCAL_STATE_VERSION, historyIndexFolderSourcesIncluded: true, vaultId: "vault-malformed-local", activeBaseId: "base-default", bases: [], padding: "x".repeat(4 * 1024 * 1024 + 1) },
   ]) {
     const data = migrateData(null);
     data.selectedPath = "Synced.md";
@@ -3662,7 +3789,7 @@ test("external Sync remediates an invalid ENT Index payload and writes the corre
       recordKind: "topic",
     }];
     incomingBase.data.portableIndex.resolvedPathBySubjectId = { "remote-medication": medication.path };
-    incomingBase.data.manualIndexPaths = [medication.path];
+    incomingBase.data.directIndexPaths = [medication.path];
   }, 200);
   plugin.loadedData = incoming;
 
@@ -3673,7 +3800,7 @@ test("external Sync remediates an invalid ENT Index payload and writes the corre
     { indexed: subject?.indexed, kind: subject?.recordKind, libraryId: subject?.libraryId },
     { indexed: false, kind: "medication", libraryId: "medication" },
   );
-  assert.deepEqual(plugin.data.manualIndexPaths, []);
+  assert.deepEqual(plugin.data.directIndexPaths, []);
   assert.equal(plugin.getActiveKnowledgeBase().updatedAt, 200, "repair must not manufacture a newer LWW timestamp");
   assert.equal(plugin.savedData.length, 1, "the corrected merged store is written back exactly once");
   const persisted = plugin.savedData[0] as typeof incoming;
@@ -3787,7 +3914,7 @@ test("external Sync discards rejected direct and queued saves by merging from th
   plugin.data.pinnedPaths = ["Local-A.md"];
   const firstLocalSave = plugin.savePluginData();
   await saveStarted.promise;
-  plugin.data.manualIndexPaths = ["Local-B.md"];
+  plugin.data.directIndexPaths = ["Local-B.md"];
   const secondLocalSave = plugin.savePluginData();
   const interruptedTimestamp = plugin.getKnowledgeBases(true)[0]?.updatedAt ?? 0;
 
@@ -3807,12 +3934,12 @@ test("external Sync discards rejected direct and queued saves by merging from th
   assert.equal(localResults.every((result) => result.status === "rejected"), true);
   assert.equal(plugin.data.selectedPath, "Local-route.md", "the device-local route survives the rejected semantic saves");
   assert.deepEqual(plugin.data.pinnedPaths, [], "the rejected direct pin save is not treated as committed state");
-  assert.deepEqual(plugin.data.manualIndexPaths, [], "the rejected queued manual-path save is not treated as committed state");
+  assert.deepEqual(plugin.data.directIndexPaths, [], "the rejected queued direct-path save is not treated as committed state");
   assert.deepEqual(plugin.data.nextStudyPaths, [], "the compensating rollback causally supersedes the rejected write");
   const persistedBase = disk.bases.find((entry) => entry.id === disk.activeBaseId);
   assert.equal(persistedBase?.data.selectedPath, "");
   assert.deepEqual(persistedBase?.data.pinnedPaths, []);
-  assert.deepEqual(persistedBase?.data.manualIndexPaths, []);
+  assert.deepEqual(persistedBase?.data.directIndexPaths, []);
   assert.deepEqual(persistedBase?.data.nextStudyPaths, []);
   assert.ok(rescueContents.some((content) => content.includes("Remote.md")), "the unrelated remote envelope is rescued before rollback adoption");
   assert.ok((persistedBase?.semanticRevision ?? 0) > incomingBase.semanticRevision);
@@ -4933,6 +5060,325 @@ function vaultWith(fileCount: number) {
   };
 }
 
+test("fresh generic storage folders do not implicitly grant Index membership", async () => {
+  const insidePrimary = new TFile("Knowledge Base/Stored note.md");
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.primaryFolder = "Knowledge Base";
+  data.settings.defaultNoteFolder = "Knowledge Base";
+  const { plugin } = pluginWithFiles(data, [insidePrimary], {
+    [insidePrimary.path]: { title: "Stored note" },
+  });
+
+  await plugin.loadPluginData();
+
+  assert.deepEqual(plugin.data.indexFolderSources, []);
+  assert.equal(plugin.getRecord(insidePrimary.path), null);
+  assert.deepEqual(plugin.getIndexRecords(), []);
+});
+
+test("direct Index membership is independent of every storage folder", async () => {
+  const insidePrimary = new TFile("Knowledge Base/Inside.md");
+  const anywhereElse = new TFile("Projects/Outside.md");
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.primaryFolder = "Knowledge Base";
+  data.directIndexPaths = [insidePrimary.path, anywhereElse.path];
+  const { plugin } = pluginWithFiles(data, [insidePrimary, anywhereElse], {
+    [insidePrimary.path]: { title: "Inside" },
+    [anywhereElse.path]: { title: "Outside" },
+  });
+
+  await plugin.loadPluginData();
+
+  assert.deepEqual(
+    plugin.getIndexRecords().map((record) => record.path).sort(),
+    [insidePrimary.path, anywhereElse.path].sort(),
+  );
+  assert.deepEqual(plugin.data.directIndexPaths, [insidePrimary.path, anywhereElse.path]);
+  assert.deepEqual(plugin.data.indexFolderSources, []);
+});
+
+test("an explicitly linked folder indexes both current and future notes", async () => {
+  const linkedFolder = new TFolder("Research");
+  const current = new TFile("Research/Current.md");
+  const future = new TFile("Research/Future.md");
+  const files = [current];
+  const frontmatterByPath: Record<string, Record<string, unknown>> = {
+    [current.path]: { title: "Current" },
+  };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.primaryFolder = "Knowledge Base";
+  const { plugin } = pluginWithFiles(data, files, frontmatterByPath, null, [linkedFolder]);
+  await plugin.loadPluginData();
+
+  await plugin.linkIndexFolder(linkedFolder.path);
+  assert.deepEqual(plugin.getIndexRecords().map((record) => record.path), [current.path]);
+
+  files.push(future);
+  frontmatterByPath[future.path] = { title: "Future" };
+  plugin.invalidateRecordCache();
+  assert.deepEqual(
+    plugin.getIndexRecords().map((record) => record.path).sort(),
+    [current.path, future.path].sort(),
+  );
+});
+
+test("overlapping linked folders use the nearest source for visual grouping", async () => {
+  const file = new TFile("Research/Focused/Airway/Topic.md");
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.primaryFolder = "Storage Elsewhere";
+  data.indexFolderSources = [
+    { id: "source-research", path: "Research", origin: "user" },
+    { id: "source-focused", path: "Research/Focused", origin: "user" },
+  ];
+  const { plugin } = pluginWithFiles(data, [file], { [file.path]: { title: "Topic" } });
+  await plugin.loadPluginData();
+
+  const record = plugin.getRecord(file.path);
+  assert.equal(record?.domain, "Airway");
+  assert.equal(record?.role, "canonical");
+});
+
+test("blank primary grouping defers to the nearest linked source", async () => {
+  const file = new TFile("Archive/Research/Airway/Topic.md");
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.primaryFolder = "";
+  data.indexFolderSources = [
+    { id: "source-archive", path: "Archive", origin: "user" },
+    { id: "source-research", path: "Archive/Research", origin: "user" },
+  ];
+  const { plugin } = pluginWithFiles(data, [file], { [file.path]: { title: "Topic" } });
+  await plugin.loadPluginData();
+
+  assert.equal(plugin.getRecord(file.path)?.domain, "Airway");
+  assert.equal(plugin.suggestedIndexGroup(file), "Airway");
+});
+
+test("vault-root legacy source groups by top-level folder and incrementally tracks created and changed notes", async () => {
+  const existing = new TFile("A/B/Existing.md");
+  const files = [existing];
+  const frontmatterByPath: Record<string, Record<string, unknown>> = {
+    [existing.path]: { title: "Existing" },
+  };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.primaryFolder = "";
+  data.indexFolderSources = [{ id: "legacy-root", path: INDEX_FOLDER_VAULT_ROOT, origin: "legacy-primary-folder" }];
+  const { plugin } = pluginWithFiles(data, files, frontmatterByPath);
+  const internal = plugin as unknown as {
+    invalidateRecordCachesForPath(path: string, change?: { file: TFile | null }): boolean;
+  };
+  await plugin.loadPluginData();
+
+  assert.equal(plugin.getRecord(existing.path)?.domain, "A");
+  assert.equal(plugin.suggestedIndexGroup(existing), "A");
+
+  const created = new TFile("C/D/New.md");
+  files.push(created);
+  frontmatterByPath[created.path] = { title: "New" };
+  assert.equal(internal.invalidateRecordCachesForPath(created.path, { file: created }), true);
+  assert.equal(plugin.getRecord(created.path)?.domain, "C");
+  assert.equal(plugin.getRecord(created.path)?.title, "New");
+
+  frontmatterByPath[created.path] = { title: "Renamed in metadata" };
+  assert.equal(internal.invalidateRecordCachesForPath(created.path, { file: created }), true);
+  assert.equal(plugin.getRecord(created.path)?.title, "Renamed in metadata");
+});
+
+test("explicit Generic membership outranks Inbox classification unless a Library owns the note", async () => {
+  const direct = new TFile("Inbox/Direct.md");
+  const linked = new TFile("Inbox/Linked/Derived.md");
+  const ordinary = new TFile("Inbox/Ordinary.md");
+  const library = new TFile("Inbox/Linked/Library.md");
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.primaryFolder = "";
+  data.settings.proposalFolder = "Inbox";
+  data.directIndexPaths = [direct.path];
+  setLinkedIndexFolders(data, "Inbox/Linked");
+  data.portableIndex.libraries = [{ id: "reading", name: "Reading", singularName: "Item", icon: "book-open", order: 0, sourceKind: null, archivedAt: null }];
+  data.portableIndex.groups = [{ id: "group", title: "Group", order: 0 }];
+  data.portableIndex.subjects = [{ id: "library", title: "Library", groupId: "group", parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "note", libraryId: "reading" }];
+  data.portableIndex.resolvedPathBySubjectId = { library: library.path };
+  data.portableIndex.libraryLayouts = { reading: [{ id: "reading-heading", title: "Reading", collapsed: false, subjects: ["library"], subheadings: [] }] };
+  const { plugin } = pluginWithFiles(data, [direct, linked, ordinary, library], {});
+  await plugin.loadPluginData();
+
+  assert.equal(plugin.getRecord(direct.path)?.role, "canonical");
+  assert.equal(plugin.getIndexRecords().some((record) => record.path === direct.path), true);
+  assert.equal(plugin.getRecord(linked.path)?.role, "canonical");
+  assert.equal(plugin.getIndexRecords().some((record) => record.path === linked.path), true);
+  assert.equal(plugin.getRecord(ordinary.path)?.role, "proposal");
+  assert.equal(plugin.getIndexRecords().some((record) => record.path === ordinary.path), false);
+  assert.equal(plugin.getRecord(library.path)?.role, "library");
+  assert.equal(plugin.getIndexRecords().some((record) => record.path === library.path), false);
+});
+
+test("direct membership inside a linked folder survives unlinking that folder", async () => {
+  const direct = new TFile("Research/Direct.md");
+  const derived = new TFile("Research/Derived.md");
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.directIndexPaths = [direct.path];
+  setLinkedIndexFolders(data, "Research");
+  const { plugin } = pluginWithFiles(data, [direct, derived], {
+    [direct.path]: { title: "Direct" },
+    [derived.path]: { title: "Derived" },
+  });
+  await plugin.loadPluginData();
+  assert.deepEqual(
+    plugin.getIndexRecords().map((record) => record.path).sort(),
+    [direct.path, derived.path].sort(),
+  );
+
+  const sourceId = plugin.getIndexFolderSources()[0]?.id;
+  assert.ok(sourceId);
+  await plugin.unlinkIndexFolder(sourceId);
+
+  assert.deepEqual(plugin.getIndexFolderSources(), []);
+  assert.deepEqual(plugin.data.directIndexPaths, [direct.path]);
+  assert.deepEqual(plugin.getIndexRecords().map((record) => record.path), [direct.path]);
+  assert.equal(plugin.getRecord(derived.path), null);
+});
+
+test("a v14 generic primary folder becomes a removable legacy source", async () => {
+  const legacyNote = new TFile("Legacy Base/Topic.md");
+  const raw = structuredClone(migrateData(null)) as unknown as Record<string, unknown>;
+  raw.version = 14;
+  delete raw.directIndexPaths;
+  delete raw.indexFolderSources;
+  raw.settings = {
+    ...(raw.settings as Record<string, unknown>),
+    workspaceMode: "generic",
+    primaryFolder: "Legacy Base",
+  };
+
+  // Migration is deliberately a pure data transform: it creates one folder
+  // rule from the legacy setting without needing a vault-file inventory.
+  const migrated = migrateData(raw);
+  assert.deepEqual(migrated.indexFolderSources.map(({ path, origin }) => ({ path, origin })), [{
+    path: "Legacy Base",
+    origin: "legacy-primary-folder",
+  }]);
+  const { plugin } = pluginWithFiles(migrated, [legacyNote], {
+    [legacyNote.path]: { title: "Legacy topic" },
+  });
+  await plugin.loadPluginData();
+  assert.deepEqual(plugin.getIndexRecords().map((record) => record.path), [legacyNote.path]);
+
+  const sourceId = plugin.getIndexFolderSources()[0]?.id;
+  assert.ok(sourceId);
+  await plugin.unlinkIndexFolder(sourceId);
+
+  assert.deepEqual(plugin.getIndexFolderSources(), []);
+  assert.deepEqual(plugin.getIndexRecords(), []);
+});
+
+test("portable flags cannot create Generic membership while explicit paths override stale unassigned flags", async () => {
+  const outside = new TFile("Outside/Portable.md");
+  const linked = new TFile("Linked/Portable.md");
+  const direct = new TFile("Outside/Direct stale.md");
+  const library = new TFile("Linked/Library.md");
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.primaryFolder = "";
+  setLinkedIndexFolders(data, "Linked");
+  data.directIndexPaths = [direct.path];
+  data.portableIndex.libraries = [{ id: "reading", name: "Reading", singularName: "Item", icon: "book-open", order: 0, sourceKind: null, archivedAt: null }];
+  data.portableIndex.groups = [{ id: "group", title: "Group", order: 0 }];
+  data.portableIndex.subjects = [
+    { id: "outside", title: "Outside", groupId: "group", parentId: null, order: 0, indexed: true, configuredId: "", recordKind: "topic" },
+    { id: "linked", title: "Linked", groupId: "group", parentId: null, order: 1, indexed: true, configuredId: "", recordKind: "topic" },
+    { id: "direct", title: "Direct", groupId: "group", parentId: null, order: 2, indexed: false, configuredId: "", recordKind: "note", libraryId: null },
+    { id: "library", title: "Library", groupId: "group", parentId: null, order: 3, indexed: false, configuredId: "", recordKind: "note", libraryId: "reading" },
+    { id: "placeholder", title: "Placeholder", groupId: "group", parentId: null, order: 4, indexed: true, configuredId: "", recordKind: "topic" },
+  ];
+  data.portableIndex.resolvedPathBySubjectId = { outside: outside.path, linked: linked.path, direct: direct.path, library: library.path };
+  data.portableIndex.libraryLayouts = { reading: [{ id: "reading-heading", title: "Reading", collapsed: false, subjects: ["library"], subheadings: [] }] };
+  const { plugin } = pluginWithFiles(data, [outside, linked, direct, library], {});
+  await plugin.loadPluginData();
+
+  assert.equal(plugin.getRecord(outside.path)?.portableIndexed, false);
+  assert.equal(plugin.getIndexRecords().some((record) => record.path === outside.path), false);
+  assert.equal(plugin.getIndexRecords().some((record) => record.path === linked.path), true);
+  assert.equal(plugin.getRecord(direct.path)?.portableIndexed, true);
+  assert.equal(plugin.getIndexRecords().some((record) => record.path === direct.path), true);
+  assert.equal(plugin.getRecord(library.path)?.libraryId, "reading");
+  assert.equal(plugin.getIndexRecords().some((record) => record.path === library.path), false);
+  const placeholder = portablePlaceholderPath("placeholder");
+  assert.equal(plugin.getRecord(placeholder)?.portableIndexed, false);
+  plugin.data.directIndexPaths.push(placeholder);
+  plugin.invalidateRecordCache();
+  assert.equal(plugin.getIndexRecords().some((record) => record.path === placeholder), true);
+});
+
+test("source-derived portable membership disappears after export when unlinked or moved out", async () => {
+  const unlinked = new TFile("Linked/Unlinked.md");
+  const moved = new TFile("Linked/Moved.md");
+  const files = [unlinked, moved];
+  const frontmatter: Record<string, Record<string, unknown>> = {
+    [unlinked.path]: { title: "Unlinked" },
+    [moved.path]: { title: "Moved" },
+  };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  setLinkedIndexFolders(data, "Linked");
+  const { plugin } = pluginWithFiles(data, files, frontmatter);
+  await plugin.loadPluginData();
+  synchronizePortableRegistry(plugin.data, plugin.getRecords());
+  assert.equal(plugin.data.directIndexPaths.length, 0);
+  const unlinkedSubject = Object.entries(plugin.data.portableIndex.resolvedPathBySubjectId)
+    .find(([, path]) => path === unlinked.path)?.[0] ?? "";
+  const movedSubject = Object.entries(plugin.data.portableIndex.resolvedPathBySubjectId)
+    .find(([, path]) => path === moved.path)?.[0] ?? "";
+  assert.equal(plugin.getPortableSubject(unlinkedSubject)?.indexed, true);
+  assert.equal(plugin.getPortableSubject(movedSubject)?.indexed, true);
+
+  const oldMovedPath = moved.path;
+  rewritePluginDataPathPrefix(plugin.data, oldMovedPath, "Elsewhere/Moved.md");
+  moved.path = "Elsewhere/Moved.md";
+  frontmatter[moved.path] = { title: "Moved" };
+  plugin.invalidateRecordCache();
+  assert.equal(plugin.getIndexRecords().some((record) => record.path === moved.path), false);
+  assert.equal(plugin.getRecord(moved.path)?.portableIndexed, false);
+
+  const sourceId = plugin.getIndexFolderSources()[0]?.id;
+  assert.ok(sourceId);
+  await plugin.unlinkIndexFolder(sourceId);
+  assert.equal(plugin.getIndexRecords().some((record) => record.path === unlinked.path), false);
+  assert.equal(plugin.getRecord(unlinked.path)?.portableIndexed, false);
+});
+
+test("Add existing can make folder-only and Library notes durable direct Index members", async () => {
+  const folderOnly = new TFile("Linked/Folder only.md");
+  const libraryFile = new TFile("Reference/Library note.md");
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  setLinkedIndexFolders(data, "Linked");
+  const { plugin } = pluginWithFiles(data, [folderOnly, libraryFile], {}, null, [new TFolder("Linked")]);
+  await plugin.loadPluginData();
+  const libraryId = await plugin.createLibrary({ name: "Reading", singularName: "Item", icon: "book-open" });
+  await plugin.assignRecordToLibrary(libraryFile.path, libraryId, { headingTitle: "Reading" });
+
+  assert.equal(plugin.getIndexCandidateFiles().some((file) => file.path === folderOnly.path), true);
+  assert.equal(plugin.getIndexCandidateFiles().some((file) => file.path === libraryFile.path), true);
+  await plugin.assignRecordToCatalog(folderOnly.path, "topic", { headingTitle: "Linked" });
+  await plugin.assignRecordToCatalog(libraryFile.path, "topic", { headingTitle: "Research" });
+  assert.equal(plugin.data.directIndexPaths.includes(folderOnly.path), true);
+  assert.equal(plugin.data.directIndexPaths.includes(libraryFile.path), true);
+  assert.equal(plugin.getRecord(libraryFile.path)?.libraryId, undefined);
+
+  const sourceId = plugin.getIndexFolderSources()[0]?.id;
+  assert.ok(sourceId);
+  await plugin.unlinkIndexFolder(sourceId);
+  assert.equal(plugin.getIndexRecords().some((record) => record.path === folderOnly.path), true);
+  assert.equal(plugin.getIndexRecords().some((record) => record.path === libraryFile.path), true);
+});
+
 test("index membership lookups stay constant-time across a large vault", async () => {
   const fileCount = 10_000;
   const plugin = new EntVaultCommandCenterPlugin(vaultWith(fileCount) as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
@@ -4940,9 +5386,10 @@ test("index membership lookups stay constant-time across a large vault", async (
   await plugin.loadPluginData();
   plugin.data.settings.workspaceMode = "generic";
   plugin.data.settings.primaryFolder = "Knowledge Base";
-  // Half the vault also carries an explicit manual membership. Testing these
+  setLinkedIndexFolders(plugin.data, "Knowledge Base");
+  // Half the vault also carries an explicit direct membership. Testing these
   // with Array.includes inside the per-file loop is quadratic.
-  plugin.data.manualIndexPaths = Array.from({ length: 5_000 }, (_, index) => `Elsewhere/Manual ${index}.md`);
+  plugin.data.directIndexPaths = Array.from({ length: 5_000 }, (_, index) => `Elsewhere/Direct ${index}.md`);
   plugin.data.excludedIndexPaths = Array.from({ length: 2_000 }, (_, index) => `Knowledge Base/Group ${index % 20}/Note ${index}.md`);
   plugin.invalidateRecordCache();
 
@@ -4984,16 +5431,19 @@ test("ENT Index eligibility validation remains linear across 32,000 portable sub
   assert.ok(elapsed < 1_000, `validating ${subjectCount.toLocaleString()} indexed subjects took ${elapsed.toFixed(1)} ms`);
 });
 
-test("hidden notes leave the index while manual members stay in it", async () => {
+test("hidden notes leave a linked folder source while direct members stay in the Index", async () => {
   const plugin = new EntVaultCommandCenterPlugin(vaultWith(6) as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
   plugin.loadedData = null;
   await plugin.loadPluginData();
   plugin.data.settings.workspaceMode = "generic";
   plugin.data.settings.primaryFolder = "Knowledge Base";
-  plugin.data.excludedIndexPaths = ["Knowledge Base/Group 0/Note 0.md"];
+  setLinkedIndexFolders(plugin.data, "Knowledge Base");
+  plugin.data.directIndexPaths = ["Knowledge Base/Group 0/Note 0.md"];
+  plugin.data.excludedIndexPaths = ["Knowledge Base/Group 2/Note 2.md"];
   plugin.invalidateRecordCache();
   const paths = plugin.getRecords().map((item) => item.path);
-  assert.equal(paths.includes("Knowledge Base/Group 0/Note 0.md"), false);
+  assert.equal(paths.includes("Knowledge Base/Group 2/Note 2.md"), false);
+  assert.equal(paths.includes("Knowledge Base/Group 0/Note 0.md"), true, "direct membership remains independently indexed");
   assert.equal(paths.includes("Knowledge Base/Group 1/Note 1.md"), true);
 });
 
@@ -5078,15 +5528,15 @@ test("ENT index removal and restoration only change active-base membership", asy
   assert.equal(plugin.getIndexRecords().some((record) => record.path === file.path), true);
   await plugin.removeRecordsFromIndex([file.path]);
   assert.deepEqual(plugin.data.excludedIndexPaths, [file.path]);
-  assert.equal(plugin.data.manualIndexPaths.includes(file.path), false);
+  assert.equal(plugin.data.directIndexPaths.includes(file.path), false);
   assert.equal(plugin.getIndexRecords().some((record) => record.path === file.path), false);
 
   await plugin.restoreRecordsToIndex([file.path]);
   assert.equal(plugin.data.excludedIndexPaths.includes(file.path), false);
   assert.equal(
-    plugin.data.manualIndexPaths.includes(file.path),
-    false,
-    "an in-folder clinical topic is indexed by its source identity, not a redundant manual membership",
+    plugin.data.directIndexPaths.includes(file.path),
+    true,
+    "restoration records durable direct membership even for a protected source topic",
   );
   assert.equal(plugin.getIndexRecords().some((record) => record.path === file.path), true);
   assert.equal(file.path, "03 Clinical Topics/01 Pediatric/ENT-PED-001 - Airway.md");
@@ -5134,7 +5584,7 @@ test("a display-only alias does not rename a legacy canonical filename during an
     review_status: "unverified",
     sources: [],
   };
-  let content = "# Legacy VPI heading\n\nBody remains here.\n";
+  let content = replaceTestFrontmatter("# Legacy VPI heading\n\nBody remains here.\n", frontmatter);
   let renameCalls = 0;
   const app = {
     vault: {
@@ -5148,7 +5598,10 @@ test("a display-only alias does not rename a legacy canonical filename during an
     metadataCache: { getFileCache: () => ({ frontmatter }), resolvedLinks: {} },
     fileManager: {
       renameFile: async () => { renameCalls += 1; },
-      processFrontMatter: async (_file: TFile, update: (metadata: Record<string, unknown>) => void) => { update(frontmatter); },
+      processFrontMatter: async (_file: TFile, update: (metadata: Record<string, unknown>) => void) => {
+        update(frontmatter);
+        content = replaceTestFrontmatter(content, frontmatter);
+      },
     },
   };
   const data = migrateData(null);
@@ -5240,7 +5693,7 @@ test("a removed clinical portable subject resolved outside the primary folder st
 
   assert.equal(plugin.getPortableSubject("subject-cleft")?.indexed, true);
   assert.equal(plugin.data.excludedIndexPaths.includes(proposal.path), false);
-  assert.equal(plugin.data.manualIndexPaths.includes(proposal.path), true);
+  assert.equal(plugin.data.directIndexPaths.includes(proposal.path), true);
   assert.equal(plugin.getIndexRecords().some((record) => record.path === proposal.path), true);
   assert.deepEqual(manager.hiddenNotes(), []);
   assert.equal(proposal.path, "01 Inbox/Topic Proposals/Proposal - Laryngeal Cleft.md");
@@ -5358,7 +5811,7 @@ test("reconciliation preserves a temporarily missing synced note binding", async
     }],
     resolvedPathBySubjectId: { "subject-airway": stalePath },
   };
-  data.manualIndexPaths = [stalePath];
+  data.directIndexPaths = [stalePath];
   data.selectedPath = stalePath;
   const plugin = pluginWith(data);
   await plugin.loadPluginData();
@@ -5368,7 +5821,7 @@ test("reconciliation preserves a temporarily missing synced note binding", async
 
   assert.equal(changed, true, "cold-start route selection may choose the retained placeholder locally");
   assert.deepEqual(plugin.data.portableIndex.resolvedPathBySubjectId, { "subject-airway": stalePath });
-  assert.deepEqual(plugin.data.manualIndexPaths, [stalePath]);
+  assert.deepEqual(plugin.data.directIndexPaths, [stalePath]);
   assert.equal(plugin.data.selectedPath, stalePath);
   assert.equal(plugin.savedData.length, 0);
 });
@@ -5398,12 +5851,14 @@ test("portable JSON writes do not create a second success notice", async () => {
   let createdContent = "";
   const app = plugin.app as unknown as {
     vault: {
+      configDir: string;
       getAbstractFileByPath(path: string): null;
       createFolder(path: string): Promise<void>;
       create(path: string, content: string): Promise<TFile>;
     };
   };
   app.vault = {
+    configDir: ".obsidian",
     getAbstractFileByPath: () => null,
     createFolder: async () => {},
     create: async (path, content) => {
@@ -5842,7 +6297,7 @@ test("resolving a portable placeholder preserves placement and Undo only unlinks
     }],
     resolvedPathBySubjectId: {},
   };
-  plugin.data.manualIndexPaths = [placeholder];
+  plugin.data.directIndexPaths = [placeholder];
   plugin.data.indexGroupByPath[placeholder] = "Airway";
   plugin.data.collections = [{ id: "airway", title: "Airway", collapsed: false, subjects: [placeholder], subheadings: [] }];
 
@@ -5853,7 +6308,7 @@ test("resolving a portable placeholder preserves placement and Undo only unlinks
   assert.equal(plugin.getRecord(linkedFile.path)?.portableRelinkable, true);
   assert.deepEqual(plugin.data.collections[0]?.subjects, [linkedFile.path]);
   assert.equal(plugin.data.indexGroupByPath[linkedFile.path], "Airway");
-  assert.equal(plugin.data.manualIndexPaths.includes(placeholder), false);
+  assert.equal(plugin.data.directIndexPaths.includes(placeholder), false);
 
   await plugin.undo();
 
@@ -5879,7 +6334,7 @@ test("Undo invalidates cached placeholder metadata", async () => {
     subjects: [{ id: "subject", title: "Old title", groupId: "group", parentId: null, order: 0, indexed: true, configuredId: "", recordKind: "topic" }],
     resolvedPathBySubjectId: {},
   };
-  plugin.data.manualIndexPaths = [portablePlaceholderPath("subject")];
+  plugin.data.directIndexPaths = [portablePlaceholderPath("subject")];
   plugin.invalidateRecordCache();
   assert.equal(plugin.getRecord(portablePlaceholderPath("subject"))?.title, "Old title");
 
@@ -5921,7 +6376,7 @@ test("confirmed identity reassignment merges bindings without duplicate organiza
     ],
     resolvedPathBySubjectId: { [localId]: linkedFile.path },
   };
-  plugin.data.manualIndexPaths = [importedPath, linkedFile.path];
+  plugin.data.directIndexPaths = [importedPath, linkedFile.path];
   plugin.data.collections = [{ id: "airway", title: "Airway", collapsed: false, subjects: [importedPath, linkedFile.path], subheadings: [] }];
 
   await assert.rejects(plugin.resolvePortableSubject(importedId, linkedFile.path), /identity reassignment/i);
@@ -5931,7 +6386,7 @@ test("confirmed identity reassignment merges bindings without duplicate organiza
   assert.equal(plugin.data.portableIndex.resolvedPathBySubjectId[importedId], linkedFile.path);
   assert.equal(plugin.data.portableIndex.resolvedPathBySubjectId[localId], undefined);
   assert.deepEqual(plugin.data.collections[0]?.subjects, [linkedFile.path]);
-  assert.deepEqual(plugin.data.manualIndexPaths, [linkedFile.path]);
+  assert.deepEqual(plugin.data.directIndexPaths, [linkedFile.path]);
 
   await plugin.undo();
   assert.equal(plugin.data.portableIndex.subjects.length, 2);
@@ -5996,7 +6451,7 @@ test("unlinking a resolved portable subject restores its placeholder without cha
     resolvedPathBySubjectId: { [subjectId]: linkedFile.path },
     relinkableSubjectIds: [subjectId],
   };
-  plugin.data.manualIndexPaths = [linkedFile.path];
+  plugin.data.directIndexPaths = [linkedFile.path];
   plugin.data.collections = [{ id: "airway", title: "Airway", collapsed: false, subjects: [linkedFile.path], subheadings: [] }];
 
   await plugin.unlinkPortableSubject(subjectId);
@@ -6229,7 +6684,7 @@ test("adding an available portable placeholder restores membership and captures 
   }
 
   assert.equal(plugin.getPortableSubject(subjectId)?.indexed, true);
-  assert.ok(plugin.data.manualIndexPaths.includes(placeholder));
+  assert.ok(plugin.data.directIndexPaths.includes(placeholder));
   assert.equal(plugin.data.indexGroupByPath[placeholder], "Airway");
   assert.equal(plugin.data.portableIndex.resolvedPathBySubjectId[subjectId], undefined);
   assert.equal(plugin.data.undoStack.at(-1)?.portableIndex?.subjects[0]?.indexed, false);
@@ -6237,7 +6692,7 @@ test("adding an available portable placeholder restores membership and captures 
   await plugin.undo();
 
   assert.equal(plugin.getPortableSubject(subjectId)?.indexed, false);
-  assert.equal(plugin.data.manualIndexPaths.includes(placeholder), false);
+  assert.equal(plugin.data.directIndexPaths.includes(placeholder), false);
   assert.equal(plugin.data.indexGroupByPath[placeholder], "Airway");
 });
 
@@ -6280,7 +6735,7 @@ test("an indexed clinical subject linked to an unverified proposal remains in bo
     }],
     resolvedPathBySubjectId: {},
   };
-  plugin.data.manualIndexPaths = [placeholder];
+  plugin.data.directIndexPaths = [placeholder];
 
   await plugin.resolvePortableSubject(subjectId, proposal.path);
 
@@ -6333,7 +6788,7 @@ test("a collection-only generic placeholder can link a new in-folder note withou
 
   assert.equal(plugin.data.portableIndex.resolvedPathBySubjectId[subjectId], created.path);
   assert.deepEqual(plugin.data.collections[0]?.subjects, [created.path]);
-  assert.equal(plugin.data.excludedIndexPaths.includes(created.path), true);
+  assert.equal(plugin.data.excludedIndexPaths.includes(created.path), false, "the storage folder is not an implicit Index source");
   assert.equal(plugin.getRecord(created.path)?.kind, "note");
   assert.equal(plugin.getIndexRecords().some((record) => record.path === created.path), false);
 });
@@ -6374,7 +6829,7 @@ test("a non-indexed syndrome linked to an ordinary generic note survives cache r
   assert.equal(rebuilt?.portableId, subjectId);
   assert.equal(rebuilt?.portableIndexed, false);
   assert.equal(rebuilt?.isPlaceholder, undefined);
-  assert.equal(plugin.data.manualIndexPaths.includes(linkedFile.path), false);
+  assert.equal(plugin.data.directIndexPaths.includes(linkedFile.path), false);
   assert.equal(plugin.getIndexRecords().some((record) => record.path === linkedFile.path), false);
   assert.equal(linkedFile.path, "Reference/Usher syndrome.md");
   assert.equal(linkedFile.stat.mtime, 24680);
@@ -6622,6 +7077,7 @@ test("custom-library assignment is visual-only and Undo or Redo preserves person
   const data = migrateData(null);
   data.settings.workspaceMode = "generic";
   data.settings.primaryFolder = "Knowledge Base";
+  setLinkedIndexFolders(data, "Knowledge Base");
   data.collections = [{ id: "study", title: "Study", collapsed: false, subjects: [file.path], subheadings: [] }];
   data.pinnedPaths = [file.path];
   data.nextStudyPaths = [file.path];
@@ -6732,7 +7188,7 @@ test("deleting a custom library to the index keeps non-topic semantics visible a
   assert.equal(plugin.getRecord(file.path)?.kind, "note", "index placement remains independent of semantic type");
   assert.equal(plugin.getRecord(file.path)?.libraryId, undefined);
   assert.equal(plugin.getPortableSubject(subjectId)?.indexed, true);
-  assert.equal(plugin.data.manualIndexPaths.includes(file.path), true, "out-of-root notes need explicit index membership");
+  assert.equal(plugin.data.directIndexPaths.includes(file.path), true, "out-of-root notes need explicit index membership");
   assert.equal(plugin.data.indexGroupByPath[file.path], "Ungrouped");
   assert.equal(plugin.getIndexRecords().some((record) => record.path === file.path), true);
   assert.deepEqual(frontmatter, originalFrontmatter);
@@ -6947,7 +7403,8 @@ test("generic notes can be assigned directly to a library without changing Markd
   const data = migrateData(null);
   data.settings.workspaceMode = "generic";
   data.settings.primaryFolder = "Knowledge Base";
-  data.manualIndexPaths = [file.path];
+  setLinkedIndexFolders(data, "Knowledge Base");
+  data.directIndexPaths = [file.path];
   data.indexGroupByPath[file.path] = "ENT";
   data.collections = [{ id: "collection", title: "Review", collapsed: false, subjects: [file.path], subheadings: [] }];
   data.pinnedPaths = [file.path];
@@ -6965,7 +7422,7 @@ test("generic notes can be assigned directly to a library without changing Markd
   assert.equal(medication?.domain, "Nasal medications");
   assert.equal(medication?.portableRelinkable, undefined);
   assert.equal(plugin.data.portableIndex.libraryLayouts.medication[0]?.subjects[0], subjectId);
-  assert.equal(plugin.data.manualIndexPaths.includes(file.path), false);
+  assert.equal(plugin.data.directIndexPaths.includes(file.path), false);
   assert.equal(plugin.data.excludedIndexPaths.includes(file.path), true);
   assert.deepEqual(plugin.data.collections[0]?.subjects, [file.path]);
   assert.deepEqual(plugin.data.pinnedPaths, [file.path]);
@@ -6983,7 +7440,7 @@ test("generic notes can be assigned directly to a library without changing Markd
   await plugin.undo();
   assert.equal(plugin.getRecord(file.path)?.kind, "topic");
   assert.equal(plugin.getRecord(file.path)?.portableId, undefined);
-  assert.deepEqual(plugin.data.manualIndexPaths, [file.path]);
+  assert.deepEqual(plugin.data.directIndexPaths, [file.path]);
   assert.deepEqual(plugin.data.excludedIndexPaths, []);
   assert.equal(sourceMutationCount(), 0);
 });
@@ -7023,10 +7480,12 @@ test("classifying one shared Markdown note as a medication is isolated to the ac
   first.settings.workspaceMode = "generic";
   first.settings.workspaceName = "ENT medications";
   first.settings.primaryFolder = "Knowledge Base";
+  setLinkedIndexFolders(first, "Knowledge Base");
   const second = migrateData(null);
   second.settings.workspaceMode = "generic";
   second.settings.workspaceName = "General notes";
   second.settings.primaryFolder = "Knowledge Base";
+  setLinkedIndexFolders(second, "Knowledge Base");
   const store = createDefaultStore(first, 100, "vault-library-isolation");
   store.bases.push(createKnowledgeBaseEntry(second, "base-general", 200));
   const { plugin, sourceMutationCount } = pluginWithFiles(store, [file], {
@@ -7056,6 +7515,7 @@ test("classification survives a store reload and Undo or Redo never loses pins, 
   const data = migrateData(null);
   data.settings.workspaceMode = "generic";
   data.settings.primaryFolder = "Knowledge Base";
+  setLinkedIndexFolders(data, "Knowledge Base");
   data.pinnedPaths = [file.path];
   data.nextStudyPaths = [file.path];
   data.collections = [{
@@ -7221,7 +7681,7 @@ test("portable placeholders can be placed once under a library subheading and de
     { id: parentId, title: "Laryngeal cleft", groupId: "topic-group", parentId: null, order: 0, indexed: true, configuredId: "", recordKind: "topic" },
     { id: childId, title: "Repair", groupId: "topic-group", parentId, order: 0, indexed: true, configuredId: "", recordKind: "topic" },
   ];
-  data.manualIndexPaths = [parentPath, childPath];
+  data.directIndexPaths = [parentPath, childPath];
   data.curriculumVisual.parentByPath[childPath] = parentPath;
   data.portableIndex.libraryLayouts.medication = [{
     id: "medication-heading",
@@ -7242,8 +7702,8 @@ test("portable placeholders can be placed once under a library subheading and de
   assert.equal(plugin.getPortableSubject(parentId)?.parentId, null);
   assert.equal(plugin.getPortableSubject(childId)?.parentId, null);
   assert.equal(plugin.data.curriculumVisual.parentByPath[childPath], null);
-  assert.equal(plugin.data.manualIndexPaths.includes(parentPath), false);
-  assert.equal(plugin.data.manualIndexPaths.includes(childPath), true);
+  assert.equal(plugin.data.directIndexPaths.includes(parentPath), false);
+  assert.equal(plugin.data.directIndexPaths.includes(childPath), true);
   assert.equal(sourceMutationCount(), 0);
 });
 
@@ -7366,7 +7826,7 @@ test("the post-import ENT invariant rejects a topic identity resolved to a nativ
     libraryId: null,
   }];
   plugin.data.portableIndex.resolvedPathBySubjectId = { "incoming-topic-collision": medication.path };
-  plugin.data.manualIndexPaths = [medication.path];
+  plugin.data.directIndexPaths = [medication.path];
   const before = structuredClone(plugin.data);
 
   assert.throws(
@@ -7737,7 +8197,7 @@ test("portable linking rejects configured-ID and record-kind mismatches before m
     subjects: [{ id: subjectId, title: "Laryngeal Cleft", groupId: "group-pediatric", parentId: null, order: 0, indexed: true, configuredId: "ENT-PED-003.05", recordKind: "topic" }],
     resolvedPathBySubjectId: {},
   };
-  plugin.data.manualIndexPaths = [portablePlaceholderPath(subjectId)];
+  plugin.data.directIndexPaths = [portablePlaceholderPath(subjectId)];
   const before = structuredClone(plugin.data.portableIndex);
 
   await assert.rejects(plugin.resolvePortableSubject(subjectId, wrongTopic.path), /configured ID mismatch/i);
@@ -7801,7 +8261,7 @@ test("previewIndexRepair reports missing-note registrations as a dry run; the re
   const existingNote = new TFile("Knowledge Base/Existing.md");
   const data = migrateData(null);
   data.settings.primaryFolder = "Knowledge Base";
-  data.manualIndexPaths = [
+  data.directIndexPaths = [
     "Notes/Outside missing.md",
     "Knowledge Base/Existing.md",
     "Knowledge Base/Existing.md",
@@ -7816,6 +8276,9 @@ test("previewIndexRepair reports missing-note registrations as a dry run; the re
   }];
   const { plugin, sourceMutationCount } = pluginWithFiles(data, [existingNote], { [existingNote.path]: {} });
   await plugin.loadPluginData();
+  // Loading canonicalizes persisted input; inject a live duplicate so the
+  // diagnostics dry run still exercises its non-prune repair count.
+  plugin.data.directIndexPaths.push(existingNote.path);
   const before = structuredClone(plugin.data);
 
   const preview = plugin.previewIndexRepair();
@@ -7824,19 +8287,116 @@ test("previewIndexRepair reports missing-note registrations as a dry run; the re
     "Knowledge Base/Missing.md",
     "Notes/Outside missing.md",
   ], "every registration whose file is absent on this device is reported once");
-  assert.ok(preview.otherFixCount >= 1, "the duplicate manual membership counts as a non-prune fix");
+  assert.ok(preview.otherFixCount >= 1, "the duplicate direct membership counts as a non-prune fix");
+  assert.match(preview.fingerprint, /^[0-9a-f]{16}$/u, "the preview carries an exact-plan token");
   assert.deepEqual(plugin.data, before, "the preview mutates nothing");
 
-  await plugin.repairIndexOrganization();
-  assert.deepEqual(plugin.data.manualIndexPaths, ["Knowledge Base/Existing.md"]);
+  await plugin.repairIndexOrganization(preview);
+  assert.deepEqual(plugin.data.directIndexPaths, ["Knowledge Base/Existing.md"]);
   assert.deepEqual(plugin.data.pinnedPaths, ["Knowledge Base/Existing.md"]);
   assert.deepEqual(plugin.data.nextStudyPaths, []);
   assert.deepEqual(plugin.data.excludedIndexPaths, []);
   assert.deepEqual(plugin.data.collections[0]?.subjects, ["Knowledge Base/Existing.md"]);
 
-  assert.deepEqual(plugin.previewIndexRepair(), { prunedPaths: [], otherFixCount: 0 },
+  const after = plugin.previewIndexRepair();
+  assert.deepEqual({ prunedPaths: after.prunedPaths, otherFixCount: after.otherFixCount }, { prunedPaths: [], otherFixCount: 0 },
     "after the repair there is nothing left to prune or fix");
+  assert.equal(plugin.data.undoStack.at(-1)?.label, "Repair safe index organization issues",
+    "repair always leaves an in-plugin Undo boundary");
   assert.equal(sourceMutationCount(), 0);
+});
+
+test("index repair rejects a stale preview without writing or changing plugin state", async () => {
+  const data = migrateData(null);
+  data.settings.primaryFolder = "Knowledge Base";
+  data.directIndexPaths = ["Knowledge Base/Missing A.md"];
+  const { plugin } = pluginWithFiles(data, [], {});
+  await plugin.loadPluginData();
+  const preview = plugin.previewIndexRepair();
+
+  plugin.data.pinnedPaths.push("Knowledge Base/Missing B.md");
+  const before = structuredClone(plugin.data);
+  plugin.savedData.length = 0;
+
+  await assert.rejects(
+    plugin.repairIndexOrganization(preview),
+    /changed after the preview.*No repair was applied/iu,
+  );
+  assert.deepEqual(plugin.data, before);
+  assert.equal(plugin.savedData.length, 0, "a preview rejected before the transaction is never persisted");
+});
+
+test("index repair rechecks the exact preview at the commit boundary and requests hard Undo preflight", async () => {
+  const data = migrateData(null);
+  data.settings.primaryFolder = "Knowledge Base";
+  data.directIndexPaths = ["Knowledge Base/Missing A.md"];
+  const { plugin } = pluginWithFiles(data, [], {});
+  await plugin.loadPluginData();
+  const preview = plugin.previewIndexRepair();
+  let mutationOptions: { requireUndo?: boolean } | undefined;
+  const host = plugin as unknown as {
+    mutate(
+      label: string,
+      action: () => void,
+      options?: { requireUndo?: boolean },
+    ): Promise<void>;
+  };
+  host.mutate = async (_label, action, options) => {
+    mutationOptions = options;
+    // Simulates another organization update while this repair waited behind
+    // the logical write barrier, after its early preview check already passed.
+    plugin.data.pinnedPaths.push("Knowledge Base/Missing B.md");
+    action();
+  };
+
+  await assert.rejects(
+    plugin.repairIndexOrganization(preview),
+    /changed after the preview.*No repair was applied/iu,
+  );
+  assert.deepEqual(plugin.data.directIndexPaths, ["Knowledge Base/Missing A.md"], "the stale repair action never starts");
+  assert.deepEqual(plugin.data.pinnedPaths, ["Knowledge Base/Missing B.md"], "the concurrent change remains untouched");
+  assert.equal(mutationOptions?.requireUndo, true);
+});
+
+test("index repair refuses an operation that cannot fit in bounded Undo", async () => {
+  const data = migrateData(null);
+  data.settings.primaryFolder = "Knowledge Base";
+  const { plugin } = pluginWithFiles(data, [], {});
+  await plugin.loadPluginData();
+  const oversizedMissingPath = `Knowledge Base/${"界".repeat(200_000)}.md`;
+  plugin.data.pinnedPaths = [oversizedMissingPath];
+  const preview = plugin.previewIndexRepair();
+  const before = structuredClone(plugin.data);
+  plugin.savedData.length = 0;
+
+  await assert.rejects(
+    plugin.repairIndexOrganization(preview),
+    /too large for safe in-plugin Undo/iu,
+  );
+  assert.deepEqual(plugin.data, before, "Undo preflight fails before repair mutates live data");
+  assert.equal(plugin.savedData.length, 0);
+});
+
+test("bulk index removal and restoration opt into hard Undo preflight", async () => {
+  const file = new TFile("Knowledge Base/Topic.md");
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.primaryFolder = "Knowledge Base";
+  const { plugin } = pluginWithFiles(data, [file], { [file.path]: { title: "Topic" } });
+  await plugin.loadPluginData();
+  const calls: Array<{ includePortableIndex?: boolean; requireUndo?: boolean }> = [];
+  const originalMutate = plugin.mutate.bind(plugin);
+  plugin.mutate = async (label, action, options = {}) => {
+    calls.push(options);
+    await originalMutate(label, action, options);
+  };
+
+  await plugin.removeRecordsFromIndex([file.path]);
+  await plugin.restoreRecordsToIndex([file.path]);
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls.every((options) => options.includePortableIndex === true), true);
+  assert.equal(calls.every((options) => options.requireUndo === true), true);
 });
 
 test("identity merge deterministically preserves the surviving parent and appends owner children", async () => {
@@ -7871,8 +8431,8 @@ test("identity merge deterministically preserves the surviving parent and append
     libraries: [],
     libraryLayouts: { procedure: [], medication: [], syndrome: [] },
   };
-  plugin.data.manualIndexPaths = [path("target-parent"), path("owner-parent"), path("target"), ownerFile.path, path("target-child"), path("owner-child")];
-  plugin.data.indexGroupByPath = Object.fromEntries(plugin.data.manualIndexPaths.map((subjectPath) => [subjectPath, "Airway"]));
+  plugin.data.directIndexPaths = [path("target-parent"), path("owner-parent"), path("target"), ownerFile.path, path("target-child"), path("owner-child")];
+  plugin.data.indexGroupByPath = Object.fromEntries(plugin.data.directIndexPaths.map((subjectPath) => [subjectPath, "Airway"]));
   // Adversarial insertion order: the old implementation allowed the later
   // owner entry/container to overwrite the target survivor's placement.
   plugin.data.curriculumVisual.parentByPath = {
@@ -7936,7 +8496,7 @@ test("identity merge rejects owner children that would become cross-group descen
     ],
     resolvedPathBySubjectId: { owner: ownerFile.path },
   };
-  plugin.data.manualIndexPaths = [portablePlaceholderPath("target"), ownerFile.path, portablePlaceholderPath("owner-child")];
+  plugin.data.directIndexPaths = [portablePlaceholderPath("target"), ownerFile.path, portablePlaceholderPath("owner-child")];
   const before = structuredClone(plugin.data.portableIndex);
 
   await assert.rejects(plugin.resolvePortableSubject("target", ownerFile.path, true), /across groups.*child subjects/i);
@@ -7969,7 +8529,7 @@ test("cross-group identity merge without descendants keeps the surviving target 
     ],
     resolvedPathBySubjectId: { owner: ownerFile.path },
   };
-  plugin.data.manualIndexPaths = [targetPath, ownerFile.path];
+  plugin.data.directIndexPaths = [targetPath, ownerFile.path];
   // Put the owner entry last to exercise a colliding path-map rewrite.
   plugin.data.indexGroupByPath = { [targetPath]: "Group A", [ownerFile.path]: "Group B" };
 
@@ -8025,7 +8585,7 @@ test("linking refuses to mutate when a full portable Undo snapshot exceeds the s
     ],
     resolvedPathBySubjectId: { owner: ownerFile.path },
   };
-  plugin.data.manualIndexPaths = [portablePlaceholderPath("target"), ownerFile.path];
+  plugin.data.directIndexPaths = [portablePlaceholderPath("target"), ownerFile.path];
 
   await assert.rejects(plugin.resolvePortableSubject("target", ownerFile.path, true), /too large for safe.*Undo/i);
 
@@ -8057,7 +8617,7 @@ test("unlink rolls back in memory and on disk when its first save fails", async 
     resolvedPathBySubjectId: { subject: linkedFile.path },
     relinkableSubjectIds: ["subject"],
   };
-  plugin.data.manualIndexPaths = [linkedFile.path];
+  plugin.data.directIndexPaths = [linkedFile.path];
   plugin.data.collections = [{ id: "airway", title: "Airway", collapsed: false, subjects: [linkedFile.path], subheadings: [] }];
   let saveAttempts = 0;
   plugin.saveData = async (value: unknown) => {
@@ -8070,7 +8630,7 @@ test("unlink rolls back in memory and on disk when its first save fails", async 
 
   assert.equal(saveAttempts, 2);
   assert.equal(plugin.data.portableIndex.resolvedPathBySubjectId.subject, linkedFile.path);
-  assert.deepEqual(plugin.data.manualIndexPaths, [linkedFile.path]);
+  assert.deepEqual(plugin.data.directIndexPaths, [linkedFile.path]);
   assert.deepEqual(plugin.data.collections[0]?.subjects, [linkedFile.path]);
   const persisted = plugin.savedData.at(-1) as {
     activeBaseId?: string;
@@ -8236,6 +8796,38 @@ test("explicit attachment upload uses the configured folder and appends under on
   assert.equal(created.path, "Assets/Uploads/scan.png");
   assert.deepEqual(createdFolders, ["Assets", "Assets/Uploads"]);
   assert.equal(markdown, "---\ntitle: Topic\n---\n\n## Attachments\n\n![[old.png]]\n![[Assets/Uploads/scan.png]]\n\n## Notes\n- Keep\n");
+});
+
+test("attachment import accepts a case-variant Markdown extension consistently", async () => {
+  const note = new TFile("Knowledge/Topic.MD");
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getAbstractFileByPath: (path: string) => path === note.path ? note : null,
+      getMarkdownFiles: () => [note],
+      getAllLoadedFiles: () => [note],
+    },
+    workspace: { getActiveFile: () => note, getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+    fileManager: {},
+  };
+  const data = migrateData(null);
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-uppercase-markdown-test");
+  await plugin.loadPluginData();
+
+  const originalOpen = Object.getOwnPropertyDescriptor(AttachmentImportModal.prototype, "open");
+  let opens = 0;
+  AttachmentImportModal.prototype.open = function open(): void { opens += 1; };
+  Notice.messages.length = 0;
+  try {
+    plugin.openAttachmentImport(note);
+    assert.equal(opens, 1);
+    assert.deepEqual(Notice.messages, []);
+  } finally {
+    if (originalOpen) Object.defineProperty(AttachmentImportModal.prototype, "open", originalOpen);
+    else Reflect.deleteProperty(AttachmentImportModal.prototype, "open");
+  }
 });
 
 test("attachment upload refuses every ambiguous ai_lock form before copying and a replaced note identity", async () => {
@@ -8570,6 +9162,34 @@ test("portable JSON serialization fails before creating an export folder", async
   assert.equal(tree.entries.has("Knowledge Base Command Center Exports"), false);
 });
 
+test("portable JSON writes reject restricted exports folders at the final write boundary", async () => {
+  const plugin = pluginWith(null);
+  await plugin.loadPluginData();
+  let createFolderCalls = 0;
+  let createCalls = 0;
+  const app = plugin.app as unknown as {
+    vault: {
+      configDir: string;
+      getAbstractFileByPath(path: string): null;
+      createFolder(path: string): Promise<void>;
+      create(path: string, content: string): Promise<TFile>;
+    };
+  };
+  app.vault = {
+    configDir: ".obsidian",
+    getAbstractFileByPath: () => null,
+    createFolder: async () => { createFolderCalls += 1; },
+    create: async (path) => { createCalls += 1; return new TFile(path); },
+  };
+
+  for (const exportsFolder of ["../Outside", ".obsidian/Private exports", ".trash/Rescues"]) {
+    plugin.data.settings.exportsFolder = exportsFolder;
+    await assert.rejects(plugin.writePortableJson("backup", { keep: true }), /not writable.*cannot/iu);
+  }
+  assert.equal(createFolderCalls, 0);
+  assert.equal(createCalls, 0);
+});
+
 test("proposal promotion restores the original note and removes its empty destination folder when rewriting fails", async () => {
   const proposalsRoot = new TFolder("01 Inbox");
   const proposalFolder = new TFolder("01 Inbox/Topic Proposals");
@@ -8605,7 +9225,10 @@ test("proposal promotion restores the original note and removes its empty destin
     metadataCache: { getFileCache: () => ({ frontmatter }), resolvedLinks: {} },
     fileManager: {
       renameFile: (file: TFile, destination: string) => tree.renameFile(file, destination),
-      processFrontMatter: async (_file: TFile, update: (metadata: Record<string, unknown>) => void) => { update(frontmatter); },
+      processFrontMatter: async (_file: TFile, update: (metadata: Record<string, unknown>) => void) => {
+        update(frontmatter);
+        content = replaceTestFrontmatter(content, frontmatter);
+      },
       trashFile: (file: TAbstractFile) => tree.trashFile(file),
     },
   };
@@ -8709,13 +9332,18 @@ test("proposal promotion rollback never overwrites a destination created concurr
   assert.deepEqual(tree.trashedFolders, [], "pre-existing folders remain untouched");
 });
 
-test("proposal promotion reports a combined recovery error if content rollback fails", async () => {
+test("proposal promotion refuses a different TFile object installed at the destination", async () => {
   const proposalFolder = new TFolder("01 Inbox/Topic Proposals");
   const clinicalRoot = new TFolder("03 Clinical Topics");
+  const laryngologyFolder = new TFolder("03 Clinical Topics/03 Laryngology");
   const sourcePath = "01 Inbox/Topic Proposals/Laryngeal cleft.md";
+  const destination = "03 Clinical Topics/03 Laryngology/ENT-LAR-010 - Laryngeal cleft.md";
   const source = new TFile(sourcePath);
-  const tree = trackedVaultTree([proposalFolder, clinicalRoot, source]);
-  const frontmatter: Record<string, unknown> = { type: "topic-proposal", title: "Laryngeal cleft", review_status: "unverified" };
+  const replacement = new TFile(destination);
+  const tree = trackedVaultTree([proposalFolder, clinicalRoot, laryngologyFolder, source]);
+  const originalContent = "---\ntype: topic-proposal\ntitle: Laryngeal cleft\nreview_status: unverified\n---\n# Laryngeal cleft\n";
+  const replacementContent = "# Synced replacement\n\nMust remain untouched.\n";
+  let frontmatterCalls = 0;
   let processCalls = 0;
   const app = {
     vault: {
@@ -8723,7 +9351,186 @@ test("proposal promotion reports a combined recovery error if content rollback f
       getAbstractFileByPath: (path: string) => tree.entries.get(path) ?? null,
       getMarkdownFiles: () => tree.markdownFiles(),
       createFolder: (path: string) => tree.createFolder(path),
-      read: async () => "# Original proposal\n",
+      read: async (file: TFile) => file === source ? originalContent : replacementContent,
+      process: async (): Promise<void> => { processCalls += 1; },
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => ({ frontmatter: { type: "topic-proposal", title: "Laryngeal cleft" } }), resolvedLinks: {} },
+    fileManager: {
+      renameFile: async (file: TFile, path: string) => {
+        await tree.renameFile(file, path);
+        tree.entries.set(path, replacement);
+      },
+      processFrontMatter: async (): Promise<void> => { frontmatterCalls += 1; },
+      trashFile: (file: TAbstractFile) => tree.trashFile(file),
+    },
+  };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  data.settings.primaryFolder = "03 Clinical Topics";
+  data.settings.proposalFolder = "01 Inbox/Topic Proposals";
+  data.settings.idProperty = "curriculum_id";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-promotion-object-identity-test");
+  await plugin.loadPluginData();
+
+  await assert.rejects(plugin.promoteProposal(sourcePath, {
+    title: "Laryngeal cleft", domain: "Laryngology", parentPath: "", topicKind: "condition",
+    priority: "P1", safetyCritical: true, curriculumId: "ENT-LAR-010", addToCollection: false,
+  }), /replaced at its destination.*replacement was not changed/is);
+
+  assert.equal(tree.entries.get(destination), replacement);
+  assert.equal(replacementContent, "# Synced replacement\n\nMust remain untouched.\n");
+  assert.equal(frontmatterCalls, 0);
+  assert.equal(processCalls, 0, "rollback must not select the replacement merely by path");
+});
+
+test("proposal promotion does not adopt a concurrent post-frontmatter edit as its rollback token", async () => {
+  const proposalFolder = new TFolder("01 Inbox/Topic Proposals");
+  const clinicalRoot = new TFolder("03 Clinical Topics");
+  const laryngologyFolder = new TFolder("03 Clinical Topics/03 Laryngology");
+  const sourcePath = "01 Inbox/Topic Proposals/Laryngeal cleft draft.md";
+  const destination = "03 Clinical Topics/03 Laryngology/ENT-LAR-010 - Laryngeal cleft.md";
+  const source = new TFile(sourcePath);
+  const tree = trackedVaultTree([proposalFolder, clinicalRoot, laryngologyFolder, source]);
+  const originalContent = "---\ntype: topic-proposal\ntitle: Laryngeal cleft draft\nreview_status: unverified\n---\n# Laryngeal cleft draft\n\nOriginal body.\n";
+  const frontmatter: Record<string, unknown> = { type: "topic-proposal", title: "Laryngeal cleft draft", review_status: "unverified" };
+  let content = originalContent;
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getAbstractFileByPath: (path: string) => tree.entries.get(path) ?? null,
+      getMarkdownFiles: () => tree.markdownFiles(),
+      createFolder: (path: string) => tree.createFolder(path),
+      read: async () => content,
+      process: async (_file: TFile, update: (current: string) => string) => { content = update(content); },
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => ({ frontmatter }), resolvedLinks: {} },
+    fileManager: {
+      renameFile: (file: TFile, path: string) => tree.renameFile(file, path),
+      processFrontMatter: async (_file: TFile, update: (metadata: Record<string, unknown>) => void) => {
+        update(frontmatter);
+        content = `${replaceTestFrontmatter(content, frontmatter)}\nConcurrent editor body that must survive.\n`;
+      },
+      trashFile: (file: TAbstractFile) => tree.trashFile(file),
+    },
+  };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  data.settings.primaryFolder = "03 Clinical Topics";
+  data.settings.proposalFolder = "01 Inbox/Topic Proposals";
+  data.settings.idProperty = "curriculum_id";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-promotion-operation-token-test");
+  await plugin.loadPluginData();
+
+  await assert.rejects(plugin.promoteProposal(sourcePath, {
+    title: "Laryngeal cleft", domain: "Laryngology", parentPath: "", topicKind: "condition",
+    priority: "P1", safetyCritical: true, curriculumId: "ENT-LAR-010", addToCollection: false,
+  }), /changed while its clinical frontmatter was being updated.*Automatic promotion rollback also failed/is);
+
+  assert.equal(source.path, destination, "the concurrent edit remains attached to the exact operation file");
+  assert.match(content, /Concurrent editor body that must survive/);
+  assert.notEqual(content, originalContent, "rollback cannot overwrite a read it did not prove operation-owned");
+});
+
+test("proposal promotion rollback leaves a concurrently edited operation file untouched", async () => {
+  const proposalFolder = new TFolder("01 Inbox/Topic Proposals");
+  const clinicalRoot = new TFolder("03 Clinical Topics");
+  const laryngologyFolder = new TFolder("03 Clinical Topics/03 Laryngology");
+  const sourcePath = "01 Inbox/Topic Proposals/Laryngeal cleft draft.md";
+  const destination = "03 Clinical Topics/03 Laryngology/ENT-LAR-010 - Laryngeal cleft.md";
+  const source = new TFile(sourcePath);
+  const tree = trackedVaultTree([proposalFolder, clinicalRoot, laryngologyFolder, source]);
+  const originalContent = "---\ntype: topic-proposal\ntitle: Laryngeal cleft draft\nreview_status: unverified\n---\n# Laryngeal cleft draft\n\nOriginal proposal body.\n";
+  const frontmatter: Record<string, unknown> = {
+    type: "topic-proposal",
+    title: "Laryngeal cleft draft",
+    review_status: "unverified",
+  };
+  let content = originalContent;
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getAbstractFileByPath: (path: string) => tree.entries.get(path) ?? null,
+      getMarkdownFiles: () => tree.markdownFiles(),
+      createFolder: (path: string) => tree.createFolder(path),
+      read: async () => content,
+      process: async (_file: TFile, update: (current: string) => string): Promise<void> => {
+        content = update(content);
+      },
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => ({ frontmatter }), resolvedLinks: {} },
+    fileManager: {
+      renameFile: (file: TFile, path: string) => tree.renameFile(file, path),
+      processFrontMatter: async (_file: TFile, update: (metadata: Record<string, unknown>) => void) => {
+        update(frontmatter);
+        content = replaceTestFrontmatter(content, frontmatter);
+      },
+      trashFile: (file: TAbstractFile) => tree.trashFile(file),
+    },
+  };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  data.settings.primaryFolder = "03 Clinical Topics";
+  data.settings.proposalFolder = "01 Inbox/Topic Proposals";
+  data.settings.idProperty = "curriculum_id";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-promotion-same-file-race-test");
+  await plugin.loadPluginData();
+  (plugin as unknown as { refreshViews(): Promise<void> }).refreshViews = async () => {
+    content += "\nConcurrent Sync edit that must survive.\n";
+    throw new Error("simulated refresh failure after concurrent edit");
+  };
+
+  const loggedRefreshErrors: unknown[][] = [];
+  const originalConsoleError = console.error;
+  console.error = (...values: unknown[]): void => { loggedRefreshErrors.push(values); };
+  try {
+    const promoted = await plugin.promoteProposal(sourcePath, {
+      title: "Laryngeal cleft",
+      domain: "Laryngology",
+      parentPath: "",
+      topicKind: "condition",
+      priority: "P1",
+      safetyCritical: true,
+      curriculumId: "ENT-LAR-010",
+      addToCollection: false,
+    });
+    assert.equal(promoted, source);
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.equal(loggedRefreshErrors.length, 1);
+  assert.match(String(loggedRefreshErrors[0]?.[0]), /could not refresh views after proposal promotion/i);
+  assert.equal(source.path, destination, "the path stays put when moving it back could misroute the concurrent edit");
+  assert.equal(tree.entries.get(destination), source);
+  assert.equal(tree.entries.has(sourcePath), false);
+  assert.match(content, /# Laryngeal cleft/);
+  assert.match(content, /Original proposal body/);
+  assert.match(content, /Concurrent Sync edit that must survive/);
+  assert.notEqual(content, originalContent);
+});
+
+test("proposal promotion reports a combined recovery error if content rollback fails", async () => {
+  const proposalFolder = new TFolder("01 Inbox/Topic Proposals");
+  const clinicalRoot = new TFolder("03 Clinical Topics");
+  const sourcePath = "01 Inbox/Topic Proposals/Laryngeal cleft.md";
+  const source = new TFile(sourcePath);
+  const tree = trackedVaultTree([proposalFolder, clinicalRoot, source]);
+  const frontmatter: Record<string, unknown> = { type: "topic-proposal", title: "Laryngeal cleft", review_status: "unverified" };
+  let content = "---\ntype: topic-proposal\ntitle: Laryngeal cleft\nreview_status: unverified\n---\n# Original proposal\n";
+  let processCalls = 0;
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getAbstractFileByPath: (path: string) => tree.entries.get(path) ?? null,
+      getMarkdownFiles: () => tree.markdownFiles(),
+      createFolder: (path: string) => tree.createFolder(path),
+      read: async () => content,
       process: async (): Promise<void> => {
         processCalls += 1;
         throw new Error(processCalls === 1 ? "simulated promotion failure" : "simulated rollback write failure");
@@ -8733,7 +9540,10 @@ test("proposal promotion reports a combined recovery error if content rollback f
     metadataCache: { getFileCache: () => ({ frontmatter }), resolvedLinks: {} },
     fileManager: {
       renameFile: (file: TFile, destination: string) => tree.renameFile(file, destination),
-      processFrontMatter: async (_file: TFile, update: (metadata: Record<string, unknown>) => void) => { update(frontmatter); },
+      processFrontMatter: async (_file: TFile, update: (metadata: Record<string, unknown>) => void) => {
+        update(frontmatter);
+        content = replaceTestFrontmatter(content, frontmatter);
+      },
       trashFile: (file: TAbstractFile) => tree.trashFile(file),
     },
   };
@@ -8814,7 +9624,10 @@ test("failed canonical placement restores the original path and content", async 
     metadataCache: { getFileCache: () => ({ frontmatter }), resolvedLinks: {} },
     fileManager: {
       renameFile: (file: TFile, destination: string) => tree.renameFile(file, destination),
-      processFrontMatter: async (_file: TFile, update: (metadata: Record<string, unknown>) => void) => { update(frontmatter); },
+      processFrontMatter: async (_file: TFile, update: (metadata: Record<string, unknown>) => void) => {
+        update(frontmatter);
+        content = replaceTestFrontmatter(content, frontmatter);
+      },
       trashFile: (file: TAbstractFile) => tree.trashFile(file),
     },
   };
@@ -8924,17 +9737,101 @@ test("canonical placement rollback never overwrites a destination created concur
   assert.deepEqual(tree.trashedFolders, []);
 });
 
+test("canonical placement rollback leaves concurrent content on the same TFile untouched", async () => {
+  const clinicalRoot = new TFolder("03 Clinical Topics");
+  const laryngologyFolder = new TFolder("03 Clinical Topics/03 Laryngology");
+  const sourcePath = "03 Clinical Topics/03 Laryngology/ENT-LAR-010 - Original title.md";
+  const destination = "03 Clinical Topics/03 Laryngology/ENT-LAR-010 - Updated title.md";
+  const source = new TFile(sourcePath);
+  const tree = trackedVaultTree([clinicalRoot, laryngologyFolder, source]);
+  const originalContent = "---\ntype: clinical-topic\ntitle: Original title\ncurriculum_id: ENT-LAR-010\ndomain: Laryngology\nreview_status: unverified\n---\n# Original title\n\nClinical body.\n";
+  const frontmatter: Record<string, unknown> = {
+    type: "clinical-topic",
+    title: "Original title",
+    curriculum_id: "ENT-LAR-010",
+    domain: "Laryngology",
+    topic_kind: "condition",
+    priority: "P2",
+    review_status: "unverified",
+  };
+  let content = originalContent;
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getAbstractFileByPath: (path: string) => tree.entries.get(path) ?? null,
+      getMarkdownFiles: () => tree.markdownFiles(),
+      createFolder: (path: string) => tree.createFolder(path),
+      read: async () => content,
+      process: async (_file: TFile, update: (current: string) => string): Promise<void> => {
+        content = update(content);
+      },
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => ({ frontmatter }), resolvedLinks: {} },
+    fileManager: {
+      renameFile: (file: TFile, path: string) => tree.renameFile(file, path),
+      processFrontMatter: async (_file: TFile, update: (metadata: Record<string, unknown>) => void) => {
+        update(frontmatter);
+        content = replaceTestFrontmatter(content, frontmatter);
+      },
+      trashFile: (file: TAbstractFile) => tree.trashFile(file),
+    },
+  };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "ent-clinical";
+  data.settings.primaryFolder = "03 Clinical Topics";
+  data.settings.idProperty = "curriculum_id";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-placement-same-file-race-test");
+  await plugin.loadPluginData();
+  (plugin as unknown as { refreshViews(): Promise<void> }).refreshViews = async () => {
+    content += "\nConcurrent editor change that must survive.\n";
+    throw new Error("simulated placement refresh failure after concurrent edit");
+  };
+
+  const loggedRefreshErrors: unknown[][] = [];
+  const originalConsoleError = console.error;
+  console.error = (...values: unknown[]): void => { loggedRefreshErrors.push(values); };
+  try {
+    const edited = await plugin.editCanonicalPlacement(sourcePath, {
+      title: "Updated title",
+      domain: "Laryngology",
+      parentPath: "",
+      topicKind: "condition",
+      priority: "P1",
+      safetyCritical: false,
+      curriculumId: "ENT-LAR-010",
+      addToCollection: false,
+    });
+    assert.equal(edited, source);
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.equal(loggedRefreshErrors.length, 1);
+  assert.match(String(loggedRefreshErrors[0]?.[0]), /could not refresh views after canonical placement/i);
+  assert.equal(source.path, destination);
+  assert.equal(tree.entries.get(destination), source);
+  assert.equal(tree.entries.has(sourcePath), false);
+  assert.match(content, /# Updated title/);
+  assert.match(content, /Clinical body/);
+  assert.match(content, /Concurrent editor change that must survive/);
+  assert.notEqual(content, originalContent);
+});
+
 test("cross-base search records retain each inactive base's own display aliases", async () => {
   const file = new TFile("Shared/Topic.md");
   const first = migrateData(null);
   first.settings.workspaceMode = "generic";
   first.settings.workspaceName = "First base";
   first.settings.primaryFolder = "Shared";
+  setLinkedIndexFolders(first, "Shared");
   first.displayNameByPath[file.path] = "First display";
   const second = migrateData(null);
   second.settings.workspaceMode = "generic";
   second.settings.workspaceName = "Second base";
   second.settings.primaryFolder = "Shared";
+  setLinkedIndexFolders(second, "Shared");
   second.displayNameByPath[file.path] = "Second display";
   const store = createDefaultStore(first, 1, "vault-cross-base-alias-test");
   store.bases.push(createKnowledgeBaseEntry(second, "base-second", 2));
@@ -8949,6 +9846,42 @@ test("cross-base search records retain each inactive base's own display aliases"
     ["Second base", "Second display"],
   ]);
   assert.equal(results.groups[1]?.records[0]?.sourceTitle, "Source title");
+});
+
+test("cold generic cross-base search reads metadata only for the configured candidate union", async () => {
+  const firstFiles = Array.from({ length: 9 }, (_, index) => new TFile(`First/Topic ${index}.md`));
+  const secondFiles = Array.from({ length: 11 }, (_, index) => new TFile(`Second/Topic ${index}.md`));
+  const unrelated = Array.from({ length: 10_000 }, (_, index) => new TFile(`Unrelated/Note ${index}.md`));
+  const files = [...firstFiles, ...secondFiles, ...unrelated];
+  const frontmatterByPath = Object.fromEntries(files.map((file) => [file.path, { title: file.basename }]));
+  const first = migrateData(null);
+  first.settings.workspaceMode = "generic";
+  first.settings.workspaceName = "First base";
+  setLinkedIndexFolders(first, "First");
+  const second = migrateData(null);
+  second.settings.workspaceMode = "generic";
+  second.settings.workspaceName = "Second base";
+  setLinkedIndexFolders(second, "Second");
+  const store = createDefaultStore(first, 1, "vault-scoped-search-metadata");
+  store.bases.push(createKnowledgeBaseEntry(second, "base-second", 2));
+  const { plugin, metadataReadCount, vaultEnumerationCount } = pluginWithFiles(store, files, frontmatterByPath);
+  await plugin.loadPluginData();
+
+  const results = await plugin.searchKnowledgeBases("topic", {
+    limit: 7,
+    yieldEvery: Number.MAX_SAFE_INTEGER,
+  });
+
+  assert.ok(results);
+  assert.equal(results.total, firstFiles.length + secondFiles.length);
+  assert.equal(results.rendered, 7, "candidate scoping preserves the bounded result cap");
+  assert.equal(metadataReadCount(), firstFiles.length + secondFiles.length);
+  assert.equal(vaultEnumerationCount(), 1);
+  assert.equal(results.groups.some((group) => group.records.some((record) => record.path.startsWith("Unrelated/"))), false);
+
+  await plugin.searchKnowledgeBases("topic 1", { yieldEvery: Number.MAX_SAFE_INTEGER });
+  assert.equal(metadataReadCount(), firstFiles.length + secondFiles.length, "later queries reuse the scoped metadata snapshot");
+  assert.equal(vaultEnumerationCount(), 1);
 });
 
 test("cross-base search omits hidden unreferenced ENT topics but preserves referenced source semantics", async () => {
@@ -8991,18 +9924,21 @@ test("cross-base search streams uncached bases through one bounded catalog witho
   first.settings.workspaceMode = "generic";
   first.settings.workspaceName = "Base 1";
   first.settings.primaryFolder = "Shared";
+  setLinkedIndexFolders(first, "Shared");
   const store = createDefaultStore(first, 1, "vault-cross-base-snapshot-test");
   for (let index = 2; index <= 12; index += 1) {
     const data = migrateData(null);
     data.settings.workspaceMode = "generic";
     data.settings.workspaceName = `Base ${index}`;
     data.settings.primaryFolder = "Shared";
+    setLinkedIndexFolders(data, "Shared");
     store.bases.push(createKnowledgeBaseEntry(data, `base-${index}`, index));
   }
   const archivedData = migrateData(null);
   archivedData.settings.workspaceMode = "generic";
   archivedData.settings.workspaceName = "Archived base";
   archivedData.settings.primaryFolder = "Shared";
+  setLinkedIndexFolders(archivedData, "Shared");
   const archivedEntry = createKnowledgeBaseEntry(archivedData, "base-archived-search", 13);
   archivedEntry.archivedAt = 14;
   archivedEntry.updatedAt = 14;
@@ -9100,12 +10036,14 @@ test("over-budget cross-base searches reuse the stable working set on every late
   active.settings.workspaceMode = "generic";
   active.settings.primaryFolder = "Shared";
   active.settings.workspaceName = "Active";
+  setLinkedIndexFolders(active, "Shared");
   const store = createDefaultStore(active, 1, "vault-over-budget-search-cache");
   for (let index = 1; index <= 6; index += 1) {
     const data = migrateData(null);
     data.settings.workspaceMode = "generic";
     data.settings.primaryFolder = "Shared";
     data.settings.workspaceName = `Inactive ${index}`;
+    setLinkedIndexFolders(data, "Shared");
     store.bases.push(createKnowledgeBaseEntry(data, `base-${index}`, index + 1));
   }
   const { plugin } = pluginWithFiles(store, files, frontmatterByPath);
@@ -9146,9 +10084,11 @@ test("a vault rename overlays stale portable paths while asynchronous repair is 
   const active = migrateData(null);
   active.settings.workspaceMode = "generic";
   active.settings.primaryFolder = "Active";
+  setLinkedIndexFolders(active, "Active");
   const inactive = migrateData(null);
   inactive.settings.workspaceMode = "generic";
   inactive.settings.primaryFolder = "Inactive";
+  setLinkedIndexFolders(inactive, "Inactive");
   inactive.portableIndex.groups = [{ id: "group-inactive", title: "Inactive", order: 0 }];
   inactive.portableIndex.subjects = [{
     id: "subject-old-topic",
@@ -9326,7 +10266,8 @@ test("search projection candidates are restricted to each configured base plus e
   const data = migrateData(null);
   data.settings.workspaceMode = "generic";
   data.settings.primaryFolder = "Knowledge A";
-  data.manualIndexPaths = [manual.path];
+  setLinkedIndexFolders(data, "Knowledge A");
+  data.directIndexPaths = [manual.path];
   const entry = createKnowledgeBaseEntry(data, "base-a", 1);
   const plugin = pluginWith(createDefaultStore(data, 1, "vault-search-candidates-test"));
   const internal = plugin as unknown as {
@@ -9405,9 +10346,11 @@ test("path-scoped vault-event invalidation preserves unrelated base caches and a
   const first = migrateData(null);
   first.settings.workspaceMode = "generic";
   first.settings.primaryFolder = "Active";
+  setLinkedIndexFolders(first, "Active");
   const second = migrateData(null);
   second.settings.workspaceMode = "generic";
   second.settings.primaryFolder = "Inactive";
+  setLinkedIndexFolders(second, "Inactive");
   const store = createDefaultStore(first, 1, "vault-cross-base-relevance-test");
   store.bases.push(createKnowledgeBaseEntry(second, "base-second", 2));
   const { plugin, metadataReadCount, vaultEnumerationCount } = pluginWithFiles(
@@ -9798,10 +10741,12 @@ test("switching to a base whose selection needs reconciling completes with an op
   const files = [new TFile("Knowledge Base/Topic.md")];
   const dataA = migrateData(null);
   dataA.settings.setupComplete = true;
+  setLinkedIndexFolders(dataA, "Knowledge Base");
   const store = createDefaultStore(dataA, 100, "vault-deadlock-switch");
   const dataB = migrateData(null);
   dataB.settings.setupComplete = true;
   dataB.settings.workspaceName = "Base B";
+  setLinkedIndexFolders(dataB, "Knowledge Base");
   // selectedPath is intentionally the fresh-base default: empty, so the
   // in-operation refresh must reconcile a selection fallback.
   store.bases.push(createKnowledgeBaseEntry(dataB, "base-b", 200));
@@ -9889,6 +10834,138 @@ test("a store save writes the data.json backup twin before the primary write", a
   assert.deepEqual(JSON.parse(adapterWrites[0]?.content ?? "null"), JSON.parse(JSON.stringify(savedData[0])));
 });
 
+test("a failed backup-twin write never calls the primary saveData writer", async () => {
+  const events: string[] = [];
+  const legacy = migrateData(null);
+  legacy.settings.workspaceName = "Backup must succeed first";
+  const app = {
+    vault: {
+      ...emptyWritableTestVault(),
+      adapter: {
+        exists: async () => false,
+        read: async () => { throw new Error("missing"); },
+        write: async (path: string) => {
+          events.push(`backup:${path}`);
+          throw new Error("simulated backup disk failure");
+        },
+      },
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null },
+    fileManager: {},
+    loadLocalStorage: () => null,
+    saveLocalStorage: () => {},
+  };
+  const plugin = new EntVaultCommandCenterPlugin(
+    app as never,
+    { dir: ".obsidian/plugins/knowledge-base-command-center" } as never,
+  ) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = legacy;
+  const savedData: unknown[] = [];
+  plugin.saveData = async (value: unknown) => {
+    events.push("primary");
+    savedData.push(structuredClone(value));
+  };
+
+  const loggedErrors: unknown[][] = [];
+  const originalConsoleError = console.error;
+  console.error = (...values: unknown[]): void => { loggedErrors.push(values); };
+  try {
+    await plugin.loadPluginData();
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.deepEqual(events, ["backup:.obsidian/plugins/knowledge-base-command-center/data.json.bak"]);
+  assert.deepEqual(savedData, [], "saveData must not run after the prerequisite twin write rejects");
+  assert.equal(plugin.isDataReadOnly(), true);
+  assert.match(plugin.dataCompatibilityWarning, /backup could not be refreshed.*primary store was not written/is);
+  assert.ok(loggedErrors.some((values) => String(values[0]).includes("could not refresh the data.json backup")));
+});
+
+test("a Sync generation arriving during the backup write fences the primary store writer", async () => {
+  const store = createDefaultStore(migrateData(null), 100, "vault-backup-generation-fence");
+  const app = {
+    vault: {
+      ...emptyWritableTestVault(),
+      adapter: {
+        exists: async () => false,
+        read: async () => { throw new Error("missing"); },
+        write: async () => {
+          (plugin as unknown as { externalChangeGeneration: number }).externalChangeGeneration += 1;
+        },
+      },
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null },
+    fileManager: {},
+    loadLocalStorage: () => null,
+    saveLocalStorage: () => {},
+  };
+  const plugin = new EntVaultCommandCenterPlugin(
+    app as never,
+    { dir: ".obsidian/plugins/knowledge-base-command-center" } as never,
+  ) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = store;
+  await plugin.loadPluginData();
+  const primaryWrites: unknown[] = [];
+  plugin.saveData = async (value: unknown) => { primaryWrites.push(structuredClone(value)); };
+  const internal = plugin as unknown as {
+    saveExplicitStoreSnapshot(snapshot: PluginStore): Promise<void>;
+  };
+
+  await assert.rejects(
+    internal.saveExplicitStoreSnapshot(store),
+    /Sync while the backup was being refreshed.*primary store was not written/is,
+  );
+  assert.deepEqual(primaryWrites, [], "saveData is fenced after the awaited backup boundary");
+});
+
+test("captured-store restoration rechecks Sync generation after its backup write", async () => {
+  const store = createDefaultStore(migrateData(null), 100, "vault-captured-generation-fence");
+  const app = {
+    vault: {
+      ...emptyWritableTestVault(),
+      adapter: {
+        exists: async () => false,
+        read: async () => { throw new Error("missing"); },
+        write: async () => {
+          (plugin as unknown as { externalChangeGeneration: number }).externalChangeGeneration += 1;
+        },
+      },
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null },
+    fileManager: {},
+    loadLocalStorage: () => null,
+    saveLocalStorage: () => {},
+  };
+  const plugin = new EntVaultCommandCenterPlugin(
+    app as never,
+    { dir: ".obsidian/plugins/knowledge-base-command-center" } as never,
+  ) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = store;
+  await plugin.loadPluginData();
+  const primaryWrites: unknown[] = [];
+  plugin.saveData = async (value: unknown) => { primaryWrites.push(structuredClone(value)); };
+  const internal = plugin as unknown as {
+    externalChangeGeneration: number;
+    restoreCapturedPluginData(
+      capture: { read: { value: unknown }; adapterWriteGeneration: number },
+      expectedExternalGeneration: number,
+    ): Promise<void>;
+  };
+
+  await assert.rejects(
+    internal.restoreCapturedPluginData(
+      { read: { value: store }, adapterWriteGeneration: 0 },
+      internal.externalChangeGeneration,
+    ),
+    /newer synced settings file arrived while the recovery backup was being refreshed.*primary store was not written/is,
+  );
+  assert.deepEqual(primaryWrites, [], "captured recovery never reaches saveData after the generation changes");
+});
+
 test("a torn data.json is recovered from the backup twin instead of read-only mode", async () => {
   const backupData = migrateData(null);
   backupData.settings.workspaceName = "Recovered organization";
@@ -9927,6 +11004,156 @@ test("a torn data.json is recovered from the backup twin instead of read-only mo
   assert.equal(plugin.data.settings.workspaceName, "Recovered organization");
   assert.equal(savedData.length, 1, "the recovered store is written back so data.json is valid again");
   assert.deepEqual((savedData[0] as PluginStore).vaultId, "vault-backup-restore");
+});
+
+test("a readable Sync replacement observed after loadData fails wins over the older backup", async () => {
+  const backupData = migrateData(null);
+  backupData.settings.workspaceName = "Older backup";
+  const backupStore = createDefaultStore(backupData, 100, "vault-readable-replacement");
+  const replacementData = migrateData(null);
+  replacementData.settings.workspaceName = "Newer synced primary";
+  const replacementStore = createDefaultStore(replacementData, 200, "vault-readable-replacement");
+  const adapterWrites: string[] = [];
+  const app = {
+    vault: {
+      ...emptyWritableTestVault(),
+      adapter: {
+        exists: async () => true,
+        read: async (path: string) => path.endsWith("data.json.bak")
+          ? JSON.stringify(backupStore)
+          : JSON.stringify(replacementStore),
+        write: async (path: string) => { adapterWrites.push(path); },
+      },
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null },
+    fileManager: {},
+    loadLocalStorage: () => null,
+    saveLocalStorage: () => {},
+  };
+  const plugin = new EntVaultCommandCenterPlugin(
+    app as never,
+    { dir: ".obsidian/plugins/knowledge-base-command-center" } as never,
+  ) as EntVaultCommandCenterPlugin & TestPluginBase;
+  const primaryWrites: unknown[] = [];
+  plugin.loadData = async () => { throw new SyntaxError("the earlier primary was torn"); };
+  plugin.saveData = async (value: unknown) => { primaryWrites.push(structuredClone(value)); };
+
+  const result = await plugin.loadPluginData();
+
+  assert.equal(result.compatible, true);
+  assert.equal(plugin.data.settings.workspaceName, "Newer synced primary");
+  assert.deepEqual(adapterWrites, [], "the readable replacement is neither preserved as corrupt nor replaced");
+  assert.deepEqual(primaryWrites, []);
+});
+
+test("corrupt-primary recovery cancels if Sync replaces data.json during the backup write", async () => {
+  const backupData = migrateData(null);
+  backupData.settings.workspaceName = "Recovered backup held read-only";
+  const backupStore = createDefaultStore(backupData, 100, "vault-corrupt-recovery-cas");
+  const syncedData = migrateData(null);
+  syncedData.settings.workspaceName = "Newer synced primary";
+  const syncedStore = createDefaultStore(syncedData, 200, "vault-corrupt-recovery-cas");
+  const corruptPrimary = '{"version":';
+  let primaryReads = 0;
+  const adapterWrites: string[] = [];
+  const app = {
+    vault: {
+      ...emptyWritableTestVault(),
+      adapter: {
+        exists: async () => true,
+        read: async (path: string) => {
+          if (path.endsWith("data.json.bak")) return JSON.stringify(backupStore);
+          primaryReads += 1;
+          return primaryReads <= 2 ? corruptPrimary : JSON.stringify(syncedStore);
+        },
+        write: async (path: string) => { adapterWrites.push(path); },
+      },
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null },
+    fileManager: {},
+    loadLocalStorage: () => null,
+    saveLocalStorage: () => {},
+  };
+  const plugin = new EntVaultCommandCenterPlugin(
+    app as never,
+    { dir: ".obsidian/plugins/knowledge-base-command-center" } as never,
+  ) as EntVaultCommandCenterPlugin & TestPluginBase;
+  const primaryWrites: unknown[] = [];
+  plugin.loadData = async () => { throw new SyntaxError("Unexpected end of JSON input"); };
+  plugin.saveData = async (value: unknown) => { primaryWrites.push(structuredClone(value)); };
+
+  const result = await plugin.loadPluginData();
+
+  assert.equal(result.compatible, false);
+  assert.equal(plugin.isDataReadOnly(), true);
+  assert.equal(plugin.data.settings.workspaceName, "Recovered backup held read-only");
+  assert.match(plugin.dataCompatibilityWarning, /changed through Sync.*newer primary was not overwritten/is);
+  assert.deepEqual(primaryWrites, [], "the newer synced primary never reaches saveData overwrite");
+  assert.equal(adapterWrites.filter((path) => path.includes("data.json.corrupt-")).length, 1);
+  assert.equal(adapterWrites.filter((path) => path.endsWith("data.json.bak")).length, 1);
+});
+
+test("an unpreservable corrupt primary opens a valid backup read-only without restore", async () => {
+  Notice.messages.length = 0;
+  const backupData = migrateData(null);
+  backupData.settings.workspaceName = "Backup opened without overwrite";
+  const backupStore = createDefaultStore(backupData, 100, "vault-backup-preservation-failure");
+  const corruptPrimary = '{"version":';
+  const adapterWriteAttempts: Array<{ path: string; content: string }> = [];
+  const app = {
+    vault: {
+      ...emptyWritableTestVault(),
+      adapter: {
+        exists: async (path: string) => path.endsWith("data.json") || path.endsWith("data.json.bak"),
+        read: async (path: string) => path.endsWith("data.json.bak")
+          ? JSON.stringify(backupStore)
+          : corruptPrimary,
+        write: async (path: string, content: string) => {
+          adapterWriteAttempts.push({ path, content });
+          if (path.includes("data.json.corrupt-")) throw new Error("simulated forensic-copy failure");
+        },
+      },
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null },
+    fileManager: {},
+    loadLocalStorage: () => null,
+    saveLocalStorage: () => {},
+  };
+  const plugin = new EntVaultCommandCenterPlugin(
+    app as never,
+    { dir: ".obsidian/plugins/knowledge-base-command-center" } as never,
+  ) as EntVaultCommandCenterPlugin & TestPluginBase;
+  const savedData: unknown[] = [];
+  plugin.saveData = async (value: unknown) => { savedData.push(structuredClone(value)); };
+  plugin.loadData = async () => { throw new SyntaxError("Unexpected end of JSON input"); };
+
+  const loggedErrors: unknown[][] = [];
+  const originalConsoleError = console.error;
+  console.error = (...values: unknown[]): void => { loggedErrors.push(values); };
+  let result: Awaited<ReturnType<typeof plugin.loadPluginData>>;
+  try {
+    result = await plugin.loadPluginData();
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.equal(result.compatible, false);
+  assert.equal(plugin.data.settings.workspaceName, "Backup opened without overwrite");
+  assert.equal(plugin.isDataReadOnly(), true);
+  assert.match(plugin.dataCompatibilityWarning, /backup is open read-only.*could not be preserved/is);
+  assert.deepEqual(savedData, [], "the backup must not be restored over an unpreserved corrupt primary");
+  assert.equal(adapterWriteAttempts.length, 1, "only the failed forensic-copy attempt is allowed");
+  assert.match(adapterWriteAttempts[0]?.path ?? "", /data\.json\.corrupt-/u);
+  assert.equal(adapterWriteAttempts[0]?.content, corruptPrimary);
+  assert.ok(loggedErrors.some((values) => String(values[0]).includes("could not preserve the unreadable data.json")));
+  assert.ok(Notice.messages.some((message) => /backup was opened read-only/i.test(message)));
+
+  await plugin.savePluginData();
+  assert.deepEqual(savedData, [], "later save requests remain inert while recovery is read-only");
+  assert.equal(adapterWriteAttempts.length, 1);
 });
 
 test("a corrupt data.json with no usable backup still enters read-only protection", async () => {
@@ -10070,6 +11297,7 @@ function twoBaseRecordStore(vaultId: string): PluginStore {
   const active = migrateData(null);
   active.settings.workspaceMode = "generic";
   active.settings.primaryFolder = "Active";
+  setLinkedIndexFolders(active, "Active");
   active.portableIndex.groups = [{ id: "group-one", title: "Group one", order: 0 }];
   // A portable identity resolved to a path that may or may not exist on disk is
   // the one record whose very existence depends on the file scan: it projects a
@@ -10089,6 +11317,7 @@ function twoBaseRecordStore(vaultId: string): PluginStore {
   const inactive = migrateData(null);
   inactive.settings.workspaceMode = "generic";
   inactive.settings.primaryFolder = "Inactive";
+  setLinkedIndexFolders(inactive, "Inactive");
   const store = createDefaultStore(active, 1, vaultId);
   store.bases.push(createKnowledgeBaseEntry(inactive, "base-second", 2));
   return store;
@@ -10205,6 +11434,7 @@ test("a single edit in a large vault patches the cache instead of rescanning eve
   const data = migrateData(null);
   data.settings.workspaceMode = "generic";
   data.settings.primaryFolder = "Knowledge Base";
+  setLinkedIndexFolders(data, "Knowledge Base");
   const { plugin, metadataReadCount, vaultEnumerationCount } = pluginWithFiles(
     createDefaultStore(data, 1, "vault-large-incremental-edit"),
     files,
@@ -10271,6 +11501,7 @@ test("bulk index removal and restore resolve records and subjects without a per-
   const data = migrateData(null);
   data.settings.workspaceMode = "generic";
   data.settings.primaryFolder = "Knowledge Base";
+  setLinkedIndexFolders(data, "Knowledge Base");
   data.portableIndex.groups = [{ id: "bulk-group", title: "Bulk group", order: 0 }];
   data.portableIndex.subjects = files.map((file, index) => ({
     id: `bulk-subject-${index}`,
@@ -10342,7 +11573,7 @@ test("a steady-state startup takes no speculative pre-repair clone of the whole 
   const first = migrateData(null);
   first.settings.workspaceMode = "generic";
   first.settings.primaryFolder = "Knowledge Base";
-  first.manualIndexPaths = Array.from({ length: 200 }, (_, index) => `Elsewhere/Manual ${index}.md`);
+  first.directIndexPaths = Array.from({ length: 200 }, (_, index) => `Elsewhere/Direct ${index}.md`);
   const second = migrateData(null);
   second.settings.workspaceMode = "ent-clinical";
   const store = createDefaultStore(first, 1, "vault-startup-clone-budget");
@@ -10398,7 +11629,7 @@ test("a startup that does repair still restores the pre-repair store when its wr
 
   const subject = plugin.data.portableIndex.subjects.find((candidate) => candidate.id === "legacy-medication");
   assert.equal(subject?.indexed, true, "the in-memory store returns to its pre-repair shape");
-  assert.deepEqual(plugin.data.manualIndexPaths, [file.path]);
+  assert.deepEqual(plugin.data.directIndexPaths, [file.path]);
   assert.equal(plugin.isDataReadOnly(), true, "the rejected repair leaves the bases read-only");
 });
 
@@ -10432,7 +11663,7 @@ test("live classification and deterministic startup repair share one clinical so
   data.portableIndex.resolvedPathBySubjectId = Object.fromEntries(
     cases.map((item) => [`legacy-${item.kind}`, item.path]),
   );
-  data.manualIndexPaths = cases.map((item) => item.path);
+  data.directIndexPaths = cases.map((item) => item.path);
   const { plugin } = pluginWithFiles(createDefaultStore(data, 1, "vault-clinical-source-table"), files, frontmatterByPath);
   await plugin.loadPluginData();
 
@@ -10450,7 +11681,7 @@ test("live classification and deterministic startup repair share one clinical so
   // find nothing left to change, which is only true if both tables agree.
   const repaired = plugin as unknown as { remediateInvalidClinicalIndexes(): boolean };
   assert.equal(repaired.remediateInvalidClinicalIndexes(), false, "the repaired store needs no further repair");
-  assert.deepEqual(plugin.data.manualIndexPaths, [], "no invalid manual entrance survives");
+  assert.deepEqual(plugin.data.directIndexPaths, [], "no invalid direct entrance survives");
 });
 
 test("scoped events reclassify a clinical proposal in place and still match a full rebuild", async () => {
@@ -11343,12 +12574,14 @@ test("vault-side JSON exports honor the configured exports folder", async () => 
   let createdPath = "";
   const app = plugin.app as unknown as {
     vault: {
+      configDir: string;
       getAbstractFileByPath(path: string): null;
       createFolder(path: string): Promise<void>;
       create(path: string, content: string): Promise<TFile>;
     };
   };
   app.vault = {
+    configDir: ".obsidian",
     getAbstractFileByPath: () => null,
     createFolder: async () => { /* folder creation is not under test */ },
     create: async (path) => { createdPath = path; return new TFile(path); },

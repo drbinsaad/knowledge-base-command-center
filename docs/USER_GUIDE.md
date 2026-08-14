@@ -15,7 +15,7 @@ Switching knowledge bases changes every open Command Center view because the act
 
 ## Knowledge Index
 
-The Index starts with every Markdown note below the configured indexed folder. A Generic base can also include eligible notes from elsewhere through manual membership.
+The Index of a new Generic base starts with no folder-authoritative membership. A note joins when you explicitly add that note or when you explicitly link a folder whose rule supplies eligible descendants. The default new-note folder controls storage only and never enrolls a note by itself.
 
 The initial hierarchy uses:
 
@@ -48,7 +48,11 @@ Visual arrangement stays in plugin data. It does not change note paths or frontm
 
 ### Index membership
 
-Use **Add → Add existing note to Index** in a Generic base to include an eligible note outside the automatic folder scope. Removing membership or hiding a record affects only the active knowledge base. The Markdown file remains in the vault and can be restored through Index Manager.
+Use **Add → Add existing note to Index** or the current-note action in a Generic base to persist direct membership for that exact note. Direct membership does not depend on the note's current folder. A folder supplies dynamic membership only through an explicit linked-folder rule; notes merely stored in the default new-note, Inbox, template, attachment, export, or Library creation folder do not join the Index for that reason. When an Inbox note is also supplied directly or by a linked rule, that explicit Index choice takes precedence over storage and the note appears in the Index, unless it has a deliberate Library classification.
+
+Removing or hiding a record affects only the active knowledge base. For a note supplied by a linked folder, hiding records an Index exclusion instead of touching the file. Unlinking the folder removes only that source rule; a separately added direct member remains indexed. Generic membership, grouping, nesting, Library classification, Collections, pins, and queues never move, rename, delete, or rewrite Markdown.
+
+Generic bases migrated from pre-v15 data keep the old `primaryFolder` as a removable **legacy linked-folder source**. This preserves the pre-upgrade result set without treating the setting as a storage command or silently changing notes.
 
 The ENT preset protects canonical source classification and folder scope. It still permits personal visual organization where the profile allows it.
 
@@ -59,7 +63,7 @@ Open **Manage Index…** from the Command palette, Index header, or overflow men
 | Tab | Purpose |
 | --- | --- |
 | **Indexed** | Search current members, assign a visual group in bulk where permitted, or remove active-base membership. |
-| **Available** | Add eligible existing notes that are not currently in the Generic Index. |
+| **Available** | Add direct membership to eligible existing notes that are not already direct members. This includes notes currently supplied only by a linked folder, so you can make one durable before unlinking that folder. |
 | **Hidden** | Restore records removed from the active base, including protected ENT subjects. |
 | **Groups** | Create, reorder, rename, merge, or remove visual groups safely. |
 | **Diagnostics** | Inspect missing references, duplicate membership, broken visual parents, and orphaned group state, apply the established safe reference cleanup, or open the broader Taxonomy Health Center. |
@@ -185,7 +189,7 @@ When creation has an explicit Library context, templates may also use these quot
 
 The <code>yaml:</code> prefix is deliberate. Values are emitted as YAML-compatible double-quoted scalars, including escaping quotes, line breaks, and control characters. A template can safely write <code>category: {{yaml:category}}</code>. Tokens resolve only during explicit note creation; they are not reevaluated when a note opens, a Library is renamed, or organization changes. Plain <code>{{id}}</code>, <code>{{category}}</code>, and other third-party template syntax remain untouched. Legacy title/date/time behavior is unchanged.
 
-Notes created through the primary action join the chosen destination — the Inbox by default, or the Index, a Collection, or a Library when selected — even when their folder is outside the automatically indexed folder and the profile permits manual membership. If a synced change removes the chosen Collection or Library while the form is open, the note is still created and the plugin explains that it was left unfiled instead of placing it somewhere wrong.
+Notes created through the primary action join only the destination explicitly chosen by that flow — the Inbox by default, or the Index, a Collection, or a Library when selected. Choosing or editing the file's folder does not create Index membership. When the Index is the destination, the plugin records direct membership even if the file is stored elsewhere. If a synced change removes the chosen Collection or Library while the form is open, the note is still created and the plugin explains that it was left unfiled instead of placing it somewhere wrong.
 
 ## Quick entry and shortcuts
 
@@ -374,7 +378,7 @@ Configurable Generic-base settings include:
 
 - Command Center name and subtitle;
 - Index, item, group, and Inbox labels;
-- indexed, Inbox, default note, and templates folders;
+- explicit linked-folder Index rules, plus Inbox, default new-note storage, and templates folders;
 - ID, group, and parent metadata mappings;
 - default starting content and template;
 - optional per-Library folder, starting-content, and template profiles;

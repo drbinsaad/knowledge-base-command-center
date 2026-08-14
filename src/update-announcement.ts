@@ -146,6 +146,20 @@ export const UPDATE_ANNOUNCEMENT_0_15_0: UpdateAnnouncement = {
   releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.15.0",
 };
 
+export const UPDATE_ANNOUNCEMENT_0_16_0: UpdateAnnouncement = {
+  version: "0.16.0",
+  title: "What’s new in Knowledge Base Command Center 0.16.0",
+  intro: "Index membership is now deliberate: storage folders no longer decide what belongs to a knowledge base. This update also tightens repair, recovery, and import safety without moving or rewriting your notes.",
+  highlights: [
+    "A new Generic knowledge base starts with an empty Index. Its default new-note folder controls where new files are stored, not which notes are members.",
+    "Add current note and Add existing note create direct membership for that exact note, even if the note also belongs through a linked folder.",
+    "A linked folder is a named, removable Index source. Existing Generic bases preserve their former folder scope as one legacy source, while Obsidian .base files remain separate read-only query views.",
+    "Index repair rechecks the exact preview immediately before applying it, and repair, bulk removal, and restore refuse to start unless their plugin-data changes can be undone.",
+    "Large-vault search, view-state saves, and Manage index rendering do less unnecessary work; imports reject restricted destinations, concurrent note edits survive rollback, and tabs and pop-out windows behave correctly.",
+  ],
+  releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.16.0",
+};
+
 const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_12_0.version, UPDATE_ANNOUNCEMENT_0_12_0],
   [UPDATE_ANNOUNCEMENT_0_12_1.version, UPDATE_ANNOUNCEMENT_0_12_1],
@@ -157,6 +171,7 @@ const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_14_1.version, UPDATE_ANNOUNCEMENT_0_14_1],
   [UPDATE_ANNOUNCEMENT_0_14_2.version, UPDATE_ANNOUNCEMENT_0_14_2],
   [UPDATE_ANNOUNCEMENT_0_15_0.version, UPDATE_ANNOUNCEMENT_0_15_0],
+  [UPDATE_ANNOUNCEMENT_0_16_0.version, UPDATE_ANNOUNCEMENT_0_16_0],
 ]);
 
 function parseSemanticVersion(value: string): ParsedSemanticVersion | null {

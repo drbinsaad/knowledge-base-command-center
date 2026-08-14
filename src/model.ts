@@ -11,7 +11,7 @@ export const MEDICATION_ROOT = "06 Clinical Tools/Medications/";
 export const SYNDROME_ROOT = "06 Clinical Tools/Syndromes/";
 export const DEFAULT_PROPOSAL_FOLDER = "01 Inbox/ENT Topic Proposals";
 export const DEFAULT_EXPORTS_FOLDER = "Knowledge Base Command Center Exports";
-export const DATA_VERSION = 14;
+export const DATA_VERSION = 15;
 export const STORE_VERSION = 15;
 export const MIN_RECOGNIZED_STORE_VERSION = 11;
 export const STORE_KIND = "knowledge-base-command-center-store";
@@ -21,7 +21,7 @@ export const MAX_LIBRARIES = 50;
 export const MAX_SEMANTIC_LINEAGE = 64;
 /** Device-local routes, disclosure state, and bounded history must fit comfortably in localStorage. */
 export const MAX_DEVICE_LOCAL_STATE_BYTES = 4 * 1024 * 1024;
-export const DEVICE_LOCAL_STATE_VERSION = 2;
+export const DEVICE_LOCAL_STATE_VERSION = 3;
 /** Permanent base-deletion tombstones are small, but remain bounded and are never silently evicted. */
 export const MAX_DELETED_KNOWLEDGE_BASE_IDS = 10_000;
 export const DEFAULT_KNOWLEDGE_BASE_ID = "base-default";
@@ -82,6 +82,21 @@ export type LibraryTab = `library:${string}`;
 export type MainTab = CoreTab | LibraryTab;
 export type OpenNoteBehavior = "new-tab" | "same-tab" | "split";
 export type WorkspaceMode = "generic" | "ent-clinical";
+export type IndexFolderSourceOrigin = "user" | "legacy-primary-folder";
+
+/** One folder the user explicitly linked as a dynamic source of Index membership. */
+export interface IndexFolderSource {
+  /** Stable within one knowledge base; folder renames never change this identity. */
+  id: string;
+  path: string;
+  /** Legacy sources preserve pre-v15 primaryFolder behavior without scanning the vault. */
+  origin: IndexFolderSourceOrigin;
+}
+
+/** Keep folder-rule validation and Settings rendering bounded. */
+export const MAX_INDEX_FOLDER_SOURCES = 300;
+/** Persisted sentinel for the vault root. Obsidian note paths themselves never equal this value. */
+export const INDEX_FOLDER_VAULT_ROOT = "/";
 export type NewNoteMode = "empty" | "template";
 export type AttachmentStorageMode = "obsidian" | "fixed-folder" | "note-subfolder" | "ask";
 export type AttachmentInsertionMode = "cursor" | "marker" | "heading" | "end";
@@ -341,6 +356,11 @@ export interface PersonalOrganizationState {
   nextStudyPaths: string[];
   savedViews: SavedView[];
   curriculumVisual: CurriculumVisualState;
+  /** Canonical exact-note memberships. New code writes only this field. */
+  directIndexPaths: string[];
+  /** Explicit dynamic folder memberships, independent of the note-creation folder. */
+  indexFolderSources: IndexFolderSource[];
+  /** Read-only migration compatibility for pre-v15 data. */
   manualIndexPaths: string[];
   excludedIndexPaths: string[];
   indexGroupByPath: Record<string, string>;
@@ -358,6 +378,8 @@ export const PERSONAL_ORGANIZATION_FIELDS: ReadonlyArray<keyof PersonalOrganizat
   "nextStudyPaths",
   "savedViews",
   "curriculumVisual",
+  "directIndexPaths",
+  "indexFolderSources",
   "manualIndexPaths",
   "excludedIndexPaths",
   "indexGroupByPath",
@@ -446,6 +468,9 @@ export interface PluginData {
   nextStudyPaths: string[];
   savedViews: SavedView[];
   curriculumVisual: CurriculumVisualState;
+  directIndexPaths: string[];
+  indexFolderSources: IndexFolderSource[];
+  /** Read-only migration compatibility for pre-v15 data. */
   manualIndexPaths: string[];
   excludedIndexPaths: string[];
   indexGroupByPath: Record<string, string>;
@@ -503,6 +528,8 @@ export interface DeviceLocalKnowledgeBaseState {
 /** Stored through App.saveLocalStorage, never through plugin data.json. */
 export interface DeviceLocalPluginState {
   version: typeof DEVICE_LOCAL_STATE_VERSION;
+  /** False only while a v2 payload is being upgraded against its matching synced base. */
+  historyIndexFolderSourcesIncluded: boolean;
   /** Prevents a retained App-local payload from attaching to a reinstalled or different vault store. */
   vaultId: string;
   activeBaseId: string;
@@ -576,6 +603,8 @@ export const DEFAULT_DATA: PluginData = {
   nextStudyPaths: [],
   savedViews: [],
   curriculumVisual: { parentByPath: {}, orderByContainer: {} },
+  directIndexPaths: [],
+  indexFolderSources: [],
   manualIndexPaths: [],
   excludedIndexPaths: [],
   indexGroupByPath: {},
@@ -731,6 +760,133 @@ export function semanticPluginDataProjection(data: PluginData): PluginData {
   applyCollapsedLayout(projected.collections, []);
   for (const layout of Object.values(projected.portableIndex.libraryLayouts ?? {})) applyCollapsedLayout(layout, []);
   return projected;
+}
+
+type SemanticComparisonKind = "json" | "root" | "portable-index" | "layout-list" | "layout-node" | "library-layouts";
+
+interface SemanticComparisonWork {
+  left: unknown;
+  right: unknown;
+  kind: SemanticComparisonKind;
+}
+
+const ROOT_VIEW_STATE_KEYS = new Set(["selectedPath", "activeTab", "collapsed", "undoStack", "redoStack"]);
+const PORTABLE_INDEX_VIEW_STATE_KEYS = new Set(["libraryLayouts"]);
+const LAYOUT_NODE_VIEW_STATE_KEYS = new Set(["collapsed", "subheadings"]);
+const NO_SEMANTIC_COMPARISON_KEYS = new Set<string>();
+
+/**
+ * Compare two plugin payloads using the exact exclusions of
+ * semanticPluginDataProjection(), without cloning and canonical-stringifying
+ * both complete graphs. This is the hot-path guard used by view-only saves:
+ * it still examines every semantic field once, so an unsaved organization
+ * edit cannot ride along with a selection/collapse write.
+ */
+export function pluginDataSemanticallyEqual(left: PluginData, right: PluginData): boolean {
+  const pending: SemanticComparisonWork[] = [{ left, right, kind: "root" }];
+  const enqueueRecord = (
+    leftValue: unknown,
+    rightValue: unknown,
+    excluded: ReadonlySet<string>,
+    kindForKey?: (key: string) => SemanticComparisonKind,
+  ): boolean => {
+    if (!leftValue || typeof leftValue !== "object" || Array.isArray(leftValue)
+      || !rightValue || typeof rightValue !== "object" || Array.isArray(rightValue)) return false;
+    const leftRecord = leftValue as Record<string, unknown>;
+    const rightRecord = rightValue as Record<string, unknown>;
+    const leftKeys = Object.keys(leftRecord);
+    let leftKeyCount = 0;
+    for (const key of leftKeys) {
+      if (!excluded.has(key) && leftRecord[key] !== undefined) leftKeyCount += 1;
+    }
+    let rightKeyCount = 0;
+    for (const key of Object.keys(rightRecord)) {
+      if (!excluded.has(key) && rightRecord[key] !== undefined) rightKeyCount += 1;
+    }
+    if (leftKeyCount !== rightKeyCount) return false;
+    for (const key of leftKeys) {
+      if (excluded.has(key) || leftRecord[key] === undefined) continue;
+      if (!Object.prototype.hasOwnProperty.call(rightRecord, key) || rightRecord[key] === undefined) return false;
+      pending.push({
+        left: leftRecord[key],
+        right: rightRecord[key],
+        kind: kindForKey?.(key) ?? "json",
+      });
+    }
+    return true;
+  };
+  while (pending.length > 0) {
+    const work = pending.pop();
+    if (!work) continue;
+    const { left: leftValue, right: rightValue, kind } = work;
+    if (leftValue === rightValue) continue;
+
+    if (kind === "root") {
+      if (!enqueueRecord(leftValue, rightValue, ROOT_VIEW_STATE_KEYS, (key) => (
+        key === "collections" ? "layout-list" : key === "portableIndex" ? "portable-index" : "json"
+      ))) return false;
+      continue;
+    }
+    if (kind === "portable-index") {
+      if (!enqueueRecord(leftValue, rightValue, PORTABLE_INDEX_VIEW_STATE_KEYS)) return false;
+      // libraryLayouts is excluded from the generic fields but remains semantic
+      // apart from each live node's collapsed flag.
+      const leftLayouts = (leftValue as { libraryLayouts?: unknown }).libraryLayouts;
+      const rightLayouts = (rightValue as { libraryLayouts?: unknown }).libraryLayouts;
+      pending.push({ left: leftLayouts, right: rightLayouts, kind: "library-layouts" });
+      continue;
+    }
+    if (kind === "library-layouts") {
+      if (!enqueueRecord(leftValue, rightValue, NO_SEMANTIC_COMPARISON_KEYS, () => "layout-list")) return false;
+      continue;
+    }
+    if (kind === "layout-list") {
+      if (!Array.isArray(leftValue) || !Array.isArray(rightValue) || leftValue.length !== rightValue.length) return false;
+      for (let index = 0; index < leftValue.length; index += 1) {
+        pending.push({ left: leftValue[index], right: rightValue[index], kind: "layout-node" });
+      }
+      continue;
+    }
+    if (kind === "layout-node") {
+      if (!enqueueRecord(leftValue, rightValue, LAYOUT_NODE_VIEW_STATE_KEYS)) return false;
+      const leftNode = leftValue as Record<string, unknown>;
+      const rightNode = rightValue as Record<string, unknown>;
+      const leftHasChildren = Object.prototype.hasOwnProperty.call(leftNode, "subheadings")
+        && leftNode.subheadings !== undefined;
+      const rightHasChildren = Object.prototype.hasOwnProperty.call(rightNode, "subheadings")
+        && rightNode.subheadings !== undefined;
+      // Unlike collapsed, the exact presence of an optional nested-layout key
+      // remains in the canonical semantic projection.
+      if (leftHasChildren !== rightHasChildren) return false;
+      if (leftHasChildren) pending.push({ left: leftNode.subheadings, right: rightNode.subheadings, kind: "layout-list" });
+      continue;
+    }
+
+    if (Array.isArray(leftValue) || Array.isArray(rightValue)) {
+      if (!Array.isArray(leftValue) || !Array.isArray(rightValue) || leftValue.length !== rightValue.length) return false;
+      for (let index = 0; index < leftValue.length; index += 1) {
+        // canonicalJsonValue turns undefined array slots into null.
+        pending.push({
+          left: leftValue[index] === undefined ? null : leftValue[index],
+          right: rightValue[index] === undefined ? null : rightValue[index],
+          kind: "json",
+        });
+      }
+      continue;
+    }
+    if (leftValue && typeof leftValue === "object" || rightValue && typeof rightValue === "object") {
+      if (!enqueueRecord(leftValue, rightValue, NO_SEMANTIC_COMPARISON_KEYS)) return false;
+      continue;
+    }
+    // JSON serializes every non-finite number as null. PluginData validation
+    // normally prevents these, but matching canonical semantics here keeps the
+    // safety check exact even for an unsaved malformed mutation.
+    const leftScalar = typeof leftValue === "number" && !Number.isFinite(leftValue) ? null : leftValue;
+    const rightScalar = typeof rightValue === "number" && !Number.isFinite(rightValue) ? null : rightValue;
+    if (leftScalar === rightScalar) continue;
+    return false;
+  }
+  return true;
 }
 
 /** Stable compact identity for one base's semantic payload. */
@@ -1901,39 +2057,214 @@ function cleanVaultPath(path: string): string {
   return path.trim().replace(/\\/g, "/").replace(/\/{2,}/g, "/").replace(/^\/+|\/+$/g, "");
 }
 
-function directChildFolderName(primaryFolder: string, path: string): string {
-  const root = cleanVaultPath(primaryFolder);
+function validIndexFolderSourceId(value: string): boolean {
+  return Boolean(value
+    && value.length <= 128
+    && /^[a-z0-9][a-z0-9._:@+-]*$/i.test(value)
+    && isSafeObjectKey(value));
+}
+
+/** Stable identity used when pre-v15 primary-folder behavior becomes an explicit source. */
+export function legacyPrimaryFolderSourceId(path: string): string {
+  const cleanPath = cleanVaultPath(path) || INDEX_FOLDER_VAULT_ROOT;
+  return `index-folder-legacy-${fingerprintText(cleanPath)}`;
+}
+
+/** Build the deterministic, non-enumerating compatibility rule for one legacy generic base. */
+export function createLegacyPrimaryFolderSource(path: string): IndexFolderSource | null {
+  const cleanPath = cleanVaultPath(path) || INDEX_FOLDER_VAULT_ROOT;
+  return {
+    id: legacyPrimaryFolderSourceId(cleanPath),
+    path: cleanPath,
+    origin: "legacy-primary-folder",
+  };
+}
+
+/**
+ * Clean persisted source rules without touching the vault. A path may be linked
+ * only once; a user-authored source wins over a duplicate legacy compatibility
+ * source so migration provenance never masks a later explicit action.
+ */
+export function cleanIndexFolderSources(input: unknown): IndexFolderSource[] {
+  if (!Array.isArray(input)) return [];
+  const output: IndexFolderSource[] = [];
+  const indexByPath = new Map<string, number>();
+  const usedIds = new Set<string>();
+  for (const raw of (input as unknown[]).slice(0, MAX_INDEX_FOLDER_SOURCES)) {
+    const value = asUnknownRecord(raw);
+    const rawPath = asText(value.path);
+    const path = rawPath.trim() === INDEX_FOLDER_VAULT_ROOT
+      ? INDEX_FOLDER_VAULT_ROOT
+      : cleanVaultPath(rawPath);
+    if (!path) continue;
+    const origin: IndexFolderSourceOrigin = value.origin === "legacy-primary-folder"
+      ? "legacy-primary-folder"
+      : "user";
+    const existingIndex = indexByPath.get(path);
+    if (existingIndex !== undefined) {
+      const existing = output[existingIndex];
+      if (existing && existing.origin === "legacy-primary-folder" && origin === "user") {
+        existing.origin = "user";
+      }
+      continue;
+    }
+    let id = asText(value.id);
+    if (!validIndexFolderSourceId(id) || usedIds.has(id)) {
+      const prefix = origin === "legacy-primary-folder" ? "index-folder-legacy" : "index-folder";
+      id = `${prefix}-${fingerprintText(path)}`;
+      let suffix = 2;
+      while (usedIds.has(id)) {
+        id = `${prefix}-${fingerprintText(path)}-${suffix}`;
+        suffix += 1;
+      }
+    }
+    usedIds.add(id);
+    indexByPath.set(path, output.length);
+    output.push({ id, path, origin });
+  }
+  return output;
+}
+
+/** Pure effective-source lookup shared by scanning, UI, and portability code. */
+export function pathIsInIndexFolderSources(
+  path: string,
+  sources: readonly IndexFolderSource[],
+): boolean {
+  // Portable placeholders are synthetic plugin identities, not vault paths.
+  // Even the legacy vault-root source must not claim them as descendants.
+  if (isPortablePlaceholderPath(path)) return false;
   const candidate = cleanVaultPath(path);
-  const relative = root
-    ? candidate.startsWith(`${root}/`) ? candidate.slice(root.length + 1) : ""
-    : candidate;
-  return relative && !relative.includes("/") ? relative : "";
+  if (!candidate) return false;
+  return sources.some((source) => {
+    if (source.path.trim() === INDEX_FOLDER_VAULT_ROOT) return true;
+    const root = cleanVaultPath(source.path);
+    return Boolean(root && (candidate === root || candidate.startsWith(`${root}/`)));
+  });
+}
+
+/**
+ * Return the deepest linked-folder ancestor used for runtime grouping. The
+ * root sentinel is returned only when no more-specific linked source matches.
+ */
+export function nearestIndexFolderSourceRoot(
+  path: string,
+  sources: readonly IndexFolderSource[],
+): string {
+  const candidate = cleanVaultPath(path);
+  if (!candidate) return "";
+  let nearest = "";
+  let hasVaultRoot = false;
+  for (const source of sources) {
+    if (source.path.trim() === INDEX_FOLDER_VAULT_ROOT) {
+      hasVaultRoot = true;
+      continue;
+    }
+    const root = cleanVaultPath(source.path);
+    if (root.length > nearest.length && (candidate === root || candidate.startsWith(`${root}/`))) {
+      nearest = root;
+    }
+  }
+  return nearest || (hasVaultRoot ? INDEX_FOLDER_VAULT_ROOT : "");
 }
 
 function folderDerivedGroupFromPath(
   settings: Pick<PluginSettings, "primaryFolder" | "workspaceMode">,
+  sources: readonly IndexFolderSource[],
   path: string,
+  hasDirectFolderReference: boolean,
 ): string {
-  const folderName = directChildFolderName(settings.primaryFolder, path);
-  if (settings.workspaceMode === "ent-clinical") return folderName.replace(/^\d+\s+/, "").trim();
-  if (folderName) return folderName;
-  // configuredGroupFromPath also derives generic-mode groups from the
-  // top-level folder of notes living outside the primary folder, so renaming
-  // such a folder must migrate group state too. Folders nested inside the
-  // primary folder keep deriving no group of their own.
-  const root = cleanVaultPath(settings.primaryFolder);
   const candidate = cleanVaultPath(path);
-  if (!candidate || candidate === root || (root && candidate.startsWith(`${root}/`))) return "";
-  return candidate.split("/")[0] ?? "";
+  if (!candidate) return "";
+  const fallback = candidate.split("/").pop() ?? "";
+  const primaryRoot = cleanVaultPath(settings.primaryFolder);
+  const insidePrimary = Boolean(primaryRoot
+    && (candidate === primaryRoot || candidate.startsWith(`${primaryRoot}/`)));
+  if (settings.workspaceMode === "ent-clinical" && !insidePrimary) return "";
+  const groupingRoot = settings.workspaceMode === "ent-clinical"
+    ? primaryRoot
+    : insidePrimary
+      ? primaryRoot
+      : nearestIndexFolderSourceRoot(candidate, sources);
+  if (!groupingRoot && !hasDirectFolderReference) {
+    // Preserve the long-standing top-level fallback without letting a rename
+    // under an unrelated base root mutate that base's same-named group.
+    return candidate.includes("/") ? "" : fallback;
+  }
+  // Runtime grouping is easiest to model with one representative Markdown
+  // note directly inside the renamed folder.
+  const representativePath = `${candidate}/__kbcc_folder_rename__.md`;
+  const group = groupingRoot
+    ? configuredGroupFromIndexRoot(representativePath, groupingRoot, fallback)
+    : fallback;
+  return settings.workspaceMode === "ent-clinical"
+    ? group.replace(/^\d+\s+/, "").trim()
+    : group;
+}
+
+function organizationHasDirectChildReference(
+  state: PersonalOrganizationState & { portableIndex?: PortableIndexLocalState },
+  folder: string,
+): boolean {
+  const root = cleanVaultPath(folder);
+  if (!root) return false;
+  const isDirectChild = (path: string): boolean => {
+    const candidate = cleanVaultPath(path);
+    if (!candidate.startsWith(`${root}/`)) return false;
+    return !candidate.slice(root.length + 1).includes("/");
+  };
+  const orderedPaths: string[] = [];
+  for (const paths of Object.values(state.curriculumVisual.orderByContainer)) orderedPaths.push(...paths);
+  const candidates = [
+    ...state.directIndexPaths,
+    ...state.manualIndexPaths,
+    ...state.excludedIndexPaths,
+    ...state.pinnedPaths,
+    ...state.nextStudyPaths,
+    ...Object.keys(state.indexGroupByPath),
+    ...Object.keys(state.displayNameByPath),
+    ...Object.keys(state.curriculumVisual.parentByPath),
+    ...orderedPaths,
+    ...Object.values(state.portableIndex?.resolvedPathBySubjectId ?? {}),
+  ];
+  if (candidates.some(isDirectChild)) return true;
+  const pending: Array<LayoutHeading | LayoutSubheading> = [...state.collections];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (!node) continue;
+    if (node.subjects.some(isDirectChild)) return true;
+    pending.push(...childSubheadings(node));
+  }
+  return false;
 }
 
 function folderDerivedGroupRename(
+  state: PersonalOrganizationState & { portableIndex?: PortableIndexLocalState },
   settings: Pick<PluginSettings, "primaryFolder" | "workspaceMode">,
+  sources: readonly IndexFolderSource[],
   oldPath: string,
   newPath: string,
 ): FolderDerivedGroupRename | null {
-  const oldGroup = folderDerivedGroupFromPath(settings, oldPath);
-  const newGroup = folderDerivedGroupFromPath(settings, newPath);
+  const hasDirectFolderReference = organizationHasDirectChildReference(state, oldPath);
+  const oldGroup = folderDerivedGroupFromPath(
+    settings,
+    sources,
+    oldPath,
+    hasDirectFolderReference,
+  );
+  const projectedSettings = {
+    ...settings,
+    primaryFolder: replacePathPrefix(settings.primaryFolder, oldPath, newPath),
+  };
+  const projectedSources = sources.map((source) => ({
+    ...source,
+    path: replacePathPrefix(source.path, oldPath, newPath),
+  }));
+  const newGroup = folderDerivedGroupFromPath(
+    projectedSettings,
+    projectedSources,
+    newPath,
+    hasDirectFolderReference,
+  );
   return oldGroup && newGroup && oldGroup !== newGroup ? { oldGroup, newGroup } : null;
 }
 
@@ -2033,16 +2364,21 @@ function rewriteSnapshotFolderRename(
   snapshot: PersonalSnapshot,
   oldPath: string,
   newPath: string,
-  inheritedGroupRename: FolderDerivedGroupRename | null,
+  inheritedSettings: Pick<PluginSettings, "primaryFolder" | "workspaceMode">,
 ): boolean {
-  const ownGroupRename = snapshot.settings
-    ? folderDerivedGroupRename(snapshot.settings, oldPath, newPath)
-    : inheritedGroupRename;
+  const effectiveSettings = { ...(snapshot.settings ?? inheritedSettings) };
+  const ownGroupRename = folderDerivedGroupRename(
+    snapshot,
+    effectiveSettings,
+    snapshot.indexFolderSources,
+    oldPath,
+    newPath,
+  );
   let changed = false;
   if (ownGroupRename && rewriteFolderDerivedGroupState(snapshot, ownGroupRename)) changed = true;
   if (snapshot.settings && rewriteFolderPathSettings(snapshot.settings, oldPath, newPath)) changed = true;
   for (const nested of snapshot.layoutSnapshots ?? []) {
-    if (rewriteSnapshotFolderRename(nested, oldPath, newPath, ownGroupRename)) changed = true;
+    if (rewriteSnapshotFolderRename(nested, oldPath, newPath, effectiveSettings)) changed = true;
   }
   if (changed) snapshotByteCache.delete(snapshot);
   return changed;
@@ -2058,7 +2394,14 @@ export function rewritePluginDataFolderRename(
   newPath: string,
 ): boolean {
   if (!oldPath || !newPath || oldPath === newPath) return false;
-  const currentGroupRename = folderDerivedGroupRename(data.settings, oldPath, newPath);
+  const settingsBeforeRename = { ...data.settings };
+  const currentGroupRename = folderDerivedGroupRename(
+    data,
+    settingsBeforeRename,
+    data.indexFolderSources,
+    oldPath,
+    newPath,
+  );
   let changed = false;
   if (currentGroupRename) {
     const oldAlias = Object.entries(data.indexGroupAliases)
@@ -2082,7 +2425,7 @@ export function rewritePluginDataFolderRename(
       snapshot,
       oldPath,
       newPath,
-      currentGroupRename,
+      settingsBeforeRename,
     )) changed = true;
   }
   const layoutSnapshots = limitSnapshotStack(data.layoutSnapshots, 10);
@@ -2159,10 +2502,18 @@ function rewriteSnapshotPrefixes(snapshot: PersonalSnapshot, oldPath: string, ne
   for (const paths of [
     snapshot.pinnedPaths,
     snapshot.nextStudyPaths,
+    snapshot.directIndexPaths,
     snapshot.manualIndexPaths,
     snapshot.excludedIndexPaths,
   ]) {
     if (rewritePathList(paths, oldPath, newPath)) changed = true;
+  }
+  for (const source of snapshot.indexFolderSources) {
+    const next = replacePathPrefix(source.path, oldPath, newPath);
+    if (next !== source.path) {
+      source.path = next;
+      changed = true;
+    }
   }
   if (rewritePathMapPrefixes(snapshot.indexGroupByPath, oldPath, newPath)) changed = true;
   if (rewritePathMapPrefixes(snapshot.displayNameByPath, oldPath, newPath)) changed = true;
@@ -2192,8 +2543,21 @@ export function rewriteActivePluginDataPathPrefix(data: PluginData, oldPath: str
   for (const heading of data.collections) {
     if (rewriteLayoutNodeSubjects(heading, oldPath, newPath)) changed = true;
   }
-  for (const paths of [data.pinnedPaths, data.nextStudyPaths, data.manualIndexPaths, data.excludedIndexPaths]) {
+  for (const paths of [
+    data.pinnedPaths,
+    data.nextStudyPaths,
+    data.directIndexPaths,
+    data.manualIndexPaths,
+    data.excludedIndexPaths,
+  ]) {
     if (rewritePathList(paths, oldPath, newPath)) changed = true;
+  }
+  for (const source of data.indexFolderSources) {
+    const next = replacePathPrefix(source.path, oldPath, newPath);
+    if (next !== source.path) {
+      source.path = next;
+      changed = true;
+    }
   }
   if (rewritePathMapPrefixes(data.indexGroupByPath, oldPath, newPath)) changed = true;
   if (rewritePathMapPrefixes(data.displayNameByPath, oldPath, newPath)) changed = true;
@@ -2242,6 +2606,8 @@ export function clonePersonalOrganization(source: PersonalOrganizationState): Pe
     nextStudyPaths: [...source.nextStudyPaths],
     savedViews: source.savedViews.map((view) => ({ ...view })),
     curriculumVisual: cloneCurriculumVisual(source.curriculumVisual),
+    directIndexPaths: [...source.directIndexPaths],
+    indexFolderSources: source.indexFolderSources.map((folderSource) => ({ ...folderSource })),
     manualIndexPaths: [...source.manualIndexPaths],
     excludedIndexPaths: [...source.excludedIndexPaths],
     indexGroupByPath: clonePathMap(source.indexGroupByPath),
@@ -2780,13 +3146,66 @@ function cleanPathMap(input: unknown): Record<string, string> {
   return output;
 }
 
-function cleanSnapshots(input: unknown, allowNested = true, maxCount = 20, maxBytes?: number): PersonalSnapshot[] {
+/** Consume the deprecated field only when the canonical field is absent. */
+function cleanDirectIndexPaths(value: Record<string, unknown>): string[] {
+  const input = Object.prototype.hasOwnProperty.call(value, "directIndexPaths")
+    ? value.directIndexPaths
+    : value.manualIndexPaths;
+  return [...new Set(asStringList(input))];
+}
+
+function legacyIndexFolderSources(
+  loadedVersion: number,
+  settings: Pick<PluginSettings, "workspaceMode" | "primaryFolder">,
+  input: unknown,
+): IndexFolderSource[] {
+  const sources = cleanIndexFolderSources(input);
+  if (loadedVersion >= 15 || settings.workspaceMode !== "generic") return sources;
+  const legacySource = createLegacyPrimaryFolderSource(settings.primaryFolder);
+  return legacySource ? cleanIndexFolderSources([legacySource, ...sources]) : sources;
+}
+
+/**
+ * v14 and earlier treated an exported portable subject's `indexed` bit as
+ * effective membership. v15 makes paths/sources authoritative, so materialize
+ * only the historical subjects that are not already covered by the migrated
+ * primary-folder rule. No vault enumeration is required.
+ */
+function backfillLegacyPortableDirectMembership(
+  state: Pick<PersonalOrganizationState, "directIndexPaths" | "indexFolderSources"> & {
+    portableIndex?: PortableIndexLocalState;
+  },
+  workspaceMode: WorkspaceMode,
+): void {
+  if (workspaceMode !== "generic" || !state.portableIndex) return;
+  const direct = new Set(state.directIndexPaths);
+  for (const subject of state.portableIndex.subjects) {
+    if (!subject.indexed) continue;
+    const path = state.portableIndex.resolvedPathBySubjectId[subject.id]
+      || portablePlaceholderPath(subject.id);
+    if (isPortablePlaceholderPath(path)
+      || !pathIsInIndexFolderSources(path, state.indexFolderSources)) direct.add(path);
+  }
+  state.directIndexPaths = [...direct];
+}
+
+function cleanSnapshots(
+  input: unknown,
+  allowNested = true,
+  maxCount = 20,
+  maxBytes?: number,
+  requireCanonicalMembership = false,
+): PersonalSnapshot[] {
   if (!Array.isArray(input)) return [];
   const snapshots: PersonalSnapshot[] = [];
   // Histories are untrusted synced input. Limit the raw entries before cloning
   // nested structures, then apply the same byte budget used by local writes.
   for (const [snapshotIndex, raw] of (input as unknown[]).slice(-maxCount).entries()) {
     try {
+      if (requireCanonicalMembership) {
+        const candidate = requiredPlainRecord(raw, "Stored history");
+        validateCanonicalIndexMembershipProvenance(candidate, "Stored history");
+      }
       // Invalid history is non-authoritative and may be dropped. Validate one
       // retained candidate before allocating its cleaned maps/lists; this keeps
       // a hostile Undo entry from making otherwise-valid primary data read-only.
@@ -2814,7 +3233,9 @@ function cleanSnapshots(input: unknown, allowNested = true, maxCount = 20, maxBy
       nextStudyPaths: asStringList(snapshot.nextStudyPaths),
       savedViews: cleanSavedViews(snapshot.savedViews),
       curriculumVisual: cleanCurriculumVisual(snapshot.curriculumVisual),
-      manualIndexPaths: asStringList(snapshot.manualIndexPaths),
+      directIndexPaths: cleanDirectIndexPaths(snapshot),
+      indexFolderSources: cleanIndexFolderSources(snapshot.indexFolderSources),
+      manualIndexPaths: [],
       excludedIndexPaths: asStringList(snapshot.excludedIndexPaths),
       indexGroupByPath: cleanPathMap(snapshot.indexGroupByPath),
       displayNameByPath: cleanPathMap(snapshot.displayNameByPath),
@@ -2823,11 +3244,57 @@ function cleanSnapshots(input: unknown, allowNested = true, maxCount = 20, maxBy
       portableIndex: snapshot.portableIndex === undefined ? undefined : cleanPortableIndex(snapshot.portableIndex),
       settings: snapshot.settings === undefined ? undefined : cleanSettings(snapshot.settings),
       layoutSnapshots: allowNested && snapshot.layoutSnapshots !== undefined
-        ? cleanSnapshots(snapshot.layoutSnapshots, false, MAX_TRANSFER_SNAPSHOTS)
+        ? cleanSnapshots(snapshot.layoutSnapshots, false, MAX_TRANSFER_SNAPSHOTS, undefined, requireCanonicalMembership)
         : undefined,
     });
   }
   return limitSnapshotStack(snapshots, maxCount, maxBytes);
+}
+
+/**
+ * Old snapshots inherited primaryFolder membership from settings rather than
+ * storing it. Carry that same rule into each historical state deterministically
+ * so Undo cannot unexpectedly unlink the migrated base.
+ */
+function migrateLegacySnapshotFolderSources(
+  snapshots: PersonalSnapshot[],
+  inheritedSources: readonly IndexFolderSource[],
+  inheritedWorkspaceMode: WorkspaceMode,
+): void {
+  for (const snapshot of snapshots) {
+    const workspaceMode = snapshot.settings?.workspaceMode ?? inheritedWorkspaceMode;
+    if (snapshot.settings) {
+      snapshot.indexFolderSources = legacyIndexFolderSources(
+        0,
+        snapshot.settings,
+        snapshot.indexFolderSources,
+      );
+    } else if (snapshot.indexFolderSources.length === 0) {
+      snapshot.indexFolderSources = inheritedSources.map((source) => ({ ...source }));
+    }
+    backfillLegacyPortableDirectMembership(snapshot, workspaceMode);
+    migrateLegacySnapshotFolderSources(
+      snapshot.layoutSnapshots ?? [],
+      snapshot.indexFolderSources,
+      workspaceMode,
+    );
+  }
+}
+
+/**
+ * Upgrade v2 device-local history after the matching synced base has migrated.
+ * v2 snapshots carried no folder-source field, so an ordinary Undo snapshot
+ * must inherit the base's migrated rule instead of silently unlinking it.
+ */
+export function migrateLegacyDeviceViewFolderSources(
+  state: PluginViewState,
+  inheritedSources: readonly IndexFolderSource[],
+  inheritedWorkspaceMode: WorkspaceMode = inheritedSources.length > 0 ? "generic" : "ent-clinical",
+): PluginViewState {
+  const migrated = cloneJsonValue(state);
+  migrateLegacySnapshotFolderSources(migrated.undoStack, inheritedSources, inheritedWorkspaceMode);
+  migrateLegacySnapshotFolderSources(migrated.redoStack, inheritedSources, inheritedWorkspaceMode);
+  return migrated;
 }
 
 function cleanMigrationBackup(input: unknown): MigrationBackup | undefined {
@@ -2953,6 +3420,12 @@ export function enforceStoredTextBounds(data: PluginData): void {
   for (const category of settings.followUpCategories) {
     category.label = clampStoredText(category.label);
   }
+  data.directIndexPaths = [...new Set(data.directIndexPaths.map(clampStoredText).filter(Boolean))];
+  data.indexFolderSources = cleanIndexFolderSources(data.indexFolderSources.map((source) => ({
+    id: clampStoredText(source.id),
+    path: clampStoredText(source.path),
+    origin: source.origin,
+  })));
   data.indexGroupOrder = data.indexGroupOrder.map(clampStoredText);
   for (const key of Object.keys(data.indexGroupAliases)) {
     const clampedKey = clampStoredText(key);
@@ -3005,6 +3478,8 @@ export function isRecognizedPluginData(input: unknown): boolean {
     "nextStudyPaths",
     "savedViews",
     "curriculumVisual",
+    "directIndexPaths",
+    "indexFolderSources",
     "manualIndexPaths",
     "excludedIndexPaths",
     "indexGroupByPath",
@@ -3277,10 +3752,14 @@ function migrateDataWithBudget(
     || (loadedVersion === 0 && isRecognizedPluginData(loaded) && Object.keys(loaded).length > 0)) {
     validatePluginDataLoadShape(loaded, validationBudget);
   }
+  if (loadedVersion === DATA_VERSION) {
+    validateCanonicalIndexMembershipProvenance(loaded, "Plugin data");
+  }
   // Versions newer than this plugin are read through the latest compatible
   // shape instead of being mistaken for v1. main.ts keeps them read-only.
   if (loadedVersion >= 3 || (loadedVersion === 0 && isRecognizedPluginData(loaded) && Object.keys(loaded).length > 0)) {
     const settings = cleanSettings(loaded.settings, loadedVersion > 0 && loadedVersion <= 5);
+    const indexFolderSources = legacyIndexFolderSources(loadedVersion, settings, loaded.indexFolderSources);
     const data: PluginData = {
       version: DATA_VERSION,
       collections: cleanLayout(loaded.collections),
@@ -3288,7 +3767,9 @@ function migrateDataWithBudget(
       nextStudyPaths: asStringList(loaded.nextStudyPaths),
       savedViews: cleanSavedViews(loaded.savedViews),
       curriculumVisual: cleanCurriculumVisual(loaded.curriculumVisual),
-      manualIndexPaths: asStringList(loaded.manualIndexPaths),
+      directIndexPaths: cleanDirectIndexPaths(loaded),
+      indexFolderSources,
+      manualIndexPaths: [],
       excludedIndexPaths: asStringList(loaded.excludedIndexPaths),
       indexGroupByPath: cleanPathMap(loaded.indexGroupByPath),
       displayNameByPath: cleanPathMap(loaded.displayNameByPath),
@@ -3298,16 +3779,22 @@ function migrateDataWithBudget(
       selectedPath: asText(loaded.selectedPath),
       activeTab: migrateMainTab(loaded.activeTab, settings.defaultTab),
       settings,
-      layoutSnapshots: cleanSnapshots(loaded.layoutSnapshots, true, MAX_TRANSFER_SNAPSHOTS),
+      layoutSnapshots: cleanSnapshots(loaded.layoutSnapshots, true, MAX_TRANSFER_SNAPSHOTS, undefined, loadedVersion === DATA_VERSION),
       // v11-v13 kept device history inside data.json. Preserve its validated
       // newest 20 entries here long enough for main.ts to move the aggregate
       // into the vault-bound 4 MiB local payload before semantic writeback.
-      undoStack: cleanSnapshots(loaded.undoStack, true, 20, preserveLegacyDeviceHistory ? MAX_PORTABLE_UNDO_BYTES : undefined),
-      redoStack: cleanSnapshots(loaded.redoStack, true, 20, preserveLegacyDeviceHistory ? MAX_PORTABLE_UNDO_BYTES : undefined),
+      undoStack: cleanSnapshots(loaded.undoStack, true, 20, preserveLegacyDeviceHistory ? MAX_PORTABLE_UNDO_BYTES : undefined, loadedVersion === DATA_VERSION),
+      redoStack: cleanSnapshots(loaded.redoStack, true, 20, preserveLegacyDeviceHistory ? MAX_PORTABLE_UNDO_BYTES : undefined, loadedVersion === DATA_VERSION),
       collapsed: cleanCollapseState(loaded.collapsed),
       migrationBackup: cleanMigrationBackup(loaded.migrationBackup),
       v2MigrationBackup: cleanV2MigrationBackup(loaded.v2MigrationBackup),
     };
+    if (loadedVersion < 15) {
+      backfillLegacyPortableDirectMembership(data, settings.workspaceMode);
+      migrateLegacySnapshotFolderSources(data.layoutSnapshots, indexFolderSources, settings.workspaceMode);
+      migrateLegacySnapshotFolderSources(data.undoStack, indexFolderSources, settings.workspaceMode);
+      migrateLegacySnapshotFolderSources(data.redoStack, indexFolderSources, settings.workspaceMode);
+    }
     return normalizeKnowledgeBaseLibrariesAndNavigation(data);
   }
 
@@ -3318,6 +3805,7 @@ function migrateDataWithBudget(
     const savedViews = cleanSavedViews(loaded.savedViews);
     const rawSettings = loaded.settings && typeof loaded.settings === "object" ? loaded.settings as Record<string, unknown> : {};
     const settings = cleanSettings(rawSettings, true);
+    const indexFolderSources = legacyIndexFolderSources(loadedVersion, settings, loaded.indexFolderSources);
     const data: PluginData = {
       version: DATA_VERSION,
       collections,
@@ -3325,6 +3813,8 @@ function migrateDataWithBudget(
       nextStudyPaths,
       savedViews,
       curriculumVisual: cleanCurriculumVisual(loaded.curriculumVisual),
+      directIndexPaths: cleanDirectIndexPaths(loaded),
+      indexFolderSources,
       manualIndexPaths: [],
       excludedIndexPaths: [],
       indexGroupByPath: {},
@@ -3352,6 +3842,8 @@ function migrateDataWithBudget(
         settings: rawSettings,
       }),
     };
+    backfillLegacyPortableDirectMembership(data, settings.workspaceMode);
+    migrateLegacySnapshotFolderSources(data.layoutSnapshots, indexFolderSources, settings.workspaceMode);
     return normalizeKnowledgeBaseLibrariesAndNavigation(data);
   }
 
@@ -3925,6 +4417,15 @@ export function configuredGroupFromPath(path: string, primaryFolder: string, fal
   return segments.length > 1 ? segments[0] || fallback : fallback;
 }
 
+/** Folder grouping shared by ordinary sources and the persisted vault-root sentinel. */
+export function configuredGroupFromIndexRoot(path: string, root: string, fallback = "Ungrouped"): string {
+  return configuredGroupFromPath(
+    path,
+    root.trim() === INDEX_FOLDER_VAULT_ROOT ? "" : root,
+    fallback,
+  );
+}
+
 function yamlQuotedTemplateScalar(value: string): string {
   return JSON.stringify(value.normalize("NFC"))
     .replace(/[\u007f-\u009f]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`)
@@ -4280,7 +4781,8 @@ export function buildIndexDiagnostics(data: PluginData, records: VaultRecord[], 
     if (!path || existingPaths.has(path) || isPortablePlaceholderPath(path)) return;
     diagnostics.push({ id: `missing:${owner}:${path}`, kind: "missing-note", title: "Missing note reference", detail: `${owner} references a note that no longer exists.`, path });
   };
-  for (const path of data.manualIndexPaths) addMissing(path, "Manual index membership");
+  for (const path of data.directIndexPaths) addMissing(path, "Direct index membership");
+  for (const path of data.manualIndexPaths) addMissing(path, "Legacy manual index membership");
   for (const path of data.excludedIndexPaths) addMissing(path, "Hidden index membership");
   for (const path of data.pinnedPaths) addMissing(path, "Pins");
   for (const path of data.nextStudyPaths) addMissing(path, "Next list");
@@ -4427,8 +4929,10 @@ export function parseWorkspaceConfig(input: unknown): WorkspaceConfig {
 
 export interface PersonalBackup extends PersonalOrganizationState {
   kind: "ent-vault-command-center-personal-backup";
-  /** v10 introduced nested collection/library subheadings; v9 layouts stay flat. */
-  version: 10;
+  /** v11 adds canonical direct-note and explicit linked-folder membership. */
+  version: 11;
+  /** False only when an older backup could not encode linked-folder provenance. */
+  indexFolderSourcesIncluded: boolean;
   exportedAt: string;
   /** Stable identity of the vault that created this exact-path recovery. */
   sourceVaultId: string;
@@ -4471,7 +4975,8 @@ export function createPersonalBackup(
   if (!cleanSourceBaseName) throw new Error("A knowledge-base name is required to create same-base recovery data.");
   return {
     kind: "ent-vault-command-center-personal-backup",
-    version: 10,
+    version: 11,
+    indexFolderSourcesIncluded: true,
     exportedAt,
     sourceVaultId: cleanSourceVaultId,
     sourceBaseId: cleanSourceBaseId,
@@ -4654,21 +5159,57 @@ function validateRecoveryCollections(
   }
 }
 
+function validateRecoveryIndexFolderSources(
+  input: unknown,
+  label: string,
+  budget: TransferValidationBudget,
+): void {
+  const count = transferArrayLength(input, label, MAX_INDEX_FOLDER_SOURCES);
+  addTransferReferenceCount(budget, count, label);
+  if (!Array.isArray(input)) return;
+  input.forEach((rawSource, index) => {
+    requiredPlainRecord(rawSource, `${label} ${index + 1}`);
+  });
+}
+
+function validateCanonicalIndexMembershipProvenance(
+  value: Record<string, unknown>,
+  label: string,
+): void {
+  if (!Array.isArray(value.directIndexPaths) || !Array.isArray(value.indexFolderSources)) {
+    throw new Error(`${label} is missing canonical Index membership provenance (direct paths and linked folders).`);
+  }
+  value.indexFolderSources.forEach((rawSource, index) => {
+    const source = requiredPlainRecord(rawSource, `${label} linked index folder ${index + 1}`);
+    if (typeof source.path !== "string") {
+      throw new Error(`${label} linked index folder ${index + 1} is missing its path.`);
+    }
+    const rawPath = source.path;
+    if (rawPath.trim() !== INDEX_FOLDER_VAULT_ROOT && !cleanVaultPath(rawPath)) {
+      throw new Error(`${label} linked index folder ${index + 1} has an empty path.`);
+    }
+  });
+}
+
 function validateRecoverySnapshot(
   input: unknown,
   label: string,
   budget: TransferValidationBudget,
   remainingSnapshotLevels: number,
   trimExcessSnapshots = false,
+  requireIndexFolderSources = false,
 ): void {
   const value = requiredPlainRecord(input, label);
   validateRecoveryCollections(value.collections, `${label} collections`, budget);
   for (const [key, list] of [
     ["pins", value.pinnedPaths],
     ["Next list", value.nextStudyPaths],
+    ["direct index", value.directIndexPaths],
     ["manual index", value.manualIndexPaths],
     ["hidden index", value.excludedIndexPaths],
   ] as const) validateRecoveryReferenceList(list, `${label} ${key}`, budget);
+  if (requireIndexFolderSources) validateCanonicalIndexMembershipProvenance(value, label);
+  validateRecoveryIndexFolderSources(value.indexFolderSources, `${label} linked index folders`, budget);
   addTransferReferenceCount(
     budget,
     transferArrayLength(value.savedViews, `${label} saved views`, MAX_TRANSFER_COLLECTIONS),
@@ -4699,6 +5240,7 @@ function validateRecoverySnapshot(
     budget,
     remainingSnapshotLevels - 1,
     trimExcessSnapshots,
+    requireIndexFolderSources,
   ));
 }
 
@@ -4832,6 +5374,9 @@ function validateLoadedLayoutText(
 ): void {
   if (input === undefined) return;
   if (!Array.isArray(input)) throw new Error(`${label} must be a list.`);
+  if (input.length > MAX_TRANSFER_COLLECTIONS) {
+    throw new Error(`${label} has more than ${MAX_TRANSFER_COLLECTIONS.toLocaleString()} entries.`);
+  }
   input.forEach((rawNode, index) => {
     const nodeLabel = `${label} ${index + 1}`;
     const node = requiredPlainRecord(rawNode, nodeLabel);
@@ -4977,6 +5522,25 @@ function validateLoadedPortableIndexText(input: unknown, label: string, budget: 
   }
 }
 
+function validateLoadedIndexFolderSourcesText(
+  input: unknown,
+  label: string,
+  budget: LoadTextValidationBudget,
+): void {
+  if (input === undefined) return;
+  if (!Array.isArray(input)) throw new Error(`${label} must be a list.`);
+  if (input.length > MAX_INDEX_FOLDER_SOURCES) {
+    throw new Error(`${label} has more than ${MAX_INDEX_FOLDER_SOURCES.toLocaleString()} entries.`);
+  }
+  input.forEach((rawSource, index) => {
+    const sourceLabel = `${label} ${index + 1}`;
+    const source = requiredPlainRecord(rawSource, sourceLabel);
+    validateLoadedText(source.id, `${sourceLabel} ID`, budget);
+    validateLoadedText(source.path, `${sourceLabel} path`, budget);
+    validateLoadedText(source.origin, `${sourceLabel} origin`, budget);
+  });
+}
+
 function validateLoadedSnapshotText(
   input: unknown,
   label: string,
@@ -4992,10 +5556,12 @@ function validateLoadedSnapshotText(
   for (const [name, list] of [
     ["pins", value.pinnedPaths],
     ["Next list", value.nextStudyPaths],
+    ["direct index", value.directIndexPaths],
     ["manual index", value.manualIndexPaths],
     ["hidden index", value.excludedIndexPaths],
     ["group order", value.indexGroupOrder],
   ] as const) validateLoadedTextList(list, `${label} ${name}`, budget);
+  validateLoadedIndexFolderSourcesText(value.indexFolderSources, `${label} linked index folders`, budget);
   validateLoadedSavedViewsText(value.savedViews, `${label} saved views`, budget);
   validateLoadedVisualText(value.curriculumVisual, `${label} visual hierarchy`, budget);
   validateLoadedTextMap(value.indexGroupByPath, `${label} visual groups`, budget);
@@ -5051,9 +5617,12 @@ function validateLegacyV1LoadShape(
   validateLoadedText(input.selectedPath, "Legacy plugin selected path", validationBudget.text);
 }
 
-function validatePersonalBackupTransferShape(value: Record<string, unknown>): void {
+function validatePersonalBackupTransferShape(
+  value: Record<string, unknown>,
+  requireIndexFolderSources: boolean,
+): void {
   const budget: TransferValidationBudget = { references: 0, collectionStructures: 0, snapshots: 0 };
-  validateRecoverySnapshot(value, "Recovery", budget, 2);
+  validateRecoverySnapshot(value, "Recovery", budget, 2, false, requireIndexFolderSources);
   validateLoadedSnapshotText(value, "Recovery", createLoadTextValidationBudget(), 2);
 }
 
@@ -5063,8 +5632,11 @@ export function parsePersonalBackup(input: unknown): PersonalBackup {
   const sourceVersion = Number(value.version);
   // Older backups (v1-v9 flat layouts) import fine; newer formats than this
   // build refuse cleanly so nested organization is never silently flattened.
-  if (value.kind !== "ent-vault-command-center-personal-backup" || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(sourceVersion)) {
+  if (value.kind !== "ent-vault-command-center-personal-backup" || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].includes(sourceVersion)) {
     throw new Error("Unsupported Command Center backup format.");
+  }
+  if (sourceVersion >= 11 && value.indexFolderSourcesIncluded !== true) {
+    throw new Error("This recovery backup is missing its linked-folder membership marker.");
   }
   const sourceVaultId = cleanRecoveryVaultId(value.sourceVaultId);
   if (sourceVersion >= 6 && !sourceVaultId) {
@@ -5078,10 +5650,11 @@ export function parsePersonalBackup(input: unknown): PersonalBackup {
   if (sourceVersion >= 7 && (!sourceBaseName || !sourceWorkspaceMode)) {
     throw new Error("This recovery backup is missing its required source knowledge-base identity or preset.");
   }
-  validatePersonalBackupTransferShape(value);
+  validatePersonalBackupTransferShape(value, sourceVersion >= 11);
   return {
     kind: "ent-vault-command-center-personal-backup",
-    version: 10,
+    version: 11,
+    indexFolderSourcesIncluded: sourceVersion >= 11,
     exportedAt: asText(value.exportedAt),
     sourceVaultId,
     sourceBaseId,
@@ -5092,7 +5665,9 @@ export function parsePersonalBackup(input: unknown): PersonalBackup {
     nextStudyPaths: asStringList(value.nextStudyPaths),
     savedViews: cleanSavedViews(value.savedViews),
     curriculumVisual: cleanCurriculumVisual(value.curriculumVisual),
-    manualIndexPaths: asStringList(value.manualIndexPaths),
+    directIndexPaths: cleanDirectIndexPaths(value),
+    indexFolderSources: cleanIndexFolderSources(value.indexFolderSources),
+    manualIndexPaths: [],
     excludedIndexPaths: asStringList(value.excludedIndexPaths),
     indexGroupByPath: cleanPathMap(value.indexGroupByPath),
     displayNameByPath: cleanPathMap(value.displayNameByPath),
@@ -5101,6 +5676,57 @@ export function parsePersonalBackup(input: unknown): PersonalBackup {
     layoutSnapshots: cleanSnapshots(value.layoutSnapshots, true, MAX_TRANSFER_SNAPSHOTS),
     portableIndex: cleanPortableIndex(value.portableIndex),
   };
+}
+
+function repairLegacyBackupSnapshotFolderSources(
+  snapshots: PersonalSnapshot[],
+  inheritedSources: readonly IndexFolderSource[],
+  inheritedWorkspaceMode: WorkspaceMode,
+): void {
+  for (const snapshot of snapshots) {
+    const workspaceMode = snapshot.settings?.workspaceMode ?? inheritedWorkspaceMode;
+    snapshot.indexFolderSources = snapshot.settings
+      ? legacyIndexFolderSources(0, snapshot.settings, [])
+      : inheritedSources.map((source) => ({ ...source }));
+    backfillLegacyPortableDirectMembership(snapshot, workspaceMode);
+    repairLegacyBackupSnapshotFolderSources(
+      snapshot.layoutSnapshots ?? [],
+      snapshot.indexFolderSources,
+      workspaceMode,
+    );
+  }
+}
+
+/**
+ * Apply a parsed same-vault recovery without letting pre-v11 backups erase the
+ * destination's v15 linked-folder provenance. Both standalone recovery and a
+ * portable package route through this boundary.
+ */
+export function applyPersonalBackupToData(data: PluginData, backup: PersonalBackup): void {
+  const preservedFolderSources = data.indexFolderSources.map((source) => ({ ...source }));
+  const organization = clonePersonalOrganization(backup);
+  organization.directIndexPaths = [...new Set([
+    ...organization.directIndexPaths,
+    ...organization.manualIndexPaths,
+  ])];
+  organization.manualIndexPaths = [];
+  if (!backup.indexFolderSourcesIncluded) {
+    organization.indexFolderSources = preservedFolderSources;
+  }
+  Object.assign(data, organization);
+  data.layoutSnapshots = limitSnapshotStack(
+    backup.layoutSnapshots.map((snapshot) => cloneJsonValue(snapshot)),
+    10,
+  );
+  data.portableIndex = clonePortableIndex(backup.portableIndex);
+  if (!backup.indexFolderSourcesIncluded) {
+    backfillLegacyPortableDirectMembership(data, data.settings.workspaceMode);
+    repairLegacyBackupSnapshotFolderSources(
+      data.layoutSnapshots,
+      preservedFolderSources,
+      data.settings.workspaceMode,
+    );
+  }
 }
 
 function serializedUtf8Bytes(value: unknown): number {
@@ -5176,7 +5802,31 @@ function parseLocalCollapsedLayout(
   return parseLocalCollapsedLayoutNodes(input, label, budget, 1);
 }
 
-function parseDeviceHistory(input: unknown, label: string): PersonalSnapshot[] {
+function requireDeviceHistoryFolderSources(
+  snapshot: Record<string, unknown>,
+  label: string,
+  remainingNestedLevels = 1,
+): void {
+  validateCanonicalIndexMembershipProvenance(snapshot, label);
+  if (remainingNestedLevels <= 0 || snapshot.layoutSnapshots === undefined) return;
+  if (!Array.isArray(snapshot.layoutSnapshots)) throw new Error(`${label} named snapshots are malformed.`);
+  snapshot.layoutSnapshots.forEach((raw, index) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new Error(`${label} named snapshot ${index + 1} is malformed.`);
+    }
+    requireDeviceHistoryFolderSources(
+      raw as Record<string, unknown>,
+      `${label} named snapshot ${index + 1}`,
+      remainingNestedLevels - 1,
+    );
+  });
+}
+
+function parseDeviceHistory(
+  input: unknown,
+  label: string,
+  indexFolderSourcesRequired: boolean,
+): PersonalSnapshot[] {
   if (!Array.isArray(input) || input.length > 20) throw new Error(`${label} is malformed or too large.`);
   const budget: TransferValidationBudget = { references: 0, collectionStructures: 0, snapshots: 0 };
   for (const [index, raw] of input.entries()) {
@@ -5192,6 +5842,9 @@ function parseDeviceHistory(input: unknown, label: string): PersonalSnapshot[] {
       || typeof snapshot.curriculumVisual !== "object") {
       throw new Error(`${label} entry ${index + 1} is malformed.`);
     }
+    if (indexFolderSourcesRequired) {
+      requireDeviceHistoryFolderSources(snapshot, `${label} entry ${index + 1}`);
+    }
     validateRecoverySnapshot(snapshot, `${label} entry ${index + 1}`, budget, 2);
   }
   const cleaned = cleanSnapshots(input);
@@ -5204,8 +5857,14 @@ export function parseDeviceLocalPluginState(input: unknown): DeviceLocalPluginSt
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Device-local state is malformed.");
   if (serializedUtf8Bytes(input) > MAX_DEVICE_LOCAL_STATE_BYTES) throw new Error("Device-local state is too large.");
   const value = input as Record<string, unknown>;
-  if (value.version !== DEVICE_LOCAL_STATE_VERSION || !Array.isArray(value.bases) || value.bases.length > MAX_KNOWLEDGE_BASES) {
+  const sourceVersion = Number(value.version);
+  if (![2, DEVICE_LOCAL_STATE_VERSION].includes(sourceVersion)
+    || !Array.isArray(value.bases)
+    || value.bases.length > MAX_KNOWLEDGE_BASES) {
     throw new Error("Device-local state has an unsupported or malformed shape.");
+  }
+  if (sourceVersion >= DEVICE_LOCAL_STATE_VERSION && value.historyIndexFolderSourcesIncluded !== true) {
+    throw new Error("Device-local state is missing its linked-folder history marker.");
   }
   const vaultId = cleanKnowledgeBaseId(value.vaultId, "Device-local vault");
   const activeBaseId = cleanKnowledgeBaseId(value.activeBaseId, "Device-local active knowledge base");
@@ -5254,12 +5913,26 @@ export function parseDeviceLocalPluginState(input: unknown): DeviceLocalPluginSt
         },
         collections: parseLocalCollapsedLayout(view.collections, `Device-local base ${baseId} collections`, budget),
         libraryLayouts,
-        undoStack: parseDeviceHistory(view.undoStack, `Device-local base ${baseId} Undo history`),
-        redoStack: parseDeviceHistory(view.redoStack, `Device-local base ${baseId} Redo history`),
+        undoStack: parseDeviceHistory(
+          view.undoStack,
+          `Device-local base ${baseId} Undo history`,
+          sourceVersion >= DEVICE_LOCAL_STATE_VERSION,
+        ),
+        redoStack: parseDeviceHistory(
+          view.redoStack,
+          `Device-local base ${baseId} Redo history`,
+          sourceVersion >= DEVICE_LOCAL_STATE_VERSION,
+        ),
       },
     };
   });
-  return { version: DEVICE_LOCAL_STATE_VERSION, vaultId, activeBaseId, bases };
+  return {
+    version: DEVICE_LOCAL_STATE_VERSION,
+    historyIndexFolderSourcesIncluded: sourceVersion >= DEVICE_LOCAL_STATE_VERSION,
+    vaultId,
+    activeBaseId,
+    bases,
+  };
 }
 
 export interface DeviceLocalPluginStateBuildResult {
@@ -5281,6 +5954,7 @@ export function createDeviceLocalPluginStateWithReport(store: PluginStore): Devi
     : available[0]?.id ?? store.bases[0]?.id ?? DEFAULT_KNOWLEDGE_BASE_ID;
   const state: DeviceLocalPluginState = {
     version: DEVICE_LOCAL_STATE_VERSION,
+    historyIndexFolderSourcesIncluded: true,
     vaultId: store.vaultId,
     activeBaseId,
     bases: store.bases.map((entry) => ({ baseId: entry.id, view: capturePluginViewState(entry.data) })),
@@ -5387,13 +6061,20 @@ function collectPersonalBackupPaths(backup: PersonalBackup): string[] {
     for (const orderedPaths of Object.values(visual.orderByContainer)) orderedPaths.forEach(add);
   };
   const seenSnapshots = new Set<PersonalSnapshot>();
-  const addState = (state: Pick<PersonalBackup, "collections" | "pinnedPaths" | "nextStudyPaths" | "curriculumVisual" | "manualIndexPaths" | "excludedIndexPaths" | "indexGroupByPath" | "displayNameByPath" | "layoutSnapshots" | "portableIndex">): void => {
+  const addState = (state: Pick<PersonalBackup, "collections" | "pinnedPaths" | "nextStudyPaths" | "curriculumVisual" | "directIndexPaths" | "indexFolderSources" | "manualIndexPaths" | "excludedIndexPaths" | "indexGroupByPath" | "displayNameByPath" | "layoutSnapshots" | "portableIndex">): void => {
     const addLayoutNode = (node: LayoutHeading | LayoutSubheading): void => {
       node.subjects.forEach(add);
       for (const subheading of childSubheadings(node)) addLayoutNode(subheading);
     };
     for (const collection of state.collections) addLayoutNode(collection);
-    for (const list of [state.pinnedPaths, state.nextStudyPaths, state.manualIndexPaths, state.excludedIndexPaths]) list.forEach(add);
+    for (const list of [
+      state.pinnedPaths,
+      state.nextStudyPaths,
+      state.directIndexPaths,
+      state.manualIndexPaths,
+      state.excludedIndexPaths,
+    ]) list.forEach(add);
+    state.indexFolderSources.forEach((source) => add(source.path));
     Object.keys(state.indexGroupByPath).forEach(add);
     Object.keys(state.displayNameByPath).forEach(add);
     addVisual(state.curriculumVisual);

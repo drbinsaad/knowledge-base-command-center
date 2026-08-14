@@ -446,6 +446,24 @@ test("portfolio workspace preflight rejects an unsafe fixed attachment folder", 
   }), /relative segments|outside|folder/i);
 });
 
+test("portfolio workspace preflight rejects every restricted exports folder class", () => {
+  for (const exportsFolder of ["../Outside", ".obsidian/Private exports", ".trash/Rescues"]) {
+    const source = entry("base-source", "Source");
+    source.data.settings.exportsFolder = exportsFolder;
+    const bundle = bundleFor([source], "vault-local");
+    const destination = entry("base-destination", "Destination");
+
+    assert.throws(() => createPortfolioImportPlan(storeWith([destination], "vault-local"), bundle, [{
+      sourceBaseId: source.id,
+      destination: { kind: "existing", baseId: destination.id },
+      mode: "merge",
+    }], {
+      now: 1_700_000_000_502,
+      resources: { configDir: ".obsidian" },
+    }), /cannot/iu, exportsFolder);
+  }
+});
+
 test("stale or tampered plans leave the store byte-for-byte unchanged", () => {
   const source = entry("base-source", "Source");
   const bundle = bundleFor([source], "vault-local");

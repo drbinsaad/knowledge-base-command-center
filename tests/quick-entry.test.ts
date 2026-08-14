@@ -977,6 +977,11 @@ test("the unified quick-create form defaults to the Inbox and re-targets the Ind
     async assignRecordToCatalog(path: string, kind: string, target: CatalogPlacementTarget = {}): Promise<void> {
       catalogAssignments.push({ path, kind, target });
     },
+    setDirectIndexMembershipState(path: string, indexed: boolean): void {
+      data.directIndexPaths = indexed
+        ? [...new Set([...data.directIndexPaths, path])]
+        : data.directIndexPaths.filter((candidate) => candidate !== path);
+    },
     async mutate(_label: string, mutator: () => void): Promise<void> { mutator(); },
     async saveViewState(): Promise<void> { savedViewState += 1; },
     async openFile(): Promise<void> { /* opening is not under test */ },
@@ -1137,9 +1142,15 @@ test("the Inbox destination cannot silently create a note the plugin would never
     getDataEpoch: () => 1,
     getLibraries: (): LibraryDefinition[] => [],
     getTemplateFiles: (): TFile[] => [],
+    getRecord: () => null,
     isClinicalMode: () => false,
     validateGenericNote: () => null,
     async createKnowledgeNote(): Promise<TFile> { created += 1; return createdFile; },
+    setDirectIndexMembershipState(path: string, indexed: boolean): void {
+      data.directIndexPaths = indexed
+        ? [...new Set([...data.directIndexPaths, path])]
+        : data.directIndexPaths.filter((candidate) => candidate !== path);
+    },
     async mutate(_label: string, mutator: () => void): Promise<void> { mutator(); },
     async saveViewState(): Promise<void> { /* not under test */ },
     async openFile(): Promise<void> { /* not under test */ },
@@ -1193,7 +1204,7 @@ test("the Inbox destination cannot silently create a note the plugin would never
     // belonging to nothing.
     await form.onSubmit({ title: "Stray capture", folder: "Elsewhere", mode: "empty", templatePath: "", addToCollection: false });
     assert.equal(created, 1);
-    assert.deepEqual(data.manualIndexPaths, [createdFile.path]);
+    assert.deepEqual(data.directIndexPaths, [createdFile.path]);
     assert.equal(Notice.messages.some((message) => message.includes("outside the configured Inbox folder")), true);
   } finally {
     if (noteOpen) Object.defineProperty(KnowledgeNoteModal.prototype, "open", noteOpen);
@@ -1269,6 +1280,11 @@ test("a failed filing step never orphans the created note", async () => {
     isClinicalMode: () => false,
     validateGenericNote: () => null,
     async createKnowledgeNote(): Promise<TFile> { return createdFile; },
+    setDirectIndexMembershipState(path: string, indexed: boolean): void {
+      data.directIndexPaths = indexed
+        ? [...new Set([...data.directIndexPaths, path])]
+        : data.directIndexPaths.filter((candidate) => candidate !== path);
+    },
     async mutate(_label: string, mutator: () => void): Promise<void> { mutator(); },
   };
   const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView & {
@@ -1301,7 +1317,7 @@ test("a failed filing step never orphans the created note", async () => {
     else Reflect.deleteProperty(KnowledgeNoteModal.prototype, "open");
   }
 
-  assert.deepEqual(data.manualIndexPaths, [createdFile.path], "the unfiled note is rescued into the Index");
+  assert.deepEqual(data.directIndexPaths, [createdFile.path], "the unfiled note is rescued into the Index");
   assert.equal(Notice.messages.some((message) => message.includes(createdFile.path) && message.includes("could not be filed")), true);
 });
 

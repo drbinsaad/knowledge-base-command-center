@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.16.0
+
+### Changed
+
+- Generic Index membership is now explicit. A new base starts with no folder-authoritative Index source: the default new-note folder controls storage only, and neither it nor an Inbox, template, attachment, export, or per-Library creation folder enrolls notes merely because they are stored there.
+- **Add existing note to Index**, the current-note action, and explicit Index creation persist direct membership for the exact note. That intent remains distinct even when the note also sits below a linked folder, so unlinking the folder cannot silently remove a note the user added directly.
+- Folder-derived membership now exists only through a named linked-folder rule that the user deliberately creates and can remove. Hiding a matched note records a plugin-owned exclusion. Unlinking a rule changes membership only; it never moves, deletes, renames, or rewrites Markdown.
+- Generic bases loaded from pre-v15 data convert the former `primaryFolder` behavior into one deterministic, removable `legacy-primary-folder` source. This preserves the pre-upgrade result set without keeping a storage setting authoritative. Historical snapshots and private same-vault recovery retain the source provenance.
+- Generic grouping, nesting, Libraries, Collections, pins, queues, and membership remain plugin-data operations only. Obsidian `.base` files remain a separate read-only query-view integration and never become Command Center knowledge bases or membership rules.
+
+### Fixed
+
+- Startup and recovery now preserve the exact corrupt `data.json` bytes and compare them again at the queued write boundary. A readable replacement arriving through Sync wins over an older backup; any changed primary cancels restoration into protected read-only mode; primitive or array-shaped plugin data fails closed instead of being replaced with defaults; and both primary-save paths recheck Sync generation after their awaited backup write.
+- Membership provenance is now enforced through version-15 synced data, version-11 recovery, and version-3 device-local Undo/Redo history. Pre-version-15 folder scope—including the legacy vault-root case—and older recovery/history are converted conservatively; portable `indexed` flags are migrated where needed but no longer act as a third Generic membership authority; and vault-root grouping retains the original top-level-folder behavior.
+- Workspace and portfolio imports now reject restricted `exportsFolder` paths, and the final JSON write boundary validates the configured folder again before creating any directory or recovery/conflict file.
+- ENT proposal-promotion and canonical-placement rollback now compares the exact same `TFile` content against the operation's last known write. If Sync or an editor changed that file, rollback preserves both the newer content and its current path and reports explicit recovery guidance instead of overwriting the concurrent edit.
+- **Repair safe issues** now carries the exact reviewed preview through confirmation and rechecks it at the transaction boundary. Repair, bulk Index removal, and restore refuse to start unless every planned plugin-data change can be recorded for Undo.
+- **Manage index** tabs now expose their tab/panel relationships and support arrow, Home, and End keys. Folder **Browse** in Settings now commits correctly when Settings is open in an Obsidian pop-out window.
+- Cold cross-base search now reads metadata only for paths eligible for at least one Generic base; view-only saves no longer clone and serialize the full semantic graph three times; and inactive Manage index note lists stay lazy while large heading and diagnostic lists render in explicit 300-row pages.
+- Late layout readiness can no longer attach listeners to an unloaded plugin instance. Attachment commands handle case-variant `.MD` extensions consistently, modal focus stays in its owning pop-out window, and the custom Obsidian Bases view follows the configured note-opening behavior.
+
+> Older numbered release entries below describe the behavior of those published versions. References there to an “indexed folder” or “automatic folder scope” are historical and do not describe the 0.16.0 explicit-membership contract above.
+
 ## 0.15.0
 
 ### Added
