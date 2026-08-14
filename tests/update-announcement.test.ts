@@ -11,6 +11,7 @@ import {
   UPDATE_ANNOUNCEMENT_0_12_0,
   UPDATE_ANNOUNCEMENT_0_16_0,
   UPDATE_ANNOUNCEMENT_0_16_1,
+  UPDATE_ANNOUNCEMENT_0_17_0,
   type UpdateAnnouncement,
 } from "../src/update-announcement.ts";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
@@ -81,6 +82,21 @@ test("0.16.1 has curated legacy-folder review news", () => {
   assert.equal(
     UPDATE_ANNOUNCEMENT_0_16_1.releaseUrl,
     "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.16.1",
+  );
+});
+
+test("0.17.0 has curated membership explanation and placeholder-resolution news", () => {
+  const upgrade = planUpdateAnnouncement("0.17.0", "0.16.1", true);
+  assert.equal(upgrade.announcement, UPDATE_ANNOUNCEMENT_0_17_0);
+  assert.equal(UPDATE_ANNOUNCEMENT_0_17_0.highlights.length, 5);
+  const highlights = UPDATE_ANNOUNCEMENT_0_17_0.highlights.join("\n");
+  assert.match(highlights, /Why this appears/u);
+  assert.match(highlights, /never link automatically/u);
+  assert.match(highlights, /large placeholder imports require an extra confirmation/u);
+  assert.match(highlights, /undo the import/u);
+  assert.equal(
+    UPDATE_ANNOUNCEMENT_0_17_0.releaseUrl,
+    "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.17.0",
   );
 });
 

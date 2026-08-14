@@ -3,6 +3,7 @@ import type EntVaultCommandCenterPlugin from "./main";
 import {
   assertPersonalBackupMatchesVault,
   cleanLibraryNoteProfiles,
+  canonicalJsonString,
   cloneJsonValue,
   errorMessage,
   resolveLibraryNoteProfile,
@@ -43,6 +44,15 @@ import {
   summarizePortableExport,
   synchronizePortableRegistry,
 } from "./portability";
+import {
+  buildEligiblePlaceholderMatchNotes,
+  buildPlaceholderResolutionQueue,
+  type PlaceholderMatchNote,
+} from "./membership-explanation";
+import {
+  previewPortableImportOutcome,
+  type PortableImportOutcomePreview,
+} from "./portable-import-preview";
 
 type CenterMode = "export" | "import";
 type ComponentKey = "workspace" | "index" | "collections" | "study" | "savedViews" | "recovery";
@@ -54,6 +64,16 @@ interface WorkspaceImportValidation {
   libraryTemplateResetIds: string[];
   droppedLibraryProfileIds: string[];
   missingFolderText: string;
+}
+
+interface CompletedPortableImport {
+  subjectCatalogImported: boolean;
+  addedSubjects: number;
+  matchedSubjects: number;
+  unresolvedSubjects: number;
+  totalPlaceholders: number;
+  exactCandidatePlaceholders: number;
+  placeholderSummaryAvailable: boolean;
 }
 
 /**
@@ -204,6 +224,17 @@ export class ExportImportCenterModal extends Modal {
   private importMode: PortableImportMode = "merge";
   private recoveryConfirmed = false;
   private crossBaseRecoveryConfirmed = false;
+  private largePlaceholderImportConfirmed = false;
+  private completedImport: CompletedPortableImport | null = null;
+  private completedImportUndoToken: string | null = null;
+  private reviewedImportOutcomeToken: string | null = null;
+  private placeholderMatchNoteCache: {
+    records: readonly VaultRecord[];
+    baseId: string;
+    generation: number;
+    settingsKey: string;
+    notes: PlaceholderMatchNote[];
+  } | null = null;
   private exportRecoveryConfirmed = false;
   private busyAction: BusyAction | null = null;
   private centerOpen = false;
@@ -425,7 +456,7 @@ export class ExportImportCenterModal extends Modal {
         // a real plugin-data mutation that should happen only when Export runs.
         const preview = createPortableExport(
           isolatedExportData(this.plugin.data),
-          selectionUsesSubjectCatalog(selection) ? this.plugin.getRecords() : [],
+          selectionUsesSubjectCatalog(selection) ? this.currentRecords() : [],
           selection,
           new Date().toISOString(),
           this.currentVaultId(),
@@ -492,6 +523,10 @@ export class ExportImportCenterModal extends Modal {
 
   private renderImport(): void {
     const parent = this.renderParent();
+    if (this.completedImport) {
+      this.renderCompletedImport(this.completedImport);
+      return;
+    }
     parent.createEl("p", {
       text: "Choose a command center portable export, older workspace export, or same-vault recovery backup. Import never writes, moves, or deletes Markdown notes.",
     });
@@ -563,10 +598,35 @@ export class ExportImportCenterModal extends Modal {
     this.renderImportSource(this.importValue);
     this.renderComponentToggles(this.importSelection, available, (selection) => {
       this.importSelection = selection;
+      this.largePlaceholderImportConfirmed = false;
     }, recoveryBlockReason, workspaceBlockReason);
 
     const selection = normalizePortableSelection(this.importSelection);
     this.renderSummary(this.importValue, selection, "Selected import");
+    let outcomePreview: PortableImportOutcomePreview | null = null;
+    let outcomePreviewError = "";
+    if (!selection.recovery && portableSelectionHasAny(selection)) {
+      try {
+        const records = selectionUsesSubjectCatalog(selection) ? this.currentRecords() : [];
+        outcomePreview = previewPortableImportOutcome(
+          this.plugin.data,
+          records,
+          this.importValue,
+          selection,
+          this.importMode,
+          selectionUsesSubjectCatalog(selection) ? this.currentPlaceholderMatchNotes(records) : records,
+        );
+        if (outcomePreview) this.renderImportOutcomePreview(outcomePreview);
+      } catch (error) {
+        outcomePreviewError = errorMessage(error);
+        this.renderError(`The selected import cannot be simulated safely: ${outcomePreviewError}`);
+      }
+    }
+    if (!this.busyAction) {
+      this.reviewedImportOutcomeToken = outcomePreview
+        ? this.importOutcomeReviewToken(selection, outcomePreview)
+        : null;
+    }
     if (selection.recovery) {
       const recovery = this.importValue.components.recovery;
       const needsBaseOverride = recoveryCheck?.baseIdentity !== "verified";
@@ -644,9 +704,26 @@ export class ExportImportCenterModal extends Modal {
             .setDisabled(Boolean(this.busyAction))
             .onChange((value) => {
               this.importMode = value === "replace" ? "replace" : "merge";
+              this.largePlaceholderImportConfirmed = false;
               this.rerenderFromControl("import-behavior");
             });
         });
+      if (outcomePreview?.requiresLargeImportConfirmation) {
+        const confirmation = new Setting(parent)
+          .setName("Confirm large placeholder import")
+          .setDesc(`I understand that ${outcomePreview.importedAwaitingNotes} selected subjects will remain as placeholders. No Markdown notes will be created or linked automatically.`)
+          .addToggle((toggle) => {
+            toggle.toggleEl.dataset.portabilityFocus = "import-large-placeholder-confirm";
+            toggle
+              .setValue(this.largePlaceholderImportConfirmed)
+              .setDisabled(Boolean(this.busyAction))
+              .onChange((confirmed) => {
+                this.largePlaceholderImportConfirmed = confirmed;
+                this.rerenderFromControl("import-large-placeholder-confirm");
+              });
+          });
+        confirmation.settingEl.addClass("ent-cc-portability-toggle");
+      }
     }
 
     new Setting(parent)
@@ -662,10 +739,66 @@ export class ExportImportCenterModal extends Modal {
           .setCta()
           .setDisabled(Boolean(this.busyAction)
             || !portableSelectionHasAny(selection)
+            || Boolean(outcomePreviewError)
+            || Boolean(outcomePreview?.requiresLargeImportConfirmation && !this.largePlaceholderImportConfirmed)
             || (selection.recovery && (!this.recoveryConfirmed
               || (recoveryCheck?.baseIdentity !== "verified" && !this.crossBaseRecoveryConfirmed))))
           .onClick(() => this.run("import", () => this.importSelected()));
       });
+  }
+
+  private renderCompletedImport(completed: CompletedPortableImport): void {
+    const parent = this.renderParent();
+    const summary = parent.createDiv({
+      cls: "ent-cc-manager-diagnostic ent-cc-portability-summary ent-cc-portability-outcome",
+      attr: { role: "status", "aria-live": "polite" },
+    });
+    summary.createEl("strong", { text: "Import complete" });
+    summary.createEl("p", {
+      text: completed.subjectCatalogImported
+        ? `${completed.addedSubjects} new subjects · ${completed.matchedSubjects} existing identity matches · ${completed.unresolvedSubjects} imported subjects awaiting a note.`
+        : "The selected plugin organization was applied successfully.",
+    });
+    const placeholderSummaryAvailable = completed.placeholderSummaryAvailable !== false;
+    summary.createEl("p", {
+      text: !completed.subjectCatalogImported
+        ? "No subject catalog was imported, so the placeholder queue was not rescanned. Markdown notes were not changed."
+        : placeholderSummaryAvailable
+          ? `This knowledge base now has ${completed.totalPlaceholders} unresolved placeholder${completed.totalPlaceholders === 1 ? "" : "s"}; ${completed.exactCandidatePlaceholders} ${completed.exactCandidatePlaceholders === 1 ? "has" : "have"} exact local title or ID candidates for deliberate review. Markdown notes were not changed.`
+          : "The import succeeded, but its placeholder queue summary could not be refreshed. Open the queue to retry the live projection. Markdown notes were not changed.",
+    });
+    new Setting(parent)
+      .addButton((button) => button
+        .setButtonText("Undo import")
+        .setIcon("undo-2")
+        .setDisabled(Boolean(this.busyAction) || !this.completedImportUndoToken)
+        .onClick(() => this.run("import", async () => {
+          if (!this.guardOpenedBase()) return;
+          const undoStack = this.plugin.data.undoStack;
+          const newestUndo = undoStack[undoStack.length - 1];
+          if (!newestUndo || canonicalJsonString(newestUndo) !== this.completedImportUndoToken) {
+            new Notice("Undo history changed after this import. Use the main undo command and review its label before continuing.", 8000);
+            return;
+          }
+          await this.plugin.undo();
+          this.dataChanged = true;
+          if (this.guardOpenedBase()) this.close();
+        })))
+      .addButton((button) => button
+        .setButtonText("Open placeholder queue")
+        .setIcon("file-question")
+        .setCta()
+        .setDisabled(Boolean(this.busyAction)
+          || (placeholderSummaryAvailable && completed.totalPlaceholders === 0))
+        .onClick(() => {
+          if (!this.guardOpenedBase()) return;
+          this.close();
+          this.plugin.openPlaceholderResolutionQueue();
+        }))
+      .addButton((button) => button
+        .setButtonText("Close")
+        .setDisabled(Boolean(this.busyAction))
+        .onClick(() => this.close()));
   }
 
   private renderComponentToggles(
@@ -837,6 +970,37 @@ export class ExportImportCenterModal extends Modal {
     return typeof this.plugin.getVaultId === "function" ? this.plugin.getVaultId() : "";
   }
 
+  private currentRecords(): VaultRecord[] {
+    return typeof this.plugin.getRecords === "function" ? this.plugin.getRecords() : [];
+  }
+
+  /** Candidate counts use the same eligible Markdown universe as the link picker. */
+  private currentPlaceholderMatchNotes(records: readonly VaultRecord[]): PlaceholderMatchNote[] {
+    if (typeof this.plugin.getVaultNoteFiles !== "function") return [...records];
+    const baseId = this.currentBaseId();
+    const generation = typeof this.plugin.getVaultNoteGeneration === "function"
+      ? this.plugin.getVaultNoteGeneration()
+      : -1;
+    const { workspaceMode, idProperty, templatesFolder } = this.plugin.data.settings;
+    const settingsKey = `${workspaceMode}\0${idProperty}\0${templatesFolder}`;
+    const cached = this.placeholderMatchNoteCache;
+    if (cached?.records === records
+      && cached.baseId === baseId
+      && cached.generation === generation
+      && cached.settingsKey === settingsKey) return cached.notes;
+    const metadataCache = (this.app as unknown as {
+      metadataCache?: { getFileCache(file: TFile): { frontmatter?: Record<string, unknown> } | null };
+    }).metadataCache;
+    const notes = buildEligiblePlaceholderMatchNotes(
+      this.plugin.getVaultNoteFiles(false),
+      records,
+      this.plugin.data.settings,
+      (file) => metadataCache?.getFileCache(file)?.frontmatter,
+    );
+    this.placeholderMatchNoteCache = { records, baseId, generation, settingsKey, notes };
+    return notes;
+  }
+
   private currentBaseId(): string {
     return typeof this.plugin.getActiveKnowledgeBaseId === "function"
       ? this.plugin.getActiveKnowledgeBaseId()
@@ -895,6 +1059,23 @@ export class ExportImportCenterModal extends Modal {
     box.setText(message);
   }
 
+  private renderImportOutcomePreview(preview: PortableImportOutcomePreview): void {
+    const box = this.renderParent().createDiv({
+      cls: "ent-cc-manager-diagnostic ent-cc-portability-summary ent-cc-portability-outcome",
+      attr: { role: "status", "aria-live": "polite" },
+    });
+    box.createEl("strong", { text: "Predicted outcome" });
+    box.createEl("p", {
+      text: `${preview.result.addedSubjects} new subjects · ${preview.result.matchedSubjects} existing identity matches · ${preview.importedAwaitingNotes} selected subjects awaiting a note`,
+    });
+    box.createEl("p", {
+      text: `Whole base after import: ${preview.after.total} placeholders (${preview.after.index} in Index, ${preview.after.libraries} in Libraries, ${preview.after.unplaced} unplaced). ${preview.postImportCandidates} have exact local title or ID candidates for manual review.`,
+    });
+    box.createEl("p", {
+      text: "No candidate will be linked automatically. You will be able to review placeholders individually after import.",
+    });
+  }
+
   private renderError(message: string): void {
     const box = this.renderParent().createDiv({ cls: "ent-cc-manager-diagnostic" });
     box.createEl("strong", { text: "Cannot continue" });
@@ -915,7 +1096,7 @@ export class ExportImportCenterModal extends Modal {
     const exportData = this.plugin.data;
     const prepared = preparePortableExport(
       exportData,
-      selectionUsesSubjectCatalog(selection) ? this.plugin.getRecords() : [],
+      selectionUsesSubjectCatalog(selection) ? this.currentRecords() : [],
       selection,
       now.toISOString(),
       this.currentVaultId(),
@@ -1005,6 +1186,11 @@ export class ExportImportCenterModal extends Modal {
     this.importMode = "merge";
     this.recoveryConfirmed = false;
     this.crossBaseRecoveryConfirmed = false;
+    this.largePlaceholderImportConfirmed = false;
+    this.completedImport = null;
+    this.completedImportUndoToken = null;
+    this.reviewedImportOutcomeToken = null;
+    this.placeholderMatchNoteCache = null;
     this.pendingFocusKey = "import-file";
     if (!this.busyAction) this.render();
   }
@@ -1143,6 +1329,25 @@ export class ExportImportCenterModal extends Modal {
         this.crossBaseRecoveryConfirmed,
       );
     }
+    if (!selection.recovery) {
+      const records = selectionUsesSubjectCatalog(selection) ? this.currentRecords() : [];
+      const currentPreview = previewPortableImportOutcome(
+        this.plugin.data,
+        records,
+        value,
+        selection,
+        this.importMode,
+        selectionUsesSubjectCatalog(selection) ? this.currentPlaceholderMatchNotes(records) : records,
+      );
+      if (currentPreview && this.reviewedImportOutcomeToken
+        && this.importOutcomeReviewToken(selection, currentPreview) !== this.reviewedImportOutcomeToken) {
+        this.largePlaceholderImportConfirmed = false;
+        throw new Error("The destination changed after the predicted outcome was reviewed. Review the updated outcome before importing.");
+      }
+      if (currentPreview?.requiresLargeImportConfirmation && !this.largePlaceholderImportConfirmed) {
+        throw new Error(`Confirm the ${currentPreview.importedAwaitingNotes}-placeholder import before continuing.`);
+      }
+    }
     const workspaceValidation = this.validateWorkspaceComponent(value, selection);
     // Reject an incompatible ENT Index package before mutate() creates Undo
     // state or applies any component. applyPortableExport repeats this check
@@ -1241,7 +1446,76 @@ export class ExportImportCenterModal extends Modal {
       ? ` ${workspaceValidation.droppedLibraryProfileIds.length} Library ${workspaceValidation.droppedLibraryProfileIds.length === 1 ? "profile was" : "profiles were"} omitted because the destination has no matching Library.`
       : "";
     new Notice(`Import complete.${subjectText}${workspaceValidation.defaultTemplateReset ? " The missing source template was reset to Empty note." : ""}${profileResetText}${droppedProfileText}${workspaceValidation.missingFolderText} Markdown notes were not changed.`, 10000);
-    this.close();
+    const subjectCatalogImported = selectionUsesSubjectCatalog(selection);
+    let totalPlaceholders = 0;
+    let exactCandidatePlaceholders = 0;
+    let placeholderSummaryAvailable = false;
+    let completionDiagnosticFailed = false;
+    if (subjectCatalogImported) {
+      try {
+        const completedRecords = this.currentRecords();
+        const placeholderQueue = buildPlaceholderResolutionQueue(
+          this.plugin.data,
+          this.currentPlaceholderMatchNotes(completedRecords),
+          completedRecords,
+        );
+        totalPlaceholders = placeholderQueue.total;
+        exactCandidatePlaceholders = placeholderQueue.withCandidates;
+        placeholderSummaryAvailable = true;
+      } catch (error) {
+        completionDiagnosticFailed = true;
+        console.error("Knowledge Base Command Center saved the portable import but could not refresh its placeholder summary", error);
+      }
+    }
+    this.completedImport = {
+      subjectCatalogImported,
+      addedSubjects: imported.addedSubjects,
+      matchedSubjects: imported.matchedSubjects,
+      unresolvedSubjects: imported.unresolvedSubjects,
+      totalPlaceholders,
+      exactCandidatePlaceholders,
+      placeholderSummaryAvailable,
+    };
+    try {
+      const undoStack = this.plugin.data.undoStack;
+      const newestUndo = undoStack[undoStack.length - 1];
+      this.completedImportUndoToken = newestUndo ? canonicalJsonString(newestUndo) : null;
+    } catch (error) {
+      completionDiagnosticFailed = true;
+      this.completedImportUndoToken = null;
+      console.error("Knowledge Base Command Center saved the portable import but could not prepare its one-click Undo handoff", error);
+    }
+    if (completionDiagnosticFailed) {
+      new Notice("The import was saved, but part of its completion summary could not be prepared. Reopen the center to refresh it; the main undo history remains available.", 10000);
+    }
+    // Prototype-only unit fixtures exercise the transactional import method
+    // without opening an Obsidian Modal. A real open center always has its
+    // content element and should remain open for the outcome handoff.
+    if (this.contentEl) this.render();
+  }
+
+  /** Fingerprint only the values shown in the outcome UI, never its full candidate arrays. */
+  private importOutcomeReviewToken(
+    selection: PortableExportSelection,
+    preview: PortableImportOutcomePreview,
+  ): string {
+    const queueSummary = (queue: PortableImportOutcomePreview["after"]): object => ({
+      total: queue.total,
+      index: queue.index,
+      libraries: queue.libraries,
+      unplaced: queue.unplaced,
+      withCandidates: queue.withCandidates,
+    });
+    return canonicalJsonString({
+      mode: this.importMode,
+      selection: normalizePortableSelection(selection),
+      result: preview.result,
+      before: queueSummary(preview.before),
+      after: queueSummary(preview.after),
+      importedAwaitingNotes: preview.importedAwaitingNotes,
+      postImportCandidates: preview.postImportCandidates,
+      requiresLargeImportConfirmation: preview.requiresLargeImportConfirmation,
+    });
   }
 
   private createBaseGuard(): OpenedBaseGuard {

@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    body {
+      padding: 16px;
+      background: #1e1e1e;
+      color: #dcddde;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    button { font: inherit; }
+    .fixture-surface {
+      width: 1240px;
+      max-width: 100%;
+      border: 1px solid #454545;
+    }
+    .ent-cc-view {
+      --background-primary: #202020;
+      --background-secondary: #262626;
+      --background-modifier-border: #454545;
+      --background-modifier-hover: #303030;
+      --interactive-accent: #7c5cff;
+      --text-normal: #dcddde;
+      --text-muted: #a7a7a7;
+      --text-faint: #777;
+      --text-warning: #f0a44c;
+      --ent-cc-border: #454545;
+      --ent-cc-accent: #8b6cff;
+      --ent-cc-accent-soft: rgba(139, 108, 255, 0.14);
+      --ent-cc-amber: #f0a44c;
+      width: 100%;
+      background: var(--background-primary);
+    }
+    .fixture-label {
+      margin: 8px 16px 4px;
+      color: var(--text-faint);
+      font-size: 11px;
+    }
+  </style>
+</head>
+<body>
+  <main id="fixture" class="fixture-surface ent-cc-view">
+    <div class="fixture-label">Active Index curriculum row</div>
+    <div class="ent-cc-curriculum-node">
+      <div class="ent-cc-row ent-cc-subject-row ent-cc-curriculum-row ent-cc-placeholder-row ent-cc-depth-2" data-row="curriculum-placeholder">
+        <span class="ent-cc-disclosure ent-cc-disclosure-spacer" aria-hidden="true"></span>
+        <span class="ent-cc-leading-icon ent-cc-record-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5"></circle></svg></span>
+        <button class="ent-cc-subject-title" dir="auto">Congenital Laryngotracheoesophageal Cleft With An Exceptionally Long Name</button>
+        <span class="ent-cc-subject-id has-membership-provenance">
+          <span class="ent-cc-subject-id-value">No note yet</span>
+          <span class="ent-cc-membership-provenance">Imported placeholder</span>
+        </span>
+        <div class="ent-cc-row-badges">
+          <span class="ent-cc-placeholder-badge">No note</span>
+          <span class="ent-cc-membership-badge is-imported-placeholder">Imported</span>
+          <span class="ent-cc-visual-badge" title="Custom visual placement"><svg viewBox="0 0 16 16"><path d="M8 1v14M1 8h14"></path></svg></span>
+          <span class="ent-cc-priority is-urgent">P1</span>
+          <span class="ent-cc-safety-badge" title="Safety-critical"><svg viewBox="0 0 16 16"><path d="M8 1l6 3v4c0 4-3 6-6 7-3-1-6-3-6-7V4z"></path></svg></span>
+          <span class="ent-cc-pin-badge" title="Pinned"><svg viewBox="0 0 16 16"><path d="M5 2h6l-1 5 3 2H3l3-2z"></path></svg></span>
+          <span class="ent-cc-lock-badge" title="AI locked"><svg viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="7"></rect></svg></span>
+        </div>
+        <button class="ent-cc-row-more" aria-label="Actions for placeholder"><svg viewBox="0 0 16 16"><circle cx="3" cy="8" r="1"></circle><circle cx="8" cy="8" r="1"></circle><circle cx="13" cy="8" r="1"></circle></svg></button>
+      </div>
+    </div>
+
+    <div class="fixture-label">Cross-base Index result row</div>
+    <div class="ent-cc-row ent-cc-subject-row ent-cc-level-3" data-row="cross-base-worst-badges">
+      <span class="ent-cc-leading-icon ent-cc-record-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><rect x="3" y="2" width="10" height="12"></rect></svg></span>
+      <button class="ent-cc-subject-title" dir="auto">Clinical Evaluation of Airway Obstruction With Detailed Differential Diagnosis</button>
+      <span class="ent-cc-subject-id has-membership-provenance">
+        <span class="ent-cc-subject-id-value">ENT-PED-003.01</span>
+        <span class="ent-cc-membership-provenance">Protected source</span>
+      </span>
+      <div class="ent-cc-row-badges">
+        <span class="ent-cc-membership-badge is-protected-source">Protected</span>
+        <span class="ent-cc-visual-badge" title="Custom visual placement"><svg viewBox="0 0 16 16"><path d="M8 1v14M1 8h14"></path></svg></span>
+        <span class="ent-cc-priority is-urgent">P1</span>
+        <span class="ent-cc-safety-badge" title="Safety-critical"><svg viewBox="0 0 16 16"><path d="M8 1l6 3v4c0 4-3 6-6 7-3-1-6-3-6-7V4z"></path></svg></span>
+        <span class="ent-cc-pin-badge" title="Pinned"><svg viewBox="0 0 16 16"><path d="M5 2h6l-1 5 3 2H3l3-2z"></path></svg></span>
+        <span class="ent-cc-lock-badge" title="AI locked"><svg viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="7"></rect></svg></span>
+      </div>
+      <button class="ent-cc-row-more" aria-label="Actions for cross-base result"><svg viewBox="0 0 16 16"><circle cx="3" cy="8" r="1"></circle><circle cx="8" cy="8" r="1"></circle><circle cx="13" cy="8" r="1"></circle></svg></button>
+    </div>
+  </main>
+</body>
+</html>

@@ -1,6 +1,9 @@
 node_modules/
+.claude/
 data.json
 dist/
 main.js
+SHA256SUMS.txt
 *.map
 ._*
+output/playwright/

@@ -5,27 +5,44 @@ on:
     tags:
       - "[0-9]+.[0-9]+.[0-9]+"
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
+      - name: Verify tag commit is reachable from main
+        run: |
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          node scripts/verify-tag-ancestry.mjs
       - name: Install dependencies
         run: npm ci
+      - name: Audit high-severity dependency findings
+        run: npm run audit:high
+      - name: Install Chromium for rendered layout tests
+        run: npx playwright install --with-deps chromium
       - name: Test and build
         run: npm run check
       - name: Verify release tag
         run: node -e 'const manifest=require("./manifest.json"); if (manifest.version !== process.env.GITHUB_REF_NAME) throw new Error(`Tag ${process.env.GITHUB_REF_NAME} does not match manifest ${manifest.version}`)'
       - name: Extract release notes
         run: node scripts/extract-release-notes.mjs "$GITHUB_REF_NAME" > release-notes.md
+      - name: Create release checksums
+        run: npm run release:checksums
       - name: Upload verified release assets
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -34,12 +51,14 @@ jobs:
             main.js
             manifest.json
             styles.css
+            SHA256SUMS.txt
             release-notes.md
           if-no-files-found: error
 
   release:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
       id-token: write
@@ -56,8 +75,9 @@ jobs:
             main.js
             manifest.json
             styles.css
+            SHA256SUMS.txt
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release create "$GITHUB_REF_NAME" main.js manifest.json styles.css --verify-tag --title "Knowledge Base Command Center $GITHUB_REF_NAME" --notes-file release-notes.md
+        run: gh release create "$GITHUB_REF_NAME" main.js manifest.json styles.css SHA256SUMS.txt --verify-tag --title "Knowledge Base Command Center $GITHUB_REF_NAME" --notes-file release-notes.md

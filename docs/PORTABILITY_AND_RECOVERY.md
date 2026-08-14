@@ -61,7 +61,7 @@ Import maps each selected source to either a new compatible knowledge base or on
 
 Large categories initially show 50 entries and expand in bounded 50-entry pages. A stale destination base, active-base selection, complete store snapshot, or externally synced generation invalidates the plan before mutation. The selected portfolio remains unchanged.
 
-Every Replace destination requires the displayed typed phrase. Before any plugin-data mutation, the plugin writes a separate strict same-vault recovery package for every destination that will be replaced. If one recovery write fails, no plan operation is applied. The final multi-base store change uses the existing atomic persistence and rollback path and each destination also receives an in-plugin Undo snapshot when its bounded size permits. A plan that cannot retain the required Undo snapshot is rejected.
+Every Replace destination requires the displayed typed phrase. Before any plugin-data mutation, the plugin writes a separate strict same-vault recovery package for every destination that will be replaced. If one recovery write fails, no plan operation is applied. The final multi-base store change uses the existing atomic persistence and rollback path. Every destination's required in-plugin Undo snapshot is staged together in one version-4 causal batch before the primary write. If the exact protected batch cannot fit within the shared 4 MiB device-local limit, the entire plan is rejected before any primary store mutation. After a restart, each destination is promoted only when its committed semantic revision, head, and payload fingerprint match; a mismatched or newer synced base retains its pre-import local history instead.
 
 Cross-vault Merge and new-base initialization retain the normal portable behavior. Cross-vault Replace has an additional acknowledgement because it can remove selected destination organization even though it never changes Markdown files.
 
@@ -87,7 +87,7 @@ Import never creates notes automatically. A subject without a destination note a
 - Protected ENT topics offer **Create unverified proposal** and route it to the Inbox.
 - Other protected clinical kinds offer Link or Keep only.
 
-Creating or linking preserves the portable identity and its Index/Library placement. A resolved subject can later change its linked note or return to a placeholder. Linking a note already owned by another portable subject requires confirmation before identities merge.
+Creating or linking preserves the portable identity and its Index/Library placement. A resolved subject can later change its linked note or return to a placeholder. If its linked Markdown file disappears locally, the subject returns to the placeholder queue while retaining the prior path binding; a later file at that same path resolves it automatically. Until then, link another eligible note deliberately or wait for Sync. Linking a note already owned by another portable subject requires confirmation before identities merge.
 
 ## Portable format compatibility
 
@@ -103,6 +103,12 @@ After choosing a JSON file, select only the available sections to apply and choo
 
 - **Merge with this vault** adds or updates selected organization while retaining unrelated local organization.
 - **Replace selected sections** resets only the selected plugin sections. Notes absent from a replacement Index may be hidden from that Index, but no Markdown note is deleted, moved, overwritten, or rewritten.
+
+For portable sections, **Predicted outcome** runs the same two-phase import against an isolated copy before any mutation. It reports new subjects, existing stable-identity matches, selected incoming subjects still awaiting a local note, the complete before/after placeholder queue split across Index, Libraries, and unplaced blueprint subjects, and how many post-import placeholders have at least one exact normalized title or configured-ID candidate. Candidate discovery scans every eligible Markdown note in the vault, including unindexed notes and notes outside the active base's storage and linked-folder rules. The displayed value counts placeholders with at least one candidate, not the raw number of candidate notes. A candidate is never selected or linked by the preview.
+
+If the prediction leaves 100 or more selected incoming subjects unresolved, a separate large-placeholder-import acknowledgement is required. The outcome is recomputed immediately before mutation, so a stale selection cannot bypass that acknowledgement. After a successful import, the completion screen reports the actual unresolved queue and offers **Open placeholder queue**, **Undo import**, and Close. The queue exposes guarded per-subject create/link actions and never performs a bulk automatic link.
+
+Selecting **Workspace settings** together with Index, any Library, Collections, or Study state is conditionally restricted. If the selected Workspace settings would change fields used to project subject records, the combined preview and Apply are rejected before mutation. Import Workspace settings alone first, let Command Center refresh the vault, then reopen this center and import the subject-catalog sections. The rule applies to single-base and multi-base portfolio imports; the two-step restriction does not apply when those projection fields stay unchanged or the portfolio destination is a new empty base.
 
 When source and destination use different Generic/ENT presets, Workspace settings is automatically excluded. Path-free Index, Library, Collection, and study components can still transfer without changing the destination's name or preset.
 
@@ -168,6 +174,8 @@ Recovery exported from a provisional identity that later lost first-upgrade conv
 
 One base's recovery does not contain sibling or archived bases.
 
+Before a primary plugin-data write, the adjacent <code>data.json.bak</code> is refreshed with known-good previous committed authority. If that prerequisite write or its Sync-generation fence fails, no primary or compensating write is attempted and the unchanged operation remains safe to retry after the underlying issue is fixed. After the primary commits, advancing the backup to the new authority is best effort: a post-commit backup failure does not reject the committed edit and can leave <code>data.json.bak</code> temporarily one commit behind. A failed candidate is never promoted as backup authority. This rotating recovery aid is not a substitute for a complete vault backup or same-vault recovery.
+
 ### Restore
 
 1. Work in the original vault and update the plugin on every device. Use a Portable set, not recovery, for intentional cross-vault transfer.
@@ -185,6 +193,8 @@ Do not use a different-base or legacy-identity override unless the displayed unc
 ## Sync model and conflict handling
 
 Different knowledge bases can merge independently through Obsidian Sync. Current stores carry a per-base semantic revision, head, payload fingerprint, and bounded causal lineage. When two different semantic payloads have no proven ancestor relationship, the plugin treats them as concurrent edits, writes every possible losing complete envelope to private conflict rescue, and only then selects a deterministic whole-base winner. It still does not field-merge simultaneous edits.
+
+An operation that requires Undo stages its exact causal snapshot in the bounded version-4 device-local pending-Undo journal before the primary semantic commit. Multi-base portfolio import stages all destination snapshots in one bounded pending-Undo batch and proves each destination independently. A user-invoked Undo or Redo stages its exact pre-transition stacks and inverse snapshot in a separate pending Undo/Redo transition journal. On startup, a matching committed semantic revision, head, and payload fingerprint promotes the required snapshot or reconstructs the exact completed history transition; a nonmatching authority discards the staged required Undo or retains the exact pre-transition Undo/Redo stacks. This closes both restart windows between primary commit and normal local-history finalization. If the complete protected journal or batch cannot be retained within the 4 MiB device-local limit, the operation fails closed before primary mutation.
 
 Run **Open sync & recovery center** for local evidence about the active base, last successful local save, last external plugin-data reload, conflict rescues, recovery age, and any recorded active-base conflict. The center does not inspect Obsidian Sync, a provider queue, the network, or another device. An absent warning is not proof that it is safe to switch devices. Avoid editing the same base on two devices at once, let your provider settle using its supported surface, and keep current recovery exports.
 

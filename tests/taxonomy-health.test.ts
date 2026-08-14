@@ -518,11 +518,17 @@ test("index manager bulk selection matches the notes the filter shows", () => {
 test("index manager tabs expose linked panels and support arrow, Home, and End keys", () => {
   const data = migrateData(null);
   data.settings.workspaceMode = "generic";
+  const indexedRecords = [record("Knowledge Base/Alpha.md", "Alpha"), record("Knowledge Base/Beta.md", "Beta")];
+  data.directIndexPaths = indexedRecords.map((item) => item.path);
+  let indexRecordReads = 0;
   const plugin = {
     app: { vault: { getAbstractFileByPath: () => null } },
     data,
-    getIndexRecords: (): VaultRecord[] => [],
-    getRecords: (): VaultRecord[] => [],
+    getIndexRecords: (): VaultRecord[] => {
+      indexRecordReads += 1;
+      return indexedRecords;
+    },
+    getRecords: (): VaultRecord[] => indexedRecords,
     getIndexCandidateFiles: () => [],
     getIndexGroups: () => [],
     getIndexDiagnostics: () => [],
@@ -572,9 +578,9 @@ test("index manager tabs expose linked panels and support arrow, Home, and End k
     manager.render();
     const tablist = manager.contentEl.querySelector('[role="tablist"]');
     assert.equal(tablist?.getAttribute("aria-label"), "Index manager sections");
-    assert.equal(manager.contentEl.querySelectorAll('[role="tab"]').length, 5);
+    assert.equal(manager.contentEl.querySelectorAll('[role="tab"]').length, 6);
     const panels = manager.contentEl.querySelectorAll('[role="tabpanel"]') as unknown as FakeElement[];
-    assert.equal(panels.length, 5, "every tab controls a real panel, including lazy hidden panels");
+    assert.equal(panels.length, 6, "every tab controls a real panel, including lazy hidden panels");
     assert.equal(panels.filter((panel) => !panel.hidden).length, 1);
 
     const indexed = tab("indexed");
@@ -596,6 +602,13 @@ test("index manager tabs expose linked panels and support arrow, Home, and End k
     assert.equal(activeTab().getAttribute("data-manager-tab"), "indexed", "ArrowRight wraps at the end");
     tab("indexed").dispatch("keydown", { key: "ArrowLeft" });
     assert.equal(activeTab().getAttribute("data-manager-tab"), "diagnostics", "ArrowLeft wraps at the start");
+
+    const readsBeforeSourceTab = indexRecordReads;
+    assert.equal(tab("sources").textContent, "Why included—", "the inactive explanation tab stays lazy");
+    tab("sources").click();
+    assert.equal(activeTab().getAttribute("data-manager-tab"), "sources");
+    assert.equal(tab("sources").textContent, "Why included2", "the active badge counts records whose inclusion it explains");
+    assert.equal(indexRecordReads, readsBeforeSourceTab + 2, "activation reads once for the badge and once for its source summary");
   } finally {
     if (priorAddButton) Object.defineProperty(Setting.prototype, "addButton", priorAddButton);
     else Reflect.deleteProperty(settingPrototype, "addButton");

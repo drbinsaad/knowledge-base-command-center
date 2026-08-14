@@ -31,6 +31,7 @@ import {
   canonicalHierarchyIssue,
   canonicalPath,
   cloneJsonValue,
+  codeUnitCompare,
   canonicalPathInputsUnchanged,
   capturePluginViewState,
   cleanDomainFolder,
@@ -40,6 +41,7 @@ import {
   createDefaultStore,
   createDeviceLocalPluginState,
   createDeviceLocalPluginStateWithReport,
+  deviceHistoryStackFingerprint,
   deterministicSemanticHead,
   createKnowledgeBaseEntry,
   DATA_VERSION,
@@ -87,6 +89,7 @@ import {
   pathIsInsideFolder,
   pathIsInIndexFolderSources,
   pluginDataSemanticallyEqual,
+  projectPendingHistoryTransition,
   portablePlaceholderPath,
   portableSubjectIdFromPath,
   pluginStoreNeedsNormalization,
@@ -134,6 +137,11 @@ import {
   VaultRecord,
   WorkspaceMode,
   type IndexFolderSource,
+  type PendingRequiredUndoCommit,
+  type PendingRequiredUndoBatchCommit,
+  type PendingRequiredUndoBatchEntry,
+  type PendingHistoryTransitionCommit,
+  type PersonalSnapshot,
 } from "./model";
 import {
   MAX_PORTABLE_PACKAGE_BYTES,
@@ -390,9 +398,38 @@ interface RejectedSemanticAttempt {
   lineage: string[];
 }
 
+interface SemanticRevisionPlan {
+  semanticHash: string;
+  rejected: RejectedSemanticAttempt[];
+  nextRevision: number;
+  parentHead: string;
+}
+
 class ExternalSettingsSupersededError extends Error {}
 class CorruptPrimarySupersededError extends Error {}
 class SemanticConflictRescueError extends Error {}
+
+/**
+ * Preserve the original error type while recording that saveData was never
+ * entered. Callers that own a wider transaction can then restore memory
+ * without publishing a false compensating write or poisoning the App-wide
+ * persistence barrier. A WeakSet avoids changing externally observed errors.
+ */
+const primaryStoreWriteNotAttemptedErrors = new WeakSet<object>();
+
+function markPrimaryStoreWriteNotAttempted(error: unknown): unknown {
+  const marked = error !== null && (typeof error === "object" || typeof error === "function")
+    ? error
+    : new Error(errorMessage(error));
+  primaryStoreWriteNotAttemptedErrors.add(marked);
+  return marked;
+}
+
+function primaryStoreWriteWasNotAttempted(error: unknown): boolean {
+  return error !== null
+    && (typeof error === "object" || typeof error === "function")
+    && primaryStoreWriteNotAttemptedErrors.has(error);
+}
 
 const APP_WRITE_BARRIER_KEY = Symbol.for("knowledge-base-command-center.adapter-write-barrier.v1");
 
@@ -546,6 +583,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private lastConflictRescuePath = "";
   private deviceLocalState: DeviceLocalPluginState | null = null;
   private deviceLocalStateLoaded = false;
+  /** Exact causal identity reserved by a required-Undo preflight for the next semantic write. */
+  private preparedRequiredUndoCommit: PendingRequiredUndoCommit | null = null;
+  /** Exact causal identity reserved by an Undo/Redo transition preflight. */
+  private preparedHistoryTransitionCommit: PendingHistoryTransitionCommit | null = null;
+  /** Keeps generic post-commit local persistence from erasing a staged portfolio batch. */
+  private stagedRequiredUndoBatchCommit: PendingRequiredUndoBatchCommit | null = null;
   /** Sticky until restart after the explicit privacy reset. */
   private deviceLocalPersistenceSuppressed = false;
   private syncRecoveryLocalState: SyncRecoveryLocalState = createDefaultSyncRecoveryLocalState();
@@ -618,6 +661,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.addCommand({ id: "open-workspace", name: "Open workspace", callback: () => this.run(() => this.activateView()) });
     this.addCommand({ id: "add-or-create", name: "Add or create…", callback: () => void this.withView((view) => view.openAddActions()) });
     this.addCommand({ id: "manage-knowledge-index", name: "Manage index…", callback: () => void this.withView((view) => view.openIndexManager()) });
+    this.addCommand({ id: "open-placeholder-resolution-queue", name: "Open imported placeholder queue", icon: "file-question", callback: () => this.openPlaceholderResolutionQueue() });
+    this.addCommand({ id: "resolve-next-imported-placeholder", name: "Resolve next imported placeholder…", icon: "list-start", callback: () => void this.withView((view) => view.startResolveNextPlaceholder()) });
     this.addCommand({
       id: "review-legacy-index-source",
       name: "Review legacy index source…",
@@ -899,6 +944,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return leaf.view;
   }
 
+  openPlaceholderResolutionQueue(): void {
+    void this.withView((view) => view.openPlaceholderResolutionQueue());
+  }
+
   private async withView(action: (view: EntVaultCommandCenterView) => void | Promise<void>): Promise<void> {
     try {
       await action(await this.activateView());
@@ -1009,10 +1058,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     ));
   }
 
-  private bumpEntrySemanticRevision(entry: KnowledgeBaseEntry, timestamp = Date.now()): boolean {
+  private planEntrySemanticRevision(entry: KnowledgeBaseEntry): SemanticRevisionPlan | null {
     const semanticHash = semanticEntryFingerprint(entry);
     const rejected = this.unsupersededRejectedAttempts(entry);
-    if (semanticHash === entry.semanticHash && rejected.length === 0) return false;
+    if (semanticHash === entry.semanticHash && rejected.length === 0) return null;
     if (!Number.isSafeInteger(entry.semanticRevision) || entry.semanticRevision < 0
       || entry.semanticRevision >= Number.MAX_SAFE_INTEGER) {
       throw new Error("The knowledge base semantic revision cannot be advanced safely. Export the base before repairing plugin data.");
@@ -1022,12 +1071,139 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (!Number.isSafeInteger(nextRevision)) {
       throw new Error("The knowledge base semantic revision cannot be advanced safely. Export the base before repairing plugin data.");
     }
+    return {
+      semanticHash,
+      rejected,
+      nextRevision,
+      parentHead: entry.semanticHead,
+    };
+  }
+
+  private prepareRequiredUndoCommit(entry: KnowledgeBaseEntry, snapshot: PersonalSnapshot): PendingRequiredUndoCommit | null {
+    const plan = this.planEntrySemanticRevision(entry);
+    if (!plan) return null;
+    if (!Number.isSafeInteger(snapshot.at) || snapshot.at <= 0) {
+      throw new Error("The required Undo snapshot timestamp is invalid.");
+    }
+    return {
+      baseId: entry.id,
+      parentSemanticHead: plan.parentHead,
+      candidateSemanticRevision: plan.nextRevision,
+      candidateSemanticHead: nextSemanticHead(plan.parentHead, plan.semanticHash),
+      candidateSemanticHash: plan.semanticHash,
+      undoSnapshotAt: snapshot.at,
+      undoSnapshotFingerprint: fingerprintText(canonicalJsonString(snapshot)),
+    };
+  }
+
+  private prepareRequiredUndoBatchCommit(
+    beforeStore: PluginStore,
+    baseIds: readonly string[],
+  ): PendingRequiredUndoBatchCommit {
+    if (baseIds.length < 1 || baseIds.length > MAX_KNOWLEDGE_BASES) {
+      throw new Error(`A required Undo batch must identify between 1 and ${MAX_KNOWLEDGE_BASES} knowledge bases.`);
+    }
+    const sortedBaseIds = [...baseIds].sort(codeUnitCompare);
+    if (new Set(sortedBaseIds).size !== sortedBaseIds.length) {
+      throw new Error("A required Undo batch cannot identify the same knowledge base twice.");
+    }
+    const beforeById = new Map(beforeStore.bases.map((entry) => [entry.id, entry]));
+    const entries: PendingRequiredUndoBatchEntry[] = sortedBaseIds.map((baseId) => {
+      const candidate = this.store.bases.find((entry) => entry.id === baseId);
+      if (!candidate) throw new Error("A portfolio destination is unavailable after applying its reviewed plan.");
+      const before = beforeById.get(baseId);
+      if (before) {
+        if (!Number.isSafeInteger(before.semanticRevision)
+          || before.semanticRevision < 0
+          || before.semanticRevision >= Number.MAX_SAFE_INTEGER
+          || candidate.semanticRevision !== before.semanticRevision + 1) {
+          throw new Error(`The portfolio candidate for “${candidate.data.settings.workspaceName}” did not advance its semantic revision exactly once.`);
+        }
+      } else if (candidate.semanticRevision !== 0
+        || candidate.semanticHead !== candidate.semanticHash) {
+        throw new Error(`The new portfolio candidate for “${candidate.data.settings.workspaceName}” has invalid initial semantic authority.`);
+      }
+      if (candidate.semanticHash !== semanticEntryFingerprint(candidate)) {
+        throw new Error(`The portfolio candidate for “${candidate.data.settings.workspaceName}” has stale semantic authority.`);
+      }
+      if (candidate.data.redoStack.length !== 0) {
+        throw new Error(`The portfolio candidate for “${candidate.data.settings.workspaceName}” did not clear Redo history.`);
+      }
+      const requiredUndo = candidate.data.undoStack[candidate.data.undoStack.length - 1];
+      if (!requiredUndo || !Number.isSafeInteger(requiredUndo.at) || requiredUndo.at <= 0) {
+        throw new Error(`The portfolio candidate for “${candidate.data.settings.workspaceName}” is missing its required Undo snapshot.`);
+      }
+      if (!before && candidate.data.undoStack.length !== 1) {
+        throw new Error(`The new portfolio candidate for “${candidate.data.settings.workspaceName}” has invalid staged history.`);
+      }
+      return {
+        baseId,
+        baseExistedBefore: Boolean(before),
+        candidateSemanticRevision: candidate.semanticRevision,
+        candidateSemanticHead: candidate.semanticHead,
+        candidateSemanticHash: candidate.semanticHash,
+        undoSnapshotAt: requiredUndo.at,
+        undoSnapshotFingerprint: fingerprintText(canonicalJsonString(requiredUndo)),
+      };
+    });
+    return { entries };
+  }
+
+  private prepareHistoryTransitionCommit(
+    entry: KnowledgeBaseEntry,
+    direction: "undo" | "redo",
+    sourceSnapshot: PersonalSnapshot,
+    inverseSnapshot: PersonalSnapshot,
+    priorUndoStack: PersonalSnapshot[],
+    priorRedoStack: PersonalSnapshot[],
+  ): PendingHistoryTransitionCommit | null {
+    const plan = this.planEntrySemanticRevision(entry);
+    if (!plan) return null;
+    if (!Number.isSafeInteger(sourceSnapshot.at) || sourceSnapshot.at <= 0) {
+      throw new Error(`The ${direction} source snapshot timestamp is invalid.`);
+    }
+    const pending: PendingHistoryTransitionCommit = {
+      baseId: entry.id,
+      direction,
+      parentSemanticHead: plan.parentHead,
+      candidateSemanticRevision: plan.nextRevision,
+      candidateSemanticHead: nextSemanticHead(plan.parentHead, plan.semanticHash),
+      candidateSemanticHash: plan.semanticHash,
+      sourceSnapshotAt: sourceSnapshot.at,
+      sourceSnapshotFingerprint: fingerprintText(canonicalJsonString(sourceSnapshot)),
+      inverseSnapshot: cloneJsonValue(inverseSnapshot),
+      inverseSnapshotFingerprint: fingerprintText(canonicalJsonString(inverseSnapshot)),
+      priorUndoStackFingerprint: deviceHistoryStackFingerprint(priorUndoStack),
+      priorRedoStackFingerprint: deviceHistoryStackFingerprint(priorRedoStack),
+      postUndoStackFingerprint: deviceHistoryStackFingerprint(entry.data.undoStack),
+      postRedoStackFingerprint: deviceHistoryStackFingerprint(entry.data.redoStack),
+    };
+    // Prove immediately that the compact inverse delta reconstructs the exact
+    // live post-transition stacks before either localStorage or data.json sees it.
+    projectPendingHistoryTransition(priorUndoStack, priorRedoStack, pending);
+    return pending;
+  }
+
+  private bumpEntrySemanticRevision(entry: KnowledgeBaseEntry, timestamp = Date.now()): boolean {
+    const plan = this.planEntrySemanticRevision(entry);
+    if (!plan) return false;
+    const prepared = this.preparedRequiredUndoCommit ?? this.preparedHistoryTransitionCommit;
+    const usesPreparedHead = prepared?.baseId === entry.id
+      && prepared.parentSemanticHead === plan.parentHead
+      && prepared.candidateSemanticRevision === plan.nextRevision
+      && prepared.candidateSemanticHash === plan.semanticHash;
     const parentHead = entry.semanticHead;
     const rejectedAncestry: string[] = [];
-    for (const attempt of rejected) rejectedAncestry.push(attempt.head, ...attempt.lineage);
-    entry.semanticRevision = nextRevision;
-    entry.semanticHash = semanticHash;
-    entry.semanticHead = nextSemanticHead(parentHead, semanticHash);
+    for (const attempt of plan.rejected) rejectedAncestry.push(attempt.head, ...attempt.lineage);
+    entry.semanticRevision = plan.nextRevision;
+    entry.semanticHash = plan.semanticHash;
+    entry.semanticHead = usesPreparedHead
+      ? prepared.candidateSemanticHead
+      : nextSemanticHead(parentHead, plan.semanticHash);
+    if (usesPreparedHead) {
+      if (prepared === this.preparedRequiredUndoCommit) this.preparedRequiredUndoCommit = null;
+      if (prepared === this.preparedHistoryTransitionCommit) this.preparedHistoryTransitionCommit = null;
+    }
     entry.semanticLineage = boundedSemanticLineage([
       ...rejectedAncestry,
       parentHead,
@@ -1152,8 +1328,19 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (active) store.activeBaseId = active.id;
   }
 
-  private storeDeviceLocalState(state: DeviceLocalPluginState, requireStorage = false): void {
-    if (this.deviceLocalPersistenceSuppressed) return;
+  private storeDeviceLocalState(
+    state: DeviceLocalPluginState,
+    requireStorage = false,
+    allowPendingBatchResolution = false,
+  ): void {
+    if (this.deviceLocalPersistenceSuppressed) {
+      if (requireStorage) throw new Error("Device-local storage is unavailable while local persistence is suppressed.");
+      return;
+    }
+    // Defense in depth for direct local-state writers (legacy migration,
+    // semantic no-op history, and external projection paths): only the batch
+    // reconciler/finalizer may replace a staged journal.
+    if (this.stagedRequiredUndoBatchCommit && !allowPendingBatchResolution) return;
     if (typeof this.app.saveLocalStorage === "function") {
       this.app.saveLocalStorage(DEVICE_LOCAL_STATE_KEY, state);
     } else if (requireStorage) {
@@ -1209,6 +1396,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   private captureLiveDeviceLocalState(): void {
     if (this.deviceLocalPersistenceSuppressed) return;
+    // A committed portfolio can remain protected only by its durable batch
+    // journal when the marker-free finalizer is rejected. Generic view-state
+    // capture must not replace that sole recovery authority in memory; doing
+    // so would also let a later save erase it from localStorage.
+    if (this.stagedRequiredUndoBatchCommit) return;
     if (!this.committedStoreSnapshot
       && this.deviceLocalState
       && this.deviceLocalState.vaultId !== this.store.vaultId) {
@@ -1228,6 +1420,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   private persistDeviceLocalState(): void {
     if (this.deviceLocalPersistenceSuppressed) return;
+    // Only the protected batch finalizer or explicit reconciliation may remove
+    // a staged portfolio journal. Route/view saves are intentionally deferred
+    // until restart if that finalization could not be made durable.
+    if (this.stagedRequiredUndoBatchCommit) return;
     if (!this.committedStoreSnapshot
       && this.deviceLocalState
       && this.deviceLocalState.vaultId !== this.store.vaultId) {
@@ -1245,6 +1441,451 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     } catch (error) {
       console.error("Knowledge Base Command Center could not persist device-local state", error);
       new Notice("The knowledge base was saved, but this device's current route or undo history could not be remembered.", 8000);
+    }
+  }
+
+  private localStateRetainsPendingUndo(
+    state: DeviceLocalPluginState,
+    pending: PendingRequiredUndoCommit,
+  ): boolean {
+    const undoStack = state.bases
+      .find((base) => base.baseId === pending.baseId)
+      ?.view.undoStack ?? [];
+    const newestUndo = undoStack[undoStack.length - 1];
+    return newestUndo?.at === pending.undoSnapshotAt
+      && fingerprintText(canonicalJsonString(newestUndo)) === pending.undoSnapshotFingerprint;
+  }
+
+  private committedAuthorityMatchesPendingUndo(
+    store: PluginStore,
+    pending: PendingRequiredUndoCommit | PendingRequiredUndoBatchEntry | PendingHistoryTransitionCommit,
+  ): boolean {
+    const entry = store.bases.find((candidate) => candidate.id === pending.baseId);
+    return entry?.semanticRevision === pending.candidateSemanticRevision
+      && entry.semanticHead === pending.candidateSemanticHead
+      && entry.semanticHash === pending.candidateSemanticHash;
+  }
+
+  /**
+   * Resolve a pre-commit local journal only against an accepted store identity.
+   * A matching causal head promotes Undo and clears pre-transaction Redo; any
+   * other head removes the staged Undo and restores the retained Redo stack.
+   */
+  private reconcilePendingRequiredUndoCommit(store: PluginStore): boolean {
+    const state = this.deviceLocalState;
+    const pending = state?.pendingRequiredUndoCommit;
+    if (!state || !pending || state.vaultId !== store.vaultId) return false;
+    if (!this.localStateRetainsPendingUndo(state, pending)) {
+      throw new Error("The pending required Undo journal no longer identifies its staged snapshot.");
+    }
+    const resolved = cloneJsonValue(state);
+    const local = resolved.bases.find((base) => base.baseId === pending.baseId);
+    if (!local) throw new Error("The pending required Undo journal refers to an unavailable knowledge base.");
+    if (this.committedAuthorityMatchesPendingUndo(store, pending)) {
+      local.view.redoStack = [];
+    } else {
+      local.view.undoStack = local.view.undoStack.slice(0, -1);
+    }
+    delete resolved.pendingRequiredUndoCommit;
+    // Apply the resolved state in memory even if the cleanup write fails. The
+    // durable marker remains safe and will be resolved again on next startup.
+    this.deviceLocalState = resolved;
+    this.deviceLocalStateLoaded = true;
+    try {
+      this.storeDeviceLocalState(resolved, true);
+    } catch (error) {
+      console.error("Knowledge Base Command Center could not finalize its pending required Undo journal", error);
+      new Notice("Required undo history was recovered safely, but its local journal could not be finalized. Obsidian will retry on restart.", 10000);
+    }
+    return true;
+  }
+
+  private localStateRetainsPendingUndoBatchEntry(
+    state: DeviceLocalPluginState,
+    pending: PendingRequiredUndoBatchEntry,
+  ): boolean {
+    const local = state.bases.find((base) => base.baseId === pending.baseId);
+    const undoStack = local?.view.undoStack ?? [];
+    const newestUndo = undoStack[undoStack.length - 1];
+    return Boolean(local
+      && newestUndo?.at === pending.undoSnapshotAt
+      && fingerprintText(canonicalJsonString(newestUndo)) === pending.undoSnapshotFingerprint
+      && (pending.baseExistedBefore
+        || (undoStack.length === 1 && local.view.redoStack.length === 0)));
+  }
+
+  /** Resolve every destination in an atomic portfolio journal independently. */
+  private reconcilePendingRequiredUndoBatchCommit(store: PluginStore): boolean {
+    const state = this.deviceLocalState;
+    const pending = state?.pendingRequiredUndoBatchCommit;
+    if (!state || !pending || state.vaultId !== store.vaultId) return false;
+    // Retain the synchronous write barrier until the marker-free cleanup is
+    // itself durable. If that write fails, view saves and later semantic
+    // operations cannot overwrite the still-durable pending journal.
+    this.stagedRequiredUndoBatchCommit = pending;
+    const resolved = cloneJsonValue(state);
+    for (const entry of pending.entries) {
+      const localIndex = resolved.bases.findIndex((base) => base.baseId === entry.baseId);
+      const local = localIndex >= 0 ? resolved.bases[localIndex] : undefined;
+      if (!local || !this.localStateRetainsPendingUndoBatchEntry(resolved, entry)) {
+        throw new Error("The pending required Undo batch no longer identifies every staged snapshot exactly.");
+      }
+      if (this.committedAuthorityMatchesPendingUndo(store, entry)) {
+        local.view.redoStack = [];
+      } else if (entry.baseExistedBefore) {
+        local.view.undoStack = local.view.undoStack.slice(0, -1);
+      } else {
+        // A staged local profile for a new destination must never attach to a
+        // missing, rejected, or different same-ID semantic authority.
+        resolved.bases.splice(localIndex, 1);
+      }
+    }
+    delete resolved.pendingRequiredUndoBatchCommit;
+    if (!resolved.bases.some((base) => base.baseId === resolved.activeBaseId)) {
+      resolved.activeBaseId = resolved.bases.some((base) => base.baseId === store.activeBaseId)
+        ? store.activeBaseId
+        : resolved.bases[0]?.baseId ?? store.activeBaseId;
+    }
+    this.deviceLocalState = resolved;
+    this.deviceLocalStateLoaded = true;
+    try {
+      this.storeDeviceLocalState(resolved, true, true);
+      this.stagedRequiredUndoBatchCommit = null;
+    } catch (error) {
+      console.error("Knowledge Base Command Center could not finalize its pending required Undo batch", error);
+      new Notice("Portfolio undo history was recovered safely, but its local journal could not be finalized. Obsidian will retry on restart.", 10000);
+    }
+    return true;
+  }
+
+  /** Resolve a staged Undo/Redo transition only against its exact candidate. */
+  private reconcilePendingHistoryTransitionCommit(store: PluginStore): boolean {
+    const state = this.deviceLocalState;
+    const pending = state?.pendingHistoryTransitionCommit;
+    if (!state || !pending || state.vaultId !== store.vaultId) return false;
+    const resolved = cloneJsonValue(state);
+    const local = resolved.bases.find((base) => base.baseId === pending.baseId);
+    if (!local) throw new Error("The pending history transition refers to an unavailable knowledge base.");
+    if (this.committedAuthorityMatchesPendingUndo(store, pending)) {
+      const post = projectPendingHistoryTransition(
+        local.view.undoStack,
+        local.view.redoStack,
+        pending,
+      );
+      local.view.undoStack = post.undoStack;
+      local.view.redoStack = post.redoStack;
+    } else {
+      // The local base already carries the exact pre-transition stacks. A
+      // rejected, compensated, or newer synced head must never receive the
+      // candidate's history transition.
+      projectPendingHistoryTransition(
+        local.view.undoStack,
+        local.view.redoStack,
+        pending,
+      );
+    }
+    delete resolved.pendingHistoryTransitionCommit;
+    this.deviceLocalState = resolved;
+    this.deviceLocalStateLoaded = true;
+    try {
+      this.storeDeviceLocalState(resolved, true);
+    } catch (error) {
+      console.error("Knowledge Base Command Center could not finalize its pending history transition", error);
+      new Notice("Undo or redo history was recovered safely, but its local journal could not be finalized. Obsidian will retry on restart.", 10000);
+    }
+    return true;
+  }
+
+  /**
+   * Persist and verify the exact Undo snapshot required by a destructive
+   * organization transaction before its synced semantic payload may commit.
+   * The ordinary local-state builder is allowed to discard old history to
+   * stay inside the 4 MiB device budget; this boundary additionally proves
+   * that the new transaction snapshot itself survived that reduction.
+   */
+  private persistRequiredUndoState(
+    baseId: string,
+    snapshot: PersonalSnapshot,
+    pending: PendingRequiredUndoCommit | null,
+    previousRedoStack: PersonalSnapshot[],
+  ): boolean {
+    const entry = this.store.bases.find((candidate) => candidate.id === baseId);
+    if (!entry) throw new Error("The knowledge base requiring Undo is unavailable.");
+    const liveRedoStack = entry.data.redoStack;
+    if (pending) entry.data.redoStack = previousRedoStack;
+    let built: ReturnType<typeof createDeviceLocalPluginStateWithReport>;
+    try {
+      built = createDeviceLocalPluginStateWithReport(this.store, pending ?? undefined);
+    } catch (error) {
+      if (pending && /could not be bounded safely/i.test(errorMessage(error))) {
+        throw new Error("This change cannot keep its required Undo snapshot within the 4 MiB device-local limit. Export a same-vault recovery backup, then reduce the operation size.");
+      }
+      throw error;
+    } finally {
+      entry.data.redoStack = liveRedoStack;
+    }
+    const required = canonicalJsonString(snapshot);
+    const retained = pending
+      ? this.localStateRetainsPendingUndo(built.state, pending)
+      : built.state.bases
+        .find((base) => base.baseId === baseId)
+        ?.view.undoStack.some((candidate) => canonicalJsonString(candidate) === required) ?? false;
+    if (!retained) {
+      throw new Error("This change cannot keep its required Undo snapshot within the 4 MiB device-local limit. Export a same-vault recovery backup, then reduce the operation size.");
+    }
+    this.storeDeviceLocalState(built.state, true);
+    if (built.historyTruncated) {
+      const localByBaseId = new Map(built.state.bases.map((base) => [base.baseId, base.view]));
+      for (const candidate of this.store.bases) {
+        const local = localByBaseId.get(candidate.id);
+        candidate.data.undoStack = cloneJsonValue(local?.undoStack ?? []);
+        candidate.data.redoStack = candidate.id === baseId && pending
+          ? []
+          : cloneJsonValue(local?.redoStack ?? []);
+      }
+      this.useActiveData(this.requireActiveBase().data);
+    }
+    return built.historyTruncated;
+  }
+
+  /** Retry the marker-free post-commit write and make any remaining failure explicit. */
+  private finalizeRequiredUndoCommit(pending: PendingRequiredUndoCommit): void {
+    if (!this.committedAuthorityMatchesPendingUndo(this.store, pending)) {
+      console.error("Knowledge Base Command Center did not finalize required Undo because committed authority did not match its pending journal");
+      new Notice("The change was saved, but required undo is still pending causal verification. Obsidian will verify it on restart.", 10000);
+      return;
+    }
+    const current = this.deviceLocalState;
+    if (current
+      && current.vaultId === this.store.vaultId
+      && !current.pendingRequiredUndoCommit
+      && this.localStateRetainsPendingUndo(current, pending)) {
+      return;
+    }
+    try {
+      const built = createDeviceLocalPluginStateWithReport(this.store);
+      if (!this.localStateRetainsPendingUndo(built.state, pending)) {
+        throw new Error("The committed change's required Undo snapshot was not retained.");
+      }
+      this.storeDeviceLocalState(built.state, true);
+    } catch (error) {
+      console.error("Knowledge Base Command Center could not promote its committed required Undo journal", error);
+      new Notice("The change was saved and its undo remains protected by a pending local journal, but finalization failed. Obsidian will retry on restart.", 12000);
+    }
+  }
+
+  /** Stage every mapped base's required Undo before an atomic portfolio write. */
+  private persistRequiredUndoBatchState(
+    beforeStore: PluginStore,
+    pending: PendingRequiredUndoBatchCommit,
+  ): { historyTruncated: boolean; viewStateTruncated: boolean } {
+    const beforeById = new Map(beforeStore.bases.map((entry) => [entry.id, entry]));
+    const batchBaseIds = new Set(pending.entries.map((entry) => entry.baseId));
+    const liveRedoByBaseId = new Map<string, PersonalSnapshot[]>();
+    for (const pendingEntry of pending.entries) {
+      const candidate = this.store.bases.find((entry) => entry.id === pendingEntry.baseId);
+      if (!candidate) throw new Error("A portfolio destination is unavailable while staging its required Undo.");
+      liveRedoByBaseId.set(candidate.id, candidate.data.redoStack);
+      const before = beforeById.get(candidate.id);
+      candidate.data.redoStack = before ? before.data.redoStack : [];
+    }
+    let built: ReturnType<typeof createDeviceLocalPluginStateWithReport>;
+    try {
+      built = createDeviceLocalPluginStateWithReport(this.store, undefined, undefined, pending);
+    } catch (error) {
+      if (/could not be bounded safely/i.test(errorMessage(error))) {
+        throw new Error("This portfolio import cannot keep every mapped base's required Undo within the 4 MiB device-local limit. Keep the recovery files, then import fewer or smaller bases.");
+      }
+      throw error;
+    } finally {
+      for (const [baseId, redoStack] of liveRedoByBaseId) {
+        const candidate = this.store.bases.find((entry) => entry.id === baseId);
+        if (candidate) candidate.data.redoStack = redoStack;
+      }
+    }
+    if (!pending.entries.every((entry) => this.localStateRetainsPendingUndoBatchEntry(built.state, entry))) {
+      throw new Error("This portfolio import cannot keep every mapped base's required Undo within the 4 MiB device-local limit. Keep the recovery files, then import fewer or smaller bases.");
+    }
+    let boundedHistoryByBaseId: Map<string, {
+      undoStack: PersonalSnapshot[];
+      redoStack: PersonalSnapshot[];
+    }> | null = null;
+    if (built.historyTruncated) {
+      const localByBaseId = new Map(built.state.bases.map((base) => [base.baseId, base.view]));
+      boundedHistoryByBaseId = new Map(this.store.bases.map((candidate) => {
+        const local = localByBaseId.get(candidate.id);
+        return [candidate.id, {
+          undoStack: cloneJsonValue(local?.undoStack ?? []),
+          redoStack: batchBaseIds.has(candidate.id)
+            ? []
+            : cloneJsonValue(local?.redoStack ?? []),
+        }];
+      }));
+    }
+    // The durable journal is deliberately the final fallible preparation.
+    // Everything below it is reference assignment only, so a failure cannot
+    // strand a pending marker before the caller installs its write barrier.
+    this.storeDeviceLocalState(built.state, true);
+    if (boundedHistoryByBaseId) {
+      for (const candidate of this.store.bases) {
+        const history = boundedHistoryByBaseId.get(candidate.id);
+        if (!history) continue;
+        candidate.data.undoStack = history.undoStack;
+        candidate.data.redoStack = history.redoStack;
+      }
+    }
+    return {
+      historyTruncated: built.historyTruncated,
+      viewStateTruncated: built.viewStateTruncated,
+    };
+  }
+
+  /** Write marker-free local state only after protecting and proving every mapped Undo. */
+  private finalizeRequiredUndoBatchCommit(
+    pending: PendingRequiredUndoBatchCommit,
+  ): { finalized: boolean; historyTruncated: boolean; viewStateTruncated: boolean } {
+    let markerFreeWasStored = false;
+    try {
+      if (!pending.entries.every((entry) => this.committedAuthorityMatchesPendingUndo(this.store, entry))) {
+        console.error("Knowledge Base Command Center did not finalize portfolio Undo because committed authority did not match its pending batch");
+        new Notice("The portfolio was saved, but its undo history is still pending causal verification. Obsidian will verify it on restart.", 10000);
+        return { finalized: false, historyTruncated: false, viewStateTruncated: false };
+      }
+      const current = this.deviceLocalState;
+      if (current
+        && current.vaultId === this.store.vaultId
+        && !current.pendingRequiredUndoBatchCommit
+        && pending.entries.every((entry) => this.localStateRetainsPendingUndoBatchEntry(current, entry))) {
+        this.applyDeviceLocalState(this.store, current);
+        this.useActiveData(this.requireActiveBase().data);
+        this.invalidateRecordCache();
+        return { finalized: true, historyTruncated: false, viewStateTruncated: false };
+      }
+      const built = createDeviceLocalPluginStateWithReport(this.store, undefined, undefined, pending);
+      if (!pending.entries.every((entry) => this.localStateRetainsPendingUndoBatchEntry(built.state, entry))) {
+        throw new Error("One or more committed portfolio Undo snapshots were not retained.");
+      }
+      const markerFree = cloneJsonValue(built.state);
+      delete markerFree.pendingRequiredUndoBatchCommit;
+      if (!pending.entries.every((entry) => this.localStateRetainsPendingUndoBatchEntry(markerFree, entry))) {
+        throw new Error("One or more committed portfolio Undo snapshots changed during finalization.");
+      }
+      this.storeDeviceLocalState(markerFree, true, true);
+      markerFreeWasStored = true;
+      // Conform the live projection to the exact bounded state before the
+      // caller lowers the write barrier. Otherwise an immediate ordinary view
+      // save could rebuild from pressure that the protected finalizer removed
+      // and discard a non-active mapped base's required Undo.
+      this.applyDeviceLocalState(this.store, markerFree);
+      this.useActiveData(this.requireActiveBase().data);
+      this.invalidateRecordCache();
+      return {
+        finalized: true,
+        historyTruncated: built.historyTruncated,
+        viewStateTruncated: built.viewStateTruncated,
+      };
+    } catch (error) {
+      console.error("Knowledge Base Command Center could not promote its committed required Undo batch", error);
+      new Notice(
+        markerFreeWasStored
+          ? "The portfolio was saved and its protected local history was finalized, but the live view could not adopt its bounded projection. Organization remains read-only until Obsidian is restarted."
+          : "The portfolio was saved and its undo remains protected by a pending local journal, but finalization failed. Obsidian will retry on restart.",
+        12000,
+      );
+      return { finalized: false, historyTruncated: false, viewStateTruncated: false };
+    }
+  }
+
+  private noticeRequiredUndoBatchReduction(
+    historyTruncated: boolean,
+    viewStateTruncated: boolean,
+  ): void {
+    if (!historyTruncated && !viewStateTruncated) return;
+    new Notice(
+      viewStateTruncated
+        ? "Older device-local history or inactive route and layout state was reduced so every imported base keeps its required undo within the four-megabyte local limit."
+        : "Older undo or redo entries were removed on this device so every imported base keeps its required undo within the four-megabyte local limit.",
+      10000,
+    );
+  }
+
+  private localStateMatchesHistoryTransitionPost(
+    state: DeviceLocalPluginState,
+    pending: PendingHistoryTransitionCommit,
+  ): boolean {
+    const local = state.bases.find((base) => base.baseId === pending.baseId);
+    return Boolean(local
+      && deviceHistoryStackFingerprint(local.view.undoStack) === pending.postUndoStackFingerprint
+      && deviceHistoryStackFingerprint(local.view.redoStack) === pending.postRedoStackFingerprint);
+  }
+
+  /** Persist the exact pre-transition stacks plus their bounded causal delta. */
+  private persistHistoryTransitionState(
+    baseId: string,
+    pending: PendingHistoryTransitionCommit,
+    priorUndoStack: PersonalSnapshot[],
+    priorRedoStack: PersonalSnapshot[],
+  ): boolean {
+    const entry = this.store.bases.find((candidate) => candidate.id === baseId);
+    if (!entry) throw new Error("The knowledge base using history is unavailable.");
+    const postUndoStack = entry.data.undoStack;
+    const postRedoStack = entry.data.redoStack;
+    let built: ReturnType<typeof createDeviceLocalPluginStateWithReport>;
+    entry.data.undoStack = priorUndoStack;
+    entry.data.redoStack = priorRedoStack;
+    try {
+      built = createDeviceLocalPluginStateWithReport(this.store, undefined, pending);
+    } catch (error) {
+      if (/could not be bounded safely/i.test(errorMessage(error))) {
+        throw new Error(`This ${pending.direction} cannot keep its exact crash-safe history transition within the 4 MiB device-local limit. Export a same-vault recovery backup, then reduce local history size.`);
+      }
+      throw error;
+    } finally {
+      entry.data.undoStack = postUndoStack;
+      entry.data.redoStack = postRedoStack;
+    }
+    const staged = built.state.bases.find((base) => base.baseId === baseId);
+    if (!staged
+      || deviceHistoryStackFingerprint(staged.view.undoStack) !== pending.priorUndoStackFingerprint
+      || deviceHistoryStackFingerprint(staged.view.redoStack) !== pending.priorRedoStackFingerprint) {
+      throw new Error(`This ${pending.direction} cannot keep its exact crash-safe history transition within the 4 MiB device-local limit. Export a same-vault recovery backup, then reduce local history size.`);
+    }
+    projectPendingHistoryTransition(staged.view.undoStack, staged.view.redoStack, pending);
+    this.storeDeviceLocalState(built.state, true);
+    if (built.historyTruncated) {
+      const localByBaseId = new Map(built.state.bases.map((base) => [base.baseId, base.view]));
+      for (const candidate of this.store.bases) {
+        if (candidate.id === baseId) continue;
+        const local = localByBaseId.get(candidate.id);
+        candidate.data.undoStack = cloneJsonValue(local?.undoStack ?? []);
+        candidate.data.redoStack = cloneJsonValue(local?.redoStack ?? []);
+      }
+      this.useActiveData(this.requireActiveBase().data);
+    }
+    return built.historyTruncated;
+  }
+
+  /** Promote the marker-free post-transition stacks after semantic commit. */
+  private finalizeHistoryTransitionCommit(pending: PendingHistoryTransitionCommit): void {
+    if (!this.committedAuthorityMatchesPendingUndo(this.store, pending)) {
+      console.error("Knowledge Base Command Center did not finalize history because committed authority did not match its pending transition");
+      new Notice(`The ${pending.direction} was saved, but its history transition is still pending causal verification. Obsidian will verify it on restart.`, 10000);
+      return;
+    }
+    const current = this.deviceLocalState;
+    if (current
+      && current.vaultId === this.store.vaultId
+      && !current.pendingHistoryTransitionCommit
+      && this.localStateMatchesHistoryTransitionPost(current, pending)) return;
+    try {
+      const built = createDeviceLocalPluginStateWithReport(this.store);
+      if (!this.localStateMatchesHistoryTransitionPost(built.state, pending)) {
+        throw new Error("The committed history transition was not retained exactly.");
+      }
+      this.storeDeviceLocalState(built.state, true);
+    } catch (error) {
+      console.error("Knowledge Base Command Center could not promote its committed history transition", error);
+      new Notice(`The ${pending.direction} was saved and its history remains protected by a pending local journal, but finalization failed. Obsidian will retry on restart.`, 12000);
     }
   }
 
@@ -1361,6 +2002,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           ? "Other base view profiles stored on this device"
           : "No saved view profile on this device";
     const readOnly = this.isDataReadOnly();
+    const portfolioUndoFinalizationPending = Boolean(this.stagedRequiredUndoBatchCommit);
     return {
       activeBaseName: privacySafeBaseName(active.data.settings.workspaceName),
       workspaceProfile: active.data.settings.workspaceMode === "ent-clinical" ? "ENT clinical preset" : "Generic knowledge base",
@@ -1379,11 +2021,15 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         artifactSummary.newestNamedRecoveryAt ?? 0,
       ) || null,
       readOnly,
-      readOnlyReason: privacySafeReadOnlyReason(this.dataCompatibilityWarning, {
-        persistenceUncertain: this.persistenceUncertain,
-        semanticConflictRescueFailed: this.semanticConflictRescueFailed,
-      }),
-      stickyUntilRestart: this.persistenceUncertain || this.semanticConflictRescueFailed,
+      readOnlyReason: portfolioUndoFinalizationPending
+        ? "A committed portfolio import is waiting for protected local undo finalization. Organization remains protected until restart."
+        : privacySafeReadOnlyReason(this.dataCompatibilityWarning, {
+          persistenceUncertain: this.persistenceUncertain,
+          semanticConflictRescueFailed: this.semanticConflictRescueFailed,
+        }),
+      stickyUntilRestart: this.persistenceUncertain
+        || this.semanticConflictRescueFailed
+        || portfolioUndoFinalizationPending,
       activeBaseConcurrentEditAt: localConflict?.at ?? null,
       activeBaseConcurrentEditCount: localConflict?.count ?? 0,
       deviceProfile: describePlatform(Platform),
@@ -1423,6 +2069,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.useActiveData(this.requireActiveBase().data);
     this.deviceLocalState = null;
     this.deviceLocalStateLoaded = true;
+    // Explicit privacy reset is the one operation allowed to discard a
+    // pending portfolio journal without reconciliation.
+    this.stagedRequiredUndoBatchCommit = null;
     this.syncRecoveryLocalState = createDefaultSyncRecoveryLocalState();
     this.syncRecoveryLocalStateLoaded = true;
     this.lastFollowUpUndo = null;
@@ -1733,6 +2382,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         && pluginStoreNeedsNormalization(loaded, this.store);
       if (capturedRead === undefined) {
         this.loadDeviceLocalState();
+        this.reconcilePendingRequiredUndoCommit(this.store);
+        this.reconcilePendingRequiredUndoBatchCommit(this.store);
+        this.reconcilePendingHistoryTransitionCommit(this.store);
         const needsLegacyDeviceStateMigration = !this.deviceLocalPersistenceSuppressed
           && recognizedStore
           && sourceVersion < STORE_VERSION
@@ -1889,6 +2541,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           corruptPrimaryGuard
             ? () => this.assertCorruptPrimaryUnchanged(corruptPrimaryGuard)
             : undefined,
+          loaded,
         );
       }
     } catch (error) {
@@ -1978,6 +2631,28 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const baseId = this.store.activeBaseId;
     const entry = this.store.bases.find((candidate) => candidate.id === baseId);
     if (!entry) throw new Error("The knowledge base being saved is unavailable.");
+    if (this.stagedRequiredUndoBatchCommit) {
+      // Direct/settings writers receive a live PluginData object and can
+      // mutate it before requesting persistence. Restore the last committed
+      // semantic authority while retaining this device's protected view and
+      // history, then fail closed without moving any candidate head.
+      const rollbackEntry = (this.committedStoreSnapshot ?? this.rollbackStoreSnapshot)
+        ?.bases.find((candidate) => candidate.id === baseId);
+      if (rollbackEntry) {
+        const localView = capturePluginViewState(entry.data);
+        const restoredData = cloneJsonValue(rollbackEntry.data);
+        applyPluginViewState(restoredData, localView, true);
+        entry.data = restoredData;
+        entry.updatedAt = rollbackEntry.updatedAt;
+        entry.semanticRevision = rollbackEntry.semanticRevision;
+        entry.semanticHead = rollbackEntry.semanticHead;
+        entry.semanticHash = rollbackEntry.semanticHash;
+        entry.semanticLineage = [...rollbackEntry.semanticLineage];
+        if (this.store.activeBaseId === baseId) this.useActiveData(restoredData);
+        this.invalidateRecordCache();
+      }
+      throw new Error("Portfolio undo finalization is pending. Restart Obsidian so the protected local journal can be reconciled before changing knowledge-base data.");
+    }
     if (this.externalReloadBusy) {
       // An opaque PluginData snapshot cannot be safely merged with a synced
       // update to the same base: even a selection-only save could resurrect
@@ -2063,14 +2738,22 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         liveEntry.semanticHash = rollbackEntryBeforeAttempt.semanticHash;
         liveEntry.semanticLineage = [...rollbackEntryBeforeAttempt.semanticLineage];
         if (this.store.activeBaseId === baseId) this.useActiveData(restoredData);
-        this.advanceRejectedSemanticAttempts();
+        const compensationNeeded = this.advanceRejectedSemanticAttempts();
         if (!this.externalReloadBusy) {
-          try {
-            await this.saveStoreSnapshot();
-          } catch (rollbackError) {
-            console.error("Knowledge Base Command Center could not persist a rejected direct-save rollback", rollbackError);
-            this.markPersistenceUncertain("A rejected knowledge-base edit may have reached Sync, and its compensating rollback could not be saved. Knowledge bases remain read-only until Obsidian is restarted after the plugin data.json is copied or a same-vault recovery is exported.");
-            throw new Error(`${errorMessage(error)} The compensating rollback also failed; organization is now read-only.`);
+          if (compensationNeeded) {
+            try {
+              await this.saveStoreSnapshot();
+            } catch (rollbackError) {
+              console.error("Knowledge Base Command Center could not persist a rejected direct-save rollback", rollbackError);
+              this.markPersistenceUncertain("A rejected knowledge-base edit may have reached Sync, and its compensating rollback could not be saved. Knowledge bases remain read-only until Obsidian is restarted after the plugin data.json is copied or a same-vault recovery is exported.");
+              throw new Error(`${errorMessage(error)} The compensating rollback also failed; organization is now read-only.`);
+            }
+          } else {
+            // A prerequisite backup/fence can fail before saveData is called.
+            // No rejected causal head exists in that case, so the restored
+            // committed state needs only its device-local view/history—not a
+            // second primary attempt that could falsely poison read-only mode.
+            this.persistDeviceLocalStateSafely();
           }
         }
       }
@@ -2179,12 +2862,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     allowDuringExternalReload = false,
     expectedExternalGeneration?: number,
     primaryStoreGuard?: () => Promise<void>,
+    backupAuthority?: unknown,
   ): Promise<void> {
     await this.saveExplicitStoreSnapshot(
       this.store,
       allowDuringExternalReload,
       expectedExternalGeneration,
       primaryStoreGuard,
+      backupAuthority,
     );
   }
 
@@ -2196,17 +2881,20 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   /**
    * Obsidian's adapter rewrites data.json in place (no temp-file rename), so a
    * crash mid-write would otherwise truncate the only durable copy of every
-   * knowledge base. Writing the same payload to a twin first guarantees that
-   * at least one of the two files parses at any instant.
+   * knowledge base. Before a primary write this receives only the last
+   * committed authority, never the candidate about to be attempted. A
+   * rejected or fenced candidate therefore cannot be revived on restart.
    */
-  private async writeStoreBackup(snapshot: unknown): Promise<void> {
+  private async writeStoreBackup(snapshot: unknown, prerequisite = true): Promise<void> {
     const path = this.storeBackupPath();
     if (!path) return;
     try {
       await this.app.vault.adapter.write(path, JSON.stringify(snapshot));
     } catch (error) {
       console.error("Knowledge Base Command Center could not refresh the data.json backup", error);
-      throw new Error(`The data.json backup could not be refreshed (${errorMessage(error)}). The primary store was not written.`);
+      throw new Error(prerequisite
+        ? `The data.json backup could not be refreshed (${errorMessage(error)}). The primary store was not written.`
+        : `The primary store was saved, but its data.json backup could not be refreshed (${errorMessage(error)}).`);
     }
   }
 
@@ -2275,7 +2963,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     allowDuringExternalReload = false,
     expectedExternalGeneration?: number,
     primaryStoreGuard?: () => Promise<void>,
+    explicitBackupAuthority?: unknown,
   ): Promise<void> {
+    let primaryStoreWriteEntered = false;
+    try {
     this.adoptSharedPersistenceUncertainty();
     if (this.persistenceUncertain) throw new Error(this.dataCompatibilityWarning);
     if (this.dataCompatibilityWarning) return;
@@ -2290,7 +2981,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (guardExternalGeneration && externalGeneration !== this.externalChangeGeneration) {
         throw new ExternalSettingsSupersededError("Knowledge-base data changed through Sync before this edit could be saved. The synced copy is being reloaded; try the local edit again afterward.");
       }
-      await this.writeStoreBackup(snapshot);
+      // A twin written with the candidate before saveData settles can revive
+      // an edit that the adapter rejected after a torn or partial primary
+      // write. Preserve only the last authority known to have committed.
+      const backupAuthority = explicitBackupAuthority
+        ?? this.committedStoreSnapshot
+        ?? this.rollbackStoreSnapshot;
+      if (backupAuthority) await this.writeStoreBackup(backupAuthority);
       if (guardExternalGeneration && externalGeneration !== this.externalChangeGeneration) {
         throw new ExternalSettingsSupersededError("Knowledge-base data changed through Sync while the backup was being refreshed. The primary store was not written; try the local edit again after the synced copy reloads.");
       }
@@ -2300,6 +2997,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (guardExternalGeneration && externalGeneration !== this.externalChangeGeneration) {
         throw new ExternalSettingsSupersededError("Knowledge-base data changed through Sync before the primary store write. The primary store was not written; try the local edit again after the synced copy reloads.");
       }
+      primaryStoreWriteEntered = true;
       try {
         await this.saveData(snapshot);
       } catch (error) {
@@ -2318,7 +3016,20 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.rollbackStoreSnapshot = cloneJsonValue(snapshot);
       this.clearSupersededRejectedAttempts(snapshot);
       if (!allowDuringExternalReload) this.recordLocalSuccessfulSave();
-      this.persistDeviceLocalStateSafely();
+      // A portfolio batch preflight already wrote the only crash-safe local
+      // authority. Its protected finalizer—not the generic builder—must be the
+      // first code allowed to remove that marker after primary commit.
+      if (!this.stagedRequiredUndoBatchCommit) this.persistDeviceLocalStateSafely();
+      // Once the primary has passed every save/fence check, advance the twin
+      // to that newly committed authority. Failure here cannot reject the
+      // already-committed primary; the next save will first restore this twin
+      // from committedStoreSnapshot before touching data.json.
+      try {
+        await this.writeStoreBackup(snapshot, false);
+      } catch (error) {
+        console.error("Knowledge Base Command Center saved data.json but could not advance its committed backup", error);
+        new Notice("Knowledge-base data was saved, but its automatic backup could not be refreshed. Fix storage access before the next change.", 10000);
+      }
     };
     const operation = this.saveQueue.then(
       () => this.enqueueAppAdapterWrite(save),
@@ -2326,6 +3037,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     );
     this.saveQueue = operation.then(() => undefined, () => undefined);
     await operation;
+    } catch (error) {
+      if (!primaryStoreWriteEntered) throw markPrimaryStoreWriteNotAttempted(error);
+      throw error;
+    }
   }
 
   private waitForOperationsIdle(): Promise<void> {
@@ -2472,6 +3187,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     capture: ExternalPluginDataCapture,
     expectedExternalGeneration: number,
   ): Promise<void> {
+    let primaryStoreWriteEntered = false;
+    try {
     if ("error" in capture.read) throw capture.read.error;
     const snapshot = cloneJsonValue(capture.read.value);
     const save = async (): Promise<void> => {
@@ -2482,6 +3199,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (expectedExternalGeneration !== this.externalChangeGeneration) {
         throw new ExternalSettingsSupersededError("A newer synced settings file arrived while the recovery backup was being refreshed. The primary store was not written.");
       }
+      primaryStoreWriteEntered = true;
       try {
         await this.saveData(snapshot);
       } finally {
@@ -2497,6 +3215,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     );
     this.saveQueue = operation.then(() => undefined, () => undefined);
     await operation;
+    } catch (error) {
+      if (!primaryStoreWriteEntered) throw markPrimaryStoreWriteNotAttempted(error);
+      throw error;
+    }
   }
 
   /**
@@ -2859,6 +3581,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // neither side requests conflict writeback. This applies to every arm
       // above, including the ones that omit the term from their own expression.
       const needsWriteback = adopted.needsWriteback || loaded.sourceVersion !== STORE_VERSION;
+      this.store = adopted.workingStore;
+      if (this.reconcilePendingRequiredUndoCommit(this.store)
+        || this.reconcilePendingRequiredUndoBatchCommit(this.store)
+        || this.reconcilePendingHistoryTransitionCommit(this.store)) {
+        this.applyDeviceLocalState(this.store, this.deviceLocalState);
+      }
       if (loaded.legacyDeviceState?.vaultId === adopted.workingStore.vaultId) {
         // Only now is the external identity accepted. Apply the migrated
         // route/history to the final semantic winner and durably bind it before
@@ -2870,7 +3598,6 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           loaded.legacyDeviceStateViewTruncated === true,
         );
       }
-      this.store = adopted.workingStore;
       this.useActiveData(this.requireActiveBase().data);
       this.dataCompatibilityWarning = "";
       this.retainedExternalSettingsPayload = null;
@@ -3155,6 +3882,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   getDataEpoch(): number { return this.dataEpoch; }
   getExternalChangeGeneration(): number { return this.externalChangeGeneration; }
   getSearchGeneration(): number { return this.searchGeneration; }
+  /**
+   * O(1) invalidation token for eligible Markdown-note projections. The shared
+   * search generation already advances for Markdown create/delete/rename,
+   * metadata changes, base changes, and settings-driven record invalidation.
+   */
+  getVaultNoteGeneration(): number { return this.searchGeneration; }
   getVaultId(): string { return this.store.vaultId; }
 
   /**
@@ -3163,10 +3896,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
    * portfolio export never introduces a second package schema or reads note
    * bodies/attachments.
    */
-  createPortfolioExport(
+  async createPortfolioExport(
     requests: ReadonlyArray<{ baseId: string; selection: PortableExportSelection; completeLibrarySet?: boolean }>,
     exportedAt = new Date().toISOString(),
-  ): PortfolioExportV1 {
+  ): Promise<PortfolioExportV1> {
     if (this.externalReloadBusy) throw new Error("Finish reloading synced knowledge-base data before exporting a portfolio.");
     const selected = requests.map((request) => {
       const entry = this.store.bases.find((candidate) => candidate.id === request.baseId && candidate.archivedAt === null);
@@ -3182,44 +3915,105 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     // IDs on every run, so re-importing two portfolios of the same state would
     // duplicate every linked subject. Allocate the IDs on the live registry
     // first and persist them, mirroring the single-base export flow. Read-only
-    // and busy states keep the clone-local allocation so exports still work,
-    // merely without persisted IDs.
-    if (!this.isDataReadOnly()
-      && !this.baseOperationBusy && !this.dataTransactionBusy && this.directSaveBusyCount === 0) {
-      const changedBaseIds: string[] = [];
-      for (const request of selected) {
-        if (!selectionUsesSubjects(request.selection)) continue;
-        if (synchronizePortableRegistry(request.entry.data, request.records)) changedBaseIds.push(request.entry.id);
+    // stores keep clone-local allocation so recovery export remains possible;
+    // writable busy stores reject the request instead of racing a second
+    // allocation save.
+    if (!this.isDataReadOnly() && selected.some((request) => selectionUsesSubjects(request.selection))) {
+      if (this.baseOperationBusy || this.dataTransactionBusy || this.directSaveBusyCount > 0) {
+        throw new Error("Finish the current knowledge-base operation before exporting a portfolio with stable subject IDs.");
       }
-      if (changedBaseIds.length > 0) this.persistPortfolioRegistryAllocation(changedBaseIds);
+      const backup = cloneJsonValue(this.store);
+      let persistenceDelegated = false;
+      try {
+        const changedBaseIds: string[] = [];
+        for (const request of selected) {
+          if (!selectionUsesSubjects(request.selection)) continue;
+          if (synchronizePortableRegistry(request.entry.data, request.records)) changedBaseIds.push(request.entry.id);
+        }
+        if (changedBaseIds.length > 0) {
+          persistenceDelegated = true;
+          await this.persistPortfolioRegistryAllocation(changedBaseIds, backup);
+        }
+      } catch (error) {
+        // Registry synchronization, semantic-head advancement, and attempted
+        // snapshot allocation all precede the adapter transaction. Any one of
+        // them can still throw (for example under memory pressure), so the
+        // caller owns the earliest rollback boundary—not only save failures.
+        if (!persistenceDelegated) {
+          this.store = backup;
+          this.useActiveData(this.requireActiveBase().data);
+          this.invalidateRecordCache();
+        }
+        throw error;
+      }
     }
     return createPortfolioExport(selected, exportedAt, this.store.vaultId);
   }
 
   /**
    * Persist stable subject IDs that a portfolio export just allocated on live
-   * knowledge bases. The export itself is synchronous, so the save is queued
-   * as a direct-save transaction. On rejection the allocation stays in memory
-   * and the save machinery records the rejected head, so the next successful
-   * save publishes the allocation as a causal child instead of a stale sibling.
+   * knowledge bases. Export delivery awaits this complete transaction. A
+   * rejected or fenced save restores the pre-allocation registry and publishes
+   * a causal compensation when the attempted payload may have reached Sync.
    */
-  private persistPortfolioRegistryAllocation(changedBaseIds: readonly string[]): void {
-    for (const baseId of changedBaseIds) {
-      const entry = this.store.bases.find((candidate) => candidate.id === baseId);
-      if (entry) this.bumpEntrySemanticRevision(entry);
+  private async persistPortfolioRegistryAllocation(
+    changedBaseIds: readonly string[],
+    backup: PluginStore,
+  ): Promise<void> {
+    let attemptedStore: PluginStore;
+    try {
+      for (const baseId of changedBaseIds) {
+        const entry = this.store.bases.find((candidate) => candidate.id === baseId);
+        if (entry) this.bumpEntrySemanticRevision(entry);
+      }
+      this.invalidateRecordCache();
+      attemptedStore = cloneJsonValue(this.store);
+    } catch (error) {
+      this.store = backup;
+      this.useActiveData(this.requireActiveBase().data);
+      this.invalidateRecordCache();
+      throw error;
     }
-    this.invalidateRecordCache();
     this.directSaveBusyCount += 1;
-    const operation = this.enqueueAppLogicalOperation(() => this.saveStoreSnapshot());
+    const operation = this.enqueueAppLogicalOperation(async () => {
+      try {
+        await this.saveStoreSnapshot();
+      } catch (error) {
+        const primaryWriteWasNotAttempted = primaryStoreWriteWasNotAttempted(error);
+        if (!primaryWriteWasNotAttempted) {
+          this.recordRejectedSemanticAttempts(this.neutralSyncedStore(attemptedStore));
+        }
+        this.store = backup;
+        this.useActiveData(this.requireActiveBase().data);
+        this.invalidateRecordCache();
+        if (primaryWriteWasNotAttempted) {
+          this.persistDeviceLocalStateSafely();
+        } else if (!this.externalReloadBusy) {
+          const compensationNeeded = this.advanceRejectedSemanticAttempts();
+          if (compensationNeeded) {
+            try {
+              await this.saveStoreSnapshot();
+            } catch (rollbackError) {
+              console.error("Knowledge Base Command Center could not persist a rejected portfolio-ID rollback", rollbackError);
+              this.markPersistenceUncertain("A rejected portfolio stable-ID allocation may have reached Sync, and its compensating rollback could not be saved. Knowledge bases remain read-only until Obsidian is restarted after data.json and a same-vault recovery are preserved.");
+              throw new Error("Portfolio export was cancelled and its registry rollback could not be saved. Organization is now read-only; preserve data.json and export a same-vault recovery before restarting Obsidian.");
+            }
+          } else {
+            this.persistDeviceLocalStateSafely();
+          }
+        } else {
+          this.advanceRejectedSemanticAttempts();
+        }
+        throw error;
+      }
+    });
     this.directSaveTransactionQueue = operation.then(() => undefined, () => undefined);
-    void operation
-      .catch((error: unknown) => {
-        console.error("Knowledge Base Command Center could not persist stable subject IDs allocated by a portfolio export", error);
-      })
-      .finally(() => {
-        this.directSaveBusyCount -= 1;
-        this.announceOperationsIdle();
-      });
+    try {
+      await operation;
+    } finally {
+      this.directSaveBusyCount -= 1;
+      this.announceOperationsIdle();
+    }
   }
 
   /** Prepare the sole exact mutation plan used by both portfolio preview and apply. */
@@ -3283,7 +4077,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
     await this.commitBaseStoreChange(() => {
       applyPortfolioImportPlan(this.store, plan, typedConfirmation, this.externalChangeGeneration);
-    });
+    }, true, plan.operations.map((operation) => operation.destinationBaseId));
     return recoveryPaths;
   }
 
@@ -3449,7 +4243,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     throw new Error("A new stable knowledge-base ID could not be allocated safely. Try again.");
   }
 
-  private async commitBaseStoreChange(change: () => void, persistSyncedStore = true): Promise<void> {
+  private async commitBaseStoreChange(
+    change: () => void,
+    persistSyncedStore = true,
+    requiredUndoBatchBaseIds: readonly string[] = [],
+  ): Promise<void> {
     this.assertDataWritable();
     if (this.baseOperationBusy) throw new Error("Another knowledge-base change is still being saved.");
     if (this.dataTransactionBusy) throw new Error("Finish the current organization change before switching knowledge bases.");
@@ -3478,22 +4276,56 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         await this.saveQueue;
         const backup = cloneJsonValue(this.store);
         let attemptedStore: PluginStore | null = null;
+        let pendingRequiredUndoBatchCommit: PendingRequiredUndoBatchCommit | null = null;
+        let olderLocalHistoryTruncated = false;
+        let olderLocalViewStateTruncated = false;
         try {
           change();
           this.useActiveData(this.requireActiveBase().data);
           this.invalidateRecordCache();
           if (persistSyncedStore) {
-            attemptedStore = cloneJsonValue(this.store);
+            if (requiredUndoBatchBaseIds.length > 0) {
+              pendingRequiredUndoBatchCommit = this.prepareRequiredUndoBatchCommit(
+                backup,
+                requiredUndoBatchBaseIds,
+              );
+              const preparedAttemptedStore = cloneJsonValue(this.store);
+              // This required local write is the final fallible preparation
+              // before attemptedStore becomes authoritative for the primary.
+              const localReduction = this.persistRequiredUndoBatchState(
+                backup,
+                pendingRequiredUndoBatchCommit,
+              );
+              olderLocalHistoryTruncated ||= localReduction.historyTruncated;
+              olderLocalViewStateTruncated ||= localReduction.viewStateTruncated;
+              this.stagedRequiredUndoBatchCommit = pendingRequiredUndoBatchCommit;
+              attemptedStore = preparedAttemptedStore;
+            } else {
+              attemptedStore = cloneJsonValue(this.store);
+            }
             await this.saveStoreSnapshot();
+            if (pendingRequiredUndoBatchCommit) {
+              const finalization = this.finalizeRequiredUndoBatchCommit(pendingRequiredUndoBatchCommit);
+              olderLocalHistoryTruncated ||= finalization.historyTruncated;
+              olderLocalViewStateTruncated ||= finalization.viewStateTruncated;
+              if (finalization.finalized) {
+                this.stagedRequiredUndoBatchCommit = null;
+              }
+            }
           } else {
             this.persistDeviceLocalState();
           }
         } catch (error) {
-          if (attemptedStore) this.recordRejectedSemanticAttempts(this.neutralSyncedStore(attemptedStore));
+          let batchResolutionSafe = false;
+          const primaryWriteMayHaveBeenAttempted = attemptedStore !== null
+            && !primaryStoreWriteWasNotAttempted(error);
+          if (primaryWriteMayHaveBeenAttempted && attemptedStore) {
+            this.recordRejectedSemanticAttempts(this.neutralSyncedStore(attemptedStore));
+          }
           this.store = backup;
           this.useActiveData(this.requireActiveBase().data);
           this.invalidateRecordCache();
-          const envelopeRollback = attemptedStore
+          const envelopeRollback = primaryWriteMayHaveBeenAttempted && attemptedStore
             ? this.prepareRejectedEnvelopeRollback(backup, attemptedStore)
             : { changed: false, unsafeReason: "" };
           if (envelopeRollback.unsafeReason) {
@@ -3503,18 +4335,29 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
             if (compensationNeeded && !this.externalReloadBusy) {
               try {
                 await this.saveStoreSnapshot();
+                batchResolutionSafe = true;
               } catch (rollbackError) {
                 console.error("Knowledge Base Command Center could not persist the failed base-change rollback", rollbackError);
                 this.markPersistenceUncertain("A rejected knowledge-base change may have reached Sync, and its compensating rollback could not be saved. Knowledge bases remain read-only until Obsidian is restarted after the plugin data.json and a same-vault recovery are preserved.");
                 throw new Error("The knowledge-base change failed and its rollback could not be saved. Organization is now read-only; preserve data.json and export a same-vault recovery before restarting Obsidian.");
               }
+            } else if (!primaryWriteMayHaveBeenAttempted) {
+              this.persistDeviceLocalStateSafely();
+              batchResolutionSafe = true;
             }
+          }
+          if (pendingRequiredUndoBatchCommit && batchResolutionSafe) {
+            this.reconcilePendingRequiredUndoBatchCommit(this.store);
           }
           try {
             await this.refreshViews(false, true);
           } catch (refreshError) {
             console.error("Knowledge Base Command Center restored a failed base change but could not refresh its view", refreshError);
           }
+          this.noticeRequiredUndoBatchReduction(
+            olderLocalHistoryTruncated,
+            olderLocalViewStateTruncated,
+          );
           throw error;
         }
         // The store change is committed once saveData succeeds. A rendering
@@ -3525,6 +4368,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           console.error("Knowledge Base Command Center saved the base change but could not refresh its view", error);
           new Notice("The knowledge-base change was saved, but the view could not refresh. Reopen the command center to update it.", 8000);
         }
+        this.noticeRequiredUndoBatchReduction(
+          olderLocalHistoryTruncated,
+          olderLocalViewStateTruncated,
+        );
       });
     } finally {
       this.baseOperationBusy = false;
@@ -3669,11 +4516,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   assertDataWritable(): void {
     this.adoptSharedPersistenceUncertainty();
     if (this.dataCompatibilityWarning) throw new Error(this.dataCompatibilityWarning);
+    if (this.stagedRequiredUndoBatchCommit) {
+      throw new Error("Portfolio undo finalization is pending. Restart Obsidian so the protected local journal can be reconciled before changing knowledge-base data.");
+    }
   }
 
   isDataReadOnly(): boolean {
     this.adoptSharedPersistenceUncertainty();
-    return Boolean(this.dataCompatibilityWarning);
+    return Boolean(this.dataCompatibilityWarning || this.stagedRequiredUndoBatchCommit);
   }
   isClinicalMode(): boolean { return this.data.settings.workspaceMode === "ent-clinical"; }
   canVisuallyMoveAcrossGroups(): boolean { return !this.isClinicalMode() || this.data.settings.allowClinicalVisualGroupMoves; }
@@ -6412,6 +7262,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   async reconcileRecords(records: VaultRecord[], withinOperation = false): Promise<boolean> {
+    // A view refresh after a committed portfolio may run before a rejected
+    // marker-free local finalizer settles. Defer even deterministic semantic
+    // normalization so the staged causal heads remain exact until restart.
+    if (this.stagedRequiredUndoBatchCommit) return false;
     const valid = new Set(records.map((record) => record.path));
     const markdownPaths = new Set(this.app.vault.getMarkdownFiles().map((file) => file.path));
     let semanticChanged = false;
@@ -6502,6 +7356,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       const previousSelectedPath = this.data.selectedPath;
       const previousActiveTab = this.data.activeTab;
       const previousCollapsed = cloneJsonValue(this.data.collapsed);
+      let storeSaveAttempted = false;
+      let olderLocalHistoryTruncated = false;
+      let pendingRequiredUndoCommit: PendingRequiredUndoCommit | null = null;
       const snapshot = snapshotPersonal(
         this.data,
         label,
@@ -6520,12 +7377,31 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       try {
         action();
         if (options.normalizeAfterRestore === true) this.normalizeActiveDataAfterRestore();
+        // Required-Undo journals fingerprint the exact semantic payload that
+        // savePluginDataOperation will commit. Apply the same persisted text
+        // bounds before reserving that causal head; the save path repeats this
+        // idempotently as its final sink guard.
+        enforceStoredTextBounds(this.data);
         // All organization mutations can affect membership, display aliases,
         // portable subjects, or record grouping. Central invalidation keeps
         // warm record-cache hits O(1) without relying on a proportional JSON key.
         this.invalidateRecordCache();
+        if (options.requireUndo) {
+          const entry = this.requireActiveBase();
+          pendingRequiredUndoCommit = this.prepareRequiredUndoCommit(entry, snapshot);
+          this.preparedRequiredUndoCommit = pendingRequiredUndoCommit;
+          olderLocalHistoryTruncated = this.persistRequiredUndoState(
+            entry.id,
+            snapshot,
+            pendingRequiredUndoCommit,
+            previousRedoStack,
+          );
+        }
+        storeSaveAttempted = true;
         await this.savePluginDataOperation();
+        if (pendingRequiredUndoCommit) this.finalizeRequiredUndoCommit(pendingRequiredUndoCommit);
       } catch (error) {
+        this.preparedRequiredUndoCommit = null;
         if (transactionBackup) {
           this.replaceActiveData(transactionBackup, transactionMetadata);
         } else {
@@ -6547,7 +7423,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         // captured before the adapter save could replace it. Avoid writing a
         // second stale rollback snapshot; the reload below will merge the
         // restored in-memory store and persist the authoritative result.
-        if (!this.externalReloadBusy) {
+        if (!storeSaveAttempted) {
+          // A required-Undo localStorage preflight failed before saveData was
+          // entered. The restored semantic store is already authoritative, so
+          // publishing a causal compensation would invent a write attempt and
+          // could incorrectly mark a harmless storage failure as uncertainty.
+          this.persistDeviceLocalStateSafely();
+        } else if (!this.externalReloadBusy) {
           try {
             // A rejected adapter write may still have replaced data.json or
             // reached Sync. Publish the rollback as a newer semantic revision
@@ -6578,8 +7460,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         console.error("Knowledge Base Command Center saved the organization change but could not refresh its view", error);
         new Notice("The change was saved, but the view could not refresh. Reopen the command center to update it.", 8000);
       }
+      if (olderLocalHistoryTruncated) {
+        new Notice("Older undo or redo entries were removed on this device so this change's required undo remains restart-safe within the four-megabyte local limit.", 10000);
+      }
       });
     } finally {
+      this.preparedRequiredUndoCommit = null;
       this.dataTransactionBusy = false;
       this.announceOperationsIdle();
     }
@@ -6597,38 +7483,110 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.dataTransactionBusy = true;
     try {
       await this.enqueueAppLogicalOperation(async () => {
-      // Clone after entering the guarded region so an allocation/serialization
-      // failure cannot leave organization history permanently marked busy.
-      const storeBackup = cloneJsonValue(this.store);
-      const snapshot = (direction === "undo" ? this.data.undoStack : this.data.redoStack).pop();
+      const priorUndoStack = [...this.data.undoStack];
+      const priorRedoStack = [...this.data.redoStack];
+      const sourceStack = direction === "undo" ? priorUndoStack : priorRedoStack;
+      const snapshot = sourceStack[sourceStack.length - 1];
       if (!snapshot) return;
+      const inverseSnapshot = snapshotPersonal(
+        this.data,
+        snapshot.label,
+        Boolean(snapshot.settings),
+        Boolean(snapshot.portableIndex),
+        Boolean(snapshot.layoutSnapshots),
+        snapshot.activeTab !== undefined,
+      );
+      const opposite = limitSnapshotStack([
+        ...(direction === "undo" ? priorRedoStack : priorUndoStack),
+        inverseSnapshot,
+      ]);
+      const retainedInverse = opposite[opposite.length - 1];
+      if (retainedInverse !== inverseSnapshot
+        || fingerprintText(canonicalJsonString(retainedInverse))
+          !== fingerprintText(canonicalJsonString(inverseSnapshot))) {
+        throw new Error(`The ${direction} cannot be completed safely because its exact inverse snapshot exceeds the bounded local history limit. Reduce the affected organization, then try again.`);
+      }
+      // Clone only after the inverse is proven retainable. Until this point no
+      // live stack, restored payload, local journal, or primary store changed.
+      const storeBackup = cloneJsonValue(this.store);
+      let pendingHistoryTransitionCommit: PendingHistoryTransitionCommit | null = null;
+      let storeSaveAttempted = false;
+      let olderLocalHistoryTruncated = false;
       try {
-        const opposite = limitSnapshotStack([
-          ...(direction === "undo" ? this.data.redoStack : this.data.undoStack),
-          snapshotPersonal(
-            this.data,
-            snapshot.label,
-            Boolean(snapshot.settings),
-            Boolean(snapshot.portableIndex),
-            Boolean(snapshot.layoutSnapshots),
-            snapshot.activeTab !== undefined,
-          ),
-        ]);
-        if (direction === "undo") this.data.redoStack = opposite;
-        else this.data.undoStack = opposite;
+        if (direction === "undo") {
+          this.data.undoStack = priorUndoStack.slice(0, -1);
+          this.data.redoStack = opposite;
+        } else {
+          this.data.redoStack = priorRedoStack.slice(0, -1);
+          this.data.undoStack = opposite;
+        }
         restoreSnapshot(this.data, snapshot);
         // Historical snapshots predate the ENT destination invariant. Repair
         // the restored active payload before its first write so Undo/Redo cannot
         // persist a medication, syndrome, or procedure back into the Index.
         this.normalizeActiveDataAfterRestore();
+        // Reserve the history journal against the exact bounded payload that
+        // the semantic writer will hash and commit.
+        enforceStoredTextBounds(this.data);
         this.invalidateRecordCache();
-        await this.savePluginDataOperation();
+        const entry = this.requireActiveBase();
+        pendingHistoryTransitionCommit = this.prepareHistoryTransitionCommit(
+          entry,
+          direction,
+          snapshot,
+          inverseSnapshot,
+          priorUndoStack,
+          priorRedoStack,
+        );
+        if (pendingHistoryTransitionCommit) {
+          this.preparedHistoryTransitionCommit = pendingHistoryTransitionCommit;
+          olderLocalHistoryTruncated = this.persistHistoryTransitionState(
+            entry.id,
+            pendingHistoryTransitionCommit,
+            priorUndoStack,
+            priorRedoStack,
+          );
+        }
+        if (pendingHistoryTransitionCommit) {
+          storeSaveAttempted = true;
+          await this.savePluginDataOperation();
+          this.finalizeHistoryTransitionCommit(pendingHistoryTransitionCommit);
+        } else {
+          // Restoring a snapshot can be a semantic no-op (for example, when it
+          // differs only in device-local view/history). Persist that completed
+          // history transition directly: there is no synced payload to commit
+          // and therefore no primary-write crash window to journal.
+          const built = createDeviceLocalPluginStateWithReport(this.store);
+          if (built.historyTruncated) {
+            const localByBaseId = new Map(built.state.bases.map((base) => [base.baseId, base.view]));
+            for (const candidate of this.store.bases) {
+              const local = localByBaseId.get(candidate.id);
+              candidate.data.undoStack = cloneJsonValue(local?.undoStack ?? []);
+              candidate.data.redoStack = cloneJsonValue(local?.redoStack ?? []);
+            }
+            this.useActiveData(this.requireActiveBase().data);
+          }
+          // Make the durable marker-free write the final fallible boundary.
+          // If it rejects, the outer transaction restores the exact prior
+          // stacks; after it succeeds, no post-commit bookkeeping can turn a
+          // completed local transition into an apparent failure.
+          this.storeDeviceLocalState(built.state, true);
+          olderLocalHistoryTruncated = built.historyTruncated;
+        }
       } catch (error) {
+        this.preparedHistoryTransitionCommit = null;
         this.preserveNewerCausalMetadata(storeBackup);
         this.store = storeBackup;
         this.useActiveData(this.requireActiveBase().data);
         this.invalidateRecordCache();
-        if (!this.externalReloadBusy) {
+        const primaryWriteMayHaveBeenAttempted = storeSaveAttempted
+          && !primaryStoreWriteWasNotAttempted(error);
+        if (!primaryWriteMayHaveBeenAttempted) {
+          // A journal/quota/backup prerequisite failed before data.json. The
+          // exact prior stacks are already authoritative; retrying their local
+          // persistence is best-effort and never creates semantic uncertainty.
+          this.persistDeviceLocalStateSafely();
+        } else if (!this.externalReloadBusy) {
           try {
             // The rejected history payload may already be on disk. Advance
             // from its causal head before publishing the restored organization
@@ -6662,9 +7620,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         console.error(`Knowledge Base Command Center saved ${direction} but could not refresh its view`, error);
         new Notice(`The ${direction} was saved, but the view could not refresh. Reopen the command center to update it.`, 8000);
       }
+      if (olderLocalHistoryTruncated) {
+        new Notice(`Older undo or redo entries in other knowledge bases were removed so this ${direction} remains crash-safe within the four-megabyte local limit.`, 10000);
+      }
       new Notice(`${direction === "undo" ? "Undid" : "Redid"}: ${snapshot.label}`);
       });
     } finally {
+      this.preparedHistoryTransitionCommit = null;
       this.dataTransactionBusy = false;
       this.announceOperationsIdle();
     }
@@ -7038,16 +8000,22 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       safetyCritical: value.safetyCritical,
     }, this.today());
     const createdFolders: TFolder[] = [];
+    let file: TFile;
     try {
       await this.ensureFolder(path.substring(0, path.lastIndexOf("/")), createdFolders);
-      const file = await this.app.vault.create(path, content);
-      this.invalidateRecordCache();
-      await this.refreshViews();
-      return file;
+      file = await this.app.vault.create(path, content);
     } catch (error) {
       await this.removeCreatedEmptyFolders(createdFolders);
       throw error;
     }
+    this.invalidateRecordCache();
+    try {
+      await this.refreshViews();
+    } catch (error) {
+      console.error("Knowledge Base Command Center created the topic proposal but could not refresh its view", error);
+      new Notice(`The topic proposal was created at ${file.path}, but the view could not refresh. Open the note from the file explorer.`, 9000);
+    }
+    return file;
   }
 
   async createCanonical(value: TopicFormValue): Promise<TFile> {
@@ -7065,16 +8033,22 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       safetyCritical: value.safetyCritical,
     }, this.today());
     const createdFolders: TFolder[] = [];
+    let file: TFile;
     try {
       await this.ensureFolder(path.substring(0, path.lastIndexOf("/")), createdFolders);
-      const file = await this.app.vault.create(path, content);
-      this.invalidateRecordCache();
-      await this.refreshViews();
-      return file;
+      file = await this.app.vault.create(path, content);
     } catch (error) {
       await this.removeCreatedEmptyFolders(createdFolders);
       throw error;
     }
+    this.invalidateRecordCache();
+    try {
+      await this.refreshViews();
+    } catch (error) {
+      console.error("Knowledge Base Command Center created the canonical topic but could not refresh its view", error);
+      new Notice(`The canonical topic was created at ${file.path}, but the view could not refresh. Open the note from the file explorer.`, 9000);
+    }
+    return file;
   }
 
   private assertNoteOperationFile(file: TFile, expectedPath: string, label: string): void {
@@ -7479,6 +8453,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.baseOperationBusy = true;
     let retryAfterExternalReload = false;
     let historyWasTrimmed = false;
+    let primaryStoreWriteStarted = false;
     try {
         const historyDepths = this.store.bases.map((entry) => [entry.data.layoutSnapshots.length, entry.data.undoStack.length, entry.data.redoStack.length]);
         let semanticChanged = false;
@@ -7501,8 +8476,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         const boundedDepths = this.store.bases.map((entry) => [entry.data.layoutSnapshots.length, entry.data.undoStack.length, entry.data.redoStack.length]);
         historyWasTrimmed = boundedDepths.some((depths, baseIndex) => depths.some((depth, stackIndex) => depth < (historyDepths[baseIndex]?.[stackIndex] ?? 0)));
         this.invalidateRecordCache();
-        if (semanticChanged) await this.saveStoreSnapshot();
-        else if (localStateChanged) this.persistDeviceLocalState();
+        if (semanticChanged) {
+          primaryStoreWriteStarted = true;
+          await this.saveStoreSnapshot();
+        } else if (localStateChanged) {
+          this.persistDeviceLocalState();
+        }
         // A callback can start after saveStoreSnapshot has committed but before
         // this continuation resumes. Let that reload merge the committed rename,
         // then run the idempotent rewrite once more against its final envelope.
@@ -7515,10 +8494,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         this.store = storeBackup;
         this.useActiveData(this.requireActiveBase().data);
         this.invalidateRecordCache();
-        this.advanceRejectedSemanticAttempts();
+        const primaryWriteMayHaveBeenAttempted = primaryStoreWriteStarted
+          && !primaryStoreWriteWasNotAttempted(error);
+        const compensationNeeded = primaryWriteMayHaveBeenAttempted
+          && this.advanceRejectedSemanticAttempts();
         if (interruptedByExternalReload) {
           retryAfterExternalReload = true;
-        } else {
+        } else if (compensationNeeded) {
           try {
             await this.saveStoreSnapshot();
           } catch (rollbackError) {
@@ -7536,6 +8518,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
             }
           }
           if (!retryAfterExternalReload) throw error;
+        } else {
+          this.persistDeviceLocalStateSafely();
+          throw error;
         }
     } finally {
       this.baseOperationBusy = false;

@@ -1,13 +1,28 @@
 .ent-cc-view {
   --ent-cc-accent: var(--interactive-accent, #39c5bb);
   --ent-cc-accent-soft: color-mix(in srgb, var(--ent-cc-accent) 15%, transparent);
-  --ent-cc-amber: #d7a84f;
+  --ent-cc-amber: var(--text-warning, var(--color-orange, #8a5a00));
   --ent-cc-border: var(--background-modifier-border, #31343a);
   --ent-cc-surface: var(--background-secondary, #17191d);
   --ent-cc-surface-raised: var(--background-primary-alt, #202329);
   height: 100%;
   color: var(--text-normal);
   background: var(--background-primary);
+}
+
+.theme-dark .ent-cc-view {
+  --ent-cc-amber: var(--text-warning, var(--color-orange, #f0b85a));
+}
+
+.ent-cc-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .ent-cc-whats-new-modal {
@@ -253,7 +268,7 @@
 }
 
 .ent-cc-placeholder-badge {
-  display: inline-flex;
+  display: none;
   align-items: center;
   min-height: 20px;
   padding: 1px 7px;
@@ -264,6 +279,10 @@
   font-weight: 700;
   line-height: 1;
   white-space: nowrap;
+}
+
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-placeholder-badge {
+  display: inline-flex;
 }
 
 .ent-cc-status-pill.is-placeholder {
@@ -904,11 +923,12 @@
 .ent-cc-row {
   position: relative;
   display: grid;
-  grid-template-columns: 22px 22px minmax(0, 1fr) minmax(80px, 118px) 52px 30px;
+  grid-template-columns: 22px 22px minmax(0, 1fr) minmax(80px, 118px) minmax(52px, max-content) 30px;
   align-items: center;
   min-height: 36px;
-  padding: 3px 16px 3px 20px;
-  border-left: 2px solid transparent;
+  padding-block: 3px;
+  padding-inline: 20px 16px;
+  border-inline-start: 2px solid transparent;
   gap: 6px;
 }
 
@@ -917,7 +937,7 @@
 }
 
 .ent-cc-row.is-selected {
-  border-left-color: var(--ent-cc-accent);
+  border-inline-start-color: var(--ent-cc-accent);
   background: var(--ent-cc-accent-soft);
 }
 
@@ -964,7 +984,7 @@
   min-height: 38px;
   /* Nested subheadings reuse the curriculum depth variable; a first-level
      subheading (depth 0) keeps its original 42px indent. */
-  padding-left: calc(42px + (var(--ent-cc-depth, 0) * 22px));
+  padding-inline-start: calc(42px + (var(--ent-cc-depth, 0) * 22px));
   color: var(--text-muted);
   font-size: 11px;
   font-weight: 650;
@@ -985,7 +1005,7 @@
 }
 
 .ent-cc-curriculum-row {
-  padding-left: calc(20px + (var(--ent-cc-depth, 0) * 22px));
+  padding-inline-start: calc(20px + (var(--ent-cc-depth, 0) * 22px));
 }
 
 .ent-cc-depth-0 { --ent-cc-depth: 0; }
@@ -1044,23 +1064,23 @@
 }
 
 .ent-cc-level-1 {
-  padding-left: 50px;
+  padding-inline-start: 50px;
 }
 
 .ent-cc-level-2 {
-  padding-left: 76px;
+  padding-inline-start: 76px;
 }
 
 .ent-cc-level-3 {
-  padding-left: 102px;
+  padding-inline-start: 102px;
 }
 
 .ent-cc-level-4 {
-  padding-left: 128px;
+  padding-inline-start: 128px;
 }
 
 .ent-cc-level-5 {
-  padding-left: 154px;
+  padding-inline-start: 154px;
 }
 
 .ent-cc-heading-body,
@@ -1195,7 +1215,8 @@
 }
 
 .ent-cc-drop-hint {
-  margin: 3px 20px 3px 76px;
+  margin-block: 3px;
+  margin-inline: 76px 20px;
   padding: 8px 12px;
   border: 1px dashed var(--ent-cc-border);
   border-radius: 6px;
@@ -1311,7 +1332,7 @@
   gap: 8px;
   margin-top: 18px;
   padding: 10px 11px;
-  border-left: 2px solid var(--ent-cc-accent);
+  border-inline-start: 2px solid var(--ent-cc-accent);
   color: var(--text-muted);
   background: var(--ent-cc-accent-soft);
   font-size: 10px;
@@ -1399,7 +1420,7 @@
   .ent-cc-tree-panel {
     min-height: 58vh;
     overflow: visible;
-    border-right: 0;
+    border-inline-end: 0;
     border-bottom: 1px solid var(--ent-cc-border);
   }
 
@@ -1410,7 +1431,7 @@
 
   .ent-cc-row {
     grid-template-columns: 20px 20px minmax(0, 1fr) 76px 45px 26px;
-    padding-right: 8px;
+    padding-inline-end: 8px;
   }
 
   .ent-cc-subject-id {
@@ -1553,8 +1574,10 @@
   grid-column: 5;
   align-items: center;
   justify-content: flex-end;
+  justify-self: end;
+  flex-wrap: nowrap;
   gap: 5px;
-  min-width: 0;
+  min-width: max-content;
 }
 
 .ent-cc-view button.ent-cc-subject-title {
@@ -1590,7 +1613,8 @@
 
 .ent-cc-safety-badge,
 .ent-cc-pin-badge,
-.ent-cc-visual-badge {
+.ent-cc-visual-badge,
+.ent-cc-lock-badge {
   display: inline-grid;
   flex: 0 0 auto;
   color: var(--ent-cc-amber);
@@ -1608,13 +1632,15 @@
 .ent-cc-safety-badge svg,
 .ent-cc-pin-badge svg,
 .ent-cc-visual-badge svg,
+.ent-cc-lock-badge svg,
 .ent-cc-record-icon svg {
   width: 12px;
   height: 12px;
 }
 
 .ent-cc-queue-description {
-  margin: 1px 24px 5px 78px;
+  margin-block: 1px 5px;
+  margin-inline: 78px 24px;
   color: var(--text-faint);
   font-size: 0.75rem;
   line-height: 1.45;
@@ -1999,8 +2025,7 @@
 @media (max-width: 900px) {
   .ent-cc-tabs,
   .ent-cc-filter-chips {
-    padding-right: 14px;
-    padding-left: 14px;
+    padding-inline: 14px;
   }
 
   .ent-cc-filter-hint,
@@ -2014,8 +2039,7 @@
   }
 
   .ent-cc-search-row {
-    padding-right: 14px;
-    padding-left: 14px;
+    padding-inline: 14px;
   }
 }
 
@@ -2062,6 +2086,7 @@
   .ent-cc-heading-row .ent-cc-leading-icon,
   .ent-cc-subheading-row .ent-cc-leading-icon,
   .ent-cc-subject-id,
+  .ent-cc-subject-id.has-membership-provenance,
   .ent-cc-row-count {
     display: none;
   }
@@ -2105,31 +2130,31 @@
   }
 
   .ent-cc-level-1 {
-    padding-left: 27px;
+    padding-inline-start: 27px;
   }
 
   .ent-cc-level-2 {
-    padding-left: 43px;
+    padding-inline-start: 43px;
   }
 
   .ent-cc-level-3 {
-    padding-left: 59px;
+    padding-inline-start: 59px;
   }
 
   .ent-cc-level-4 {
-    padding-left: 75px;
+    padding-inline-start: 75px;
   }
 
   .ent-cc-level-5 {
-    padding-left: 91px;
+    padding-inline-start: 91px;
   }
 
   .ent-cc-subheading-row {
-    padding-left: calc(4px + (var(--ent-cc-depth, 0) * 14px));
+    padding-inline-start: calc(4px + (var(--ent-cc-depth, 0) * 14px));
   }
 
   .ent-cc-queue-description {
-    margin-left: 47px;
+    margin-inline-start: 47px;
   }
 
   .ent-cc-inspector {
@@ -2141,17 +2166,9 @@
   }
 
   .ent-cc-footer {
-    padding-right: 14px;
+    padding-inline-end: 14px;
     padding-bottom: max(7px, env(safe-area-inset-bottom));
-    padding-left: 14px;
-  }
-
-  /* Safety, AI-lock and pin state must stay visible on phones; only the
-     verbose id/priority chips are dropped for width. */
-  .ent-cc-row-badges {
-    display: flex;
-    gap: 2px;
-    flex: 0 0 auto;
+    padding-inline-start: 14px;
   }
 
   .ent-cc-subject-row .ent-cc-row-badges {
@@ -2408,7 +2425,7 @@
   gap: 9px;
   margin: 12px 0 4px;
   padding: 10px 12px;
-  border-left: 3px solid var(--color-orange, #d79b49);
+  border-inline-start: 3px solid var(--color-orange, #d79b49);
   color: var(--text-muted);
   background: color-mix(in srgb, var(--color-orange, #d79b49) 10%, transparent);
   font-size: 11px;
@@ -2654,7 +2671,7 @@
 }
 
 .ent-cc-manager-bulk-actions .ent-cc-muted {
-  margin-right: auto;
+  margin-inline-end: auto;
 }
 
 .ent-cc-manager-list {
@@ -2935,8 +2952,7 @@
 .ent-cc-subject-row.is-drop-before::before,
 .ent-cc-subject-row.is-drop-after::after {
   position: absolute;
-  right: 10px;
-  left: 22px;
+  inset-inline: 22px 10px;
   z-index: 4;
   height: 2px;
   border-radius: 2px;
@@ -2964,7 +2980,7 @@
 
 @media (max-width: 1024px) {
   .ent-cc-curriculum-row {
-    padding-left: calc(8px + (var(--ent-cc-depth, 0) * 14px));
+    padding-inline-start: calc(8px + (var(--ent-cc-depth, 0) * 14px));
   }
 
   .ent-cc-header-actions {
@@ -2984,8 +3000,7 @@
   .ent-cc-header-actions .ent-cc-button {
     min-height: 44px;
     justify-content: center;
-    padding-right: 8px;
-    padding-left: 8px;
+    padding-inline: 8px;
   }
 
   .ent-cc-header-actions .ent-cc-icon-button {
@@ -3002,14 +3017,12 @@
   }
 
   .ent-cc-tabs {
-    padding-right: 8px;
-    padding-left: 8px;
+    padding-inline: 8px;
   }
 
   .ent-cc-tab {
     min-height: 44px;
-    padding-right: 9px;
-    padding-left: 9px;
+    padding-inline: 9px;
     font-size: 0.8125rem;
     text-align: start;
   }
@@ -3251,8 +3264,7 @@
   }
 
   .ent-cc-manager-list .ent-cc-empty-action {
-    margin-right: 12px;
-    margin-left: 12px;
+    margin-inline: 12px;
   }
 
   .ent-cc-manager-list {
@@ -3569,7 +3581,7 @@
 .ent-cc-library-terminology-note {
   margin: -4px 0 16px;
   padding: 9px 11px;
-  border-left: 3px solid var(--ent-cc-accent);
+  border-inline-start: 3px solid var(--ent-cc-accent);
   color: var(--text-muted);
   background: var(--ent-cc-accent-soft);
   font-size: 11px;
@@ -3750,7 +3762,7 @@
 }
 
 .ent-cc-library-form-count {
-  margin-left: auto;
+  margin-inline-start: auto;
   color: var(--text-faint);
   white-space: nowrap;
 }
@@ -4023,7 +4035,7 @@
 .ent-cc-base-terminology-note {
   margin: -6px 0 14px;
   padding: 9px 11px;
-  border-left: 3px solid var(--ent-cc-accent);
+  border-inline-start: 3px solid var(--ent-cc-accent);
   color: var(--text-muted);
   background: var(--ent-cc-accent-soft);
   font-size: 11px;
@@ -4047,7 +4059,7 @@
 
 .ent-cc-base-name-count {
   flex: 0 0 auto;
-  margin-left: auto;
+  margin-inline-start: auto;
 }
 
 .ent-cc-knowledge-base-modal .setting-item-control {
@@ -4239,8 +4251,7 @@
   .ent-cc-base-switcher {
     max-width: 100%;
     min-height: 44px;
-    padding-right: 11px;
-    padding-left: 11px;
+    padding-inline: 11px;
   }
 
   .ent-cc-base-switcher-name {
@@ -4551,6 +4562,7 @@
 .ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-heading-row .ent-cc-leading-icon,
 .ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-subheading-row .ent-cc-leading-icon,
 .ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-subject-id,
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-subject-id.has-membership-provenance,
 .ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-row-count {
   display: none;
 }
@@ -4594,6 +4606,7 @@
   grid-row: 1;
   align-self: center;
   justify-self: end;
+  gap: 2px;
 }
 
 .ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-row-badges .ent-cc-priority,
@@ -4838,7 +4851,8 @@
 .ent-cc-sync-recovery-scroll {
   flex: 1 1 auto;
   min-height: 0;
-  padding: 1px 3px 12px 1px;
+  padding-block: 1px 12px;
+  padding-inline: 1px 3px;
   overflow-y: auto;
   overscroll-behavior-y: contain;
   scrollbar-gutter: stable;

@@ -43,6 +43,10 @@ test("public repository metadata is present", async () => {
   const readme = await readFile(path.join(root, "README.md"), "utf8");
   const changelog = await readFile(path.join(root, "CHANGELOG.md"), "utf8");
   const iphoneChecklist = await readFile(path.join(root, "docs", "manual-iphone-release-checklist.md"), "utf8");
+  const currentIphoneEvidence = await readFile(
+    path.join(root, "docs", "release-evidence", `${String(manifest.version)}-iphone.md`),
+    "utf8",
+  );
   const userGuide = await readFile(path.join(root, "docs", "USER_GUIDE.md"), "utf8");
   const packageJson = await readFile(path.join(root, "package.json"), "utf8");
   assert.match(license, /MIT License/);
@@ -71,9 +75,11 @@ test("public repository metadata is present", async () => {
   const backupVersion = /export interface PersonalBackup extends PersonalOrganizationState \{[\s\S]*?\n {2}version: (\d+);/u.exec(model)?.[1];
   const dataVersion = /export const DATA_VERSION = (\d+);/u.exec(model)?.[1];
   const storeVersion = /export const STORE_VERSION = (\d+);/u.exec(model)?.[1];
+  const deviceLocalVersion = /export const DEVICE_LOCAL_STATE_VERSION = (\d+);/u.exec(model)?.[1];
   assert.ok(backupVersion, "src/model.ts must declare the PersonalBackup version");
   assert.ok(dataVersion, "src/model.ts must declare DATA_VERSION");
   assert.ok(storeVersion, "src/model.ts must declare STORE_VERSION");
+  assert.ok(deviceLocalVersion, "src/model.ts must declare DEVICE_LOCAL_STATE_VERSION");
   const recoveryGuide = await readFile(path.join(root, "docs", "PORTABILITY_AND_RECOVERY.md"), "utf8");
   const gettingStarted = await readFile(path.join(root, "docs", "GETTING_STARTED.md"), "utf8");
   const troubleshooting = await readFile(path.join(root, "docs", "TROUBLESHOOTING.md"), "utf8");
@@ -84,6 +90,27 @@ test("public repository metadata is present", async () => {
   assert.match(gettingStarted, new RegExp(`version-${storeVersion} store and schema-${dataVersion} knowledge-base data`, "iu"));
   assert.match(recoveryGuide, new RegExp(`version-${storeVersion} store with version-${dataVersion} knowledge-base data`, "iu"));
   assert.match(troubleshooting, new RegExp(`version-${storeVersion} store with schema-${dataVersion} knowledge-base data`, "iu"));
+  assert.match(userGuide, new RegExp(`version-${deviceLocalVersion} device-local pending-Undo journal`, "iu"));
+  assert.match(recoveryGuide, new RegExp(`version-${deviceLocalVersion} device-local pending-Undo journal`, "iu"));
+  assert.match(userGuide, /pending Undo\/Redo transition journal/iu);
+  assert.match(recoveryGuide, /pending Undo\/Redo transition journal/iu);
+  assert.match(userGuide, /multi-base portfolio import stages[^.]*required Undo[^.]*one bounded causal batch/iu);
+  assert.match(recoveryGuide, /all destination snapshots[^.]*one bounded pending-Undo batch/iu);
+  assert.match(recoveryGuide, /exact protected batch cannot fit[^.]*4 MiB[^.]*rejected[^.]*before any primary store mutation/iu);
+  const currentChangelogStart = changelog.indexOf(`## ${String(manifest.version)}`);
+  const nextChangelogStart = changelog.indexOf("\n## ", currentChangelogStart + 1);
+  const currentChangelog = changelog.slice(currentChangelogStart, nextChangelogStart < 0 ? undefined : nextChangelogStart);
+  assert.match(currentChangelog, new RegExp(`version-${deviceLocalVersion} device-local journals`, "iu"));
+  assert.match(currentChangelog, /user-invoked Undo\/Redo restart-durable/iu);
+  assert.match(currentChangelog, /multi-base portfolio import stages every destination's required Undo[^.]*one causally verified batch/iu);
+  assert.match(readme, /every eligible Markdown note in the vault[^.]*including unindexed notes and notes outside/iu);
+  assert.match(recoveryGuide, /counts placeholders with at least one candidate, not the raw number of candidate notes/iu);
+  assert.match(recoveryGuide, /Import Workspace settings alone first[^.]*refresh the vault[^.]*import the subject-catalog sections/iu);
+  assert.match(troubleshooting, /previously linked Markdown file[^.]*temporarily missing[\s\S]*retains the prior path binding/iu);
+  assert.match(readme, /known-good previous committed authority[\s\S]*post-commit backup failure[\s\S]{0,220}one commit behind/iu);
+  assert.match(recoveryGuide, /prerequisite write[^.]*Sync-generation fence fails, no primary or compensating write is attempted/iu);
+  assert.doesNotMatch(readme, /Every save maintains a parseable twin of the last successfully committed `data\.json`/u);
+  assert.doesNotMatch(recoveryGuide, /safety twin of the last successfully committed plugin state/iu);
   assert.match(readme, /obsidian:\/\/kbcc-quick-entry/);
   assert.match(readme, /obsidian:\/\/kbcc-create-subject/);
   assert.match(readme, /obsidian:\/\/kbcc-create-heading/);
@@ -109,20 +136,25 @@ test("public repository metadata is present", async () => {
   assert.match(iphoneChecklist, /What’s new/);
   const escapedManifestVersion = String(manifest.version).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
   assert.match(iphoneChecklist, new RegExp(`releases/tag/${escapedManifestVersion}`, "u"));
+  assert.match(currentIphoneEvidence, new RegExp(`Candidate version:\\s*${escapedManifestVersion}`, "u"));
+  assert.match(currentIphoneEvidence, /maintainer-authorized waiver/iu);
+  assert.match(currentIphoneEvidence, /physical-iPhone matrix not executed/iu);
+  assert.doesNotMatch(currentIphoneEvidence, /^\s*-?\s*(?:Status|Final result):\s*\*\*?Pass\b/imu);
+  assert.doesNotMatch(currentIphoneEvidence, /\bPending\b/iu);
+  assert.doesNotMatch(iphoneChecklist, /recorded by the release workflow/iu);
   const commandAppendix = userGuide.slice(userGuide.indexOf("\n## Commands\n"), userGuide.indexOf("\n## Safety boundary\n"));
   for (const command of [
     "Quick append: Add to current note…",
     "Quick append: Choose a note…",
     "Quick append: Undo last append",
+    "Open imported placeholder queue",
+    "Resolve next imported placeholder…",
     "Review legacy index source…",
   ]) assert.match(commandAppendix, new RegExp(command.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
   assert.match(userGuide, /Any focused Quick Entry or Quick Append command/);
   assert.match(userGuide, /Open Library: _Library name_/);
-  assert.match(packageJson, /tests\/follow-up\.test\.ts/);
-  assert.match(packageJson, /tests\/update-announcement\.test\.ts/);
-  assert.match(packageJson, /tests\/legacy-index-review\.test\.ts/);
-  assert.match(packageJson, /tests\/legacy-index-review-modal\.test\.ts/);
-  assert.match(packageJson, /tests\/view-provenance\.test\.ts/);
+  assert.match(packageJson, /node scripts\/run-runtime-tests\.mjs/);
+  assert.doesNotMatch(packageJson, /tests\/(?:follow-up|update-announcement|view-provenance)\.test\.ts/, "runtime tests must be discovered instead of manually enumerated");
 });
 
 test("manual release surface contains the three required nonempty assets", async () => {
@@ -246,33 +278,73 @@ test("runtime source satisfies blocking Obsidian review rules", async () => {
 test("review and release automation is reproducible and least-privilege", async () => {
   const packageJson = await readJson("package.json");
   const scripts = packageJson.scripts as Record<string, string>;
-  for (const name of ["typecheck", "lint", "test", "verify-release", "verify-community", "review", "release:bundle"]) {
+  for (const name of [
+    "typecheck", "lint", "test", "test:coverage", "test:performance", "test:layout", "verify-release",
+    "verify-community", "verify-bundle-size", "audit:high", "review", "check", "release:checksums", "release:bundle",
+  ]) {
     assert.equal(typeof scripts[name], "string", `missing npm script ${name}`);
   }
   const buildIndex = scripts.review.indexOf("npm run build");
+  const bundleSizeIndex = scripts.review.indexOf("npm run verify-bundle-size");
   const communityIndex = scripts.review.indexOf("npm run verify-community");
   assert.notEqual(buildIndex, -1, "review must build main.js");
+  assert.notEqual(bundleSizeIndex, -1, "review must enforce the bundle budget");
   assert.notEqual(communityIndex, -1, "review must run Community verification");
+  assert.ok(buildIndex < bundleSizeIndex, "review must build main.js before measuring it");
   assert.ok(buildIndex < communityIndex, "review must build main.js before Community verification scans it");
+  assert.match(scripts.review, /npm run test:coverage/);
+  assert.match(scripts.review, /npm run test:performance/);
+  assert.match(scripts.check, /npm run test:layout/);
+  assert.match(scripts["release:bundle"], /npm run check/);
+  const runtimeRunner = await readFile(path.join(root, "scripts", "run-runtime-tests.mjs"), "utf8");
+  assert.match(runtimeRunner, /entry\.name\.endsWith\("\.test\.ts"\)/);
+  assert.match(runtimeRunner, /entry\.name !== "release\.test\.ts"/);
+  assert.match(runtimeRunner, /--test-coverage-lines=80/);
+  assert.match(runtimeRunner, /--test-coverage-branches=75/);
+  assert.match(runtimeRunner, /--test-coverage-functions=70/);
+  assert.match(runtimeRunner, /--test-coverage-include=src\/\*\.ts/);
+  assert.doesNotMatch(runtimeRunner, /--test-coverage-include=src\/(?:model|view)\.ts/);
+  const bundleVerifier = await readFile(path.join(root, "scripts", "check-bundle-size.mjs"), "utf8");
+  assert.match(bundleVerifier, /main\.js/);
+  assert.match(bundleVerifier, /gzipSync/);
+  const layoutTest = await readFile(path.join(root, "tests", "layout", "index-row-geometry.spec.ts"), "utf8");
+  assert.match(layoutTest, /readFile\(stylesPath/);
+  assert.match(layoutTest, /metadata must not collide with its badges/);
+  assert.match(layoutTest, /phone-width RTL at 125% text/);
   const communityVerifier = await readFile(path.join(root, "scripts", "verify-community.mjs"), "utf8");
   assert.match(communityVerifier, /readFile\(path\.join\(root, "main\.js"\)/);
   assert.match(communityVerifier, /built main\.js must not require external module/);
-  const [ciWorkflow, releaseWorkflow] = await Promise.all(["ci.yml", "release.yml"].map((name) => readFile(path.join(root, ".github", "workflows", name), "utf8")));
-  const workflow = `${ciWorkflow}\n${releaseWorkflow}`;
+  const [ciWorkflow, releaseWorkflow, securityWorkflow] = await Promise.all(
+    ["ci.yml", "release.yml", "security-audit.yml"].map((name) => readFile(path.join(root, ".github", "workflows", name), "utf8")),
+  );
+  const workflow = `${ciWorkflow}\n${releaseWorkflow}\n${securityWorkflow}`;
   const actionReferences = [...workflow.matchAll(/^[ \t]*uses:[ \t]*([^\s#]+)/gm)].map((match) => match[1]);
   assert.ok(actionReferences.length > 0, "workflows must contain pinned actions");
   for (const reference of actionReferences) assert.match(reference, /^[^@\s]+@[0-9a-f]{40}$/, `action must use a full commit SHA: ${reference}`);
   assert.equal((ciWorkflow.match(/^permissions:/gm) ?? []).length, 1);
   assert.equal((ciWorkflow.match(/^[ \t]+permissions:/gm) ?? []).length, 0);
-  assert.match(ciWorkflow, /^permissions:\n {2}contents: read\n\njobs:/m);
+  assert.match(ciWorkflow, /^permissions:\n {2}contents: read\n\nconcurrency:/m);
+  assert.match(ciWorkflow, /cancel-in-progress: true/);
+  assert.match(ciWorkflow, /npm run audit:high/);
+  assert.match(ciWorkflow, /playwright install --with-deps chromium/);
   assert.equal((releaseWorkflow.match(/^permissions:/gm) ?? []).length, 0);
   assert.deepEqual(releaseWorkflow.match(/^ {4}permissions:\n(?:^ {6}[\w-]+: (?:read|write)\n)+/gm), [
     "    permissions:\n      contents: read\n",
     "    permissions:\n      contents: write\n      id-token: write\n      attestations: write\n",
   ]);
+  assert.match(releaseWorkflow, /fetch-depth: 0/);
+  assert.match(releaseWorkflow, /verify-tag-ancestry\.mjs/);
+  assert.match(releaseWorkflow, /refs\/heads\/main:refs\/remotes\/origin\/main/);
+  assert.match(releaseWorkflow, /SHA256SUMS\.txt/);
+  assert.match(releaseWorkflow, /npm run audit:high/);
   assert.match(workflow, /--notes-file release-notes\.md/);
   assert.match(workflow, /GH_REPO: \$\{\{ github\.repository \}\}/);
   assert.match(workflow, /attest-build-provenance@[0-9a-f]{40}/);
+  assert.match(securityWorkflow, /^ {2}schedule:/m);
+  assert.match(securityWorkflow, /^ {2}workflow_dispatch:/m);
+  assert.match(securityWorkflow, /^permissions:\n {2}contents: read/m);
+  assert.match(securityWorkflow, /npm ci --ignore-scripts/);
+  assert.match(securityWorkflow, /npm run audit:high/);
 });
 
 test("public issue intake prevents accidental private-vault disclosure", async () => {

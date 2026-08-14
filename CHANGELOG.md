@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.17.0
+
+### Added
+
+- Added **Why this appears** to Index row menus and record inspectors. The read-only explanation names every applicable authority independently—direct membership, each linked folder, protected ENT source, imported placeholder, exclusion, Library placement, Collections, pin/Next state—and displays a Markdown path only as storage location, never as an implied membership rule.
+- Added **Manage index → Why included**, a base-wide summary that separates direct memberships, linked folders, protected sources, imported placeholders, hidden overrides, and location-only creation/storage folders. Inherited pre-v15 folder links can be opened in the existing review flow from the same surface.
+- Added **Imported placeholders needing notes** as the first Smart Queue, plus **Open imported placeholder queue** and **Resolve next imported placeholder…** commands. Exact normalized title or configured-ID candidates are found across every eligible Markdown note in the vault, including unindexed notes and notes outside the active base's folder rules; the plugin never selects or links a candidate automatically and identifies any existing portable owners before confirmation.
+- Added a same-engine predicted outcome to single-base portable import: new subjects, existing identity matches, incoming subjects still awaiting notes, complete before/after placeholder counts, placement totals, and the number of unresolved placeholders with at least one exact local candidate—not the raw number of matching notes. An import predicted to leave 100 or more selected subjects unresolved needs an additional acknowledgement.
+- Added an import-completion handoff with the resulting unresolved count, **Open placeholder queue**, and immediate **Undo import** actions.
+
+### Changed
+
+- Reorganized Generic settings into three explicit concepts: **Index membership**, **Note storage and creation**, and **Portable blueprint and link progress**. Folder location no longer reads like automatic enrollment authority.
+- Separated membership explanation, placeholder-queue construction, and portable-import simulation into independently tested runtime seams. Runtime tests are now discovered automatically, with enforced source coverage, large-vault performance, real-Chromium layout variants, bundle-size, dependency-audit, tag-ancestry, and release-checksum gates.
+- Improved read-only behavior, keyboard/focus semantics, screen-reader context, bidirectional text, theme compatibility, and compact/desktop control reachability across the affected Index and import surfaces.
+
+### Fixed
+
+- Prevented long Index metadata, membership badges, placeholder status, and row actions from colliding or rendering duplicate **No linked note** text at desktop, narrow-pane, enlarged-text, and right-to-left widths.
+- Made <code>data.json.bak</code> hold known-good previous committed authority before the primary write. A failed prerequisite backup or Sync fence performs no primary or compensating write and remains retryable; after a successful primary commit, backup advancement is best effort and may temporarily leave the backup one commit behind.
+- Made required Undo protection and user-invoked Undo/Redo restart-durable with bounded version-4 device-local journals. Required operations stage the exact prior snapshot; Undo and Redo stage their exact pre-transition stacks plus the inverse snapshot needed to reconstruct the new stacks. Multi-base portfolio import stages every destination's required Undo together in one causally verified batch. Startup applies a staged result only when each committed semantic revision, head, and payload fingerprint matches; otherwise it preserves the exact pre-transaction history independently for each base. The operation fails closed before the primary write when that guarantee cannot fit within 4 MiB, including repair, restore, bulk removal, single-base or portfolio import, Undo, and Redo paths.
+- Kept a previously linked portable subject in the placeholder queue when its Markdown file is temporarily missing while retaining the prior path binding, so the same path can resolve automatically when Sync delivers it again.
+- Rejected a combined Workspace-settings and subject-catalog import when the incoming Workspace fields would change record projection. Single-base and multi-base portfolio review both direct users to import Workspace settings alone, let the vault refresh, then reopen the center and import Index, Libraries, Collections, or Study state; harmless combined imports whose projection fields are unchanged remain allowed.
+- Kept portable subject identities stable across portfolio construction and later serialization instead of regenerating an identity after the bundle was prepared.
+- Treated a successful Markdown-file create as the commit boundary: a later view-refresh failure now reports the exact created path instead of falsely presenting the whole create as failed and inviting a duplicate retry.
+
+### Verification
+
+- The release candidate is gated by TypeScript, zero-warning ESLint and JSON validation, automatically discovered runtime tests with coverage floors, a 500,000-record performance budget, seven real-Chromium row-layout variants, production build and bundle budget, Obsidian Community static verification, high-severity dependency audit, release metadata checks, tag ancestry, and SHA-256 release checksums.
+- The physical-iPhone matrix was not executed. The maintainer explicitly authorized release with that scope waived and unverified; this release does not claim a physical-device Pass.
+
 ## 0.16.1
 
 ### Added

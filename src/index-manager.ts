@@ -1,8 +1,9 @@
-import { Menu, Modal, Notice, Setting, TFile, setIcon } from "obsidian";
+import { Menu, Modal, Notice, Setting, TFile, TFolder, setIcon } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
 import {
   curriculumContainerKey,
   errorMessage,
+  INDEX_FOLDER_VAULT_ROOT,
   IndexDiagnostic,
   isSafeObjectKey,
   isPortablePlaceholderPath,
@@ -11,6 +12,7 @@ import {
   resetCurriculumVisualPath,
   VaultRecord,
 } from "./model";
+import { linkedSourceLabel } from "./membership-explanation";
 import {
   clearGuardedTimer,
   ConfirmModal,
@@ -27,7 +29,7 @@ import { ExportImportCenterModal } from "./portability-modal";
 import { TaxonomyHealthModal } from "./taxonomy-health-modal";
 import { SyncRecoveryCenterModal } from "./sync-recovery-modal";
 
-export type ManagerTab = "indexed" | "available" | "hidden" | "groups" | "diagnostics";
+export type ManagerTab = "indexed" | "available" | "hidden" | "sources" | "groups" | "diagnostics";
 
 type NoteListTab = Extract<ManagerTab, "indexed" | "available" | "hidden">;
 
@@ -198,6 +200,11 @@ export class IndexManagerModal extends Modal {
       { id: "indexed", label: "Indexed", count: () => noteCount("indexed") },
       { id: "available", label: "Available", count: () => noteCount("available"), genericOnly: true },
       { id: "hidden", label: "Hidden", count: () => noteCount("hidden") },
+      {
+        id: "sources",
+        label: "Why included",
+        count: () => this.tab === "sources" ? this.plugin.getIndexRecords().length : "—",
+      },
       { id: "groups", label: "Index headings", count: () => groups.length },
       { id: "diagnostics", label: "Diagnostics", count: () => this.diagnosticsCache?.length ?? "—" },
     ];
@@ -256,6 +263,8 @@ export class IndexManagerModal extends Modal {
 
     if (this.tab === "indexed" || this.tab === "available" || this.tab === "hidden") {
       this.renderNoteManager(this.noteList(this.tab), () => this.noteList("available").length, activePanel);
+    } else if (this.tab === "sources") {
+      this.renderSourceSummary(activePanel);
     } else if (this.tab === "groups") {
       this.renderGroups(groups, activePanel);
     } else {
@@ -344,6 +353,83 @@ export class IndexManagerModal extends Modal {
         meta: `${record.domain} · imported subject removed from this knowledge base`,
       }));
     return [...hidden, ...placeholders];
+  }
+
+  private renderSourceSummary(parent: HTMLElement): void {
+    const records = this.plugin.getRecords();
+    const indexed = this.plugin.getIndexRecords();
+    const direct = new Set([
+      ...(this.plugin.data.directIndexPaths ?? []),
+      ...(this.plugin.data.manualIndexPaths ?? []),
+    ]);
+    const realDirect = indexed.filter((record) => !record.isPlaceholder && direct.has(record.path));
+    const placeholders = indexed.filter((record) => record.isPlaceholder || isPortablePlaceholderPath(record.path));
+    const protectedCount = this.plugin.isClinicalMode()
+      ? indexed.filter((record) => !record.isPlaceholder && !direct.has(record.path)).length
+      : 0;
+
+    const rule = parent.createDiv({ cls: "ent-cc-manager-diagnostic" });
+    rule.createEl("strong", { text: "Index membership is explicit" });
+    rule.createEl("p", {
+      text: this.plugin.isClinicalMode()
+        ? `A note appears through the protected clinical source, direct membership, or an imported placeholder. Storage folders do not grant membership.`
+        : `A note appears only through direct membership, one of the exact linked folders below, or an imported placeholder. Its storage folder alone does not grant membership.`,
+    });
+
+    const totals = parent.createDiv({ cls: "ent-cc-manager-list ent-cc-manager-sources" });
+    const addSummary = (title: string, count: number, detail: string): void => {
+      const row = totals.createDiv({ cls: "ent-cc-manager-note" });
+      const text = row.createDiv({ cls: "ent-cc-manager-note-text" });
+      text.createDiv({ cls: "ent-cc-manager-note-title", text: title });
+      text.createDiv({ cls: "ent-cc-picker-meta", text: `${count} · ${detail}` });
+    };
+    addSummary("Direct memberships", realDirect.length, "Kept until you explicitly remove them, even after unlinking a folder.");
+    addSummary("Imported placeholders", placeholders.length, "Blueprint subjects with no linked Markdown note yet.");
+    if (this.plugin.isClinicalMode()) {
+      addSummary("Protected clinical source", protectedCount, "Derived from the ENT clinical safety model, not from linked folders.");
+    }
+    addSummary("Hidden overrides", this.plugin.data.excludedIndexPaths.length, "Explicit exclusions from this knowledge base; Markdown files remain untouched.");
+
+    const heading = parent.createEl("h3", { text: "Linked index folders" });
+    heading.addClass("ent-cc-manager-section-title");
+    if (this.plugin.data.indexFolderSources.length === 0) {
+      parent.createDiv({ cls: "ent-cc-empty", text: "No folder supplies Index membership. Moving or creating a note in a storage folder will not add it." });
+    }
+    for (const source of this.plugin.data.indexFolderSources) {
+      const members = records.filter((record) => !record.isPlaceholder
+        && pathIsInIndexFolderSources(record.path, [source]));
+      const folderAvailable = source.path === INDEX_FOLDER_VAULT_ROOT
+        || this.app.vault.getAbstractFileByPath(source.path) instanceof TFolder;
+      const row = parent.createDiv({ cls: "ent-cc-manager-diagnostic ent-cc-manager-source" });
+      row.createEl("strong", { text: linkedSourceLabel(source), attr: { dir: "auto" } });
+      row.createEl("p", {
+        text: `${source.origin === "legacy-primary-folder" ? "Inherited during upgrade" : "Linked deliberately"} · ${members.length} current Markdown ${members.length === 1 ? "note" : "notes"} below this source · ${folderAvailable ? "folder available" : "folder unavailable on this device"}.`,
+      });
+      if (source.origin === "legacy-primary-folder") {
+        const review = row.createEl("button", {
+          cls: "ent-cc-button",
+          text: "Review inherited link…",
+          type: "button",
+        });
+        review.disabled = this.plugin.isDataReadOnly();
+        review.addEventListener("click", () => {
+          if (!this.guardOpenedBase()) return;
+          this.plugin.openLegacyIndexReview(source.id);
+        });
+      }
+    }
+
+    const storage = parent.createDiv({ cls: "ent-cc-manager-diagnostic" });
+    storage.createEl("strong", { text: "Storage and creation folders (location only)" });
+    storage.createEl("p", {
+      text: [
+        `Grouping root: ${this.plugin.data.settings.primaryFolder || "Vault root"}`,
+        `New-note folder: ${this.plugin.data.settings.defaultNoteFolder || "Vault root"}`,
+        `Inbox: ${this.plugin.data.settings.proposalFolder || "Not configured"}`,
+      ].join(" · "),
+      attr: { dir: "auto" },
+    });
+    storage.createEl("p", { text: "These paths choose where notes are stored or grouped. They do not add a note unless the same path is deliberately linked above." });
   }
 
   private renderNoteManager(notes: ManagerNote[], availableCount: () => number, parent = this.contentEl): void {

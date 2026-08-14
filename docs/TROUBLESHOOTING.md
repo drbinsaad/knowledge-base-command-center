@@ -22,17 +22,20 @@ Before removing and re-adding the BRAT entry, export current organization and ba
 ## A note is missing from the Index
 
 1. Confirm the intended knowledge base is active.
-2. In a Generic base, confirm the note was explicitly added or is below a folder you explicitly linked. The default new-note folder is storage only.
-3. Open **Manage Index… → Hidden** and restore the record if present. A hidden note stays excluded even while a linked-folder rule matches it.
-4. Check **Available** for an eligible note that has no direct membership, then use **Add existing note to Index** for durable one-note membership. A note supplied only by a linked folder also appears here so you can preserve it directly before unlinking the folder.
-5. Check whether the subject is primarily classified in a Library rather than the Index.
-6. Run **Diagnostics** for stale or missing plugin references.
+2. If the record is visible elsewhere, choose **Why this appears**. Otherwise open **Manage Index… → Why included**. Confirm whether authority is direct membership, an exact linked folder, a protected source, or an imported placeholder; the displayed Markdown path is storage location only.
+3. In a Generic base, confirm the note was explicitly added or is below a folder you explicitly linked. The default new-note folder is storage only.
+4. Open **Manage Index… → Hidden** and restore the record if present. A hidden note stays excluded even while a linked-folder rule matches it.
+5. Check **Available** for an eligible note that has no direct membership, then use **Add existing note to Index** for durable one-note membership. A note supplied only by a linked folder also appears here so you can preserve it directly before unlinking the folder.
+6. Check whether the subject is primarily classified in a Library rather than the Index.
+7. Run **Diagnostics** for stale or missing plugin references.
 
 Adding, restoring, hiding, or unlinking membership does not move or rewrite the Markdown file. Generic organization lives in plugin data. A pre-v15 Generic base may show its former `primaryFolder` as a removable legacy linked-folder source so its pre-upgrade notes do not disappear.
 
 ## A note appears automatically after upgrading
 
 If an ordinary note such as `README.md` appears in a Generic Index merely because it is stored below an old knowledge-base folder, check the warning at the top of the Command Center or in Settings. A pre-v15 upgrade temporarily preserves the old folder-authoritative behavior as a **legacy linked-folder source**; this is plugin membership, not an Obsidian file move and not an Obsidian `.base` rule.
+
+Before changing it, open the note's **Why this appears** action or **Manage Index… → Why included**. If the explanation names the inherited linked folder, that rule—not the note's location by itself—is the active authority. A direct membership listed at the same time will survive unlinking; an exclusion can hide the note without touching the file.
 
 Choose **Review…** or run **Review legacy index source…**. First let Obsidian Sync finish and verify that the linked folder's Markdown contents are complete on this device, then check the confirmation in the review. Apply remains blocked if a non-root source folder is unavailable, and an empty local list does not prove another synced device has no notes. Select only the notes that should remain durable direct members, then choose **Apply review & unlink**. Unselected notes leave the plugin Index, future notes placed in that folder no longer join automatically, and every Markdown file remains where it is unchanged. The conversion and unlink are saved together as one Undo action. Choose **Keep linked** only when you intentionally want that folder's current and future Markdown descendants to join automatically; **Not now** leaves the source and warning unchanged.
 
@@ -46,14 +49,18 @@ Protected ENT records can move only to destinations compatible with their source
 
 ## A portable subject says “No note”
 
-This is a path-free placeholder, not necessarily a missing file.
+There are two intentional cases: an imported subject can be path-free because it has never been linked on this device, or a previously linked Markdown file can be temporarily missing. In the second case, the plugin retains the prior path binding and keeps the subject in the placeholder queue. Let Sync finish; if a file returns at that same path, the binding resolves automatically. You can also deliberately link another eligible note. Do not treat the placeholder as proof that the file was deleted on every device.
 
 - **Create empty note** creates a new local note where the profile permits.
 - **Create from template** copies a local template.
 - **Link existing note** resolves the portable identity to a chosen note.
 - **Keep placeholder** preserves imported organization without creating a file.
 
-If the subject was previously linked, check whether the note has not yet synced to this device. The plugin conservatively retains bindings for temporarily missing Markdown files.
+For several unresolved subjects, open Smart queues → **Imported placeholders needing notes** or run **Open imported placeholder queue**. Candidate discovery checks every eligible Markdown note in the vault, including unindexed notes and notes outside the active base's folder rules, for an exact normalized title or configured-ID match. Its total is the number of unresolved subjects with at least one candidate, not the number of matching notes. Candidates are suggestions for review only: the plugin does not auto-link one; choose the subject, inspect any existing portable owner, and explicitly create or link. **Resolve next imported placeholder…** starts with the next item.
+
+## Index row text, status, or actions overlap
+
+Update to 0.17.0 or newer. The desktop and compact row grids now reserve separate areas for title/metadata, membership badges, and the action button; a placeholder has one **No note** status instead of competing duplicate labels. If overlap remains, record the Obsidian leaf width, zoom/text scaling, theme and snippets, left-to-right or right-to-left direction, and a sanitized screenshot. Temporarily disable snippets and switch to the default theme to distinguish a plugin regression from an overriding style.
 
 ## Edit a Library on iPhone or iPad
 
@@ -67,7 +74,7 @@ Choose **Arrange**, tap the row's **…** button, then use Move under, Move to g
 
 To move a subheading itself rather than a record, tap that subheading's **…** button and use **Move under…** or **Outdent one level**. The move takes the subheading's records and everything nested inside it. If a destination you expect is missing, it is either inside the subheading you are moving or it would push the branch past the five-level limit; the plugin says so rather than showing an empty list.
 
-If controls clip or the software keyboard covers content, record the iPhone model, iOS version, Obsidian version, portrait/landscape orientation, Dynamic Type setting, and a sanitized screenshot. Check the current [physical-device evidence](release-evidence/0.10.0-iphone.md) before assuming the complete matrix passed.
+If controls clip or the software keyboard covers content, record the iPhone model, iOS version, Obsidian version, portrait/landscape orientation, Dynamic Type setting, and a sanitized screenshot. The [0.17.0 physical-device record](release-evidence/0.17.0-iphone.md) is waived and unverified; do not assume the complete matrix passed.
 
 ## Broad search stops after 300 visible results
 
@@ -80,6 +87,10 @@ Browse views also page record rows and structural sections in groups of 300. Use
 Place the JSON file anywhere inside the vault, then open **Export / import center… → Import** and select it through the in-vault picker.
 
 The file must be 10 MB or smaller and pass bounded-list and aggregate-reference validation. Same-vault recovery starts unselected and needs a separate exact-path confirmation.
+
+For a portable import, review **Predicted outcome** before applying. It reports additions, existing identity matches, incoming subjects still awaiting notes, the whole resulting placeholder queue, and how many unresolved placeholders have at least one exact eligible vault-wide candidate; it never links a candidate. If 100 or more selected incoming subjects are predicted to remain unresolved, check the additional large-import acknowledgement. After a successful import, choose **Open placeholder queue**, **Undo import**, or Close on the completion screen.
+
+If Workspace settings are selected with Index, a Library, Collections, or Study state, and those settings would change fields used to project records, the plugin deliberately rejects the combined operation. Import **Workspace settings** alone first, let Command Center refresh the vault, then reopen the import center and apply the subject-catalog sections. The same guard applies in multi-base portfolio review. No two-step import is required when those projection fields are unchanged or the portfolio destination is a new empty base.
 
 ## Nested subheadings do not appear on another device
 
@@ -126,6 +137,15 @@ The file is under the configured Exports folder (<code>Knowledge Base Command Ce
 
 Back up the vault and request support with sanitized version, timing, and Sync details.
 
+## A save says the automatic backup could not be refreshed
+
+Read the notice carefully because it distinguishes the commit boundary:
+
+- **The primary store was not written** means the prerequisite <code>data.json.bak</code> refresh or its Sync fence failed. The plugin attempted no primary or compensating write. Fix storage access, let Sync settle, then retry the original operation.
+- **The primary store was saved** means the organization edit committed, but the best-effort post-commit backup advance failed. Do not repeat the edit. The backup may be one commit behind; fix storage access before the next change and export a fresh private recovery.
+
+In both cases, a failed in-memory candidate is never backup authority. Do not replace a readable primary file with <code>data.json.bak</code> while the plugin is running.
+
 ## Import was rejected
 
 Common intentional rejection reasons include:
@@ -136,7 +156,8 @@ Common intentional rejection reasons include:
 - wrong source vault, base, or preset for recovery;
 - cross-preset recovery;
 - recovery from a losing provisional identity;
-- insufficient legacy unique-path matches; or
+- insufficient legacy unique-path matches;
+- a combined Workspace-settings and subject-catalog import whose Workspace fields would change record projection; or
 - inability to guarantee an Undo snapshot before mutation.
 
 Do not edit IDs or identity fields by hand to bypass these checks. Use a current Portable set for deliberate cross-vault transfer and private recovery only in its intended source vault.

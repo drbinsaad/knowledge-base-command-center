@@ -54,7 +54,7 @@ Removing or hiding a record affects only the active knowledge base. For a note s
 
 Generic bases migrated from pre-v15 data temporarily keep the old `primaryFolder` as a reviewable **legacy linked-folder source** so the pre-upgrade result set does not disappear. The Command Center and Settings keep a warning visible until you choose **Review…** or run **Review legacy index source…** from the Command palette. The review lists only real Markdown notes currently available on this device whose membership depends on that source alone. It initially selects all notes for preservation when they fit within the direct-membership limit; use the filter, **Clear all notes**, or individual checkboxes as needed. Before **Apply review & unlink** becomes available, confirm that Obsidian Sync has finished and the folder's Markdown contents are complete on this device. A missing non-root source blocks Apply, and zero local candidates is never treated as proof that every synced copy is empty. Apply makes selected notes direct members and removes the folder rule in one Undo-protected transaction. An unusually large source that cannot fit is left unselected and explains its capacity instead of truncating the choice. **Keep linked** records an intentional dynamic-folder choice and remains safe when a folder is temporarily unavailable. **Not now** changes nothing, and the warning remains. None of these actions edits, moves, renames, or deletes Markdown.
 
-Index rows show **Direct**, **Linked folder**, **Imported placeholder**, or **Protected source** so membership authority is visible. Compact panes use shorter equivalents while keeping the full explanation available to assistive technology.
+Index rows show **Direct**, **Linked folder**, **Imported placeholder**, or **Protected source** so membership authority is visible. Compact panes use shorter equivalents while keeping the full explanation available to assistive technology. Choose **Why this appears** from a record menu or inspector to see every authority that applies at once, including the exact linked sources, exclusion, primary Library, Collections, pin and Next state. Its Markdown path is labelled separately as storage location and never presented as a membership rule.
 
 The ENT preset protects canonical source classification and folder scope. It still permits personal visual organization where the profile allows it.
 
@@ -67,7 +67,8 @@ Open **Manage Index…** from the Command palette, Index header, or overflow men
 | **Indexed** | Search current members, assign a visual group in bulk where permitted, or remove active-base membership. |
 | **Available** | Add direct membership to eligible existing notes that are not already direct members. This includes notes currently supplied only by a linked folder, so you can make one durable before unlinking that folder. |
 | **Hidden** | Restore records removed from the active base, including protected ENT subjects. |
-| **Groups** | Create, reorder, rename, merge, or remove visual groups safely. |
+| **Why included** | Audit direct memberships, imported placeholders, protected-source members, hidden overrides, every exact linked folder and its availability, and location-only storage/creation folders. An inherited linked folder can open its review from here. |
+| **Index headings** | Create, reorder, rename, merge, or remove visual groups safely. |
 | **Diagnostics** | Inspect missing references, duplicate membership, broken visual parents, and orphaned group state, apply the established safe reference cleanup, or open the broader Taxonomy Health Center. |
 
 Index Manager changes plugin state only. It does not move, delete, or rewrite Markdown notes.
@@ -152,13 +153,14 @@ Use a record's menu or inspector to add it to a Collection. In Arrange mode, Col
 
 Depending on the profile and current organization, smart queues can surface:
 
+- imported placeholders needing notes, with exact local title or configured-ID candidate counts;
 - Inbox records;
 - a personal Next list;
 - pinned records;
 - ungrouped records; and
 - recently changed records.
 
-Queues are views over existing records and plugin state. They do not create duplicate notes.
+Queues are views over existing records and plugin state. They do not create duplicate notes. The placeholder queue is always first: choose a subject to open its deliberate create/link choices, or run **Resolve next imported placeholder…** to begin with the next item. Exact candidates are hints, not automatic links, and any existing portable owners are disclosed before a deliberate merge.
 
 ## Create notes
 
@@ -277,7 +279,13 @@ In a Generic base, a placeholder can:
 - link an existing note; or
 - remain unresolved.
 
-After linking, **Change linked note** and **Unlink note** preserve the portable identity and organization. Choosing a note already owned by another portable subject requires explicit confirmation before identities are merged.
+While the linked Markdown note is present, **Change linked note** and **Unlink note** preserve the portable identity and organization. If that file later disappears locally, the subject becomes an unresolved placeholder but retains its prior path binding. It stays in the queue, a file that later arrives at the same path resolves it automatically, and you may deliberately link another eligible note instead. Choosing a note already owned by another portable subject requires explicit confirmation before identities are merged.
+
+Open Smart queues → **Imported placeholders needing notes** or run **Open imported placeholder queue** for the complete active-base list. It separates Index, Library, and unplaced blueprint subjects. Candidate discovery scans every eligible Markdown note in the vault, including unindexed notes and notes outside the active base's storage or linked-folder rules, for an exact normalized title or configured-ID match. The count is unresolved subjects with at least one match, not the number of matching notes, and nothing is selected automatically. **Resolve next imported placeholder…** opens the next unresolved subject's existing guarded create/link actions.
+
+Before a single-base portable import, **Predicted outcome** simulates the production import against an isolated copy. It shows incoming additions, existing identity matches, selected subjects still awaiting a note, the whole post-import placeholder count by placement, and how many unresolved placeholders have at least one exact eligible vault-wide candidate. Nothing is linked during preview. A predicted import that leaves 100 or more selected subjects unresolved requires an extra acknowledgement; after import, use **Open placeholder queue**, **Undo import**, or Close from the completion screen.
+
+If **Workspace settings** are selected together with Index, any Library, Collections, or Study state and those settings would change a record-projection field, preview and Apply stop before mutation. Import Workspace settings alone, let Command Center refresh the vault, then reopen the center and import the subject-catalog sections. This rule applies to single-base and multi-base portfolio imports; the combined path remains available when the selected Workspace settings leave projection fields unchanged or the portfolio destination is a new empty base.
 
 For a protected clinical topic, the ENT preset substitutes **Create unverified proposal** for direct canonical creation and routes it to the Inbox. Other protected clinical kinds offer Link or Keep only.
 
@@ -343,7 +351,7 @@ A wide Obsidian leaf keeps the Index and inspector side by side. Compact or narr
 
 A saved view retains the current section and literal search query. Queries can contain a path if one was typed, so review saved views before including them in a portable export.
 
-Undo/Redo covers personal organization and guarded import changes. Named organization snapshots are base-local and restore plugin state, not Markdown note bodies.
+Undo/Redo covers personal organization and guarded import changes. Required Undo operations first stage an exact causal snapshot in the bounded version-4 device-local pending-Undo journal. A multi-base portfolio import stages the newest required Undo for every affected destination as one bounded causal batch. Pressing Undo or Redo separately stages the exact pre-transition history stacks and the inverse snapshot in a pending Undo/Redo transition journal. After a restart, a journal advances history only when the committed semantic revision, head, and payload fingerprint match; a portfolio batch resolves that proof independently for each destination. Otherwise required Undo is discarded or the user-invoked transition retains its exact pre-transition stacks. If the complete protected operation cannot fit within the shared 4 MiB device-local limit, it is refused before its primary mutation. Named organization snapshots are base-local and restore plugin state, not Markdown note bodies.
 
 For durable recovery, use a same-vault recovery export in addition to a complete vault backup. See [Portability and recovery](PORTABILITY_AND_RECOVERY.md).
 
@@ -353,7 +361,7 @@ Choose **Multi-base portfolio transfer…** to export several available knowledg
 
 During import, enable the sources you want, map each one to a new base or one distinct existing base, choose Merge or Replace per existing destination, and select the exact components and Libraries. **Build exact preview** shows base, heading, subject, Library, conflict, unavailable folder/template fallback, and will-not-change categories. Apply commits this exact precomputed plan without rematching. If the store, destination, active-base state, or Sync generation changes, rebuild the preview.
 
-Replace requires the displayed typed phrase. Before changing plugin data, the plugin saves a same-vault recovery package for every replacement destination; failure to write any recovery aborts all mutation. Cross-vault Replace also requires its own acknowledgement. No portfolio operation moves, rewrites, or deletes Markdown notes or attachments.
+Replace requires the displayed typed phrase. Before changing plugin data, the plugin saves a same-vault recovery package for every replacement destination; failure to write any recovery aborts all mutation. The plugin then stages every destination's required Undo snapshot together. If that exact batch cannot fit within the shared 4 MiB device-local history budget, the whole portfolio is rejected before the primary store write. Cross-vault Replace also requires its own acknowledgement. No portfolio operation moves, rewrites, or deletes Markdown notes or attachments.
 
 ## Sync and recovery center
 
@@ -376,11 +384,16 @@ Choose **Clear device-local data…** in this center, or run the command of the 
 
 ## Settings
 
-Configurable Generic-base settings include:
+Generic-base settings deliberately separate three concepts:
+
+- **Index membership** — direct-note behavior and explicit linked-folder rules that can make a note appear;
+- **Note storage and creation** — Inbox, default creation folder, templates, and creation defaults that control location or content but never enroll a note by themselves; and
+- **Portable blueprint and link progress** — imported subject identities, unresolved-link progress, and related blueprint behavior.
+
+Other configurable settings include:
 
 - Command Center name and subtitle;
 - Index, item, group, and Inbox labels;
-- explicit linked-folder Index rules, plus Inbox, default new-note storage, and templates folders;
 - ID, group, and parent metadata mappings;
 - default starting content and template;
 - optional per-Library folder, starting-content, and template profiles;
@@ -404,6 +417,8 @@ The ENT preset also exposes safety-badge display and optional advanced canonical
 - Open export / import center
 - Open multi-base portfolio transfer
 - Manage index…
+- Open imported placeholder queue
+- Resolve next imported placeholder…
 - Review legacy index source… (shown only while an upgraded Generic folder source still needs a choice)
 - Open taxonomy health center
 - Add or create…

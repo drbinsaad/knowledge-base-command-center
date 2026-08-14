@@ -1239,6 +1239,7 @@ test("an ENT custom-Library placeholder uses its profile while protected built-i
     getActiveKnowledgeBaseId: () => "base-a",
     getDataEpoch: () => 0,
     isClinicalMode: () => true,
+    isDataReadOnly: () => false,
     getLibrary: (id: string) => id === custom.id ? custom : BUILTIN_LIBRARY_DEFINITIONS.find((item) => item.id === id) ?? null,
     getEffectiveLibraryNoteProfile: () => ({
       folder: "Evidence",
@@ -1582,6 +1583,7 @@ test("Generic indexed non-topic records expose inspector and mobile arrange cont
     getActiveKnowledgeBaseId: () => "base-a",
     getDataEpoch: () => 0,
     isClinicalMode: () => false,
+    isDataReadOnly: () => false,
     canVisuallyMoveAcrossGroups: () => true,
     getLibrary: () => null,
   };
@@ -3545,7 +3547,7 @@ test("Settings Browse commits a folder selected from a pop-out window input real
   const tab = new EntCommandCenterSettingsTab(host.app as never, host as never);
   tab.update = () => undefined;
   const group = tab.getSettingDefinitions().find((definition) => (
-    "heading" in definition && definition.heading === "Folders and templates"
+    "heading" in definition && definition.heading === "Note storage and creation"
   ));
   assert.ok(group && "items" in group);
   const definition = group.items.find((item) => "name" in item && item.name === "Inbox folder");
@@ -3640,7 +3642,7 @@ test("attachment text settings use the buffered non-refresh save pipeline", () =
     requestedRefreshes.push(refresh);
   };
   const folders = tab.getSettingDefinitions().find((definition) => (
-    "heading" in definition && definition.heading === "Folders and templates"
+    "heading" in definition && definition.heading === "Note storage and creation"
   ));
   assert.ok(folders && "items" in folders);
 

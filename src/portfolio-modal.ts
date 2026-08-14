@@ -385,7 +385,7 @@ export class PortfolioTransferModal extends Modal {
       throw new Error("Choose at least one component for the portfolio.");
     }
     const now = new Date();
-    const bundle = this.plugin.createPortfolioExport(requests, now.toISOString());
+    const bundle = await this.plugin.createPortfolioExport(requests, now.toISOString());
     const serialized = serializePortfolioExport(bundle);
     const delivery = await deliverJsonExport(
       this.plugin,

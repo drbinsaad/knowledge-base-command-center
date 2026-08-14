@@ -411,6 +411,79 @@ test("moving a command-center leaf to a pop-out rebinds the pane observer", asyn
   assert.equal(migrationListenerRemoved, true);
 });
 
+test("wide record selection updates current state in place and preserves row focus", async () => {
+  const dom = createFakeDom();
+  installResizeObserver(dom.window);
+  const firstRecord = record("Knowledge Base/Airway.md", "Airway");
+  const secondRecord = record("Knowledge Base/Otology.md", "Otology");
+  const source = searchSource("base-focus", "Focus base", [firstRecord, secondRecord]);
+  source.data.settings.setupComplete = true;
+  source.data.curriculumVisual.orderByContainer["root:research"] = [firstRecord.path];
+  const view = createView(dom.window, [source]);
+  const content = dom.document.body.createDiv({ cls: "view-content" });
+  content.setBoundingClientRect({ width: 1200 });
+  (view as unknown as { contentEl: HTMLElement }).contentEl = asHtmlElement(content);
+
+  await view.reload();
+
+  const titles = content.querySelectorAll(".ent-cc-subject-title");
+  const first = titles.find((title) => title.textContent === firstRecord.title);
+  const second = titles.find((title) => title.textContent === secondRecord.title);
+  assert.ok(first && second);
+  const firstRow = first.parentElement;
+  const secondRow = second.parentElement;
+  assert.ok(firstRow && secondRow);
+  first.focus();
+  first.click();
+
+  assert.equal(source.data.selectedPath, firstRecord.path);
+  assert.equal(content.contains(first), true, "desktop selection must not replace the focused row DOM");
+  assert.equal(dom.document.activeElement, first);
+  assert.equal(firstRow.hasClass("is-selected"), true);
+  assert.equal(first.getAttribute("aria-current"), "true");
+  assert.equal(secondRow.hasClass("is-selected"), false);
+  assert.equal(second.getAttribute("aria-current"), null);
+  const tree = content.querySelector(".ent-cc-tree-panel");
+  assert.ok(tree);
+  const shortcutHelpId = tree.getAttribute("aria-describedby");
+  assert.ok(shortcutHelpId);
+  assert.match(content.querySelector(`[id="${shortcutHelpId}"]`)?.textContent ?? "", /Space selects.*M adds.*P pins/u);
+  assert.equal(first.getAttribute("aria-keyshortcuts"), "Enter Space M P");
+  assert.doesNotMatch(first.getAttribute("aria-label") ?? "", /Space selects|P pins/u);
+  const visualStatus = firstRow.querySelector(".ent-cc-visual-badge");
+  assert.equal(visualStatus?.getAttribute("role"), "img");
+  assert.equal(visualStatus?.getAttribute("aria-label"), "Custom visual placement");
+});
+
+test("read-only organization disables write-only controls before activation", async () => {
+  const dom = createFakeDom();
+  installResizeObserver(dom.window);
+  const source = searchSource("base-read-only", "Protected base", [record("Knowledge Base/Airway.md", "Airway")]);
+  source.data.settings.setupComplete = true;
+  const view = createView(dom.window, [source]) as unknown as EntVaultCommandCenterView & {
+    plugin: { isDataReadOnly(): boolean };
+  };
+  view.plugin.isDataReadOnly = () => true;
+  const content = dom.document.body.createDiv({ cls: "view-content" });
+  content.setBoundingClientRect({ width: 1200 });
+  view.contentEl = asHtmlElement(content);
+
+  await view.reload();
+
+  const quickEntry = content.querySelector(".ent-cc-quick-entry-button");
+  const add = content.querySelector(".ent-cc-header-actions .ent-cc-add-button");
+  const arrange = content.querySelector(".ent-cc-header-actions button[aria-pressed]");
+  const searchButtons = content.querySelectorAll(".ent-cc-search-row button");
+  const saveSearch = searchButtons.find((button) => button.getAttribute("title")?.startsWith("Save this search"));
+  const bulkCollection = searchButtons.find((button) => button.getAttribute("title")?.includes("search results"));
+  for (const control of [quickEntry, add, arrange, saveSearch, bulkCollection]) {
+    assert.ok(control);
+    assert.equal(control.disabled, true);
+    assert.match(control.getAttribute("title") ?? "", /read-only/u);
+  }
+  assert.equal(arrange?.getAttribute("aria-pressed"), "false");
+});
+
 test("real mobile search focus applies the keyboard viewport and resets every scroll owner", () => {
   const dom = createFakeDom();
   dom.window.innerHeight = 844;
@@ -484,6 +557,30 @@ test("real mobile search follows iOS visual-viewport panning below the shell top
   } finally {
     mobilePlatform.isMobile = previousMobile;
   }
+});
+
+test("clinical filter chips expose and update pressed state without rebuilding the focused control", () => {
+  const dom = createFakeDom();
+  const source = searchSource("base-filters", "Filter base", []);
+  source.data.settings.workspaceMode = "ent-clinical";
+  const view = createView(dom.window, [source]) as unknown as MobileViewHarness & {
+    plugin: { isClinicalMode(): boolean };
+  };
+  const content = dom.document.body.createDiv({ cls: "view-content" });
+  const shell = content.createDiv({ cls: "ent-cc-shell" });
+  view.contentEl = asHtmlElement(content);
+  view.plugin.isClinicalMode = () => true;
+
+  view.renderSearch(asHtmlElement(shell));
+
+  const chip = shell.querySelector(".ent-cc-filter-chip");
+  assert.ok(chip);
+  assert.equal(chip.getAttribute("aria-pressed"), "false");
+  chip.focus();
+  chip.click();
+  assert.equal(chip.getAttribute("aria-pressed"), "true");
+  assert.equal(chip.hasClass("is-active"), true);
+  assert.equal(dom.document.activeElement, chip);
 });
 
 test("real mobile reload renders a non-empty global search route end to end", async () => {
@@ -692,6 +789,37 @@ test("stacked-pane CSS responds to leaf classes without viewport-relative view s
     assert.doesNotMatch(declarations, /\b(?:left|right|padding-left|padding-right)\s*:/);
   }
   assert.doesNotMatch(styles, /(?:42|58)vw/);
+});
+
+test("row CSS reserves intrinsic status width and keeps compact provenance out of the action column", () => {
+  const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+  assert.match(
+    styles,
+    /\.ent-cc-row\s*\{[^}]*grid-template-columns:\s*22px 22px minmax\(0, 1fr\) minmax\(80px, 118px\) minmax\(52px, max-content\) 30px;/s,
+  );
+  assert.match(
+    styles,
+    /\.ent-cc-row-badges\s*\{[^}]*justify-self:\s*end;[^}]*flex-wrap:\s*nowrap;[^}]*min-width:\s*max-content;/s,
+  );
+  assert.match(styles, /\.ent-cc-placeholder-badge\s*\{[^}]*display:\s*none;/s);
+  assert.match(
+    styles,
+    /\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-placeholder-badge\s*\{\s*display:\s*inline-flex;/s,
+  );
+  assert.match(
+    styles,
+    /\.ent-cc-subject-id\.has-membership-provenance,\s*\.ent-cc-row-count\s*\{\s*display:\s*none;/s,
+  );
+  assert.match(
+    styles,
+    /\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-subject-id\.has-membership-provenance,\s*\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-row-count\s*\{\s*display:\s*none;/s,
+  );
+  assert.match(styles, /--ent-cc-amber:\s*var\(--text-warning, var\(--color-orange, #8a5a00\)\);/);
+  assert.match(styles, /\.theme-dark \.ent-cc-view\s*\{\s*--ent-cc-amber:\s*var\(--text-warning, var\(--color-orange, #f0b85a\)\);/s);
+  assert.doesNotMatch(
+    styles,
+    /(?:^|[;{]\s*)(?:left|right|margin-left|margin-right|padding-left|padding-right|border-left|border-right)\s*:/m,
+  );
 });
 
 test("Library creation-profile sheets remain keyboard-aware and touch-sized on iPhone", () => {
@@ -1185,9 +1313,9 @@ test("a depth-three nested subheading keeps 44px menu-driven controls on mobile"
 
   const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
   assert.match(styles, /\.ent-cc-view \.ent-cc-heading-row button\.ent-cc-row-title,\s*\.ent-cc-view \.ent-cc-subheading-row button\.ent-cc-row-title\s*\{\s*min-height:\s*44px;/, "the 44px rule still covers every subheading row, nested or not");
-  assert.match(styles, /\.ent-cc-subheading-row\s*\{[^{}]*padding-left:\s*calc\(42px \+ \(var\(--ent-cc-depth, 0\) \* 22px\)\);/s, "nested subheading rows indent through the shared depth variable");
-  assert.match(styles, /\.ent-cc-level-3\s*\{\s*padding-left:\s*102px;/, "record rows gain indentation levels beyond two");
-  assert.match(styles, /\.ent-cc-level-5\s*\{\s*padding-left:\s*154px;/, "record indentation reaches the depth cap");
+  assert.match(styles, /\.ent-cc-subheading-row\s*\{[^{}]*padding-inline-start:\s*calc\(42px \+ \(var\(--ent-cc-depth, 0\) \* 22px\)\);/s, "nested subheading rows indent through the shared depth variable");
+  assert.match(styles, /\.ent-cc-level-3\s*\{\s*padding-inline-start:\s*102px;/, "record rows gain indentation levels beyond two");
+  assert.match(styles, /\.ent-cc-level-5\s*\{\s*padding-inline-start:\s*154px;/, "record indentation reaches the depth cap");
 });
 
 test("touch subheading row menus offer the reparent actions that desktop reaches by dragging", () => {

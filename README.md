@@ -100,11 +100,11 @@ The Index starts empty in a new Generic base. **Add existing note to Index** rec
 
 Generic bases loaded from pre-v15 plugin data retain their former `primaryFolder` behavior temporarily as one reviewable legacy linked-folder source. This compatibility migration prevents existing entries from disappearing silently, but the Command Center and Settings keep a warning visible until you make an explicit choice. **Review…** lists the real notes currently available on this device and supplied only by that folder: keep selected notes as durable direct members and unlink the folder in one Undo-protected action, intentionally **Keep linked** for current and future descendants, or choose **Not now**. Apply stays blocked if a non-root source folder is unavailable, and every unlink requires you to confirm that Obsidian Sync has finished and the folder contents are complete on this device; a locally empty list alone is never treated as proof that every synced copy is empty. Unlinking removes only membership supplied by the rule; no Markdown file is moved, deleted, or rewritten.
 
-Index rows label why they belong: **Direct**, **Linked folder**, **Imported placeholder**, or **Protected source**. These labels describe plugin membership only; they do not alter the note or an Obsidian `.base` query.
+Index rows label why they belong: **Direct**, **Linked folder**, **Imported placeholder**, or **Protected source**. Open a row's **Why this appears** action for every applicable authority plus its separately labelled storage location. **Manage Index… → Why included** gives the same distinction across the whole knowledge base, including linked-folder details, hidden overrides, and location-only creation folders. These read-only explanations do not alter the note or an Obsidian `.base` query.
 
 Choose **Arrange** to build a separate visual hierarchy — group, nest, reorder, indent, pin — that changes only plugin-owned organization.
 
-**Manage Index…** provides Indexed, Available, Hidden, Groups, and Diagnostics views for bulk membership work and safe integrity repair. Removing or hiding membership never deletes the Markdown file; it can be restored from the Hidden tab.
+**Manage Index…** provides Indexed, Available, Hidden, Why included, Index headings, and Diagnostics views for membership review, bulk work, and safe integrity repair. Removing or hiding membership never deletes the Markdown file; it can be restored from the Hidden tab.
 
 ### Collections with nested subheadings
 
@@ -120,7 +120,9 @@ Under **Settings → Libraries → Library creation profiles**, each Library can
 
 ### Smart queues
 
-Depending on profile and current organization, smart queues surface your Inbox, a manually curated Next list, pinned records, ungrouped records, and recently changed records. Queues are views over records and plugin state — they never create duplicate notes.
+Smart queues begin with **Imported placeholders needing notes**, which lists every unresolved portable subject, including one whose previously linked note is temporarily missing. Candidate discovery checks every eligible Markdown note in the vault—including unindexed notes and notes outside the active base's storage or linked-folder rules—for an exact normalized title or configured-ID match. Its count is the number of unresolved subjects with at least one candidate, not the raw number of matching notes. Choose a subject—or run **Resolve next imported placeholder…**—to create or link deliberately. A candidate is never linked automatically, and an existing portable owner is disclosed before identities can be merged. A missing previously linked note keeps its prior path binding, so arrival at that same path can resolve it automatically after Sync.
+
+Depending on profile and current organization, the remaining smart queues surface your Inbox, a manually curated Next list, pinned records, ungrouped records, and recently changed records. Queues are views over records and plugin state — they never create duplicate notes.
 
 ### Search across every knowledge base
 
@@ -162,9 +164,13 @@ The command copies one explicitly selected file, up to 100 MB, into the vault. I
 
 Personal organization supports Undo/Redo and named snapshots. Portable exports carry workspace settings, a path-free Index blueprint, selected Libraries, Collections, study state, and saved views — never note bodies or attachment binaries.
 
+Before a single-base portable import, **Predicted outcome** shows new subjects, existing identity matches, selected subjects that will still await a note, the whole post-import placeholder queue by placement, and how many unresolved placeholders have at least one exact eligible vault-wide candidate. No candidate is auto-linked. A predicted import of 100 or more unresolved incoming subjects needs an additional acknowledgement. The completion screen can open the placeholder queue or undo the import immediately.
+
+If **Workspace settings** are selected with Index, Libraries, Collections, or Study state and those settings would change fields used to project records, the combined import is blocked before mutation. Import Workspace settings by themselves first, let Command Center refresh the vault, then reopen the center and import the subject-catalog sections. A combined import remains allowed when the selected Workspace settings do not change those projection fields.
+
 **Multi-base portfolio transfer** bundles up to 50 independent portable packages behind one bounded manifest. Map each source to a new or existing compatible base, choose Merge or Replace per destination, select components per source, and inspect an exact immutable change plan before applying it. Replace requires a displayed typed phrase and writes a same-vault recovery for every affected destination before the atomic mutation. The preview reports base, heading, subject, Library, conflict, folder/template fallback, and explicit will-not-change categories.
 
-Portable packages created by version 0.12.1 and earlier use format version 4. Packages created by version 0.13.0 use format version 5, which adds the nested subheading layout. Older packages still import — the current build reads versions 1 through 4 — while an older plugin build refuses a newer package rather than guessing destructively, so update every syncing device before applying a new export.
+Portable packages created by version 0.12.1 and earlier use format version 4. Packages created by version 0.13.0 and later use format version 5, which adds the nested subheading layout. Older packages still import — the current build reads versions 1 through 5 — while an older plugin build refuses a newer package rather than guessing destructively, so update every syncing device before applying a new export.
 
 Read [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md) before importing, replacing, or restoring.
 
@@ -198,7 +204,7 @@ The manifest is mobile-compatible and the plugin ships mobile layouts throughout
 
 The bundle is built to a 2018 JavaScript baseline so it can run on older mobile web views, and that baseline is enforced rather than assumed: the compiler is pinned to exactly that language level, so using a newer built-in method fails the build instead of shipping unpolyfilled. Version 0.13.1 fixed four such methods that had been reaching devices — the most serious ran while classifying note paths and needed iOS Safari 15.4 or newer.
 
-Physical-device claims are kept separate from automated coverage: see the [0.10.0 iPhone evidence note](docs/release-evidence/0.10.0-iphone.md) and the [manual iPhone release checklist](docs/manual-iphone-release-checklist.md) rather than assuming any release checklist passed.
+Physical-device claims are kept separate from automated coverage: see the completed-but-partial [0.10.0 iPhone evidence note](docs/release-evidence/0.10.0-iphone.md), the explicitly unverified [0.17.0 waiver record](docs/release-evidence/0.17.0-iphone.md), and the [manual iPhone release checklist](docs/manual-iphone-release-checklist.md) rather than assuming any release checklist passed.
 
 ### Right-to-left and bidirectional text
 
@@ -290,7 +296,7 @@ The plugin is local-first by design and makes no network request of any kind.
 
 **Automatic protection**
 
-- Every save refreshes a parseable twin of `data.json` first; startup restores from it when the primary file cannot be parsed, keeping the unreadable file beside it for inspection.
+- Before a primary save, `data.json.bak` is refreshed from known-good previous committed authority. If that prerequisite backup or its Sync fence fails, the primary and any compensating write are not attempted and the operation can be retried after the underlying problem is fixed. After a successful primary commit, the plugin tries to advance the backup to the new authority; a post-commit backup failure leaves the primary committed and may leave `data.json.bak` one commit behind. Startup can restore a parseable backup when the primary cannot be parsed, keeping the unreadable file beside it for inspection. A failed candidate never becomes backup authority.
 - Divergent concurrent edits are written to a private in-vault conflict rescue before adoption, and the plugin fails closed if that rescue cannot be created.
 - Newer or unrecognized plugin data opens read-only rather than being overwritten by an older build.
 
@@ -315,7 +321,7 @@ Follow the complete [backup and restore procedure](docs/PORTABILITY_AND_RECOVERY
 | --- | --- |
 | Obsidian | 1.13.0 or newer |
 | Desktop | Uses Obsidian-compatible APIs; no Electron- or Node-only runtime dependency |
-| iPhone and iPad | Supported through touch menus and mobile layouts; consult the current [physical-device evidence](docs/release-evidence/0.10.0-iphone.md) rather than assuming every release checklist item passed |
+| iPhone and iPad | Supported through touch menus and mobile layouts; the [0.17.0 physical-device record](docs/release-evidence/0.17.0-iphone.md) is explicitly waived and unverified, so do not assume the release checklist passed |
 | Android | The manifest is mobile-compatible, but this repository does not currently document a complete physical-Android test pass |
 | Network | No plugin network requests, analytics, telemetry, accounts, advertising, or payments |
 
@@ -331,12 +337,13 @@ Follow the complete [backup and restore procedure](docs/PORTABILITY_AND_RECOVERY
 - Desktop offers drag-and-drop; touch devices use labelled row action menus.
 - The bundle targets a 2018 JavaScript baseline for older mobile web views. Newer built-in methods are rejected at build time rather than polyfilled, so a feature needing one has to be written differently or the baseline has to be raised deliberately.
 - Same-vault recovery is intentionally not portable between vaults.
-- Real-iPhone keyboard, safe-area, Dynamic Type, landscape, import/export, and destructive recovery behavior needs explicit physical-device evidence. Automated DOM checks are not a substitute, and the 0.12.0 physical-iPhone matrix was explicitly waived by the maintainer rather than executed.
+- Real-iPhone keyboard, safe-area, Dynamic Type, landscape, import/export, and destructive recovery behavior needs explicit physical-device evidence. Automated DOM checks are not a substitute, and the 0.17.0 physical-iPhone matrix was explicitly waived by the maintainer rather than executed; it is unverified, not a Pass.
 
 ## Troubleshooting
 
 - **Visual movement on iPhone:** choose **Arrange**, open a row's **…** menu, then use Move under, Indent, Outdent, Move up/down, or Make top-level. To move a subheading itself, use **Move under…** or **Outdent one level** on that subheading's **…** menu.
-- **Missing note or unexpected Library:** check the active knowledge base, Index Manager membership, hidden records, and the record's primary Index/Library section.
+- **Missing or unexpected Index note:** open the row's **Why this appears** action or **Manage Index… → Why included** before changing anything. Storage location and membership authority are reported separately.
+- **Unresolved imported subject:** open Smart queues → **Imported placeholders needing notes**, or run **Resolve next imported placeholder…**. Review exact candidates manually; the plugin never auto-links one.
 - **Read-only settings or salvage mode:** preserve `data.json` and do not force a downgrade.
 
 Every other symptom, including import refusals and Sync protection reasons, is covered in [Troubleshooting](docs/TROUBLESHOOTING.md).
@@ -349,7 +356,7 @@ Every other symptom, including import refusals and Sync protection reasons, is c
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Apple Shortcuts guide](docs/APPLE_SHORTCUT.md)
 - [Starter templates](templates/README.md)
-- [0.10.0 iPhone evidence](docs/release-evidence/0.10.0-iphone.md) · [0.12.0 iPhone evidence](docs/release-evidence/0.12.0-iphone.md)
+- [0.10.0 iPhone evidence](docs/release-evidence/0.10.0-iphone.md) · [0.12.0 iPhone evidence](docs/release-evidence/0.12.0-iphone.md) · [0.17.0 iPhone waiver record](docs/release-evidence/0.17.0-iphone.md)
 - [Manual real-iPhone release checklist](docs/manual-iphone-release-checklist.md)
 - [Changelog](CHANGELOG.md)
 

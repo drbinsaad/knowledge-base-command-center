@@ -21,15 +21,18 @@ Install dependencies:
 
 ~~~bash
 npm ci
+npm run test:layout:install
 ~~~
+
+The second command installs the local Chromium binary used only by the rendered-layout regression suite. CI installs it automatically.
 
 Run the complete local gate:
 
 ~~~bash
-npm run review
+npm run check
 ~~~
 
-The review task runs strict typechecking, zero-warning lint and JSON validation, unit and rendered-DOM tests, a production build, Community-oriented static checks, and release verification.
+The check task runs strict typechecking, zero-warning lint and JSON validation, automatically discovered runtime tests with core/UI coverage thresholds, the large-vault performance budget, a production build and bundle-size budget, Community-oriented static checks, release verification, and real-Chromium row-geometry tests.
 
 ## Repository map
 
@@ -41,7 +44,7 @@ The review task runs strict typechecking, zero-warning lint and JSON validation,
 - <code>src/library-modal.ts</code>: Library creation and lifecycle.
 - <code>src/portability-modal.ts</code> and <code>src/portability.ts</code>: export, import, validation, and recovery.
 - <code>src/model.ts</code> and <code>src/store-merge.ts</code>: schemas, migration, normalization, and Sync reconciliation.
-- <code>tests/</code>: model, lifecycle, rendered UI, mobile DOM, release, and store-merge coverage.
+- <code>tests/</code>: model, lifecycle, rendered UI, real-browser layout, mobile DOM, release, performance, and store-merge coverage.
 - <code>docs/</code>: user guidance, release evidence, and privacy-sensitive operating procedures.
 
 ## Non-negotiable boundaries
