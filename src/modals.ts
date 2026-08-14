@@ -3,6 +3,7 @@ import type { DropdownComponent, TextComponent, ToggleComponent } from "obsidian
 import {
   canonicalPath,
   childSubheadings,
+  DEFAULT_EXPORTS_FOLDER,
   DOMAIN_DEFINITIONS,
   errorMessage,
   expectedParentCurriculumId,
@@ -956,6 +957,32 @@ export interface WorkspaceSetupValue {
   templatesFolder: string;
   defaultNewNoteMode: NewNoteMode;
   defaultTemplatePath: string;
+  exportsFolder: string;
+}
+
+/**
+ * Nest every plugin folder under one parent, keeping each folder's own leaf
+ * name (the Exports folder gets the short leaf "Exports" instead of its long
+ * default). Pure so the wizard's Apply button is directly testable.
+ */
+export function nestSetupFoldersUnderHome(value: WorkspaceSetupValue, home: string): WorkspaceSetupValue {
+  const cleanHome = home.trim().replace(/^\/+|\/+$/gu, "");
+  if (!cleanHome) return value;
+  const nest = (current: string, fallbackLeaf: string): string => {
+    const leaf = current.trim().replace(/^\/+|\/+$/gu, "").split("/").pop() || fallbackLeaf;
+    return `${cleanHome}/${leaf}`;
+  };
+  return {
+    ...value,
+    primaryFolder: nest(value.primaryFolder, "Notes"),
+    proposalFolder: nest(value.proposalFolder, "Inbox"),
+    defaultNoteFolder: nest(value.defaultNoteFolder, "Notes"),
+    templatesFolder: value.templatesFolder.trim() ? nest(value.templatesFolder, "Templates") : value.templatesFolder,
+    exportsFolder: `${cleanHome}/Exports`,
+    // A template file path outside the new templates folder would fail
+    // validation; clear it so the picker is re-run against the new folder.
+    defaultTemplatePath: "",
+  };
 }
 
 /**
@@ -963,6 +990,12 @@ export interface WorkspaceSetupValue {
  * would classify to no record at all. Wording mirrors the Settings tab's Inbox
  * folder validator ("Inbox" is this plugin's proper name for that tab).
  */
+/**
+ * Hoisted because obsidianmd/ui/sentence-case would rewrite the folder
+ * examples (KB/Inbox, KB/Exports) when the literal sits at a UI call site.
+ */
+export const HOME_FOLDER_FIELD_DESCRIPTION = "Type a parent folder and press Apply: every plugin folder below nests under it — for example KB/Inbox, KB/Templates, and KB/Exports. Each folder stays editable afterwards.";
+
 export const INBOX_FOLDER_REQUIRED_MESSAGE = "Choose an Inbox folder. Without one, notes aimed at the Inbox would not appear anywhere in this plugin.";
 
 /**
@@ -1004,6 +1037,7 @@ export class WorkspaceSetupModal extends Modal {
       templatesFolder: initial.templatesFolder,
       defaultNewNoteMode: initial.defaultNewNoteMode,
       defaultTemplatePath: initial.defaultTemplatePath,
+      exportsFolder: initial.exportsFolder,
     };
   }
 
@@ -1026,6 +1060,23 @@ export class WorkspaceSetupModal extends Modal {
     textField("Item plural", "For example: notes, projects, papers.", "itemPlural", "notes");
     textField("Group name", "For example: Category, Area, Course, or Department.", "groupLabel", "Group");
     const folderExists = (path: string): boolean => this.app.vault.getAbstractFileByPath(normalizePath(path)) instanceof TFolder;
+    let homeFolder = "";
+    new Setting(this.contentEl)
+      .setName("Keep everything in one folder (optional)")
+      .setDesc(HOME_FOLDER_FIELD_DESCRIPTION)
+      .addText((text) => {
+        text.setPlaceholder("KB").onChange((value) => { homeFolder = value; });
+        text.inputEl.setAttribute("aria-label", "Home folder for all plugin folders");
+      })
+      .addButton((button) => {
+        button.setButtonText("Apply").onClick(() => {
+          if (!homeFolder.trim()) return;
+          this.value = nestSetupFoldersUnderHome(this.value, homeFolder);
+          // Re-render so every folder field shows its nested value.
+          this.onOpen();
+        });
+        button.buttonEl.setAttribute("aria-label", "Apply the home folder to every plugin folder");
+      });
     const folderField = (
       name: string,
       description: string,
@@ -1054,6 +1105,7 @@ export class WorkspaceSetupModal extends Modal {
     textField("Group property", "Falls back to the first subfolder when absent.", "groupProperty", "category");
     textField("Parent property", "Optional wikilink/title used for default nesting.", "parentProperty", "parent");
     textField("Templates folder", "Leave empty to allow any Markdown note as a template.", "templatesFolder", "Templates");
+    textField("Exports folder", "JSON backups, portable exports, and rescue files are written here.", "exportsFolder", DEFAULT_EXPORTS_FOLDER);
 
     new Setting(this.contentEl)
       .setName("Default starting content")
@@ -1094,11 +1146,12 @@ export class WorkspaceSetupModal extends Modal {
       if (!this.value[key]) { this.errorEl?.setText("Name and item labels cannot be empty."); return; }
     }
     this.value.workspaceSubtitle = this.value.workspaceSubtitle.trim();
-    for (const key of ["primaryFolder", "proposalFolder", "defaultNoteFolder", "templatesFolder"] as const) this.value[key] = this.value[key].trim().replace(/^\/+|\/+$/g, "");
+    for (const key of ["primaryFolder", "proposalFolder", "defaultNoteFolder", "templatesFolder", "exportsFolder"] as const) this.value[key] = this.value[key].trim().replace(/^\/+|\/+$/g, "");
     if (!this.value.proposalFolder) {
       this.errorEl?.setText(INBOX_FOLDER_REQUIRED_MESSAGE);
       return;
     }
+    if (!this.value.exportsFolder) this.value.exportsFolder = DEFAULT_EXPORTS_FOLDER;
     for (const key of ["idProperty", "groupProperty", "parentProperty"] as const) this.value[key] = this.value[key].trim();
     this.value.defaultTemplatePath = this.value.defaultTemplatePath.trim().replace(/^\/+/, "");
     if (this.value.defaultNewNoteMode === "template" && !this.value.defaultTemplatePath) {

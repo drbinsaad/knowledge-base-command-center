@@ -2153,7 +2153,7 @@ export class EntVaultCommandCenterView extends ItemView {
     new WorkspaceSetupModal(this.app, settings, async (value) => {
       if (!ownsBase()) return;
       this.plugin.assertDataWritable();
-      for (const folder of [value.primaryFolder, value.defaultNoteFolder, value.templatesFolder, value.proposalFolder]) {
+      for (const folder of [value.primaryFolder, value.defaultNoteFolder, value.templatesFolder, value.proposalFolder, value.exportsFolder]) {
         const error = validateWritableFolderPath(folder, this.app.vault.configDir);
         if (error) throw new Error(error);
       }

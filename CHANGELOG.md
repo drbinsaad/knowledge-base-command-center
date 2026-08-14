@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.15.0
+
+### Added
+
+- The **Exports folder** is now a setting. JSON backups, portable exports on mobile, and sync-conflict rescues previously always went to a fixed top-level `Knowledge Base Command Center Exports` folder; that stays the default, but it can now live anywhere — for example `KB/Exports`. Existing export files are not moved, and like every plugin folder it follows vault renames automatically.
+- The setup wizard gains **"Keep everything in one folder"**: type one parent folder and press Apply, and every plugin folder nests under it — `KB/Inbox`, `KB/Knowledge Base`, `KB/Templates`, `KB/Exports` — keeping each folder's own name. Every field stays editable afterwards, so it is a starting point, not a constraint. With this, the plugin can run entirely inside a single folder of your vault instead of claiming several top-level folders.
+
 ## 0.14.2
 
 ### Added

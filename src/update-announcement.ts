@@ -135,6 +135,17 @@ export const UPDATE_ANNOUNCEMENT_0_14_2: UpdateAnnouncement = {
   releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.14.2",
 };
 
+export const UPDATE_ANNOUNCEMENT_0_15_0: UpdateAnnouncement = {
+  version: "0.15.0",
+  title: "What’s new in Knowledge Base Command Center 0.15.0",
+  intro: "The plugin can now live entirely inside one folder of your vault.",
+  highlights: [
+    "The Exports folder — JSON backups, portable exports, and rescue files — is now a setting instead of a fixed top-level folder. The default is unchanged, and existing files are not moved.",
+    "The setup wizard gains “Keep everything in one folder”: type one parent and every plugin folder nests under it, such as KB/Inbox and KB/Exports. Every folder stays editable afterwards.",
+  ],
+  releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.15.0",
+};
+
 const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_12_0.version, UPDATE_ANNOUNCEMENT_0_12_0],
   [UPDATE_ANNOUNCEMENT_0_12_1.version, UPDATE_ANNOUNCEMENT_0_12_1],
@@ -145,6 +156,7 @@ const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_14_0.version, UPDATE_ANNOUNCEMENT_0_14_0],
   [UPDATE_ANNOUNCEMENT_0_14_1.version, UPDATE_ANNOUNCEMENT_0_14_1],
   [UPDATE_ANNOUNCEMENT_0_14_2.version, UPDATE_ANNOUNCEMENT_0_14_2],
+  [UPDATE_ANNOUNCEMENT_0_15_0.version, UPDATE_ANNOUNCEMENT_0_15_0],
 ]);
 
 function parseSemanticVersion(value: string): ParsedSemanticVersion | null {

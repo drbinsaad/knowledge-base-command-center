@@ -10,6 +10,7 @@ export const PROCEDURE_ROOT = "04 Procedures/";
 export const MEDICATION_ROOT = "06 Clinical Tools/Medications/";
 export const SYNDROME_ROOT = "06 Clinical Tools/Syndromes/";
 export const DEFAULT_PROPOSAL_FOLDER = "01 Inbox/ENT Topic Proposals";
+export const DEFAULT_EXPORTS_FOLDER = "Knowledge Base Command Center Exports";
 export const DATA_VERSION = 14;
 export const STORE_VERSION = 15;
 export const MIN_RECOGNIZED_STORE_VERSION = 11;
@@ -406,6 +407,8 @@ export interface PluginSettings {
   libraryNoteProfiles: LibraryNoteProfiles;
   attachmentStorageMode: AttachmentStorageMode;
   attachmentFolder: string;
+  /** Vault folder receiving JSON backups, mobile exports, and conflict rescues. */
+  exportsFolder: string;
   attachmentInsertionMode: AttachmentInsertionMode;
   attachmentMarker: string;
   attachmentHeading: string;
@@ -527,6 +530,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   libraryNoteProfiles: {},
   attachmentStorageMode: "obsidian",
   attachmentFolder: "Attachments",
+  exportsFolder: DEFAULT_EXPORTS_FOLDER,
   attachmentInsertionMode: "cursor",
   attachmentMarker: "<!-- kbcc:attachments -->",
   attachmentHeading: "Attachments",
@@ -1879,6 +1883,7 @@ const FOLDER_PATH_SETTING_KEYS = [
   "defaultNoteFolder",
   "defaultTemplatePath",
   "attachmentFolder",
+  "exportsFolder",
 ] as const satisfies ReadonlyArray<keyof PluginSettings>;
 
 interface FolderDerivedGroupState {
@@ -2902,6 +2907,7 @@ function cleanSettings(input: unknown, legacyEnt = false): PluginSettings {
       ? settings.attachmentStorageMode
       : base.attachmentStorageMode,
     attachmentFolder: asText(settings.attachmentFolder, base.attachmentFolder).replace(/^\/+|\/+$/g, ""),
+    exportsFolder: asText(settings.exportsFolder, base.exportsFolder).replace(/^\/+|\/+$/g, "") || base.exportsFolder,
     attachmentInsertionMode: isAttachmentInsertionMode(settings.attachmentInsertionMode)
       ? settings.attachmentInsertionMode
       : base.attachmentInsertionMode,
@@ -2937,7 +2943,7 @@ export function enforceStoredTextBounds(data: PluginData): void {
   for (const key of [
     "workspaceName", "workspaceSubtitle", "indexLabel", "itemSingular", "itemPlural", "groupLabel",
     "primaryFolder", "inboxLabel", "idProperty", "groupProperty", "parentProperty", "templatesFolder",
-    "defaultNoteFolder", "defaultTemplatePath", "attachmentFolder", "attachmentMarker",
+    "defaultNoteFolder", "defaultTemplatePath", "attachmentFolder", "exportsFolder", "attachmentMarker",
     "attachmentHeading", "proposalFolder",
   ] as const) settings[key] = clampStoredText(settings[key]);
   for (const profile of Object.values(settings.libraryNoteProfiles)) {
@@ -4885,6 +4891,7 @@ function validateLoadedSettingsText(input: unknown, label: string, budget: LoadT
     "defaultTemplatePath",
     "attachmentStorageMode",
     "attachmentFolder",
+    "exportsFolder",
     "attachmentInsertionMode",
     "attachmentMarker",
     "attachmentHeading",

@@ -116,7 +116,7 @@ Desktop uses the operating system download and file picker.
 
 The plugin itself does not read or write outside the vault. On desktop, the operating-system surfaces place files only where the user chooses.
 
-On iPhone and iPad, Export writes JSON under <code>Knowledge Base Command Center Exports/</code> inside the vault so it can sync or be shared through Files. Import uses an in-vault JSON picker and displays the selected vault path during review.
+On iPhone and iPad, Export writes JSON into the configured Exports folder inside the vault (<code>Knowledge Base Command Center Exports/</code> by default; Settings → Exports folder) so it can sync or be shared through Files. Import uses an in-vault JSON picker and displays the selected vault path during review.
 
 Single-base import and export enforce a 10 MB ceiling plus per-list and aggregate-reference limits. A portfolio is limited to 50 bases and 32 MB total, and also enforces strict aggregate subject, structure, and reference budgets across its already-bounded packages. Export validates the exact serialized JSON before saving, so the plugin does not intentionally create a package its own importer refuses to read.
 
