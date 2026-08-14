@@ -160,6 +160,20 @@ export const UPDATE_ANNOUNCEMENT_0_16_0: UpdateAnnouncement = {
   releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.16.0",
 };
 
+export const UPDATE_ANNOUNCEMENT_0_16_1: UpdateAnnouncement = {
+  version: "0.16.1",
+  title: "What’s new in Knowledge Base Command Center 0.16.1",
+  intro: "Upgraded knowledge bases now make inherited folder membership visible and reviewable without moving or rewriting your notes.",
+  highlights: [
+    "A persistent warning identifies each legacy linked folder that still adds notes automatically after the 0.16 upgrade.",
+    "Review lists the real source-only Markdown notes available on this device; selected notes become durable direct members while the folder is unlinked in one Undo-protected action.",
+    "Unlink stays blocked until you confirm Obsidian Sync is finished, and a missing folder is never mistaken for an empty one.",
+    "Index rows explain why they belong with Direct, Linked folder, Imported placeholder, or Protected source labels.",
+    "The review is searchable, paginated, mobile-friendly, and read-only aware, and it rechecks the source, notes, Sync generation, and folder availability before saving.",
+  ],
+  releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.16.1",
+};
+
 const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_12_0.version, UPDATE_ANNOUNCEMENT_0_12_0],
   [UPDATE_ANNOUNCEMENT_0_12_1.version, UPDATE_ANNOUNCEMENT_0_12_1],
@@ -172,6 +186,7 @@ const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_14_2.version, UPDATE_ANNOUNCEMENT_0_14_2],
   [UPDATE_ANNOUNCEMENT_0_15_0.version, UPDATE_ANNOUNCEMENT_0_15_0],
   [UPDATE_ANNOUNCEMENT_0_16_0.version, UPDATE_ANNOUNCEMENT_0_16_0],
+  [UPDATE_ANNOUNCEMENT_0_16_1.version, UPDATE_ANNOUNCEMENT_0_16_1],
 ]);
 
 function parseSemanticVersion(value: string): ParsedSemanticVersion | null {

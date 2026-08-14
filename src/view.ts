@@ -26,6 +26,7 @@ import {
   errorMessage,
   expectedParentCurriculumId,
   GenericNoteFormValue,
+  IndexFolderSource,
   isExtensionCurriculumId,
   LayoutHeading,
   LibraryDefinition,
@@ -40,10 +41,11 @@ import {
   metadataHasGap,
   ParsedQuery,
   parseQuery,
-  recordBelongsToIndex,
   moveCurriculumVisual,
+  pathIsInIndexFolderSources,
   pathIsInsideFolder,
   parsePersonalBackup,
+  recordBelongsToIndex,
   resolveExpectedParentPath,
   roleLabel,
   restoreSnapshot,
@@ -53,6 +55,7 @@ import {
   snapshotStackDepthIsTruncated,
   TopicFormValue,
   PluginSettings,
+  PluginData,
   TemplateTokenContext,
   unknownQueryTokens,
   validateWritableFolderPath,
@@ -180,8 +183,121 @@ function libraryIcon(library: Pick<LibraryDefinition, "icon">): string {
   return resolveLibraryIconId(library.icon);
 }
 
+export type IndexMembershipProvenanceKind =
+  | "direct"
+  | "linked-folder"
+  | "imported-placeholder"
+  | "protected-source";
+
+export interface IndexMembershipProvenance {
+  kind: IndexMembershipProvenanceKind;
+  /** Exact desktop label. Compact panes use compactLabel but retain ariaLabel. */
+  label: string;
+  compactLabel: string;
+  ariaLabel: string;
+}
+
+export interface IndexMembershipProvenanceData {
+  settings: Pick<PluginSettings, "workspaceMode">;
+  directIndexPaths: readonly string[];
+  indexFolderSources: readonly IndexFolderSource[];
+  manualIndexPaths?: readonly string[];
+  excludedIndexPaths?: readonly string[];
+  directMembershipPathSet?: ReadonlySet<string>;
+  excludedIndexPathSet?: ReadonlySet<string>;
+}
+
+/**
+ * Explain why one row belongs to this knowledge base. Library and Hidden
+ * records intentionally return null: visual library placement and exclusion
+ * are destinations outside the Index, not Index membership provenance.
+ */
+export function indexMembershipProvenance(
+  record: Pick<VaultRecord, "path" | "isPlaceholder" | "libraryId" | "portableId" | "portableIndexed">,
+  data: IndexMembershipProvenanceData,
+): IndexMembershipProvenance | null {
+  if (record.libraryId
+    || record.portableIndexed === false
+    || (data.excludedIndexPathSet
+      ? data.excludedIndexPathSet.has(record.path)
+      : (data.excludedIndexPaths ?? []).includes(record.path))) return null;
+
+  if (record.isPlaceholder) {
+    return {
+      kind: "imported-placeholder",
+      label: "Imported placeholder",
+      compactLabel: "Imported",
+      ariaLabel: "Index membership: Imported placeholder",
+    };
+  }
+
+  const direct = data.directMembershipPathSet
+    ? data.directMembershipPathSet.has(record.path)
+    : data.directIndexPaths.includes(record.path) || (data.manualIndexPaths ?? []).includes(record.path);
+  if (direct) {
+    return {
+      kind: "direct",
+      label: "Direct",
+      compactLabel: "Direct",
+      ariaLabel: "Index membership: Direct",
+    };
+  }
+
+  if (data.settings.workspaceMode === "ent-clinical") {
+    return {
+      kind: "protected-source",
+      label: "Protected source",
+      compactLabel: "Protected",
+      ariaLabel: "Index membership: Protected clinical source",
+    };
+  }
+
+  if (pathIsInIndexFolderSources(record.path, data.indexFolderSources)) {
+    return {
+      kind: "linked-folder",
+      label: "Linked folder",
+      compactLabel: "Linked",
+      ariaLabel: "Index membership: Linked folder",
+    };
+  }
+
+  return null;
+}
+
+export interface LegacyIndexReviewPlanSummary {
+  source: Pick<IndexFolderSource, "id" | "path">;
+  sourceFolderAvailable?: boolean;
+  candidates: readonly unknown[];
+}
+
+function quotedFolderList(paths: string[]): string {
+  const displayed = paths.slice(0, 2).map((path) => `“${path === "/" ? "Vault root" : path}”`);
+  if (paths.length > 2) return `${displayed.join(", ")}, and ${paths.length - 2} more`;
+  if (displayed.length === 2) return `${displayed[0]} and ${displayed[1]}`;
+  return displayed[0] ?? "";
+}
+
+/** User-facing warning copy kept pure so source counts and overlap rules stay testable. */
+export function legacyIndexSourceWarningText(plans: readonly LegacyIndexReviewPlanSummary[]): string {
+  if (plans.length === 0) return "";
+  const folders = quotedFolderList(plans.map((plan) => plan.source.path));
+  const candidates = plans.reduce((sum, plan) => sum + plan.candidates.length, 0);
+  const unavailable = plans.filter((plan) => plan.sourceFolderAvailable === false);
+  const sourceLead = plans.length === 1
+    ? `Legacy linked folder ${folders} is still active.`
+    : `Legacy linked folders ${folders} are still active.`;
+  if (unavailable.length > 0) {
+    return `${sourceLead} ${unavailable.length === 1 ? "One linked folder is" : `${unavailable.length.toLocaleString()} linked folders are`} unavailable on this device, so their notes cannot be counted safely. Let Obsidian Sync finish or restore the ${unavailable.length === 1 ? "folder" : "folders"} before unlinking.`;
+  }
+  const behavior = candidates === 0
+    ? `No current notes depend only on ${plans.length === 1 ? "this link" : "these links"}, but future notes stored there will enter the Index automatically.`
+    : `${candidates.toLocaleString()} ${candidates === 1 ? "note currently enters" : "notes currently enter"} the Index automatically because ${candidates === 1 ? "it is" : "they are"} stored there.`;
+  return `${sourceLead} ${behavior}`;
+}
+
 interface SearchRecordContext {
   source: KnowledgeBaseSearchSource;
+  showIndexProvenance?: boolean;
 }
 
 export interface SearchViewportLayout {
@@ -551,6 +667,7 @@ export class EntVaultCommandCenterView extends ItemView {
   private loadedBaseId = "";
   private loadedDataEpoch = 0;
   private staleViewNoticeShown = false;
+  private indexProvenanceCache: WeakMap<object, IndexMembershipProvenanceData> | null = null;
 
   constructor(leaf: WorkspaceLeaf, private readonly plugin: EntVaultCommandCenterPlugin) {
     super(leaf);
@@ -2445,6 +2562,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private render(preserveBrowseLimits = false): void {
+    this.indexProvenanceCache = new WeakMap<object, IndexMembershipProvenanceData>();
     // A full route/tab render returns to the bounded initial page. Incremental
     // "Show more" actions use renderTree() and therefore preserve their limit.
     if (!preserveBrowseLimits) {
@@ -2472,6 +2590,7 @@ export class EntVaultCommandCenterView extends ItemView {
     if (this.plugin.dataCompatibilityWarning) {
       shell.createDiv({ cls: "ent-cc-compatibility-warning", text: this.plugin.dataCompatibilityWarning, attr: { role: "alert" } });
     }
+    this.renderLegacyIndexSourceWarning(shell);
 
     if (compact && this.mobileInspectorOpen && this.recordByPath.has(this.plugin.data.selectedPath)) {
       shell.addClass("is-inspector-route");
@@ -2595,6 +2714,45 @@ export class EntVaultCommandCenterView extends ItemView {
     footer.createSpan({ text: this.plugin.isClinicalMode()
       ? "Personal organization stays separate. New clinical scaffolds are unverified and never set review approval."
       : "Personal organization and visual hierarchy stay in plugin data. Index actions never move or rewrite source notes." });
+  }
+
+  private renderLegacyIndexSourceWarning(parent: HTMLElement): void {
+    if (this.plugin.isClinicalMode()) return;
+    let plans: LegacyIndexReviewPlanSummary[] = [];
+    let preparationError = "";
+    try {
+      plans = this.plugin.getLegacyIndexReviewPlans?.() ?? [];
+    } catch (error) {
+      preparationError = errorMessage(error, "The legacy folder review is too large to prepare safely.");
+    }
+    const legacySources = this.plugin.data.indexFolderSources
+      .filter((source) => source.origin === "legacy-primary-folder");
+    if (plans.length === 0 && legacySources.length === 0) return;
+    const readOnly = this.plugin.isDataReadOnly();
+    const warning = parent.createDiv({
+      cls: "ent-cc-legacy-index-warning",
+      attr: { role: "region", "aria-label": "Legacy linked folder review required" },
+    });
+    const icon = warning.createSpan({ cls: "ent-cc-legacy-index-warning-icon", attr: { "aria-hidden": "true" } });
+    setIcon(icon, "triangle-alert");
+    const warningText = preparationError
+      ? `${preparationError} The inherited folder link remains active; no Markdown was changed.`
+      : legacyIndexSourceWarningText(plans);
+    warning.createSpan({
+      cls: "ent-cc-legacy-index-warning-text",
+      text: `${warningText}${readOnly ? " Organization is read-only; resolve the protection state before reviewing." : ""}`,
+    });
+    const review = warning.createEl("button", {
+      cls: "ent-cc-button",
+      type: "button",
+      text: "Review…",
+      attr: readOnly ? { title: "Resolve the read-only protection state before reviewing" } : {},
+    });
+    review.disabled = readOnly || Boolean(preparationError);
+    review.addEventListener("click", () => {
+      if (readOnly || preparationError) return;
+      this.plugin.openLegacyIndexReview?.();
+    });
   }
 
   private createInspector(parent: HTMLElement): void {
@@ -3221,6 +3379,7 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     this.browseRowsRendered += 1;
     const record = node.record;
+    const provenance = this.membershipProvenance(record, this.plugin.data);
     const collapsed = this.collapsedCurriculumNodes.has(record.path) && !this.query;
     const section = parent.createDiv({ cls: "ent-cc-curriculum-node" });
     const row = section.createDiv({
@@ -3252,8 +3411,8 @@ export class EntVaultCommandCenterView extends ItemView {
       cls: "ent-cc-subject-title",
       text: record.title,
       attr: { dir: "auto", "aria-label": record.isPlaceholder
-        ? `${record.title}, no note yet. Space selects; Enter creates or links a note; M adds to a collection; P pins.`
-        : `${record.title}, ${this.recordRoleName(record)}. Space selects; Enter opens; M adds to a collection; P pins.` },
+        ? `${record.title}, no note yet.${provenance ? ` ${provenance.ariaLabel}.` : ""} Space selects; Enter creates or links a note; M adds to a collection; P pins.`
+        : `${record.title}, ${this.recordRoleName(record)}.${provenance ? ` ${provenance.ariaLabel}.` : ""} Space selects; Enter opens; M adds to a collection; P pins.` },
     });
     title.addEventListener("click", () => {
       if (record.isPlaceholder) this.openPlaceholderActions(record);
@@ -3267,9 +3426,14 @@ export class EntVaultCommandCenterView extends ItemView {
       if (event.key.toLowerCase() === "p" && !event.metaKey && !event.ctrlKey) { event.preventDefault(); this.run(() => this.togglePin(record.path)); }
     });
     this.attachHoverPreview(title, record);
-    row.createSpan({ text: record.isPlaceholder ? "No note yet" : record.curriculumId || (this.plugin.isClinicalMode() ? "supporting" : this.plugin.data.settings.itemSingular), cls: "ent-cc-subject-id", attr: { dir: "auto" } });
+    this.renderIndexRowMetadata(
+      row,
+      record.isPlaceholder ? "No note yet" : record.curriculumId || (this.plugin.isClinicalMode() ? "supporting" : this.plugin.data.settings.itemSingular),
+      provenance,
+    );
     const badges = row.createDiv({ cls: "ent-cc-row-badges" });
     if (record.isPlaceholder) badges.createSpan({ text: "No note", cls: "ent-cc-placeholder-badge" });
+    if (provenance) this.renderCompactIndexMembershipBadge(badges, provenance);
     if (this.hasCurriculumVisualPlacement(record.path)) {
       const visual = badges.createSpan({ cls: "ent-cc-visual-badge", attr: { title: "Custom visual placement" } });
       setIcon(visual, "move");
@@ -3569,10 +3733,11 @@ export class EntVaultCommandCenterView extends ItemView {
       baseRow.createSpan({ cls: "ent-cc-row-title", text: source.baseName, attr: { dir: "auto" } });
       baseRow.createSpan({ cls: "ent-cc-row-count", text: String(baseGroup.total) });
       const baseContent = baseSection.createDiv({ cls: "ent-cc-heading-body" });
-      const libraryGroups = [
+      const libraryGroups: Array<{ label: string; icon: string; records: VaultRecord[]; showIndexProvenance?: boolean }> = [
         {
           label: source.data.settings.indexLabel,
           icon: "library",
+          showIndexProvenance: true,
           records: baseGroup.records.filter((record) => record.role !== "proposal"
             && recordBelongsToIndex(record, source.data.settings.workspaceMode === "ent-clinical")),
         },
@@ -3608,7 +3773,10 @@ export class EntVaultCommandCenterView extends ItemView {
         row.createSpan({ cls: "ent-cc-row-title", text: libraryGroup.label });
         row.createSpan({ cls: "ent-cc-row-count", text: String(libraryGroup.records.length) });
         const content = section.createDiv({ cls: "ent-cc-subheading-body" });
-        libraryGroup.records.forEach((record) => this.renderRecordRow(content, record, 2, undefined, { source }));
+        libraryGroup.records.forEach((record) => this.renderRecordRow(content, record, 2, undefined, {
+          source,
+          showIndexProvenance: libraryGroup.showIndexProvenance,
+        }));
       }
     }
     return results.total;
@@ -3624,6 +3792,56 @@ export class EntVaultCommandCenterView extends ItemView {
     if (record.kind === "topic") return `Indexed ${data.settings.itemSingular}`;
     if (record.role === "proposal") return `${data.settings.inboxLabel} ${data.settings.itemSingular}`;
     return roleLabel(record);
+  }
+
+  private renderCompactIndexMembershipBadge(parent: HTMLElement, provenance: IndexMembershipProvenance): void {
+    parent.createSpan({
+      cls: `ent-cc-membership-badge is-${provenance.kind}`,
+      text: provenance.compactLabel,
+      attr: {
+        title: provenance.ariaLabel,
+        "aria-label": provenance.ariaLabel,
+        "data-membership-kind": provenance.kind,
+      },
+    });
+  }
+
+  private membershipProvenance(
+    record: Pick<VaultRecord, "path" | "isPlaceholder" | "libraryId" | "portableId" | "portableIndexed">,
+    data: PluginData,
+  ): IndexMembershipProvenance | null {
+    const cache = this.indexProvenanceCache
+      ?? (this.indexProvenanceCache = new WeakMap<object, IndexMembershipProvenanceData>());
+    let prepared = cache.get(data);
+    if (!prepared) {
+      const next: IndexMembershipProvenanceData = {
+        ...data,
+        directMembershipPathSet: new Set([...data.directIndexPaths, ...data.manualIndexPaths]),
+        excludedIndexPathSet: new Set(data.excludedIndexPaths),
+      };
+      cache.set(data, next);
+      prepared = next;
+    }
+    return indexMembershipProvenance(record, prepared);
+  }
+
+  private renderIndexRowMetadata(
+    row: HTMLElement,
+    text: string,
+    provenance: IndexMembershipProvenance | null,
+  ): void {
+    const metadata = row.createSpan({
+      cls: `ent-cc-subject-id ${provenance ? "has-membership-provenance" : ""}`,
+      attr: { dir: "auto" },
+    });
+    metadata.createSpan({ cls: "ent-cc-subject-id-value", text });
+    if (provenance) {
+      metadata.createSpan({
+        cls: "ent-cc-membership-provenance",
+        text: provenance.label,
+        attr: { title: provenance.ariaLabel },
+      });
+    }
   }
 
   private renderBrowseRecordRow(
@@ -3653,6 +3871,9 @@ export class EntVaultCommandCenterView extends ItemView {
     const source = searchContext?.source;
     const sourceData = source?.data ?? this.plugin.data;
     const sourceIsActive = !source || source.baseId === this.plugin.getActiveKnowledgeBaseId();
+    const provenance = searchContext?.showIndexProvenance
+      ? this.membershipProvenance(record, sourceData)
+      : null;
     const row = parent.createDiv({
       cls: `ent-cc-row ent-cc-subject-row ent-cc-level-${level} ${record.isPlaceholder ? "ent-cc-placeholder-row" : ""} ${sourceIsActive && this.plugin.data.selectedPath === record.path ? "is-selected" : ""}`,
     });
@@ -3685,8 +3906,8 @@ export class EntVaultCommandCenterView extends ItemView {
       cls: "ent-cc-subject-title",
       text: record.title,
       attr: { dir: "auto", "aria-label": record.isPlaceholder
-        ? `${record.title}, no note yet. Space selects; Enter creates or links a note; M adds to a collection; P pins.`
-        : `${record.title}, ${this.recordRoleName(record, sourceData)}${source ? ` in ${source.baseName}` : ""}. Space selects; Enter opens; M adds to a collection; P pins.` },
+        ? `${record.title}, no note yet.${provenance ? ` ${provenance.ariaLabel}.` : ""} Space selects; Enter creates or links a note; M adds to a collection; P pins.`
+        : `${record.title}, ${this.recordRoleName(record, sourceData)}${source ? ` in ${source.baseName}` : ""}.${provenance ? ` ${provenance.ariaLabel}.` : ""} Space selects; Enter opens; M adds to a collection; P pins.` },
     });
     title.addEventListener("click", () => {
       if (source && !sourceIsActive) this.run(() => this.activateSearchResult(source, record, record.isPlaceholder ? "placeholder" : "select"));
@@ -3719,15 +3940,16 @@ export class EntVaultCommandCenterView extends ItemView {
       }
     });
     this.attachHoverPreview(title, record, sourceData.settings);
-    row.createSpan({
-      text: record.isPlaceholder ? "No note yet" : record.curriculumId || (sourceData.settings.workspaceMode === "ent-clinical"
+    this.renderIndexRowMetadata(
+      row,
+      record.isPlaceholder ? "No note yet" : record.curriculumId || (sourceData.settings.workspaceMode === "ent-clinical"
         ? record.role === "supporting" ? "supporting" : record.role === "proposal" ? "proposal" : record.role === "vault-note" ? "vault note" : record.kind
         : record.role === "proposal" ? sourceData.settings.inboxLabel : record.role === "vault-note" ? "vault note" : sourceData.settings.itemSingular),
-      cls: "ent-cc-subject-id",
-      attr: { dir: "auto" },
-    });
+      provenance,
+    );
     const badges = row.createDiv({ cls: "ent-cc-row-badges" });
     if (record.isPlaceholder) badges.createSpan({ text: "No note", cls: "ent-cc-placeholder-badge" });
+    if (provenance) this.renderCompactIndexMembershipBadge(badges, provenance);
     if (record.priority) badges.createSpan({ text: record.priority, cls: `ent-cc-priority ${record.priority === "P1" ? "is-urgent" : ""}` });
     if (sourceData.settings.workspaceMode === "ent-clinical" && sourceData.settings.showSafetyBadges && record.safetyCritical) {
       const safety = badges.createSpan({ cls: "ent-cc-safety-badge", attr: { title: "Safety-critical" } });

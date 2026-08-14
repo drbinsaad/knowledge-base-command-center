@@ -52,7 +52,9 @@ Use **Add → Add existing note to Index** or the current-note action in a Gener
 
 Removing or hiding a record affects only the active knowledge base. For a note supplied by a linked folder, hiding records an Index exclusion instead of touching the file. Unlinking the folder removes only that source rule; a separately added direct member remains indexed. Generic membership, grouping, nesting, Library classification, Collections, pins, and queues never move, rename, delete, or rewrite Markdown.
 
-Generic bases migrated from pre-v15 data keep the old `primaryFolder` as a removable **legacy linked-folder source**. This preserves the pre-upgrade result set without treating the setting as a storage command or silently changing notes.
+Generic bases migrated from pre-v15 data temporarily keep the old `primaryFolder` as a reviewable **legacy linked-folder source** so the pre-upgrade result set does not disappear. The Command Center and Settings keep a warning visible until you choose **Review…** or run **Review legacy index source…** from the Command palette. The review lists only real Markdown notes currently available on this device whose membership depends on that source alone. It initially selects all notes for preservation when they fit within the direct-membership limit; use the filter, **Clear all notes**, or individual checkboxes as needed. Before **Apply review & unlink** becomes available, confirm that Obsidian Sync has finished and the folder's Markdown contents are complete on this device. A missing non-root source blocks Apply, and zero local candidates is never treated as proof that every synced copy is empty. Apply makes selected notes direct members and removes the folder rule in one Undo-protected transaction. An unusually large source that cannot fit is left unselected and explains its capacity instead of truncating the choice. **Keep linked** records an intentional dynamic-folder choice and remains safe when a folder is temporarily unavailable. **Not now** changes nothing, and the warning remains. None of these actions edits, moves, renames, or deletes Markdown.
+
+Index rows show **Direct**, **Linked folder**, **Imported placeholder**, or **Protected source** so membership authority is visible. Compact panes use shorter equivalents while keeping the full explanation available to assistive technology.
 
 The ENT preset protects canonical source classification and folder scope. It still permits personal visual organization where the profile allows it.
 
@@ -402,6 +404,7 @@ The ENT preset also exposes safety-badge display and optional advanced canonical
 - Open export / import center
 - Open multi-base portfolio transfer
 - Manage index…
+- Review legacy index source… (shown only while an upgraded Generic folder source still needs a choice)
 - Open taxonomy health center
 - Add or create…
 - Create note from template or empty note…

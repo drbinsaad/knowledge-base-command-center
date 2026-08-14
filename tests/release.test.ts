@@ -107,17 +107,22 @@ test("public repository metadata is present", async () => {
   assert.match(iphoneChecklist, /Manage categories/);
   assert.match(iphoneChecklist, /Turn on VoiceOver/);
   assert.match(iphoneChecklist, /What’s new/);
-  assert.match(iphoneChecklist, /releases\/tag\/0\.16\.0/);
+  const escapedManifestVersion = String(manifest.version).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  assert.match(iphoneChecklist, new RegExp(`releases/tag/${escapedManifestVersion}`, "u"));
   const commandAppendix = userGuide.slice(userGuide.indexOf("\n## Commands\n"), userGuide.indexOf("\n## Safety boundary\n"));
   for (const command of [
     "Quick append: Add to current note…",
     "Quick append: Choose a note…",
     "Quick append: Undo last append",
+    "Review legacy index source…",
   ]) assert.match(commandAppendix, new RegExp(command.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
   assert.match(userGuide, /Any focused Quick Entry or Quick Append command/);
   assert.match(userGuide, /Open Library: _Library name_/);
   assert.match(packageJson, /tests\/follow-up\.test\.ts/);
   assert.match(packageJson, /tests\/update-announcement\.test\.ts/);
+  assert.match(packageJson, /tests\/legacy-index-review\.test\.ts/);
+  assert.match(packageJson, /tests\/legacy-index-review-modal\.test\.ts/);
+  assert.match(packageJson, /tests\/view-provenance\.test\.ts/);
 });
 
 test("manual release surface contains the three required nonempty assets", async () => {

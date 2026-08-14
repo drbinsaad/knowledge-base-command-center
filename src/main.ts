@@ -192,6 +192,14 @@ import {
 import { TaxonomyHealthModal } from "./taxonomy-health-modal";
 import { PortfolioTransferModal } from "./portfolio-modal";
 import {
+  acceptLegacyIndexSourceToData,
+  applyLegacyIndexReviewToData,
+  buildLegacyIndexReviewPlan,
+  withLegacyIndexReviewSelection,
+  type LegacyIndexReviewPlan,
+} from "./legacy-index-review";
+import { LegacyIndexReviewModal } from "./legacy-index-review-modal";
+import {
   createDefaultSyncRecoveryLocalState,
   describeConfigProfile,
   describePlatform,
@@ -399,6 +407,10 @@ interface AppWriteBarrier {
   /** Synchronous, App-lifetime claims prevent replacement instances racing. */
   updateAnnouncementClaims: Set<string>;
   activeUpdateAnnouncementVersion: string | null;
+  /** Active-base IDs already offered legacy membership review in this App session. */
+  legacyIndexReviewClaims: Set<string>;
+  /** Prevent replacement instances from opening two review modals at once. */
+  activeLegacyIndexReviewBaseId: string | null;
 }
 
 export type { KnowledgeBaseSearchSource } from "./search";
@@ -562,6 +574,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private librarySubjectCountsCacheByBase = new Map<string, ReadonlyMap<string, number>>();
   private referencedPathsCacheByBase = new Map<string, Set<string>>();
   private excludedPathsCacheByBase = new Map<string, Set<string>>();
+  private legacyIndexReviewPlanCache: {
+    baseId: string;
+    records: VaultRecord[];
+    plans: LegacyIndexReviewPlan[];
+  } | null = null;
   private recordLinkIndex = new Map<string, VaultRecord>();
   private recordLinkIndexBaseId = "";
   private backlinkIndex: Map<string, string[]> | null = null;
@@ -579,6 +596,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private settingsTab: EntCommandCenterSettingsTab | null = null;
   private updateAnnouncementHandled = false;
   private activeUpdateAnnouncementModal: UpdateAnnouncementModal | null = null;
+  private activeLegacyIndexReviewModal: LegacyIndexReviewModal | null = null;
+  private activeLegacyIndexReviewBaseId = "";
   dataCompatibilityWarning = "";
 
   async onload(): Promise<void> {
@@ -599,6 +618,16 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.addCommand({ id: "open-workspace", name: "Open workspace", callback: () => this.run(() => this.activateView()) });
     this.addCommand({ id: "add-or-create", name: "Add or create…", callback: () => void this.withView((view) => view.openAddActions()) });
     this.addCommand({ id: "manage-knowledge-index", name: "Manage index…", callback: () => void this.withView((view) => view.openIndexManager()) });
+    this.addCommand({
+      id: "review-legacy-index-source",
+      name: "Review legacy index source…",
+      icon: "folder-sync",
+      checkCallback: (checking) => {
+        if (!this.hasLegacyIndexSource()) return false;
+        if (!checking) this.openLegacyIndexReview();
+        return true;
+      },
+    });
     this.addCommand({ id: "open-taxonomy-health", name: "Open taxonomy health center", callback: () => new TaxonomyHealthModal(this).open() });
     this.addCommand({ id: "open-sync-recovery-center", name: "Open sync & recovery center", icon: "shield-check", callback: () => new SyncRecoveryCenterModal(this).open() });
     const currentUpdateAnnouncement = updateAnnouncementForVersion(this.manifest.version);
@@ -803,13 +832,26 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         else if (this.app.workspace.getLeavesOfType(VIEW_TYPE).length > 0) this.scheduleRefresh(false);
       }));
       this.registerEvent(this.app.vault.on("create", (file) => {
+        if (file instanceof TFolder) {
+          this.legacyIndexReviewPlanCache = null;
+          if (this.hasLegacyIndexSource()) this.scheduleRefresh(false);
+          return;
+        }
         if (!(file instanceof TFile)) return;
         this.backlinkIndex = null;
         this.invalidateKnowledgeBaseSearchSnapshot();
         if (this.invalidateRecordCachesForPath(file.path, { file })) this.scheduleRefresh(false);
         else if (this.app.workspace.getLeavesOfType(VIEW_TYPE).length > 0) this.scheduleRefresh(false);
+        const legacySources = this.data.indexFolderSources
+          .filter((source) => source.origin === "legacy-primary-folder");
+        if (pathIsInIndexFolderSources(file.path, legacySources)) this.maybeShowLegacyIndexReview();
       }));
       this.registerEvent(this.app.vault.on("delete", (file) => {
+        if (file instanceof TFolder) {
+          this.legacyIndexReviewPlanCache = null;
+          if (this.hasLegacyIndexSource()) this.scheduleRefresh(false);
+          return;
+        }
         if (!(file instanceof TFile)) return;
         this.backlinkIndex = null;
         this.invalidateKnowledgeBaseSearchSnapshot();
@@ -820,6 +862,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       }));
       this.registerEvent(this.app.vault.on("rename", (file, oldPath) => this.handleVaultRenameEvent(file, oldPath)));
       this.maybeShowUpdateAnnouncement(initialLoad);
+      this.maybeShowLegacyIndexReview();
     });
   }
 
@@ -830,6 +873,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.activeUpdateAnnouncementModal = null;
     if (hadActiveUpdateAnnouncement && this.appWriteBarrier) {
       this.appWriteBarrier.activeUpdateAnnouncementVersion = null;
+    }
+    const legacyReviewBaseId = this.activeLegacyIndexReviewBaseId;
+    this.activeLegacyIndexReviewModal?.dismissImmediately();
+    this.activeLegacyIndexReviewModal = null;
+    this.activeLegacyIndexReviewBaseId = "";
+    if (legacyReviewBaseId && this.appWriteBarrier?.activeLegacyIndexReviewBaseId === legacyReviewBaseId) {
+      this.appWriteBarrier.activeLegacyIndexReviewBaseId = null;
     }
     if (this.refreshTimer !== null) this.refreshTimerWindow?.clearTimeout(this.refreshTimer);
     this.refreshTimer = null;
@@ -1386,6 +1436,85 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
   }
 
+  private maybeShowLegacyIndexReview(): void {
+    if (this.unloaded || this.deviceLocalPersistenceSuppressed) return;
+    if (!this.appWriteBarrier) this.activateAppWriteBarrier();
+    if (this.activeUpdateAnnouncementModal
+      || this.appWriteBarrier?.activeUpdateAnnouncementVersion !== null
+      || this.activeLegacyIndexReviewModal
+      || this.isDataReadOnly()
+      || !this.hasLegacyIndexSource()) return;
+    const baseId = this.getActiveKnowledgeBaseId();
+    const claims = this.appWriteBarrier?.legacyIndexReviewClaims;
+    if (!claims || claims.has(baseId)) return;
+    claims.add(baseId);
+    this.openLegacyIndexReview();
+  }
+
+  /** Open the exact active-base review from startup, Settings, or the Index. */
+  openLegacyIndexReview(sourceId?: string): void {
+    if (this.unloaded || this.deviceLocalPersistenceSuppressed) return;
+    if (!this.appWriteBarrier) this.activateAppWriteBarrier();
+    if (this.isDataReadOnly()) {
+      new Notice("Knowledge-base organization is read-only. Resolve the protection state before reviewing this legacy index source.", 8000);
+      return;
+    }
+    if (this.activeUpdateAnnouncementModal
+      || this.appWriteBarrier?.activeUpdateAnnouncementVersion !== null) {
+      new Notice("Close what’s new before reviewing the legacy index source.");
+      return;
+    }
+    if (this.activeLegacyIndexReviewModal) {
+      new Notice("A legacy index review is already open.");
+      return;
+    }
+    if (!this.appWriteBarrier) this.activateAppWriteBarrier();
+    if (this.appWriteBarrier?.activeLegacyIndexReviewBaseId !== null) {
+      new Notice("A legacy index review is already open in another Obsidian window.");
+      return;
+    }
+
+    let plan: LegacyIndexReviewPlan | undefined;
+    try {
+      const plans = this.getLegacyIndexReviewPlans();
+      plan = sourceId
+        ? plans.find((candidate) => candidate.source.id === sourceId)
+        : plans.find((candidate) => candidate.sourceFolderAvailable) ?? plans[0];
+    } catch (error) {
+      new Notice(errorMessage(error, "The legacy Index source could not be reviewed."), 8000);
+      return;
+    }
+    if (!plan) {
+      new Notice("No unreviewed legacy index source remains in this knowledge base.");
+      return;
+    }
+
+    const baseId = this.getActiveKnowledgeBaseId();
+    let modal: LegacyIndexReviewModal;
+    const clearActiveModal = (): void => {
+      if (this.activeLegacyIndexReviewModal === modal) this.activeLegacyIndexReviewModal = null;
+      if (this.activeLegacyIndexReviewBaseId === baseId) this.activeLegacyIndexReviewBaseId = "";
+      if (this.appWriteBarrier?.activeLegacyIndexReviewBaseId === baseId) {
+        this.appWriteBarrier.activeLegacyIndexReviewBaseId = null;
+      }
+    };
+    modal = new LegacyIndexReviewModal(
+      this,
+      plan,
+      () => this.settingsTab?.update(),
+      clearActiveModal,
+    );
+    this.activeLegacyIndexReviewModal = modal;
+    this.activeLegacyIndexReviewBaseId = baseId;
+    if (this.appWriteBarrier) this.appWriteBarrier.activeLegacyIndexReviewBaseId = baseId;
+    try {
+      modal.open();
+    } catch {
+      clearActiveModal();
+      console.warn("Knowledge Base Command Center could not open the legacy Index review.");
+    }
+  }
+
   /**
    * Announcements are App-local and are marked before opening. That ordering
    * makes an update window one-time even if another live plugin instance or a
@@ -1433,11 +1562,16 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (this.unloaded || this.deviceLocalPersistenceSuppressed || this.activeUpdateAnnouncementModal) return;
     if (!this.appWriteBarrier) this.activateAppWriteBarrier();
     if (this.appWriteBarrier?.activeUpdateAnnouncementVersion !== null) return;
+    if (this.activeLegacyIndexReviewModal || this.appWriteBarrier?.activeLegacyIndexReviewBaseId !== null) {
+      new Notice("Close the legacy index review before opening what’s new.");
+      return;
+    }
     const modal = new UpdateAnnouncementModal(this.app, announcement, () => {
       if (this.activeUpdateAnnouncementModal === modal) this.activeUpdateAnnouncementModal = null;
       if (this.appWriteBarrier?.activeUpdateAnnouncementVersion === announcement.version) {
         this.appWriteBarrier.activeUpdateAnnouncementVersion = null;
       }
+      this.maybeShowLegacyIndexReview();
     });
     this.activeUpdateAnnouncementModal = modal;
     if (this.appWriteBarrier) this.appWriteBarrier.activeUpdateAnnouncementVersion = announcement.version;
@@ -1451,6 +1585,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // The release was already marked before presentation. Keep this generic:
       // modal failures must not reveal vault, device, or plugin-data details.
       console.warn("Knowledge Base Command Center could not open the update announcement.");
+      this.maybeShowLegacyIndexReview();
     }
   }
 
@@ -2220,6 +2355,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         uncertainty: null,
         updateAnnouncementClaims: new Set<string>(),
         activeUpdateAnnouncementVersion: null,
+        legacyIndexReviewClaims: new Set<string>(),
+        activeLegacyIndexReviewBaseId: null,
       };
     const runtimeBarrier = barrier as unknown as Record<string, unknown>;
     const logicalTail = runtimeBarrier.logicalTail;
@@ -2236,6 +2373,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
     if (typeof runtimeBarrier.activeUpdateAnnouncementVersion !== "string") {
       barrier.activeUpdateAnnouncementVersion = null;
+    }
+    if (!(runtimeBarrier.legacyIndexReviewClaims instanceof Set)) {
+      barrier.legacyIndexReviewClaims = new Set<string>();
+    }
+    if (typeof runtimeBarrier.activeLegacyIndexReviewBaseId !== "string") {
+      barrier.activeLegacyIndexReviewBaseId = null;
     }
     const priorTail = barrier.tail;
     const priorLogicalTail = barrier.logicalTail;
@@ -2989,6 +3132,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           this.externalReloadPromise = null;
           this.externalReloadBusy = false;
           this.recordExternalReload(reloadOutcome);
+          if (reloadOutcome === "applied") this.maybeShowLegacyIndexReview();
         }
       }
     };
@@ -3394,6 +3538,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (!target) throw new Error("That knowledge base is unavailable.");
     await this.commitBaseStoreChange(() => { this.store.activeBaseId = target.id; }, false);
     new Notice(`Switched to “${target.data.settings.workspaceName}”.`);
+    this.maybeShowLegacyIndexReview();
   }
 
   async createKnowledgeBase(name: string, mode: WorkspaceMode, defaultNoteFolder = ""): Promise<KnowledgeBaseEntry> {
@@ -4188,6 +4333,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.clearInactiveSearchRecordsCache();
     this.recordsByPathCacheByBase.clear();
     this.librarySubjectCountsCacheByBase.clear();
+    this.legacyIndexReviewPlanCache = null;
     if (membershipChanged) {
       this.referencedPathsCacheByBase.clear();
       this.excludedPathsCacheByBase.clear();
@@ -4234,6 +4380,107 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   getIndexFolderSources(): readonly IndexFolderSource[] {
     return this.data.indexFolderSources;
+  }
+
+  private hasLegacyIndexSource(): boolean {
+    return this.data.settings.workspaceMode === "generic"
+      && this.data.indexFolderSources.some((source) => source.origin === "legacy-primary-folder");
+  }
+
+  private buildLegacyIndexReview(
+    sourceId: string,
+    records = this.getRecords(),
+    existingMarkdownPaths = new Set(this.app.vault.getMarkdownFiles().map((file) => file.path)),
+  ): LegacyIndexReviewPlan {
+    const source = this.data.indexFolderSources.find((candidate) => candidate.id === sourceId);
+    const sourceFolderAvailable = source?.path === INDEX_FOLDER_VAULT_ROOT
+      || Boolean(source && this.app.vault.getAbstractFileByPath(normalizePath(source.path)) instanceof TFolder);
+    return buildLegacyIndexReviewPlan({
+      data: this.data,
+      records,
+      existingMarkdownPaths,
+      sourceFolderAvailable,
+      sourceId,
+    });
+  }
+
+  /** Exact active-base previews used by startup, Settings, and the main Index warning. */
+  getLegacyIndexReviewPlans(): LegacyIndexReviewPlan[] {
+    if (this.data.settings.workspaceMode !== "generic") return [];
+    const legacySources = this.data.indexFolderSources
+      .filter((source) => source.origin === "legacy-primary-folder");
+    if (legacySources.length === 0) return [];
+    const baseId = this.getActiveKnowledgeBaseId();
+    const records = this.getRecords();
+    if (this.legacyIndexReviewPlanCache?.baseId === baseId
+      && this.legacyIndexReviewPlanCache.records === records) {
+      return this.legacyIndexReviewPlanCache.plans;
+    }
+    const existingMarkdownPaths = new Set(this.app.vault.getMarkdownFiles().map((file) => file.path));
+    const plans = legacySources.map((source) => this.buildLegacyIndexReview(
+      source.id,
+      records,
+      existingMarkdownPaths,
+    ));
+    this.legacyIndexReviewPlanCache = { baseId, records, plans };
+    return plans;
+  }
+
+  /**
+   * Preserve the reviewed subset as direct membership and unlink the legacy
+   * source in one Undo-required transaction. Rebuilding inside `mutate` makes
+   * the displayed list the sole plan: vault, metadata, Sync, or membership
+   * drift aborts instead of changing an unseen note.
+   */
+  async applyLegacyIndexReview(
+    reviewed: LegacyIndexReviewPlan,
+    preservePaths: readonly string[],
+    syncContentsConfirmed: boolean,
+  ): Promise<void> {
+    if (!syncContentsConfirmed) {
+      throw new Error("Confirm that Obsidian Sync has finished and the linked folder is complete before unlinking it.");
+    }
+    const commit = withLegacyIndexReviewSelection(reviewed, preservePaths);
+    await this.mutate(`Review legacy Index folder “${reviewed.source.path}”`, () => {
+      const current = this.buildLegacyIndexReview(reviewed.source.id);
+      if (current.fingerprint !== reviewed.fingerprint) {
+        throw new Error("The legacy Index source or its notes changed after review. Reopen the review and try again.");
+      }
+      const currentCommit = withLegacyIndexReviewSelection(current, preservePaths);
+      if (currentCommit.fingerprint !== commit.fingerprint
+        || !applyLegacyIndexReviewToData(this.data, currentCommit)) {
+        throw new Error("The legacy Index review changed before it could be applied. Reopen the review and try again.");
+      }
+      this.invalidateRecordCache();
+    }, { requireUndo: true });
+  }
+
+  /** Record an informed choice to retain the migrated folder as a normal link. */
+  async keepLegacyIndexSource(reviewed: LegacyIndexReviewPlan): Promise<void> {
+    await this.mutate(`Keep folder “${reviewed.source.path}” linked to the Index`, () => {
+      const current = this.buildLegacyIndexReview(reviewed.source.id);
+      if (current.fingerprint !== reviewed.fingerprint
+        || !acceptLegacyIndexSourceToData(this.data, current)) {
+        throw new Error("The legacy Index source or its notes changed after review. Reopen the review and try again.");
+      }
+      this.invalidateRecordCache();
+    }, { requireUndo: true });
+  }
+
+  /** Safe fallback when candidate enumeration itself cannot open a review. */
+  async keepLegacyIndexSourceById(sourceId: string, expectedPath: string): Promise<void> {
+    await this.mutate(`Keep folder “${expectedPath}” linked to the Index`, () => {
+      const matches = this.data.indexFolderSources.filter((source) => source.id === sourceId);
+      const source = matches[0];
+      if (matches.length !== 1
+        || !source
+        || source.origin !== "legacy-primary-folder"
+        || source.path !== expectedPath) {
+        throw new Error("The legacy Index source changed before it could be kept. Reopen Settings and try again.");
+      }
+      source.origin = "user";
+      this.invalidateRecordCache();
+    }, { requireUndo: true });
   }
 
   async linkIndexFolder(path: string): Promise<void> {

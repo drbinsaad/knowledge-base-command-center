@@ -4,6 +4,7 @@ import { ManageLibrariesModal } from "./library-modal";
 import { FollowUpCategoryManagerModal } from "./follow-up-modal";
 import type { FollowUpCategoryDefinition } from "./follow-up";
 import { ManageLibraryNoteProfilesModal } from "./library-profile-modal";
+import type { LegacyIndexReviewPlan } from "./legacy-index-review";
 import type EntVaultCommandCenterPlugin from "./main";
 import {
   asUnknownRecord,
@@ -37,6 +38,9 @@ interface SettingsHost extends Plugin {
   getIndexRecords(): Array<{ path: string }>;
   linkIndexFolder(path: string): Promise<void>;
   unlinkIndexFolder(sourceId: string): Promise<void>;
+  getLegacyIndexReviewPlans(): LegacyIndexReviewPlan[];
+  openLegacyIndexReview(sourceId?: string): void;
+  keepLegacyIndexSourceById(sourceId: string, expectedPath: string): Promise<void>;
   countOrphanedByProposalFolderChange(nextFolder: string): number;
   countOrphanedByPrimaryFolderChange(nextFolder: string): number;
   isDataReadOnly(): boolean;
@@ -371,6 +375,82 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
     const activeBaseId = this.host.getActiveKnowledgeBaseId();
     const ownsConfiguredBase = this.createOpenedBaseGuard(activeBaseId);
     const activeBase = knowledgeBases.find((entry) => entry.id === activeBaseId);
+    // Settings search/unit harnesses may provide only the historical host
+    // surface. The production host always implements this review API.
+    let legacyReviewPlans: LegacyIndexReviewPlan[] = [];
+    let legacyReviewPreparationError = "";
+    try {
+      legacyReviewPlans = this.host.getLegacyIndexReviewPlans?.() ?? [];
+    } catch (error) {
+      legacyReviewPreparationError = errorMessage(error, "The legacy folder review is too large to prepare safely.");
+    }
+    const openLegacyReview = (sourceId: string): void => {
+      void this.prepareForKnowledgeBaseChange().then((ready) => {
+        if (!ready || !ownsConfiguredBase()) return;
+        let currentPlan: LegacyIndexReviewPlan | undefined;
+        try {
+          currentPlan = (this.host.getLegacyIndexReviewPlans?.() ?? [])
+            .find((plan) => plan.source.id === sourceId);
+        } catch (error) {
+          new Notice(errorMessage(error, "The legacy folder review could not be prepared."), 8000);
+          this.update();
+          return;
+        }
+        if (!currentPlan) {
+          new Notice("This legacy index source no longer needs review.");
+          this.update();
+          return;
+        }
+        this.host.openLegacyIndexReview(currentPlan.source.id);
+      });
+    };
+    if (legacyReviewPreparationError) {
+      definitions.push({
+        type: "group",
+        heading: "Index migration review required",
+        items: [{
+          name: "Legacy folder review unavailable",
+          desc: `${legacyReviewPreparationError} The inherited folder link remains active and no Markdown was changed. Let Obsidian Sync finish and retry; if the source exceeds the safe review limits, leave it linked until its scope can be reviewed safely.`,
+          aliases: ["legacy", "migration", "automatic membership", "linked folder", "warning"],
+        }],
+      });
+    } else if (legacyReviewPlans.length > 0) {
+      const availablePlans = legacyReviewPlans.filter((plan) => plan.sourceFolderAvailable);
+      const unavailableCount = legacyReviewPlans.length - availablePlans.length;
+      const candidateCount = availablePlans.reduce((total, plan) => total + plan.candidates.length, 0);
+      definitions.push({
+        type: "group",
+        heading: "Index migration review required",
+        items: [
+          {
+            name: "Why this warning remains",
+            desc: unavailableCount > 0
+              ? `${legacyReviewPlans.length.toLocaleString()} legacy folder ${legacyReviewPlans.length === 1 ? "source still grants" : "sources still grant"} automatic Index membership. ${unavailableCount.toLocaleString()} ${unavailableCount === 1 ? "folder is" : "folders are"} unavailable on this device, so their notes cannot be counted safely until Obsidian Sync finishes or the folder is restored.`
+              : `${legacyReviewPlans.length.toLocaleString()} legacy folder ${legacyReviewPlans.length === 1 ? "source still grants" : "sources still grant"} automatic Index membership. ${candidateCount.toLocaleString()} source-only Markdown ${candidateCount === 1 ? "note needs" : "notes need"} an explicit keep-or-remove choice. New notes below ${legacyReviewPlans.length === 1 ? "that folder" : "those folders"} will continue to appear automatically until reviewed.`,
+            aliases: ["legacy", "migration", "automatic membership", "linked folder", "warning"],
+          },
+          ...legacyReviewPlans.map((plan) => renderSetting(
+            plan.source.path,
+            plan.sourceFolderAvailable
+              ? `${plan.candidates.length.toLocaleString()} source-only Markdown ${plan.candidates.length === 1 ? "note currently depends" : "notes currently depend"} on this inherited folder link. Review exact notes, intentionally keep the dynamic link, or choose Not now. No Markdown file is changed by any review choice.`
+              : "This inherited folder is unavailable on this device, so its notes cannot be counted safely. Open the review to keep the link intentionally, or choose Not now and let Obsidian Sync finish before unlinking. No Markdown file is changed.",
+            (row) => {
+              row.settingEl.addClass("ent-cc-legacy-warning");
+              row.addButton((button) => button
+                .setButtonText("Review…")
+                .setIcon("list-checks")
+                .setCta()
+                .setDisabled(readOnly)
+                .onClick(() => {
+                  if (!ownsConfiguredBase()) return;
+                  openLegacyReview(plan.source.id);
+                }));
+            },
+            ["review", "preserve direct", "unlink", "keep linked"],
+          )),
+        ],
+      });
+    }
     definitions.push({
       type: "group",
       heading: "Knowledge bases",
@@ -758,7 +838,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
               "Linked Index folders",
               this.host.data.indexFolderSources.length === 0
                 ? "None. Notes enter this Index only when you explicitly add them. Linking a folder is opt-in and includes its current and future Markdown notes without moving or editing them."
-                : `${this.host.data.indexFolderSources.length} folder${this.host.data.indexFolderSources.length === 1 ? " is" : "s are"} explicitly linked. The default new-note folder remains storage-only.`,
+                : `${this.host.data.indexFolderSources.length} folder ${this.host.data.indexFolderSources.length === 1 ? "source is" : "sources are"} linked. An inherited legacy source remains automatic until you review it; the default new-note folder itself remains storage-only.`,
               (row) => {
                 row.addButton((button) => button
                   .setButtonText("Link folder…")
@@ -785,28 +865,62 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
             ...this.host.data.indexFolderSources.map((source) => renderSetting(
               source.path,
               source.origin === "legacy-primary-folder"
-                ? "Legacy linked source preserved during upgrade. Unlink it to make this base fully note-by-note; Markdown files remain untouched."
+                ? "Legacy linked source preserved during upgrade. Review exact notes before unlinking it or intentionally keeping it dynamic; Markdown files remain untouched."
                 : "Explicit linked source. Notes below this folder join dynamically; the folder is never moved or edited.",
               (row) => {
-                row.addButton((button) => button
-                  .setButtonText("Unlink")
-                  .setIcon("unlink")
-                  .setDisabled(readOnly)
-                  .onClick(() => {
-                    if (!ownsConfiguredBase()) return;
-                    new ConfirmModal(
-                      this.host.app,
-                      "Unlink folder from this Index?",
-                      `Notes supplied only by “${source.path}” will leave the Index. Notes explicitly added one by one, supplied by another linked folder, or used in Collections remain available. No Markdown file will be changed.`,
-                      "Unlink folder",
-                      async () => {
+                if (source.origin === "legacy-primary-folder") {
+                  row.settingEl.addClass("ent-cc-legacy-warning");
+                  row.addButton((button) => button
+                    .setButtonText("Review…")
+                    .setIcon("list-checks")
+                    .setCta()
+                    .setDisabled(readOnly)
+                    .onClick(() => {
+                      if (!ownsConfiguredBase()) return;
+                      openLegacyReview(source.id);
+                    }));
+                  if (legacyReviewPreparationError) {
+                    row.addButton((button) => button
+                      .setButtonText("Keep linked")
+                      .setIcon("link")
+                      .setDisabled(readOnly)
+                      .onClick(() => {
                         if (!ownsConfiguredBase()) return;
-                        await this.host.unlinkIndexFolder(source.id);
-                        if (!ownsConfiguredBase()) return;
-                        this.update();
-                      },
-                    ).open();
-                  }));
+                        new ConfirmModal(
+                          this.host.app,
+                          "Keep this folder linked to the Index?",
+                          `“${source.path}” will become an intentional dynamic source. Its current and future Markdown notes will continue to join the Index automatically. No Markdown file will be changed.`,
+                          "Keep linked",
+                          async () => {
+                            if (!ownsConfiguredBase()) return;
+                            await this.host.keepLegacyIndexSourceById(source.id, source.path);
+                            if (!ownsConfiguredBase()) return;
+                            this.update();
+                          },
+                        ).open();
+                      }));
+                  }
+                } else {
+                  row.addButton((button) => button
+                    .setButtonText("Unlink")
+                    .setIcon("unlink")
+                    .setDisabled(readOnly)
+                    .onClick(() => {
+                      if (!ownsConfiguredBase()) return;
+                      new ConfirmModal(
+                        this.host.app,
+                        "Unlink folder from this Index?",
+                        `Notes supplied only by “${source.path}” will leave the Index. Notes explicitly added one by one, supplied by another linked folder, or used in Collections remain available. No Markdown file will be changed.`,
+                        "Unlink folder",
+                        async () => {
+                          if (!ownsConfiguredBase()) return;
+                          await this.host.unlinkIndexFolder(source.id);
+                          if (!ownsConfiguredBase()) return;
+                          this.update();
+                        },
+                      ).open();
+                    }));
+                }
               },
               ["membership", "legacy", "unlink folder"],
             )),
