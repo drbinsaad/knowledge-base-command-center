@@ -30,6 +30,12 @@ Before removing and re-adding the BRAT entry, export current organization and ba
 
 Adding, restoring, hiding, or unlinking membership does not move or rewrite the Markdown file. Generic organization lives in plugin data. A pre-v15 Generic base may show its former `primaryFolder` as a removable legacy linked-folder source so its pre-upgrade notes do not disappear.
 
+## A note appears automatically after upgrading
+
+If an ordinary note such as `README.md` appears in a Generic Index merely because it is stored below an old knowledge-base folder, check the warning at the top of the Command Center or in Settings. A pre-v15 upgrade temporarily preserves the old folder-authoritative behavior as a **legacy linked-folder source**; this is plugin membership, not an Obsidian file move and not an Obsidian `.base` rule.
+
+Choose **Review…** or run **Review legacy index source…**. First let Obsidian Sync finish and verify that the linked folder's Markdown contents are complete on this device, then check the confirmation in the review. Apply remains blocked if a non-root source folder is unavailable, and an empty local list does not prove another synced device has no notes. Select only the notes that should remain durable direct members, then choose **Apply review & unlink**. Unselected notes leave the plugin Index, future notes placed in that folder no longer join automatically, and every Markdown file remains where it is unchanged. The conversion and unlink are saved together as one Undo action. Choose **Keep linked** only when you intentionally want that folder's current and future Markdown descendants to join automatically; **Not now** leaves the source and warning unchanged.
+
 ## A subject appears in the wrong Index or Library
 
 Update every device to version 0.10.0 or newer and let Sync settle. Open the row's **…** menu and choose **Move to another section…**.

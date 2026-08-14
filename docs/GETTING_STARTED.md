@@ -135,7 +135,7 @@ Permanent deletion is available only for an archived base and requires typed con
 
 Version 0.10 and later wrap earlier single-base organization into one knowledge base without intentionally resetting it. The first upgraded copy receives a random full vault identity plus a non-secret fingerprint of its legacy organization.
 
-When a Generic base stored in pre-v15 plugin data is upgraded, its former `primaryFolder` becomes one deterministic **legacy linked-folder source**. This preserves the notes that appeared under the old folder-authoritative behavior. The source can be unlinked later like any other folder rule; doing so never deletes or moves Markdown, and notes explicitly added directly remain members.
+When a Generic base stored in pre-v15 plugin data is upgraded, its former `primaryFolder` temporarily becomes one deterministic **legacy linked-folder source**. This prevents notes from disappearing during upgrade. A persistent warning and the **Review legacy index source…** command list the real notes currently available on this device and supplied only by that source. Before unlinking, let Obsidian Sync finish and confirm in the review that the folder's Markdown contents are complete; Apply is blocked when a non-root source folder is unavailable, and zero local notes is not treated as proof that other synced devices are empty. Keep selected notes as durable direct members and unlink the folder in one Undo-protected action, intentionally **Keep linked**, or choose **Not now**. Until you resolve the warning, current and future Markdown below that legacy source can still enter automatically. No review choice deletes, moves, renames, or rewrites Markdown.
 
 When upgrading a synced vault on several devices:
 

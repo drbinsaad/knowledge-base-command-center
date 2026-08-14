@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import EntVaultCommandCenterPlugin, { SYNC_RECOVERY_LOCAL_STATE_KEY } from "../src/main.ts";
+import { INDEX_FOLDER_VAULT_ROOT, type IndexFolderSource } from "../src/model.ts";
 import { UpdateAnnouncementModal } from "../src/update-announcement-modal.ts";
 import {
   compareSemanticVersions,
@@ -9,6 +10,7 @@ import {
   planUpdateAnnouncement,
   UPDATE_ANNOUNCEMENT_0_12_0,
   UPDATE_ANNOUNCEMENT_0_16_0,
+  UPDATE_ANNOUNCEMENT_0_16_1,
   type UpdateAnnouncement,
 } from "../src/update-announcement.ts";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
@@ -67,6 +69,21 @@ test("0.16.0 has curated explicit-membership and safety news", () => {
   );
 });
 
+test("0.16.1 has curated legacy-folder review news", () => {
+  const upgrade = planUpdateAnnouncement("0.16.1", "0.16.0", true);
+  assert.equal(upgrade.announcement, UPDATE_ANNOUNCEMENT_0_16_1);
+  assert.equal(UPDATE_ANNOUNCEMENT_0_16_1.highlights.length, 5);
+  const highlights = UPDATE_ANNOUNCEMENT_0_16_1.highlights.join("\n");
+  assert.match(highlights, /legacy linked folder/u);
+  assert.match(highlights, /durable direct members/u);
+  assert.match(highlights, /Obsidian Sync is finished/u);
+  assert.match(highlights, /Direct, Linked folder, Imported placeholder, or Protected source/u);
+  assert.equal(
+    UPDATE_ANNOUNCEMENT_0_16_1.releaseUrl,
+    "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.16.1",
+  );
+});
+
 test("downgrades never replay an announcement and prerelease precedence stays deterministic", () => {
   const downgrade = planUpdateAnnouncement("0.12.0", "0.13.0", true);
   assert.equal(downgrade.announcement, null);
@@ -103,6 +120,17 @@ interface AnnouncementInternal {
   unloaded: boolean;
   deviceLocalPersistenceSuppressed: boolean;
   loadSyncRecoveryLocalState(): void;
+}
+
+interface LegacyReviewLifecycleInternal {
+  maybeShowLegacyIndexReview(): void;
+  openLegacyIndexReview(sourceId?: string): void;
+  unloaded: boolean;
+  deviceLocalPersistenceSuppressed: boolean;
+}
+
+function availableLegacySource(): IndexFolderSource {
+  return { id: "legacy-root", path: INDEX_FOLDER_VAULT_ROOT, origin: "legacy-primary-folder" };
 }
 
 function announcementPlugin(
@@ -162,6 +190,45 @@ test("two replacement instances with stale local snapshots share one synchronous
   first.maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
   replacement.maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
   assert.equal(opened.length, 1);
+});
+
+test("legacy folder review is offered once per App session and remains eligible after restart", () => {
+  const opened: string[] = [];
+  const create = (app: object) => {
+    const plugin = new EntVaultCommandCenterPlugin(app as never, { version: "0.16.0" } as never) as
+      EntVaultCommandCenterPlugin & LegacyReviewLifecycleInternal;
+    plugin.data.settings.workspaceMode = "generic";
+    plugin.data.indexFolderSources = [availableLegacySource()];
+    plugin.openLegacyIndexReview = () => { opened.push(plugin.getActiveKnowledgeBaseId()); };
+    return plugin;
+  };
+
+  const firstApp = {};
+  const first = create(firstApp);
+  const replacement = create(firstApp);
+  first.maybeShowLegacyIndexReview();
+  first.maybeShowLegacyIndexReview();
+  replacement.maybeShowLegacyIndexReview();
+  assert.equal(opened.length, 1, "Not now or a hot-reload cannot repeat the automatic offer in one App session");
+
+  create({}).maybeShowLegacyIndexReview();
+  assert.equal(opened.length, 2, "a full Obsidian restart offers an unresolved legacy source again");
+});
+
+test("legacy folder review is not offered without a writable Generic legacy source", () => {
+  for (const mode of ["fresh", "clinical", "read-only", "unloaded", "suppressed"] as const) {
+    const plugin = new EntVaultCommandCenterPlugin({} as never, { version: "0.16.0" } as never) as
+      EntVaultCommandCenterPlugin & LegacyReviewLifecycleInternal;
+    if (mode !== "fresh") plugin.data.indexFolderSources = [availableLegacySource()];
+    if (mode === "clinical") plugin.data.settings.workspaceMode = "ent-clinical";
+    if (mode === "read-only") plugin.dataCompatibilityWarning = "Protected read-only state";
+    if (mode === "unloaded") plugin.unloaded = true;
+    if (mode === "suppressed") plugin.deviceLocalPersistenceSuppressed = true;
+    let opens = 0;
+    plugin.openLegacyIndexReview = () => { opens += 1; };
+    plugin.maybeShowLegacyIndexReview();
+    assert.equal(opens, 0, mode);
+  }
 });
 
 test("plugin lifecycle skips fresh installs and fails closed when its one-time marker cannot persist", () => {
@@ -233,6 +300,54 @@ test("manual reopening marks the release, refuses stacked duplicates, and closes
     Reflect.set(UpdateAnnouncementModal.prototype, "open", originalOpen);
     Reflect.set(UpdateAnnouncementModal.prototype, "close", originalClose);
   }
+});
+
+test("What’s New finishes before the once-per-session legacy review is offered", () => {
+  const localStorage = new Map<string, unknown>();
+  const plugin = announcementPlugin(localStorage, [], { version: "0.16.1" });
+  Reflect.deleteProperty(plugin, "openUpdateAnnouncement");
+  plugin.data.indexFolderSources = [availableLegacySource()];
+  let legacyOpens = 0;
+  plugin.openLegacyIndexReview = () => {
+    legacyOpens += 1;
+  };
+  const originalOpen = Reflect.get(UpdateAnnouncementModal.prototype, "open");
+  const updateModals: UpdateAnnouncementModal[] = [];
+  UpdateAnnouncementModal.prototype.open = function open(): void { updateModals.push(this); };
+  try {
+    plugin.maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
+    const updateModal = updateModals[0];
+    assert.ok(updateModal);
+    assert.equal(legacyOpens, 0, "the two startup modals never stack");
+    Object.assign(updateModal, { contentEl: { empty: () => undefined } });
+    updateModal.onClose();
+    assert.equal(legacyOpens, 1);
+  } finally {
+    Reflect.set(UpdateAnnouncementModal.prototype, "open", originalOpen);
+  }
+});
+
+test("an App-wide What’s New barrier blocks a replacement instance's legacy review", () => {
+  const localStorage = new Map<string, unknown>();
+  const app = {
+    loadLocalStorage: (key: string) => structuredClone(localStorage.get(key) ?? null),
+    saveLocalStorage: (key: string, value: unknown) => { localStorage.set(key, structuredClone(value)); },
+  };
+  const announcement = new EntVaultCommandCenterPlugin(app as never, { version: "0.16.0" } as never) as
+    EntVaultCommandCenterPlugin & AnnouncementInternal;
+  const replacement = new EntVaultCommandCenterPlugin(app as never, { version: "0.16.0" } as never) as
+    EntVaultCommandCenterPlugin & LegacyReviewLifecycleInternal;
+  replacement.data.indexFolderSources = [availableLegacySource()];
+  let legacyOpens = 0;
+  replacement.openLegacyIndexReview = () => { legacyOpens += 1; };
+
+  announcement.openCurrentUpdateAnnouncement(UPDATE_ANNOUNCEMENT_0_16_0);
+  replacement.maybeShowLegacyIndexReview();
+  assert.equal(legacyOpens, 0, "replacement instances share the active update-modal barrier");
+
+  announcement.onunload();
+  replacement.maybeShowLegacyIndexReview();
+  assert.equal(legacyOpens, 1);
 });
 
 test("onLayoutReady owns automatic presentation and unload prevents a late or duplicate open", async () => {

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.16.1
+
+### Added
+
+- Upgraded Generic bases with a preserved `legacy-primary-folder` source now show a persistent review warning in the Command Center and Settings. Once per active knowledge base in each Obsidian App session, the plugin offers the source-only Markdown notes currently available on the device for review: preserve any selected notes as durable direct members and unlink the folder in one Undo-protected transaction, intentionally **Keep linked**, or choose **Not now** without changing anything. Unlink requires an explicit confirmation that Obsidian Sync and the local folder contents are complete; a missing non-root folder blocks Apply instead of being mistaken for an empty source. The review never edits, moves, renames, or deletes Markdown.
+- Index rows now explain their membership provenance with **Direct**, **Linked folder**, **Imported placeholder**, or **Protected source** labels, including compact and screen-reader equivalents.
+
+### Fixed
+
+- Legacy-folder review revalidates the exact source, folder availability, candidate list, metadata, vault paths, active base, Sync generation, and read-only state before commit. A stale or not-yet-synced review aborts without partial plugin-data changes, and unlinking does not accidentally unhide a separately direct member.
+
 ## 0.16.0
 
 ### Changed

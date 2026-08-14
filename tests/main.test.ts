@@ -2625,6 +2625,50 @@ test("a missing data file stays uncommitted and adopts the first identified Sync
   assert.equal(plugin.savedData.length, 0, "the already-current identified capture needs no writeback");
 });
 
+test("a delayed Sync adoption offers an inherited folder review after layout-ready startup", async () => {
+  const authoritativeData = migrateData(null);
+  authoritativeData.settings.workspaceMode = "generic";
+  authoritativeData.indexFolderSources = [{
+    id: "legacy-delayed-sync",
+    path: INDEX_FOLDER_VAULT_ROOT,
+    origin: "legacy-primary-folder",
+  }];
+  const authoritative = createDefaultStore(authoritativeData, 500, "vault-legacy-delayed-sync");
+  const plugin = pluginWith(null);
+  let reviewOpens = 0;
+  plugin.openLegacyIndexReview = () => { reviewOpens += 1; };
+
+  await plugin.loadPluginData();
+  assert.equal(reviewOpens, 0);
+  plugin.loadedData = authoritative;
+  await plugin.onExternalSettingsChange();
+
+  assert.equal(reviewOpens, 1, "the applied Sync reload retries the once-per-session offer");
+});
+
+test("automatic legacy review is claimed once for each active knowledge base", async () => {
+  const first = migrateData(null);
+  first.indexFolderSources = [{ id: "legacy-first", path: INDEX_FOLDER_VAULT_ROOT, origin: "legacy-primary-folder" }];
+  const second = migrateData(null);
+  second.indexFolderSources = [{ id: "legacy-second", path: INDEX_FOLDER_VAULT_ROOT, origin: "legacy-primary-folder" }];
+  const store = createDefaultStore(first, 100, "vault-legacy-base-claims");
+  const secondEntry = createKnowledgeBaseEntry(second, "base-second", 200);
+  store.bases.push(secondEntry);
+  const plugin = pluginWith(store);
+  await plugin.loadPluginData();
+  const openedBaseIds: string[] = [];
+  plugin.openLegacyIndexReview = () => { openedBaseIds.push(plugin.getActiveKnowledgeBaseId()); };
+  const lifecycle = plugin as unknown as { maybeShowLegacyIndexReview(): void };
+
+  lifecycle.maybeShowLegacyIndexReview();
+  lifecycle.maybeShowLegacyIndexReview();
+  await plugin.switchKnowledgeBase(secondEntry.id);
+  await plugin.switchKnowledgeBase(store.activeBaseId);
+  await plugin.switchKnowledgeBase(secondEntry.id);
+
+  assert.deepEqual(openedBaseIds, ["base-default", "base-second"]);
+});
+
 test("a rejected first edit from a missing-data cold start restores its bootstrap baseline", async () => {
   const plugin = pluginWith(null);
   const loaded = await plugin.loadPluginData(false);
@@ -5276,6 +5320,258 @@ test("a v14 generic primary folder becomes a removable legacy source", async () 
 
   assert.deepEqual(plugin.getIndexFolderSources(), []);
   assert.deepEqual(plugin.getIndexRecords(), []);
+});
+
+test("legacy review blocks an unavailable Sync folder and rechecks its arrival at commit", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.indexFolderSources = [{ id: "legacy-review", path: "Legacy Base", origin: "legacy-primary-folder" }];
+  const files: TFile[] = [];
+  const folders: TFolder[] = [];
+  const frontmatter: Record<string, Record<string, unknown>> = {};
+  const { plugin, sourceMutationCount } = pluginWithFiles(data, files, frontmatter, null, folders);
+  await plugin.loadPluginData();
+  const unavailable = plugin.getLegacyIndexReviewPlans()[0];
+  assert.ok(unavailable);
+  assert.equal(unavailable.sourceFolderAvailable, false);
+  const beforeUnavailable = structuredClone(plugin.data);
+  await assert.rejects(
+    plugin.applyLegacyIndexReview(unavailable, [], true),
+    /not available.*Sync/iu,
+  );
+  assert.deepEqual(plugin.data, beforeUnavailable);
+  assert.equal(plugin.data.undoStack.length, 0);
+
+  const arrived = new TFile("Legacy Base/Arrived.md");
+  folders.push(new TFolder("Legacy Base", [arrived]));
+  files.push(arrived);
+  frontmatter[arrived.path] = { title: "Arrived" };
+  plugin.invalidateRecordCache();
+  const available = plugin.getLegacyIndexReviewPlans()[0];
+  assert.ok(available);
+  assert.equal(available.sourceFolderAvailable, true);
+  assert.deepEqual(available.candidates.map((candidate) => candidate.path), [arrived.path]);
+
+  folders.splice(0);
+  plugin.invalidateRecordCache();
+  const beforeDisappearance = structuredClone(plugin.data);
+  await assert.rejects(
+    plugin.applyLegacyIndexReview(available, [arrived.path], true),
+    /changed after review|changed before it could be applied/iu,
+  );
+  assert.deepEqual(plugin.data, beforeDisappearance, "a folder that disappears after preview cannot be unlinked");
+  assert.equal(plugin.data.undoStack.length, 0);
+  assert.equal(sourceMutationCount(), 0);
+});
+
+test("legacy Index review preserves the selected subset and unlinks in one Undo-required transaction", async () => {
+  const alreadyDirect = new TFile("Legacy Base/Already direct.md");
+  const preserve = new TFile("Legacy Base/Preserve.md");
+  const leave = new TFile("Legacy Base/Leave.md");
+  const hidden = new TFile("Legacy Base/Hidden.md");
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.primaryFolder = "Legacy Base";
+  data.directIndexPaths = [alreadyDirect.path];
+  data.excludedIndexPaths = [hidden.path];
+  data.indexFolderSources = [{ id: "legacy-review", path: "Legacy Base", origin: "legacy-primary-folder" }];
+  const { plugin, sourceMutationCount } = pluginWithFiles(data, [alreadyDirect, preserve, leave, hidden], {
+    [alreadyDirect.path]: { title: "Already direct" },
+    [preserve.path]: { title: "Preserve" },
+    [leave.path]: { title: "Leave" },
+    [hidden.path]: { title: "Hidden" },
+  }, null, [new TFolder("Legacy Base")]);
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+  const before = structuredClone(plugin.data);
+  const undoBefore = plugin.data.undoStack.length;
+  const plans = plugin.getLegacyIndexReviewPlans();
+  assert.equal(plans.length, 1);
+  const plan = plans[0];
+  assert.ok(plan);
+  assert.deepEqual(plan.candidates.map((candidate) => candidate.path), [leave.path, preserve.path].sort());
+  await assert.rejects(
+    plugin.applyLegacyIndexReview(plan, [preserve.path], false),
+    /Confirm.*Sync/iu,
+  );
+  assert.deepEqual(plugin.data, before, "the host boundary rejects an unlink without explicit Sync confirmation");
+
+  const calls: Array<{ label: string; requireUndo?: boolean }> = [];
+  const originalMutate = plugin.mutate.bind(plugin);
+  plugin.mutate = async (label, action, options = {}) => {
+    calls.push({ label, requireUndo: options.requireUndo });
+    await originalMutate(label, action, options);
+  };
+  await plugin.applyLegacyIndexReview(plan, [preserve.path], true);
+
+  assert.deepEqual(calls, [{
+    label: "Review legacy Index folder “Legacy Base”",
+    requireUndo: true,
+  }], "preserve and unlink share one hard-Undo transaction");
+  assert.deepEqual(plugin.data.indexFolderSources, []);
+  assert.deepEqual(plugin.data.directIndexPaths, [alreadyDirect.path, preserve.path]);
+  assert.deepEqual(plugin.data.excludedIndexPaths, [], "a source-only hidden override is retired with its source");
+  assert.deepEqual(
+    plugin.getIndexRecords().map((record) => record.path).sort(),
+    [alreadyDirect.path, preserve.path].sort(),
+  );
+  assert.equal(plugin.getRecord(leave.path), null, "the unselected source-only note leaves the plugin Index");
+  assert.equal(plugin.data.undoStack.length, undoBefore + 1);
+  assert.equal(plugin.data.undoStack.at(-1)?.label, "Review legacy Index folder “Legacy Base”");
+  assert.equal(plugin.savedData.length, 1);
+  assert.equal(sourceMutationCount(), 0, "membership review never writes, moves, or deletes Markdown");
+
+  await plugin.undo();
+  const restoredWithoutHistory = structuredClone(plugin.data);
+  restoredWithoutHistory.undoStack = [];
+  restoredWithoutHistory.redoStack = [];
+  const beforeWithoutHistory = structuredClone(before);
+  beforeWithoutHistory.undoStack = [];
+  beforeWithoutHistory.redoStack = [];
+  assert.deepEqual(restoredWithoutHistory, beforeWithoutHistory, "Undo restores the source, direct paths, and hidden overrides atomically");
+  assert.equal(sourceMutationCount(), 0, "Undo also leaves every Markdown file untouched");
+});
+
+test("legacy vault-root review preserves a selected note's visible group after unlink", async () => {
+  const nested = new TFile("Research/Deep/Topic.md");
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.primaryFolder = "";
+  data.indexFolderSources = [{
+    id: "legacy-root-review",
+    path: INDEX_FOLDER_VAULT_ROOT,
+    origin: "legacy-primary-folder",
+  }];
+  const { plugin } = pluginWithFiles(data, [nested], { [nested.path]: { title: "Topic" } });
+  await plugin.loadPluginData();
+  const before = plugin.getRecord(nested.path);
+  assert.equal(before?.domain, "Research");
+  const plan = plugin.getLegacyIndexReviewPlans()[0];
+  assert.ok(plan);
+
+  await plugin.applyLegacyIndexReview(plan, [nested.path], true);
+
+  assert.deepEqual(plugin.data.indexFolderSources, []);
+  assert.equal(plugin.data.indexGroupByPath[nested.path], "Research");
+  assert.equal(plugin.getRecord(nested.path)?.domain, "Research");
+});
+
+test("legacy Index review rejects vault, metadata, and source drift without partial mutation", async () => {
+  const driftKinds = ["vault", "metadata", "source"] as const;
+  for (const driftKind of driftKinds) {
+    const original = new TFile("Legacy Base/Original.md");
+    const files = [original];
+    const frontmatter: Record<string, Record<string, unknown>> = {
+      [original.path]: { title: "Original" },
+    };
+    const data = migrateData(null);
+    data.settings.workspaceMode = "generic";
+    data.indexFolderSources = [{ id: "legacy-review", path: "Legacy Base", origin: "legacy-primary-folder" }];
+    const { plugin, sourceMutationCount } = pluginWithFiles(data, files, frontmatter, null, [new TFolder("Legacy Base")]);
+    await plugin.loadPluginData();
+    const plan = plugin.getLegacyIndexReviewPlans()[0];
+    assert.ok(plan);
+
+    if (driftKind === "vault") {
+      const arrived = new TFile("Legacy Base/Arrived.md");
+      files.push(arrived);
+      frontmatter[arrived.path] = { title: "Arrived" };
+    } else if (driftKind === "metadata") {
+      frontmatter[original.path] = { title: "Renamed after preview" };
+    } else {
+      const source = plugin.data.indexFolderSources[0];
+      assert.ok(source);
+      source.path = "Different legacy root";
+    }
+    plugin.invalidateRecordCache();
+    const before = structuredClone(plugin.data);
+
+    await assert.rejects(
+      plugin.applyLegacyIndexReview(plan, [original.path], true),
+      /changed after review|changed before it could be applied/iu,
+      `${driftKind} drift must invalidate the exact preview`,
+    );
+    assert.deepEqual(plugin.data, before, `${driftKind} drift remains intact and the reviewed action changes nothing`);
+    assert.equal(sourceMutationCount(), 0, `${driftKind} drift rejection never mutates Markdown`);
+  }
+});
+
+test("keeping a reviewed legacy source changes only its origin and is Undoable", async () => {
+  const indexed = new TFile("Legacy Base/Indexed.md");
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.directIndexPaths = ["Outside/Direct.md"];
+  data.excludedIndexPaths = ["Legacy Base/Hidden.md"];
+  data.indexFolderSources = [{ id: "legacy-review", path: "Legacy Base", origin: "legacy-primary-folder" }];
+  const { plugin, sourceMutationCount } = pluginWithFiles(data, [indexed], {
+    [indexed.path]: { title: "Indexed" },
+  }, null, [new TFolder("Legacy Base")]);
+  await plugin.loadPluginData();
+  const plan = plugin.getLegacyIndexReviewPlans()[0];
+  assert.ok(plan);
+  const before = structuredClone(plugin.data);
+  const expected = structuredClone(before);
+  const expectedSource = expected.indexFolderSources[0];
+  assert.ok(expectedSource);
+  expectedSource.origin = "user";
+  expected.undoStack = [];
+  expected.redoStack = [];
+  const undoBefore = plugin.data.undoStack.length;
+  const calls: Array<{ label: string; requireUndo?: boolean }> = [];
+  const originalMutate = plugin.mutate.bind(plugin);
+  plugin.mutate = async (label, action, options = {}) => {
+    calls.push({ label, requireUndo: options.requireUndo });
+    await originalMutate(label, action, options);
+  };
+
+  await plugin.keepLegacyIndexSource(plan);
+
+  const afterWithoutHistory = structuredClone(plugin.data);
+  afterWithoutHistory.undoStack = [];
+  afterWithoutHistory.redoStack = [];
+  assert.deepEqual(afterWithoutHistory, expected, "the informed keep action changes provenance only");
+  assert.deepEqual(calls, [{
+    label: "Keep folder “Legacy Base” linked to the Index",
+    requireUndo: true,
+  }]);
+  assert.equal(plugin.data.undoStack.length, undoBefore + 1);
+  assert.equal(plugin.data.undoStack.at(-1)?.label, "Keep folder “Legacy Base” linked to the Index");
+  assert.equal(plugin.getIndexRecords().some((record) => record.path === indexed.path), true);
+  assert.equal(sourceMutationCount(), 0);
+
+  await plugin.undo();
+  const restoredWithoutHistory = structuredClone(plugin.data);
+  restoredWithoutHistory.undoStack = [];
+  restoredWithoutHistory.redoStack = [];
+  const beforeWithoutHistory = structuredClone(before);
+  beforeWithoutHistory.undoStack = [];
+  beforeWithoutHistory.redoStack = [];
+  assert.deepEqual(restoredWithoutHistory, beforeWithoutHistory);
+  assert.equal(plugin.data.indexFolderSources[0]?.origin, "legacy-primary-folder");
+  assert.equal(plugin.getIndexRecords().some((record) => record.path === indexed.path), true);
+});
+
+test("a preparation failure still has an exact Undoable Keep-linked fallback", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.indexFolderSources = [{ id: "legacy-fallback", path: "Missing Legacy Base", origin: "legacy-primary-folder" }];
+  const { plugin, sourceMutationCount } = pluginWithFiles(data, [], {});
+  await plugin.loadPluginData();
+  const before = structuredClone(plugin.data);
+
+  await plugin.keepLegacyIndexSourceById("legacy-fallback", "Missing Legacy Base");
+
+  assert.equal(plugin.data.indexFolderSources[0]?.origin, "user");
+  assert.equal(plugin.data.undoStack.at(-1)?.label, "Keep folder “Missing Legacy Base” linked to the Index");
+  assert.equal(sourceMutationCount(), 0);
+  await plugin.undo();
+  const restoredWithoutHistory = structuredClone(plugin.data);
+  restoredWithoutHistory.undoStack = [];
+  restoredWithoutHistory.redoStack = [];
+  const beforeWithoutHistory = structuredClone(before);
+  beforeWithoutHistory.undoStack = [];
+  beforeWithoutHistory.redoStack = [];
+  assert.deepEqual(restoredWithoutHistory, beforeWithoutHistory);
 });
 
 test("portable flags cannot create Generic membership while explicit paths override stale unassigned flags", async () => {
