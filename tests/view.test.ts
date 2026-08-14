@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Menu, Notice, Platform, Setting, TFile, TFolder } from "obsidian";
-import { AddActionModal, calculateModalViewportLayout, CollectionPickerModal, type CollectionTarget, ConfirmModal, IndexGroupModal, KnowledgeNoteModal, localDateStamp, missingSetupFolderHint, RecordPickerModal, TextPromptModal, TopicEditorModal, VaultFilePickerModal, WorkspaceSetupModal, type WorkspaceSetupValue } from "../src/modals.ts";
+import { AddActionModal, calculateModalViewportLayout, CollectionPickerModal, type CollectionTarget, ConfirmModal, IndexGroupModal, KnowledgeNoteModal, localDateStamp, missingSetupFolderHint, nestSetupFoldersUnderHome, RecordPickerModal, TextPromptModal, TopicEditorModal, VaultFilePickerModal, WorkspaceSetupModal, type WorkspaceSetupValue } from "../src/modals.ts";
 import {
   canRelinkPortableRecord,
   calculateSearchViewportLayout,
@@ -28,6 +28,7 @@ import {
   buildCurriculumTree,
   createDefaultStore,
   createPersonalBackup,
+  DEFAULT_EXPORTS_FOLDER,
   emptyCurriculumTree,
   libraryTabId,
   migrateData,
@@ -3988,6 +3989,7 @@ test("setup wizard requires an Inbox folder with the Settings tab's message", as
     parentProperty: "parent",
     templatesFolder: "",
     defaultNewNoteMode: "empty",
+    exportsFolder: DEFAULT_EXPORTS_FOLDER,
     defaultTemplatePath: "",
   };
   modal.errorEl = { setText: (text: string) => { errorText = text; } };
@@ -6563,4 +6565,25 @@ test("a collection move whose target vanished keeps the source membership and sa
   );
   assert.equal(Notice.messages.some((message) => message.includes("no longer exists")), true);
   assert.equal(Notice.messages.some((message) => message.includes("Moved in My Collections")), false);
+});
+
+test("the setup wizard's home folder nests every plugin folder under one parent", () => {
+  const base = {
+    workspaceName: "My KB", workspaceSubtitle: "", indexLabel: "Index", itemSingular: "note",
+    itemPlural: "notes", groupLabel: "Group", primaryFolder: "Knowledge Base", proposalFolder: "Inbox",
+    inboxLabel: "Inbox", defaultNoteFolder: "Knowledge Base", idProperty: "id", groupProperty: "category",
+    parentProperty: "parent", templatesFolder: "Templates", defaultNewNoteMode: "template" as const,
+    defaultTemplatePath: "Templates/Note.md", exportsFolder: DEFAULT_EXPORTS_FOLDER,
+  };
+  const nested = nestSetupFoldersUnderHome(base, " /KB/ ");
+  assert.equal(nested.primaryFolder, "KB/Knowledge Base");
+  assert.equal(nested.proposalFolder, "KB/Inbox");
+  assert.equal(nested.defaultNoteFolder, "KB/Knowledge Base");
+  assert.equal(nested.templatesFolder, "KB/Templates");
+  assert.equal(nested.exportsFolder, "KB/Exports", "the long default leaf collapses to Exports");
+  assert.equal(nested.defaultTemplatePath, "", "a template path outside the new templates folder is cleared for re-picking");
+  assert.equal(nested.workspaceName, "My KB", "non-folder fields pass through untouched");
+  // Empty templates folder means "any Markdown note" — nesting must not invent one.
+  assert.equal(nestSetupFoldersUnderHome({ ...base, templatesFolder: "" }, "KB").templatesFolder, "");
+  assert.deepEqual(nestSetupFoldersUnderHome(base, "   "), base, "a blank home folder changes nothing");
 });

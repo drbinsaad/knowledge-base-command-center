@@ -42,6 +42,7 @@ import {
   createKnowledgeBaseEntry,
   DATA_VERSION,
   DEFAULT_DATA,
+  DEFAULT_EXPORTS_FOLDER,
   DEFAULT_SETTINGS,
   ENT_CLINICAL_SETTINGS,
   enforceStoredTextBounds,
@@ -6343,7 +6344,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   async writePortableJson(kind: "backup" | "workspace" | "portable" | "portfolio" | "conflict", value: unknown): Promise<TFile> {
-    const folder = "Knowledge Base Command Center Exports";
+    // Per-base setting; cleanSettings guarantees it non-empty, and the
+    // classifier never reads it, so relocating it cannot orphan notes.
+    const folder = normalizePath(this.data.settings.exportsFolder).replace(/^\/+|\/+$/gu, "")
+      || DEFAULT_EXPORTS_FOLDER;
     const content = `${JSON.stringify(value, null, 2)}\n`;
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const basePath = normalizePath(`${folder}/knowledge-base-command-center-${kind}-${stamp}`);

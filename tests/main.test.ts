@@ -22,6 +22,7 @@ import {
   MAX_LIBRARIES,
   MAX_TRANSFER_TEXT_LENGTH,
   migrateData,
+  DEFAULT_EXPORTS_FOLDER,
   migrateStore,
   setCloneJsonValueObserver,
   nextSemanticHead,
@@ -11332,4 +11333,32 @@ test("a note outside proposalFolder, primaryFolder, and manual paths has no reco
   plugin.data.settings.proposalFolder = "Inbox";
   plugin.invalidateRecordCache();
   assert.equal(plugin.getRecords().some((record) => record.path === note.path && record.role === "proposal"), true, "exact match classifies as proposal");
+});
+
+test("vault-side JSON exports honor the configured exports folder", async () => {
+  const data = migrateData(null);
+  data.settings.exportsFolder = "KB/Exports";
+  const plugin = pluginWith(createDefaultStore(data, 100, "vault-custom-exports"));
+  await plugin.loadPluginData(false);
+  let createdPath = "";
+  const app = plugin.app as unknown as {
+    vault: {
+      getAbstractFileByPath(path: string): null;
+      createFolder(path: string): Promise<void>;
+      create(path: string, content: string): Promise<TFile>;
+    };
+  };
+  app.vault = {
+    getAbstractFileByPath: () => null,
+    createFolder: async () => { /* folder creation is not under test */ },
+    create: async (path) => { createdPath = path; return new TFile(path); },
+  };
+
+  await plugin.writePortableJson("backup", { keep: true });
+  assert.match(createdPath, /^KB\/Exports\/knowledge-base-command-center-backup-/);
+
+  // Loading tolerates a blank stored value by falling back to the default,
+  // so exports can never land at the vault root.
+  const reloaded = migrateData(JSON.parse(JSON.stringify({ ...data, settings: { ...data.settings, exportsFolder: "   " } })));
+  assert.equal(reloaded.settings.exportsFolder, DEFAULT_EXPORTS_FOLDER);
 });

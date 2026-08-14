@@ -143,7 +143,7 @@ Recovery exported before first-upgrade identity convergence may carry the losing
 
 If <code>data.json</code> has not arrived yet, the plugin creates only a provisional fresh-device identity and does not immediately write an authoritative empty store during startup. Harmless first-open view state cannot override an established synced store.
 
-If meaningful organization or settings are changed before the established store arrives, the plugin writes a private <code>Knowledge Base Command Center Exports/knowledge-base-command-center-conflict-*.json</code> rescue before adopting the established store. The rescue contains plugin organization and exact vault-relative paths, but no Markdown note bodies. Preserve it privately for recovery or support.
+If meaningful organization or settings are changed before the established store arrives, the plugin writes a private <code>knowledge-base-command-center-conflict-*.json</code> rescue into the configured Exports folder (<code>Knowledge Base Command Center Exports/</code> by default) before adopting the established store. The rescue contains plugin organization and exact vault-relative paths, but no Markdown note bodies. Preserve it privately for recovery or support.
 
 ## Updating on iPhone and iPad
 

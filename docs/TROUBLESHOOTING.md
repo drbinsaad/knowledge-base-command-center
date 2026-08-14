@@ -116,7 +116,7 @@ Open **Sync & recovery center** to review the locally recorded conflict warning 
 
 The plugin preserved meaningful organization before adopting another authoritative store or entering protected read-only mode.
 
-The file is under <code>Knowledge Base Command Center Exports/</code> and can contain exact vault-relative paths and complete plugin organization, but not Markdown note bodies. Keep it private. Do not import it casually or attach it to a public issue.
+The file is under the configured Exports folder (<code>Knowledge Base Command Center Exports/</code> by default; Settings → Exports folder) and can contain exact vault-relative paths and complete plugin organization, but not Markdown note bodies. Keep it private. Do not import it casually or attach it to a public issue.
 
 Back up the vault and request support with sanitized version, timing, and Sync details.
 

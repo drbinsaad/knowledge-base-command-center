@@ -879,6 +879,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
               this.bindBufferedTextCommit(text.inputEl);
             });
           }, ["attachment heading"]),
+          folderSetting("Exports folder", "JSON backups, portable exports on mobile, and sync-conflict rescues are written here. Existing export files are not moved.", settings.exportsFolder, (value) => { settings.exportsFolder = value; }, false),
           guardedFolderSetting(
             "Inbox folder",
             settings.workspaceMode === "ent-clinical" ? "Clinical proposals must stay inside 01 Inbox." : "Notes in this folder appear in the Inbox section.",
