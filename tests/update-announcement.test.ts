@@ -12,6 +12,7 @@ import {
   UPDATE_ANNOUNCEMENT_0_16_0,
   UPDATE_ANNOUNCEMENT_0_16_1,
   UPDATE_ANNOUNCEMENT_0_17_0,
+  UPDATE_ANNOUNCEMENT_0_18_0,
   type UpdateAnnouncement,
 } from "../src/update-announcement.ts";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
@@ -97,6 +98,22 @@ test("0.17.0 has curated membership explanation and placeholder-resolution news"
   assert.equal(
     UPDATE_ANNOUNCEMENT_0_17_0.releaseUrl,
     "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.17.0",
+  );
+});
+
+test("0.18.0 has curated Global Note Organizer and safety news", () => {
+  const upgrade = planUpdateAnnouncement("0.18.0", "0.17.0", true);
+  assert.equal(upgrade.announcement, UPDATE_ANNOUNCEMENT_0_18_0);
+  assert.equal(UPDATE_ANNOUNCEMENT_0_18_0.highlights.length, 5);
+  const highlights = UPDATE_ANNOUNCEMENT_0_18_0.highlights.join("\n");
+  assert.match(highlights, /Notes → Destinations → Review/u);
+  assert.match(highlights, /untargeted bases stay unchanged/u);
+  assert.match(highlights, /color-independent organization indicator/u);
+  assert.match(highlights, /durable Undo/u);
+  assert.match(highlights, /never creates, moves, renames, deletes, or rewrites Markdown/u);
+  assert.equal(
+    UPDATE_ANNOUNCEMENT_0_18_0.releaseUrl,
+    "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.18.0",
   );
 });
 

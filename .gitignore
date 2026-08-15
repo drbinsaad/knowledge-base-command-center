@@ -7,3 +7,4 @@ SHA256SUMS.txt
 *.map
 ._*
 output/playwright/
+.playwright-cli/

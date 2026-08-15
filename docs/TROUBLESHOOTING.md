@@ -47,6 +47,38 @@ In a Library, use **Add → Add existing note** or its contextual classification
 
 Protected ENT records can move only to destinations compatible with their source-derived clinical kind.
 
+## The Organizer shows a README or every note in a folder
+
+The **Notes** step is a vault browser, so it can show eligible existing Markdown files that are not organized anywhere. Merely appearing in this picker does not add a note to an Index, Library, or Collection. The active-note indicator says **KBCC: Not organized** for an ordinary unorganized note; this neutral state is not an error.
+
+Selecting a folder deliberately selects a one-time snapshot of all its current eligible Markdown descendants, which can include `README.md`. Before **Choose destinations**, clear the folder selection, remove the individual README from **Selected notes**, or use **Skip this note** under per-note behavior. The snapshot never creates a linked-folder rule, so a Markdown file created in that folder later will not be included automatically.
+
+If the README already appears in an Index without a reviewed Organizer Apply, use **Why this appears** or **Manage Index… → Why included**. A direct membership, an explicit or inherited legacy linked-folder source, a protected ENT source, or a portable identity—not the Organizer's vault browser—is providing that membership. Follow [A note appears automatically after upgrading](#a-note-appears-automatically-after-upgrading) when the authority is an inherited legacy linked folder.
+
+## Note Organizer Apply says the review is stale
+
+Apply rechecks the exact selected file identities and modification facts, every target KBCC knowledge base and destination, and the locally observed Sync generation. A note rename, deletion, replacement, or edit; a changed heading, Library, Collection, or base; or newly observed synced plugin data can invalidate the prepared review. This is intentional: no subset is applied.
+
+Let Sync finish, confirm the selected notes still exist, choose **Refresh review**, and inspect the new before/after rows. If an ENT destination is rejected, use a source-eligible Index group or a Library compatible with the note's protected clinical kind. Restricted clinical, template, configuration, or immutable source paths cannot be forced through the Organizer.
+
+## Dragging a note onto Organize does nothing
+
+Organizer drop support is a progressive enhancement. It accepts only bounded text path payloads from compatible Obsidian drag sources; operating-system file objects, absolute paths, unsafe URLs, missing or restricted notes, and non-Markdown files are refused. Platforms, themes, and other plugins can expose a different drag payload.
+
+Use the dependable fallback: select or right-click the note, multi-selection, or folder in Obsidian's File Explorer and choose **Organize in KBCC…**, or choose **Organize** and select notes in the vault tree. Dropping never imports an external file and never moves a vault file.
+
+## The active-note indicator is red
+
+Red is reserved for broken persisted organization, such as a duplicate or missing portable identity, unavailable Library, conflicting primary placements, or simultaneous direct-and-hidden Index state. It never means merely “not in the current Index.” Activate the indicator or run **Show current note’s knowledge-base memberships** and read the issue under each affected knowledge base before changing anything.
+
+The indicator also uses an icon, accessible label, tooltip, and optional count, so color is not the only status signal. A normal unorganized note is neutral/muted; organization only in another base uses the accent state; current-base primary or Collections-only organization uses the success state.
+
+## Multi-base Organizer Undo disappeared after restart
+
+**Note organizer: Undo last multi-base change** and **Note organizer: Redo last multi-base change** coordinate the newest exact Organizer batch only during the plugin session that applied it. They also fail closed after a conflicting newer organization change, because the affected bases no longer have the expected newest Undo state.
+
+Every affected knowledge base still received a durable per-base Undo entry. After restart, switch to each changed base and use **Undo personal organization change** separately. Undo changes plugin data only; no Markdown file operation needs to be reversed because the Organizer did not perform one.
+
 ## A portable subject says “No note”
 
 There are two intentional cases: an imported subject can be path-free because it has never been linked on this device, or a previously linked Markdown file can be temporarily missing. In the second case, the plugin retains the prior path binding and keeps the subject in the placeholder queue. Let Sync finish; if a file returns at that same path, the binding resolves automatically. You can also deliberately link another eligible note. Do not treat the placeholder as proof that the file was deleted on every device.
@@ -74,7 +106,7 @@ Choose **Arrange**, tap the row's **…** button, then use Move under, Move to g
 
 To move a subheading itself rather than a record, tap that subheading's **…** button and use **Move under…** or **Outdent one level**. The move takes the subheading's records and everything nested inside it. If a destination you expect is missing, it is either inside the subheading you are moving or it would push the branch past the five-level limit; the plugin says so rather than showing an empty list.
 
-If controls clip or the software keyboard covers content, record the iPhone model, iOS version, Obsidian version, portrait/landscape orientation, Dynamic Type setting, and a sanitized screenshot. The [0.17.0 physical-device record](release-evidence/0.17.0-iphone.md) is waived and unverified; do not assume the complete matrix passed.
+If controls clip or the software keyboard covers content, record the iPhone model, iOS version, Obsidian version, portrait/landscape orientation, Dynamic Type setting, and a sanitized screenshot. The [0.18.0 physical-device record](release-evidence/0.18.0-iphone.md) is waived and unverified; its supplemental Mac emulation is not a physical-iPhone Pass, so do not assume the complete matrix passed.
 
 ## Broad search stops after 300 visible results
 
@@ -166,7 +198,7 @@ Do not edit IDs or identity fields by hand to bypass these checks. Use a current
 
 Before disabling the plugin, run **Knowledge Base Command Center: Clear device-local data…** from the Command Palette (or choose the same action in **Sync & recovery center**) and confirm. Then remove the plugin through Community Plugins or delete its manual plugin folder.
 
-Removing the folder removes <code>data.json</code> and the synced settings and organization stored there. It does not reliably remove device-only routes, collapsed sections, Undo/Redo history, local Sync/Recovery facts, or update-announcement history because Obsidian keeps those two plugin-owned App-local values outside the folder. The clear action removes only those local values; it does not change <code>data.json</code>, Markdown notes, attachments, or recovery exports. Local tracking stays suppressed until Obsidian restarts, so disable or uninstall in that same session. If the plugin was already removed without clearing them, reinstall and enable the same or a newer release, run the clear action, then remove it again.
+Removing the folder removes <code>data.json</code> and the synced settings and organization stored there. It does not reliably remove device-only routes, collapsed sections, Undo/Redo history, local Sync/Recovery facts, or update-announcement history because Obsidian keeps those App-local values outside the folder. A third, bounded rename-recovery journal may temporarily contain the vault identity and old/new vault-relative paths until an interrupted organization repair is durably completed. The clear action removes all three plugin-owned App-local values; it does not change <code>data.json</code>, Markdown notes, attachments, or recovery exports. Local tracking stays suppressed until Obsidian restarts, so disable or uninstall in that same session. If the plugin was already removed without clearing them, reinstall and enable the same or a newer release, run the clear action, then remove it again.
 
 Before uninstalling, export current private recovery for every available base, temporarily restore any archived base that needs recovery, and back up the complete vault including <code>.obsidian</code>.
 

@@ -99,6 +99,24 @@ Creating a note in the default new-note folder does not enroll it in the Index u
 
 An imported path-free subject can remain as **No note** until you create or link a note deliberately. Open Smart queues → **Imported placeholders needing notes**, run **Open imported placeholder queue**, or run **Resolve next imported placeholder…**. Exact normalized title and configured-ID candidates are review hints only; the plugin never chooses or links one automatically.
 
+## Organize existing notes in bulk
+
+Choose **Organize** in the Command Center or run **Organize vault notes across knowledge bases…**. In this workflow, **Base** means a KBCC knowledge base, not an Obsidian `.base` file.
+
+1. In **Notes**, select one or many existing Markdown notes. Selecting a folder takes a one-time snapshot of its current eligible Markdown descendants. It does not link that folder, and notes created there later do not join automatically.
+2. In **Destinations**, choose one or more KBCC knowledge bases. Shared choices can keep, set, or clear the primary Index/Library placement and keep, add, or replace Collection memberships. Use **Skip this note** or **Custom destinations** for a per-note exception.
+3. In **Review**, inspect the exact before/after primary and Collection state. The zero-impact line confirms that no Markdown file or linked-folder rule will change, then **Apply organization** commits the reviewed plugin-data transaction.
+
+A note has at most one primary Index or Library placement inside each knowledge base and can also belong to several Collections. Knowledge bases not selected as destinations are untouched, so their existing memberships stay in place. Selecting the same note for several bases organizes it independently in each one.
+
+You can start the same review from the editor or File Explorer context menu for a single note, an Obsidian multi-selection, or a folder snapshot. On compatible desktop drags, dropping safe existing-note path text on **Organize** preselects those notes. Drop support is optional; if a theme, platform, or drag source does not provide a safe text path, use the context menu or the Organizer's vault tree.
+
+The active Markdown editor also shows an accessible organization indicator. Activate it to see that note's primary placement, Collections, provenance, and issues across every KBCC knowledge base. The icon, accessible label, tooltip, and count carry the meaning; green means organized in the current base, the accent state means organized only elsewhere, muted means ordinarily unorganized, and red is reserved for broken persisted organization.
+
+Apply rechecks the selected file identities, KBCC destinations, and Sync generation. If a note or destination changed after review, Apply aborts without a partial result; refresh the review and inspect it again. Every affected knowledge base gets its normal durable per-base Undo entry. During the same plugin session, run **Note organizer: Undo last multi-base change** or **Note organizer: Redo last multi-base change** to reverse the latest Organizer batch across all affected bases together.
+
+The Organizer bulk-organizes existing notes only. It does not bulk-create Markdown files. Use the Create note flow separately for each file you want to create. In the ENT clinical preset, destination eligibility, protected Library source kinds, and canonical Index grouping remain enforced; incompatible placements are rejected before Apply.
+
 ## Set up Quick entry
 
 Quick entry opens one focused hub for the active knowledge base. It can switch bases, create a No note subject, create Index/Collection/Library headings or subheadings, create an empty or template-based note, and add the current or an existing note.
@@ -174,13 +192,13 @@ After updating, confirm the plugin is enabled before opening its workspace. For 
 
 An existing installation shows **What’s new in Knowledge Base Command Center _version_** once on this device after the update, where _version_ is the newly installed release. Its complete-release-notes action is a normal link to that exact GitHub release and contacts GitHub only after you activate it; the plugin performs no background version check or network request. Fresh installs establish the local version marker without showing update news. Use **Open what’s new** in the Command Palette whenever you want to reopen the window.
 
-The sanitized [0.10.0 iPhone evidence](release-evidence/0.10.0-iphone.md) remains the latest completed device record. The [0.17.0 evidence record](release-evidence/0.17.0-iphone.md) and [current manual checklist](manual-iphone-release-checklist.md) record its physical-iPhone matrix as maintainer-waived and unverified, not Passed.
+The sanitized [0.10.0 iPhone evidence](release-evidence/0.10.0-iphone.md) remains the latest completed physical-device record. The [0.17.0](release-evidence/0.17.0-iphone.md) and [0.18.0](release-evidence/0.18.0-iphone.md) evidence records and the [current manual checklist](manual-iphone-release-checklist.md) record their physical-iPhone matrices as maintainer-waived and unverified, not Passed. The 0.18.0 record identifies supplemental Mac Obsidian mobile-emulation coverage separately and does not treat it as iPhone evidence.
 
 ## Uninstall
 
 Export current organization and back up the vault first. Run **Knowledge Base Command Center: Clear device-local data…** from the Command Palette (also available in **Sync & recovery center**) and confirm. Then disable and remove the plugin through Community Plugins, or remove its manual plugin folder.
 
-Removing the plugin folder removes its <code>data.json</code>, including synced knowledge-base definitions, settings, Libraries, Collections, pins, visual hierarchy, and named snapshots. It does not by itself reliably remove device-only routes, collapsed sections, Undo/Redo history, local Sync/Recovery facts, or update-announcement history because Obsidian stores those App-local values outside the plugin folder. The clear command removes those two plugin-owned local values without changing <code>data.json</code>, Markdown notes, attachments, or recovery export files, and local tracking stays suppressed until Obsidian restarts. Disable or uninstall in that same session. If the plugin was already removed without clearing them, reinstall and enable the same or a newer release, run the command, then remove it again.
+Removing the plugin folder removes its <code>data.json</code>, including synced knowledge-base definitions, settings, Libraries, Collections, pins, visual hierarchy, and named snapshots. It does not by itself reliably remove device-only routes, collapsed sections, Undo/Redo history, local Sync/Recovery facts, or update-announcement history because Obsidian stores those App-local values outside the plugin folder. A third, bounded rename-recovery journal may temporarily contain the vault identity and old/new vault-relative paths until an interrupted organization repair is durably completed. The clear command removes all three plugin-owned App-local values without changing <code>data.json</code>, Markdown notes, attachments, or recovery export files, and local tracking stays suppressed until Obsidian restarts. Disable or uninstall in that same session. If the plugin was already removed without clearing them, reinstall and enable the same or a newer release, run the command, then remove it again.
 
 ## Next
 

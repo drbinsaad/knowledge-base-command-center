@@ -2743,6 +2743,54 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     const quickEntry = createQuickEntryButton(actions, () => this.openQuickEntry(this.app.workspace.getActiveFile()?.path));
     disableWhenReadOnly(quickEntry, readOnly, "Quick entry");
+    const organize = actions.createEl("button", {
+      cls: "ent-cc-button ent-cc-note-organizer-launch",
+      type: "button",
+      attr: {
+        "aria-label": "Organize vault notes across knowledge bases. You can also drop existing Obsidian Markdown notes here.",
+        title: "Organize notes across knowledge bases",
+      },
+    });
+    setIcon(organize.createSpan(), "network");
+    organize.createSpan({ text: "Organize" });
+    const organizerReadOnlyNotice = "Organizing notes is unavailable while organization data is read-only.";
+    disableWhenReadOnly(organize, readOnly, "Organize notes");
+    organize.addEventListener("click", () => {
+      if (readOnly) {
+        new Notice(organizerReadOnlyNotice, 8000);
+        return;
+      }
+      this.plugin.openNoteOrganizer();
+    });
+    const acceptsOrganizerDrop = (event: DragEvent): boolean => {
+      const types = event.dataTransfer ? Array.from(event.dataTransfer.types).map((type) => type.toLocaleLowerCase()) : [];
+      return !types.includes("files") && (types.includes("text/plain") || types.includes("text/uri-list"));
+    };
+    organize.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (readOnly) {
+        organize.removeClass("is-drop-target");
+        if (event.dataTransfer) event.dataTransfer.dropEffect = "none";
+        return;
+      }
+      const accepts = acceptsOrganizerDrop(event);
+      organize.toggleClass("is-drop-target", accepts);
+      if (event.dataTransfer) event.dataTransfer.dropEffect = accepts ? "copy" : "none";
+    });
+    organize.addEventListener("dragleave", (event) => {
+      if (!organize.contains(event.relatedTarget as Node | null)) organize.removeClass("is-drop-target");
+    });
+    organize.addEventListener("drop", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      organize.removeClass("is-drop-target");
+      if (readOnly) {
+        new Notice(organizerReadOnlyNotice, 8000);
+        return;
+      }
+      this.plugin.openNoteOrganizerDrop(event.dataTransfer);
+    });
     const globalAdd = actions.createEl("button", { cls: "ent-cc-button ent-cc-add-button", type: "button" });
     setIcon(globalAdd.createSpan(), "plus");
     globalAdd.createSpan({ text: "Add" });
@@ -5922,6 +5970,9 @@ export class EntVaultCommandCenterView extends ItemView {
     menu.addItem((item) => item.setTitle("Add or create…").setIcon("plus").onClick(() => {
       if (ownsBase()) this.openAddActions();
     }));
+    menu.addItem((item) => item.setTitle("Organize vault notes across knowledge bases…").setIcon("network").onClick(() => {
+      this.plugin.openNoteOrganizer();
+    }));
     menu.addItem((item) => item.setTitle(`Manage ${this.plugin.data.settings.indexLabel}`).setIcon("list-tree").onClick(() => {
       if (ownsBase()) this.openIndexManager();
     }));
@@ -5952,6 +6003,26 @@ export class EntVaultCommandCenterView extends ItemView {
     menu.addItem((item) => item.setTitle("Redo personal organization change").setIcon("redo-2").setDisabled(this.plugin.data.redoStack.length === 0).onClick(() => {
       if (ownsBase()) this.run(() => this.plugin.redo());
     }));
+    menu.addItem((item) => item
+      .setTitle("Undo last multi-base note organizer change")
+      .setIcon("undo-2")
+      .setDisabled(typeof this.plugin.canUndoNoteOrganizerBatch !== "function"
+        || !this.plugin.canUndoNoteOrganizerBatch())
+      .onClick(() => {
+        if (typeof this.plugin.undoNoteOrganizerBatch === "function") {
+          this.run(() => this.plugin.undoNoteOrganizerBatch());
+        }
+      }));
+    menu.addItem((item) => item
+      .setTitle("Redo last multi-base note organizer change")
+      .setIcon("redo-2")
+      .setDisabled(typeof this.plugin.canRedoNoteOrganizerBatch !== "function"
+        || !this.plugin.canRedoNoteOrganizerBatch())
+      .onClick(() => {
+        if (typeof this.plugin.redoNoteOrganizerBatch === "function") {
+          this.run(() => this.plugin.redoNoteOrganizerBatch());
+        }
+      }));
     menu.addSeparator();
     menu.addItem((item) => item.setTitle("Expand all visible groups").setIcon("chevrons-down").onClick(() => this.run(async () => {
       if (!ownsBase()) return;

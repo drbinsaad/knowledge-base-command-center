@@ -2,8 +2,10 @@ import { readFile, stat } from "node:fs/promises";
 import { gzipSync } from "node:zlib";
 
 const budgets = [
-  { file: "main.js", raw: 950_000, gzip: 250_000 },
-  { file: "styles.css", raw: 135_000, gzip: 20_000 },
+  // Measured Organizer release-candidate ceilings retain a small explicit
+  // margin while still rejecting another accidental feature-sized increase.
+  { file: "main.js", raw: 1_120_000, gzip: 295_000 },
+  { file: "styles.css", raw: 150_000, gzip: 20_500 },
 ];
 
 for (const budget of budgets) {

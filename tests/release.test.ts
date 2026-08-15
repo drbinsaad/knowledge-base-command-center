@@ -47,7 +47,12 @@ test("public repository metadata is present", async () => {
     path.join(root, "docs", "release-evidence", `${String(manifest.version)}-iphone.md`),
     "utf8",
   );
+  const released017IphoneEvidence = await readFile(
+    path.join(root, "docs", "release-evidence", "0.17.0-iphone.md"),
+    "utf8",
+  );
   const userGuide = await readFile(path.join(root, "docs", "USER_GUIDE.md"), "utf8");
+  const security = await readFile(path.join(root, "SECURITY.md"), "utf8");
   const packageJson = await readFile(path.join(root, "package.json"), "utf8");
   assert.match(license, /MIT License/);
   assert.match(readme, /Privacy and permissions/);
@@ -83,6 +88,14 @@ test("public repository metadata is present", async () => {
   const recoveryGuide = await readFile(path.join(root, "docs", "PORTABILITY_AND_RECOVERY.md"), "utf8");
   const gettingStarted = await readFile(path.join(root, "docs", "GETTING_STARTED.md"), "utf8");
   const troubleshooting = await readFile(path.join(root, "docs", "TROUBLESHOOTING.md"), "utf8");
+  for (const localDataGuide of [readme, gettingStarted, troubleshooting, userGuide]) {
+    assert.match(localDataGuide, /rename-recovery journal/iu);
+    assert.match(localDataGuide, /vault identity[^.]*old\/new vault-relative paths/iu);
+    assert.match(localDataGuide, /all three plugin-owned App-local values/iu);
+  }
+  assert.match(security, /bounded vault-scoped rename-recovery journal/iu);
+  assert.match(security, /vault identity plus the old and new vault-relative paths/iu);
+  assert.match(security, /all three plugin-owned App-local values/iu);
   assert.match(readme, new RegExp(`Portable packages created by version .* use format version ${portableVersion}`, "iu"));
   assert.match(readme, new RegExp(`Current v${backupVersion} (?:snapshots|files)`, "iu"));
   assert.match(recoveryGuide, new RegExp(`Current version-${backupVersion} recovery files`, "iu"));
@@ -96,13 +109,49 @@ test("public repository metadata is present", async () => {
   assert.match(recoveryGuide, /pending Undo\/Redo transition journal/iu);
   assert.match(userGuide, /multi-base portfolio import stages[^.]*required Undo[^.]*one bounded causal batch/iu);
   assert.match(recoveryGuide, /all destination snapshots[^.]*one bounded pending-Undo batch/iu);
+  assert.match(userGuide, /Global Note Organizer Apply[^.]*other multi-base author[^.]*same mechanism/iu);
+  assert.match(recoveryGuide, /Global Note Organizer Apply[^.]*other author[^.]*multi-base form[^.]*same mechanism/iu);
   assert.match(recoveryGuide, /exact protected batch cannot fit[^.]*4 MiB[^.]*rejected[^.]*before any primary store mutation/iu);
+  for (const organizerCommand of [
+    "Organize vault notes across knowledge bases…",
+    "Organize current note across knowledge bases…",
+    "Show current note’s knowledge-base memberships",
+    "Note organizer: Undo last multi-base change",
+    "Note organizer: Redo last multi-base change",
+  ]) {
+    assert.match(userGuide, new RegExp(`^- ${organizerCommand.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}$`, "mu"),
+      `the commands appendix must include ${organizerCommand}`);
+  }
   const currentChangelogStart = changelog.indexOf(`## ${String(manifest.version)}`);
   const nextChangelogStart = changelog.indexOf("\n## ", currentChangelogStart + 1);
   const currentChangelog = changelog.slice(currentChangelogStart, nextChangelogStart < 0 ? undefined : nextChangelogStart);
   assert.match(currentChangelog, new RegExp(`version-${deviceLocalVersion} device-local journals`, "iu"));
   assert.match(currentChangelog, /user-invoked Undo\/Redo restart-durable/iu);
   assert.match(currentChangelog, /multi-base portfolio import stages every destination's required Undo[^.]*one causally verified batch/iu);
+  const released017Start = changelog.indexOf("## 0.17.0");
+  assert.notEqual(released017Start, -1, "the published 0.17.0 release record must remain in the changelog");
+  const released017End = changelog.indexOf("\n## ", released017Start + 1);
+  const released017Changelog = changelog.slice(released017Start, released017End < 0 ? undefined : released017End);
+  assert.match(released017Changelog, /500,000-record performance budget, seven real-Chromium row-layout variants/iu);
+  assert.doesNotMatch(released017Changelog, /Organizer (?:performance )?budget/iu);
+  const unreleasedChangelogStart = changelog.indexOf("## Unreleased");
+  if (unreleasedChangelogStart >= 0) {
+    const nextSectionStart = changelog.indexOf("\n## ", unreleasedChangelogStart + 1);
+    const unreleasedChangelog = changelog.slice(
+      unreleasedChangelogStart,
+      nextSectionStart < 0 ? undefined : nextSectionStart,
+    );
+    assert.match(unreleasedChangelog, new RegExp(`version-${deviceLocalVersion} device-local journals`, "iu"));
+    assert.match(unreleasedChangelog, /user-invoked Undo\/Redo restart-durable/iu);
+    assert.match(unreleasedChangelog, /multi-base portfolio import stages every destination's required Undo[^.]*one causally verified batch/iu);
+  }
+  assert.match(readme, /at most 5,000 selected Markdown notes[^.]*20,000 effective note\/base destinations/iu);
+  assert.match(userGuide, /up to 5,000 selected Markdown notes[^.]*one review/iu);
+  assert.match(userGuide, /at most 20,000 effective note\/base directives/iu);
+  assert.match(readme, /aggregate required-Undo snapshots[\s\S]{0,220}4 MiB[\s\S]{0,220}rejected before any primary plugin-store mutation/iu);
+  assert.match(userGuide, /aggregate snapshots[^.]*4 MiB[^.]*whole Apply is refused/iu);
+  assert.match(readme, /vault-qualified `obsidian:\/\/open`[^.]*including one naming the current vault/iu);
+  assert.match(userGuide, /vault-qualified `obsidian:\/\/open` URI is rejected[^.]*current vault/iu);
   assert.match(readme, /every eligible Markdown note in the vault[^.]*including unindexed notes and notes outside/iu);
   assert.match(recoveryGuide, /counts placeholders with at least one candidate, not the raw number of candidate notes/iu);
   assert.match(recoveryGuide, /Import Workspace settings alone first[^.]*refresh the vault[^.]*import the subject-catalog sections/iu);
@@ -134,13 +183,57 @@ test("public repository metadata is present", async () => {
   assert.match(iphoneChecklist, /Manage categories/);
   assert.match(iphoneChecklist, /Turn on VoiceOver/);
   assert.match(iphoneChecklist, /What’s new/);
+  assert.match(iphoneChecklist, /0\.18\.0 Global Note Organizer additions/);
+  assert.match(iphoneChecklist, /Unverified — not executed on a physical iPhone/);
+  assert.match(iphoneChecklist, /Notes → Destinations → Review using touch only/);
+  assert.match(iphoneChecklist, /5,001-note selection[^.]*more than 20,000 effective note\/base directives/iu);
+  assert.match(iphoneChecklist, /aggregate required-Undo snapshots exceed[^.]*4 MiB/iu);
   const escapedManifestVersion = String(manifest.version).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
   assert.match(iphoneChecklist, new RegExp(`releases/tag/${escapedManifestVersion}`, "u"));
   assert.match(currentIphoneEvidence, new RegExp(`Candidate version:\\s*${escapedManifestVersion}`, "u"));
-  assert.match(currentIphoneEvidence, /maintainer-authorized waiver/iu);
-  assert.match(currentIphoneEvidence, /physical-iPhone matrix not executed/iu);
-  assert.doesNotMatch(currentIphoneEvidence, /^\s*-?\s*(?:Status|Final result):\s*\*\*?Pass\b/imu);
   assert.doesNotMatch(currentIphoneEvidence, /\bPending\b/iu);
+  assert.doesNotMatch(
+    currentIphoneEvidence,
+    /FINAL_LOCAL_[A-Z0-9_]+/u,
+    "candidate evidence must contain exact final local results before release",
+  );
+  assert.match(released017IphoneEvidence, /maintainer-authorized waiver/iu);
+  assert.match(released017IphoneEvidence, /physical-iPhone matrix not executed/iu);
+  assert.doesNotMatch(released017IphoneEvidence, /^\s*-?\s*(?:Status|Final result):\s*\*\*?Pass\b/imu);
+  const explicitPhysicalPass = /^\s*-?\s*(?:Status|Final result):\s*\*\*?Pass\b/imu.test(currentIphoneEvidence);
+  const executedPhysicalMatrix = /physical-iPhone matrix executed/iu.test(currentIphoneEvidence);
+  const explicitWaiver = /maintainer-authorized waiver/iu.test(currentIphoneEvidence);
+  const unexecutedPhysicalMatrix = /physical-iPhone matrix not executed/iu.test(currentIphoneEvidence);
+  assert.notEqual(
+    explicitPhysicalPass && explicitWaiver,
+    true,
+    "a candidate cannot claim a physical-device Pass and a waiver at the same time",
+  );
+  assert.ok(
+    (explicitPhysicalPass && executedPhysicalMatrix && !explicitWaiver && !unexecutedPhysicalMatrix)
+      || (explicitWaiver && unexecutedPhysicalMatrix && !explicitPhysicalPass),
+    "current physical-device evidence must record either an executed Pass or an explicit maintainer-authorized unexecuted waiver",
+  );
+  if (explicitPhysicalPass) {
+    assert.match(currentIphoneEvidence, /physical-iPhone matrix executed/iu);
+    assert.doesNotMatch(currentIphoneEvidence, /maintainer-authorized waiver|matrix not executed/iu);
+  } else {
+    assert.match(currentIphoneEvidence, /not Passed|not a (?:device|physical-device) Pass/iu);
+    assert.match(currentIphoneEvidence, /(?:for this candidate|for 0\.\d+\.\d+ only|must not be reused)/iu);
+    assert.doesNotMatch(currentIphoneEvidence, /^\s*-?\s*(?:Status|Final result):\s*\*\*?Pass\b/imu);
+  }
+  if (manifest.version === "0.17.0") {
+    assert.equal(currentIphoneEvidence, released017IphoneEvidence);
+  }
+  if (manifest.version === "0.18.0") {
+    assert.match(currentIphoneEvidence, /Obsidian 1\.13\.7 on macOS/iu);
+    assert.match(currentIphoneEvidence, /400 × 1267 portrait/iu);
+    assert.match(currentIphoneEvidence, /1267 × 400 landscape/iu);
+    assert.match(currentIphoneEvidence, /LTR 1267 × 400/iu);
+    assert.match(currentIphoneEvidence, /RTL 844 × 390/iu);
+    assert.match(currentIphoneEvidence, /Every applicable item[\s\S]{0,300}remains unexecuted on a physical device/iu);
+    assert.match(currentIphoneEvidence, /Dynamic Type[^.]*VoiceOver/iu);
+  }
   assert.doesNotMatch(iphoneChecklist, /recorded by the release workflow/iu);
   const commandAppendix = userGuide.slice(userGuide.indexOf("\n## Commands\n"), userGuide.indexOf("\n## Safety boundary\n"));
   for (const command of [
@@ -263,8 +356,19 @@ test("mobile flows keep primary actions visible and empty states actionable", as
 test("runtime source satisfies blocking Obsidian review rules", async () => {
   const main = await readFile(path.join(root, "src/main.ts"), "utf8");
   const settings = await readFile(path.join(root, "src/settings.ts"), "utf8");
-  const runtimeNames = (await readdir(path.join(root, "src"))).filter((name) => name.endsWith(".ts") && !name.startsWith("._"));
-  const runtimeSources = await Promise.all(runtimeNames.map((name) => readFile(path.join(root, "src", name), "utf8")));
+  const discoverRuntimeSources = async (directory: string): Promise<string[]> => {
+    const entries = await readdir(directory, { withFileTypes: true });
+    const files: string[] = [];
+    for (const entry of entries) {
+      if (entry.name.startsWith("._")) continue;
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) files.push(...await discoverRuntimeSources(absolute));
+      else if (entry.isFile() && entry.name.endsWith(".ts")) files.push(absolute);
+    }
+    return files;
+  };
+  const runtimePaths = await discoverRuntimeSources(path.join(root, "src"));
+  const runtimeSources = await Promise.all(runtimePaths.map((file) => readFile(file, "utf8")));
   const runtime = runtimeSources.join("\n");
   assert.doesNotMatch(main, /detachLeavesOfType\(VIEW_TYPE\)/);
   assert.doesNotMatch(settings, /setName\("Knowledge Base Command Center"\)\.setHeading\(\)/);
@@ -314,6 +418,7 @@ test("review and release automation is reproducible and least-privilege", async 
   const communityVerifier = await readFile(path.join(root, "scripts", "verify-community.mjs"), "utf8");
   assert.match(communityVerifier, /readFile\(path\.join\(root, "main\.js"\)/);
   assert.match(communityVerifier, /built main\.js must not require external module/);
+  assert.match(communityVerifier, /discoverRuntimeSources\(absolute\)/);
   const [ciWorkflow, releaseWorkflow, securityWorkflow] = await Promise.all(
     ["ci.yml", "release.yml", "security-audit.yml"].map((name) => readFile(path.join(root, ".github", "workflows", name), "utf8")),
   );

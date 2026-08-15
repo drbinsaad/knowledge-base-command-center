@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <title>KBCC Note Organizer layout fixture</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    body {
+      padding: 16px;
+      background: #171717;
+      color: #dcddde;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    button, input, select { color: inherit; font: inherit; }
+    button { cursor: pointer; }
+    svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+    [hidden] { display: none !important; }
+
+    .fixture-shell {
+      display: flex;
+      width: 100%;
+      min-width: 0;
+      align-items: center;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .fixture-theme {
+      --background-primary: #202020;
+      --background-secondary: #282828;
+      --background-modifier-border: #484848;
+      --background-modifier-border-hover: #3b3b3b;
+      --background-modifier-hover: #353535;
+      --background-modifier-success: #1f5f3d;
+      --interactive-accent: #8b6cff;
+      --interactive-normal: #303030;
+      --text-normal: #dcddde;
+      --text-muted: #a7a7a7;
+      --text-faint: #777;
+      --text-accent: #a993ff;
+      --text-on-accent: #fff;
+      --text-warning: #f0a44c;
+      --text-error: #ff6b6b;
+      --color-green: #55c878;
+      --ent-cc-border: #484848;
+      --ent-cc-accent: #8b6cff;
+      --ent-cc-accent-soft: rgba(139, 108, 255, 0.14);
+      min-width: 0;
+      background: var(--background-primary);
+      color: var(--text-normal);
+    }
+
+    .fixture-dialog {
+      display: flex;
+      padding: 14px;
+      overflow: hidden;
+      border: 1px solid var(--background-modifier-border);
+      border-radius: 12px;
+      flex-direction: column;
+      box-shadow: 0 18px 48px rgb(0 0 0 / 35%);
+      gap: 10px;
+    }
+
+    .fixture-modal-title {
+      margin: 0;
+      font-size: 1.25rem;
+      line-height: 1.25;
+    }
+
+    .fixture-stage {
+      display: flex;
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+      flex: 1 1 auto;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .fixture-stage > .ent-cc-note-organizer-panel {
+      flex: 1 1 auto;
+    }
+
+    .fixture-disclosure-glyph,
+    .fixture-file-glyph {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .fixture-indicator-surface {
+      width: min(720px, 100%);
+      padding: 12px;
+      border: 1px solid var(--background-modifier-border);
+      border-radius: 10px;
+    }
+
+    .fixture-indicator-surface h2 {
+      margin: 0 0 10px;
+      font-size: 1rem;
+    }
+
+    .fixture-editor-header {
+      display: flex;
+      min-width: 0;
+      align-items: center;
+      padding: 8px;
+      border-radius: 8px;
+      background: var(--background-secondary);
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .fixture-indicator-button {
+      display: inline-grid;
+      width: 32px;
+      height: 32px;
+      min-width: 32px;
+      min-height: 32px;
+      padding: 0;
+      border: 1px solid var(--background-modifier-border);
+      border-radius: 7px;
+      background: transparent;
+      place-items: center;
+    }
+
+    .fixture-indicator-button svg { width: 18px; height: 18px; }
+
+    @media (max-width: 760px) {
+      body { padding: 6px; }
+      .fixture-dialog { padding: 10px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="fixture-shell">
+    <section id="organizer" class="fixture-theme fixture-dialog ent-cc-note-organizer-modal" role="dialog" aria-modal="true" aria-labelledby="organizer-title" aria-describedby="organizer-boundary">
+      <h1 id="organizer-title" class="fixture-modal-title">Organize vault notes</h1>
+      <div class="ent-cc-note-organizer-root">
+        <div class="ent-cc-note-organizer-render-root" aria-busy="false">
+        <ol class="ent-cc-note-organizer-progress" aria-label="Organizer progress" data-layout-group="progress">
+          <li class="ent-cc-note-organizer-progress-step is-active" data-step="notes" aria-current="step">
+            <span class="ent-cc-note-organizer-progress-number" aria-hidden="true">1</span><span>Notes</span>
+          </li>
+          <li class="ent-cc-note-organizer-progress-step" data-step="destinations">
+            <span class="ent-cc-note-organizer-progress-number" aria-hidden="true">2</span><span>Destinations</span>
+          </li>
+          <li class="ent-cc-note-organizer-progress-step" data-step="review">
+            <span class="ent-cc-note-organizer-progress-number" aria-hidden="true">3</span><span>Review</span>
+          </li>
+        </ol>
+
+        <div id="organizer-boundary" class="ent-cc-note-organizer-boundary" role="note">
+          Organization is stored only in KBCC plugin data. Folder selection is a one-time snapshot; it never links a folder. Markdown files stay where they are and are never rewritten.
+        </div>
+
+        <section class="fixture-stage" data-stage="notes" aria-label="Notes stage">
+          <div class="ent-cc-note-organizer-panel" role="region" aria-labelledby="organizer-notes-heading">
+            <div class="ent-cc-note-organizer-section-heading">
+              <h3 id="organizer-notes-heading">Choose Markdown notes</h3>
+              <p>Select individual notes or take a one-time snapshot of a folder’s current Markdown descendants.</p>
+            </div>
+            <div class="ent-cc-note-organizer-notes-layout" data-layout-group="notes-columns">
+              <div class="ent-cc-note-organizer-browser">
+                <input class="ent-cc-note-organizer-search" type="search" value="laryng" aria-label="Search Markdown notes">
+                <div class="ent-cc-note-organizer-tree" role="tree" aria-label="Markdown vault tree" aria-multiselectable="true">
+                  <div class="ent-cc-note-organizer-tree-item" role="treeitem" aria-level="1" aria-posinset="1" aria-setsize="3" aria-expanded="true" aria-checked="mixed" style="--ent-cc-note-organizer-depth: 0" data-layout-group="tree-row">
+                    <button class="ent-cc-note-organizer-tree-toggle" type="button" aria-label="Collapse Knowledge Base">
+                      <span class="fixture-disclosure-glyph" aria-hidden="true">⌄</span>
+                    </button>
+                    <label class="ent-cc-note-organizer-checkbox-target"><input class="ent-cc-note-organizer-tree-checkbox" type="checkbox" aria-label="Select current Markdown notes in Knowledge Base"></label>
+                    <span class="ent-cc-note-organizer-tree-icon fixture-file-glyph" aria-hidden="true">▣</span>
+                    <div class="ent-cc-note-organizer-tree-text"><div class="ent-cc-note-organizer-tree-name" dir="auto">Knowledge Base</div><div class="ent-cc-note-organizer-tree-path" dir="auto">Knowledge Base</div></div>
+                  </div>
+                  <div class="ent-cc-note-organizer-tree-item" role="treeitem" aria-level="2" aria-posinset="2" aria-setsize="3" aria-expanded="true" aria-checked="mixed" style="--ent-cc-note-organizer-depth: 1" data-layout-group="tree-row">
+                    <button class="ent-cc-note-organizer-tree-toggle" type="button" aria-label="Collapse ENT"><span class="fixture-disclosure-glyph" aria-hidden="true">⌄</span></button>
+                    <label class="ent-cc-note-organizer-checkbox-target"><input class="ent-cc-note-organizer-tree-checkbox" type="checkbox" aria-label="Select current Markdown notes in ENT"></label>
+                    <span class="ent-cc-note-organizer-tree-icon fixture-file-glyph" aria-hidden="true">▣</span>
+                    <div class="ent-cc-note-organizer-tree-text"><div class="ent-cc-note-organizer-tree-name" dir="auto">ENT</div><div class="ent-cc-note-organizer-tree-path" dir="auto">Knowledge Base/ENT</div></div>
+                  </div>
+                  <div class="ent-cc-note-organizer-tree-item" role="treeitem" aria-level="3" aria-posinset="3" aria-setsize="3" aria-checked="true" style="--ent-cc-note-organizer-depth: 2" data-layout-group="tree-row">
+                    <span class="ent-cc-note-organizer-tree-spacer" aria-hidden="true"></span>
+                    <label class="ent-cc-note-organizer-checkbox-target"><input class="ent-cc-note-organizer-tree-checkbox" type="checkbox" checked aria-label="Select Laryngomalacia"></label>
+                    <span class="ent-cc-note-organizer-tree-icon fixture-file-glyph" aria-hidden="true">▤</span>
+                    <div class="ent-cc-note-organizer-tree-text"><div class="ent-cc-note-organizer-tree-name" dir="auto">Laryngomalacia and congenital dynamic airway obstruction</div><div class="ent-cc-note-organizer-tree-path" dir="auto">Knowledge Base/ENT/Pediatric/Laryngomalacia and congenital dynamic airway obstruction.md</div></div>
+                  </div>
+                </div>
+                <div class="ent-cc-note-organizer-pagination" aria-label="Vault tree row pages">
+                  <button class="ent-cc-note-organizer-secondary-button" type="button" disabled>Previous</button>
+                  <div class="ent-cc-note-organizer-page-status" role="status">Showing 1–3 of 3; 0 omitted from this page</div>
+                  <button class="ent-cc-note-organizer-secondary-button" type="button" disabled>Next</button>
+                </div>
+              </div>
+              <div class="ent-cc-note-organizer-selected">
+                <div class="ent-cc-note-organizer-selected-heading" data-layout-group="selected-heading"><h3>Selected notes (2)</h3><button class="ent-cc-note-organizer-text-button" type="button">Clear</button></div>
+                <ul class="ent-cc-note-organizer-selected-list">
+                  <li class="ent-cc-note-organizer-selected-item" data-layout-group="selected-row"><span dir="auto">Knowledge Base/ENT/Pediatric/Laryngomalacia and congenital dynamic airway obstruction.md</span><button class="ent-cc-note-organizer-remove" type="button" aria-label="Remove Laryngomalacia"><span aria-hidden="true">×</span></button></li>
+                  <li class="ent-cc-note-organizer-selected-item" data-layout-group="selected-row"><span dir="auto">Demo Vault/Incoming/SYNTHETIC-NOTE-0001.md</span><button class="ent-cc-note-organizer-remove" type="button" aria-label="Remove synthetic note"><span aria-hidden="true">×</span></button></li>
+                </ul>
+              </div>
+            </div>
+          </div>
+          <footer class="ent-cc-note-organizer-footer" data-layout-group="footer">
+            <button class="ent-cc-note-organizer-secondary-button fixture-action-cancel" type="button">Cancel</button>
+            <div class="ent-cc-note-organizer-footer-navigation" data-layout-group="footer-navigation">
+              <button class="ent-cc-note-organizer-primary-button fixture-action-primary" type="button" data-stage-target="destinations">Choose destinations</button>
+            </div>
+          </footer>
+        </section>
+
+        <section class="fixture-stage" data-stage="destinations" aria-label="Destinations stage" hidden>
+          <div class="ent-cc-note-organizer-panel" role="region" aria-labelledby="organizer-destinations-heading">
+            <div class="ent-cc-note-organizer-section-heading">
+              <h3 id="organizer-destinations-heading">Choose knowledge-base destinations</h3>
+              <p>2 selected notes inherit the shared destinations unless you choose Skip or Custom below.</p>
+            </div>
+            <div class="ent-cc-note-organizer-destination-section">
+              <div class="ent-cc-note-organizer-destination-heading" data-layout-group="destination-heading"><h4>Shared destinations</h4><button class="ent-cc-note-organizer-secondary-button" type="button">Add knowledge base</button></div>
+
+              <div class="ent-cc-note-organizer-destination-card">
+                <div class="ent-cc-note-organizer-card-header" data-layout-group="card-header"><h5>Knowledge base destination</h5><span class="ent-cc-note-organizer-current-base">Current</span><button class="ent-cc-note-organizer-remove" type="button" aria-label="Remove ENT destination"><span aria-hidden="true">×</span></button></div>
+                <label class="ent-cc-note-organizer-field"><span>Knowledge base</span><select aria-label="Knowledge base" dir="auto"><option selected dir="auto">ENT Consultant — Current</option><option dir="auto">Research Library</option></select></label>
+                <fieldset class="ent-cc-note-organizer-fieldset">
+                  <legend>Primary placement</legend>
+                  <label class="ent-cc-note-organizer-field"><span>Action</span><select aria-label="Primary action"><option selected>Place in Knowledge Index</option></select></label>
+                  <label class="ent-cc-note-organizer-field"><span>Heading</span><select aria-label="Index heading"><option selected>Pediatric</option></select></label>
+                  <label class="ent-cc-note-organizer-field"><span>Subheading</span><select aria-label="Index subheading"><option selected>Congenital Laryngeal Anomalies</option></select></label>
+                </fieldset>
+                <fieldset class="ent-cc-note-organizer-fieldset">
+                  <legend>Collections</legend>
+                  <label class="ent-cc-note-organizer-field"><span>Action</span><select aria-label="Collection action"><option selected>Add Collection targets</option></select></label>
+                  <button class="ent-cc-note-organizer-secondary-button" type="button" data-fixture-surface="add-collection-target">Add target</button>
+                  <div class="ent-cc-note-organizer-collection-target">
+                    <label class="ent-cc-note-organizer-field"><span>Collection</span><select aria-label="Collection"><option selected>Board Review</option></select></label>
+                    <label class="ent-cc-note-organizer-field"><span>Subheading</span><select aria-label="Collection subheading"><option selected>Pediatric Airway</option></select></label>
+                    <button class="ent-cc-note-organizer-remove" type="button" aria-label="Remove Collection target"><span aria-hidden="true">×</span></button>
+                  </div>
+                </fieldset>
+              </div>
+
+              <div class="ent-cc-note-organizer-destination-card">
+                <div class="ent-cc-note-organizer-card-header" data-layout-group="card-header"><h5>Knowledge base destination</h5><button class="ent-cc-note-organizer-remove" type="button" aria-label="Remove Research destination"><span aria-hidden="true">×</span></button></div>
+                <label class="ent-cc-note-organizer-field"><span>Knowledge base</span><select aria-label="Second knowledge base"><option selected>Research Library</option></select></label>
+                <fieldset class="ent-cc-note-organizer-fieldset">
+                  <legend>Primary placement</legend>
+                  <label class="ent-cc-note-organizer-field"><span>Action</span><select aria-label="Second primary action"><option selected>Place in a Library</option></select></label>
+                  <label class="ent-cc-note-organizer-field"><span>Library</span><select aria-label="Library"><option selected>Reading</option></select></label>
+                  <label class="ent-cc-note-organizer-field"><span>Heading</span><select aria-label="Library heading"><option selected>Journal articles and evidence reviews</option></select></label>
+                </fieldset>
+                <fieldset class="ent-cc-note-organizer-fieldset">
+                  <legend>Collections</legend>
+                  <label class="ent-cc-note-organizer-field"><span>Action</span><select aria-label="Second collection action"><option selected>Replace Collection targets</option></select></label>
+                  <div class="ent-cc-note-organizer-help">Replace with no targets removes all current Collection memberships in this knowledge base.</div>
+                  <label class="ent-cc-note-organizer-clear-confirmation" data-fixture-surface="replace-confirmation">
+                    <input type="checkbox" aria-label="Confirm clearing all collection memberships">
+                    <span>I understand that applying Replace with no targets removes every Collection membership for these notes in this knowledge base.</span>
+                  </label>
+                  <button class="ent-cc-note-organizer-secondary-button" type="button">Add target</button>
+                </fieldset>
+              </div>
+            </div>
+
+            <div class="ent-cc-note-organizer-overrides">
+              <div class="ent-cc-note-organizer-destination-heading"><div><h4>Per-note behavior</h4><p>Overrides are optional and loaded one note at a time.</p></div></div>
+              <div class="ent-cc-note-organizer-override-list">
+                <div class="ent-cc-note-organizer-override-row" data-layout-group="override-row">
+                  <div class="ent-cc-note-organizer-override-identity"><div class="ent-cc-note-organizer-override-title" dir="auto">Laryngomalacia and congenital dynamic airway obstruction</div><div class="ent-cc-note-organizer-override-path" dir="auto">Knowledge Base/ENT/Pediatric/Laryngomalacia and congenital dynamic airway obstruction.md</div></div>
+                  <select class="ent-cc-note-organizer-override-mode" aria-label="Behavior for Laryngomalacia" dir="auto"><option selected>Custom destinations</option></select>
+                  <button class="ent-cc-note-organizer-secondary-button" type="button" aria-expanded="true">Close custom editor</button>
+                  <div class="ent-cc-note-organizer-custom-editor" data-fixture-surface="custom-destination-editor">
+                    <div class="ent-cc-note-organizer-custom-label" dir="auto">Custom destinations for Laryngomalacia and congenital dynamic airway obstruction</div>
+                    <button class="ent-cc-note-organizer-secondary-button" type="button">Add custom knowledge base</button>
+                    <div class="ent-cc-note-organizer-destination-card">
+                      <div class="ent-cc-note-organizer-card-header" data-layout-group="custom-card-header"><h5>Knowledge base destination</h5><button class="ent-cc-note-organizer-remove" type="button" aria-label="Remove custom destination"><span aria-hidden="true">×</span></button></div>
+                      <label class="ent-cc-note-organizer-field"><span>Knowledge base</span><select aria-label="Custom knowledge base" dir="auto"><option selected dir="auto">ENT Consultant — Current</option></select></label>
+                      <fieldset class="ent-cc-note-organizer-fieldset"><legend>Primary placement</legend><label class="ent-cc-note-organizer-field"><span>Action</span><select aria-label="Custom primary action"><option selected>Keep current primary placement</option></select></label></fieldset>
+                      <fieldset class="ent-cc-note-organizer-fieldset"><legend>Collections</legend><label class="ent-cc-note-organizer-field"><span>Action</span><select aria-label="Custom collection action"><option selected>Keep current Collections</option></select></label></fieldset>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="ent-cc-note-organizer-pagination" aria-label="Selected notes pages" data-fixture-surface="override-pagination">
+                <button class="ent-cc-note-organizer-secondary-button" type="button" disabled>Previous</button>
+                <div class="ent-cc-note-organizer-page-status" role="status" aria-live="polite" tabindex="-1">Showing 1–100 of 101; 1 omitted from this page</div>
+                <button class="ent-cc-note-organizer-secondary-button" type="button">Next</button>
+              </div>
+            </div>
+          </div>
+          <footer class="ent-cc-note-organizer-footer" data-layout-group="footer">
+            <button class="ent-cc-note-organizer-secondary-button fixture-action-cancel" type="button">Cancel</button>
+            <div class="ent-cc-note-organizer-footer-navigation" data-layout-group="footer-navigation">
+              <button class="ent-cc-note-organizer-secondary-button fixture-action-back" type="button" data-stage-target="notes">Back to notes</button>
+              <button class="ent-cc-note-organizer-primary-button fixture-action-primary" type="button" data-stage-target="review">Prepare review</button>
+            </div>
+          </footer>
+        </section>
+
+        <section class="fixture-stage" data-stage="review" aria-label="Review stage" hidden>
+          <div class="ent-cc-note-organizer-panel" role="region" aria-labelledby="organizer-review-heading">
+            <div class="ent-cc-note-organizer-section-heading">
+              <h3 id="organizer-review-heading">Review exact organization changes</h3>
+              <p>This review was prepared against the host’s current knowledge-base state. Apply uses its exact immutable prepared token.</p>
+            </div>
+            <div class="ent-cc-note-organizer-review-summary"><strong>2 notes · 2 knowledge bases · 3 organization changes</strong><div>1 unchanged · 1 skipped</div></div>
+            <div class="ent-cc-note-organizer-zero-impact" role="note">0 files moved · 0 files renamed · 0 Markdown files rewritten · 0 folder links changed</div>
+            <div class="ent-cc-note-organizer-warning" role="alert" data-fixture-surface="refresh-review"><span>This prepared review can no longer be applied. Refresh it against current KBCC state.</span><button class="ent-cc-note-organizer-secondary-button" type="button">Refresh review</button></div>
+            <ol class="ent-cc-note-organizer-review-list">
+              <li class="ent-cc-note-organizer-review-row is-change">
+                <div class="ent-cc-note-organizer-review-row-header" data-layout-group="review-header"><div><div class="ent-cc-note-organizer-review-title" dir="auto">Laryngomalacia and congenital dynamic airway obstruction</div><div class="ent-cc-note-organizer-review-path" dir="auto">Knowledge Base/ENT/Pediatric/Laryngomalacia and congenital dynamic airway obstruction.md</div></div><span class="ent-cc-note-organizer-review-base" dir="auto">ENT Consultant</span></div>
+                <div class="ent-cc-note-organizer-comparison" data-layout-group="review-comparison"><div class="ent-cc-note-organizer-review-state"><div class="ent-cc-note-organizer-review-state-label">Before</div><div>Primary: No primary placement</div><div>Collections: None</div></div><span class="ent-cc-note-organizer-arrow" aria-hidden="true">→</span><div class="ent-cc-note-organizer-review-state"><div class="ent-cc-note-organizer-review-state-label">After</div><div>Primary: Index — Pediatric / Congenital Laryngeal Anomalies</div><div>Collections: Board Review / Pediatric Airway</div></div></div>
+              </li>
+              <li class="ent-cc-note-organizer-review-row is-change">
+                <div class="ent-cc-note-organizer-review-row-header" data-layout-group="review-header"><div><div class="ent-cc-note-organizer-review-title" dir="auto">Laryngomalacia and congenital dynamic airway obstruction</div><div class="ent-cc-note-organizer-review-path" dir="auto">Knowledge Base/ENT/Pediatric/Laryngomalacia and congenital dynamic airway obstruction.md</div></div><span class="ent-cc-note-organizer-review-base" dir="auto">Research Library</span></div>
+                <div class="ent-cc-note-organizer-comparison" data-layout-group="review-comparison"><div class="ent-cc-note-organizer-review-state"><div class="ent-cc-note-organizer-review-state-label">Before</div><div>Primary: No primary placement</div><div>Collections: Read later</div></div><span class="ent-cc-note-organizer-arrow" aria-hidden="true">→</span><div class="ent-cc-note-organizer-review-state"><div class="ent-cc-note-organizer-review-state-label">After</div><div>Primary: Library — Reading / Journal articles and evidence reviews</div><div>Collections: Read later</div></div></div>
+              </li>
+              <li class="ent-cc-note-organizer-review-row is-skipped">
+                <div class="ent-cc-note-organizer-review-row-header" data-layout-group="review-header"><div><div class="ent-cc-note-organizer-review-title" dir="auto">SYNTHETIC-NOTE-0001</div><div class="ent-cc-note-organizer-review-path" dir="auto">Demo Vault/Incoming/SYNTHETIC-NOTE-0001.md</div></div><span class="ent-cc-note-organizer-review-base" dir="auto">No destination</span></div>
+                <div class="ent-cc-note-organizer-comparison" data-layout-group="review-comparison"><div class="ent-cc-note-organizer-review-state"><div class="ent-cc-note-organizer-review-state-label">Before</div><div>Primary: Skipped</div><div>Collections: None</div></div><span class="ent-cc-note-organizer-arrow" aria-hidden="true">→</span><div class="ent-cc-note-organizer-review-state"><div class="ent-cc-note-organizer-review-state-label">After</div><div>Primary: Skipped</div><div>Collections: None</div></div></div>
+              </li>
+            </ol>
+            <div class="ent-cc-note-organizer-pagination" aria-label="Review rows pages" data-fixture-surface="review-pagination">
+              <button class="ent-cc-note-organizer-secondary-button" type="button" disabled>Previous</button>
+              <div class="ent-cc-note-organizer-page-status" role="status" aria-live="polite" tabindex="-1">Showing 1–300 of 301; 1 omitted from this page</div>
+              <button class="ent-cc-note-organizer-secondary-button" type="button">Next</button>
+            </div>
+          </div>
+          <footer class="ent-cc-note-organizer-footer" data-layout-group="footer">
+            <button class="ent-cc-note-organizer-secondary-button fixture-action-cancel" type="button">Cancel</button>
+            <div class="ent-cc-note-organizer-footer-navigation" data-layout-group="footer-navigation">
+              <button class="ent-cc-note-organizer-secondary-button fixture-action-back" type="button" data-stage-target="destinations">Back to destinations</button>
+              <button class="ent-cc-note-organizer-primary-button fixture-action-primary" type="button">Apply organization</button>
+            </div>
+          </footer>
+        </section>
+        </div>
+        <div class="ent-cc-note-organizer-live" role="status" aria-live="polite" aria-atomic="true">Review prepared with 3 organization changes.</div>
+      </div>
+    </section>
+
+    <section id="membership-indicators" class="fixture-theme fixture-indicator-surface" aria-label="Membership indicator states">
+      <h2>Active-note knowledge-base status</h2>
+      <div class="fixture-editor-header" data-layout-group="indicators">
+        <button class="fixture-indicator-button ent-cc-note-membership-indicator ent-cc-note-membership-organized-current" type="button" aria-label="Organized in ENT Consultant. Activate to review or change memberships."><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="8"></circle><path d="m6 10 2.5 2.5L14 7"></path></svg></button>
+        <button class="fixture-indicator-button ent-cc-note-membership-indicator ent-cc-note-membership-collection-only-current" type="button" aria-label="In collections only in ENT Consultant. Activate to review or change memberships."><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2 6h6l2 2h8v8H2z"></path><path d="m7 12 2 2 4-5"></path></svg></button>
+        <button class="fixture-indicator-button ent-cc-note-membership-indicator ent-cc-note-membership-organized-other" data-kbcc-count="2" type="button" aria-label="Organized in two other knowledge bases, but not in ENT Consultant. Activate to review or change memberships."><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m10 2 7 4-7 4-7-4z"></path><path d="m3 10 7 4 7-4"></path><path d="m3 14 7 4 7-4"></path></svg></button>
+        <button class="fixture-indicator-button ent-cc-note-membership-indicator ent-cc-note-membership-not-organized" type="button" aria-label="This note is not organized in any KBCC knowledge base. Activate to review or change memberships."><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="8"></circle></svg></button>
+        <button class="fixture-indicator-button ent-cc-note-membership-indicator ent-cc-note-membership-broken" data-kbcc-count="3" type="button" aria-label="Three organization issues. Activate to review or change memberships."><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2 19 18H1z"></path><path d="M10 7v5M10 15v1"></path></svg></button>
+      </div>
+      <div class="ent-cc-note-membership-base-list" aria-label="Membership issue edge fixture">
+        <div class="ent-cc-note-membership-base has-issue" data-fixture-surface="membership-issue-edge">
+          <div class="ent-cc-note-membership-base-heading"><strong dir="auto">Research Library</strong><span>Broken reference</span></div>
+          <div class="ent-cc-note-membership-issue">The stored organization target is unavailable.</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    (() => {
+      const order = ["notes", "destinations", "review"];
+      const showStage = (stage) => {
+        const activeIndex = order.indexOf(stage);
+        for (const section of document.querySelectorAll("[data-stage]")) {
+          const active = section.getAttribute("data-stage") === stage;
+          section.toggleAttribute("hidden", !active);
+        }
+        for (const step of document.querySelectorAll("[data-step]")) {
+          const index = order.indexOf(step.getAttribute("data-step"));
+          step.classList.toggle("is-active", index === activeIndex);
+          step.classList.toggle("is-complete", index < activeIndex);
+          if (index === activeIndex) step.setAttribute("aria-current", "step");
+          else step.removeAttribute("aria-current");
+        }
+        document.body.dataset.activeStage = stage;
+      };
+      window.showFixtureStage = showStage;
+      document.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-stage-target]");
+        if (button) showStage(button.getAttribute("data-stage-target"));
+      });
+      showStage("notes");
+    })();
+  </script>
+</body>
+</html>

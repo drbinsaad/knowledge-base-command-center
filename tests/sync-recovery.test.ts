@@ -4,7 +4,7 @@ import test from "node:test";
 import { Notice, TFile, TFolder } from "obsidian";
 import EntVaultCommandCenterPlugin from "../src/main.ts";
 import { createDefaultStore, migrateData, type PluginStore } from "../src/model.ts";
-import { SyncRecoveryCenterModal } from "../src/sync-recovery-modal.ts";
+import { ClearDeviceLocalDataModal, SyncRecoveryCenterModal } from "../src/sync-recovery-modal.ts";
 import {
   MAX_SYNC_RECOVERY_ARTIFACT_ENTRIES,
   createDefaultSyncRecoveryLocalState,
@@ -361,6 +361,21 @@ test("Sync and Recovery UI is bounded, has one scroll owner, and keeps mobile ac
   assert.doesNotMatch(modalSource, /getMarkdownFiles|cachedRead|vault\.read/);
   assert.match(mainSource, /id: "open-sync-recovery-center"/);
   assert.match(managerSource, /Sync & Recovery Center…/);
+});
+
+test("device-local clear disclosure includes the pending vault-rename journal", () => {
+  const dom = createFakeDom();
+  const modal = new ClearDeviceLocalDataModal({ app: {} } as never) as ClearDeviceLocalDataModal & {
+    contentEl: HTMLElement;
+    titleEl: HTMLElement;
+  };
+  modal.contentEl = asHtmlElement(dom.document.body.createDiv());
+  modal.titleEl = asHtmlElement(dom.document.body.createEl("h2"));
+  modal.onOpen();
+  const disclosure = modal.contentEl.textContent ?? "";
+  assert.match(disclosure, /pending vault-rename recovery journal/iu);
+  assert.match(disclosure, /vault identity[^.]*old\/new vault-relative paths/iu);
+  assert.match(disclosure, /Synced knowledge-base organization[^.]*not changed/iu);
 });
 
 test("diagnostic failure logs omit thrown identifiers and paths", async () => {

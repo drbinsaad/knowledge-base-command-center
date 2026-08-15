@@ -1,8 +1,11 @@
 type FakeListener = (event: FakeEvent) => void;
+const NON_BUBBLING_FAKE_EVENTS = new Set(["blur", "focus", "mouseenter", "mouseleave"]);
 
 export interface FakeEventInit {
+  bubbles?: boolean;
   clientY?: number;
   ctrlKey?: boolean;
+  dataTransfer?: DataTransfer | null;
   key?: string;
   metaKey?: boolean;
   relatedTarget?: FakeElement | null;
@@ -10,8 +13,10 @@ export interface FakeEventInit {
 }
 
 export class FakeEvent {
+  readonly bubbles: boolean;
   readonly clientY: number;
   readonly ctrlKey: boolean;
+  readonly dataTransfer: DataTransfer | null;
   defaultPrevented = false;
   readonly key: string;
   readonly metaKey: boolean;
@@ -22,8 +27,10 @@ export class FakeEvent {
   currentTarget: FakeElement | null = null;
 
   constructor(readonly type: string, init: FakeEventInit = {}) {
+    this.bubbles = init.bubbles ?? !NON_BUBBLING_FAKE_EVENTS.has(type);
     this.clientY = init.clientY ?? 0;
     this.ctrlKey = init.ctrlKey ?? false;
+    this.dataTransfer = init.dataTransfer ?? null;
     this.key = init.key ?? "";
     this.metaKey = init.metaKey ?? false;
     this.relatedTarget = init.relatedTarget ?? null;
@@ -179,8 +186,20 @@ export class FakeElement {
   dispatch(type: string, init: FakeEventInit = {}): FakeEvent {
     const event = new FakeEvent(type, init);
     event.target = this;
-    event.currentTarget = this;
-    for (const listener of this.listeners.get(type) ?? []) listener(event);
+    const propagationPath: FakeElement[] = [this];
+    if (event.bubbles) {
+      let ancestor = this.parentElement;
+      while (ancestor) {
+        propagationPath.push(ancestor);
+        ancestor = ancestor.parentElement;
+      }
+    }
+    for (const current of propagationPath) {
+      event.currentTarget = current;
+      for (const listener of [...(current.listeners.get(type) ?? [])]) listener(event);
+      if (event.propagationStopped) break;
+    }
+    event.currentTarget = null;
     return event;
   }
 

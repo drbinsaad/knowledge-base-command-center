@@ -72,12 +72,12 @@ First-device Sync precautions and the exact per-route update steps are in [Getti
 
 Export your current organization first. Then run **Knowledge Base Command Center: Clear device-local data…** and confirm, before disabling and removing the plugin through Community Plugins (or deleting its manual plugin folder).
 
-The plugin folder contains `data.json` with synced knowledge bases, settings, Libraries, Collections, pins, hierarchy, and named snapshots. Device-only routes, collapsed sections, Undo/Redo history, local Sync/Recovery facts, and the highest plugin version observed for one-time update announcements are stored through Obsidian's App-local storage outside that folder, so deleting only the folder does not reliably remove them. The clear command removes both plugin-owned local values without changing `data.json`, Markdown notes, attachments, or recovery export files, and local tracking stays suppressed until Obsidian restarts — disable or uninstall in that same session. If you already removed the plugin without clearing them, reinstall and enable the same or a newer release, run the clear command, then remove it again.
+The plugin folder contains `data.json` with synced knowledge bases, settings, Libraries, Collections, pins, hierarchy, and named snapshots. Device-only routes, collapsed sections, Undo/Redo history, local Sync/Recovery facts, and the highest plugin version observed for one-time update announcements are stored through Obsidian's App-local storage outside that folder, so deleting only the folder does not reliably remove them. A third, bounded rename-recovery journal may temporarily contain the vault identity and old/new vault-relative paths until an interrupted organization repair is durably completed. The clear command removes all three plugin-owned App-local values without changing `data.json`, Markdown notes, attachments, or recovery export files, and local tracking stays suppressed until Obsidian restarts — disable or uninstall in that same session. If you already removed the plugin without clearing them, reinstall and enable the same or a newer release, run the clear command, then remove it again.
 
 ## Quick start
 
 1. **Create a knowledge base.** Choose **Generic knowledge base** and select the default folder for notes you create later. This is a storage default, not an Index rule. (The ENT clinical preset is optional and is described below.)
-2. **Choose membership deliberately.** Use **Add → Add existing note to Index** for durable one-note membership. When you deliberately link a folder, its eligible Markdown descendants join through that named rule; no other folder is scanned as Index authority.
+2. **Choose membership deliberately.** Use **Add → Add existing note to Index** for durable one-note membership, or **Organize** to review several existing notes and one or more knowledge-base destinations together. When you deliberately link a folder, its eligible current and future Markdown descendants join through that named rule; selecting a folder in the Organizer is instead a one-time snapshot and never links it.
 3. **Shape the view.** Choose **Arrange**, then group, nest, and reorder records. Drag on desktop; use each row's **…** menu on touch devices. Nothing on disk changes.
 4. **Add Libraries and Collections.** Libraries are primary categories such as Papers or Projects. Collections are reusable lists that cut across them — a note can belong to many Collections at once.
 5. **Export a recovery package.** Create a same-vault recovery export for each knowledge base and keep it private. This is what restores your organization if plugin data is ever lost.
@@ -105,6 +105,27 @@ Index rows label why they belong: **Direct**, **Linked folder**, **Imported plac
 Choose **Arrange** to build a separate visual hierarchy — group, nest, reorder, indent, pin — that changes only plugin-owned organization.
 
 **Manage Index…** provides Indexed, Available, Hidden, Why included, Index headings, and Diagnostics views for membership review, bulk work, and safe integrity repair. Removing or hiding membership never deletes the Markdown file; it can be restored from the Hidden tab.
+
+### Global Note Organizer
+
+Choose **Organize** in the Command Center, or run **Organize vault notes across knowledge bases…**, to organize existing Markdown notes without changing their files. In this workflow, **knowledge base** or **Base** always means an independent KBCC knowledge base—not an Obsidian `.base` file.
+
+The three-step Notes → Destinations → Review flow can:
+
+- select one note, several notes, or a folder's current eligible Markdown descendants from a vault-shaped tree;
+- apply shared destinations across several KBCC knowledge bases, then use **Skip** or **Custom destinations** for individual notes;
+- keep, set, or clear the one primary Index/Library placement independently in each targeted base; and
+- keep, add, or replace Collection memberships independently of the primary placement.
+
+Existing memberships in knowledge bases you do not target stay unchanged. Within each targeted base, one primary Index or Library placement is maintained, while Collection memberships are additive and can coexist with either primary placement. A folder selection is only a one-time snapshot of Markdown notes present when the Organizer opens; it does not create a linked-folder rule and future files do not join automatically.
+
+For faster entry, Obsidian's public File Explorer and editor context menus expose **Organize in KBCC…** for one note and bulk/folder variants for supported selections. The Command Center's **Organize** button also accepts safe text path payloads from compatible Obsidian drags as a progressive enhancement. Operating-system file drops and untrusted payloads are refused. A vault-qualified `obsidian://open` URI is also refused even when it names the current vault, because the drop surface cannot authenticate that vault name; use an unqualified vault-relative path, the context menu, or the Organizer's vault browser instead.
+
+Open Markdown notes show an interactive KBCC organization indicator in the editor header. Its icon, text alternative, tooltip, and optional count distinguish organization in the current base, Collections-only organization, organization only in other bases, and ordinary not-organized state. Red is reserved for a broken persisted reference, not for a normal unorganized note, and color is never the only signal. Activate the indicator to review all-base memberships or open the Organizer for that note.
+
+Before Apply, the Organizer shows exact before/after primary and Collection results and explicitly reports zero file moves, renames, rewrites, or folder-link changes. Apply revalidates the selected file identities, destination state, and Sync generation; if anything relevant is stale, nothing is partially applied and you prepare the review again. Each changed base keeps durable per-base Undo. During the same plugin session, **Note organizer: Undo last multi-base change** and **Note organizer: Redo last multi-base change** reverse the newest reviewed batch across all affected bases together.
+
+The Organizer is deliberately for bulk organization of **existing** Markdown notes. It does not bulk-create files. Use the explicit Create note flow for each new file. In the ENT clinical preset, existing eligibility, protected Library source kinds, and canonical Index grouping remain authoritative; an incompatible placement is rejected during review.
 
 ### Collections with nested subheadings
 
@@ -204,7 +225,7 @@ The manifest is mobile-compatible and the plugin ships mobile layouts throughout
 
 The bundle is built to a 2018 JavaScript baseline so it can run on older mobile web views, and that baseline is enforced rather than assumed: the compiler is pinned to exactly that language level, so using a newer built-in method fails the build instead of shipping unpolyfilled. Version 0.13.1 fixed four such methods that had been reaching devices — the most serious ran while classifying note paths and needed iOS Safari 15.4 or newer.
 
-Physical-device claims are kept separate from automated coverage: see the completed-but-partial [0.10.0 iPhone evidence note](docs/release-evidence/0.10.0-iphone.md), the explicitly unverified [0.17.0 waiver record](docs/release-evidence/0.17.0-iphone.md), and the [manual iPhone release checklist](docs/manual-iphone-release-checklist.md) rather than assuming any release checklist passed.
+Physical-device claims are kept separate from automated coverage: see the completed-but-partial [0.10.0 iPhone evidence note](docs/release-evidence/0.10.0-iphone.md), the explicitly unverified [0.17.0](docs/release-evidence/0.17.0-iphone.md) and [0.18.0](docs/release-evidence/0.18.0-iphone.md) waiver records, and the [manual iPhone release checklist](docs/manual-iphone-release-checklist.md) rather than assuming any release checklist passed. The 0.18.0 record separately identifies the supplemental Mac Obsidian mobile-emulation coverage and its limits.
 
 ### Right-to-left and bidirectional text
 
@@ -292,6 +313,7 @@ The plugin is local-first by design and makes no network request of any kind.
 **What leaves the vault, and what cannot enter it**
 
 - Quick entry, Quick append, and Attach file Obsidian protocols accept only their fixed intrinsic actions. Any query parameter is rejected before a hub, picker, or form opens; titles, paths, content, and files cannot be supplied by URL. Current-note actions use only the locally active eligible note.
+- The Organizer's optional drop target accepts only bounded `text/plain` or `text/uri-list` path strings and rejects operating-system file payloads, absolute paths, and unsafe URLs. Every parsed candidate must resolve to a current eligible Markdown file inside the vault; if one does not, the drop opens nothing. It never reads a dropped note body; the File Explorer context menu and Organizer vault browser remain the dependable alternatives.
 - The plugin never writes outside the vault and never enumerates external files. The explicit Attach file command reads only the one external file you select in the operating-system picker. Desktop JSON export and import also use operating-system download and file-picker surfaces, so those files go where you choose.
 
 **Automatic protection**
@@ -321,7 +343,7 @@ Follow the complete [backup and restore procedure](docs/PORTABILITY_AND_RECOVERY
 | --- | --- |
 | Obsidian | 1.13.0 or newer |
 | Desktop | Uses Obsidian-compatible APIs; no Electron- or Node-only runtime dependency |
-| iPhone and iPad | Supported through touch menus and mobile layouts; the [0.17.0 physical-device record](docs/release-evidence/0.17.0-iphone.md) is explicitly waived and unverified, so do not assume the release checklist passed |
+| iPhone and iPad | Supported through touch menus and mobile layouts; the [0.18.0 physical-device record](docs/release-evidence/0.18.0-iphone.md) is explicitly waived and unverified, so do not assume the release checklist passed |
 | Android | The manifest is mobile-compatible, but this repository does not currently document a complete physical-Android test pass |
 | Network | No plugin network requests, analytics, telemetry, accounts, advertising, or payments |
 
@@ -335,9 +357,13 @@ Follow the complete [backup and restore procedure](docs/PORTABILITY_AND_RECOVERY
 - The Sync and recovery center cannot report network, provider queue, remote-device, or Obsidian Sync status.
 - Search retains at most the strongest 300 visible matches while reporting the full count. Browse rows and structural sections page in groups of 300.
 - Desktop offers drag-and-drop; touch devices use labelled row action menus.
+- Organizer path dropping is a progressive enhancement because Obsidian themes, platforms, and drag sources expose different text payloads. The public File Explorer/editor context menus and the Organizer's own vault tree are the supported fallback.
+- One Organizer review accepts at most 5,000 selected Markdown notes and 20,000 effective note/base destinations. Split a larger job into separately reviewed batches.
+- A multi-base Organizer Apply must fit its exact aggregate required-Undo snapshots within the shared 4 MiB device-local history budget. If it does not fit, the whole Apply is rejected before any primary plugin-store mutation. Split the affected bases across batches; because each Undo entry is an exact whole-base snapshot, selecting fewer notes while targeting the same bases may not reduce this journal size.
+- The Organizer rejects any vault-qualified `obsidian://open` drop URI, including one naming the current vault. Use an unqualified vault-relative path or one of the supported menu/tree entry points.
 - The bundle targets a 2018 JavaScript baseline for older mobile web views. Newer built-in methods are rejected at build time rather than polyfilled, so a feature needing one has to be written differently or the baseline has to be raised deliberately.
 - Same-vault recovery is intentionally not portable between vaults.
-- Real-iPhone keyboard, safe-area, Dynamic Type, landscape, import/export, and destructive recovery behavior needs explicit physical-device evidence. Automated DOM checks are not a substitute, and the 0.17.0 physical-iPhone matrix was explicitly waived by the maintainer rather than executed; it is unverified, not a Pass.
+- Real-iPhone keyboard, safe-area, Dynamic Type, landscape, import/export, and destructive recovery behavior needs explicit physical-device evidence. Automated DOM checks and Mac Obsidian mobile emulation are not substitutes, and the 0.18.0 physical-iPhone matrix was explicitly waived by the maintainer rather than executed; it is unverified, not a Pass.
 
 ## Troubleshooting
 
@@ -356,7 +382,7 @@ Every other symptom, including import refusals and Sync protection reasons, is c
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Apple Shortcuts guide](docs/APPLE_SHORTCUT.md)
 - [Starter templates](templates/README.md)
-- [0.10.0 iPhone evidence](docs/release-evidence/0.10.0-iphone.md) · [0.12.0 iPhone evidence](docs/release-evidence/0.12.0-iphone.md) · [0.17.0 iPhone waiver record](docs/release-evidence/0.17.0-iphone.md)
+- [0.10.0 iPhone evidence](docs/release-evidence/0.10.0-iphone.md) · [0.12.0 iPhone evidence](docs/release-evidence/0.12.0-iphone.md) · [0.17.0 iPhone waiver record](docs/release-evidence/0.17.0-iphone.md) · [0.18.0 iPhone waiver and Mac-emulation record](docs/release-evidence/0.18.0-iphone.md)
 - [Manual real-iPhone release checklist](docs/manual-iphone-release-checklist.md)
 - [Changelog](CHANGELOG.md)
 

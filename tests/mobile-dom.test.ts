@@ -458,12 +458,21 @@ test("wide record selection updates current state in place and preserves row foc
 test("read-only organization disables write-only controls before activation", async () => {
   const dom = createFakeDom();
   installResizeObserver(dom.window);
+  Notice.messages.length = 0;
   const source = searchSource("base-read-only", "Protected base", [record("Knowledge Base/Airway.md", "Airway")]);
   source.data.settings.setupComplete = true;
   const view = createView(dom.window, [source]) as unknown as EntVaultCommandCenterView & {
-    plugin: { isDataReadOnly(): boolean };
+    plugin: {
+      isDataReadOnly(): boolean;
+      openNoteOrganizer(): void;
+      openNoteOrganizerDrop(dataTransfer: DataTransfer | null): void;
+    };
   };
+  let organizerOpenCount = 0;
+  let organizerDropCount = 0;
   view.plugin.isDataReadOnly = () => true;
+  view.plugin.openNoteOrganizer = () => { organizerOpenCount += 1; };
+  view.plugin.openNoteOrganizerDrop = () => { organizerDropCount += 1; };
   const content = dom.document.body.createDiv({ cls: "view-content" });
   content.setBoundingClientRect({ width: 1200 });
   view.contentEl = asHtmlElement(content);
@@ -471,17 +480,70 @@ test("read-only organization disables write-only controls before activation", as
   await view.reload();
 
   const quickEntry = content.querySelector(".ent-cc-quick-entry-button");
+  const organize = content.querySelector(".ent-cc-note-organizer-launch");
   const add = content.querySelector(".ent-cc-header-actions .ent-cc-add-button");
   const arrange = content.querySelector(".ent-cc-header-actions button[aria-pressed]");
   const searchButtons = content.querySelectorAll(".ent-cc-search-row button");
   const saveSearch = searchButtons.find((button) => button.getAttribute("title")?.startsWith("Save this search"));
   const bulkCollection = searchButtons.find((button) => button.getAttribute("title")?.includes("search results"));
-  for (const control of [quickEntry, add, arrange, saveSearch, bulkCollection]) {
+  for (const control of [quickEntry, organize, add, arrange, saveSearch, bulkCollection]) {
     assert.ok(control);
     assert.equal(control.disabled, true);
     assert.match(control.getAttribute("title") ?? "", /read-only/u);
   }
   assert.equal(arrange?.getAttribute("aria-pressed"), "false");
+
+  organize?.dispatch("click");
+  assert.equal(organizerOpenCount, 0, "read-only activation must not open a writable organizer");
+  Notice.messages.length = 0;
+
+  const dropped = { types: ["text/plain"], files: { length: 0 }, dropEffect: "copy" } as unknown as DataTransfer;
+  const drag = organize?.dispatch("dragover", { dataTransfer: dropped });
+  assert.equal(drag?.defaultPrevented, true);
+  assert.equal(drag?.propagationStopped, true);
+  assert.equal(dropped.dropEffect, "none");
+  assert.equal(organize?.hasClass("is-drop-target"), false);
+  const drop = organize?.dispatch("drop", { dataTransfer: dropped });
+  assert.equal(drop?.defaultPrevented, true);
+  assert.equal(drop?.propagationStopped, true);
+  assert.equal(organizerDropCount, 0, "read-only drops must not reach the organizer");
+  assert.deepEqual(Notice.messages, ["Organizing notes is unavailable while organization data is read-only."]);
+});
+
+test("the dedicated Organizer drop target intercepts safe and rejected payloads without bubbling", async () => {
+  const dom = createFakeDom();
+  installResizeObserver(dom.window);
+  const view = createView(dom.window) as unknown as EntVaultCommandCenterView & {
+    plugin: { openNoteOrganizerDrop(dataTransfer: DataTransfer | null): void };
+  };
+  const received: Array<DataTransfer | null> = [];
+  view.plugin.openNoteOrganizerDrop = (dataTransfer) => { received.push(dataTransfer); };
+  const content = dom.document.body.createDiv({ cls: "view-content" });
+  content.setBoundingClientRect({ width: 1200 });
+  view.contentEl = asHtmlElement(content);
+  await view.reload();
+  const organize = content.querySelector(".ent-cc-note-organizer-launch");
+  assert.ok(organize);
+
+  const safe = { types: ["text/plain"], files: { length: 0 }, dropEffect: "none" } as unknown as DataTransfer;
+  const safeDrag = organize.dispatch("dragover", { dataTransfer: safe });
+  assert.equal(safeDrag.defaultPrevented, true);
+  assert.equal(safeDrag.propagationStopped, true);
+  assert.equal(safe.dropEffect, "copy");
+  const safeDrop = organize.dispatch("drop", { dataTransfer: safe });
+  assert.equal(safeDrop.defaultPrevented, true);
+  assert.equal(safeDrop.propagationStopped, true);
+  assert.equal(received[0], safe);
+
+  const files = { types: ["Files", "text/plain"], files: { length: 1 }, dropEffect: "copy" } as unknown as DataTransfer;
+  const filesDrag = organize.dispatch("dragover", { dataTransfer: files });
+  assert.equal(filesDrag.defaultPrevented, true);
+  assert.equal(filesDrag.propagationStopped, true);
+  assert.equal(files.dropEffect, "none");
+  const filesDrop = organize.dispatch("drop", { dataTransfer: files });
+  assert.equal(filesDrop.defaultPrevented, true);
+  assert.equal(filesDrop.propagationStopped, true);
+  assert.equal(received[1], files, "the fail-closed parser receives and rejects the complete OS payload");
 });
 
 test("real mobile search focus applies the keyboard viewport and resets every scroll owner", () => {
