@@ -58,6 +58,64 @@ Index rows show **Direct**, **Linked folder**, **Imported placeholder**, or **Pr
 
 The ENT preset protects canonical source classification and folder scope. It still permits personal visual organization where the profile allows it.
 
+## Global Note Organizer
+
+The Global Note Organizer coordinates existing-note organization across the whole KBCC installation. Open it with **Organize** in the Command Center, **Organize vault notes across knowledge bases…** in the Command palette, or **Organize current note across knowledge bases…** for the active Markdown note. Here **knowledge base** and **Base** mean a KBCC knowledge base; the Organizer does not read or edit native Obsidian `.base` definitions.
+
+### Choose notes
+
+The **Notes** step mirrors the vault's folder hierarchy and selects only eligible Markdown files. You can select individual notes or a folder, up to 5,000 selected Markdown notes in one review. A folder selection is expanded immediately into the current descendant-note paths and is therefore a one-time snapshot:
+
+- it does not create or modify an Index linked-folder rule;
+- future notes placed in that folder are not included automatically;
+- removing or moving a selected file before Apply makes the prepared review stale; and
+- selecting a folder never authorizes moving, renaming, deleting, creating, or rewriting any descendant.
+
+The same snapshot behavior is used by Obsidian's public File Explorer context menus. Right-click one Markdown note for **Organize in KBCC…** and **Show KBCC memberships**; right-click a supported multi-selection or folder for the corresponding current-note-count action. The editor context menu offers the single-note actions for its Markdown file.
+
+The **Organize** header button is also a progressive drop target for compatible Obsidian drag sources that expose bounded `text/plain` or `text/uri-list` vault paths. Every candidate must resolve to a current eligible Markdown note. Operating-system files, absolute paths, unsafe URLs, missing paths, restricted paths, and non-Markdown files do not enter the review. A vault-qualified `obsidian://open` URI is rejected even when it names the current vault because the drop surface cannot authenticate that vault name; use an unqualified vault-relative path instead. Because drag payloads differ by platform and theme, the File Explorer context menu and the Organizer's own vault tree are the supported fallback.
+
+### Choose destinations and overrides
+
+The **Destinations** step starts with shared destinations. Add each KBCC knowledge base that should change; the same note can target several bases in one review. For each target base, choose independently:
+
+| Area | Choices | Result |
+| --- | --- | --- |
+| **Primary placement** | Keep current, place in an Index heading, place in a Library heading/subheading or Unplaced, or remove the primary placement | Maintains at most one primary Index or Library placement in that base. |
+| **Collections** | Keep current, add selected targets, or replace with the selected targets | Collection memberships remain independent of the primary placement and can be additive. Replacing with no targets removes Collections only in that target base. |
+
+Notes use the shared destinations by default. Under **Per-note behavior**, choose **Skip this note** to leave one selected note unchanged, or **Custom destinations** to give it a different set of bases and placements. A knowledge base omitted from a note's effective destinations is not changed; existing Index, Library, and Collection memberships in that other base remain in place. One review may contain at most 20,000 effective note/base directives after shared destinations and overrides are resolved; split a larger job into separately reviewed batches.
+
+The ENT clinical preset keeps its destination-aware safeguards. Notes in restricted or immutable clinical scope are ineligible; a protected source kind can enter only a compatible protected Library; an Index placement must be source-eligible; and, while visual cross-domain movement is disabled, the note keeps its canonical source-derived Index group. An incompatible clinical choice is rejected during preparation rather than partially applied.
+
+### Review, Apply, and Undo
+
+Choose **Prepare review** to build exact before/after rows for every effective note/base destination. The review reports changed, unchanged, and skipped rows and states: **0 files moved · 0 files renamed · 0 Markdown files rewritten · 0 folder links changed**. Preparing a review does not change organization.
+
+**Apply organization** accepts only that opaque prepared result. Immediately before and during the transaction, the plugin revalidates the exact Markdown file objects and their modification facts, every affected destination and heading, the knowledge-base state, and the observed Sync generation. If a file, destination, or synced plugin state changed, Apply fails closed before a partial organization result. Choose **Refresh review**, inspect the new before/after rows, and Apply again only when they are correct.
+
+Each affected knowledge base receives its ordinary restart-durable per-base Undo entry. Before the primary plugin-store mutation, a multi-base Organizer Apply stages the exact required-Undo snapshot for every affected base as one protected batch. If those aggregate snapshots cannot fit within the shared 4 MiB device-local history budget, the whole Apply is refused without a partial organization change. Split the affected bases across batches; because each Undo entry is an exact whole-base snapshot, selecting fewer notes while targeting the same bases may not reduce this journal size. The newest multi-base Organizer batch also has two session-only commands:
+
+- **Note organizer: Undo last multi-base change** reverses all affected bases together; and
+- **Note organizer: Redo last multi-base change** reapplies that same batch.
+
+Those coordinated commands remain available only in the plugin session that applied the batch and only while their exact newest-Undo guards still match. After restart—or after another incompatible organization change—use each base's durable **Undo personal organization change** action separately. Undo changes KBCC plugin data only and never reverses a Markdown file operation because the Organizer performs none.
+
+### Active-note indicator
+
+Every open Markdown editor gets an interactive KBCC organization indicator. Activate it—or run **Show current note’s knowledge-base memberships**—to open a read-only all-base summary, then choose **Organize…** if a change is needed.
+
+The indicator conveys state through icon, accessible label, tooltip, class, and an optional multi-base count; color is supplementary:
+
+- organized in the current base, including a distinct Collections-only label: success/green;
+- organized in other bases but not the current one: accent;
+- not organized anywhere: neutral/muted, which is a normal state; and
+- broken persisted organization, such as a conflicting primary placement, duplicate or missing portable identity, unavailable Library, or simultaneous direct-and-hidden state: danger/red.
+
+Red never means merely “not indexed.” Review the issue detail before changing organization.
+
+The Organizer's bulk scope is existing Markdown notes. It does not create notes in bulk; use **Create note from template or empty note…** separately when a new file is required.
+
 ## Index Manager
 
 Open **Manage Index…** from the Command palette, Index header, or overflow menu.
@@ -351,7 +409,7 @@ A wide Obsidian leaf keeps the Index and inspector side by side. Compact or narr
 
 A saved view retains the current section and literal search query. Queries can contain a path if one was typed, so review saved views before including them in a portable export.
 
-Undo/Redo covers personal organization and guarded import changes. Required Undo operations first stage an exact causal snapshot in the bounded version-4 device-local pending-Undo journal. A multi-base portfolio import stages the newest required Undo for every affected destination as one bounded causal batch. Pressing Undo or Redo separately stages the exact pre-transition history stacks and the inverse snapshot in a pending Undo/Redo transition journal. After a restart, a journal advances history only when the committed semantic revision, head, and payload fingerprint match; a portfolio batch resolves that proof independently for each destination. Otherwise required Undo is discarded or the user-invoked transition retains its exact pre-transition stacks. If the complete protected operation cannot fit within the shared 4 MiB device-local limit, it is refused before its primary mutation. Named organization snapshots are base-local and restore plugin state, not Markdown note bodies.
+Undo/Redo covers personal organization and guarded import changes. Required Undo operations first stage an exact causal snapshot in the bounded version-4 device-local pending-Undo journal. A multi-base portfolio import stages the newest required Undo for every affected destination as one bounded causal batch. A Global Note Organizer Apply is the other multi-base author and stages every affected base through that same mechanism. Pressing Undo or Redo separately stages the exact pre-transition history stacks and the inverse snapshot in a pending Undo/Redo transition journal. After a restart, a journal advances history only when the committed semantic revision, head, and payload fingerprint match; a multi-base batch resolves that proof independently for each affected base. Otherwise required Undo is discarded or the user-invoked transition retains its exact pre-transition stacks. If the complete protected operation cannot fit within the shared 4 MiB device-local limit, it is refused before its primary mutation. Named organization snapshots are base-local and restore plugin state, not Markdown note bodies.
 
 For durable recovery, use a same-vault recovery export in addition to a complete vault backup. See [Portability and recovery](PORTABILITY_AND_RECOVERY.md).
 
@@ -380,7 +438,7 @@ The artifact scan examines at most 2,000 direct children of the export folder an
 
 This is not a Sync-status surface. It makes no network request, calls no private Obsidian Sync API, and cannot tell whether a provider is online, queued, caught up, or safe for a device handoff. It never reads note bodies. Full paths, export filenames, custom configuration names, vault/base identifiers, and full semantic fingerprints are not shown.
 
-Choose **Clear device-local data…** in this center, or run the command of the same name, when preparing to uninstall or intentionally resetting this device. A confirmation explains that it clears only this plugin's App-local route, disclosure, Undo/Redo, local diagnostic facts, and update-announcement history. It does not write synced <code>data.json</code> or change Markdown, attachments, or recovery exports. Tracking remains suppressed until Obsidian restarts, so disable or uninstall in the same session; restart only when you want local tracking to resume.
+Choose **Clear device-local data…** in this center, or run the command of the same name, when preparing to uninstall or intentionally resetting this device. A confirmation explains that it clears this plugin's App-local route, disclosure, Undo/Redo, local diagnostic facts, update-announcement history, and any bounded pending rename-recovery journal. That journal may temporarily contain the vault identity and old/new vault-relative paths after an interrupted organization repair. The clear action removes all three plugin-owned App-local values; it does not write synced <code>data.json</code> or change Markdown, attachments, or recovery exports. Tracking remains suppressed until Obsidian restarts, so disable or uninstall in the same session; restart only when you want local tracking to resume.
 
 ## Settings
 
@@ -417,6 +475,11 @@ The ENT preset also exposes safety-badge display and optional advanced canonical
 - Open export / import center
 - Open multi-base portfolio transfer
 - Manage index…
+- Organize vault notes across knowledge bases…
+- Organize current note across knowledge bases…
+- Show current note’s knowledge-base memberships
+- Note organizer: Undo last multi-base change
+- Note organizer: Redo last multi-base change
 - Open imported placeholder queue
 - Resolve next imported placeholder…
 - Review legacy index source… (shown only while an upgraded Generic folder source still needs a choice)
@@ -441,6 +504,6 @@ The ENT preset adds proposal-promotion and advanced canonical-placement commands
 
 ## Safety boundary
 
-Ordinary Index, Library, Collection, queue, search, and visual-arrangement actions do not edit source notes. Explicit note creation writes a new file after confirmation.
+Ordinary Index, Library, Collection, queue, search, visual-arrangement, and Global Note Organizer actions do not edit source notes. The Organizer changes only reviewed KBCC memberships and placements; it does not create, move, rename, delete, or rewrite Markdown and does not create linked-folder rules. Explicit note creation is a separate workflow that writes one new file after confirmation.
 
 The ENT preset has two separately disclosed exceptions: proposal promotion and advanced canonical placement can move a selected note and update its structural frontmatter and top-level heading. They refuse <code>ai_lock: true</code>, preview the destination, and attempt rollback on failure. Review the destination and back up the vault before using them.

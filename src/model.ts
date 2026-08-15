@@ -3847,6 +3847,12 @@ export function migrateData(input: unknown): PluginData {
   return migrateDataWithBudget(input);
 }
 
+function stripUndefinedMigrationBackupKeys(data: PluginData): PluginData {
+  if (data.migrationBackup === undefined) delete data.migrationBackup;
+  if (data.v2MigrationBackup === undefined) delete data.v2MigrationBackup;
+  return data;
+}
+
 function migrateDataWithBudget(
   input: unknown,
   validationBudget = createPluginLoadValidationBudget(),
@@ -3904,7 +3910,7 @@ function migrateDataWithBudget(
       migrateLegacySnapshotFolderSources(data.undoStack, indexFolderSources, settings.workspaceMode);
       migrateLegacySnapshotFolderSources(data.redoStack, indexFolderSources, settings.workspaceMode);
     }
-    return normalizeKnowledgeBaseLibrariesAndNavigation(data);
+    return normalizeKnowledgeBaseLibrariesAndNavigation(stripUndefinedMigrationBackupKeys(data));
   }
 
   if (loadedVersion === 2) {
@@ -3953,7 +3959,7 @@ function migrateDataWithBudget(
     };
     backfillLegacyPortableDirectMembership(data, settings.workspaceMode);
     migrateLegacySnapshotFolderSources(data.layoutSnapshots, indexFolderSources, settings.workspaceMode);
-    return normalizeKnowledgeBaseLibrariesAndNavigation(data);
+    return normalizeKnowledgeBaseLibrariesAndNavigation(stripUndefinedMigrationBackupKeys(data));
   }
 
   if (loadedVersion !== 1 || !Array.isArray(loaded.headings)) return cloneJsonValue(DEFAULT_DATA);
@@ -3975,7 +3981,7 @@ function migrateDataWithBudget(
     },
     migrationBackup: cleanMigrationBackup({ version: 1, headings: oldHeadings, migratedAt: Date.now() }),
   };
-  return normalizeKnowledgeBaseLibrariesAndNavigation(data);
+  return normalizeKnowledgeBaseLibrariesAndNavigation(stripUndefinedMigrationBackupKeys(data));
 }
 
 export function curriculumContainerKey(domain: string, parentPath: string | null): string {

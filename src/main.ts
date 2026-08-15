@@ -1,4 +1,4 @@
-import { MarkdownView, normalizePath, Notice, parseYaml, Platform, Plugin, TFile, TFolder, type TAbstractFile } from "obsidian";
+import { MarkdownView, normalizePath, Notice, parseYaml, Platform, Plugin, setIcon, TFile, TFolder, type Menu, type TAbstractFile } from "obsidian";
 import {
   attachmentFileName,
   attachmentPathCandidate,
@@ -208,6 +208,48 @@ import {
 } from "./legacy-index-review";
 import { LegacyIndexReviewModal } from "./legacy-index-review-modal";
 import {
+  buildNoteOrganizerContextMenuDescriptor,
+  MAX_NOTE_ORGANIZER_SELECTION_CANDIDATES,
+  normalizeNoteOrganizerSelection,
+  parseNoteOrganizerDrop,
+  summarizeNoteOrganizerMembership,
+  type NoteOrganizerBaseProjection,
+  type NoteOrganizerMembershipSummary,
+  type NoteOrganizerSelectedVaultItem,
+  type NoteOrganizerSelectionSnapshot,
+} from "./note-organizer-surfaces";
+import { NoteMembershipModal } from "./note-membership-modal";
+import {
+  applyNoteOrganizerPlan,
+  createNoteOrganizerPlan,
+  MAX_NOTE_ORGANIZER_COLLECTION_TARGETS,
+  MAX_NOTE_ORGANIZER_DIRECTIVES,
+  MAX_NOTE_ORGANIZER_NOTES,
+  type NoteOrganizerCollectionsDirective,
+  type NoteOrganizerDirective,
+  type NoteOrganizerFileFact,
+  type NoteOrganizerPlan,
+  type NoteOrganizerPrimaryDirective,
+} from "./note-organizer";
+import {
+  createNoteOrganizerBatchHistoryToken,
+  projectNoteOrganizerBatchTransition,
+  type NoteOrganizerBatchHistoryDirection,
+  type NoteOrganizerBatchHistoryToken,
+} from "./note-organizer-history";
+import {
+  NoteOrganizerModal,
+  type NoteOrganizerDraft,
+  type NoteOrganizerSource,
+  type OrganizerApplyResult,
+  type OrganizerBaseOption,
+  type OrganizerDestinationDraft,
+  type OrganizerHeadingOption,
+  type OrganizerPreparedPlan,
+  type OrganizerReviewRow,
+  type OrganizerVaultNode,
+} from "./note-organizer-modal";
+import {
   createDefaultSyncRecoveryLocalState,
   describeConfigProfile,
   describePlatform,
@@ -229,11 +271,20 @@ import {
   type UpdateAnnouncement,
 } from "./update-announcement";
 import { UpdateAnnouncementModal } from "./update-announcement-modal";
+import {
+  createVaultRenameJournal,
+  parseVaultRenameJournal,
+  type PendingVaultRename,
+  type VaultRenameJournal,
+} from "./vault-rename-journal";
 
 /** Bound stable inactive projections by records, not an arbitrary base count. */
 const MAX_INACTIVE_SEARCH_CACHED_RECORDS = 50_000;
+const MAX_NOTE_ORGANIZER_MEMBERSHIP_CACHE_ENTRIES = 32;
+const NOTE_ORGANIZER_INDICATOR_DEBOUNCE_MS = 100;
 export const DEVICE_LOCAL_STATE_KEY = "ent-vault-command-center.device-state.v1";
 export const SYNC_RECOVERY_LOCAL_STATE_KEY = "ent-vault-command-center.sync-recovery-state.v1";
+export const VAULT_RENAME_JOURNAL_KEY = "ent-vault-command-center.vault-rename-journal.v1";
 const FOLLOW_UP_UNDO_WINDOW_MS = 5 * 60 * 1000;
 
 /**
@@ -405,6 +456,35 @@ interface SemanticRevisionPlan {
   parentHead: string;
 }
 
+interface PreparedNoteOrganizerCommit {
+  readonly kind: "knowledge-base-command-center-prepared-note-organizer";
+  readonly plan: Readonly<NoteOrganizerPlan>;
+  readonly fileIdentities: ReadonlyArray<{ readonly path: string; readonly file: TFile }>;
+  consumed: boolean;
+}
+
+type RequiredUndoBatchOperationLabel = "Note Organizer" | "portfolio import" | "multi-base change";
+
+function requiredUndoBatchSubject(operationLabel: RequiredUndoBatchOperationLabel): string {
+  if (operationLabel === "Note Organizer") return "The Note Organizer change";
+  if (operationLabel === "portfolio import") return "The portfolio import";
+  return "The multi-base change";
+}
+
+function requiredUndoBatchUndoLabel(operationLabel: RequiredUndoBatchOperationLabel): string {
+  if (operationLabel === "portfolio import") return "Portfolio";
+  if (operationLabel === "Note Organizer") return operationLabel;
+  return "Multi-base change";
+}
+
+interface NoteOrganizerFileFactContext {
+  readonly ownerIdsByPath: ReadonlyMap<string, readonly string[]>;
+  readonly subjectById: ReadonlyMap<string, PortableSubjectDefinition>;
+  readonly groupTitleById: ReadonlyMap<string, string>;
+  readonly directPaths: Set<string>;
+  readonly excludedPaths: Set<string>;
+}
+
 class ExternalSettingsSupersededError extends Error {}
 class CorruptPrimarySupersededError extends Error {}
 class SemanticConflictRescueError extends Error {}
@@ -448,6 +528,8 @@ interface AppWriteBarrier {
   legacyIndexReviewClaims: Set<string>;
   /** Prevent replacement instances from opening two review modals at once. */
   activeLegacyIndexReviewBaseId: string | null;
+  /** Generation of the plugin instance that owns the App-wide Note Organizer. */
+  activeNoteOrganizerGeneration: number | null;
 }
 
 export type { KnowledgeBaseSearchSource } from "./search";
@@ -546,12 +628,6 @@ interface KnowledgeBaseSearchVaultSnapshot {
   generation: number;
 }
 
-interface PendingVaultRename {
-  oldPath: string;
-  newPath: string;
-  folderRename: boolean;
-}
-
 export default class EntVaultCommandCenterPlugin extends Plugin {
   data: PluginData = cloneJsonValue(DEFAULT_DATA);
   private store: PluginStore = createDefaultStore(this.data);
@@ -587,8 +663,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private preparedRequiredUndoCommit: PendingRequiredUndoCommit | null = null;
   /** Exact causal identity reserved by an Undo/Redo transition preflight. */
   private preparedHistoryTransitionCommit: PendingHistoryTransitionCommit | null = null;
-  /** Keeps generic post-commit local persistence from erasing a staged portfolio batch. */
+  /** Keeps generic post-commit local persistence from erasing a staged multi-base batch. */
   private stagedRequiredUndoBatchCommit: PendingRequiredUndoBatchCommit | null = null;
+  /** User-facing owner of the staged batch; restart recovery intentionally falls back to a generic label. */
+  private stagedRequiredUndoBatchOperationLabel: RequiredUndoBatchOperationLabel = "multi-base change";
   /** Sticky until restart after the explicit privacy reset. */
   private deviceLocalPersistenceSuppressed = false;
   private syncRecoveryLocalState: SyncRecoveryLocalState = createDefaultSyncRecoveryLocalState();
@@ -622,6 +700,21 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     records: VaultRecord[];
     plans: LegacyIndexReviewPlan[];
   } | null = null;
+  /** Small per-path LRU of active-note/all-base projections for one data generation. */
+  private readonly noteOrganizerMembershipSummaryCache = new Map<string, {
+    activeBaseId: string;
+    generation: number;
+    summary: NoteOrganizerMembershipSummary;
+  }>();
+  private readonly noteOrganizerIndicators = new Map<MarkdownView, {
+    element: HTMLElement;
+    path: string;
+  }>();
+  private noteOrganizerIndicatorTimer: number | null = null;
+  private noteOrganizerIndicatorTimerWindow: Window | null = null;
+  private activeNoteOrganizerModal: NoteOrganizerModal | null = null;
+  private readonly preparedNoteOrganizerCommits = new WeakSet<PreparedNoteOrganizerCommit>();
+  private noteOrganizerBatchHistory: NoteOrganizerBatchHistoryToken | null = null;
   private recordLinkIndex = new Map<string, VaultRecord>();
   private recordLinkIndexBaseId = "";
   private backlinkIndex: Map<string, string[]> | null = null;
@@ -633,6 +726,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
    * old path from stale plugin data.
    */
   private pendingVaultRenames: PendingVaultRename[] = [];
+  /** Parsed journal may belong to an established identity still arriving through Sync. */
+  private retainedVaultRenameJournal: VaultRenameJournal | null = null;
+  private vaultRenameJournalLoaded = false;
+  /** Number of pending-prefix entries known to be present in localStorage. */
+  private journaledVaultRenameCount = 0;
+  /** Malformed recovery authority is never discarded or silently reopened writable. */
+  private vaultRenameJournalWarning = "";
   private vaultRenameRepairQueue: Promise<void> = Promise.resolve();
   private lastFollowUpUndo: { expiresAt: number; file: TFile; undo: FollowUpUndoMetadata } | null = null;
   private readonly libraryCommandNames = new Map<string, string>();
@@ -646,7 +746,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   async onload(): Promise<void> {
     this.activateAppWriteBarrier();
     this.loadSyncRecoveryLocalState();
+    this.loadVaultRenameJournal();
     const initialLoad = await this.loadPluginData();
+    if (this.activateVaultRenameJournalForCurrentStore()) this.schedulePendingVaultRenameRepairs();
     this.registerView(VIEW_TYPE, (leaf) => new EntVaultCommandCenterView(leaf, this));
     this.registerHoverLinkSource("ent-vault-command-center", {
       display: "Knowledge Base Command Center",
@@ -661,6 +763,55 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.addCommand({ id: "open-workspace", name: "Open workspace", callback: () => this.run(() => this.activateView()) });
     this.addCommand({ id: "add-or-create", name: "Add or create…", callback: () => void this.withView((view) => view.openAddActions()) });
     this.addCommand({ id: "manage-knowledge-index", name: "Manage index…", callback: () => void this.withView((view) => view.openIndexManager()) });
+    this.addCommand({
+      id: "organize-vault-notes",
+      name: "Organize vault notes across knowledge bases…",
+      icon: "network",
+      callback: () => this.openNoteOrganizer(),
+    });
+    this.addCommand({
+      id: "organize-current-note",
+      name: "Organize current note across knowledge bases…",
+      icon: "network",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        if (!this.noteOrganizerFileIsSelectable(file)) return false;
+        if (!checking && file) this.openNoteOrganizer([file.path], "command");
+        return true;
+      },
+    });
+    this.addCommand({
+      id: "show-current-note-memberships",
+      name: "Show current note’s knowledge-base memberships",
+      icon: "list-tree",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        if (!this.noteOrganizerFileIsSelectable(file)) return false;
+        if (!checking && file) this.openNoteOrganizerMembership(file.path);
+        return true;
+      },
+    });
+    this.addCommand({
+      id: "undo-last-note-organizer-batch",
+      name: "Note organizer: Undo last multi-base change",
+      icon: "undo-2",
+      checkCallback: (checking) => {
+        if (!this.canUndoNoteOrganizerBatch()) return false;
+        if (!checking) this.run(() => this.undoNoteOrganizerBatch());
+        return true;
+      },
+    });
+    this.addCommand({
+      id: "redo-last-note-organizer-batch",
+      name: "Note organizer: Redo last multi-base change",
+      icon: "redo-2",
+      checkCallback: (checking) => {
+        if (!this.canRedoNoteOrganizerBatch()) return false;
+        if (!checking) this.run(() => this.redoNoteOrganizerBatch());
+        return true;
+      },
+    });
+    this.registerNoteOrganizerContextMenus();
     this.addCommand({ id: "open-placeholder-resolution-queue", name: "Open imported placeholder queue", icon: "file-question", callback: () => this.openPlaceholderResolutionQueue() });
     this.addCommand({ id: "resolve-next-imported-placeholder", name: "Resolve next imported placeholder…", icon: "list-start", callback: () => void this.withView((view) => view.startResolveNextPlaceholder()) });
     this.addCommand({
@@ -906,6 +1057,15 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         else if (this.app.workspace.getLeavesOfType(VIEW_TYPE).length > 0) this.scheduleRefresh(false);
       }));
       this.registerEvent(this.app.vault.on("rename", (file, oldPath) => this.handleVaultRenameEvent(file, oldPath)));
+      // A few supported non-DOM test and recovery hosts intentionally expose
+      // only the leaf/query subset of Workspace. Keep the editor affordance
+      // progressive instead of making plugin startup depend on event support.
+      if (typeof this.app.workspace.on === "function") {
+        this.registerEvent(this.app.workspace.on("file-open", () => this.scheduleNoteOrganizerIndicatorSync()));
+        this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.scheduleNoteOrganizerIndicatorSync()));
+        this.registerEvent(this.app.workspace.on("layout-change", () => this.scheduleNoteOrganizerIndicatorSync()));
+      }
+      this.syncNoteOrganizerIndicators();
       this.maybeShowUpdateAnnouncement(initialLoad);
       this.maybeShowLegacyIndexReview();
     });
@@ -913,6 +1073,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   onunload(): void {
     this.unloaded = true;
+    this.dismissActiveNoteOrganizer();
     const hadActiveUpdateAnnouncement = this.activeUpdateAnnouncementModal !== null;
     this.activeUpdateAnnouncementModal?.close();
     this.activeUpdateAnnouncementModal = null;
@@ -929,8 +1090,15 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (this.refreshTimer !== null) this.refreshTimerWindow?.clearTimeout(this.refreshTimer);
     this.refreshTimer = null;
     this.refreshTimerWindow = null;
+    if (this.noteOrganizerIndicatorTimer !== null) {
+      this.noteOrganizerIndicatorTimerWindow?.clearTimeout(this.noteOrganizerIndicatorTimer);
+    }
+    this.noteOrganizerIndicatorTimer = null;
+    this.noteOrganizerIndicatorTimerWindow = null;
     for (const commandId of this.libraryCommandNames.keys()) this.removeCommand(commandId);
     this.libraryCommandNames.clear();
+    for (const binding of this.noteOrganizerIndicators.values()) binding.element.remove();
+    this.noteOrganizerIndicators.clear();
   }
 
   async activateView(): Promise<EntVaultCommandCenterView> {
@@ -1099,6 +1267,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private prepareRequiredUndoBatchCommit(
     beforeStore: PluginStore,
     baseIds: readonly string[],
+    operationLabel: RequiredUndoBatchOperationLabel,
   ): PendingRequiredUndoBatchCommit {
     if (baseIds.length < 1 || baseIds.length > MAX_KNOWLEDGE_BASES) {
       throw new Error(`A required Undo batch must identify between 1 and ${MAX_KNOWLEDGE_BASES} knowledge bases.`);
@@ -1110,31 +1279,31 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const beforeById = new Map(beforeStore.bases.map((entry) => [entry.id, entry]));
     const entries: PendingRequiredUndoBatchEntry[] = sortedBaseIds.map((baseId) => {
       const candidate = this.store.bases.find((entry) => entry.id === baseId);
-      if (!candidate) throw new Error("A portfolio destination is unavailable after applying its reviewed plan.");
+      if (!candidate) throw new Error(`A destination for ${operationLabel} is unavailable after applying its reviewed plan.`);
       const before = beforeById.get(baseId);
       if (before) {
         if (!Number.isSafeInteger(before.semanticRevision)
           || before.semanticRevision < 0
           || before.semanticRevision >= Number.MAX_SAFE_INTEGER
           || candidate.semanticRevision !== before.semanticRevision + 1) {
-          throw new Error(`The portfolio candidate for “${candidate.data.settings.workspaceName}” did not advance its semantic revision exactly once.`);
+          throw new Error(`The ${operationLabel} candidate for “${candidate.data.settings.workspaceName}” did not advance its semantic revision exactly once.`);
         }
       } else if (candidate.semanticRevision !== 0
         || candidate.semanticHead !== candidate.semanticHash) {
-        throw new Error(`The new portfolio candidate for “${candidate.data.settings.workspaceName}” has invalid initial semantic authority.`);
+        throw new Error(`The new ${operationLabel} candidate for “${candidate.data.settings.workspaceName}” has invalid initial semantic authority.`);
       }
       if (candidate.semanticHash !== semanticEntryFingerprint(candidate)) {
-        throw new Error(`The portfolio candidate for “${candidate.data.settings.workspaceName}” has stale semantic authority.`);
+        throw new Error(`The ${operationLabel} candidate for “${candidate.data.settings.workspaceName}” has stale semantic authority.`);
       }
       if (candidate.data.redoStack.length !== 0) {
-        throw new Error(`The portfolio candidate for “${candidate.data.settings.workspaceName}” did not clear Redo history.`);
+        throw new Error(`The ${operationLabel} candidate for “${candidate.data.settings.workspaceName}” did not clear Redo history.`);
       }
       const requiredUndo = candidate.data.undoStack[candidate.data.undoStack.length - 1];
       if (!requiredUndo || !Number.isSafeInteger(requiredUndo.at) || requiredUndo.at <= 0) {
-        throw new Error(`The portfolio candidate for “${candidate.data.settings.workspaceName}” is missing its required Undo snapshot.`);
+        throw new Error(`The ${operationLabel} candidate for “${candidate.data.settings.workspaceName}” is missing its required Undo snapshot.`);
       }
       if (!before && candidate.data.undoStack.length !== 1) {
-        throw new Error(`The new portfolio candidate for “${candidate.data.settings.workspaceName}” has invalid staged history.`);
+        throw new Error(`The new ${operationLabel} candidate for “${candidate.data.settings.workspaceName}” has invalid staged history.`);
       }
       return {
         baseId,
@@ -1394,9 +1563,83 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
   }
 
+  /** Load without attaching: a retained journal is authoritative only for its exact vault ID. */
+  private loadVaultRenameJournal(): void {
+    if (this.vaultRenameJournalLoaded || this.deviceLocalPersistenceSuppressed) return;
+    this.vaultRenameJournalLoaded = true;
+    if (typeof this.app.loadLocalStorage !== "function") return;
+    try {
+      const loaded = this.app.loadLocalStorage(VAULT_RENAME_JOURNAL_KEY) as unknown;
+      this.retainedVaultRenameJournal = loaded === null || loaded === undefined
+        ? null
+        : parseVaultRenameJournal(loaded);
+    } catch (error) {
+      // Unlike disposable UI state, this value may be the only surviving map
+      // from physically renamed notes to stale synced membership paths. Keep
+      // the original local value for recovery and prevent unrelated writes.
+      this.retainedVaultRenameJournal = null;
+      this.vaultRenameJournalWarning = "The device-local vault-rename recovery journal is damaged or too large. Knowledge-base organization is read-only so pending note-path repairs are not lost. Preserve plugin data and clear device-local data only after the affected paths are repaired.";
+      this.dataCompatibilityWarning = this.vaultRenameJournalWarning;
+      new Notice(this.vaultRenameJournalWarning, 15000);
+      console.warn("Knowledge Base Command Center could not parse its vault-rename recovery journal", error);
+    }
+  }
+
+  /** Activate a retained journal only after the synced store proves the exact vault identity. */
+  private activateVaultRenameJournalForCurrentStore(): boolean {
+    const journal = this.retainedVaultRenameJournal;
+    if (!journal || journal.vaultId !== this.store.vaultId) return this.pendingVaultRenames.length > 0;
+    if (this.pendingVaultRenames.length === 0) {
+      this.pendingVaultRenames = journal.renames.map((entry) => ({ ...entry }));
+      this.journaledVaultRenameCount = this.pendingVaultRenames.length;
+      // Search and active-note summaries must project the restored overlay in
+      // the same turn in which it becomes visible.
+      this.invalidateRecordCache();
+    } else if (this.journaledVaultRenameCount === 0) {
+      // A physical rename can arrive while a previously retained established
+      // identity is still being delivered by Sync. Its session-only entries
+      // happened after the durable journal, so append them to that exact order.
+      this.pendingVaultRenames = [
+        ...journal.renames.map((entry) => ({ ...entry })),
+        ...this.pendingVaultRenames,
+      ];
+      this.journaledVaultRenameCount = journal.renames.length;
+      this.invalidateRecordCache();
+    }
+    return this.pendingVaultRenames.length > 0;
+  }
+
+  private writeVaultRenameJournal(renames: readonly PendingVaultRename[]): void {
+    if (this.deviceLocalPersistenceSuppressed) {
+      throw new Error("Device-local persistence is suppressed for this session.");
+    }
+    if (this.vaultRenameJournalWarning) throw new Error(this.vaultRenameJournalWarning);
+    if (this.retainedVaultRenameJournal && this.retainedVaultRenameJournal.vaultId !== this.store.vaultId) {
+      throw new Error("A vault-rename journal for a different vault identity is already retained.");
+    }
+    if (typeof this.app.saveLocalStorage !== "function") {
+      throw new Error("Obsidian's device-local storage API is unavailable.");
+    }
+    if (renames.length === 0) {
+      this.app.saveLocalStorage(VAULT_RENAME_JOURNAL_KEY, null);
+      this.retainedVaultRenameJournal = null;
+      return;
+    }
+    const journal = createVaultRenameJournal(this.store.vaultId, renames);
+    // App.saveLocalStorage is synchronous. The physical rename is never sent
+    // to the async repair queue until this call has returned successfully (or
+    // the user has been explicitly warned that restart safety is unavailable).
+    this.app.saveLocalStorage(VAULT_RENAME_JOURNAL_KEY, journal);
+    this.retainedVaultRenameJournal = journal;
+  }
+
+  private noticeVaultRenameJournalWriteFailure(): void {
+    new Notice("The vault rename was detected, but its restart-safe local repair journal could not be saved. Keep Obsidian open until the organization repair finishes; if it remains read-only, preserve plugin data before restarting.", 15000);
+  }
+
   private captureLiveDeviceLocalState(): void {
     if (this.deviceLocalPersistenceSuppressed) return;
-    // A committed portfolio can remain protected only by its durable batch
+    // A committed multi-base operation can remain protected only by its durable batch
     // journal when the marker-free finalizer is rejected. Generic view-state
     // capture must not replace that sole recovery authority in memory; doing
     // so would also let a later save erase it from localStorage.
@@ -1421,7 +1664,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private persistDeviceLocalState(): void {
     if (this.deviceLocalPersistenceSuppressed) return;
     // Only the protected batch finalizer or explicit reconciliation may remove
-    // a staged portfolio journal. Route/view saves are intentionally deferred
+    // a staged multi-base journal. Route/view saves are intentionally deferred
     // until restart if that finalization could not be made durable.
     if (this.stagedRequiredUndoBatchCommit) return;
     if (!this.committedStoreSnapshot
@@ -1514,7 +1757,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         || (undoStack.length === 1 && local.view.redoStack.length === 0)));
   }
 
-  /** Resolve every destination in an atomic portfolio journal independently. */
+  /** Resolve every destination in an atomic multi-base journal independently. */
   private reconcilePendingRequiredUndoBatchCommit(store: PluginStore): boolean {
     const state = this.deviceLocalState;
     const pending = state?.pendingRequiredUndoBatchCommit;
@@ -1523,6 +1766,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     // itself durable. If that write fails, view saves and later semantic
     // operations cannot overwrite the still-durable pending journal.
     this.stagedRequiredUndoBatchCommit = pending;
+    this.stagedRequiredUndoBatchOperationLabel = "multi-base change";
     const resolved = cloneJsonValue(state);
     for (const entry of pending.entries) {
       const localIndex = resolved.bases.findIndex((base) => base.baseId === entry.baseId);
@@ -1551,9 +1795,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     try {
       this.storeDeviceLocalState(resolved, true, true);
       this.stagedRequiredUndoBatchCommit = null;
+      this.stagedRequiredUndoBatchOperationLabel = "multi-base change";
     } catch (error) {
       console.error("Knowledge Base Command Center could not finalize its pending required Undo batch", error);
-      new Notice("Portfolio undo history was recovered safely, but its local journal could not be finalized. Obsidian will retry on restart.", 10000);
+      new Notice("Multi-base undo history was recovered safely, but its local journal could not be finalized. Obsidian will retry on restart.", 10000);
     }
     return true;
   }
@@ -1674,17 +1919,18 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
   }
 
-  /** Stage every mapped base's required Undo before an atomic portfolio write. */
+  /** Stage every affected base's required Undo before an atomic multi-base write. */
   private persistRequiredUndoBatchState(
     beforeStore: PluginStore,
     pending: PendingRequiredUndoBatchCommit,
+    operationLabel: RequiredUndoBatchOperationLabel,
   ): { historyTruncated: boolean; viewStateTruncated: boolean } {
     const beforeById = new Map(beforeStore.bases.map((entry) => [entry.id, entry]));
     const batchBaseIds = new Set(pending.entries.map((entry) => entry.baseId));
     const liveRedoByBaseId = new Map<string, PersonalSnapshot[]>();
     for (const pendingEntry of pending.entries) {
       const candidate = this.store.bases.find((entry) => entry.id === pendingEntry.baseId);
-      if (!candidate) throw new Error("A portfolio destination is unavailable while staging its required Undo.");
+      if (!candidate) throw new Error(`A destination for ${operationLabel} is unavailable while staging its required Undo.`);
       liveRedoByBaseId.set(candidate.id, candidate.data.redoStack);
       const before = beforeById.get(candidate.id);
       candidate.data.redoStack = before ? before.data.redoStack : [];
@@ -1694,7 +1940,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       built = createDeviceLocalPluginStateWithReport(this.store, undefined, undefined, pending);
     } catch (error) {
       if (/could not be bounded safely/i.test(errorMessage(error))) {
-        throw new Error("This portfolio import cannot keep every mapped base's required Undo within the 4 MiB device-local limit. Keep the recovery files, then import fewer or smaller bases.");
+        if (operationLabel === "portfolio import") {
+          throw new Error("This portfolio import cannot keep every mapped base's required Undo within the 4 MiB device-local limit. Keep the recovery files, then import fewer or smaller bases.");
+        }
+        throw new Error(`${requiredUndoBatchSubject(operationLabel)} cannot keep every affected base's required Undo within the 4 MiB device-local limit. Organize fewer notes or knowledge bases, then try again.`);
       }
       throw error;
     } finally {
@@ -1704,7 +1953,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       }
     }
     if (!pending.entries.every((entry) => this.localStateRetainsPendingUndoBatchEntry(built.state, entry))) {
-      throw new Error("This portfolio import cannot keep every mapped base's required Undo within the 4 MiB device-local limit. Keep the recovery files, then import fewer or smaller bases.");
+      if (operationLabel === "portfolio import") {
+        throw new Error("This portfolio import cannot keep every mapped base's required Undo within the 4 MiB device-local limit. Keep the recovery files, then import fewer or smaller bases.");
+      }
+      throw new Error(`${requiredUndoBatchSubject(operationLabel)} cannot keep every affected base's required Undo within the 4 MiB device-local limit. Organize fewer notes or knowledge bases, then try again.`);
     }
     let boundedHistoryByBaseId: Map<string, {
       undoStack: PersonalSnapshot[];
@@ -1743,12 +1995,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   /** Write marker-free local state only after protecting and proving every mapped Undo. */
   private finalizeRequiredUndoBatchCommit(
     pending: PendingRequiredUndoBatchCommit,
+    operationLabel: RequiredUndoBatchOperationLabel,
   ): { finalized: boolean; historyTruncated: boolean; viewStateTruncated: boolean } {
+    const operationSubject = requiredUndoBatchSubject(operationLabel);
     let markerFreeWasStored = false;
     try {
       if (!pending.entries.every((entry) => this.committedAuthorityMatchesPendingUndo(this.store, entry))) {
-        console.error("Knowledge Base Command Center did not finalize portfolio Undo because committed authority did not match its pending batch");
-        new Notice("The portfolio was saved, but its undo history is still pending causal verification. Obsidian will verify it on restart.", 10000);
+        console.error(`Knowledge Base Command Center did not finalize ${operationLabel} Undo because committed authority did not match its pending batch`);
+        new Notice(`${operationSubject} was saved, but its undo history is still pending causal verification. Obsidian will verify it on restart.`, 10000);
         return { finalized: false, historyTruncated: false, viewStateTruncated: false };
       }
       const current = this.deviceLocalState;
@@ -1763,12 +2017,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       }
       const built = createDeviceLocalPluginStateWithReport(this.store, undefined, undefined, pending);
       if (!pending.entries.every((entry) => this.localStateRetainsPendingUndoBatchEntry(built.state, entry))) {
-        throw new Error("One or more committed portfolio Undo snapshots were not retained.");
+        throw new Error(`One or more committed ${operationLabel} Undo snapshots were not retained.`);
       }
       const markerFree = cloneJsonValue(built.state);
       delete markerFree.pendingRequiredUndoBatchCommit;
       if (!pending.entries.every((entry) => this.localStateRetainsPendingUndoBatchEntry(markerFree, entry))) {
-        throw new Error("One or more committed portfolio Undo snapshots changed during finalization.");
+        throw new Error(`One or more committed ${operationLabel} Undo snapshots changed during finalization.`);
       }
       this.storeDeviceLocalState(markerFree, true, true);
       markerFreeWasStored = true;
@@ -1788,8 +2042,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       console.error("Knowledge Base Command Center could not promote its committed required Undo batch", error);
       new Notice(
         markerFreeWasStored
-          ? "The portfolio was saved and its protected local history was finalized, but the live view could not adopt its bounded projection. Organization remains read-only until Obsidian is restarted."
-          : "The portfolio was saved and its undo remains protected by a pending local journal, but finalization failed. Obsidian will retry on restart.",
+          ? `${operationSubject} was saved and its protected local history was finalized, but the live view could not adopt its bounded projection. Organization remains read-only until Obsidian is restarted.`
+          : `${operationSubject} was saved and its undo remains protected by a pending local journal, but finalization failed. Obsidian will retry on restart.`,
         12000,
       );
       return { finalized: false, historyTruncated: false, viewStateTruncated: false };
@@ -1799,12 +2053,16 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private noticeRequiredUndoBatchReduction(
     historyTruncated: boolean,
     viewStateTruncated: boolean,
+    operationLabel: RequiredUndoBatchOperationLabel,
   ): void {
     if (!historyTruncated && !viewStateTruncated) return;
+    const affectedBases = operationLabel === "portfolio import"
+      ? "every imported base"
+      : `every base affected by ${requiredUndoBatchSubject(operationLabel).toLocaleLowerCase()}`;
     new Notice(
       viewStateTruncated
-        ? "Older device-local history or inactive route and layout state was reduced so every imported base keeps its required undo within the four-megabyte local limit."
-        : "Older undo or redo entries were removed on this device so every imported base keeps its required undo within the four-megabyte local limit.",
+        ? `Older device-local history or inactive route and layout state was reduced so ${affectedBases} keeps its required undo within the four-megabyte local limit.`
+        : `Older undo or redo entries were removed on this device so ${affectedBases} keeps its required undo within the four-megabyte local limit.`,
       10000,
     );
   }
@@ -2002,7 +2260,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           ? "Other base view profiles stored on this device"
           : "No saved view profile on this device";
     const readOnly = this.isDataReadOnly();
-    const portfolioUndoFinalizationPending = Boolean(this.stagedRequiredUndoBatchCommit);
+    const requiredUndoBatchFinalizationPending = Boolean(this.stagedRequiredUndoBatchCommit);
     return {
       activeBaseName: privacySafeBaseName(active.data.settings.workspaceName),
       workspaceProfile: active.data.settings.workspaceMode === "ent-clinical" ? "ENT clinical preset" : "Generic knowledge base",
@@ -2021,15 +2279,15 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         artifactSummary.newestNamedRecoveryAt ?? 0,
       ) || null,
       readOnly,
-      readOnlyReason: portfolioUndoFinalizationPending
-        ? "A committed portfolio import is waiting for protected local undo finalization. Organization remains protected until restart."
+      readOnlyReason: requiredUndoBatchFinalizationPending
+        ? `A committed ${requiredUndoBatchSubject(this.stagedRequiredUndoBatchOperationLabel).replace(/^The /u, "")} is waiting for protected local undo finalization. Organization remains protected until restart.`
         : privacySafeReadOnlyReason(this.dataCompatibilityWarning, {
           persistenceUncertain: this.persistenceUncertain,
           semanticConflictRescueFailed: this.semanticConflictRescueFailed,
         }),
       stickyUntilRestart: this.persistenceUncertain
         || this.semanticConflictRescueFailed
-        || portfolioUndoFinalizationPending,
+        || requiredUndoBatchFinalizationPending,
       activeBaseConcurrentEditAt: localConflict?.at ?? null,
       activeBaseConcurrentEditCount: localConflict?.count ?? 0,
       deviceProfile: describePlatform(Platform),
@@ -2051,7 +2309,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       throw new Error("Obsidian's device-local storage API is unavailable.");
     }
     let clearFailed = false;
-    for (const key of [DEVICE_LOCAL_STATE_KEY, SYNC_RECOVERY_LOCAL_STATE_KEY]) {
+    for (const key of [DEVICE_LOCAL_STATE_KEY, SYNC_RECOVERY_LOCAL_STATE_KEY, VAULT_RENAME_JOURNAL_KEY]) {
       try {
         this.app.saveLocalStorage(key, null);
       } catch {
@@ -2060,7 +2318,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
     if (clearFailed) throw new Error("One or more device-local values could not be cleared.");
 
-    // Keep both values absent for the rest of this plugin session. Pending
+    // A privacy reset suppresses every future device-local Organizer write in
+    // this session. Close an already-open review before changing that policy so
+    // it cannot continue to look writable against a now-invalid local journal.
+    this.dismissActiveNoteOrganizer();
+
+    // Keep every plugin-owned local value absent for the rest of this session. Pending
     // selection timers, view onClose hooks, successful saves, or Sync reloads
     // must not silently recreate privacy-reset state before uninstall/restart.
     this.deviceLocalPersistenceSuppressed = true;
@@ -2069,12 +2332,20 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.useActiveData(this.requireActiveBase().data);
     this.deviceLocalState = null;
     this.deviceLocalStateLoaded = true;
+    this.pendingVaultRenames = [];
+    this.retainedVaultRenameJournal = null;
+    this.journaledVaultRenameCount = 0;
+    this.vaultRenameJournalLoaded = true;
+    if (this.dataCompatibilityWarning === this.vaultRenameJournalWarning) this.dataCompatibilityWarning = "";
+    this.vaultRenameJournalWarning = "";
     // Explicit privacy reset is the one operation allowed to discard a
-    // pending portfolio journal without reconciliation.
+    // pending multi-base journal without reconciliation.
     this.stagedRequiredUndoBatchCommit = null;
+    this.stagedRequiredUndoBatchOperationLabel = "multi-base change";
     this.syncRecoveryLocalState = createDefaultSyncRecoveryLocalState();
     this.syncRecoveryLocalStateLoaded = true;
     this.lastFollowUpUndo = null;
+    this.noteOrganizerBatchHistory = null;
     try {
       await this.refreshViews(false);
     } catch {
@@ -2091,6 +2362,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (this.activeUpdateAnnouncementModal
       || this.appWriteBarrier?.activeUpdateAnnouncementVersion !== null
       || this.activeLegacyIndexReviewModal
+      || this.appWriteBarrier?.activeNoteOrganizerGeneration !== null
       || this.isDataReadOnly()
       || !this.hasLegacyIndexSource()) return;
     const baseId = this.getActiveKnowledgeBaseId();
@@ -2111,6 +2383,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (this.activeUpdateAnnouncementModal
       || this.appWriteBarrier?.activeUpdateAnnouncementVersion !== null) {
       new Notice("Close what’s new before reviewing the legacy index source.");
+      return;
+    }
+    if (this.appWriteBarrier?.activeNoteOrganizerGeneration !== null) {
+      new Notice("Close the note organizer before reviewing the legacy index source.");
       return;
     }
     if (this.activeLegacyIndexReviewModal) {
@@ -2211,6 +2487,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (this.unloaded || this.deviceLocalPersistenceSuppressed || this.activeUpdateAnnouncementModal) return;
     if (!this.appWriteBarrier) this.activateAppWriteBarrier();
     if (this.appWriteBarrier?.activeUpdateAnnouncementVersion !== null) return;
+    if (this.appWriteBarrier?.activeNoteOrganizerGeneration !== null) {
+      new Notice("Close the note organizer before opening what’s new.");
+      return;
+    }
     if (this.activeLegacyIndexReviewModal || this.appWriteBarrier?.activeLegacyIndexReviewBaseId !== null) {
       new Notice("Close the legacy index review before opening what’s new.");
       return;
@@ -2287,7 +2567,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     let restoredFromBackup = false;
     let corruptStorePreservationFailed = false;
     let corruptPrimaryGuard: CorruptPrimaryGuard | null = null;
-    if (!this.persistenceUncertain) this.dataCompatibilityWarning = "";
+    if (!this.persistenceUncertain) this.dataCompatibilityWarning = this.vaultRenameJournalWarning;
     try {
       if (capturedRead && "error" in capturedRead) throw capturedRead.error;
       loaded = capturedRead ? capturedRead.value : await this.loadData() as unknown;
@@ -2651,7 +2931,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         if (this.store.activeBaseId === baseId) this.useActiveData(restoredData);
         this.invalidateRecordCache();
       }
-      throw new Error("Portfolio undo finalization is pending. Restart Obsidian so the protected local journal can be reconciled before changing knowledge-base data.");
+      throw new Error(`${requiredUndoBatchUndoLabel(this.stagedRequiredUndoBatchOperationLabel)} Undo finalization is pending. Restart Obsidian so the protected local journal can be reconciled before changing knowledge-base data.`);
     }
     if (this.externalReloadBusy) {
       // An opaque PluginData snapshot cannot be safely merged with a synced
@@ -3016,7 +3296,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.rollbackStoreSnapshot = cloneJsonValue(snapshot);
       this.clearSupersededRejectedAttempts(snapshot);
       if (!allowDuringExternalReload) this.recordLocalSuccessfulSave();
-      // A portfolio batch preflight already wrote the only crash-safe local
+      // A multi-base batch preflight already wrote the only crash-safe local
       // authority. Its protected finalizer—not the generic builder—must be the
       // first code allowed to remove that marker after primary commit.
       if (!this.stagedRequiredUndoBatchCommit) this.persistDeviceLocalStateSafely();
@@ -3072,6 +3352,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         activeUpdateAnnouncementVersion: null,
         legacyIndexReviewClaims: new Set<string>(),
         activeLegacyIndexReviewBaseId: null,
+        activeNoteOrganizerGeneration: null,
       };
     const runtimeBarrier = barrier as unknown as Record<string, unknown>;
     const logicalTail = runtimeBarrier.logicalTail;
@@ -3094,6 +3375,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
     if (typeof runtimeBarrier.activeLegacyIndexReviewBaseId !== "string") {
       barrier.activeLegacyIndexReviewBaseId = null;
+    }
+    if (!Number.isSafeInteger(runtimeBarrier.activeNoteOrganizerGeneration)) {
+      barrier.activeNoteOrganizerGeneration = null;
     }
     const priorTail = barrier.tail;
     const priorLogicalTail = barrier.logicalTail;
@@ -3599,8 +3883,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         );
       }
       this.useActiveData(this.requireActiveBase().data);
-      this.dataCompatibilityWarning = "";
+      this.dataCompatibilityWarning = this.vaultRenameJournalWarning;
       this.retainedExternalSettingsPayload = null;
+      if (this.activateVaultRenameJournalForCurrentStore()) this.schedulePendingVaultRenameRepairs();
       return publishOutcome({
         capture,
         workingStore: adopted.workingStore,
@@ -3859,7 +4144,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           this.externalReloadPromise = null;
           this.externalReloadBusy = false;
           this.recordExternalReload(reloadOutcome);
-          if (reloadOutcome === "applied") this.maybeShowLegacyIndexReview();
+          if (reloadOutcome === "applied") {
+            if (this.dismissActiveNoteOrganizer()) {
+              new Notice("Synced knowledge-base data changed while the note organizer was open. The organizer was closed; reopen it to review the latest bases and memberships.", 10000);
+            }
+            this.maybeShowLegacyIndexReview();
+          }
         }
       }
     };
@@ -3889,6 +4179,962 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
    */
   getVaultNoteGeneration(): number { return this.searchGeneration; }
   getVaultId(): string { return this.store.vaultId; }
+
+  private noteOrganizerPathIsRestricted(path: string): boolean {
+    const normalized = normalizePath(path);
+    const configDir = normalizePath(this.app.vault.configDir).replace(/^\/+|\/+$/gu, "");
+    return isImmutableSourcePath(normalized)
+      || Boolean(configDir && pathIsInsideFolder(normalized, configDir));
+  }
+
+  noteOrganizerRestrictionReason(path: string): string | null {
+    return this.noteOrganizerPathIsRestricted(path)
+      ? "This note is in a protected source or Obsidian configuration area and cannot be organized by KBCC."
+      : null;
+  }
+
+  private noteOrganizerFileIsSelectable(file: TAbstractFile | null): file is TFile {
+    return file instanceof TFile
+      && file.extension.toLocaleLowerCase() === "md"
+      && this.app.vault.getAbstractFileByPath(file.path) === file
+      && !this.noteOrganizerPathIsRestricted(file.path);
+  }
+
+  private noteOrganizerSelection(
+    selectedItems: readonly NoteOrganizerSelectedVaultItem[],
+  ): NoteOrganizerSelectionSnapshot {
+    const needsFolderExpansion = selectedItems.some((item) => item.kind === "folder");
+    let inventory: TFile[];
+    if (needsFolderExpansion) {
+      inventory = this.app.vault.getMarkdownFiles();
+    } else {
+      inventory = [];
+      for (const item of selectedItems) {
+        const file = this.app.vault.getAbstractFileByPath(item.path);
+        if (file instanceof TFile && file.extension.toLocaleLowerCase() === "md") inventory.push(file);
+      }
+    }
+    return normalizeNoteOrganizerSelection(
+      selectedItems,
+      inventory,
+      { isRestrictedPath: (path) => this.noteOrganizerPathIsRestricted(path) },
+    );
+  }
+
+  private addNoteOrganizerContextMenuItems(
+    menu: Menu,
+    snapshot: NoteOrganizerSelectionSnapshot,
+    source: Extract<NoteOrganizerSource, "file-menu" | "files-menu">,
+  ): void {
+    const descriptor = buildNoteOrganizerContextMenuDescriptor(snapshot);
+    if (descriptor.noteCount === 0) {
+      if (!snapshot.complete) {
+        const title = snapshot.blockedReason === "selection-limit"
+          ? `Folder contains more than ${MAX_NOTE_ORGANIZER_NOTES.toLocaleString()} reviewable notes`
+          : "Folder is too large to snapshot safely";
+        menu.addSeparator();
+        menu.addItem((item) => item.setTitle(title).setIcon("network").setDisabled(true));
+      }
+      return;
+    }
+    menu.addSeparator();
+    for (const action of descriptor.actions) {
+      menu.addItem((item) => item
+        .setTitle(action.title)
+        .setIcon(action.icon)
+        .setDisabled(!action.enabled)
+        .onClick(() => {
+          if (!action.enabled) return;
+          if (action.id === "show-memberships") {
+            const path = snapshot.paths[0];
+            if (path) this.openNoteOrganizerMembership(path);
+            return;
+          }
+          this.openNoteOrganizer(snapshot.paths, source);
+        }));
+    }
+  }
+
+  private registerNoteOrganizerContextMenus(): void {
+    const workspace = this.app.workspace;
+    if (typeof workspace.on !== "function") return;
+    this.registerEvent(workspace.on("file-menu", (menu, file) => {
+      const item: NoteOrganizerSelectedVaultItem = {
+        path: file.path,
+        kind: file instanceof TFolder ? "folder" : "file",
+      };
+      this.addNoteOrganizerContextMenuItems(menu, this.noteOrganizerSelection([item]), "file-menu");
+    }));
+    this.registerEvent(workspace.on("files-menu", (menu, files) => {
+      const selected = files.map((file): NoteOrganizerSelectedVaultItem => ({
+        path: file.path,
+        kind: file instanceof TFolder ? "folder" : "file",
+      }));
+      this.addNoteOrganizerContextMenuItems(menu, this.noteOrganizerSelection(selected), "files-menu");
+    }));
+    this.registerEvent(workspace.on("editor-menu", (menu, _editor, info) => {
+      const file = info.file;
+      if (!this.noteOrganizerFileIsSelectable(file)) return;
+      this.addNoteOrganizerContextMenuItems(
+        menu,
+        this.noteOrganizerSelection([{ path: file.path, kind: "file" }]),
+        "file-menu",
+      );
+    }));
+  }
+
+  /** Read-only all-base organization summary for the editor indicator. */
+  getNoteOrganizerMembershipSummary(path: string): NoteOrganizerMembershipSummary {
+    const normalized = normalizePath(path);
+    const activeBaseId = this.getActiveKnowledgeBaseId();
+    const cached = this.noteOrganizerMembershipSummaryCache.get(normalized);
+    if (cached
+      && cached.activeBaseId === activeBaseId
+      && cached.generation === this.searchGeneration) {
+      this.noteOrganizerMembershipSummaryCache.delete(normalized);
+      this.noteOrganizerMembershipSummaryCache.set(normalized, cached);
+      return cached.summary;
+    }
+    if (cached) this.noteOrganizerMembershipSummaryCache.delete(normalized);
+    const abstract = this.app.vault.getAbstractFileByPath(normalized);
+    const file = abstract instanceof TFile && abstract.extension.toLowerCase() === "md" ? abstract : null;
+    const projections: NoteOrganizerBaseProjection[] = this.getKnowledgeBases().map((entry) => {
+      const recordMap = this.recordsByPathCacheByBase.get(entry.id);
+      let record = recordMap?.get(normalized) ?? null;
+      if (!recordMap) {
+        for (const candidate of this.iterateRecordScanForEntry(
+          entry,
+          file ? [file] : [],
+          undefined,
+          normalized,
+        )) {
+          if (candidate?.path === normalized) {
+            record = candidate;
+            break;
+          }
+        }
+      }
+      return {
+        baseId: entry.id,
+        name: entry.data.settings.workspaceName,
+        data: entry.data,
+        record,
+      };
+    });
+    const summary = summarizeNoteOrganizerMembership(normalized, projections, activeBaseId, {
+      pathExists: file !== null,
+      // A physical rename precedes its async all-base repair. Project every
+      // persisted membership through the same ordered overlay as record scans
+      // so the editor indicator cannot briefly (or in read-only mode,
+      // indefinitely) report the renamed note as unorganized.
+      projectPath: (storedPath) => this.projectPendingRenamePath(storedPath),
+    });
+    this.noteOrganizerMembershipSummaryCache.set(normalized, {
+      activeBaseId,
+      generation: this.searchGeneration,
+      summary,
+    });
+    while (this.noteOrganizerMembershipSummaryCache.size > MAX_NOTE_ORGANIZER_MEMBERSHIP_CACHE_ENTRIES) {
+      const oldest = this.noteOrganizerMembershipSummaryCache.keys().next();
+      if (oldest.done) break;
+      this.noteOrganizerMembershipSummaryCache.delete(oldest.value);
+    }
+    return summary;
+  }
+
+  openNoteOrganizerMembership(path: string): void {
+    new NoteMembershipModal(this, normalizePath(path)).open();
+  }
+
+  private noteOrganizerHeadingOption(heading: LayoutHeading): OrganizerHeadingOption {
+    const subheadings: Array<{ id: string; name: string }> = [];
+    const visit = (node: LayoutSubheading, labels: readonly string[]): void => {
+      const nextLabels = [...labels, node.title];
+      subheadings.push({ id: node.id, name: nextLabels.join(" / ") });
+      for (const child of childSubheadings(node)) visit(child, nextLabels);
+    };
+    for (const child of heading.subheadings) visit(child, [heading.title]);
+    return { id: heading.id, name: heading.title, subheadings };
+  }
+
+  private noteOrganizerBaseOptions(): OrganizerBaseOption[] {
+    const activeBaseId = this.getActiveKnowledgeBaseId();
+    return this.getKnowledgeBases().map((entry) => {
+      const data = entry.data;
+      const groups: string[] = [];
+      const usedGroups = new Set<string>();
+      const addGroup = (value: string): void => {
+        const clean = value.normalize("NFC").trim();
+        const key = normalizedNameKey(clean);
+        if (!clean || clean.length > 100 || usedGroups.has(key)) return;
+        usedGroups.add(key);
+        groups.push(clean);
+      };
+      for (const group of data.indexGroupOrder) addGroup(group);
+      for (const group of Object.values(data.indexGroupByPath)) addGroup(group);
+      const portableGroupById = new Map(data.portableIndex.groups.map((group) => [group.id, group.title]));
+      for (const subject of data.portableIndex.subjects) {
+        if (subject.indexed) addGroup(portableGroupById.get(subject.groupId) ?? "");
+      }
+      for (const record of this.recordsCacheByBase.get(entry.id) ?? []) {
+        if (recordBelongsToIndex(record, data.settings.workspaceMode === "ent-clinical")) addGroup(record.domain);
+      }
+      if (groups.length === 0) addGroup("Ungrouped");
+      const sourceDerivedName = data.settings.workspaceMode === "ent-clinical"
+        && !data.settings.allowClinicalVisualGroupMoves
+        ? "Canonical source group (per note)"
+        : "Suggested group (per note)";
+      const indexHeadings: OrganizerHeadingOption[] = [{
+        id: "index-group-source-derived",
+        name: sourceDerivedName,
+        subheadings: [],
+        sourceDerived: true,
+      }, ...groups.map((name): OrganizerHeadingOption => ({
+        id: `index-group-${fingerprintText(`${entry.id}\0${normalizedNameKey(name)}`).slice(0, 24)}`,
+        name,
+        subheadings: [],
+      }))];
+      return {
+        id: entry.id,
+        name: data.settings.workspaceName,
+        current: entry.id === activeBaseId,
+        indexName: data.settings.indexLabel,
+        indexHeadings,
+        libraries: data.portableIndex.libraries
+          .filter((library) => library.archivedAt === null)
+          .map((library) => ({
+            id: library.id,
+            name: library.name,
+            headings: (data.portableIndex.libraryLayouts[library.id] ?? [])
+              .map((heading) => this.noteOrganizerHeadingOption(heading)),
+          })),
+        collections: data.collections.map((heading) => this.noteOrganizerHeadingOption(heading)),
+      };
+    }).sort((left, right) => Number(right.id === activeBaseId) - Number(left.id === activeBaseId)
+      || left.name.localeCompare(right.name)
+      || left.id.localeCompare(right.id));
+  }
+
+  private noteOrganizerVaultSnapshot(): OrganizerVaultNode[] {
+    const files = this.app.vault.getMarkdownFiles()
+      .filter((file) => !this.noteOrganizerPathIsRestricted(file.path))
+      .sort((left, right) => left.path.localeCompare(right.path));
+    if (files.length > MAX_NOTE_ORGANIZER_SELECTION_CANDIDATES) {
+      throw new Error(`This vault has more than ${MAX_NOTE_ORGANIZER_SELECTION_CANDIDATES.toLocaleString()} selectable Markdown notes. Narrow the selection from File Explorer and reopen the organizer.`);
+    }
+    type MutableFolder = { kind: "folder"; name: string; path: string; children: OrganizerVaultNode[] };
+    const roots: OrganizerVaultNode[] = [];
+    const folders = new Map<string, MutableFolder>();
+    for (const file of files) {
+      const segments = file.path.split("/");
+      let parentChildren = roots;
+      let parentPath = "";
+      for (const segment of segments.slice(0, -1)) {
+        const path = parentPath ? `${parentPath}/${segment}` : segment;
+        let folder = folders.get(path);
+        if (!folder) {
+          folder = { kind: "folder", name: segment, path, children: [] };
+          folders.set(path, folder);
+          parentChildren.push(folder);
+        }
+        parentChildren = folder.children;
+        parentPath = path;
+      }
+      parentChildren.push({ kind: "note", name: file.basename, path: file.path });
+    }
+    const sortNodes = (nodes: OrganizerVaultNode[]): void => {
+      nodes.sort((left, right) => Number(left.kind === "note") - Number(right.kind === "note")
+        || left.name.localeCompare(right.name)
+        || left.path.localeCompare(right.path));
+      for (const node of nodes) if (node.kind === "folder") sortNodes(node.children as OrganizerVaultNode[]);
+    };
+    sortNodes(roots);
+    return roots;
+  }
+
+  private noteOrganizerFileFact(
+    file: TFile,
+    entry: KnowledgeBaseEntry,
+    record: VaultRecord | null,
+    context: NoteOrganizerFileFactContext,
+  ): NoteOrganizerFileFact {
+    const data = entry.data;
+    const frontmatter = asUnknownRecord(this.app.metadataCache.getFileCache(file)?.frontmatter);
+    const owners = context.ownerIdsByPath.get(file.path) ?? [];
+    const subject = owners.length === 1
+      ? context.subjectById.get(owners[0] ?? "") ?? null
+      : null;
+    const clinicalMode = data.settings.workspaceMode === "ent-clinical";
+    const proposalFolder = normalizePath(data.settings.proposalFolder).replace(/^\/+|\/+$/gu, "");
+    const identity = this.identityForFile(
+      file,
+      frontmatter,
+      data,
+      clinicalMode,
+      new Set([file.path]),
+      proposalFolder ? `${proposalFolder}/` : "",
+      context.directPaths,
+      context.excludedPaths,
+      data.settings.primaryFolder,
+    );
+    const classification = clinicalMode
+      ? this.clinicalIndexClassification(
+        file.path,
+        subject,
+        record?.kind ?? subject?.recordKind ?? identity?.kind ?? "note",
+        data,
+      )
+      : { kind: record?.kind ?? subject?.recordKind ?? identity?.kind ?? "note", indexEligible: true };
+    const configuredIdValue = frontmatter[data.settings.idProperty];
+    const configuredId = subject?.configuredId
+      || record?.curriculumId
+      || (typeof configuredIdValue === "number" ? String(configuredIdValue) : asText(configuredIdValue));
+    const title = subject?.title
+      || record?.title
+      || asText(frontmatter.title, asText(frontmatter.canonical_name, file.basename));
+    const configuredGroup = data.settings.groupProperty
+      ? asStringList(frontmatter[data.settings.groupProperty])[0] ?? ""
+      : "";
+    // Protected clinical grouping is derived from the note's source
+    // projection. A stale pre-policy visual override must never become the
+    // canonical group merely because the Organizer reviewed this note.
+    const protectedClinicalGroup = clinicalMode && !data.settings.allowClinicalVisualGroupMoves;
+    let suggestedIndexGroup = protectedClinicalGroup
+      ? record?.domain || configuredGroup
+      : data.indexGroupByPath[file.path]
+        || (subject?.indexed ? context.groupTitleById.get(subject.groupId) ?? "" : "")
+        || record?.domain
+        || configuredGroup;
+    if (!suggestedIndexGroup && data.settings.primaryFolder
+      && pathIsInsideFolder(file.path, data.settings.primaryFolder)) {
+      suggestedIndexGroup = configuredGroupFromPath(file.path, data.settings.primaryFolder);
+    }
+    if (!suggestedIndexGroup && !clinicalMode) {
+      let linkedRoot = "";
+      for (const source of data.indexFolderSources) {
+        if (pathIsInsideFolder(file.path, source.path)
+          && (source.path === INDEX_FOLDER_VAULT_ROOT || source.path.length > linkedRoot.length)) {
+          linkedRoot = source.path;
+        }
+      }
+      if (linkedRoot) {
+        suggestedIndexGroup = configuredGroupFromIndexRoot(
+          file.path,
+          linkedRoot,
+          file.parent?.name || "Ungrouped",
+        );
+      }
+    }
+    if (!suggestedIndexGroup) suggestedIndexGroup = file.parent?.isRoot() ? "Ungrouped" : file.parent?.name || "Ungrouped";
+    const configDir = normalizePath(this.app.vault.configDir).replace(/^\/+|\/+$/gu, "");
+    const inConfig = Boolean(configDir && pathIsInsideFolder(file.path, configDir));
+    const inTemplateFolder = Boolean(data.settings.templatesFolder
+      && pathIsInsideFolder(file.path, data.settings.templatesFolder));
+    const eligible = !inConfig
+      && !isImmutableSourcePath(file.path)
+      && !inTemplateFolder
+      && (!clinicalMode || !isRestrictedVaultPath(file.path, this.app.vault.configDir));
+    return {
+      path: file.path,
+      baseId: entry.id,
+      title,
+      mtime: file.stat.mtime,
+      size: file.stat.size,
+      exists: true,
+      markdown: true,
+      eligible,
+      sourceKind: classification.kind,
+      sourceRole: record?.role ?? identity?.role ?? (subject && !subject.indexed ? "library" : "vault-note"),
+      configuredId,
+      indexEligible: classification.indexEligible,
+      suggestedIndexGroup,
+    };
+  }
+
+  private noteOrganizerFileFactContext(entry: KnowledgeBaseEntry): NoteOrganizerFileFactContext {
+    const ownerIdsByPath = new Map<string, string[]>();
+    for (const [subjectId, path] of Object.entries(entry.data.portableIndex.resolvedPathBySubjectId)) {
+      if (!path) continue;
+      const owners = ownerIdsByPath.get(path) ?? [];
+      owners.push(subjectId);
+      ownerIdsByPath.set(path, owners);
+    }
+    return {
+      ownerIdsByPath,
+      subjectById: new Map(entry.data.portableIndex.subjects.map((subject) => [subject.id, subject])),
+      groupTitleById: new Map(entry.data.portableIndex.groups.map((group) => [group.id, group.title])),
+      directPaths: this.directIndexPathSet(entry.data),
+      excludedPaths: this.excludedPaths(entry.data, entry.id),
+    };
+  }
+
+  /**
+   * Project only the selected files for an organizer review. A cold global
+   * organizer must not rescan a 250k-note vault once for every destination
+   * base merely to classify one or two selected notes.
+   */
+  private noteOrganizerRecordsForEntry(
+    entry: KnowledgeBaseEntry,
+    files: readonly TFile[],
+  ): ReadonlyMap<string, VaultRecord> {
+    const cached = this.recordsByPathCacheByBase.get(entry.id);
+    if (cached) {
+      const selectedRecords: Array<readonly [string, VaultRecord]> = [];
+      for (const file of files) {
+        const record = cached.get(file.path);
+        if (record) selectedRecords.push([file.path, record] as const);
+      }
+      return new Map(selectedRecords);
+    }
+    const wanted = new Set(files.map((file) => file.path));
+    const records = new Map<string, VaultRecord>();
+    for (const record of this.iterateRecordScanForEntry(entry, files)) {
+      if (record && wanted.has(record.path)) records.set(record.path, record);
+    }
+    return records;
+  }
+
+  private noteOrganizerDirective(
+    path: string,
+    destination: OrganizerDestinationDraft,
+    optionsByBaseId: ReadonlyMap<string, OrganizerBaseOption>,
+  ): NoteOrganizerDirective {
+    const base = optionsByBaseId.get(destination.baseId);
+    if (!base) throw new Error(`Knowledge base ${destination.baseId} is no longer available.`);
+    let primary: NoteOrganizerPrimaryDirective;
+    if (destination.primary.mode === "keep" || destination.primary.mode === "none") {
+      primary = { mode: destination.primary.mode };
+    } else if (destination.primary.mode === "index") {
+      const heading = base.indexHeadings.find((candidate) => candidate.id === destination.primary.headingId);
+      if (!heading) throw new Error(`Choose an exact ${base.indexName} section in “${base.name}”.`);
+      primary = heading.sourceDerived ? { mode: "index" } : { mode: "index", groupTitle: heading.name };
+    } else {
+      if (!destination.primary.libraryId) throw new Error(`Choose a Library in “${base.name}”.`);
+      primary = {
+        mode: "library",
+        libraryId: destination.primary.libraryId,
+        ...(destination.primary.headingId ? { headingId: destination.primary.headingId } : {}),
+        ...(destination.primary.subheadingId ? { subheadingId: destination.primary.subheadingId } : {}),
+      };
+    }
+    let collections: NoteOrganizerCollectionsDirective;
+    if (destination.collections.mode === "keep") collections = { mode: "keep" };
+    else collections = {
+      mode: destination.collections.mode,
+      targets: destination.collections.targets.map((target) => ({
+        headingId: target.headingId,
+        ...(target.subheadingId ? { subheadingId: target.subheadingId } : {}),
+      })),
+    };
+    return { path, baseId: destination.baseId, primary, collections };
+  }
+
+  private async prepareNoteOrganizer(draft: NoteOrganizerDraft): Promise<OrganizerPreparedPlan> {
+    this.assertDataWritable();
+    if (this.baseOperationBusy || this.dataTransactionBusy || this.directSaveBusyCount > 0 || this.externalReloadBusy) {
+      throw new Error("Finish the current knowledge-base or Sync operation before preparing the organizer review.");
+    }
+    const rawDraft = asUnknownRecord(draft);
+    if (draft.version !== 1) throw new Error("This note organizer draft is unsupported.");
+    if (!Array.isArray(rawDraft.selectedPaths) || draft.selectedPaths.length > MAX_NOTE_ORGANIZER_NOTES) {
+      throw new Error(`Choose at most ${MAX_NOTE_ORGANIZER_NOTES.toLocaleString()} Markdown notes in one organizer review.`);
+    }
+    if (!Array.isArray(rawDraft.destinations) || !Array.isArray(rawDraft.overrides)) {
+      throw new Error("The organizer destination draft is malformed. Reopen the organizer and review it again.");
+    }
+    const paths = [...new Set(draft.selectedPaths.map((path) => normalizePath(path)))];
+    if (paths.length !== draft.selectedPaths.length) throw new Error("The organizer selection contains a duplicate or invalid note path.");
+    const pathSet = new Set(paths);
+    const options = this.noteOrganizerBaseOptions();
+    const optionsByBaseId = new Map(options.map((base) => [base.id, base]));
+    if (new Set(draft.overrides.map((override) => override.path)).size !== draft.overrides.length
+      || draft.overrides.some((override) => !pathSet.has(override.path))) {
+      throw new Error("The organizer has a duplicate or unselected note override. Refresh its selection.");
+    }
+    const overrideByPath = new Map(draft.overrides.map((override) => [override.path, override]));
+    const directives: NoteOrganizerDirective[] = [];
+    const directivePairs = new Set<string>();
+    const skippedPaths = new Set<string>();
+    let collectionTargetCount = 0;
+    for (const path of paths) {
+      const override = overrideByPath.get(path);
+      if (override?.mode === "skip") {
+        skippedPaths.add(path);
+        continue;
+      }
+      const destinations = override?.mode === "custom" ? override.destinations : draft.destinations;
+      for (const destination of destinations) {
+        if (directives.length >= MAX_NOTE_ORGANIZER_DIRECTIVES) {
+          throw new Error(`Choose at most ${MAX_NOTE_ORGANIZER_DIRECTIVES.toLocaleString()} note/base destinations in one organizer review.`);
+        }
+        collectionTargetCount += destination.collections.mode === "keep"
+          ? 0
+          : destination.collections.targets.length;
+        if (collectionTargetCount > MAX_NOTE_ORGANIZER_COLLECTION_TARGETS) {
+          throw new Error(`Choose at most ${MAX_NOTE_ORGANIZER_COLLECTION_TARGETS.toLocaleString()} Collection targets in one organizer review.`);
+        }
+        const pair = `${destination.baseId}\0${path}`;
+        if (directivePairs.has(pair)) {
+          throw new Error(`“${path}” has more than one destination card for the same knowledge base.`);
+        }
+        directivePairs.add(pair);
+        directives.push(this.noteOrganizerDirective(path, destination, optionsByBaseId));
+      }
+    }
+    if (directives.length === 0) {
+      const rows: OrganizerReviewRow[] = paths.map((path) => ({
+        path,
+        noteTitle: path.split("/").pop()?.replace(/\.md$/iu, "") ?? path,
+        baseId: null,
+        baseName: null,
+        outcome: "skipped",
+        before: { primary: "Skipped", collections: [] },
+        after: { primary: "Skipped", collections: [] },
+      }));
+      return {
+        preparedToken: null,
+        reviewRows: rows,
+        warnings: [],
+        errors: ["Every selected note is skipped or has no destination. Choose at least one knowledge-base destination."],
+        summary: { noteCount: paths.length, baseCount: 0, changeCount: 0, unchangedCount: 0, skippedCount: paths.length },
+      };
+    }
+    const filesByPath = new Map<string, TFile>();
+    for (const path of paths) {
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (!this.noteOrganizerFileIsSelectable(file)) {
+        throw new Error(`“${path}” is no longer an eligible Markdown note. Refresh the organizer selection.`);
+      }
+      filesByPath.set(path, file);
+    }
+    const requestedBaseIds = [...new Set(directives.map((directive) => directive.baseId))];
+    const directivePathsByBaseId = new Map<string, Set<string>>();
+    for (const directive of directives) {
+      const basePaths = directivePathsByBaseId.get(directive.baseId) ?? new Set<string>();
+      basePaths.add(directive.path);
+      directivePathsByBaseId.set(directive.baseId, basePaths);
+    }
+    const entriesById = new Map<string, KnowledgeBaseEntry>();
+    const recordsByBaseId = new Map<string, ReadonlyMap<string, VaultRecord>>();
+    const factContextByBaseId = new Map<string, NoteOrganizerFileFactContext>();
+    for (const baseId of requestedBaseIds) {
+      const entry = this.store.bases.find((candidate) => candidate.id === baseId && candidate.archivedAt === null);
+      if (!entry) throw new Error(`Destination knowledge base ${baseId} is unavailable or archived.`);
+      entriesById.set(baseId, entry);
+      const basePaths = directivePathsByBaseId.get(baseId) ?? new Set<string>();
+      const baseFiles: TFile[] = [];
+      for (const path of basePaths) {
+        const file = filesByPath.get(path);
+        if (file) baseFiles.push(file);
+      }
+      recordsByBaseId.set(baseId, this.noteOrganizerRecordsForEntry(entry, baseFiles));
+      factContextByBaseId.set(baseId, this.noteOrganizerFileFactContext(entry));
+    }
+    const facts = directives.map((directive) => {
+      const file = filesByPath.get(directive.path);
+      const entry = entriesById.get(directive.baseId);
+      if (!file || !entry) throw new Error("A selected note or destination disappeared while preparing the review.");
+      return this.noteOrganizerFileFact(
+        file,
+        entry,
+        recordsByBaseId.get(entry.id)?.get(file.path) ?? null,
+        factContextByBaseId.get(entry.id) as NoteOrganizerFileFactContext,
+      );
+    });
+    const plan = createNoteOrganizerPlan(this.store, facts, directives, {
+      expectedExternalGeneration: this.externalChangeGeneration,
+    });
+    const token: PreparedNoteOrganizerCommit = {
+      kind: "knowledge-base-command-center-prepared-note-organizer",
+      plan,
+      fileIdentities: [...filesByPath].map(([path, file]) => ({ path, file })),
+      consumed: false,
+    };
+    this.preparedNoteOrganizerCommits.add(token);
+    const diffByPair = new Map(plan.diffs.map((diff) => [`${diff.baseId}\0${diff.path}`, diff]));
+    const reviewByPair = new Map(plan.reviews.map((review) => [`${review.baseId}\0${review.path}`, review]));
+    const directivesByPath = new Map<string, NoteOrganizerDirective[]>();
+    for (const directive of directives) {
+      const current = directivesByPath.get(directive.path) ?? [];
+      current.push(directive);
+      directivesByPath.set(directive.path, current);
+    }
+    const rows: OrganizerReviewRow[] = [];
+    for (const path of paths) {
+      const file = filesByPath.get(path);
+      const title = file?.basename ?? path.split("/").pop()?.replace(/\.md$/iu, "") ?? path;
+      if (skippedPaths.has(path)) {
+        rows.push({
+          path,
+          noteTitle: title,
+          baseId: null,
+          baseName: null,
+          outcome: "skipped",
+          before: { primary: "Skipped", collections: [] },
+          after: { primary: "Skipped", collections: [] },
+        });
+        continue;
+      }
+      for (const directive of directivesByPath.get(path) ?? []) {
+        const pair = `${directive.baseId}\0${path}`;
+        const review = reviewByPair.get(pair);
+        if (!review) throw new Error("The exact organizer review is incomplete. Refresh it before applying.");
+        const diff = diffByPair.get(pair);
+        const describePrimary = (primary: typeof review.before.primary): string => primary.kind === "none"
+          ? "No primary placement"
+          : primary.kind === "index"
+            ? `Index — ${primary.groupTitle}`
+            : `Library — ${primary.libraryName}${primary.placement ? ` / ${primary.placement.label}` : " / Unplaced"}`;
+        const warnings = diff
+          && directive.primary?.mode === "index"
+          && diff.primaryChange === null
+          && review.before.primary.kind === "index"
+          && review.after.primary.kind === "index"
+          && !entriesById.get(directive.baseId)?.data.directIndexPaths.includes(path)
+          && !entriesById.get(directive.baseId)?.data.manualIndexPaths.includes(path)
+          ? ["Adds durable direct Index membership and a portable KBCC identity. This note will stay indexed if its linked folder is later unlinked."]
+          : [];
+        rows.push({
+          path,
+          noteTitle: title,
+          baseId: review.baseId,
+          baseName: review.baseName,
+          outcome: review.changed ? "change" : "unchanged",
+          before: {
+            primary: describePrimary(review.before.primary),
+            collections: review.before.collections.map((item) => item.label),
+          },
+          after: {
+            primary: describePrimary(review.after.primary),
+            collections: review.after.collections.map((item) => item.label),
+          },
+          ...(warnings.length > 0 ? { warnings } : {}),
+        });
+      }
+    }
+    return {
+      preparedToken: token,
+      reviewRows: rows,
+      warnings: plan.summary.noOpDirectiveCount > 0
+        ? [`${plan.summary.noOpDirectiveCount.toLocaleString()} note/base destination${plan.summary.noOpDirectiveCount === 1 ? " is" : "s are"} already in the requested state.`]
+        : [],
+      errors: plan.operations.length === 0 ? ["The prepared review contains no organization changes."] : [],
+      summary: {
+        noteCount: paths.length,
+        baseCount: requestedBaseIds.length,
+        changeCount: plan.diffs.length,
+        unchangedCount: plan.summary.noOpDirectiveCount,
+        skippedCount: skippedPaths.size,
+      },
+    };
+  }
+
+  private async applyPreparedNoteOrganizer(preparedToken: unknown): Promise<OrganizerApplyResult> {
+    if (!preparedToken || typeof preparedToken !== "object") throw new Error("The prepared organizer review is unavailable.");
+    const token = preparedToken as PreparedNoteOrganizerCommit;
+    if (!this.preparedNoteOrganizerCommits.has(token)
+      || token.kind !== "knowledge-base-command-center-prepared-note-organizer"
+      || token.consumed) {
+      throw new Error("The prepared organizer review is stale or was already used. Prepare it again.");
+    }
+    token.consumed = true;
+    const identityByPath = new Map(token.fileIdentities.map((identity) => [identity.path, identity]));
+    const currentFacts = (): NoteOrganizerFileFact[] => {
+      const entriesById = new Map(token.plan.baseGuards.map((guard) => {
+        const entry = this.store.bases.find((candidate) => candidate.id === guard.baseId && candidate.archivedAt === null);
+        if (!entry) throw new Error(`Knowledge base “${guard.baseName}” is no longer available.`);
+        return [guard.baseId, entry] as const;
+      }));
+      const recordsByBaseId = new Map<string, ReadonlyMap<string, VaultRecord>>();
+      const factContextByBaseId = new Map<string, NoteOrganizerFileFactContext>();
+      const factPathsByBaseId = new Map<string, Set<string>>();
+      for (const fact of token.plan.fileFacts) {
+        const pathsForBase = factPathsByBaseId.get(fact.baseId) ?? new Set<string>();
+        pathsForBase.add(fact.path);
+        factPathsByBaseId.set(fact.baseId, pathsForBase);
+      }
+      for (const [baseId, entry] of entriesById) {
+        const pathsForBase = factPathsByBaseId.get(baseId) ?? new Set<string>();
+        const baseFiles = token.fileIdentities
+          .filter(({ path }) => pathsForBase.has(path))
+          .map(({ file }) => file);
+        recordsByBaseId.set(baseId, this.noteOrganizerRecordsForEntry(entry, baseFiles));
+        factContextByBaseId.set(baseId, this.noteOrganizerFileFactContext(entry));
+      }
+      return token.plan.fileFacts.map((expected) => {
+        const identity = identityByPath.get(expected.path);
+        const current = this.app.vault.getAbstractFileByPath(expected.path);
+        if (!identity || current !== identity.file || !this.noteOrganizerFileIsSelectable(current)) {
+          throw new Error(`“${expected.path}” moved, disappeared, or was replaced after review.`);
+        }
+        const entry = entriesById.get(expected.baseId);
+        if (!entry) throw new Error(`Destination knowledge base ${expected.baseId} is unavailable.`);
+        return this.noteOrganizerFileFact(
+          identity.file,
+          entry,
+          recordsByBaseId.get(entry.id)?.get(identity.path) ?? null,
+          factContextByBaseId.get(entry.id) as NoteOrganizerFileFactContext,
+        );
+      });
+    };
+    // Validate before joining the queued store transaction, then repeat inside
+    // it so waiting behind Settings, Sync, or another App instance cannot turn
+    // the displayed review into a different organization change.
+    applyNoteOrganizerPlan(this.store, token.plan, currentFacts(), this.externalChangeGeneration);
+    let batchHistory: NoteOrganizerBatchHistoryToken | null = null;
+    await this.commitBaseStoreChange(() => {
+      const beforeStore = cloneJsonValue(this.store);
+      const candidate = applyNoteOrganizerPlan(
+        this.store,
+        token.plan,
+        currentFacts(),
+        this.externalChangeGeneration,
+      );
+      batchHistory = createNoteOrganizerBatchHistoryToken(beforeStore, candidate, {
+        id: token.plan.id,
+        label: token.plan.label,
+        affectedBaseIds: token.plan.operations.map((operation) => operation.baseId),
+      });
+      if (!batchHistory) throw new Error("The prepared organizer review no longer contains a semantic change.");
+      this.store = candidate;
+      this.useActiveData(this.requireActiveBase().data);
+    }, true, token.plan.operations.map((operation) => operation.baseId), "Note Organizer");
+    const sessionBatchUndoReady = this.stagedRequiredUndoBatchCommit === null;
+    this.noteOrganizerBatchHistory = sessionBatchUndoReady ? batchHistory : null;
+    const changedNotes = new Set(token.plan.diffs.map((diff) => diff.path)).size;
+    const resultPrefix = `${changedNotes.toLocaleString()} note${changedNotes === 1 ? "" : "s"} organized across ${token.plan.operations.length.toLocaleString()} knowledge ${token.plan.operations.length === 1 ? "base" : "bases"}. Markdown files were not moved or changed.`;
+    return {
+      changedNotes,
+      changedBases: token.plan.operations.length,
+      changeCount: token.plan.diffs.length,
+      message: sessionBatchUndoReady
+        ? `${resultPrefix} Use the note organizer Undo command to reverse the whole batch in this session; every affected base also keeps durable Undo.`
+        : `${resultPrefix} The change was saved, but device-local Undo finalization is pending. Restart Obsidian before further organization; after restart, use each affected base's durable Undo. Session batch Undo is unavailable.`,
+    };
+  }
+
+  canUndoNoteOrganizerBatch(): boolean {
+    return !this.isDataReadOnly() && this.noteOrganizerBatchHistory?.state === "applied";
+  }
+  canRedoNoteOrganizerBatch(): boolean {
+    return !this.isDataReadOnly() && this.noteOrganizerBatchHistory?.state === "undone";
+  }
+  async undoNoteOrganizerBatch(): Promise<void> { await this.applyNoteOrganizerBatchHistory("undo"); }
+  async redoNoteOrganizerBatch(): Promise<void> { await this.applyNoteOrganizerBatchHistory("redo"); }
+
+  private async applyNoteOrganizerBatchHistory(direction: NoteOrganizerBatchHistoryDirection): Promise<void> {
+    const currentToken = this.noteOrganizerBatchHistory;
+    if (!currentToken) throw new Error("There is no in-session multi-base Note Organizer change to reverse.");
+    let nextToken: NoteOrganizerBatchHistoryToken | null = null;
+    let affectedBaseIds: string[] = [];
+    let projectionFailed = false;
+    try {
+      await this.commitBaseStoreChange(() => {
+        if (this.noteOrganizerBatchHistory !== currentToken) {
+          throw new Error("The Note Organizer batch history changed. Run the command again.");
+        }
+        let projection: ReturnType<typeof projectNoteOrganizerBatchTransition>;
+        try {
+          projection = projectNoteOrganizerBatchTransition(this.store, currentToken, direction);
+        } catch (error) {
+          projectionFailed = true;
+          throw error;
+        }
+        this.store = projection.store;
+        this.useActiveData(this.requireActiveBase().data);
+        nextToken = projection.token;
+        affectedBaseIds = projection.requiredUndoBatchBaseIds;
+      }, true, currentToken.affectedBaseIds, "Note Organizer");
+    } catch (error) {
+      if (projectionFailed && this.noteOrganizerBatchHistory === currentToken) {
+        this.noteOrganizerBatchHistory = null;
+        throw new Error(`${errorMessage(error)} The session-wide Note Organizer ${direction === "undo" ? "Undo" : "Redo"} is no longer available. Use each affected knowledge base's own durable Undo instead.`);
+      }
+      throw error;
+    }
+    if (!nextToken || affectedBaseIds.length === 0) {
+      throw new Error("The Note Organizer batch history did not produce a complete multi-base transition.");
+    }
+    this.noteOrganizerBatchHistory = nextToken;
+    new Notice(`${direction === "undo" ? "Undid" : "Redid"} the last multi-base Note Organizer change. Markdown files were not changed.`);
+  }
+
+  openNoteOrganizer(
+    preselectedPaths: readonly string[] = [],
+    source: NoteOrganizerSource = "command",
+  ): void {
+    if (this.unloaded || this.deviceLocalPersistenceSuppressed) return;
+    if (!this.appWriteBarrier) this.activateAppWriteBarrier();
+    if (this.activeNoteOrganizerModal) {
+      new Notice("The vault note organizer is already open.");
+      return;
+    }
+    if (this.appWriteBarrier?.activeNoteOrganizerGeneration !== null) {
+      new Notice("The vault note organizer is already open in another Obsidian window.");
+      return;
+    }
+    if (this.activeUpdateAnnouncementModal
+      || this.appWriteBarrier?.activeUpdateAnnouncementVersion !== null
+      || this.activeLegacyIndexReviewModal
+      || this.appWriteBarrier?.activeLegacyIndexReviewBaseId !== null) {
+      new Notice("Close the current review window before opening the note organizer.");
+      return;
+    }
+    if (preselectedPaths.some((path) => this.noteOrganizerPathIsRestricted(path))) {
+      new Notice("One or more selected notes are in a protected source or Obsidian configuration area and cannot be organized by the plugin. Nothing was opened.", 8000);
+      return;
+    }
+    const selected = this.noteOrganizerSelection(preselectedPaths.map((path) => ({ path, kind: "file" as const })));
+    if (preselectedPaths.length > 0) {
+      const expectedPaths = new Set(preselectedPaths.map((path) => normalizePath(path)));
+      const exactSelection = expectedPaths.size === preselectedPaths.length
+        && selected.paths.length === expectedPaths.size
+        && selected.paths.every((path) => expectedPaths.has(path));
+      if (!selected.complete || !exactSelection) {
+        new Notice(selected.blockedReason === "selection-limit"
+          ? "Too many notes were selected for one organizer review. Choose fewer notes."
+          : "The selected notes changed, moved, or became unavailable. Nothing was opened; select them again.", 8000);
+        return;
+      }
+    }
+    const modal = new NoteOrganizerModal({
+      app: this.app,
+      getVaultSnapshot: () => this.noteOrganizerVaultSnapshot(),
+      getBases: () => this.noteOrganizerBaseOptions(),
+      isReadOnly: () => this.isDataReadOnly(),
+      prepare: (draft) => this.prepareNoteOrganizer(draft),
+      applyPrepared: (token) => this.applyPreparedNoteOrganizer(token),
+    }, {
+      source,
+      preselectedPaths: selected.paths,
+      onClosed: () => {
+        if (this.activeNoteOrganizerModal === modal) this.activeNoteOrganizerModal = null;
+        if (this.appWriteBarrier?.activeNoteOrganizerGeneration === this.appWriteGeneration) {
+          this.appWriteBarrier.activeNoteOrganizerGeneration = null;
+        }
+      },
+    });
+    this.activeNoteOrganizerModal = modal;
+    if (this.appWriteBarrier) this.appWriteBarrier.activeNoteOrganizerGeneration = this.appWriteGeneration;
+    try {
+      modal.open();
+    } catch {
+      this.dismissActiveNoteOrganizer();
+      console.warn("Knowledge Base Command Center could not open the Note Organizer.");
+    }
+  }
+
+  private dismissActiveNoteOrganizer(): boolean {
+    const modal = this.activeNoteOrganizerModal;
+    if (!modal) return false;
+    try {
+      modal.dismissImmediately();
+    } catch {
+      console.warn("Knowledge Base Command Center could not dismiss the Note Organizer cleanly.");
+    } finally {
+      // Real Obsidian calls onClose synchronously. Keep the claim cleanup here
+      // as a defensive boundary for recovery/test hosts and modal-close faults.
+      if (this.activeNoteOrganizerModal === modal) this.activeNoteOrganizerModal = null;
+      if (this.appWriteBarrier?.activeNoteOrganizerGeneration === this.appWriteGeneration) {
+        this.appWriteBarrier.activeNoteOrganizerGeneration = null;
+      }
+    }
+    return true;
+  }
+
+  openNoteOrganizerDrop(dataTransfer: DataTransfer | null): void {
+    if (!dataTransfer) {
+      new Notice("The dropped item did not include a reviewable vault note path.");
+      return;
+    }
+    const parsed = parseNoteOrganizerDrop({
+      types: Array.from(dataTransfer.types),
+      files: dataTransfer.files,
+      getData: (type) => dataTransfer.getData(type),
+    });
+    if (parsed.blocked || parsed.paths.length === 0) {
+      const reason = parsed.rejectedReasons.includes("filesystem-payload")
+        ? "Operating-system files cannot be imported by dropping them here. Drag existing Obsidian Markdown notes or use the vault browser."
+        : "The drop did not contain safe existing Markdown note paths. Use the vault browser or File Explorer context menu.";
+      new Notice(reason, 8000);
+      return;
+    }
+    const currentPaths = parsed.paths.filter((path) => this.noteOrganizerFileIsSelectable(
+      this.app.vault.getAbstractFileByPath(path),
+    ));
+    if (currentPaths.length !== parsed.paths.length) {
+      new Notice("One or more dropped paths are missing, restricted, or not Markdown. Nothing was opened.", 8000);
+      return;
+    }
+    this.openNoteOrganizer(currentPaths, "drop");
+  }
+
+  private scheduleNoteOrganizerIndicatorSync(): void {
+    if (this.unloaded) return;
+    if (this.noteOrganizerIndicatorTimer !== null) {
+      this.noteOrganizerIndicatorTimerWindow?.clearTimeout(this.noteOrganizerIndicatorTimer);
+    }
+    const timerWindow = window.activeWindow ?? window;
+    this.noteOrganizerIndicatorTimerWindow = timerWindow;
+    this.noteOrganizerIndicatorTimer = timerWindow.setTimeout(() => {
+      this.noteOrganizerIndicatorTimer = null;
+      this.noteOrganizerIndicatorTimerWindow = null;
+      this.syncNoteOrganizerIndicators();
+    }, NOTE_ORGANIZER_INDICATOR_DEBOUNCE_MS);
+  }
+
+  private syncNoteOrganizerIndicators(): void {
+    if (this.unloaded) return;
+    const liveViews = new Set<MarkdownView>();
+    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+      if (!(leaf.view instanceof MarkdownView)) continue;
+      const view = leaf.view;
+      if (typeof view.addAction !== "function") continue;
+      liveViews.add(view);
+      const file = view.file;
+      if (!(file instanceof TFile) || file.extension.toLowerCase() !== "md") {
+        this.noteOrganizerIndicators.get(view)?.element.remove();
+        this.noteOrganizerIndicators.delete(view);
+        continue;
+      }
+      let binding = this.noteOrganizerIndicators.get(view);
+      if (!binding || !binding.element.isConnected) {
+        const next = { element: null as unknown as HTMLElement, path: file.path };
+        const element = view.addAction("circle", "KBCC note organization", () => {
+          if (next.path) this.openNoteOrganizerMembership(next.path);
+        });
+        next.element = element;
+        binding = next;
+        this.noteOrganizerIndicators.set(view, binding);
+      }
+      binding.path = file.path;
+      const summary = this.getNoteOrganizerMembershipSummary(file.path);
+      const model = summary.indicator;
+      const element = binding.element;
+      setIcon(element, model.icon);
+      element.addClass(...model.classNames);
+      for (const state of [
+        "organized-current",
+        "collection-only-current",
+        "organized-other",
+        "not-organized",
+        "broken",
+      ]) {
+        element.toggleClass(`ent-cc-note-membership-${state}`, model.state === state);
+      }
+      element.setAttribute("aria-label", model.ariaLabel);
+      element.setAttribute("data-tooltip-position", "bottom");
+      element.setAttribute("title", model.tooltip);
+      const count = summary.totalBaseCount;
+      if (count > 1) element.setAttribute("data-kbcc-count", String(count));
+      else element.removeAttribute("data-kbcc-count");
+    }
+    for (const [view, binding] of [...this.noteOrganizerIndicators]) {
+      if (liveViews.has(view) && binding.element.isConnected) continue;
+      binding.element.remove();
+      this.noteOrganizerIndicators.delete(view);
+    }
+  }
 
   /**
    * Build a path-free multi-base transfer from isolated copies. Each inner
@@ -4077,7 +5323,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
     await this.commitBaseStoreChange(() => {
       applyPortfolioImportPlan(this.store, plan, typedConfirmation, this.externalChangeGeneration);
-    }, true, plan.operations.map((operation) => operation.destinationBaseId));
+    }, true, plan.operations.map((operation) => operation.destinationBaseId), "portfolio import");
     return recoveryPaths;
   }
 
@@ -4247,6 +5493,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     change: () => void,
     persistSyncedStore = true,
     requiredUndoBatchBaseIds: readonly string[] = [],
+    requiredUndoBatchOperationLabel: RequiredUndoBatchOperationLabel = "multi-base change",
   ): Promise<void> {
     this.assertDataWritable();
     if (this.baseOperationBusy) throw new Error("Another knowledge-base change is still being saved.");
@@ -4288,6 +5535,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
               pendingRequiredUndoBatchCommit = this.prepareRequiredUndoBatchCommit(
                 backup,
                 requiredUndoBatchBaseIds,
+                requiredUndoBatchOperationLabel,
               );
               const preparedAttemptedStore = cloneJsonValue(this.store);
               // This required local write is the final fallible preparation
@@ -4295,21 +5543,27 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
               const localReduction = this.persistRequiredUndoBatchState(
                 backup,
                 pendingRequiredUndoBatchCommit,
+                requiredUndoBatchOperationLabel,
               );
               olderLocalHistoryTruncated ||= localReduction.historyTruncated;
               olderLocalViewStateTruncated ||= localReduction.viewStateTruncated;
               this.stagedRequiredUndoBatchCommit = pendingRequiredUndoBatchCommit;
+              this.stagedRequiredUndoBatchOperationLabel = requiredUndoBatchOperationLabel;
               attemptedStore = preparedAttemptedStore;
             } else {
               attemptedStore = cloneJsonValue(this.store);
             }
             await this.saveStoreSnapshot();
             if (pendingRequiredUndoBatchCommit) {
-              const finalization = this.finalizeRequiredUndoBatchCommit(pendingRequiredUndoBatchCommit);
+              const finalization = this.finalizeRequiredUndoBatchCommit(
+                pendingRequiredUndoBatchCommit,
+                requiredUndoBatchOperationLabel,
+              );
               olderLocalHistoryTruncated ||= finalization.historyTruncated;
               olderLocalViewStateTruncated ||= finalization.viewStateTruncated;
               if (finalization.finalized) {
                 this.stagedRequiredUndoBatchCommit = null;
+                this.stagedRequiredUndoBatchOperationLabel = "multi-base change";
               }
             }
           } else {
@@ -4357,6 +5611,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           this.noticeRequiredUndoBatchReduction(
             olderLocalHistoryTruncated,
             olderLocalViewStateTruncated,
+            requiredUndoBatchOperationLabel,
           );
           throw error;
         }
@@ -4371,6 +5626,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         this.noticeRequiredUndoBatchReduction(
           olderLocalHistoryTruncated,
           olderLocalViewStateTruncated,
+          requiredUndoBatchOperationLabel,
         );
       });
     } finally {
@@ -4517,7 +5773,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.adoptSharedPersistenceUncertainty();
     if (this.dataCompatibilityWarning) throw new Error(this.dataCompatibilityWarning);
     if (this.stagedRequiredUndoBatchCommit) {
-      throw new Error("Portfolio undo finalization is pending. Restart Obsidian so the protected local journal can be reconciled before changing knowledge-base data.");
+      throw new Error(`${requiredUndoBatchUndoLabel(this.stagedRequiredUndoBatchOperationLabel)} Undo finalization is pending. Restart Obsidian so the protected local journal can be reconciled before changing knowledge-base data.`);
     }
   }
 
@@ -8387,19 +9643,48 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private handleVaultRenameEvent(file: TAbstractFile, oldPath: string): void {
     if (!(file instanceof TFile) && !(file instanceof TFolder)) return;
     this.pendingVaultRenames.push({ oldPath, newPath: file.path, folderRename: file instanceof TFolder });
+    try {
+      this.writeVaultRenameJournal(this.pendingVaultRenames);
+      this.journaledVaultRenameCount = this.pendingVaultRenames.length;
+    } catch (error) {
+      // The in-memory overlay and immediate repair still protect this session.
+      // The Notice is intentionally path-free because storage errors and vault
+      // paths can contain private information.
+      console.error("Knowledge Base Command Center could not persist a vault-rename repair journal", error);
+      this.noticeVaultRenameJournalWriteFailure();
+    }
     // The file has already moved while handleRename may still be waiting behind
     // Sync or another transaction. Evict every projection now so a search can
     // never publish the old path during that wait (or after a read-only rename
     // repair is rejected).
     this.invalidateRecordCache();
+    this.schedulePendingVaultRenameRepairs();
+  }
+
+  private schedulePendingVaultRenameRepairs(): void {
+    if (this.pendingVaultRenames.length === 0) return;
     const repair = this.vaultRenameRepairQueue.then(async () => {
       // Process physical renames in event order. If one durable repair fails,
-      // later overlays remain composed in memory instead of being removed from
-      // underneath an earlier stale persisted path.
+      // later overlays and their journal remain composed instead of being
+      // removed from underneath an earlier stale persisted path.
       while (this.pendingVaultRenames.length > 0) {
         const pending = this.pendingVaultRenames[0];
         if (!pending) break;
         await this.handleRename(pending.oldPath, pending.newPath, pending.folderRename);
+        if (this.journaledVaultRenameCount > 0) {
+          const remaining = this.pendingVaultRenames.slice(1);
+          try {
+            // Cleanup is ordered after the semantic commit. If it fails, keep
+            // the entry and stop; replaying that idempotent rewrite on restart
+            // is safer than forgetting the only proof of the physical rename.
+            this.writeVaultRenameJournal(remaining);
+          } catch (error) {
+            console.error("Knowledge Base Command Center could not finalize a vault-rename repair journal", error);
+            this.noticeVaultRenameJournalWriteFailure();
+            throw new Error("The note-path repair was saved, but its restart journal could not be finalized. The recovery entry was kept and can be replayed safely.");
+          }
+          this.journaledVaultRenameCount = remaining.length;
+        }
         if (this.pendingVaultRenames[0] === pending) this.pendingVaultRenames.shift();
         else {
           const index = this.pendingVaultRenames.indexOf(pending);
@@ -8558,6 +9843,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
       if (leaf.view instanceof EntVaultCommandCenterView) await leaf.view.reload(withinOperation);
     }
+    this.syncNoteOrganizerIndicators();
   }
 
   countMemberships(path: string): number {

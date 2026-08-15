@@ -4,6 +4,19 @@ Complete this checklist on a physical iPhone before tagging a release that chang
 
 Do not use private notes, patient information, or copyrighted source material in screenshots, recordings, logs, or issue attachments.
 
+## 0.18.0 candidate record
+
+- Candidate version and commit: 0.18.0 / the merged commit containing this record and carrying release tag `0.18.0`
+- Date: 2026-08-15
+- Physical-device tester: None; no physical iPhone was connected
+- Physical iPhone / iOS / Obsidian Mobile / Sync method: Unverified
+- Physical Dynamic Type, VoiceOver, Arabic right-to-left, touch, software-keyboard, safe-area, and performance results: Unverified — not executed on a physical iPhone
+- Supplemental Mac run: Obsidian 1.13.7 on macOS with `app.emulateMobile(true)`, at 400 × 1267 portrait and 1267 × 400 landscape. The Organizer's Notes, selection tray, Destinations, cross-base destination cards, exact Review, active-note indicator, and membership dialog were inspected. A landscape footer defect found in that run was fixed and the 1267 × 400 Review was retested with its before/after content and actions reachable. Apply was not used and no Markdown was changed.
+- Supplemental automated layouts: Pass for the Organizer's LTR 1267 × 400 and RTL 844 × 390 coarse-pointer landscape variants, alongside the remaining real-Chromium layout matrix.
+- Evidence boundary: the Mac Electron emulation and Chromium layouts are useful regression evidence, but they are not iOS WebKit, a physical-device touch pass, Dynamic Type, or VoiceOver and do not complete this checklist.
+
+The historical 0.17.0 test record and sign-off below are retained unchanged. The current candidate's authorization and unverified scope are recorded separately under **0.18.0 sign-off**.
+
 ## Test record
 
 - Candidate version and commit: 0.17.0 / the merged commit containing this record and carrying release tag `0.17.0`
@@ -83,7 +96,33 @@ Record **Pass**, **Fail**, or **Not applicable** plus a short observation for ev
 45. Import the below-100 single-base package and verify **Predicted outcome** reports additions, identity matches, incoming unresolved subjects, complete post-import placement counts, and the exact number of unresolved subjects with at least one eligible vault-wide candidate before Apply. Select Workspace settings with a subject-catalog section while changing a record-projection field and confirm preview/Apply requires the documented two-step flow; import Workspace settings alone, let Command Center refresh, reopen the center, and import the catalog. Repeat with only a non-projection Workspace change and confirm the combined path remains allowed. Import the 100-or-more package and confirm Apply stays disabled until the separate large-import acknowledgement is checked. After applying, confirm **Import complete** offers **Open placeholder queue**, **Undo import**, and Close. Fully restart Obsidian before using Undo and confirm the required Undo remains available and restores the exact prior plugin organization without modifying Markdown.
 46. At default and largest Dynamic Type, in portrait, landscape, and Arabic right-to-left layout, inspect long note-backed and placeholder rows. Confirm title/metadata, membership badges, one **No linked note** status, and the action control occupy distinct non-overlapping regions; every interactive target remains at least 44 points; keyboard, VoiceOver, high-contrast/theme colors, and compatibility read-only state keep labels and controls understandable.
 
-## Sign-off
+## 0.18.0 Global Note Organizer additions
+
+Status: **Unverified — not executed on a physical iPhone.** These items apply to 0.18.0 and remain under the candidate-specific maintainer-authorized waiver recorded below. The supplemental Mac and automated layout runs do not make any item a physical-device Pass.
+
+47. Open the Global Note Organizer from the Command palette, the active-note command, the File Explorer menu for one note, a supported multi-selection, a folder, and the editor menu. Complete Notes → Destinations → Review using touch only in portrait and landscape at default and largest Dynamic Type. Confirm the modal stays within safe areas, uses one intentional scrolling region per stage, exposes every action without body-level horizontal scrolling, and keeps every interactive target at least 44 × 44 points.
+48. In a disposable vault with more than 300 eligible Markdown notes, search and page through the vault-shaped Notes tree. Confirm paging controls remain reachable, expanding and selecting a folder creates only a current one-time snapshot, the software keyboard does not cover search or primary actions, and a supported hardware keyboard can move and select without trapping focus.
+49. With VoiceOver enabled, confirm the modal title and current stage are announced before controls, Notes/Destinations/Review changes and busy states are announced, tree disclosure and selection state are meaningful, and the review's changed/unchanged/skipped rows are read in a sensible order. Verify the editor indicator distinctly announces current-base organization, Collections-only organization, other-base-only organization, ordinary unorganized state, and broken persisted organization without relying on color.
+50. Repeat the Organizer and membership-summary flow with Arabic right-to-left layout and mixed Arabic/Latin note, base, Library, heading, and Collection names. Confirm logical start/end layout mirrors, user-supplied names retain a readable direction, text wraps instead of clipping, focus order remains coherent, and danger/red is used only for a named broken state.
+51. Apply one reviewed batch across at least two disposable bases and confirm the result matches every before/after row while no Markdown file is created, moved, renamed, deleted, or rewritten. In a controlled disposable run, force-quit while the Apply busy state is visible, relaunch, and confirm pending-journal reconciliation yields either the complete causally verified result with durable per-base Undo or the preserved pre-transaction state—never a partial cross-base result.
+52. After a successful multi-base Apply, use the session-wide batch Undo and Redo before restart. Then fully restart Obsidian and confirm each affected base retains its own durable Undo. Repeat after an unrelated organization edit makes the session batch stale; confirm the coordinated command refuses safely, becomes unavailable, and directs the tester to the per-base Undo fallback instead of showing a raw error.
+53. Treat text-path drag/drop as not applicable on iPhone. Verify that the Command palette, active-note command, File Explorer single/multi/folder menus, editor menu, and Organizer tree together provide the supported mobile entry points and that canceling each one changes nothing.
+54. In a large disposable vault with several Markdown panes open, switch active notes and rearrange panes rapidly. Confirm each editor indicator updates to the correct textual state without visible jank, opens one membership summary, and returns cleanly to the note after closing or choosing **Organize…**.
+55. Leave the Organizer open, run **Clear device-local data**, and confirm the stale modal is dismissed or becomes explicitly read-only before another Apply can be prepared. Reopen only when allowed and confirm the reset did not change Markdown or synced KBCC organization.
+56. Exercise the documented bounds with synthetic data: confirm a 5,001-note selection and a review requiring more than 20,000 effective note/base directives are refused with an actionable smaller-batch message. Prepare an otherwise valid multi-base Apply whose exact aggregate required-Undo snapshots exceed the shared 4 MiB device-local history budget; confirm it fails closed before any primary plugin-store mutation and leaves every base unchanged.
+57. Upgrade a disposable existing installation from 0.17.0 to 0.18.0 in portrait and landscape, then repeat at the largest Dynamic Type size with VoiceOver. Confirm the five 0.18.0 highlights wrap without horizontal overflow, the scroll region and both 44-point actions remain reachable, and **Read complete release notes** uses the exact `https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.18.0` URL. Confirm the automatic window appears once for an existing installation, never for a fresh installation, and **Open what’s new** can reopen one non-stacking window deliberately.
+
+The 0.18.0 outcome is recorded in `docs/release-evidence/0.18.0-iphone.md`. Never mark these additions as Pass without executing them on the stated physical device. This release's explicit authorization is candidate-specific and must not be reused as evidence or authorization for a later version.
+
+## 0.18.0 sign-off
+
+- Blocking failures and issue links: No physical iPhone was connected, so the physical-iPhone, Dynamic Type, VoiceOver, touch, software-keyboard, safe-area, and iOS performance matrix remains unexecuted. The landscape defect found through supplemental Mac Obsidian mobile emulation was fixed and retested there.
+- Retest evidence: Real Obsidian 1.13.7 on macOS passed the documented 400 × 1267 portrait and 1267 × 400 landscape inspections after the fix; automated real-Chromium LTR 1267 × 400 and RTL 844 × 390 variants passed. These are explicitly supplemental and not a physical-device retest.
+- Authorization: After the remaining physical-device gap and evidence boundary were explicitly reported, the maintainer directed release. That authorization accepts the stated unverified scope for 0.18.0 only.
+- Final result: Maintainer-authorized waiver — physical-iPhone status remains **Unverified**, not a device Pass
+- Tester signature or initials: Unsigned — no physical-device tester
+
+## 0.17.0 sign-off
 
 - Blocking failures and issue links: The physical-iPhone matrix was not executed because no physical iPhone was connected. After being told this strict gate remained, the maintainer directed release and tag with the physical-device scope explicitly waived and unverified.
 - Retest evidence: No physical-device retest exists. After publication, the tagged commit's GitHub Actions checks, release attestations, and <code>SHA256SUMS.txt</code> are separate automated evidence; they do not substitute for any item in this matrix.

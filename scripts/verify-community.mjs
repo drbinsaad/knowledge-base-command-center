@@ -5,8 +5,23 @@ import path from "node:path";
 // Static, repository-local invariants that mirror high-risk Community review
 // checks. This is not a substitute for Obsidian staff review or device testing.
 const root = process.cwd();
-const sourceNames = (await readdir(path.join(root, "src"))).filter((name) => name.endsWith(".ts") && !name.startsWith("._")).sort();
-const sources = await Promise.all(sourceNames.map(async (name) => [name, await readFile(path.join(root, "src", name), "utf8")]));
+const sourceRoot = path.join(root, "src");
+async function discoverRuntimeSources(directory) {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    if (entry.name.startsWith("._")) continue;
+    const absolute = path.join(directory, entry.name);
+    if (entry.isDirectory()) files.push(...await discoverRuntimeSources(absolute));
+    else if (entry.isFile() && entry.name.endsWith(".ts")) files.push(absolute);
+  }
+  return files;
+}
+const sourcePaths = (await discoverRuntimeSources(sourceRoot)).sort();
+const sources = await Promise.all(sourcePaths.map(async (absolute) => [
+  path.relative(sourceRoot, absolute),
+  await readFile(absolute, "utf8"),
+]));
 const runtime = sources.map(([, content]) => content).join("\n");
 const main = sources.find(([name]) => name === "main.ts")?.[1] ?? "";
 const bundle = await readFile(path.join(root, "main.js"), "utf8");
@@ -68,4 +83,4 @@ assert.match(runtime, /deliverJsonExport\(this\.plugin, "backup"/);
 
 const enumerationCalls = runtime.match(/\.get(?:MarkdownFiles|Files|AllLoadedFiles)\s*\(/g) ?? [];
 const bulkReads = runtime.match(/\.(?:read|cachedRead)\s*\(/g) ?? [];
-process.stdout.write(`Community-oriented static verification passed: ${sourceNames.length} runtime files plus built main.js (${bundle.length} bytes), ${enumerationCalls.length} enumeration call sites, ${bulkReads.length} targeted read call sites, no detected network APIs, one clipboard writer, and no clipboard-read API.\n`);
+process.stdout.write(`Community-oriented static verification passed: ${sourcePaths.length} runtime files plus built main.js (${bundle.length} bytes), ${enumerationCalls.length} enumeration call sites, ${bulkReads.length} targeted read call sites, no detected network APIs, one clipboard writer, and no clipboard-read API.\n`);

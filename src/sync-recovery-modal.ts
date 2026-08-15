@@ -289,7 +289,7 @@ export class ClearDeviceLocalDataModal extends Modal {
     this.contentEl.addClass("ent-cc-modal", "ent-cc-clear-device-local");
     this.titleEl.setText("Clear device-local data?");
     this.contentEl.createEl("p", {
-      text: "This clears this device's saved route, collapsed sections, undo and redo history, local sync and recovery facts, and update-announcement history for this plugin.",
+      text: "This clears this device's saved route, collapsed sections, undo and redo history, local sync and recovery facts, update-announcement history, and any pending vault-rename recovery journal for this plugin. That bounded journal can contain the vault identity and old/new vault-relative paths.",
     });
     this.contentEl.createEl("p", {
       text: "Synced knowledge-base organization, settings, Markdown notes, attachments, and recovery export files are not changed.",

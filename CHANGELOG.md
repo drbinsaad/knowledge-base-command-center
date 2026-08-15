@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.18.0
+
+### Added
+
+- Added the **Global Note Organizer**, a three-step Notes → Destinations → Review workflow for organizing one or many existing Markdown notes across one or many KBCC knowledge bases. Shared destinations can be overridden or skipped per note; each targeted base keeps one primary Index or Library placement while Collections remain additive. Untargeted knowledge bases and memberships are preserved.
+- Added vault-tree selection, one-time folder snapshots, File Explorer and editor context-menu actions for single notes, multi-selections, and folders, plus a progressive text-path drop target on the Command Center's **Organize** button. Folder snapshots include only current eligible Markdown descendants and never become linked-folder rules; unsupported drops fall back to the vault browser or context menu.
+- Added an active-note organization indicator and read-only all-base membership detail. Its icon, label, tooltip, and accessible name distinguish current-base organization, Collection-only organization, other-base organization, ordinary unorganized state, and broken persisted references; red is reserved for broken state and color is never the only signal.
+
+### Safety
+
+- The organizer changes KBCC plugin organization only: it never moves, renames, creates, deletes, or rewrites a Markdown file and never changes linked-folder rules. Here **knowledge base** means an independent KBCC knowledge base, not an Obsidian `.base` file.
+- Apply is available only after an exact before/after review and revalidates the selected file identities, destination state, and Sync generation. A stale review aborts before any partial organization change. Every affected base receives durable per-base Undo; the newest organizer batch also has in-session **Note organizer: Undo last multi-base change** and **Redo last multi-base change** commands.
+- Kept required Undo protection and user-invoked Undo/Redo restart-durable with bounded version-4 device-local journals. Multi-base portfolio import stages every destination's required Undo together in one causally verified batch; the Global Note Organizer now stages every affected base through the same multi-base mechanism. If the Organizer's exact aggregate required-Undo snapshots cannot fit within the shared 4 MiB device-local budget, Apply fails closed before any primary plugin-store mutation.
+- One Organizer review accepts at most 5,000 selected Markdown notes and 20,000 effective note/base directives. Its optional drop parser rejects every vault-qualified `obsidian://open` URI, including one that names the current vault; use an unqualified vault-relative path, a public context-menu action, or the Organizer's vault tree instead.
+- Added a bounded, vault-scoped App-local rename-recovery journal so an interrupted Markdown rename can resume its KBCC path repair after restart. It may temporarily contain the vault identity and old/new vault-relative paths; **Clear device-local data** removes it together with the route/history and update-announcement records.
+- ENT destinations retain protected eligibility, source-kind Library constraints, and canonical clinical Index grouping unless the existing profile setting explicitly permits visual cross-domain movement. The organizer rejects an incompatible clinical placement during preparation rather than weakening the preset.
+
+### Verification
+
+- The release candidate adds the maximum 5,000-note × four-base Organizer performance budget and Organizer real-Chromium layout variants to the existing automated gates. Real Obsidian 1.13.7 on macOS was also exercised with mobile emulation at 400 × 1267 portrait and 1267 × 400 landscape; a landscape footer defect found there was fixed and retested.
+- The physical-iPhone, Dynamic Type, and VoiceOver matrix was not executed. After that remaining gap was explicitly reported, the maintainer authorized release with the physical-device scope waived and unverified; this release does not claim a physical-device Pass, and the Mac emulation is supplemental evidence rather than a substitute.
+
 ## 0.17.0
 
 ### Added

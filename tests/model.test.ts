@@ -1517,6 +1517,15 @@ test("hostile synced migration backups are dropped before they can bloat every s
   assert.equal(cleaned.collections[0]?.title, "Kept");
 });
 
+test("clean data does not retain undefined migration-backup keys that disappear on disk", () => {
+  const source = migrateData(null);
+  const cleaned = migrateData({ ...source, migrationBackup: undefined, v2MigrationBackup: undefined });
+
+  assert.equal(Object.hasOwn(cleaned, "migrationBackup"), false);
+  assert.equal(Object.hasOwn(cleaned, "v2MigrationBackup"), false);
+  assert.deepEqual(JSON.parse(JSON.stringify(cleaned)), cleaned);
+});
+
 test("legacy migration backup structure limits fail closed without blocking primary data", () => {
   const source = migrateData(null) as unknown as Record<string, unknown>;
   source.migrationBackup = {

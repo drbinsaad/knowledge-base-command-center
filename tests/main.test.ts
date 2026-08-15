@@ -3,6 +3,7 @@ import test from "node:test";
 import EntVaultCommandCenterPlugin, {
   DEVICE_LOCAL_STATE_KEY,
   SYNC_RECOVERY_LOCAL_STATE_KEY,
+  VAULT_RENAME_JOURNAL_KEY,
 } from "../src/main.ts";
 import { ExportImportCenterModal } from "../src/portability-modal.ts";
 import {
@@ -66,6 +67,7 @@ import {
   type PortfolioImportMapping,
 } from "../src/portfolio.ts";
 import { EntVaultCommandCenterView, VIEW_TYPE } from "../src/view.ts";
+import { createVaultRenameJournal, type VaultRenameJournal } from "../src/vault-rename-journal.ts";
 
 interface TestPluginBase {
   loadedData: unknown;
@@ -229,6 +231,7 @@ function pluginWith(data: unknown, initialDeviceState: unknown = null): EntVault
 function pluginWithKeyedLocalStorage(
   data: unknown,
   initialValues: ReadonlyMap<string, unknown> = new Map(),
+  files: readonly TFile[] = [],
 ): {
   plugin: EntVaultCommandCenterPlugin & TestPluginBase;
   localValues: Map<string, unknown>;
@@ -237,7 +240,11 @@ function pluginWithKeyedLocalStorage(
   const localValues = new Map([...initialValues].map(([key, value]) => [key, structuredClone(value)]));
   const localWrites: Array<[string, unknown]> = [];
   const app = {
-    vault: emptyWritableTestVault(),
+    vault: {
+      ...emptyWritableTestVault(),
+      getMarkdownFiles: () => [...files],
+      getAbstractFileByPath: (path: string) => files.find((file) => file.path === path) ?? null,
+    },
     workspace: { getLeavesOfType: () => [] },
     metadataCache: { getFileCache: () => null },
     fileManager: {},
@@ -3166,6 +3173,11 @@ test("clearing device-local data resets in-memory view/history and all local key
       semanticConflicts: [{ baseId: "base-second", at: 400, count: 1 }],
       highestPluginVersionSeen: "0.12.0",
     }],
+    [VAULT_RENAME_JOURNAL_KEY, createVaultRenameJournal(store.vaultId, [{
+      oldPath: "Knowledge/Before.md",
+      newPath: "Knowledge/After.md",
+      folderRename: false,
+    }])],
   ]);
   const writes: Array<[string, unknown]> = [];
   const app = {
@@ -3186,12 +3198,14 @@ test("clearing device-local data resets in-memory view/history and all local key
 
   await plugin.clearDeviceLocalData();
 
-  assert.deepEqual(writes.slice(-2), [
+  assert.deepEqual(writes.slice(-3), [
     [DEVICE_LOCAL_STATE_KEY, null],
     [SYNC_RECOVERY_LOCAL_STATE_KEY, null],
+    [VAULT_RENAME_JOURNAL_KEY, null],
   ]);
   assert.equal(localValues.get(DEVICE_LOCAL_STATE_KEY), null);
   assert.equal(localValues.get(SYNC_RECOVERY_LOCAL_STATE_KEY), null);
+  assert.equal(localValues.get(VAULT_RENAME_JOURNAL_KEY), null);
   assert.equal(plugin.getActiveKnowledgeBaseId(), "base-default");
   assert.equal(plugin.data.selectedPath, "");
   assert.equal(plugin.data.activeTab, plugin.data.settings.defaultTab);
@@ -3223,6 +3237,7 @@ test("clearing device-local data resets in-memory view/history and all local key
   assert.equal(writes.length, writesAfterClear, "later view saves and local fact recorders stay suppressed until restart");
   assert.equal(localValues.get(DEVICE_LOCAL_STATE_KEY), null);
   assert.equal(localValues.get(SYNC_RECOVERY_LOCAL_STATE_KEY), null);
+  assert.equal(localValues.get(VAULT_RENAME_JOURNAL_KEY), null);
 });
 
 test("one semantic save advances its base revision exactly once", async () => {
@@ -11943,6 +11958,199 @@ test("ordered rename repair keeps a complete A-to-C overlay when the first durab
   const records = result?.groups.flatMap((group) => group.records) ?? [];
   assert.deepEqual(records.map((record) => record.path), [fileC.path]);
   assert.equal(records[0]?.portableId, "subject-chain");
+});
+
+test("a read-only vault rename survives restart, replays in order, and clears its exact-vault journal", async () => {
+  const oldPath = "Knowledge Base/Old topic.md";
+  const newPath = "Knowledge Base/New topic.md";
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.collections = [{
+    id: "rename-review",
+    title: "Rename review",
+    collapsed: false,
+    subjects: [oldPath],
+    subheadings: [],
+  }];
+  data.displayNameByPath = { [oldPath]: "Durable rename" };
+  const store = createDefaultStore(data, 100, "vault-rename-restart");
+  const renamedFile = new TFile(newPath);
+
+  type RenameJournalInternals = {
+    pendingVaultRenames: Array<{ oldPath: string; newPath: string; folderRename: boolean }>;
+    vaultRenameRepairQueue: Promise<void>;
+    loadVaultRenameJournal(): void;
+    activateVaultRenameJournalForCurrentStore(): boolean;
+    schedulePendingVaultRenameRepairs(): void;
+    handleVaultRenameEvent(file: TAbstractFile, oldPath: string): void;
+    projectPendingRenamePath(path: string): string;
+    scheduleRefresh(): void;
+  };
+
+  const first = pluginWithKeyedLocalStorage(store, new Map(), [renamedFile]);
+  await first.plugin.loadPluginData(false);
+  first.plugin.dataCompatibilityWarning = "Simulated protected read-only mode.";
+  const firstInternal = first.plugin as unknown as RenameJournalInternals;
+  firstInternal.loadVaultRenameJournal();
+  firstInternal.handleVaultRenameEvent(renamedFile, oldPath);
+  await firstInternal.vaultRenameRepairQueue;
+
+  const durable = first.localValues.get(VAULT_RENAME_JOURNAL_KEY) as VaultRenameJournal | undefined;
+  assert.deepEqual(durable?.renames, [{ oldPath, newPath, folderRename: false }]);
+  assert.deepEqual(first.plugin.data.collections[0]?.subjects, [oldPath], "read-only repair does not mutate plugin data");
+  assert.equal(firstInternal.projectPendingRenamePath(oldPath), newPath, "the rejected repair keeps its live overlay");
+  const liveSummary = first.plugin.getNoteOrganizerMembershipSummary(newPath);
+  assert.equal(liveSummary.currentBaseCollectionOnly, true);
+  assert.equal(liveSummary.indicator.state, "collection-only-current", "the live editor indicator projects the pending rename");
+
+  const stillReadOnly = pluginWithKeyedLocalStorage(store, new Map(first.localValues), [renamedFile]);
+  await stillReadOnly.plugin.loadPluginData(false);
+  stillReadOnly.plugin.dataCompatibilityWarning = "Simulated protected read-only mode after restart.";
+  const readOnlyInternal = stillReadOnly.plugin as unknown as RenameJournalInternals;
+  readOnlyInternal.loadVaultRenameJournal();
+  assert.equal(readOnlyInternal.activateVaultRenameJournalForCurrentStore(), true);
+  readOnlyInternal.schedulePendingVaultRenameRepairs();
+  await readOnlyInternal.vaultRenameRepairQueue;
+  assert.equal(readOnlyInternal.projectPendingRenamePath(oldPath), newPath, "restart restores the overlay before writes resume");
+  assert.deepEqual(stillReadOnly.localValues.get(VAULT_RENAME_JOURNAL_KEY), durable);
+  const restartedSummary = stillReadOnly.plugin.getNoteOrganizerMembershipSummary(newPath);
+  assert.equal(restartedSummary.currentBaseCollectionOnly, true);
+  assert.equal(restartedSummary.brokenBaseCount, 0);
+  assert.equal(restartedSummary.indicator.state, "collection-only-current", "the restarted read-only editor indicator keeps the renamed membership");
+
+  const writable = pluginWithKeyedLocalStorage(store, new Map(stillReadOnly.localValues), [renamedFile]);
+  await writable.plugin.loadPluginData(false);
+  const writableInternal = writable.plugin as unknown as RenameJournalInternals;
+  writableInternal.scheduleRefresh = () => {};
+  writableInternal.loadVaultRenameJournal();
+  assert.equal(writableInternal.activateVaultRenameJournalForCurrentStore(), true);
+  writableInternal.schedulePendingVaultRenameRepairs();
+  await writableInternal.vaultRenameRepairQueue;
+
+  assert.deepEqual(writableInternal.pendingVaultRenames, []);
+  assert.deepEqual(writable.plugin.data.collections[0]?.subjects, [newPath]);
+  assert.equal(writable.plugin.data.displayNameByPath[newPath], "Durable rename");
+  assert.equal(writable.plugin.data.displayNameByPath[oldPath], undefined);
+  assert.equal(writable.localValues.get(VAULT_RENAME_JOURNAL_KEY), null);
+  const saved = writable.plugin.savedData.at(-1) as PluginStore | undefined;
+  assert.deepEqual(saved?.bases[0]?.data.collections[0]?.subjects, [newPath], "the journal clears only after data.json advances");
+});
+
+test("a failed rename-journal cleanup keeps the replay entry after the semantic save", async () => {
+  const oldPath = "Notes/Before.md";
+  const newPath = "Notes/After.md";
+  const data = migrateData(null);
+  data.directIndexPaths = [oldPath];
+  const live = pluginWithKeyedLocalStorage(createDefaultStore(data, 100, "vault-rename-cleanup"));
+  await live.plugin.loadPluginData(false);
+  const internal = live.plugin as unknown as {
+    app: { saveLocalStorage(key: string, value: unknown): void };
+    pendingVaultRenames: Array<{ oldPath: string; newPath: string; folderRename: boolean }>;
+    vaultRenameRepairQueue: Promise<void>;
+    handleVaultRenameEvent(file: TAbstractFile, oldPath: string): void;
+    schedulePendingVaultRenameRepairs(): void;
+    scheduleRefresh(): void;
+  };
+  internal.scheduleRefresh = () => {};
+  const saveLocalStorage = internal.app.saveLocalStorage.bind(internal.app);
+  let rejectCleanup = false;
+  internal.app.saveLocalStorage = (key, value) => {
+    if (rejectCleanup && key === VAULT_RENAME_JOURNAL_KEY && value === null) {
+      throw new Error("simulated rename-journal cleanup failure");
+    }
+    saveLocalStorage(key, value);
+  };
+
+  internal.handleVaultRenameEvent(new TFile(newPath), oldPath);
+  rejectCleanup = true;
+  await internal.vaultRenameRepairQueue;
+
+  assert.deepEqual(live.plugin.data.directIndexPaths, [newPath], "the semantic rewrite committed before cleanup");
+  assert.equal(live.plugin.savedData.length, 1);
+  assert.deepEqual(internal.pendingVaultRenames, [{ oldPath, newPath, folderRename: false }]);
+  assert.deepEqual(
+    (live.localValues.get(VAULT_RENAME_JOURNAL_KEY) as VaultRenameJournal | undefined)?.renames,
+    [{ oldPath, newPath, folderRename: false }],
+    "cleanup failure retains the crash authority",
+  );
+
+  rejectCleanup = false;
+  internal.schedulePendingVaultRenameRepairs();
+  await internal.vaultRenameRepairQueue;
+  assert.deepEqual(internal.pendingVaultRenames, [], "the idempotent replay can finalize later");
+  assert.equal(live.localValues.get(VAULT_RENAME_JOURNAL_KEY), null);
+});
+
+test("a rename-journal append failure keeps the live overlay queued and warns about restart safety", async () => {
+  const oldPath = "Notes/Unjournaled before.md";
+  const newPath = "Notes/Unjournaled after.md";
+  const live = pluginWithKeyedLocalStorage(createDefaultStore(migrateData(null), 100, "vault-rename-append-failure"));
+  await live.plugin.loadPluginData(false);
+  const internal = live.plugin as unknown as {
+    app: { saveLocalStorage(key: string, value: unknown): void };
+    pendingVaultRenames: Array<{ oldPath: string; newPath: string; folderRename: boolean }>;
+    vaultRenameRepairQueue: Promise<void>;
+    loadVaultRenameJournal(): void;
+    handleVaultRenameEvent(file: TAbstractFile, oldPath: string): void;
+    projectPendingRenamePath(path: string): string;
+  };
+  internal.loadVaultRenameJournal();
+  const saveLocalStorage = internal.app.saveLocalStorage.bind(internal.app);
+  internal.app.saveLocalStorage = (key, value) => {
+    if (key === VAULT_RENAME_JOURNAL_KEY && value !== null) {
+      throw new Error("simulated rename-journal append failure");
+    }
+    saveLocalStorage(key, value);
+  };
+  live.plugin.dataCompatibilityWarning = "Simulated read-only repair delay.";
+  const noticeStart = Notice.messages.length;
+
+  internal.handleVaultRenameEvent(new TFile(newPath), oldPath);
+  await internal.vaultRenameRepairQueue;
+
+  assert.deepEqual(internal.pendingVaultRenames, [{ oldPath, newPath, folderRename: false }]);
+  assert.equal(internal.projectPendingRenamePath(oldPath), newPath);
+  assert.equal(live.localValues.has(VAULT_RENAME_JOURNAL_KEY), false);
+  assert.equal(
+    Notice.messages.slice(noticeStart).some((message) => /restart-safe local repair journal could not be saved/iu.test(message)),
+    true,
+  );
+});
+
+test("vault-rename recovery never attaches across vault identities and malformed authority stays read-only", async () => {
+  const foreign = createVaultRenameJournal("vault-foreign-rename", [{
+    oldPath: "Notes/Old.md",
+    newPath: "Notes/New.md",
+    folderRename: false,
+  }]);
+  const localStore = createDefaultStore(migrateData(null), 100, "vault-local-rename");
+  const mismatch = pluginWithKeyedLocalStorage(localStore, new Map([[VAULT_RENAME_JOURNAL_KEY, foreign]]));
+  await mismatch.plugin.loadPluginData(false);
+  const mismatchInternal = mismatch.plugin as unknown as {
+    pendingVaultRenames: unknown[];
+    loadVaultRenameJournal(): void;
+    activateVaultRenameJournalForCurrentStore(): boolean;
+  };
+  mismatchInternal.loadVaultRenameJournal();
+  assert.equal(mismatchInternal.activateVaultRenameJournalForCurrentStore(), false);
+  assert.deepEqual(mismatchInternal.pendingVaultRenames, []);
+  assert.deepEqual(mismatch.localValues.get(VAULT_RENAME_JOURNAL_KEY), foreign, "a foreign identity is retained but never projected");
+
+  const malformedValue = {
+    version: 1,
+    vaultId: localStore.vaultId,
+    renames: [{ oldPath: "../unsafe.md", newPath: "Notes/Safe.md", folderRename: false }],
+  };
+  const malformed = pluginWithKeyedLocalStorage(localStore, new Map([[VAULT_RENAME_JOURNAL_KEY, malformedValue]]));
+  const malformedInternal = malformed.plugin as unknown as { loadVaultRenameJournal(): void };
+  malformedInternal.loadVaultRenameJournal();
+  await malformed.plugin.loadPluginData(false);
+  assert.equal(malformed.plugin.isDataReadOnly(), true);
+  assert.deepEqual(malformed.localValues.get(VAULT_RENAME_JOURNAL_KEY), malformedValue, "damaged recovery authority is not auto-deleted");
+
+  await malformed.plugin.clearDeviceLocalData();
+  assert.equal(malformed.localValues.get(VAULT_RENAME_JOURNAL_KEY), null, "explicit privacy clear may erase the damaged journal");
+  assert.equal(malformed.plugin.isDataReadOnly(), false);
 });
 
 test("search projection candidates are restricted to each configured base plus explicit references", () => {

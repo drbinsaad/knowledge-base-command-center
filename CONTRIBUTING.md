@@ -32,7 +32,7 @@ Run the complete local gate:
 npm run check
 ~~~
 
-The check task runs strict typechecking, zero-warning lint and JSON validation, automatically discovered runtime tests with core/UI coverage thresholds, the large-vault performance budget, a production build and bundle-size budget, Community-oriented static checks, release verification, and real-Chromium row-geometry tests.
+The check task runs strict typechecking, zero-warning lint and JSON validation, automatically discovered runtime tests with core/UI coverage thresholds, large-vault cross-base-search and maximum Note Organizer performance budgets, a production build and bundle-size budget, Community-oriented static checks, release verification, and real-Chromium geometry tests.
 
 ## Repository map
 

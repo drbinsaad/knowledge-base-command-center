@@ -188,6 +188,20 @@ export const UPDATE_ANNOUNCEMENT_0_17_0: UpdateAnnouncement = {
   releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.17.0",
 };
 
+export const UPDATE_ANNOUNCEMENT_0_18_0: UpdateAnnouncement = {
+  version: "0.18.0",
+  title: "What’s new in Knowledge Base Command Center 0.18.0",
+  intro: "You can now organize existing notes across all of your KBCC knowledge bases from one exact, review-first workflow.",
+  highlights: [
+    "Global Note Organizer guides one note, many notes, or a one-time folder snapshot through Notes → Destinations → Review before any KBCC organization changes.",
+    "Choose several knowledge bases at once, share destinations, or override and skip individual notes. Each targeted base keeps one primary Index or Library placement while Collections remain additive, and untargeted bases stay unchanged.",
+    "Open the Organizer from the Command Center, Command palette, File Explorer and editor menus. Each open Markdown editor also shows a textual, color-independent organization indicator with an all-base membership summary.",
+    "The exact review is revalidated at Apply, every affected base receives durable Undo, and the newest multi-base batch also has session Undo and Redo. Stale state or an oversized protected history fails closed before a partial change.",
+    "The Organizer never creates, moves, renames, deletes, or rewrites Markdown and never changes linked-folder rules. An interrupted Markdown rename has a bounded local recovery journal that Clear device-local data removes.",
+  ],
+  releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.18.0",
+};
+
 const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_12_0.version, UPDATE_ANNOUNCEMENT_0_12_0],
   [UPDATE_ANNOUNCEMENT_0_12_1.version, UPDATE_ANNOUNCEMENT_0_12_1],
@@ -202,6 +216,7 @@ const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_16_0.version, UPDATE_ANNOUNCEMENT_0_16_0],
   [UPDATE_ANNOUNCEMENT_0_16_1.version, UPDATE_ANNOUNCEMENT_0_16_1],
   [UPDATE_ANNOUNCEMENT_0_17_0.version, UPDATE_ANNOUNCEMENT_0_17_0],
+  [UPDATE_ANNOUNCEMENT_0_18_0.version, UPDATE_ANNOUNCEMENT_0_18_0],
 ]);
 
 function parseSemanticVersion(value: string): ParsedSemanticVersion | null {
