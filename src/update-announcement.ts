@@ -202,6 +202,20 @@ export const UPDATE_ANNOUNCEMENT_0_18_0: UpdateAnnouncement = {
   releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.18.0",
 };
 
+export const UPDATE_ANNOUNCEMENT_0_19_0: UpdateAnnouncement = {
+  version: "0.19.0",
+  title: "What’s new in Knowledge Base Command Center 0.19.0",
+  intro: "Create notes exactly where they belong and return from an opened note to the Command Center page that sent you there.",
+  highlights: [
+    "Choose Create note here… from a custom-Library heading or nested subheading menu to open the established Library creation form with that exact destination fixed and visible.",
+    "The destination is rechecked immediately before file creation. A later placement failure can trash only the exact unchanged file KBCC just created; a file it cannot prove unchanged is preserved and reported.",
+    "Every Markdown editor now places a Command Center return action beside the organization indicator. Notes opened from KBCC return to their prior base, tab or Library, selection, search, detail route, and position.",
+    "Return destinations survive Obsidian restarts and follow note or folder renames. Without a matching saved route for the current note path, the action opens clean KBCC home and never borrows a different note’s route.",
+    "Return history is bounded, vault-scoped, and device-local rather than synced. Clear device-local data removes it, and stale or malformed destinations fall back safely without changing Markdown or KBCC organization.",
+  ],
+  releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.19.0",
+};
+
 const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_12_0.version, UPDATE_ANNOUNCEMENT_0_12_0],
   [UPDATE_ANNOUNCEMENT_0_12_1.version, UPDATE_ANNOUNCEMENT_0_12_1],
@@ -217,6 +231,7 @@ const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_16_1.version, UPDATE_ANNOUNCEMENT_0_16_1],
   [UPDATE_ANNOUNCEMENT_0_17_0.version, UPDATE_ANNOUNCEMENT_0_17_0],
   [UPDATE_ANNOUNCEMENT_0_18_0.version, UPDATE_ANNOUNCEMENT_0_18_0],
+  [UPDATE_ANNOUNCEMENT_0_19_0.version, UPDATE_ANNOUNCEMENT_0_19_0],
 ]);
 
 function parseSemanticVersion(value: string): ParsedSemanticVersion | null {

@@ -13,6 +13,7 @@ import {
   UPDATE_ANNOUNCEMENT_0_16_1,
   UPDATE_ANNOUNCEMENT_0_17_0,
   UPDATE_ANNOUNCEMENT_0_18_0,
+  UPDATE_ANNOUNCEMENT_0_19_0,
   type UpdateAnnouncement,
 } from "../src/update-announcement.ts";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
@@ -114,6 +115,22 @@ test("0.18.0 has curated Global Note Organizer and safety news", () => {
   assert.equal(
     UPDATE_ANNOUNCEMENT_0_18_0.releaseUrl,
     "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.18.0",
+  );
+});
+
+test("0.19.0 has curated in-place creation and return-navigation news", () => {
+  const upgrade = planUpdateAnnouncement("0.19.0", "0.18.0", true);
+  assert.equal(upgrade.announcement, UPDATE_ANNOUNCEMENT_0_19_0);
+  assert.equal(UPDATE_ANNOUNCEMENT_0_19_0.highlights.length, 5);
+  const highlights = UPDATE_ANNOUNCEMENT_0_19_0.highlights.join("\n");
+  assert.match(highlights, /Create note here/u);
+  assert.match(highlights, /before file creation/u);
+  assert.match(highlights, /beside the organization indicator/u);
+  assert.match(highlights, /survive Obsidian restarts/u);
+  assert.match(highlights, /device-local/u);
+  assert.equal(
+    UPDATE_ANNOUNCEMENT_0_19_0.releaseUrl,
+    "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.19.0",
   );
 });
 

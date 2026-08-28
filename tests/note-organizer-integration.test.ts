@@ -2,12 +2,23 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { MarkdownView, Notice, TFile, TFolder } from "obsidian";
-import EntVaultCommandCenterPlugin, { DEVICE_LOCAL_STATE_KEY } from "../src/main";
+import EntVaultCommandCenterPlugin, {
+  DEVICE_LOCAL_STATE_KEY,
+  KBCC_RETURN_NAVIGATION_STATE_KEY,
+} from "../src/main";
 import {
   createDefaultStore,
   createKnowledgeBaseEntry,
   migrateData,
 } from "../src/model";
+import {
+  MAX_KBCC_RETURN_ROUTES,
+  MAX_KBCC_RETURN_STATE_BYTES,
+  parseKbccReturnNavigationState,
+  rememberKbccReturnRoute,
+  type KbccReturnRoute,
+  type KbccReturnViewState,
+} from "../src/kbcc-return-navigation";
 import type {
   NoteOrganizerDraft,
   OrganizerApplyResult,
@@ -53,6 +64,23 @@ function genericBase(name: string, primaryFolder: string) {
   return data;
 }
 
+function returnViewState(
+  selectedPath: string,
+  overrides: Partial<KbccReturnViewState> = {},
+): KbccReturnViewState {
+  return {
+    activeTab: "collections",
+    selectedPath,
+    query: "",
+    detailVisible: Boolean(selectedPath),
+    browseRowLimit: 600,
+    browseStructureLimit: 600,
+    listScrollTop: 0,
+    detailScrollTop: 0,
+    ...overrides,
+  };
+}
+
 function organizerApp(files: readonly TFile[]) {
   const byPath = new Map(files.map((file) => [file.path, file]));
   return {
@@ -71,27 +99,31 @@ function organizerApp(files: readonly TFile[]) {
 
 test("editor indicator distinguishes organized and neutral notes without relying on color", async () => {
   const file = new TFile("Notes/Airway.md");
+  const replacementFile = new TFile("Notes/Immediate replacement.md");
   const data = migrateData(null);
   data.settings.workspaceMode = "generic";
   data.directIndexPaths = [file.path];
   const view = new MarkdownView();
   view.file = file;
   const dom = createFakeDom();
-  const action = asHtmlElement(dom.document.body.createEl("button"));
-  let activate: (() => void) | null = null;
+  const actions: Array<{ element: HTMLElement; icon: string; label: string; activate: () => void }> = [];
   (view as unknown as { addAction(icon: string, label: string, callback: () => void): HTMLElement }).addAction = (
-    _icon,
-    _label,
+    icon,
+    label,
     callback,
   ) => {
-    activate = callback;
-    return action;
+    const element = asHtmlElement(dom.document.body.createEl("button"));
+    Object.defineProperty(element, "isConnected", { get: () => element.parentElement !== null });
+    actions.push({ element, icon, label, activate: callback });
+    return element;
   };
   const app = {
     vault: {
       configDir: ".obsidian",
-      getMarkdownFiles: () => [file],
-      getAbstractFileByPath: (path: string) => path === file.path ? file : null,
+      getMarkdownFiles: () => [file, replacementFile],
+      getAbstractFileByPath: (path: string) => path === file.path
+        ? file
+        : path === replacementFile.path ? replacementFile : null,
     },
     workspace: {
       getLeavesOfType: (type: string) => type === "markdown" ? [{ view }] : [],
@@ -106,25 +138,67 @@ test("editor indicator distinguishes organized and neutral notes without relying
     syncNoteOrganizerIndicators(): void;
     invalidateRecordCache(): void;
     openNoteOrganizerMembership(path: string): void;
+    rememberKbccReturnDestination(route: KbccReturnRoute): void;
+    returnToKbcc(path: string): Promise<void>;
   };
   plugin.loadedData = createDefaultStore(data, 1, "vault-note-indicator");
   await (plugin as unknown as { loadPluginData(): Promise<void> }).loadPluginData();
   let opened = "";
+  let returned = "";
   plugin.openNoteOrganizerMembership = (path) => { opened = path; };
+  plugin.returnToKbcc = async (path) => { returned = path; };
 
   plugin.syncNoteOrganizerIndicators();
-  assert.equal(action.getAttribute("data-icon"), "circle-check");
-  assert.match(action.getAttribute("aria-label") ?? "", /Organized in/u);
-  assert.equal(action.classList.contains("ent-cc-note-membership-organized-current"), true);
-  activate?.();
+  assert.equal(actions.length, 2, "the membership and Return actions are created together");
+  const membership = actions[0];
+  const returnAction = actions[1];
+  assert.equal(membership?.icon, "circle");
+  assert.equal(membership?.element.getAttribute("data-icon"), "circle-check");
+  assert.match(membership?.element.getAttribute("aria-label") ?? "", /Organized in/u);
+  assert.equal(membership?.element.classList.contains("ent-cc-note-membership-organized-current"), true);
+  assert.equal(returnAction?.icon, "library-big");
+  assert.equal(returnAction?.element.getAttribute("data-icon"), "library-big");
+  assert.match(returnAction?.element.getAttribute("aria-label") ?? "", /Command Center home/u);
+  assert.equal(returnAction?.element.getAttribute("data-kbcc-return-kind"), "home");
+  membership?.activate();
   assert.equal(opened, file.path);
+  returnAction?.activate();
+  await Promise.resolve();
+  assert.equal(returned, file.path);
+
+  view.file = replacementFile;
+  membership?.activate();
+  returnAction?.activate();
+  await Promise.resolve();
+  assert.equal(opened, replacementFile.path, "an immediate file change cannot send the membership action to the prior note");
+  assert.equal(returned, replacementFile.path, "an immediate file change cannot send Return to the prior note");
+  view.file = file;
+
+  plugin.rememberKbccReturnDestination({
+    notePath: file.path,
+    baseId: plugin.getActiveKnowledgeBaseId(),
+    capturedAt: 1,
+    view: returnViewState(file.path),
+  });
+  plugin.syncNoteOrganizerIndicators();
+  assert.equal(returnAction?.element.getAttribute("data-icon"), "history");
+  assert.equal(returnAction?.element.getAttribute("data-kbcc-return-kind"), "saved-page");
+  assert.match(returnAction?.element.getAttribute("aria-label") ?? "", /this note’s saved/iu);
 
   plugin.data.directIndexPaths = [];
   plugin.invalidateRecordCache();
   plugin.syncNoteOrganizerIndicators();
-  assert.equal(action.getAttribute("data-icon"), "circle");
-  assert.match(action.getAttribute("aria-label") ?? "", /not organized/iu);
-  assert.equal(action.classList.contains("ent-cc-note-membership-not-organized"), true);
+  assert.equal(actions.length, 2, "refresh reuses both connected actions without duplicates");
+  assert.equal(membership?.element.getAttribute("data-icon"), "circle");
+  assert.match(membership?.element.getAttribute("aria-label") ?? "", /not organized/iu);
+  assert.equal(membership?.element.classList.contains("ent-cc-note-membership-not-organized"), true);
+
+  returnAction?.element.remove();
+  plugin.syncNoteOrganizerIndicators();
+  assert.equal(actions.length, 4, "a disconnected half is replaced as one paired lifecycle");
+  assert.equal(membership?.element.isConnected, false, "the old membership action is not orphaned");
+  assert.equal(actions[2]?.element.isConnected, true);
+  assert.equal(actions[3]?.element.isConnected, true);
 });
 
 test("editor indicator refreshes coalesce and each visible path is summarized once per sync", async () => {
@@ -136,9 +210,11 @@ test("editor indicator refreshes coalesce and each visible path is summarized on
   const views = files.map((file) => {
     const view = new MarkdownView();
     view.file = file;
-    (view as unknown as { addAction(icon: string, label: string, callback: () => void): HTMLElement }).addAction = () => (
-      asHtmlElement(dom.document.body.createEl("button"))
-    );
+    (view as unknown as { addAction(icon: string, label: string, callback: () => void): HTMLElement }).addAction = () => {
+      const element = asHtmlElement(dom.document.body.createEl("button"));
+      Object.defineProperty(element, "isConnected", { get: () => element.parentElement !== null });
+      return element;
+    };
     return view;
   });
   const byPath = new Map(files.map((file) => [file.path, file]));
@@ -200,6 +276,394 @@ test("editor indicator refreshes coalesce and each visible path is summarized on
     else delete globalWithWindow.window;
   }
   assert.equal(coalescedSyncs, 1, "rapid layout events collapse into one indicator refresh");
+});
+
+test("note opening persists an exact return route before same-tab replacement and restart restores it", async () => {
+  const file = new TFile("Notes/Restart-safe.md");
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.openNoteBehavior = "same-tab";
+  data.activeTab = "collections";
+  data.selectedPath = file.path;
+  const store = createDefaultStore(data, 1, "vault-return-restart");
+  const localValues = new Map<string, unknown>();
+  let routeWasDurableBeforeOpen = false;
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getMarkdownFiles: () => [file],
+      getAbstractFileByPath: (path: string) => path === file.path ? file : null,
+    },
+    workspace: {
+      getLeavesOfType: () => [],
+      getLeaf: () => ({
+        openFile: async () => {
+          routeWasDurableBeforeOpen = localValues.has(KBCC_RETURN_NAVIGATION_STATE_KEY);
+        },
+      }),
+    },
+    metadataCache: { getFileCache: () => ({ frontmatter: {} }), resolvedLinks: {} },
+    fileManager: {},
+    loadLocalStorage: (key: string) => structuredClone(localValues.get(key) ?? null),
+    saveLocalStorage: (key: string, value: unknown) => { localValues.set(key, structuredClone(value)); },
+  };
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & {
+    loadedData: unknown;
+    loadPluginData(): Promise<void>;
+  };
+  plugin.loadedData = store;
+  await plugin.loadPluginData();
+  const captured = {
+    activeTab: "collections" as const,
+    selectedPath: file.path,
+    query: "type:resource recovery",
+    detailVisible: true,
+    browseRowLimit: 900,
+    browseStructureLimit: 600,
+    listScrollTop: 531,
+    detailScrollTop: 88,
+  };
+  const sourceView = { captureReturnViewState: () => captured };
+
+  await plugin.openFile(file, sourceView as never);
+
+  assert.equal(routeWasDurableBeforeOpen, true, "same-tab replacement cannot destroy the route before it reaches local storage");
+  const durable = localValues.get(KBCC_RETURN_NAVIGATION_STATE_KEY) as {
+    vaultId?: string;
+    routes?: Array<{ notePath?: string; view?: unknown }>;
+  } | undefined;
+  assert.equal(durable?.vaultId, store.vaultId);
+  assert.equal(durable?.routes?.[0]?.notePath, file.path);
+  assert.deepEqual(durable?.routes?.[0]?.view, captured);
+
+  let restored: unknown = null;
+  let homeOpens = 0;
+  const restarted = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & {
+    loadedData: unknown;
+    loadPluginData(): Promise<void>;
+    activateView(): Promise<{
+      restoreReturnViewState(state: unknown): Promise<boolean>;
+      openHomePage(): Promise<void>;
+    }>;
+    returnToKbcc(path: string): Promise<void>;
+  };
+  restarted.loadedData = structuredClone(store);
+  await restarted.loadPluginData();
+  restarted.activateView = async () => ({
+    restoreReturnViewState: async (state) => { restored = structuredClone(state); return true; },
+    openHomePage: async () => { homeOpens += 1; },
+  });
+
+  await restarted.returnToKbcc(file.path);
+  assert.deepEqual(restored, captured, "restart restores tab, selection, query, compact detail, and both scroll owners");
+  assert.equal(homeOpens, 0);
+
+  restored = null;
+  await restarted.returnToKbcc("Notes/Opened elsewhere.md");
+  assert.equal(restored, null, "an unrelated note never inherits another note's origin");
+  assert.equal(homeOpens, 1, "unrelated notes open a clean KBCC home");
+
+  (plugin as unknown as { rewriteKbccReturnNavigationPaths(oldPath: string, newPath: string): void })
+    .rewriteKbccReturnNavigationPaths("Notes", "Archive/Notes");
+  const renamed = localValues.get(KBCC_RETURN_NAVIGATION_STATE_KEY) as {
+    routes?: Array<{ notePath?: string; view?: { selectedPath?: string } }>;
+  } | undefined;
+  assert.equal(renamed?.routes?.[0]?.notePath, "Archive/Notes/Restart-safe.md");
+  assert.equal(renamed?.routes?.[0]?.view?.selectedPath, "Archive/Notes/Restart-safe.md");
+});
+
+test("a provisional missing-data vault cannot replace established return history before Sync arrives", async () => {
+  const established = rememberKbccReturnRoute(
+    null,
+    "vault-established",
+    {
+      notePath: "Notes/Established origin.md",
+      baseId: "base-default",
+      capturedAt: 1,
+      view: returnViewState("Notes/Established origin.md", { query: "established" }),
+    },
+  );
+  const localValues = new Map<string, unknown>([
+    [KBCC_RETURN_NAVIGATION_STATE_KEY, structuredClone(established)],
+  ]);
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getMarkdownFiles: () => [],
+      getAbstractFileByPath: () => null,
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => ({ frontmatter: {} }), resolvedLinks: {} },
+    fileManager: {},
+    loadLocalStorage: (key: string) => structuredClone(localValues.get(key) ?? null),
+    saveLocalStorage: (key: string, value: unknown) => { localValues.set(key, structuredClone(value)); },
+  };
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & {
+    loadedData: unknown;
+    store: ReturnType<typeof createDefaultStore>;
+    loadPluginData(): Promise<void>;
+    rememberKbccReturnDestination(route: KbccReturnRoute): void;
+  };
+  plugin.loadedData = null;
+  await plugin.loadPluginData();
+  assert.match(plugin.store.vaultId, /^vault-fresh-/u);
+
+  plugin.rememberKbccReturnDestination({
+    notePath: "Notes/Opened during bootstrap.md",
+    baseId: plugin.getActiveKnowledgeBaseId(),
+    capturedAt: 2,
+    view: returnViewState("", { query: "provisional" }),
+  });
+
+  assert.deepEqual(
+    localValues.get(KBCC_RETURN_NAVIGATION_STATE_KEY),
+    established,
+    "untrusted bootstrap convenience state cannot erase the established vault's restart routes",
+  );
+});
+
+test("return capture is best-effort, never intercepts Base files, and never blocks note opening", async () => {
+  Notice.messages.length = 0;
+  const note = new TFile("Notes/Open despite route failure.md");
+  const baseFile = new TFile("Bases/Clinical topics.base");
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.openNoteBehavior = "same-tab";
+  const localValues = new Map<string, unknown>();
+  let failReturnWrite = false;
+  const opened: string[] = [];
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getMarkdownFiles: () => [note],
+      getAbstractFileByPath: (path: string) => path === note.path ? note : path === baseFile.path ? baseFile : null,
+    },
+    workspace: {
+      getLeavesOfType: () => [],
+      getLeaf: () => ({ openFile: async (file: TFile) => { opened.push(file.path); } }),
+    },
+    metadataCache: { getFileCache: () => ({ frontmatter: {} }), resolvedLinks: {} },
+    fileManager: {},
+    loadLocalStorage: (key: string) => structuredClone(localValues.get(key) ?? null),
+    saveLocalStorage: (key: string, value: unknown) => {
+      if (failReturnWrite && key === KBCC_RETURN_NAVIGATION_STATE_KEY) throw new Error("storage unavailable");
+      localValues.set(key, structuredClone(value));
+    },
+  };
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & {
+    loadedData: unknown;
+    loadPluginData(): Promise<void>;
+  };
+  plugin.loadedData = createDefaultStore(data, 1, "vault-return-best-effort");
+  await plugin.loadPluginData();
+  let captures = 0;
+  let query = "";
+  const sourceView = {
+    captureReturnViewState: () => {
+      captures += 1;
+      return returnViewState(note.path, { query });
+    },
+  };
+
+  await plugin.openFile(baseFile, sourceView as never);
+  assert.deepEqual(opened, [baseFile.path], "a Base file still opens through the configured leaf behavior");
+  assert.equal(captures, 0, "non-Markdown files never attempt to create a Markdown return route");
+
+  failReturnWrite = true;
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    await plugin.openFile(note, sourceView as never);
+    query = "x".repeat(10_001);
+    await plugin.openFile(note, sourceView as never);
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.deepEqual(opened, [baseFile.path, note.path, note.path]);
+  assert.equal(captures, 2);
+  assert.match(Notice.messages.at(-1) ?? "", /Command Center return destination/iu);
+});
+
+test("delete and Unicode rename maintenance keeps path-bound return history exact", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const localValues = new Map<string, unknown>();
+  const app = {
+    vault: { configDir: ".obsidian", getMarkdownFiles: () => [], getAbstractFileByPath: () => null },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => ({ frontmatter: {} }), resolvedLinks: {} },
+    fileManager: {},
+    loadLocalStorage: (key: string) => structuredClone(localValues.get(key) ?? null),
+    saveLocalStorage: (key: string, value: unknown) => { localValues.set(key, structuredClone(value)); },
+  };
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & {
+    loadedData: unknown;
+    loadPluginData(): Promise<void>;
+    rememberKbccReturnDestination(route: KbccReturnRoute): void;
+    kbccReturnRoute(path: string): KbccReturnRoute | null;
+    pruneKbccReturnNavigationPaths(path: string, folder: boolean): void;
+    rewriteKbccReturnNavigationPaths(oldPath: string, newPath: string): void;
+  };
+  plugin.loadedData = createDefaultStore(data, 1, "vault-return-path-maintenance");
+  await plugin.loadPluginData();
+  const remember = (notePath: string, selectedPath = notePath, capturedAt = Date.now()): void => {
+    plugin.rememberKbccReturnDestination({
+      notePath,
+      baseId: plugin.getActiveKnowledgeBaseId(),
+      capturedAt,
+      view: returnViewState(selectedPath),
+    });
+  };
+  remember("Notes/Reused.md", "Notes/Reused.md", 1);
+  remember("Folder/One.md", "Folder/One.md", 2);
+  remember("Folder/Nested/Two.md", "Folder/Nested/Two.md", 3);
+  remember("Other/Keep.md", "Folder/Selected detail.md", 4);
+
+  plugin.pruneKbccReturnNavigationPaths("Notes/Reused.md", false);
+  assert.equal(plugin.kbccReturnRoute("Notes/Reused.md"), null, "recreating a deleted path cannot inherit its old route");
+  plugin.pruneKbccReturnNavigationPaths("Folder", true);
+  assert.equal(plugin.kbccReturnRoute("Folder/One.md"), null);
+  assert.equal(plugin.kbccReturnRoute("Folder/Nested/Two.md"), null);
+  assert.deepEqual(plugin.kbccReturnRoute("Other/Keep.md")?.view, returnViewState("", {
+    detailVisible: false,
+    detailScrollTop: 0,
+  }), "a surviving route drops detail state that pointed inside the deleted folder");
+
+  const decomposed = "Notes/Cafe\u0301.md";
+  const renamed = "Archive/\u061c Family 👨‍👩‍👧.md";
+  remember(decomposed, decomposed, 5);
+  remember("Other/Unrelated.md", "Other/Unrelated.md", 6);
+  plugin.rewriteKbccReturnNavigationPaths(decomposed, renamed);
+  assert.equal(plugin.kbccReturnRoute(decomposed), null);
+  assert.equal(plugin.kbccReturnRoute(renamed)?.view.selectedPath, renamed);
+  assert.equal(plugin.kbccReturnRoute("Other/Unrelated.md")?.notePath, "Other/Unrelated.md");
+
+  const persisted = localValues.get(KBCC_RETURN_NAVIGATION_STATE_KEY) as { routes?: KbccReturnRoute[] } | undefined;
+  assert.equal(persisted?.routes?.some((route) => route.notePath === renamed), true, "format characters survive restart persistence");
+});
+
+test("long folder renames keep return history bounded and discard only routes whose grown note path is invalid", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const localValues = new Map<string, unknown>();
+  const app = {
+    vault: { configDir: ".obsidian", getMarkdownFiles: () => [], getAbstractFileByPath: () => null },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => ({ frontmatter: {} }), resolvedLinks: {} },
+    fileManager: {},
+    loadLocalStorage: (key: string) => structuredClone(localValues.get(key) ?? null),
+    saveLocalStorage: (key: string, value: unknown) => { localValues.set(key, structuredClone(value)); },
+  };
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & {
+    loadedData: unknown;
+    loadPluginData(): Promise<void>;
+    rememberKbccReturnDestination(route: KbccReturnRoute): void;
+    rewriteKbccReturnNavigationPaths(oldPath: string, newPath: string): void;
+  };
+  plugin.loadedData = createDefaultStore(data, 1, "vault-return-long-rename");
+  await plugin.loadPluginData();
+  const largeQuery = "q".repeat(9_000);
+  for (let index = 0; index < MAX_KBCC_RETURN_ROUTES - 1; index += 1) {
+    const notePath = `Short/Route-${String(index).padStart(2, "0")}.md`;
+    plugin.rememberKbccReturnDestination({
+      notePath,
+      baseId: plugin.getActiveKnowledgeBaseId(),
+      capturedAt: index + 1,
+      view: returnViewState(notePath, { query: largeQuery }),
+    });
+  }
+  plugin.rememberKbccReturnDestination({
+    notePath: "Other/Keep.md",
+    baseId: plugin.getActiveKnowledgeBaseId(),
+    capturedAt: 1_000,
+    view: returnViewState("Other/Keep.md", { query: largeQuery }),
+  });
+
+  const before = localValues.get(KBCC_RETURN_NAVIGATION_STATE_KEY);
+  const beforeBytes = new TextEncoder().encode(JSON.stringify(before)).byteLength;
+  assert.ok(beforeBytes > 200_000 && beforeBytes <= MAX_KBCC_RETURN_STATE_BYTES, "the fixture starts near the persisted byte cap");
+
+  const longValidPrefix = `Archive/${"x".repeat(3_000)}`;
+  plugin.rewriteKbccReturnNavigationPaths("Short", longValidPrefix);
+  const compacted = localValues.get(KBCC_RETURN_NAVIGATION_STATE_KEY);
+  const compactedBytes = new TextEncoder().encode(JSON.stringify(compacted)).byteLength;
+  assert.ok(compactedBytes <= MAX_KBCC_RETURN_STATE_BYTES, "a valid growing rename is compacted before persistence");
+  const parsedCompacted = parseKbccReturnNavigationState(structuredClone(compacted));
+  assert.equal(parsedCompacted.routes.length, MAX_KBCC_RETURN_ROUTES, "query compaction preserves every valid route when enough");
+  assert.ok(parsedCompacted.routes.some((route) => route.notePath === "Other/Keep.md"), "an unrelated newest route survives compaction");
+  assert.ok(parsedCompacted.routes.some((route) => route.notePath.startsWith(`${longValidPrefix}/`)), "renamed routes remain usable after restart parsing");
+  assert.equal(parsedCompacted.routes.at(-1)?.view.query, "", "older searches compact before whole routes are discarded");
+
+  const invalidGrownPrefix = "y".repeat(4_090);
+  plugin.rewriteKbccReturnNavigationPaths(longValidPrefix, invalidGrownPrefix);
+  const afterInvalidGrowth = parseKbccReturnNavigationState(structuredClone(
+    localValues.get(KBCC_RETURN_NAVIGATION_STATE_KEY),
+  ));
+  assert.deepEqual(
+    afterInvalidGrowth.routes.map((route) => route.notePath),
+    ["Other/Keep.md"],
+    "routes whose renamed note path exceeds the strict bound fail open without poisoning unrelated history",
+  );
+});
+
+test("deleted bases and archived or deleted Library tabs expose Home, while a race falls back with notice", async () => {
+  Notice.messages.length = 0;
+  const notePath = "Notes/Stale destination.md";
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.portableIndex.libraries = [{
+    id: "resources",
+    name: "Resources",
+    singularName: "Resource",
+    icon: "library",
+    order: 0,
+    sourceKind: null,
+    archivedAt: null,
+  }];
+  const store = createDefaultStore(data, 1, "vault-return-stale-destination");
+  const app = organizerApp([]);
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & {
+    loadedData: unknown;
+    loadPluginData(): Promise<void>;
+    store: typeof store;
+    rememberKbccReturnDestination(route: KbccReturnRoute): void;
+    kbccReturnRoute(path: string): KbccReturnRoute | null;
+    activateView(): Promise<{ restoreReturnViewState(): Promise<boolean>; openHomePage(): Promise<void> }>;
+    returnToKbcc(path: string): Promise<void>;
+  };
+  plugin.loadedData = store;
+  await plugin.loadPluginData();
+  plugin.rememberKbccReturnDestination({
+    notePath,
+    baseId: plugin.getActiveKnowledgeBaseId(),
+    capturedAt: 1,
+    view: returnViewState(notePath, { activeTab: "library:resources" }),
+  });
+  assert.ok(plugin.kbccReturnRoute(notePath));
+
+  const library = plugin.store.bases[0]?.data.portableIndex.libraries[0];
+  assert.ok(library);
+  library.archivedAt = 2;
+  assert.equal(plugin.kbccReturnRoute(notePath), null, "an archived Library route is advertised as Home");
+  library.archivedAt = null;
+  plugin.store.bases[0]!.data.portableIndex.libraries = [];
+  assert.equal(plugin.kbccReturnRoute(notePath), null, "a deleted Library route is advertised as Home");
+  plugin.store.bases[0]!.data.portableIndex.libraries = [library];
+  plugin.store.bases[0]!.archivedAt = 3;
+  assert.equal(plugin.kbccReturnRoute(notePath), null, "an archived base route is advertised as Home");
+  plugin.store.bases.splice(0, 1);
+  assert.equal(plugin.kbccReturnRoute(notePath), null, "a deleted base route is advertised as Home");
+
+  plugin.store.bases.push(createKnowledgeBaseEntry(data, "base-default", 4));
+  plugin.store.activeBaseId = "base-default";
+  let homeOpens = 0;
+  plugin.activateView = async () => ({
+    restoreReturnViewState: async () => false,
+    openHomePage: async () => { homeOpens += 1; },
+  });
+  await plugin.returnToKbcc(notePath);
+  assert.equal(homeOpens, 1);
+  assert.match(Notice.messages.at(-1) ?? "", /saved Command Center page.*Home/iu);
 });
 
 test("one reviewed integration transaction organizes two bases and batch Undo/Redo stays atomic", async () => {
@@ -862,5 +1326,6 @@ test("membership indicator styles distinguish success, neutral, and broken state
   assert.match(css, /\.ent-cc-note-membership-not-organized[\s\S]*?var\(--text-faint\)/u);
   assert.match(css, /\.ent-cc-note-membership-broken[\s\S]*?var\(--text-error\)/u);
   assert.match(css, /data-kbcc-count[\s\S]*?font-size:\s*0\.5625rem/u);
+  assert.match(css, /@media \(max-width: 760px\), \(any-pointer: coarse\)\s*\{\s*\.ent-cc-note-membership-indicator,\s*\.ent-cc-return-to-kbcc\s*\{\s*min-width:\s*44px;\s*min-height:\s*44px;/u);
   assert.doesNotMatch(css, /\.ent-cc-note-organizer-actions[\s\S]{0,220}flex-direction:\s*column-reverse/u);
 });

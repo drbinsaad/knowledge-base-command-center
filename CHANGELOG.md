@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.19.0
+
+### Added
+
+- Added **Create note here…** to every writable custom-Library heading and nested subheading menu. The existing Library creation profile, editable folder/template form, and safe Markdown creator are reused, while the selected heading path stays fixed and visible in the form. The action works at every supported nesting depth on desktop and touch menus; protected built-in clinical Libraries and compatibility read-only state remain unavailable.
+- Added a **Return to KBCC** action beside the active-note organization indicator. When the current note path has a matching route captured as KBCC opened it, the action returns to that originating knowledge base, tab or Library, selected record, search, compact detail route, and list/detail position. The destination is saved before same-tab note navigation and survives Obsidian restarts. Without a matching path-bound route, it opens a clean KBCC Home instead of inheriting a different note's route.
+
+### Safety and privacy
+
+- Library destination IDs are re-resolved when the menu is used and again immediately before Markdown creation. A removed heading/subheading, archived or deleted Library, changed knowledge base, or read-only transition detected before creation writes no file. If placement fails after creation starts, only the exact file created by that operation is moved to Obsidian's recoverable trash, and only after its content is proved unchanged; otherwise the file is preserved and its path is reported. After successful deep placement, every owning ancestor expands so the created note is immediately reachable; unrelated Markdown is never moved or rewritten.
+- Return history is a separate, bounded App-local value: at most 24 vault-scoped note routes and at most 256 KiB. It can contain the vault identity, note and selected-record paths, the KBCC base/tab, literal search text entered in KBCC, compact-detail state, bounded browse limits, and scroll positions; it is never written to synced <code>data.json</code>. Restored browse-row and structural-section limits are each capped at 10,000. KBCC does not read or copy note bodies into this history, but user-entered search text can itself be sensitive. Note and folder renames repair matching routes, deleted paths are pruned, malformed or foreign-vault state is ignored, stale bases or Libraries fall back to Home, and **Clear device-local data** removes this value with the other plugin-owned local state.
+
+### Verification
+
+- Added parser/bounds, same-tab durability, restart, foreign-note Home fallback, rename, clear, stale-destination, deep-nesting, paired editor-action lifecycle, accessibility, and wide/compact restoration regressions. The release remains gated by TypeScript, zero-warning lint and JSON validation, automatically discovered runtime tests and coverage floors, large-vault performance budgets, real-Chromium layout variants, production bundle budgets, Community static verification, dependency audit, release metadata, tag ancestry, checksums, and provenance attestations.
+- The physical-iPhone, Dynamic Type, VoiceOver, iOS safe-area, software-keyboard, and physical-touch matrix was not executed. After that remaining gap and the limits of supplemental Mac Obsidian mobile emulation and automated responsive tests were explicitly reported, the maintainer authorized release with this scope waived and unverified for 0.19.0 only. This release does not claim a physical-device Pass.
+
 ## 0.18.0
 
 ### Added

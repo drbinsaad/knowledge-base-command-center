@@ -6343,8 +6343,9 @@
   text-align: start;
 }
 
-@media (max-width: 760px), (pointer: coarse) {
-  .ent-cc-note-membership-indicator {
+@media (max-width: 760px), (any-pointer: coarse) {
+  .ent-cc-note-membership-indicator,
+  .ent-cc-return-to-kbcc {
     min-width: 44px;
     min-height: 44px;
   }

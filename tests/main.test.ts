@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import EntVaultCommandCenterPlugin, {
   DEVICE_LOCAL_STATE_KEY,
+  KBCC_RETURN_NAVIGATION_STATE_KEY,
   SYNC_RECOVERY_LOCAL_STATE_KEY,
   VAULT_RENAME_JOURNAL_KEY,
+  type CatalogPlacementTarget,
+  type LibraryKnowledgeNoteCreationPolicy,
 } from "../src/main.ts";
 import { ExportImportCenterModal } from "../src/portability-modal.ts";
 import {
@@ -44,6 +47,7 @@ import {
   STORE_KIND,
   STORE_VERSION,
   type KnowledgeBaseEntry,
+  type LibraryDefinition,
   type PluginData,
   type PluginStore,
   type VaultRecord,
@@ -2833,6 +2837,28 @@ test("safe view-state saves do not advance semantic revision or the semantic tim
   assert.equal(persisted?.bases[0]?.view.activeTab, "collections");
 });
 
+test("an explicit return can tolerate only the final device-local view-state write failure", async () => {
+  const plugin = pluginWith(createDefaultStore(migrateData(null), 100, "vault-return-view-save-failure"));
+  await plugin.loadPluginData();
+  (plugin.app as unknown as { saveLocalStorage(key: string, value: unknown): void }).saveLocalStorage = () => {
+    throw new Error("simulated device-local write failure");
+  };
+  const handled: unknown[] = [];
+
+  await plugin.saveViewState(false, (error) => { handled.push(error); });
+  assert.equal(handled.length, 1, "Return can render session state after the final local write alone fails");
+  await assert.rejects(
+    plugin.saveViewState(),
+    /simulated device-local write failure/iu,
+    "ordinary view-state callers remain strict",
+  );
+
+  const internal = plugin as unknown as { committedStoreSnapshot: PluginStore | null };
+  internal.committedStoreSnapshot = null;
+  await plugin.saveViewState(false, (error) => { handled.push(error); });
+  assert.equal(handled.length, 2, "the same narrow tolerance applies to a missing-data bootstrap view save");
+});
+
 test("a view-only save never clones a 50,000-subject semantic graph", async () => {
   const subjectCount = 50_000;
   const data = migrateData(null);
@@ -3178,6 +3204,11 @@ test("clearing device-local data resets in-memory view/history and all local key
       newPath: "Knowledge/After.md",
       folderRename: false,
     }])],
+    [KBCC_RETURN_NAVIGATION_STATE_KEY, {
+      version: 1,
+      vaultId: store.vaultId,
+      routes: [],
+    }],
   ]);
   const writes: Array<[string, unknown]> = [];
   const app = {
@@ -3198,14 +3229,16 @@ test("clearing device-local data resets in-memory view/history and all local key
 
   await plugin.clearDeviceLocalData();
 
-  assert.deepEqual(writes.slice(-3), [
+  assert.deepEqual(writes.slice(-4), [
     [DEVICE_LOCAL_STATE_KEY, null],
     [SYNC_RECOVERY_LOCAL_STATE_KEY, null],
     [VAULT_RENAME_JOURNAL_KEY, null],
+    [KBCC_RETURN_NAVIGATION_STATE_KEY, null],
   ]);
   assert.equal(localValues.get(DEVICE_LOCAL_STATE_KEY), null);
   assert.equal(localValues.get(SYNC_RECOVERY_LOCAL_STATE_KEY), null);
   assert.equal(localValues.get(VAULT_RENAME_JOURNAL_KEY), null);
+  assert.equal(localValues.get(KBCC_RETURN_NAVIGATION_STATE_KEY), null);
   assert.equal(plugin.getActiveKnowledgeBaseId(), "base-default");
   assert.equal(plugin.data.selectedPath, "");
   assert.equal(plugin.data.activeTab, plugin.data.settings.defaultTab);
@@ -3238,6 +3271,7 @@ test("clearing device-local data resets in-memory view/history and all local key
   assert.equal(localValues.get(DEVICE_LOCAL_STATE_KEY), null);
   assert.equal(localValues.get(SYNC_RECOVERY_LOCAL_STATE_KEY), null);
   assert.equal(localValues.get(VAULT_RENAME_JOURNAL_KEY), null);
+  assert.equal(localValues.get(KBCC_RETURN_NAVIGATION_STATE_KEY), null);
 });
 
 test("one semantic save advances its base revision exactly once", async () => {
@@ -10347,6 +10381,270 @@ test("proposal and canonical creation return the committed file when view refres
   assert.equal(logged.filter((values) => String(values[0]).includes("created the")).length, 2);
 });
 
+async function targetedLibraryCreationHarness(options: {
+  destinationFolderExists?: boolean;
+  folderGate?: Promise<void>;
+  onFolderCreate?: () => void;
+  onTemplateRead?: () => void;
+  templateGate?: Promise<void>;
+} = {}): Promise<{
+  plugin: EntVaultCommandCenterPlugin & TestPluginBase;
+  library: LibraryDefinition;
+  target: CatalogPlacementTarget;
+  template: TFile;
+  entries: Map<string, TAbstractFile>;
+  contentByPath: Map<string, string>;
+  createCalls: () => number;
+  trashedPaths: string[];
+  policy: () => LibraryKnowledgeNoteCreationPolicy;
+}> {
+  const templateFolder = new TFolder("Templates");
+  const template = new TFile("Templates/Library.md");
+  templateFolder.children.push(template);
+  const entries = new Map<string, TAbstractFile>([
+    [templateFolder.path, templateFolder],
+    [template.path, template],
+  ]);
+  if (options.destinationFolderExists !== false) entries.set("Research", new TFolder("Research"));
+  const contentByPath = new Map<string, string>([[template.path, [
+    "---",
+    "category: {{yaml:category}}",
+    "library: {{yaml:library}}",
+    "type: {{yaml:type}}",
+    "---",
+    "# {{title}}",
+  ].join("\n")]]);
+  const trashedPaths: string[] = [];
+  let createCallCount = 0;
+  const parentPath = (path: string): string => path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+  const attach = (file: TAbstractFile): void => {
+    entries.set(file.path, file);
+    const parent = entries.get(parentPath(file.path));
+    if (parent instanceof TFolder && !parent.children.includes(file)) parent.children.push(file);
+  };
+  const detach = (file: TAbstractFile): void => {
+    entries.delete(file.path);
+    const parent = entries.get(parentPath(file.path));
+    if (parent instanceof TFolder) parent.children = parent.children.filter((child) => child !== file);
+  };
+  const app = {
+    ...testDeviceLocalStorage(),
+    vault: {
+      configDir: ".obsidian",
+      getAbstractFileByPath: (path: string) => entries.get(path) ?? null,
+      getMarkdownFiles: () => [...entries.values()].filter((file): file is TFile => file instanceof TFile && file.extension === "md"),
+      async cachedRead(file: TFile): Promise<string> {
+        if (file === template) {
+          options.onTemplateRead?.();
+          await options.templateGate;
+          return contentByPath.get(file.path) ?? "";
+        }
+        // Deliberately stale for created notes: destructive compensation must
+        // use Vault.read rather than trusting this cache.
+        return "";
+      },
+      async read(file: TFile): Promise<string> {
+        return contentByPath.get(file.path) ?? "";
+      },
+      async createFolder(path: string): Promise<TFolder> {
+        const folder = new TFolder(path);
+        attach(folder);
+        options.onFolderCreate?.();
+        await options.folderGate;
+        return folder;
+      },
+      async create(path: string, content: string): Promise<TFile> {
+        createCallCount += 1;
+        const file = new TFile(path);
+        contentByPath.set(path, content);
+        attach(file);
+        return file;
+      },
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+    fileManager: {
+      async trashFile(file: TAbstractFile): Promise<void> {
+        if (file instanceof TFolder && file.children.length > 0) throw new Error("Refusing to trash a non-empty test folder.");
+        trashedPaths.push(file.path);
+        contentByPath.delete(file.path);
+        detach(file);
+      },
+    },
+  };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.templatesFolder = "Templates";
+  const library: LibraryDefinition = {
+    id: "library-research",
+    name: "Research",
+    singularName: "Paper",
+    icon: "microscope",
+    order: 0,
+    sourceKind: null,
+    archivedAt: null,
+  };
+  const target = { headingId: "heading-evidence", subheadingId: "sub-guidelines" };
+  data.portableIndex.libraries = [library];
+  data.portableIndex.libraryLayouts[library.id] = [{
+    id: target.headingId,
+    title: "Evidence",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{ id: target.subheadingId, title: "Guidelines", collapsed: false, subjects: [] }],
+  }];
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-targeted-library-create");
+  await plugin.loadPluginData(false);
+  plugin.refreshViews = async () => {};
+  return {
+    plugin,
+    library,
+    target,
+    template,
+    entries,
+    contentByPath,
+    createCalls: () => createCallCount,
+    trashedPaths,
+    policy: () => ({
+      openedData: plugin.data,
+      openedBaseId: plugin.getActiveKnowledgeBaseId(),
+      openedDataEpoch: plugin.getDataEpoch(),
+      openedExternalChangeGeneration: plugin.getExternalChangeGeneration(),
+    }),
+  };
+}
+
+test("fixed Library creation rejects immutable effective folders before Vault.create", async () => {
+  const harness = await targetedLibraryCreationHarness();
+  const value = {
+    title: "Protected paper",
+    folder: "05 Sources/_books/Imported",
+    mode: "empty" as const,
+    templatePath: "",
+    addToCollection: false,
+  };
+  assert.match(harness.plugin.validateGenericNote(value) ?? "", /immutable source-book folder/i);
+  await assert.rejects(
+    harness.plugin.createKnowledgeNoteInLibrary(value, harness.library.id, harness.target, harness.policy()),
+    /immutable source-book folder/i,
+  );
+  assert.equal(harness.createCalls(), 0);
+  await assert.rejects(
+    harness.plugin.setLibraryNoteProfile(harness.library.id, { folder: "05 Sources/_books/Imported", mode: "empty" }),
+    /immutable source-book folder/i,
+  );
+});
+
+test("fixed Library creation re-resolves live template labels after a deferred read", async () => {
+  const entered = deferred();
+  const release = deferred();
+  const harness = await targetedLibraryCreationHarness({
+    onTemplateRead: entered.resolve,
+    templateGate: release.promise,
+  });
+  const creation = harness.plugin.createKnowledgeNoteInLibrary({
+    title: "Live labels",
+    folder: "Research",
+    mode: "template",
+    templatePath: harness.template.path,
+    addToCollection: false,
+  }, harness.library.id, harness.target, harness.policy());
+  await entered.promise;
+  const liveLibrary = harness.plugin.data.portableIndex.libraries.find((candidate) => candidate.id === harness.library.id);
+  const liveSubheading = harness.plugin.data.portableIndex.libraryLayouts[harness.library.id]?.[0]?.subheadings[0];
+  assert.ok(liveLibrary && liveSubheading);
+  liveLibrary.name = "Renamed Research";
+  liveLibrary.singularName = "Renamed Paper";
+  liveSubheading.title = "Renamed guidelines";
+  release.resolve();
+
+  const file = await creation;
+  const content = harness.contentByPath.get(file.path) ?? "";
+  assert.match(content, /category: "Renamed guidelines"/);
+  assert.match(content, /library: "Renamed Research"/);
+  assert.match(content, /type: "Renamed Paper"/);
+  const subjectId = Object.entries(harness.plugin.data.portableIndex.resolvedPathBySubjectId)
+    .find(([, path]) => path === file.path)?.[0];
+  assert.ok(subjectId);
+  assert.deepEqual(liveSubheading.subjects, [subjectId]);
+});
+
+test("fixed Library creation rechecks removed structure after a deferred template read", async () => {
+  const entered = deferred();
+  const release = deferred();
+  const harness = await targetedLibraryCreationHarness({
+    onTemplateRead: entered.resolve,
+    templateGate: release.promise,
+  });
+  const creation = harness.plugin.createKnowledgeNoteInLibrary({
+    title: "Stale target",
+    folder: "Research",
+    mode: "template",
+    templatePath: harness.template.path,
+    addToCollection: false,
+  }, harness.library.id, harness.target, harness.policy());
+  await entered.promise;
+  harness.plugin.data.portableIndex.libraryLayouts[harness.library.id]?.[0]?.subheadings.splice(0);
+  release.resolve();
+  await assert.rejects(creation, /subheading is no longer available/i);
+  assert.equal(harness.createCalls(), 0, "no Markdown file is created after target drift");
+});
+
+test("fixed Library creation cleans awaited folders when read-only engages before create", async () => {
+  const entered = deferred();
+  const release = deferred();
+  const harness = await targetedLibraryCreationHarness({
+    destinationFolderExists: false,
+    onFolderCreate: entered.resolve,
+    folderGate: release.promise,
+  });
+  const creation = harness.plugin.createKnowledgeNoteInLibrary({
+    title: "Read-only target",
+    folder: "Research/Deferred",
+    mode: "empty",
+    templatePath: "",
+    addToCollection: false,
+  }, harness.library.id, harness.target, harness.policy());
+  await entered.promise;
+  (harness.plugin as unknown as { dataCompatibilityWarning: string }).dataCompatibilityWarning = "Simulated read-only state.";
+  release.resolve();
+  await assert.rejects(creation, /simulated read-only state/i);
+  assert.equal(harness.createCalls(), 0);
+  assert.equal(harness.entries.has("Research"), false);
+  assert.equal(harness.entries.has("Research/Deferred"), false);
+  assert.deepEqual(harness.trashedPaths, ["Research/Deferred", "Research"]);
+});
+
+test("post-create Library filing rollback trashes only an unchanged operation-owned note", async () => {
+  const pristine = await targetedLibraryCreationHarness();
+  pristine.plugin.assignRecordToLibrary = async () => { throw new Error("simulated filing failure"); };
+  await assert.rejects(pristine.plugin.createKnowledgeNoteInLibrary({
+    title: "Pristine failure",
+    folder: "Research",
+    mode: "empty",
+    templatePath: "",
+    addToCollection: false,
+  }, pristine.library.id, pristine.target, pristine.policy()), /moved to Obsidian's trash/i);
+  assert.equal(pristine.entries.has("Research/Pristine failure.md"), false);
+  assert.deepEqual(pristine.trashedPaths, ["Research/Pristine failure.md"]);
+
+  const modified = await targetedLibraryCreationHarness();
+  modified.plugin.assignRecordToLibrary = async (path) => {
+    modified.contentByPath.set(path, "Concurrent user edit");
+    throw new Error("simulated filing failure after edit");
+  };
+  await assert.rejects(modified.plugin.createKnowledgeNoteInLibrary({
+    title: "Modified failure",
+    folder: "Research",
+    mode: "empty",
+    templatePath: "",
+    addToCollection: false,
+  }, modified.library.id, modified.target, modified.policy()), /was preserved because it could not be proved unchanged/i);
+  assert.equal(modified.entries.has("Research/Modified failure.md"), true);
+  assert.deepEqual(modified.trashedPaths, []);
+});
+
 test("note creation applies explicit YAML-safe Library tokens without rewriting the template", async () => {
   const templatesFolder = new TFolder("Templates");
   const researchFolder = new TFolder("Research");
@@ -13342,14 +13640,14 @@ test("library placement targets resolve a subheading at any depth under its owni
       {
         id: "outer-heading",
         title: "Airway",
-        collapsed: false,
+        collapsed: true,
         subjects: [],
         subheadings: [{
           id: "reading-level-2",
           title: "Pediatric",
-          collapsed: false,
+          collapsed: true,
           subjects: [],
-          subheadings: [{ id: "reading-level-3", title: "Neonatal", collapsed: false, subjects: [] }],
+          subheadings: [{ id: "reading-level-3", title: "Neonatal", collapsed: true, subjects: [] }],
         }],
       },
     ],
@@ -13373,6 +13671,9 @@ test("library placement targets resolve a subheading at any depth under its owni
   const subjectId = deep?.subjects[0] ?? "";
   assert.equal(plugin.data.portableIndex.resolvedPathBySubjectId[subjectId], file.path);
   assert.equal(outer?.subjects.length, 0, "the outer heading gains no direct copy");
+  assert.equal(outer?.collapsed, false, "the owning heading opens so the assigned record is visible");
+  assert.equal(outer?.subheadings[0]?.collapsed, false, "every nested ancestor opens");
+  assert.equal(deep?.collapsed, false, "the exact destination opens around its new record");
   assert.equal(plugin.getPortableSubject(subjectId)?.libraryId, "reading");
   assert.equal(sourceMutationCount(), 0);
 });

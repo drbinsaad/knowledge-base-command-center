@@ -289,7 +289,7 @@ export class ClearDeviceLocalDataModal extends Modal {
     this.contentEl.addClass("ent-cc-modal", "ent-cc-clear-device-local");
     this.titleEl.setText("Clear device-local data?");
     this.contentEl.createEl("p", {
-      text: "This clears this device's saved route, collapsed sections, undo and redo history, local sync and recovery facts, update-announcement history, and any pending vault-rename recovery journal for this plugin. That bounded journal can contain the vault identity and old/new vault-relative paths.",
+      text: "This clears this device's saved route, collapsed sections, undo and redo history, local sync and recovery facts, update-announcement history, any pending vault-rename recovery journal, and note-bound return destinations for this plugin. The bounded rename journal can contain the vault identity and old/new vault-relative paths. Return history can contain up to 24 opened-note paths with their command-center base, tab, selection, literal search text, detail, and scroll state. The plugin does not copy note bodies into this history, but entered search text can itself be sensitive. Neither local value syncs.",
     });
     this.contentEl.createEl("p", {
       text: "Synced knowledge-base organization, settings, Markdown notes, attachments, and recovery export files are not changed.",

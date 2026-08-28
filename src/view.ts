@@ -9,6 +9,10 @@ import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge
 import { LibraryEditorModal, ManageLibrariesModal } from "./library-modal";
 import { resolveLibraryIconId } from "./library-icons";
 import {
+  MAX_KBCC_RETURN_BROWSE_LIMIT,
+  type KbccReturnViewState,
+} from "./kbcc-return-navigation";
+import {
   buildEligiblePlaceholderMatchNotes,
   buildPlaceholderResolutionQueue,
   type PlaceholderMatchNote,
@@ -125,6 +129,16 @@ type CatalogDestination = "topic" | { libraryId: string };
 
 interface LibraryMembership extends Membership {
   libraryId: string;
+}
+
+interface CreateKnowledgeNoteFormContext {
+  createLabel?: string;
+  contextNotice?: string;
+  tokenContext?: TemplateTokenContext;
+  /** Optional combined creator for flows that must commit their own filing. */
+  createNote?: (value: GenericNoteFormValue) => Promise<TFile>;
+  /** Re-resolved immediately before the Markdown file is created. */
+  placementIssue?: () => string | null;
 }
 
 interface DragMembership extends Membership {
@@ -679,6 +693,11 @@ export class EntVaultCommandCenterView extends ItemView {
   private globalSearchErrorKey = "";
   private globalSearchErrorMessage = "";
   private globalSearchRequestGeneration = 0;
+  private pendingReturnScroll: {
+    searchKey: string;
+    listScrollTop: number;
+    detailScrollTop: number;
+  } | null = null;
   private browseRowLimit = MAX_RENDERED_BROWSE_RECORDS;
   private browseStructureLimit = MAX_RENDERED_BROWSE_STRUCTURES;
   private browseRowsRendered = 0;
@@ -737,6 +756,7 @@ export class EntVaultCommandCenterView extends ItemView {
     this.viewClosed = true;
     this.globalSearchRequestGeneration += 1;
     this.globalSearchPendingKey = "";
+    this.pendingReturnScroll = null;
     this.unbindWindowMigration();
     this.unbindPaneLayout();
     this.unbindSearchViewportLayout();
@@ -889,6 +909,7 @@ export class EntVaultCommandCenterView extends ItemView {
       this.globalSearchErrorKey = "";
       this.globalSearchErrorMessage = "";
       this.globalSearchRequestGeneration += 1;
+      this.pendingReturnScroll = null;
       this.loadedBaseId = activeBaseId;
       this.loadedDataEpoch = dataEpoch;
       this.staleViewNoticeShown = false;
@@ -999,6 +1020,7 @@ export class EntVaultCommandCenterView extends ItemView {
     this.globalSearchPendingKey = "";
     this.globalSearchErrorKey = "";
     this.globalSearchErrorMessage = "";
+    this.pendingReturnScroll = null;
   }
 
   private requestGlobalSearch(key: string, query: string): void {
@@ -1025,12 +1047,21 @@ export class EntVaultCommandCenterView extends ItemView {
       this.globalSearchResultScopeKey = this.globalSearchScopeKey();
       this.globalSearchPendingKey = "";
       this.renderTree();
-      this.resetSearchScrollPosition();
+      const pendingReturn = this.pendingReturnScroll?.searchKey === key
+        ? this.pendingReturnScroll
+        : null;
+      if (pendingReturn) {
+        this.pendingReturnScroll = null;
+        this.restoreReturnScrollPosition(pendingReturn.listScrollTop, pendingReturn.detailScrollTop);
+      } else {
+        this.resetSearchScrollPosition();
+      }
     }).catch((error) => {
       if (cancelled()) return;
       this.globalSearchPendingKey = "";
       this.globalSearchErrorKey = key;
       this.globalSearchErrorMessage = errorMessage(error);
+      if (this.pendingReturnScroll?.searchKey === key) this.pendingReturnScroll = null;
       new Notice(this.globalSearchErrorMessage);
       // renderGlobalSearchResults recognizes the error key and will not retry
       // until the user explicitly chooses Retry or changes the query.
@@ -1464,7 +1495,7 @@ export class EntVaultCommandCenterView extends ItemView {
         }
         if (notice) new Notice(notice);
         if (value.addToCollection && destination.kind !== "collection") this.openCollectionPicker(file.path);
-        await this.plugin.openFile(file);
+        await this.plugin.openFile(file, this);
       },
     }).open();
   }
@@ -1905,28 +1936,73 @@ export class EntVaultCommandCenterView extends ItemView {
     }, `Add to ${library.name}`).open();
   }
 
-  private startCreateLibraryNote(libraryId: string, target: CatalogPlacementTarget = {}): void {
+  private libraryCreatePlacementIssue(libraryId: string, target: CatalogPlacementTarget): string | null {
+    if (typeof this.plugin.isDataReadOnly === "function" && this.plugin.isDataReadOnly()) {
+      return "Creating notes is unavailable while organization data is read-only.";
+    }
     const library = this.plugin.getLibrary(libraryId);
-    if (!library || library.archivedAt !== null) return;
+    if (!library || library.archivedAt !== null) return "That library is no longer available.";
+    if (this.plugin.isClinicalMode() && library.sourceKind !== null) {
+      return `The built-in ${library.name} library follows native clinical source classification.`;
+    }
+    const layout = this.libraryLayout(libraryId);
+    const heading = target.headingId
+      ? layout.find((candidate) => candidate.id === target.headingId)
+      : target.subheadingId
+        ? layout.find((candidate) => subheadingChain(candidate, target.subheadingId ?? "") !== null)
+        : undefined;
+    if (target.headingId && !heading) return "That library heading is no longer available. Reopen the action and try again.";
+    if (target.subheadingId && (!heading || !subheadingChain(heading, target.subheadingId))) {
+      return "That library subheading is no longer available. Reopen the action and try again.";
+    }
+    return null;
+  }
+
+  private startCreateLibraryNote(libraryId: string, target: CatalogPlacementTarget = {}): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const library = this.plugin.getLibrary(libraryId);
+    if (!library || library.archivedAt !== null) {
+      new Notice("That library is no longer available.");
+      return;
+    }
     if (this.plugin.isClinicalMode() && library.sourceKind !== null) {
       new Notice(`The built-in ${library.name} library follows native clinical source classification.`);
       return;
     }
-    const ownsBase = this.createOpenedBaseGuard();
+    const placementIssue = (): string | null => {
+      if (!ownsBase()) return "The active knowledge base changed. Close and reopen this form.";
+      return this.libraryCreatePlacementIssue(libraryId, target);
+    };
+    const initialPlacementIssue = placementIssue();
+    if (initialPlacementIssue) {
+      new Notice(initialPlacementIssue);
+      return;
+    }
     const profile = this.plugin.getEffectiveLibraryNoteProfile(libraryId);
+    const creationPolicy = {
+      openedData: this.plugin.data,
+      openedBaseId: this.plugin.getActiveKnowledgeBaseId(),
+      openedDataEpoch: this.plugin.getDataEpoch(),
+      openedExternalChangeGeneration: this.plugin.getExternalChangeGeneration?.() ?? 0,
+    };
+    const targetLabel = target.headingId || target.subheadingId
+      ? collectionTargets(this.libraryLayout(libraryId))
+        .find((candidate) => (!target.headingId || candidate.headingId === target.headingId)
+          && candidate.subheadingId === target.subheadingId)?.label
+      : undefined;
+    const placementLabel = targetLabel ? `${library.name} / ${targetLabel}` : library.name;
     this.startCreateKnowledgeNote({
       folder: profile.folder,
       mode: profile.mode,
       templatePath: profile.templatePath,
-    }, false, async (file) => {
-      if (!ownsBase()) return;
-      await this.plugin.assignRecordToLibrary(file.path, libraryId, target);
-    }, `${library.singularName} created and added to ${library.name}. The Markdown note was not rewritten.`, {
+    }, false, async () => { /* The combined creator already committed exact placement. */ }, `${library.singularName} created${targetLabel ? ` under ${placementLabel}` : ` and added to ${library.name}`}. The Markdown note was not rewritten.`, {
       createLabel: library.singularName,
-      contextNotice: target.headingId
-        ? `This Markdown note will be classified in the selected heading or subheading in ${library.name} after creation.`
+      contextNotice: target.headingId || target.subheadingId
+        ? `This Markdown note will be classified under ${placementLabel} after creation. This destination is fixed for this action.`
         : `This Markdown note will be classified in ${library.name} after creation. You can choose its heading or subheading from the record’s actions menu.`,
-      tokenContext: this.libraryTemplateTokenContext(library, target),
+      createNote: (value) => this.plugin.createKnowledgeNoteInLibrary(value, libraryId, target, creationPolicy),
+      placementIssue,
     });
   }
 
@@ -2261,7 +2337,7 @@ export class EntVaultCommandCenterView extends ItemView {
     indexAfterCreate = !this.plugin.isClinicalMode(),
     onCreated?: (file: TFile) => void | Promise<void>,
     completionMessage?: string,
-    formContext?: { createLabel?: string; contextNotice?: string; tokenContext?: TemplateTokenContext },
+    formContext?: CreateKnowledgeNoteFormContext,
   ): void {
     if (!this.guardLoadedBase()) return;
     const ownsBase = this.createOpenedBaseGuard();
@@ -2272,9 +2348,10 @@ export class EntVaultCommandCenterView extends ItemView {
     // clinical create must start inside the Inbox it will actually appear in.
     const seededFolder = initial.folder
       ?? (clinicalMode && !onCreated ? settings.proposalFolder : settings.defaultNoteFolder);
+    const { placementIssue, createNote, ...modalContext } = formContext ?? {};
     new KnowledgeNoteModal(this.app, {
       itemSingular: settings.itemSingular,
-      ...formContext,
+      ...modalContext,
       templates: this.plugin.getTemplateFiles(),
       initial: {
         title: initial.title ?? "",
@@ -2285,6 +2362,8 @@ export class EntVaultCommandCenterView extends ItemView {
       },
       validate: (value) => {
         if (!ownsBase()) return "The active knowledge base changed. Close and reopen this form.";
+        const currentPlacementIssue = placementIssue?.();
+        if (currentPlacementIssue) return currentPlacementIssue;
         if (!onCreated) {
           const clinicalIssue = this.clinicalCreateFolderIssue(value.folder);
           if (clinicalIssue) return clinicalIssue;
@@ -2293,7 +2372,9 @@ export class EntVaultCommandCenterView extends ItemView {
       },
       onSubmit: async (value) => {
         if (!ownsBase()) return;
-        const file = await this.plugin.createKnowledgeNote(value, formContext?.tokenContext);
+        const file = createNote
+          ? await createNote(value)
+          : await this.plugin.createKnowledgeNote(value, modalContext.tokenContext);
         if (!ownsBase()) {
           // The base changed under the form after the file was written; no
           // registration can safely run against the replacement data, so the
@@ -2333,7 +2414,7 @@ export class EntVaultCommandCenterView extends ItemView {
             if (!ownsBase()) return;
             new Notice(`${settings.itemSingular[0]?.toUpperCase() ?? "N"}${settings.itemSingular.slice(1)} created at ${file.path}, which is outside every visible area, so it was added to ${settings.indexLabel} to stay findable.`, 10000);
             if (value.addToCollection) this.openCollectionPicker(file.path);
-            await this.plugin.openFile(file);
+            await this.plugin.openFile(file, this);
             return;
           }
         }
@@ -2341,7 +2422,7 @@ export class EntVaultCommandCenterView extends ItemView {
           ? `${settings.itemSingular[0]?.toUpperCase() ?? "N"}${settings.itemSingular.slice(1)} created and linked to the imported subject.`
           : `${settings.itemSingular[0]?.toUpperCase() ?? "N"}${settings.itemSingular.slice(1)} created${indexAfterCreate && !clinicalMode ? ` and added to ${settings.indexLabel}` : ""}. Existing notes were not changed.`));
         if (value.addToCollection) this.openCollectionPicker(file.path);
-        await this.plugin.openFile(file);
+        await this.plugin.openFile(file, this);
       },
     }).open();
   }
@@ -3015,6 +3096,135 @@ export class EntVaultCommandCenterView extends ItemView {
       throw new Error("That Library is no longer available in the active knowledge base.");
     }
     await this.changeTab(libraryTabId(libraryId), true);
+  }
+
+  /** Capture the exact visible route before this view opens a Markdown note. */
+  public captureReturnViewState(): KbccReturnViewState {
+    const compact = this.paneLayout !== "wide";
+    const inspectorBody = this.inspectorEl?.querySelector<HTMLElement>(".ent-cc-inspector-body");
+    const selectedPath = this.plugin.data.selectedPath;
+    return {
+      activeTab: this.plugin.data.activeTab,
+      selectedPath,
+      query: this.query,
+      // A wide inspector is already visible beside the list. Preserve that
+      // semantic detail route so a later compact return opens the same record.
+      detailVisible: Boolean(selectedPath) && (!compact || this.mobileInspectorOpen),
+      browseRowLimit: Math.min(MAX_KBCC_RETURN_BROWSE_LIMIT, Math.max(1, this.browseRowLimit)),
+      browseStructureLimit: Math.min(MAX_KBCC_RETURN_BROWSE_LIMIT, Math.max(1, this.browseStructureLimit)),
+      listScrollTop: Math.max(0, compact
+        ? this.workspaceEl?.scrollTop ?? this.mobileTreeScrollTop
+        : this.treeEl?.scrollTop ?? this.mobileTreeScrollTop),
+      detailScrollTop: Math.max(0, compact
+        ? inspectorBody?.scrollTop ?? this.mobileInspectorScrollTop
+        : this.inspectorEl?.scrollTop ?? this.mobileInspectorScrollTop),
+    };
+  }
+
+  /** Restore a note-bound route after its knowledge base has been activated. */
+  public async restoreReturnViewState(state: KbccReturnViewState): Promise<boolean> {
+    if (!this.guardLoadedBase()) return false;
+    const availableTabs = tabDefinitions(this.plugin.data.settings, this.records, this.plugin.getLibraries());
+    if (!availableTabs.some((tab) => tab.id === state.activeTab)) return false;
+    this.cancelPendingGlobalSearch();
+    this.globalSearchResult = null;
+    this.globalSearchResultKey = "";
+    this.globalSearchResultScopeKey = "";
+    this.query = state.query;
+    this.parsedQuery = parseQuery(state.query);
+    this.plugin.data.activeTab = state.activeTab;
+    this.plugin.data.selectedPath = state.selectedPath && this.recordByPath.has(state.selectedPath)
+      ? state.selectedPath
+      : "";
+    this.browseRowLimit = Math.min(MAX_KBCC_RETURN_BROWSE_LIMIT, Math.max(1, state.browseRowLimit));
+    this.browseStructureLimit = Math.min(MAX_KBCC_RETURN_BROWSE_LIMIT, Math.max(1, state.browseStructureLimit));
+    this.mobileTreeScrollTop = state.listScrollTop;
+    this.mobileInspectorScrollTop = state.detailScrollTop;
+    this.mobileInspectorOpen = state.detailVisible && Boolean(this.plugin.data.selectedPath);
+    this.mobileInspectorNeedsFocus = false;
+    if (!await this.persistReturnedViewStateBestEffort()) return false;
+    this.pendingReturnScroll = state.query.trim()
+      ? {
+          searchKey: this.globalSearchKey(),
+          listScrollTop: state.listScrollTop,
+          detailScrollTop: state.detailScrollTop,
+        }
+      : null;
+    this.render(true);
+    this.restoreReturnScrollPosition(state.listScrollTop, state.detailScrollTop);
+    this.focusReturnDestination(state.activeTab);
+    return true;
+  }
+
+  /** Open a clean Command Center home when the note has no matching origin. */
+  public async openHomePage(): Promise<void> {
+    if (!this.guardLoadedBase()) return;
+    const availableTabs = tabDefinitions(this.plugin.data.settings, this.records, this.plugin.getLibraries());
+    const homeTab = availableTabs.some((tab) => tab.id === this.plugin.data.settings.defaultTab)
+      ? this.plugin.data.settings.defaultTab
+      : "curriculum";
+    this.cancelPendingGlobalSearch();
+    this.globalSearchResult = null;
+    this.globalSearchResultKey = "";
+    this.globalSearchResultScopeKey = "";
+    this.query = "";
+    this.parsedQuery = parseQuery("");
+    this.plugin.data.activeTab = homeTab;
+    this.plugin.data.selectedPath = "";
+    this.mobileInspectorOpen = false;
+    this.mobileInspectorNeedsFocus = false;
+    this.mobileTreeScrollTop = 0;
+    this.mobileInspectorScrollTop = 0;
+    if (!await this.persistReturnedViewStateBestEffort()) return;
+    this.render();
+    this.restoreReturnScrollPosition(0, 0);
+    this.focusReturnDestination(homeTab);
+  }
+
+  /** A device-local write failure must not prevent an explicit in-session navigation. */
+  private async persistReturnedViewStateBestEffort(): Promise<boolean> {
+    if (this.viewClosed) return false;
+    let persistenceError: unknown = null;
+    await this.plugin.saveViewState(false, (error) => { persistenceError = error; });
+    // A base/epoch change is a real stale-view boundary, not a persistence
+    // failure to ignore. Only render when this view still owns the live data.
+    if (this.viewClosed || !this.guardLoadedBase()) return false;
+    if (persistenceError) {
+      console.warn("Knowledge Base Command Center could not persist returned view state", persistenceError);
+      new Notice("The command center page opened, but this device could not preserve its current view state for a restart.", 8000);
+    }
+    return true;
+  }
+
+  /** Explicit editor-header navigation must establish focus inside the revealed view. */
+  private focusReturnDestination(tab: MainTab): void {
+    const focus = (): void => {
+      if (this.viewClosed) return;
+      const compactInspector = this.paneLayout !== "wide" && this.mobileInspectorOpen;
+      const target = compactInspector
+        ? this.inspectorEl?.querySelector<HTMLElement>(".ent-cc-inspector-close")
+        : this.contentEl.querySelector<HTMLElement>(`[data-tab="${tab}"]`);
+      target?.focus({ preventScroll: true });
+    };
+    focus();
+    this.timerWindow.requestAnimationFrame(focus);
+  }
+
+  private restoreReturnScrollPosition(listScrollTop: number, detailScrollTop: number): void {
+    const apply = (): void => {
+      if (this.viewClosed) return;
+      const compact = this.paneLayout !== "wide";
+      const listOwner = compact ? this.workspaceEl : this.treeEl;
+      const inspectorBody = this.inspectorEl?.querySelector<HTMLElement>(".ent-cc-inspector-body");
+      const detailOwner = compact ? inspectorBody : this.inspectorEl;
+      if (listOwner) listOwner.scrollTop = listScrollTop;
+      if (detailOwner) detailOwner.scrollTop = detailScrollTop;
+    };
+    apply();
+    this.timerWindow.requestAnimationFrame(() => {
+      apply();
+      this.timerWindow.requestAnimationFrame(apply);
+    });
   }
 
   private tabCount(tab: MainTab): number {
@@ -4373,7 +4583,7 @@ export class EntVaultCommandCenterView extends ItemView {
     // Selection is transient UI state; persisting it on every click rewrites the
     // whole plugin data file and drives needless vault-sync traffic.
     this.scheduleSelectionSave();
-    if (compact) this.render();
+    if (compact) this.render(true);
     else {
       this.syncSelectedRecordRows(path);
       this.renderInspector();
@@ -4400,7 +4610,7 @@ export class EntVaultCommandCenterView extends ItemView {
   private closeMobileInspector(): void {
     this.mobileInspectorOpen = false;
     this.mobileInspectorNeedsFocus = false;
-    this.render();
+    this.render(true);
     this.timerWindow.setTimeout(() => {
       if (this.viewClosed || this.mobileInspectorOpen) return;
       if (this.workspaceEl) this.workspaceEl.scrollTop = this.mobileTreeScrollTop;
@@ -5104,6 +5314,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const layout = this.libraryLayout(libraryId);
     const layoutIsCurrent = (): boolean => layout === this.libraryLayout(libraryId);
     const index = layout.findIndex((item) => item.id === heading.id);
+    const readOnly = typeof this.plugin.isDataReadOnly === "function" && this.plugin.isDataReadOnly();
     const menu = new Menu();
     menu.addItem((item) => item.setTitle("Move heading up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => {
       if (!ownsBase() || !layoutIsCurrent()) return;
@@ -5117,6 +5328,23 @@ export class EntVaultCommandCenterView extends ItemView {
       if (currentIndex >= 0 && currentIndex < currentLayout.length - 1) this.run(() => this.moveLibraryHeading(libraryId, currentIndex, currentIndex + 1));
     }));
     menu.addSeparator();
+    if (!this.plugin.isClinicalMode() || library.sourceKind === null) {
+      menu.addItem((item) => item.setTitle("Create note here…").setIcon("file-plus-2").setDisabled(readOnly).onClick(() => {
+        if (!ownsBase()) return;
+        const currentLibrary = this.plugin.getLibrary(libraryId);
+        if (!currentLibrary || currentLibrary.archivedAt !== null) {
+          new Notice("That library is no longer available.");
+          return;
+        }
+        if (!layoutIsCurrent()) return;
+        const currentHeading = this.libraryLayout(libraryId).find((candidate) => candidate.id === heading.id);
+        if (!currentHeading) {
+          new Notice("That library heading is no longer available. Reopen the action and try again.");
+          return;
+        }
+        this.startCreateLibraryNote(libraryId, { headingId: currentHeading.id });
+      }));
+    }
     menu.addItem((item) => item.setTitle("Place record here…").setIcon("file-input").onClick(() => {
       if (ownsBase() && layoutIsCurrent()) this.openPlaceLibraryRecordPicker(libraryId, { headingId: heading.id });
     }));
@@ -5172,6 +5400,8 @@ export class EntVaultCommandCenterView extends ItemView {
     const siblings = opened?.siblings ?? [];
     const index = siblings.findIndex((item) => item.id === subheading.id);
     const parentTitle = opened?.parent.title ?? heading.title;
+    const library = this.plugin.getLibrary(libraryId);
+    const readOnly = typeof this.plugin.isDataReadOnly === "function" && this.plugin.isDataReadOnly();
     const menu = new Menu();
     menu.addItem((item) => item.setTitle("Move subheading up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => {
       if (!ownsBase() || !layoutIsCurrent()) return;
@@ -5194,6 +5424,23 @@ export class EntVaultCommandCenterView extends ItemView {
       if (ownsBase() && layoutIsCurrent()) this.outdentSubheading(libraryId, heading.id, subheading.id);
     }));
     menu.addSeparator();
+    if (library && (!this.plugin.isClinicalMode() || library.sourceKind === null)) {
+      menu.addItem((item) => item.setTitle("Create note here…").setIcon("file-plus-2").setDisabled(readOnly).onClick(() => {
+        if (!ownsBase()) return;
+        const currentLibrary = this.plugin.getLibrary(libraryId);
+        if (!currentLibrary || currentLibrary.archivedAt !== null) {
+          new Notice("That library is no longer available.");
+          return;
+        }
+        if (!layoutIsCurrent()) return;
+        const current = locateCurrent();
+        if (!current) {
+          new Notice("That library subheading is no longer available. Reopen the action and try again.");
+          return;
+        }
+        this.startCreateLibraryNote(libraryId, { headingId: heading.id, subheadingId: current.node.id });
+      }));
+    }
     menu.addItem((item) => item.setTitle("Place record here…").setIcon("file-input").onClick(() => {
       if (ownsBase() && layoutIsCurrent()) this.openPlaceLibraryRecordPicker(libraryId, { headingId: heading.id, subheadingId: subheading.id });
     }));
@@ -6629,7 +6876,7 @@ export class EntVaultCommandCenterView extends ItemView {
       new Notice("The note could not be found.");
       return;
     }
-    await this.plugin.openFile(file);
+    await this.plugin.openFile(file, this);
   }
 
   private async openCurrentBase(): Promise<void> {

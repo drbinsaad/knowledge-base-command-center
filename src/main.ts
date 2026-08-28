@@ -67,6 +67,7 @@ import {
   LibraryDefinition,
   LibraryNoteProfile,
   LibraryKind,
+  libraryIdFromTab,
   libraryTabId,
   subjectLibraryId,
   childSubheadings,
@@ -189,6 +190,14 @@ import {
 } from "./search";
 import { EntCommandCenterSettingsTab } from "./settings";
 import { EntVaultCommandCenterView, VIEW_TYPE } from "./view";
+import {
+  kbccReturnRouteForNote,
+  rememberKbccReturnRoute,
+  parseKbccReturnNavigationState,
+  rebuildBoundedKbccReturnNavigationState,
+  type KbccReturnNavigationState,
+  type KbccReturnRoute,
+} from "./kbcc-return-navigation";
 import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge-base-modal";
 import { ManageLibrariesModal } from "./library-modal";
 import { mergeKnowledgeBaseStores, type StoreMergeResult } from "./store-merge";
@@ -285,6 +294,7 @@ const NOTE_ORGANIZER_INDICATOR_DEBOUNCE_MS = 100;
 export const DEVICE_LOCAL_STATE_KEY = "ent-vault-command-center.device-state.v1";
 export const SYNC_RECOVERY_LOCAL_STATE_KEY = "ent-vault-command-center.sync-recovery-state.v1";
 export const VAULT_RENAME_JOURNAL_KEY = "ent-vault-command-center.vault-rename-journal.v1";
+export const KBCC_RETURN_NAVIGATION_STATE_KEY = "ent-vault-command-center.return-navigation.v1";
 const FOLLOW_UP_UNDO_WINDOW_MS = 5 * 60 * 1000;
 
 /**
@@ -551,6 +561,18 @@ export interface CatalogPlacementTarget {
   headingTitle?: string;
 }
 
+/**
+ * Identity fence captured when a fixed Library creation form opens. Local
+ * label edits may keep using the form, but a base/data/Sync replacement may
+ * not create a Markdown file against a different organization authority.
+ */
+export interface LibraryKnowledgeNoteCreationPolicy {
+  openedData: PluginData;
+  openedBaseId: string;
+  openedDataEpoch: number;
+  openedExternalChangeGeneration: number;
+}
+
 /** Exact dry-run token required before Index diagnostics may repair live data. */
 export interface IndexRepairPreview {
   prunedPaths: string[];
@@ -707,11 +729,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     summary: NoteOrganizerMembershipSummary;
   }>();
   private readonly noteOrganizerIndicators = new Map<MarkdownView, {
-    element: HTMLElement;
-    path: string;
+    membershipElement: HTMLElement;
+    returnElement: HTMLElement;
   }>();
   private noteOrganizerIndicatorTimer: number | null = null;
   private noteOrganizerIndicatorTimerWindow: Window | null = null;
+  private kbccReturnNavigationState: KbccReturnNavigationState | null = null;
+  private kbccReturnNavigationStateLoaded = false;
+  private kbccReturnPersistenceWarningShown = false;
   private activeNoteOrganizerModal: NoteOrganizerModal | null = null;
   private readonly preparedNoteOrganizerCommits = new WeakSet<PreparedNoteOrganizerCommit>();
   private noteOrganizerBatchHistory: NoteOrganizerBatchHistoryToken | null = null;
@@ -1043,6 +1068,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         if (pathIsInIndexFolderSources(file.path, legacySources)) this.maybeShowLegacyIndexReview();
       }));
       this.registerEvent(this.app.vault.on("delete", (file) => {
+        if (file instanceof TFile || file instanceof TFolder) {
+          this.pruneKbccReturnNavigationPaths(file.path, file instanceof TFolder);
+        }
         if (file instanceof TFolder) {
           this.legacyIndexReviewPlanCache = null;
           if (this.hasLegacyIndexSource()) this.scheduleRefresh(false);
@@ -1097,7 +1125,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.noteOrganizerIndicatorTimerWindow = null;
     for (const commandId of this.libraryCommandNames.keys()) this.removeCommand(commandId);
     this.libraryCommandNames.clear();
-    for (const binding of this.noteOrganizerIndicators.values()) binding.element.remove();
+    for (const binding of this.noteOrganizerIndicators.values()) {
+      binding.membershipElement.remove();
+      binding.returnElement.remove();
+    }
     this.noteOrganizerIndicators.clear();
   }
 
@@ -2309,7 +2340,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       throw new Error("Obsidian's device-local storage API is unavailable.");
     }
     let clearFailed = false;
-    for (const key of [DEVICE_LOCAL_STATE_KEY, SYNC_RECOVERY_LOCAL_STATE_KEY, VAULT_RENAME_JOURNAL_KEY]) {
+    for (const key of [
+      DEVICE_LOCAL_STATE_KEY,
+      SYNC_RECOVERY_LOCAL_STATE_KEY,
+      VAULT_RENAME_JOURNAL_KEY,
+      KBCC_RETURN_NAVIGATION_STATE_KEY,
+    ]) {
       try {
         this.app.saveLocalStorage(key, null);
       } catch {
@@ -2344,6 +2380,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.stagedRequiredUndoBatchOperationLabel = "multi-base change";
     this.syncRecoveryLocalState = createDefaultSyncRecoveryLocalState();
     this.syncRecoveryLocalStateLoaded = true;
+    this.kbccReturnNavigationState = null;
+    this.kbccReturnNavigationStateLoaded = true;
+    this.kbccReturnPersistenceWarningShown = false;
     this.lastFollowUpUndo = null;
     this.noteOrganizerBatchHistory = null;
     try {
@@ -3094,7 +3133,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
    * save therefore cannot smuggle organization or advance conflict resolution,
    * and it does not clone/project a very large semantic graph three times.
    */
-  async saveViewState(withinOperation = false): Promise<void> {
+  async saveViewState(
+    withinOperation = false,
+    onDeviceLocalPersistenceFailure?: (error: unknown) => void,
+  ): Promise<void> {
     if (this.unloaded) throw new Error("This plugin instance was unloaded before the view state could be saved.");
     if (this.dataCompatibilityWarning) return;
     const baseId = this.store.activeBaseId;
@@ -3123,7 +3165,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     // but localStorage is precisely where harmless first-open route state may
     // live without publishing an empty bootstrap envelope through Sync.
     if (!this.committedStoreSnapshot) {
-      this.persistDeviceLocalState();
+      try {
+        this.persistDeviceLocalState();
+      } catch (error) {
+        if (!onDeviceLocalPersistenceFailure) throw error;
+        onDeviceLocalPersistenceFailure(error);
+      }
       return;
     }
     const committedEntry = this.committedStoreSnapshot.bases.find((entry) => entry.id === baseId && entry.archivedAt === null);
@@ -3135,7 +3182,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       || !pluginDataSemanticallyEqual(liveEntry.data, committedEntry.data)) {
       throw new Error("An unsaved organization change is still pending. Its view state was not saved separately.");
     }
-    this.persistDeviceLocalState();
+    try {
+      this.persistDeviceLocalState();
+    } catch (error) {
+      if (!onDeviceLocalPersistenceFailure) throw error;
+      onDeviceLocalPersistenceFailure(error);
+    }
   }
 
   private async saveStoreSnapshot(
@@ -5069,6 +5121,147 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.openNoteOrganizer(currentPaths, "drop");
   }
 
+  private loadKbccReturnNavigationState(): void {
+    if (this.kbccReturnNavigationStateLoaded || this.deviceLocalPersistenceSuppressed) return;
+    this.kbccReturnNavigationStateLoaded = true;
+    try {
+      if (typeof this.app.loadLocalStorage !== "function") return;
+      const loaded = this.app.loadLocalStorage(KBCC_RETURN_NAVIGATION_STATE_KEY) as unknown;
+      this.kbccReturnNavigationState = loaded === null || loaded === undefined
+        ? null
+        : parseKbccReturnNavigationState(loaded);
+    } catch (error) {
+      this.kbccReturnNavigationState = null;
+      console.warn("Knowledge Base Command Center ignored malformed return navigation", error);
+      try {
+        if (typeof this.app.saveLocalStorage === "function") {
+          this.app.saveLocalStorage(KBCC_RETURN_NAVIGATION_STATE_KEY, null);
+        }
+      } catch {
+        console.warn("Knowledge Base Command Center could not clear malformed return navigation.");
+      }
+    }
+  }
+
+  private persistKbccReturnNavigationState(): boolean {
+    if (this.deviceLocalPersistenceSuppressed || !this.kbccReturnNavigationState) return false;
+    try {
+      if (typeof this.app.saveLocalStorage !== "function") throw new Error("Device-local storage is unavailable.");
+      this.app.saveLocalStorage(KBCC_RETURN_NAVIGATION_STATE_KEY, this.kbccReturnNavigationState);
+      return true;
+    } catch (error) {
+      console.warn("Knowledge Base Command Center could not preserve return navigation", error);
+      if (!this.kbccReturnPersistenceWarningShown) {
+        this.kbccReturnPersistenceWarningShown = true;
+        new Notice("The command center return destination will work in this session, but it could not be preserved across an Obsidian restart.", 8000);
+      }
+      return false;
+    }
+  }
+
+  private rememberKbccReturnDestination(route: KbccReturnRoute): void {
+    if (this.deviceLocalPersistenceSuppressed) return;
+    this.loadKbccReturnNavigationState();
+    if (!this.committedStoreSnapshot
+      && this.kbccReturnNavigationState
+      && this.kbccReturnNavigationState.vaultId !== this.store.vaultId) {
+      // A temporarily missing data.json exposes a provisional vault-fresh ID
+      // while Sync may still be delivering this vault's established store.
+      // Never replace that established vault's return history with convenience
+      // state captured against the untrusted bootstrap identity.
+      return;
+    }
+    this.kbccReturnNavigationState = rememberKbccReturnRoute(
+      this.kbccReturnNavigationState,
+      this.store.vaultId,
+      route,
+    );
+    this.persistKbccReturnNavigationState();
+  }
+
+  private kbccReturnRoute(notePath: string): KbccReturnRoute | null {
+    if (this.deviceLocalPersistenceSuppressed) return null;
+    this.loadKbccReturnNavigationState();
+    const route = kbccReturnRouteForNote(this.kbccReturnNavigationState, this.store.vaultId, notePath);
+    if (!route) return null;
+    const entry = this.store.bases.find((candidate) => candidate.id === route.baseId && candidate.archivedAt === null);
+    if (!entry) return null;
+    const libraryId = libraryIdFromTab(route.view.activeTab);
+    if (libraryId && !entry.data.portableIndex.libraries.some((library) => (
+      library.id === libraryId && library.archivedAt === null
+    ))) return null;
+    return route;
+  }
+
+  private rewriteKbccReturnNavigationPaths(oldPath: string, newPath: string): void {
+    if (this.deviceLocalPersistenceSuppressed) return;
+    this.loadKbccReturnNavigationState();
+    const state = this.kbccReturnNavigationState;
+    if (!state || state.vaultId !== this.store.vaultId) return;
+    let changed = false;
+    const rewritten = state.routes.map((route) => {
+      const notePath = replacePathPrefix(route.notePath, oldPath, newPath);
+      const selectedPath = replacePathPrefix(route.view.selectedPath, oldPath, newPath);
+      changed ||= notePath !== route.notePath || selectedPath !== route.view.selectedPath;
+      return {
+        ...route,
+        notePath,
+        view: { ...route.view, selectedPath },
+      };
+    });
+    if (!changed) return;
+    this.kbccReturnNavigationState = rebuildBoundedKbccReturnNavigationState(state.vaultId, rewritten);
+    this.persistKbccReturnNavigationState();
+  }
+
+  private pruneKbccReturnNavigationPaths(deletedPath: string, folderDelete: boolean): void {
+    if (this.deviceLocalPersistenceSuppressed) return;
+    this.loadKbccReturnNavigationState();
+    const state = this.kbccReturnNavigationState;
+    if (!state || state.vaultId !== this.store.vaultId) return;
+    const matches = (path: string): boolean => path === deletedPath
+      || (folderDelete && path.startsWith(`${deletedPath}/`));
+    let changed = false;
+    const retained = state.routes.filter((route) => {
+      if (!matches(route.notePath)) return true;
+      changed = true;
+      return false;
+    });
+    for (const route of retained) {
+      if (!route.view.selectedPath || !matches(route.view.selectedPath)) continue;
+      route.view.selectedPath = "";
+      route.view.detailVisible = false;
+      route.view.detailScrollTop = 0;
+      changed = true;
+    }
+    if (!changed) return;
+    state.routes = retained;
+    this.persistKbccReturnNavigationState();
+  }
+
+  private async returnToKbcc(notePath: string): Promise<void> {
+    const route = this.kbccReturnRoute(notePath);
+    let staleReturn = false;
+    if (route) {
+      try {
+        if (this.getActiveKnowledgeBaseId() !== route.baseId) await this.switchKnowledgeBase(route.baseId);
+        const view = await this.activateView();
+        if (await view.restoreReturnViewState(route.view)) return;
+        staleReturn = true;
+      } catch (error) {
+        // A destination can disappear through Sync between the header render
+        // and activation. Falling back to Home is deterministic and path-free.
+        console.warn("Knowledge Base Command Center could not restore a saved return destination", error);
+        staleReturn = true;
+      }
+    }
+    const home = await this.activateView();
+    await home.openHomePage();
+    if (staleReturn) {
+      new Notice("The saved command center page is no longer available, so home was opened instead.", 7000);
+    }
+  }
+
   private scheduleNoteOrganizerIndicatorSync(): void {
     if (this.unloaded) return;
     if (this.noteOrganizerIndicatorTimer !== null) {
@@ -5093,24 +5286,40 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       liveViews.add(view);
       const file = view.file;
       if (!(file instanceof TFile) || file.extension.toLowerCase() !== "md") {
-        this.noteOrganizerIndicators.get(view)?.element.remove();
+        const stale = this.noteOrganizerIndicators.get(view);
+        stale?.membershipElement.remove();
+        stale?.returnElement.remove();
         this.noteOrganizerIndicators.delete(view);
         continue;
       }
       let binding = this.noteOrganizerIndicators.get(view);
-      if (!binding || !binding.element.isConnected) {
-        const next = { element: null as unknown as HTMLElement, path: file.path };
-        const element = view.addAction("circle", "KBCC note organization", () => {
-          if (next.path) this.openNoteOrganizerMembership(next.path);
+      if (!binding || !binding.membershipElement.isConnected || !binding.returnElement.isConnected) {
+        binding?.membershipElement.remove();
+        binding?.returnElement.remove();
+        const next = {
+          membershipElement: null as unknown as HTMLElement,
+          returnElement: null as unknown as HTMLElement,
+        };
+        const membershipElement = view.addAction("circle", "KBCC note organization", () => {
+          const current = view.file;
+          if (current instanceof TFile && current.extension.toLowerCase() === "md") {
+            this.openNoteOrganizerMembership(current.path);
+          }
         });
-        next.element = element;
+        const returnElement = view.addAction("library-big", "Open Knowledge Base Command Center home", () => {
+          const current = view.file;
+          if (current instanceof TFile && current.extension.toLowerCase() === "md") {
+            this.run(() => this.returnToKbcc(current.path));
+          }
+        });
+        next.membershipElement = membershipElement;
+        next.returnElement = returnElement;
         binding = next;
         this.noteOrganizerIndicators.set(view, binding);
       }
-      binding.path = file.path;
       const summary = this.getNoteOrganizerMembershipSummary(file.path);
       const model = summary.indicator;
-      const element = binding.element;
+      const element = binding.membershipElement;
       setIcon(element, model.icon);
       element.addClass(...model.classNames);
       for (const state of [
@@ -5128,10 +5337,25 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       const count = summary.totalBaseCount;
       if (count > 1) element.setAttribute("data-kbcc-count", String(count));
       else element.removeAttribute("data-kbcc-count");
+
+      const returnRoute = this.kbccReturnRoute(file.path);
+      const returnLabel = returnRoute
+        ? "Open this note’s saved Knowledge Base Command Center page"
+        : "Open Knowledge Base Command Center home";
+      const returnElement = binding.returnElement;
+      setIcon(returnElement, returnRoute ? "history" : "library-big");
+      returnElement.addClass("ent-cc-return-to-kbcc");
+      returnElement.toggleClass("is-return", Boolean(returnRoute));
+      returnElement.toggleClass("is-home", !returnRoute);
+      returnElement.setAttribute("aria-label", returnLabel);
+      returnElement.setAttribute("data-tooltip-position", "bottom");
+      returnElement.setAttribute("title", returnLabel);
+      returnElement.setAttribute("data-kbcc-return-kind", returnRoute ? "saved-page" : "home");
     }
     for (const [view, binding] of [...this.noteOrganizerIndicators]) {
-      if (liveViews.has(view) && binding.element.isConnected) continue;
-      binding.element.remove();
+      if (liveViews.has(view) && binding.membershipElement.isConnected && binding.returnElement.isConnected) continue;
+      binding.membershipElement.remove();
+      binding.returnElement.remove();
       this.noteOrganizerIndicators.delete(view);
     }
   }
@@ -5823,6 +6047,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   async setLibraryNoteProfile(libraryId: string, profile: LibraryNoteProfile | null): Promise<void> {
     const library = this.requireLibrary(libraryId);
+    if (profile !== null) {
+      const error = this.validateLibraryNoteProfile(libraryId, profile);
+      if (error) throw new Error(error);
+    }
     const cleaned = profile === null
       ? null
       : cleanLibraryNoteProfiles({ [libraryId]: profile }, new Set([libraryId]))[libraryId] ?? null;
@@ -5830,8 +6058,6 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (!cleaned || Object.keys(cleaned).length !== Object.keys(profile).length) {
         throw new Error("The Library profile contains an unsupported value or vault path.");
       }
-      const error = this.validateLibraryNoteProfile(libraryId, cleaned);
-      if (error) throw new Error(error);
     }
     const current = this.data.settings.libraryNoteProfiles[libraryId] ?? null;
     if (JSON.stringify(current) === JSON.stringify(cleaned)) return;
@@ -7559,11 +7785,17 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private placePortableSubjectInLibrary(subjectId: string, libraryId: string, target: CatalogPlacementTarget): LayoutHeading {
     this.removePortableSubjectFromLibraryLayouts(subjectId);
     const heading = this.ensureLibraryHeading(libraryId, target);
-    const subheading = target.subheadingId
-      ? findSubheadingAtAnyDepth(heading.subheadings, target.subheadingId)
-      : undefined;
+    const subheadingChain = target.subheadingId
+      ? findSubheadingChain(heading.subheadings, target.subheadingId)
+      : null;
+    const subheading = subheadingChain?.[subheadingChain.length - 1];
     if (target.subheadingId && !subheading) throw new Error("That library subheading is no longer available.");
     (subheading?.subjects ?? heading.subjects).push(subjectId);
+    // The assignment selects this record and routes back to its Library. Keep
+    // the exact destination reachable so a newly created or moved note is not
+    // hidden behind a collapsed ancestor when the refreshed view opens.
+    heading.collapsed = false;
+    for (const ancestor of subheadingChain ?? []) ancestor.collapsed = false;
     return heading;
   }
 
@@ -8927,8 +9159,149 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (!(template instanceof TFile) || template.extension.toLocaleLowerCase() !== "md") return "The selected template could not be found.";
     }
     const path = normalizePath(genericNotePath(value.folder, value.title));
+    if (isImmutableSourcePath(path)) return "Notes cannot be created inside the immutable source-book folder.";
     if (this.app.vault.getAbstractFileByPath(path)) return `A note already exists at ${path}.`;
     return null;
+  }
+
+  /**
+   * Re-resolve a fixed Library destination against live organization state.
+   * IDs, not captured objects or labels, define the target. The returned token
+   * values deliberately come from the live labels so a harmless local rename
+   * while the form is open cannot stamp stale YAML into the new note.
+   */
+  private resolveLibraryKnowledgeNoteCreationTarget(
+    libraryId: string,
+    target: CatalogPlacementTarget,
+    policy: LibraryKnowledgeNoteCreationPolicy,
+  ): { tokenContext: TemplateTokenContext; labelFingerprint: string } {
+    this.assertDataWritable();
+    if (this.data !== policy.openedData
+      || this.getActiveKnowledgeBaseId() !== policy.openedBaseId
+      || this.dataEpoch !== policy.openedDataEpoch
+      || this.externalChangeGeneration !== policy.openedExternalChangeGeneration) {
+      throw new Error("The active knowledge base or its synced data changed. Close and reopen this form.");
+    }
+    if (this.baseOperationBusy || this.dataTransactionBusy || this.directSaveBusyCount > 0 || this.externalReloadBusy) {
+      throw new Error("Another knowledge-base change is still being saved. Wait for it to finish and try again.");
+    }
+    const library = this.requireLibrary(libraryId, false);
+    if (this.isClinicalMode() && library.sourceKind !== null) {
+      throw new Error(`The built-in ${library.name} library follows native clinical source classification.`);
+    }
+    const layout = this.data.portableIndex.libraryLayouts[libraryId] ?? [];
+    let heading = target.headingId
+      ? layout.find((candidate) => candidate.id === target.headingId)
+      : undefined;
+    if (target.headingId && !heading) {
+      throw new Error("That library heading is no longer available. Reopen the action and try again.");
+    }
+    if (!heading && target.subheadingId) {
+      heading = layout.find((candidate) => Boolean(findSubheadingAtAnyDepth(candidate.subheadings, target.subheadingId ?? "")));
+    }
+    const subheading = target.subheadingId && heading
+      ? findSubheadingAtAnyDepth(heading.subheadings, target.subheadingId)
+      : undefined;
+    if (target.subheadingId && !subheading) {
+      throw new Error("That library subheading is no longer available. Reopen the action and try again.");
+    }
+    const tokenContext: TemplateTokenContext = {
+      id: "",
+      category: subheading?.title ?? heading?.title ?? library.name,
+      parent: "",
+      library: library.name,
+      type: library.singularName,
+    };
+    return {
+      tokenContext,
+      labelFingerprint: JSON.stringify([
+        library.id,
+        library.name,
+        library.singularName,
+        heading?.id ?? "",
+        heading?.title ?? "",
+        subheading?.id ?? "",
+        subheading?.title ?? "",
+      ]),
+    };
+  }
+
+  /** Move only this operation's still-identical, still-unchanged file to trash. */
+  private async trashPristineUnfiledKnowledgeNote(file: TFile, expectedContent: string): Promise<boolean> {
+    try {
+      if (this.app.vault.getAbstractFileByPath(file.path) !== file) return false;
+      // Rollback is destructive (though recoverable), so bypass the read
+      // cache and compare the latest bytes Obsidian can read from disk.
+      const currentContent = await this.app.vault.read(file);
+      if (currentContent !== expectedContent || this.app.vault.getAbstractFileByPath(file.path) !== file) return false;
+      await this.app.fileManager.trashFile(file);
+      return true;
+    } catch (error) {
+      console.warn(`Knowledge Base Command Center preserved unfiled note ${file.path} because safe trash rollback failed`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Fixed-destination Library creation saga. Every potentially slow read or
+   * folder write happens before the final no-await preflight and Vault.create.
+   * If the subsequent organization transaction fails, only a pristine file
+   * created by this exact operation is moved to Obsidian's recoverable trash.
+   */
+  async createKnowledgeNoteInLibrary(
+    value: GenericNoteFormValue,
+    libraryId: string,
+    target: CatalogPlacementTarget,
+    policy: LibraryKnowledgeNoteCreationPolicy,
+  ): Promise<TFile> {
+    this.resolveLibraryKnowledgeNoteCreationTarget(libraryId, target, policy);
+    const initialValidation = this.validateGenericNote(value);
+    if (initialValidation) throw new Error(initialValidation);
+    const path = normalizePath(genericNotePath(value.folder, value.title));
+    const folder = path.includes("/") ? path.substring(0, path.lastIndexOf("/")) : "";
+    let templateMarkdown = "";
+    if (value.mode === "template") {
+      const template = this.app.vault.getAbstractFileByPath(normalizePath(value.templatePath));
+      if (!(template instanceof TFile)) throw new Error("The selected template could not be found.");
+      templateMarkdown = await this.app.vault.cachedRead(template);
+    }
+    const createdFolders: TFolder[] = [];
+    let createdFile: TFile | null = null;
+    try {
+      await this.ensureFolder(folder, createdFolders);
+      const liveTarget = this.resolveLibraryKnowledgeNoteCreationTarget(libraryId, target, policy);
+      const finalValidation = this.validateGenericNote(value);
+      if (finalValidation) throw new Error(finalValidation);
+      const now = new Date();
+      const content = value.mode === "template"
+        ? applyTemplateTokens(
+          templateMarkdown,
+          value.title,
+          this.today(),
+          now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          liveTarget.tokenContext,
+        )
+        : "";
+      createdFile = await this.app.vault.create(path, content);
+      try {
+        const postCreateTarget = this.resolveLibraryKnowledgeNoteCreationTarget(libraryId, target, policy);
+        if (postCreateTarget.labelFingerprint !== liveTarget.labelFingerprint) {
+          throw new Error("The Library destination labels changed while the Markdown file was being created. Reopen the action and try again.");
+        }
+        await this.assignRecordToLibrary(createdFile.path, libraryId, target);
+        return createdFile;
+      } catch (error) {
+        const rolledBack = await this.trashPristineUnfiledKnowledgeNote(createdFile, content);
+        if (rolledBack) {
+          await this.removeCreatedEmptyFolders(createdFolders);
+          throw new Error(`The note could not be filed under the selected Library destination (${errorMessage(error)}). The unchanged Markdown file was moved to Obsidian's trash.`);
+        }
+        throw new Error(`The note was created at ${createdFile.path}, but it could not be filed (${errorMessage(error)}). It was preserved because it could not be proved unchanged; use Add existing note to place it.`);
+      }
+    } catch (error) {
+      if (!createdFile) await this.removeCreatedEmptyFolders(createdFolders);
+      throw error;
+    }
   }
 
   async createKnowledgeNote(value: GenericNoteFormValue, tokenContext: TemplateTokenContext = {}): Promise<TFile> {
@@ -9642,6 +10015,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   private handleVaultRenameEvent(file: TAbstractFile, oldPath: string): void {
     if (!(file instanceof TFile) && !(file instanceof TFolder)) return;
+    this.rewriteKbccReturnNavigationPaths(oldPath, file.path);
     this.pendingVaultRenames.push({ oldPath, newPath: file.path, folderRename: file instanceof TFolder });
     try {
       this.writeVaultRenameJournal(this.pendingVaultRenames);
@@ -9868,7 +10242,37 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return index >= 0 ? String(index).padStart(4, "0") : `zz-${domain.toLowerCase()}`;
   }
 
-  async openFile(file: TFile): Promise<void> {
+  private activeCommandCenterView(): EntVaultCommandCenterView | null {
+    const workspace = this.app.workspace as typeof this.app.workspace & {
+      getActiveViewOfType?: (viewType: typeof EntVaultCommandCenterView) => EntVaultCommandCenterView | null;
+    };
+    const active = workspace.getActiveViewOfType?.(EntVaultCommandCenterView) ?? null;
+    return active instanceof EntVaultCommandCenterView ? active : null;
+  }
+
+  async openFile(file: TFile, sourceView?: EntVaultCommandCenterView): Promise<void> {
+    const origin = sourceView ?? this.activeCommandCenterView();
+    if (origin && file.extension.toLowerCase() === "md") {
+      // Persist before same-tab navigation can destroy the originating view.
+      // A failed note open leaves only a harmless path-bound route that cannot
+      // affect any other editor and may still be useful if the note opens later.
+      try {
+        this.rememberKbccReturnDestination({
+          notePath: file.path,
+          baseId: this.getActiveKnowledgeBaseId(),
+          capturedAt: Date.now(),
+          view: origin.captureReturnViewState(),
+        });
+      } catch (error) {
+        // Return navigation is a convenience layer. A malformed or oversized
+        // volatile route must never block the core note-opening action.
+        console.warn("Knowledge Base Command Center could not capture return navigation", error);
+        if (!this.kbccReturnPersistenceWarningShown) {
+          this.kbccReturnPersistenceWarningShown = true;
+          new Notice("The note will open, but its command center return destination could not be preserved.", 8000);
+        }
+      }
+    }
     const behavior = this.data.settings.openNoteBehavior;
     const leaf = behavior === "same-tab"
       ? this.app.workspace.getLeaf(false)
