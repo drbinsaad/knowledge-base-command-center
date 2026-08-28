@@ -2250,6 +2250,19 @@ test("Library note profiles clean strictly, stay bounded to real Libraries, and 
     "library-research",
     ".obsidian",
   ) ?? "", /cannot be inside/);
+  assert.match(validateLibraryNoteProfile(
+    { folder: "05 Sources/_books/Imported" },
+    data.settings,
+    "library-research",
+    ".obsidian",
+  ) ?? "", /immutable source-book folder/i);
+  data.settings.defaultNoteFolder = "05 Sources/_books/Inherited";
+  assert.match(validateLibraryNoteProfile(
+    { mode: "empty" },
+    data.settings,
+    "library-research",
+    ".obsidian",
+  ) ?? "", /immutable source-book folder/i, "an inherited effective destination is rejected too");
 });
 
 test("migration drops orphaned and hostile Library creation profiles without changing data version", () => {

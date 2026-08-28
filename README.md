@@ -72,7 +72,7 @@ First-device Sync precautions and the exact per-route update steps are in [Getti
 
 Export your current organization first. Then run **Knowledge Base Command Center: Clear device-local data…** and confirm, before disabling and removing the plugin through Community Plugins (or deleting its manual plugin folder).
 
-The plugin folder contains `data.json` with synced knowledge bases, settings, Libraries, Collections, pins, hierarchy, and named snapshots. Device-only routes, collapsed sections, Undo/Redo history, local Sync/Recovery facts, and the highest plugin version observed for one-time update announcements are stored through Obsidian's App-local storage outside that folder, so deleting only the folder does not reliably remove them. A third, bounded rename-recovery journal may temporarily contain the vault identity and old/new vault-relative paths until an interrupted organization repair is durably completed. The clear command removes all three plugin-owned App-local values without changing `data.json`, Markdown notes, attachments, or recovery export files, and local tracking stays suppressed until Obsidian restarts — disable or uninstall in that same session. If you already removed the plugin without clearing them, reinstall and enable the same or a newer release, run the clear command, then remove it again.
+The plugin folder contains `data.json` with synced knowledge bases, settings, Libraries, Collections, pins, hierarchy, and named snapshots. Device-only routes, collapsed sections, Undo/Redo history, local Sync/Recovery facts, and the highest plugin version observed for one-time update announcements are stored through Obsidian's App-local storage outside that folder, so deleting only the folder does not reliably remove them. A third, bounded rename-recovery journal may temporarily contain the vault identity and old/new vault-relative paths until an interrupted organization repair is durably completed. A fourth, bounded return-navigation history can contain the vault identity, up to 24 opened-note paths, their originating base and tab, a selected-record path, literal search text entered in KBCC, compact-detail state, and scroll positions so a note can return to the same KBCC page after restart. KBCC does not read or copy note bodies into this history, but user-entered search text can itself be sensitive; the history is not synced. The clear command removes all four plugin-owned App-local values without changing `data.json`, Markdown notes, attachments, or recovery export files, and local tracking stays suppressed until Obsidian restarts — disable or uninstall in that same session. If you already removed the plugin without clearing them, reinstall and enable the same or a newer release, run the clear command, then remove it again.
 
 ## Quick start
 
@@ -123,6 +123,8 @@ For faster entry, Obsidian's public File Explorer and editor context menus expos
 
 Open Markdown notes show an interactive KBCC organization indicator in the editor header. Its icon, text alternative, tooltip, and optional count distinguish organization in the current base, Collections-only organization, organization only in other bases, and ordinary not-organized state. Red is reserved for a broken persisted reference, not for a normal unorganized note, and color is never the only signal. Activate the indicator to review all-base memberships or open the Organizer for that note.
 
+A separate **Return to KBCC** action sits beside that indicator. When the current note path has a matching route captured as KBCC opened it, the action restores that originating knowledge base, tab or Library, selected record, search, compact detail, and saved position—even after Obsidian restarts. Without a matching path-bound route, or when its saved destination is stale, the action opens a clean KBCC Home instead and never borrows a different note's route. The bounded route history keeps only the newest origin for each note path, is device-local and vault-scoped, follows note and folder renames, prunes matching deletions, and is removable through **Clear device-local data**. Saved browse-row and structural-section limits are each capped at 10,000; an even larger expanded page returns to the bounded available position rather than retaining an unbounded DOM.
+
 Before Apply, the Organizer shows exact before/after primary and Collection results and explicitly reports zero file moves, renames, rewrites, or folder-link changes. Apply revalidates the selected file identities, destination state, and Sync generation; if anything relevant is stale, nothing is partially applied and you prepare the review again. Each changed base keeps durable per-base Undo. During the same plugin session, **Note organizer: Undo last multi-base change** and **Note organizer: Redo last multi-base change** reverse the newest reviewed batch across all affected bases together.
 
 The Organizer is deliberately for bulk organization of **existing** Markdown notes. It does not bulk-create files. Use the explicit Create note flow for each new file. In the ENT clinical preset, existing eligibility, protected Library source kinds, and canonical Index grouping remain authoritative; an incompatible placement is rejected during review.
@@ -136,6 +138,8 @@ Collections are reusable personal lists spanning the Index and Libraries. A reco
 ### Custom Libraries
 
 Create, name, icon, reorder, archive, and restore custom Libraries. Inside a Library, add headings and nested subheadings, place existing records, and use the explicit Unplaced section when structure changes.
+
+The **…** menu for any custom-Library heading or nested subheading includes **Create note here…**. It opens the normal creation form with the full heading path fixed and visible, applies that Library's creation profile, and expands every ancestor after successful placement. The exact base, Library, and destination are checked again immediately before Markdown creation. If placement still fails after the file is created, KBCC moves only that operation's provably unchanged file to Obsidian's recoverable trash; if it cannot prove the file is unchanged, it preserves the exact path and tells you how to place it manually. Protected built-in sections do not expose this action.
 
 Under **Settings → Libraries → Library creation profiles**, each Library can inherit the knowledge base's note folder, empty/template mode, and template — or override any of those fields. It is deliberately a two-level model: knowledge-base defaults, then one optional Library override. The Create note form still exposes the resolved values for a one-note exception. Profiles are keyed by the stable Library ID, so renaming keeps the profile; archiving retains it, and permanent deletion removes it.
 
@@ -225,7 +229,7 @@ The manifest is mobile-compatible and the plugin ships mobile layouts throughout
 
 The bundle is built to a 2018 JavaScript baseline so it can run on older mobile web views, and that baseline is enforced rather than assumed: the compiler is pinned to exactly that language level, so using a newer built-in method fails the build instead of shipping unpolyfilled. Version 0.13.1 fixed four such methods that had been reaching devices — the most serious ran while classifying note paths and needed iOS Safari 15.4 or newer.
 
-Physical-device claims are kept separate from automated coverage: see the completed-but-partial [0.10.0 iPhone evidence note](docs/release-evidence/0.10.0-iphone.md), the explicitly unverified [0.17.0](docs/release-evidence/0.17.0-iphone.md) and [0.18.0](docs/release-evidence/0.18.0-iphone.md) waiver records, and the [manual iPhone release checklist](docs/manual-iphone-release-checklist.md) rather than assuming any release checklist passed. The 0.18.0 record separately identifies the supplemental Mac Obsidian mobile-emulation coverage and its limits.
+Physical-device claims are kept separate from automated coverage: see the completed-but-partial [0.10.0 iPhone evidence note](docs/release-evidence/0.10.0-iphone.md), the explicitly unverified [0.17.0](docs/release-evidence/0.17.0-iphone.md), [0.18.0](docs/release-evidence/0.18.0-iphone.md), and [0.19.0](docs/release-evidence/0.19.0-iphone.md) waiver records, and the [manual iPhone release checklist](docs/manual-iphone-release-checklist.md) rather than assuming any release checklist passed. The 0.19.0 record separately identifies its supplemental Mac Obsidian mobile-emulation coverage and its limits.
 
 ### Right-to-left and bidirectional text
 
@@ -343,7 +347,7 @@ Follow the complete [backup and restore procedure](docs/PORTABILITY_AND_RECOVERY
 | --- | --- |
 | Obsidian | 1.13.0 or newer |
 | Desktop | Uses Obsidian-compatible APIs; no Electron- or Node-only runtime dependency |
-| iPhone and iPad | Supported through touch menus and mobile layouts; the [0.18.0 physical-device record](docs/release-evidence/0.18.0-iphone.md) is explicitly waived and unverified, so do not assume the release checklist passed |
+| iPhone and iPad | Supported through touch menus and mobile layouts; the [0.19.0 physical-device record](docs/release-evidence/0.19.0-iphone.md) is explicitly waived and unverified, so do not assume the release checklist passed |
 | Android | The manifest is mobile-compatible, but this repository does not currently document a complete physical-Android test pass |
 | Network | No plugin network requests, analytics, telemetry, accounts, advertising, or payments |
 
@@ -363,7 +367,7 @@ Follow the complete [backup and restore procedure](docs/PORTABILITY_AND_RECOVERY
 - The Organizer rejects any vault-qualified `obsidian://open` drop URI, including one naming the current vault. Use an unqualified vault-relative path or one of the supported menu/tree entry points.
 - The bundle targets a 2018 JavaScript baseline for older mobile web views. Newer built-in methods are rejected at build time rather than polyfilled, so a feature needing one has to be written differently or the baseline has to be raised deliberately.
 - Same-vault recovery is intentionally not portable between vaults.
-- Real-iPhone keyboard, safe-area, Dynamic Type, landscape, import/export, and destructive recovery behavior needs explicit physical-device evidence. Automated DOM checks and Mac Obsidian mobile emulation are not substitutes, and the 0.18.0 physical-iPhone matrix was explicitly waived by the maintainer rather than executed; it is unverified, not a Pass.
+- Real-iPhone keyboard, safe-area, Dynamic Type, landscape, import/export, and destructive recovery behavior needs explicit physical-device evidence. Automated DOM checks and Mac Obsidian mobile emulation are not substitutes, and the 0.19.0 physical-iPhone matrix was explicitly waived by the maintainer rather than executed; it is unverified, not a Pass.
 
 ## Troubleshooting
 
@@ -382,7 +386,7 @@ Every other symptom, including import refusals and Sync protection reasons, is c
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Apple Shortcuts guide](docs/APPLE_SHORTCUT.md)
 - [Starter templates](templates/README.md)
-- [0.10.0 iPhone evidence](docs/release-evidence/0.10.0-iphone.md) · [0.12.0 iPhone evidence](docs/release-evidence/0.12.0-iphone.md) · [0.17.0 iPhone waiver record](docs/release-evidence/0.17.0-iphone.md) · [0.18.0 iPhone waiver and Mac-emulation record](docs/release-evidence/0.18.0-iphone.md)
+- [0.10.0 iPhone evidence](docs/release-evidence/0.10.0-iphone.md) · [0.12.0 iPhone evidence](docs/release-evidence/0.12.0-iphone.md) · [0.17.0 iPhone waiver record](docs/release-evidence/0.17.0-iphone.md) · [0.18.0 iPhone waiver and Mac-emulation record](docs/release-evidence/0.18.0-iphone.md) · [0.19.0 iPhone waiver and Mac-emulation record](docs/release-evidence/0.19.0-iphone.md)
 - [Manual real-iPhone release checklist](docs/manual-iphone-release-checklist.md)
 - [Changelog](CHANGELOG.md)
 

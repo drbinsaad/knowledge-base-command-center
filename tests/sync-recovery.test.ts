@@ -363,7 +363,7 @@ test("Sync and Recovery UI is bounded, has one scroll owner, and keeps mobile ac
   assert.match(managerSource, /Sync & Recovery Center…/);
 });
 
-test("device-local clear disclosure includes the pending vault-rename journal", () => {
+test("device-local clear disclosure includes path-bearing rename and return history", () => {
   const dom = createFakeDom();
   const modal = new ClearDeviceLocalDataModal({ app: {} } as never) as ClearDeviceLocalDataModal & {
     contentEl: HTMLElement;
@@ -375,6 +375,10 @@ test("device-local clear disclosure includes the pending vault-rename journal", 
   const disclosure = modal.contentEl.textContent ?? "";
   assert.match(disclosure, /pending vault-rename recovery journal/iu);
   assert.match(disclosure, /vault identity[^.]*old\/new vault-relative paths/iu);
+  assert.match(disclosure, /note-bound return destinations/iu);
+  assert.match(disclosure, /up to 24 opened-note paths/iu);
+  assert.match(disclosure, /does not copy note bodies[^.]*search text can itself be sensitive/iu);
+  assert.match(disclosure, /Neither local value syncs/iu);
   assert.match(disclosure, /Synced knowledge-base organization[^.]*not changed/iu);
 });
 

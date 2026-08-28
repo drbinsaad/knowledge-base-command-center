@@ -692,6 +692,11 @@ export class KnowledgeNoteModal extends Modal {
   private collectionToggle: ToggleComponent | null = null;
   private collectionToggleSettingEl: HTMLElement | null = null;
   private sessionOpen = false;
+  private submitting = false;
+  private readonly disabledBeforeSubmit = new Map<
+    HTMLButtonElement | HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement,
+    boolean
+  >();
 
   private readonly syncViewportLayout = (): void => {
     const viewWindow = this.viewportWindow;
@@ -856,6 +861,10 @@ export class KnowledgeNoteModal extends Modal {
 
   onClose(): void {
     this.sessionOpen = false;
+    this.submitting = false;
+    this.disabledBeforeSubmit.clear();
+    this.modalEl.removeAttribute("aria-busy");
+    this.modalEl.removeClass("is-submitting");
     const viewWindow = this.viewportWindow;
     const viewport = viewWindow?.visualViewport;
     viewport?.removeEventListener("resize", this.syncViewportLayout);
@@ -868,6 +877,12 @@ export class KnowledgeNoteModal extends Modal {
     this.modalEl.style.removeProperty("--ent-cc-modal-visual-height");
     this.modalEl.style.removeProperty("--ent-cc-modal-visual-shift");
     this.modalEl.removeClass("is-virtual-keyboard-open");
+  }
+
+  /** Do not let Escape, the backdrop, or Cancel hide an in-flight write. */
+  close(): void {
+    if (this.sessionOpen && this.submitting) return;
+    super.close();
   }
 
   /**
@@ -930,15 +945,39 @@ export class KnowledgeNoteModal extends Modal {
     this.errorEl?.setText("");
   }
 
+  private setSubmitting(submitting: boolean): void {
+    this.submitting = submitting;
+    this.modalEl.toggleClass("is-submitting", submitting);
+    if (submitting) this.modalEl.setAttribute("aria-busy", "true");
+    else this.modalEl.removeAttribute("aria-busy");
+    if (submitting) {
+      this.disabledBeforeSubmit.clear();
+      const controls = this.contentEl.querySelectorAll<
+        HTMLButtonElement | HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
+      >("button, input, select, textarea");
+      controls.forEach((control) => {
+        this.disabledBeforeSubmit.set(control, control.disabled);
+        control.disabled = true;
+      });
+      return;
+    }
+    for (const [control, wasDisabled] of this.disabledBeforeSubmit) control.disabled = wasDisabled;
+    this.disabledBeforeSubmit.clear();
+  }
+
   private async submit(): Promise<void> {
+    if (this.submitting) return;
     this.value.title = this.value.title.trim();
     this.value.folder = this.value.folder.trim().replace(/^\/+|\/+$/g, "");
     const error = this.options.validate(this.value);
     if (error) { this.errorEl?.setText(error); return; }
+    this.setSubmitting(true);
     try {
       await this.options.onSubmit({ ...this.value });
-      this.close();
+      this.setSubmitting(false);
+      super.close();
     } catch (error) {
+      this.setSubmitting(false);
       this.errorEl?.setText(errorMessage(error));
     }
   }

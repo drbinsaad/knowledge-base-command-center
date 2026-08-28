@@ -2987,6 +2987,12 @@ export function validateLibraryNoteProfile(
   libraryId: string,
   configDir: string,
 ): string | null {
+  if (typeof profile.folder === "string") {
+    const requestedFolder = profile.folder.trim().replace(/\\/g, "/").replace(/\/{2,}/g, "/").replace(/^\/+|\/+$/g, "").normalize("NFC");
+    if (isImmutableSourcePath(`${requestedFolder}/note.md`)) {
+      return "Library notes cannot be created inside the immutable source-book folder.";
+    }
+  }
   const cleaned = cleanLibraryNoteProfiles({ [libraryId]: profile }, new Set([libraryId]))[libraryId];
   if (!cleaned || Object.keys(cleaned).length !== Object.keys(profile).length) {
     return "The Library profile contains an unsupported value or vault path.";
@@ -3004,6 +3010,9 @@ export function validateLibraryNoteProfile(
     if (templateError) return templateError;
   }
   const effective = resolveLibraryNoteProfile({ ...baseSettings, libraryNoteProfiles: { [libraryId]: cleaned } }, libraryId);
+  if (isImmutableSourcePath(`${effective.folder}/note.md`)) {
+    return "Library notes cannot be created inside the immutable source-book folder.";
+  }
   if (effective.mode === "template") {
     return validateTemplateFilePath(effective.templatePath, baseSettings.templatesFolder, configDir);
   }

@@ -4,6 +4,19 @@ Complete this checklist on a physical iPhone before tagging a release that chang
 
 Do not use private notes, patient information, or copyrighted source material in screenshots, recordings, logs, or issue attachments.
 
+## 0.19.0 candidate record
+
+- Candidate version and commit: 0.19.0 / the merged commit containing this record and carrying release tag `0.19.0`
+- Date: 2026-08-28
+- Physical-device tester: None; no physical iPhone is connected
+- Physical iPhone / iOS / Obsidian Mobile / Sync method: Unverified
+- Physical Dynamic Type, VoiceOver, Arabic right-to-left, touch, software-keyboard, safe-area, and performance results: Unverified — not executed on a physical iPhone
+- Supplemental Mac run: Real Obsidian 1.13.7 on macOS exercised the built candidate in a synthetic disposable vault at 400 × 1267 portrait and 1267 × 400 landscape with mobile/coarse-pointer emulation. A nested custom-Library subheading exposed **Create note here…**, created and placed one synthetic note under its fixed breadcrumb, and showed the result. The adjacent Return/Home and organization actions measured 44 × 44 CSS pixels; saved-page restoration survived plugin reload, an unrelated note opened clean Home, and Obsidian captured no runtime or error-level console errors. This desktop Electron run is not a physical-iPhone Pass.
+- Supplemental automated layouts: Pass on Node 22.23.2 for all 15 real-Chromium variants, including phone-width LTR/RTL, enlarged text, and coarse-pointer 1267 × 400 landscape. Automated layouts are not a physical-iPhone Pass.
+- Evidence boundary: no physical result may be inferred from Mac Electron emulation, Chromium, synthetic DOM tests, or an earlier release's screenshots.
+
+The historical 0.18.0 and 0.17.0 records remain below. After this explicitly unverified scope and the Mac-emulation limits were reported, the maintainer supplied separate candidate-specific authorization for 0.19.0. That authorization is recorded in the 0.19.0 sign-off and evidence file; it cannot be inherited by another release.
+
 ## 0.18.0 candidate record
 
 - Candidate version and commit: 0.18.0 / the merged commit containing this record and carrying release tag `0.18.0`
@@ -15,7 +28,7 @@ Do not use private notes, patient information, or copyrighted source material in
 - Supplemental automated layouts: Pass for the Organizer's LTR 1267 × 400 and RTL 844 × 390 coarse-pointer landscape variants, alongside the remaining real-Chromium layout matrix.
 - Evidence boundary: the Mac Electron emulation and Chromium layouts are useful regression evidence, but they are not iOS WebKit, a physical-device touch pass, Dynamic Type, or VoiceOver and do not complete this checklist.
 
-The historical 0.17.0 test record and sign-off below are retained unchanged. The current candidate's authorization and unverified scope are recorded separately under **0.18.0 sign-off**.
+The historical 0.17.0 test record and sign-off below are retained unchanged. The 0.18.0 authorization and unverified scope remain recorded separately under **0.18.0 sign-off**.
 
 ## Test record
 
@@ -119,6 +132,27 @@ The 0.18.0 outcome is recorded in `docs/release-evidence/0.18.0-iphone.md`. Neve
 - Blocking failures and issue links: No physical iPhone was connected, so the physical-iPhone, Dynamic Type, VoiceOver, touch, software-keyboard, safe-area, and iOS performance matrix remains unexecuted. The landscape defect found through supplemental Mac Obsidian mobile emulation was fixed and retested there.
 - Retest evidence: Real Obsidian 1.13.7 on macOS passed the documented 400 × 1267 portrait and 1267 × 400 landscape inspections after the fix; automated real-Chromium LTR 1267 × 400 and RTL 844 × 390 variants passed. These are explicitly supplemental and not a physical-device retest.
 - Authorization: After the remaining physical-device gap and evidence boundary were explicitly reported, the maintainer directed release. That authorization accepts the stated unverified scope for 0.18.0 only.
+- Final result: Maintainer-authorized waiver — physical-iPhone status remains **Unverified**, not a device Pass
+- Tester signature or initials: Unsigned — no physical-device tester
+
+## 0.19.0 in-place creation and return-navigation additions
+
+Status: **Unverified — not executed on a physical iPhone.** These items apply to 0.19.0 only. Mac and automated responsive checks may supplement this record but cannot make any item a physical-device Pass.
+
+58. In a writable custom Library, use a heading **…** menu and nested subheading **…** menus at every supported depth to choose **Create note here…**. Confirm the normal creation form shows the exact fixed Library/heading breadcrumb, resolves the Library creation profile, keeps folder/template overrides reachable above the software keyboard, creates one synthetic note at the chosen placement, and expands every ancestor so the new row is visible. Confirm every menu and action target remains at least 44 × 44 points.
+59. Reopen **Create note here…**, then separately remove the destination subheading, archive or delete the Library, switch the active base, and enter compatibility read-only mode before confirming creation. Each stale attempt must stop before Markdown creation with an actionable notice. Confirm protected built-in clinical sections omit or disable the action and canceling the form changes neither Markdown nor KBCC organization.
+60. Open organized, Collections-only, other-base-only, ordinary unorganized, and broken-reference Markdown notes. Confirm a separately labelled **Return to KBCC** action appears directly beside the organization indicator in every editor header, remains distinguishable without color, has a 44 × 44-point target, and receives a meaningful VoiceOver label without duplicating either action.
+61. From KBCC, open a note in the same tab, a new tab, and a split after setting a non-default base, Library tab, nested selected row, search query, compact detail, and scrolled list/detail positions. Activate **Return to KBCC** and confirm the matching origin is restored. Repeat after a complete Obsidian restart, after renaming the note, and after renaming its parent folder. Open an unrelated note outside KBCC and confirm the action opens clean KBCC Home instead of borrowing another note's route; make the saved base or Library stale and confirm the same safe Home fallback. Run **Clear device-local data**, reopen the note, and confirm the former return destination is gone without changing Markdown or synced organization.
+62. Repeat items 58–61 in portrait and landscape, default and largest Dynamic Type, Arabic right-to-left layout, and VoiceOver, with the software keyboard shown where applicable. Confirm safe areas, focus order, labels, touch targets, list/detail scrolling, and return restoration remain operable without body-level horizontal scrolling or covered primary actions.
+63. Upgrade a disposable existing installation from 0.18.0 to 0.19.0. Confirm the five 0.19.0 highlights wrap in portrait and landscape, both actions and the scroll region remain reachable at largest Dynamic Type with VoiceOver, the automatic window appears once only for the existing installation, and **Read complete release notes** uses exactly `https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.19.0`.
+
+The 0.19.0 outcome belongs in `docs/release-evidence/0.19.0-iphone.md`. Never mark these additions as Pass without executing them on the stated physical device, and never reuse an authorization recorded for another candidate.
+
+## 0.19.0 sign-off
+
+- Blocking failures and issue links: No physical iPhone is connected, so the complete physical-iPhone, Dynamic Type, VoiceOver, touch, software-keyboard, safe-area, right-to-left, and iOS performance matrix remains unexecuted.
+- Retest evidence: Real Obsidian 1.13.7 on macOS exercised the synthetic disposable vault at 400 × 1267 and 1267 × 400, confirmed nested **Create note here…**, 44 × 44 paired editor actions, plugin-reload route persistence, and clean Home fallback with zero captured errors. All 15 real-Chromium layouts passed. These results are supplemental and not a physical-device retest.
+- Authorization: After the physical-device gap and evidence boundary were explicitly reported, the maintainer authorized enabling the disposable local candidate and releasing/tagging 0.19.0. Acceptance is for 0.19.0 only and must not be reused.
 - Final result: Maintainer-authorized waiver — physical-iPhone status remains **Unverified**, not a device Pass
 - Tester signature or initials: Unsigned — no physical-device tester
 

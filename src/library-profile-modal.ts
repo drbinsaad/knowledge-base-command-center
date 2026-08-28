@@ -2,6 +2,7 @@ import { Modal, Notice, Setting, TFile, TFolder } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
 import {
   errorMessage,
+  isImmutableSourcePath,
   resolveLibraryNoteProfile,
   type LibraryDefinition,
   type LibraryNoteProfile,
@@ -39,6 +40,16 @@ function fileLabel(path: string): string {
 function reportProfileError(error: unknown): void {
   console.error("Knowledge Base Command Center Library creation-profile action failed", error);
   new Notice(errorMessage(error, "The Library creation profile could not be saved."), 8000);
+}
+
+/** Writable Library-note destinations shown by the folder browser. */
+export function libraryCreationFolderChoices(files: readonly unknown[]): string[] {
+  return files
+    .filter((file): file is TFolder => file instanceof TFolder
+      && !file.isRoot()
+      && !isImmutableSourcePath(`${file.path}/note.md`))
+    .map((folder) => folder.path)
+    .sort((left, right) => left.localeCompare(right));
 }
 
 /** Edit one optional base → Library note-creation override without touching notes. */
@@ -153,10 +164,7 @@ export class LibraryNoteProfileEditorModal extends Modal {
         this.folderBrowseButton = button.buttonEl;
         button.setButtonText("Browse…").onClick(() => {
           if (!this.isCurrent() || !this.folderOverride) return;
-          const folders = this.plugin.app.vault.getAllLoadedFiles()
-            .filter((file): file is TFolder => file instanceof TFolder && !file.isRoot())
-            .map((folder) => folder.path)
-            .sort((left, right) => left.localeCompare(right));
+          const folders = libraryCreationFolderChoices(this.plugin.app.vault.getAllLoadedFiles());
           new StringPickerModal(this.plugin.app, folders, "Choose destination folder", "Search vault folders…", (path) => {
             if (!this.isCurrent()) return;
             this.folder = path;

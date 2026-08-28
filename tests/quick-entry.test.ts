@@ -652,6 +652,19 @@ test("Library create and add services preserve the Quick Entry placement target"
   const existingFile = new TFile("Notes/Existing.md");
   const currentFile = new TFile("Notes/Current.md");
   const target = { headingId: "heading-a", subheadingId: "subheading-a" };
+  data.portableIndex.libraries = [library];
+  data.portableIndex.libraryLayouts[library.id] = [{
+    id: target.headingId,
+    title: "Evidence",
+    collapsed: false,
+    subjects: [],
+    subheadings: [{
+      id: target.subheadingId,
+      title: "Guidelines",
+      collapsed: false,
+      subjects: [],
+    }],
+  }];
   const assignments: Array<{ path: string; libraryId: string; target: CatalogPlacementTarget }> = [];
   const plugin = {
     data,
@@ -670,8 +683,17 @@ test("Library create and add services preserve the Quick Entry placement target"
     async assignRecordToLibrary(path: string, libraryId: string, placement: CatalogPlacementTarget): Promise<void> {
       assignments.push({ path, libraryId, target: placement });
     },
+    async createKnowledgeNoteInLibrary(
+      _value: unknown,
+      libraryId: string,
+      placement: CatalogPlacementTarget,
+    ): Promise<TFile> {
+      assignments.push({ path: createdFile.path, libraryId, target: placement });
+      return createdFile;
+    },
   };
   let onCreated: ((file: TFile) => void | Promise<void>) | undefined;
+  let createNote: ((value: unknown) => Promise<TFile>) | undefined;
   const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView & {
     app: { vault: { getAbstractFileByPath(path: string): TFile | null }; workspace: { getActiveFile(): TFile } };
     plugin: typeof plugin;
@@ -683,6 +705,8 @@ test("Library create and add services preserve the Quick Entry placement target"
       initial?: object,
       indexAfterCreate?: boolean,
       created?: (file: TFile) => void | Promise<void>,
+      completionMessage?: string,
+      formContext?: { createNote?: (value: unknown) => Promise<TFile> },
     ): void;
     startCreateLibraryNote(libraryId: string, placement?: CatalogPlacementTarget): void;
     startAddExistingToLibrary(libraryId: string, placement?: CatalogPlacementTarget): void;
@@ -697,7 +721,10 @@ test("Library create and add services preserve the Quick Entry placement target"
   view.loadedBaseId = "base-a";
   view.loadedDataEpoch = 1;
   view.staleViewNoticeShown = false;
-  view.startCreateKnowledgeNote = (_initial, _indexAfterCreate, created) => { onCreated = created; };
+  view.startCreateKnowledgeNote = (_initial, _indexAfterCreate, created, _completionMessage, formContext) => {
+    onCreated = created;
+    createNote = formContext?.createNote;
+  };
 
   const fileOpen = Object.getOwnPropertyDescriptor(VaultFilePickerModal.prototype, "open");
   VaultFilePickerModal.prototype.open = function chooseExisting(): void {
@@ -707,6 +734,8 @@ test("Library create and add services preserve the Quick Entry placement target"
   try {
     view.startCreateLibraryNote(library.id, target);
     assert.ok(onCreated);
+    assert.ok(createNote);
+    await createNote({ title: "Created" });
     await onCreated(createdFile);
     view.startAddExistingToLibrary(library.id, target);
     view.startAddCurrentToLibrary(library.id, currentFile.path, target);

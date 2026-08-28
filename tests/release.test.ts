@@ -91,11 +91,19 @@ test("public repository metadata is present", async () => {
   for (const localDataGuide of [readme, gettingStarted, troubleshooting, userGuide]) {
     assert.match(localDataGuide, /rename-recovery journal/iu);
     assert.match(localDataGuide, /vault identity[^.]*old\/new vault-relative paths/iu);
-    assert.match(localDataGuide, /all three plugin-owned App-local values/iu);
+    assert.match(localDataGuide, /return-navigation history/iu);
+    assert.match(localDataGuide, /up to 24 opened-note paths/iu);
+    assert.match(localDataGuide, /literal search text/iu);
+    assert.match(localDataGuide, /search text can itself be sensitive/iu);
+    assert.match(localDataGuide, /all four plugin-owned App-local values/iu);
   }
   assert.match(security, /bounded vault-scoped rename-recovery journal/iu);
   assert.match(security, /vault identity plus the old and new vault-relative paths/iu);
-  assert.match(security, /all three plugin-owned App-local values/iu);
+  assert.match(security, /return-navigation history/iu);
+  assert.match(security, /up to 24 opened-note paths/iu);
+  assert.match(security, /literal search text/iu);
+  assert.match(security, /search text can itself be sensitive/iu);
+  assert.match(security, /all four plugin-owned App-local values/iu);
   assert.match(readme, new RegExp(`Portable packages created by version .* use format version ${portableVersion}`, "iu"));
   assert.match(readme, new RegExp(`Current v${backupVersion} (?:snapshots|files)`, "iu"));
   assert.match(recoveryGuide, new RegExp(`Current version-${backupVersion} recovery files`, "iu"));
@@ -123,28 +131,26 @@ test("public repository metadata is present", async () => {
       `the commands appendix must include ${organizerCommand}`);
   }
   const currentChangelogStart = changelog.indexOf(`## ${String(manifest.version)}`);
+  assert.notEqual(currentChangelogStart, -1, "the current release must have a changelog section");
   const nextChangelogStart = changelog.indexOf("\n## ", currentChangelogStart + 1);
   const currentChangelog = changelog.slice(currentChangelogStart, nextChangelogStart < 0 ? undefined : nextChangelogStart);
-  assert.match(currentChangelog, new RegExp(`version-${deviceLocalVersion} device-local journals`, "iu"));
-  assert.match(currentChangelog, /user-invoked Undo\/Redo restart-durable/iu);
-  assert.match(currentChangelog, /multi-base portfolio import stages every destination's required Undo[^.]*one causally verified batch/iu);
+  assert.match(currentChangelog, /Create note here/iu);
+  assert.match(currentChangelog, /Return to KBCC/iu);
+  assert.match(currentChangelog, /survives Obsidian restarts/iu);
+  assert.match(currentChangelog, /at most 24 vault-scoped note routes[^.]*256 KiB/iu);
+  const released018Start = changelog.indexOf("## 0.18.0");
+  assert.notEqual(released018Start, -1, "the published 0.18.0 release record must remain in the changelog");
+  const released018End = changelog.indexOf("\n## ", released018Start + 1);
+  const released018Changelog = changelog.slice(released018Start, released018End < 0 ? undefined : released018End);
+  assert.match(released018Changelog, new RegExp(`version-${deviceLocalVersion} device-local journals`, "iu"));
+  assert.match(released018Changelog, /user-invoked Undo\/Redo restart-durable/iu);
+  assert.match(released018Changelog, /multi-base portfolio import stages every destination's required Undo[^.]*one causally verified batch/iu);
   const released017Start = changelog.indexOf("## 0.17.0");
   assert.notEqual(released017Start, -1, "the published 0.17.0 release record must remain in the changelog");
   const released017End = changelog.indexOf("\n## ", released017Start + 1);
   const released017Changelog = changelog.slice(released017Start, released017End < 0 ? undefined : released017End);
   assert.match(released017Changelog, /500,000-record performance budget, seven real-Chromium row-layout variants/iu);
   assert.doesNotMatch(released017Changelog, /Organizer (?:performance )?budget/iu);
-  const unreleasedChangelogStart = changelog.indexOf("## Unreleased");
-  if (unreleasedChangelogStart >= 0) {
-    const nextSectionStart = changelog.indexOf("\n## ", unreleasedChangelogStart + 1);
-    const unreleasedChangelog = changelog.slice(
-      unreleasedChangelogStart,
-      nextSectionStart < 0 ? undefined : nextSectionStart,
-    );
-    assert.match(unreleasedChangelog, new RegExp(`version-${deviceLocalVersion} device-local journals`, "iu"));
-    assert.match(unreleasedChangelog, /user-invoked Undo\/Redo restart-durable/iu);
-    assert.match(unreleasedChangelog, /multi-base portfolio import stages every destination's required Undo[^.]*one causally verified batch/iu);
-  }
   assert.match(readme, /at most 5,000 selected Markdown notes[^.]*20,000 effective note\/base destinations/iu);
   assert.match(userGuide, /up to 5,000 selected Markdown notes[^.]*one review/iu);
   assert.match(userGuide, /at most 20,000 effective note\/base directives/iu);
@@ -172,6 +178,13 @@ test("public repository metadata is present", async () => {
   assert.match(readme, /obsidian:\/\/kbcc-attach-current/);
   assert.match(readme, /Quick append follow-up notes/);
   assert.match(readme, /Settings → Mobile → Manage toolbar options/);
+  assert.match(readme, /Return to KBCC[^.]*beside/iu);
+  assert.match(readme, /Create note here/iu);
+  assert.match(userGuide, /Return to KBCC/iu);
+  assert.match(userGuide, /path-bound destination survives Obsidian restarts/iu);
+  assert.match(userGuide, /browse-row and structural-section limits are each capped at 10,000/iu);
+  assert.match(userGuide, /Create note here/iu);
+  assert.match(userGuide, /immediately before Markdown creation/iu);
   const latestChangelogVersion = /^##\s+(\d+\.\d+\.\d+)\s*$/m.exec(changelog)?.[1];
   assert.equal(latestChangelogVersion, manifest.version, "the first changelog release must match the release manifest");
   assert.match(changelog, /Version 0\.8\.1 was not published as a tag or GitHub release/);
@@ -184,10 +197,14 @@ test("public repository metadata is present", async () => {
   assert.match(iphoneChecklist, /Turn on VoiceOver/);
   assert.match(iphoneChecklist, /What’s new/);
   assert.match(iphoneChecklist, /0\.18\.0 Global Note Organizer additions/);
+  assert.match(iphoneChecklist, /0\.19\.0 in-place creation and return-navigation additions/iu);
   assert.match(iphoneChecklist, /Unverified — not executed on a physical iPhone/);
   assert.match(iphoneChecklist, /Notes → Destinations → Review using touch only/);
   assert.match(iphoneChecklist, /5,001-note selection[^.]*more than 20,000 effective note\/base directives/iu);
   assert.match(iphoneChecklist, /aggregate required-Undo snapshots exceed[^.]*4 MiB/iu);
+  assert.match(iphoneChecklist, /Create note here/iu);
+  assert.match(iphoneChecklist, /Return to KBCC/iu);
+  assert.match(iphoneChecklist, /Obsidian restart/iu);
   const escapedManifestVersion = String(manifest.version).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
   assert.match(iphoneChecklist, new RegExp(`releases/tag/${escapedManifestVersion}`, "u"));
   assert.match(currentIphoneEvidence, new RegExp(`Candidate version:\\s*${escapedManifestVersion}`, "u"));
