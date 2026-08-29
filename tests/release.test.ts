@@ -134,10 +134,19 @@ test("public repository metadata is present", async () => {
   assert.notEqual(currentChangelogStart, -1, "the current release must have a changelog section");
   const nextChangelogStart = changelog.indexOf("\n## ", currentChangelogStart + 1);
   const currentChangelog = changelog.slice(currentChangelogStart, nextChangelogStart < 0 ? undefined : nextChangelogStart);
-  assert.match(currentChangelog, /Create note here/iu);
-  assert.match(currentChangelog, /Return to KBCC/iu);
-  assert.match(currentChangelog, /survives Obsidian restarts/iu);
-  assert.match(currentChangelog, /at most 24 vault-scoped note routes[^.]*256 KiB/iu);
+  assert.match(currentChangelog, /false \*\*No linked note\*\* placeholders/iu);
+  assert.match(currentChangelog, /workspace layout ready/iu);
+  assert.match(currentChangelog, /initial metadata scan finishes/iu);
+  assert.match(currentChangelog, /does not change synced KBCC organization/iu);
+  assert.match(currentChangelog, /configured per device/iu);
+  const released019Start = changelog.indexOf("## 0.19.0");
+  assert.notEqual(released019Start, -1, "the published 0.19.0 release record must remain in the changelog");
+  const released019End = changelog.indexOf("\n## ", released019Start + 1);
+  const released019Changelog = changelog.slice(released019Start, released019End < 0 ? undefined : released019End);
+  assert.match(released019Changelog, /Create note here/iu);
+  assert.match(released019Changelog, /Return to KBCC/iu);
+  assert.match(released019Changelog, /survives Obsidian restarts/iu);
+  assert.match(released019Changelog, /at most 24 vault-scoped note routes[^.]*256 KiB/iu);
   const released018Start = changelog.indexOf("## 0.18.0");
   assert.notEqual(released018Start, -1, "the published 0.18.0 release record must remain in the changelog");
   const released018End = changelog.indexOf("\n## ", released018Start + 1);
@@ -213,6 +222,11 @@ test("public repository metadata is present", async () => {
     currentIphoneEvidence,
     /FINAL_LOCAL_[A-Z0-9_]+/u,
     "candidate evidence must contain exact final local results before release",
+  );
+  assert.doesNotMatch(
+    currentIphoneEvidence,
+    /(?:_Record\b|complete before tag|must be replaced with the clean Node 22 gate facts)/iu,
+    "candidate evidence must not retain prose staging placeholders before release",
   );
   assert.match(released017IphoneEvidence, /maintainer-authorized waiver/iu);
   assert.match(released017IphoneEvidence, /physical-iPhone matrix not executed/iu);

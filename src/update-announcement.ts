@@ -216,6 +216,19 @@ export const UPDATE_ANNOUNCEMENT_0_19_0: UpdateAnnouncement = {
   releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.19.0",
 };
 
+export const UPDATE_ANNOUNCEMENT_0_19_1: UpdateAnnouncement = {
+  version: "0.19.1",
+  title: "What’s new in Knowledge Base Command Center 0.19.1",
+  intro: "Linked notes now appear correctly when a synced vault starts on another Mac, even if Obsidian is still preparing its file metadata.",
+  highlights: [
+    "KBCC now reconciles its record cache when the workspace layout becomes ready and again when Obsidian's initial metadata scan finishes.",
+    "This removes false No linked note placeholders caused by cross-Mac startup timing while preserving a genuine placeholder when its Markdown file is still unavailable.",
+    "The repair refreshes derived display records only. It does not move, rename, create, delete, or rewrite Markdown, and it does not change synced KBCC organization.",
+    "Sync guidance now calls out that Obsidian's Active community plugin list and Installed community plugin list settings must be enabled on each device where those settings should sync.",
+  ],
+  releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.19.1",
+};
+
 const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_12_0.version, UPDATE_ANNOUNCEMENT_0_12_0],
   [UPDATE_ANNOUNCEMENT_0_12_1.version, UPDATE_ANNOUNCEMENT_0_12_1],
@@ -232,6 +245,7 @@ const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_17_0.version, UPDATE_ANNOUNCEMENT_0_17_0],
   [UPDATE_ANNOUNCEMENT_0_18_0.version, UPDATE_ANNOUNCEMENT_0_18_0],
   [UPDATE_ANNOUNCEMENT_0_19_0.version, UPDATE_ANNOUNCEMENT_0_19_0],
+  [UPDATE_ANNOUNCEMENT_0_19_1.version, UPDATE_ANNOUNCEMENT_0_19_1],
 ]);
 
 function parseSemanticVersion(value: string): ParsedSemanticVersion | null {

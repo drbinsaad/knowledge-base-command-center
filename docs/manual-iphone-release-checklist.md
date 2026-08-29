@@ -4,6 +4,19 @@ Complete this checklist on a physical iPhone before tagging a release that chang
 
 Do not use private notes, patient information, or copyrighted source material in screenshots, recordings, logs, or issue attachments.
 
+## 0.19.1 candidate record
+
+- Candidate version and commit: 0.19.1 / the merged commit containing this record and carrying release tag `0.19.1`
+- Date: 2026-08-29
+- Physical-device tester: None; no physical iPhone is connected
+- Physical iPhone / iOS / Obsidian Mobile / Sync method: Unverified
+- Physical Dynamic Type, VoiceOver, Arabic right-to-left, touch, software-keyboard, safe-area, and performance results: Unverified — not executed on a physical iPhone
+- Supplemental Mac run: Real Obsidian 1.13.7 on macOS exercised the built candidate in a synthetic disposable vault. A forced stale startup projection recovered at the initial metadata-resolution boundary, the open Command Center refreshed to linked Library notes, and no false **No linked note** placeholder badge remained for the linked fixture records. The repaired state was checked after reloading the plugin and reopening the disposable vault, with no captured runtime or error-level console errors. This desktop Electron run is not a physical-iPhone Pass.
+- Supplemental automation: The clean release bundle passed under Node 22.22.0 with 1,124/1,124 runtime tests, the enforced coverage floors, all 3 performance budgets, and all 15 Playwright layout variants. Bundle budgets and the three-file archive privacy check also passed. Automated results are not a physical-iPhone Pass.
+- Evidence boundary: no physical result may be inferred from Mac Electron testing, Playwright, synthetic DOM tests, or an earlier release's screenshots.
+
+After this explicitly unverified scope and the Mac-testing limits were reported, the maintainer directed **“Release and publish”** in response to the candidate-specific 0.19.1 authorization request. That authorization is recorded in the 0.19.1 sign-off and evidence file; it cannot be inherited by another release.
+
 ## 0.19.0 candidate record
 
 - Candidate version and commit: 0.19.0 / the merged commit containing this record and carrying release tag `0.19.0`
@@ -153,6 +166,23 @@ The 0.19.0 outcome belongs in `docs/release-evidence/0.19.0-iphone.md`. Never ma
 - Blocking failures and issue links: No physical iPhone is connected, so the complete physical-iPhone, Dynamic Type, VoiceOver, touch, software-keyboard, safe-area, right-to-left, and iOS performance matrix remains unexecuted.
 - Retest evidence: Real Obsidian 1.13.7 on macOS exercised the synthetic disposable vault at 400 × 1267 and 1267 × 400, confirmed nested **Create note here…**, 44 × 44 paired editor actions, plugin-reload route persistence, and clean Home fallback with zero captured errors. All 15 real-Chromium layouts passed. These results are supplemental and not a physical-device retest.
 - Authorization: After the physical-device gap and evidence boundary were explicitly reported, the maintainer authorized enabling the disposable local candidate and releasing/tagging 0.19.0. Acceptance is for 0.19.0 only and must not be reused.
+- Final result: Maintainer-authorized waiver — physical-iPhone status remains **Unverified**, not a device Pass
+- Tester signature or initials: Unsigned — no physical-device tester
+
+## 0.19.1 startup linked-note recovery additions
+
+Status: **Unverified — not executed on a physical iPhone.** These items apply to 0.19.1 only. Mac Obsidian and automated checks may supplement this record but cannot make any item a physical-device Pass.
+
+64. In a disposable Sync vault upgraded from 0.19.0, open a Library containing explicitly linked notes immediately after a complete Obsidian Mobile restart, while plugin organization is restored but synced Markdown discovery is still incomplete. Let Sync and initial metadata resolution finish without reloading the plugin. Confirm every temporary **No linked note** row whose Markdown file arrived becomes its linked Library record, the already-open Command Center refreshes, the active-note organization indicator updates, the linked note opens normally, and genuinely unresolved imported subjects remain placeholders.
+65. Repeat item 64 with the app backgrounded and resumed during Sync, then in portrait and landscape, at largest Dynamic Type, with VoiceOver, and with Arabic right-to-left layout. Confirm recovery causes no duplicate rows, stale badge, focus trap, horizontal overflow, or covered primary action. Upgrade a disposable existing installation from 0.19.0 to 0.19.1 and confirm **Read complete release notes** uses exactly `https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.19.1`.
+
+The 0.19.1 outcome belongs in `docs/release-evidence/0.19.1-iphone.md`. Never mark these additions as Pass without executing them on the stated physical device, and never reuse an authorization recorded for another candidate.
+
+## 0.19.1 sign-off
+
+- Blocking failures and issue links: No physical iPhone is connected, so the complete physical-iPhone, Obsidian Mobile Sync, Dynamic Type, VoiceOver, touch, software-keyboard, safe-area, right-to-left, interruption, and iOS performance matrix remains unexecuted.
+- Retest evidence: Real Obsidian 1.13.7 on macOS exercised a synthetic disposable vault, recovered a forced stale placeholder projection at metadata resolution, refreshed the restored Command Center with no false placeholder badge remaining for the linked fixture records, and retained the repaired result after reloading the plugin and reopening the disposable vault with no captured errors. The clean Node 22.22.0 release bundle passed with 1,124/1,124 runtime tests, coverage floors, all 3 performance budgets, all 15 Playwright layouts, bundle budgets, and the three-file archive privacy check. These results are supplemental and not a physical-device retest.
+- Authorization: After the candidate-specific physical-device gap and evidence boundary were explicitly reported, the maintainer directed **“Release and publish.”** This accepts the stated unverified scope for 0.19.1 only and must not be reused.
 - Final result: Maintainer-authorized waiver — physical-iPhone status remains **Unverified**, not a device Pass
 - Tester signature or initials: Unsigned — no physical-device tester
 

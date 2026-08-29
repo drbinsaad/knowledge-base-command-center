@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.19.1
+
+### Fixed
+
+- Reconciled KBCC's derived record caches when Obsidian reports the workspace layout ready and again when its initial metadata scan finishes. On a Mac opening a newly synced vault, this prevents already linked Markdown notes from remaining displayed as false **No linked note** placeholders merely because KBCC projected records before Obsidian's metadata cache was ready. A genuinely unavailable Markdown file remains an unresolved placeholder.
+- The reconciliation refreshes derived display state only. It does not move, rename, create, delete, or rewrite Markdown, and it does not change synced KBCC organization or its durable note-path bindings.
+
+### Documentation
+
+- Clarified that Obsidian Sync's **Active community plugin list** and **Installed community plugin list** settings are configured per device and must be enabled on each Mac where those settings should sync. KBCC's plugin files and plugin data must finish syncing before cross-device organization is expected to match.
+
+### Verification
+
+- Added startup-order regressions for both layout readiness and initial metadata readiness, including a delayed cross-Mac-style metadata cache where linked records first project as placeholders and then reconcile without changing Markdown or KBCC organization.
+- The physical-iPhone Sync-startup, Dynamic Type, VoiceOver, iOS safe-area, software-keyboard, and physical-touch matrix was not executed. After that gap and the limits of the supplemental Mac Obsidian and automated responsive checks were explicitly reported, the maintainer authorized the 0.19.1 release with this scope waived and unverified for this candidate only. This release does not claim a physical-device Pass.
+
 ## 0.19.0
 
 ### Added

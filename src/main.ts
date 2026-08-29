@@ -1044,6 +1044,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // can no longer own or dispose.
       if (this.unloaded || layoutReadyHandled) return;
       layoutReadyHandled = true;
+      const refreshVaultProjectionAfterReadinessBoundary = (): void => {
+        // A restored Command Center view can build its record projection while
+        // Obsidian is still populating the vault. Drop that startup snapshot at
+        // both readiness boundaries, then reload a restored hub if one is open.
+        this.invalidateRecordCache();
+        if (this.app.workspace.getLeavesOfType(VIEW_TYPE).length > 0) this.scheduleRefresh(false);
+        this.syncNoteOrganizerIndicators();
+      };
       this.registerEvent(this.app.metadataCache.on("changed", (file) => {
         // Backlinks include the whole vault, including notes outside the configured
         // index. Any metadata-link change can therefore invalidate that cache.
@@ -1051,6 +1059,15 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         this.invalidateKnowledgeBaseSearchSnapshot();
         if (this.invalidateRecordCachesForPath(file.path, { file })) this.scheduleRefresh(false);
         else if (this.app.workspace.getLeavesOfType(VIEW_TYPE).length > 0) this.scheduleRefresh(false);
+      }));
+      // Initial vault discovery does not have to emit a normal create/change
+      // event for every file. `resolved` is the final metadata-inventory fence
+      // and repairs a projection built from any earlier partial inventory.
+      let initialMetadataResolutionHandled = false;
+      this.registerEvent(this.app.metadataCache.on("resolved", () => {
+        if (initialMetadataResolutionHandled) return;
+        initialMetadataResolutionHandled = true;
+        refreshVaultProjectionAfterReadinessBoundary();
       }));
       this.registerEvent(this.app.vault.on("create", (file) => {
         if (file instanceof TFolder) {
@@ -1093,7 +1110,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.scheduleNoteOrganizerIndicatorSync()));
         this.registerEvent(this.app.workspace.on("layout-change", () => this.scheduleNoteOrganizerIndicatorSync()));
       }
-      this.syncNoteOrganizerIndicators();
+      // File events that precede listener ownership are repaired immediately;
+      // the metadata `resolved` fence above repeats this after final discovery.
+      refreshVaultProjectionAfterReadinessBoundary();
       this.maybeShowUpdateAnnouncement(initialLoad);
       this.maybeShowLegacyIndexReview();
     });

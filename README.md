@@ -229,7 +229,7 @@ The manifest is mobile-compatible and the plugin ships mobile layouts throughout
 
 The bundle is built to a 2018 JavaScript baseline so it can run on older mobile web views, and that baseline is enforced rather than assumed: the compiler is pinned to exactly that language level, so using a newer built-in method fails the build instead of shipping unpolyfilled. Version 0.13.1 fixed four such methods that had been reaching devices — the most serious ran while classifying note paths and needed iOS Safari 15.4 or newer.
 
-Physical-device claims are kept separate from automated coverage: see the completed-but-partial [0.10.0 iPhone evidence note](docs/release-evidence/0.10.0-iphone.md), the explicitly unverified [0.17.0](docs/release-evidence/0.17.0-iphone.md), [0.18.0](docs/release-evidence/0.18.0-iphone.md), and [0.19.0](docs/release-evidence/0.19.0-iphone.md) waiver records, and the [manual iPhone release checklist](docs/manual-iphone-release-checklist.md) rather than assuming any release checklist passed. The 0.19.0 record separately identifies its supplemental Mac Obsidian mobile-emulation coverage and its limits.
+Physical-device claims are kept separate from automated coverage: see the completed-but-partial [0.10.0 iPhone evidence note](docs/release-evidence/0.10.0-iphone.md), the explicitly unverified [0.17.0](docs/release-evidence/0.17.0-iphone.md), [0.18.0](docs/release-evidence/0.18.0-iphone.md), [0.19.0](docs/release-evidence/0.19.0-iphone.md), and [0.19.1](docs/release-evidence/0.19.1-iphone.md) waiver records, and the [manual iPhone release checklist](docs/manual-iphone-release-checklist.md) rather than assuming any release checklist passed. The 0.19.1 record separately identifies its supplemental Mac Obsidian startup-cache recovery coverage and its limits.
 
 ### Right-to-left and bidirectional text
 
@@ -347,7 +347,7 @@ Follow the complete [backup and restore procedure](docs/PORTABILITY_AND_RECOVERY
 | --- | --- |
 | Obsidian | 1.13.0 or newer |
 | Desktop | Uses Obsidian-compatible APIs; no Electron- or Node-only runtime dependency |
-| iPhone and iPad | Supported through touch menus and mobile layouts; the [0.19.0 physical-device record](docs/release-evidence/0.19.0-iphone.md) is explicitly waived and unverified, so do not assume the release checklist passed |
+| iPhone and iPad | Supported through touch menus and mobile layouts; the [0.19.1 physical-device record](docs/release-evidence/0.19.1-iphone.md) is explicitly waived and unverified, so do not assume the release checklist passed |
 | Android | The manifest is mobile-compatible, but this repository does not currently document a complete physical-Android test pass |
 | Network | No plugin network requests, analytics, telemetry, accounts, advertising, or payments |
 
@@ -367,7 +367,7 @@ Follow the complete [backup and restore procedure](docs/PORTABILITY_AND_RECOVERY
 - The Organizer rejects any vault-qualified `obsidian://open` drop URI, including one naming the current vault. Use an unqualified vault-relative path or one of the supported menu/tree entry points.
 - The bundle targets a 2018 JavaScript baseline for older mobile web views. Newer built-in methods are rejected at build time rather than polyfilled, so a feature needing one has to be written differently or the baseline has to be raised deliberately.
 - Same-vault recovery is intentionally not portable between vaults.
-- Real-iPhone keyboard, safe-area, Dynamic Type, landscape, import/export, and destructive recovery behavior needs explicit physical-device evidence. Automated DOM checks and Mac Obsidian mobile emulation are not substitutes, and the 0.19.0 physical-iPhone matrix was explicitly waived by the maintainer rather than executed; it is unverified, not a Pass.
+- Real-iPhone keyboard, safe-area, Dynamic Type, landscape, import/export, Sync-startup, and destructive recovery behavior needs explicit physical-device evidence. Automated DOM checks and Mac Obsidian testing are not substitutes, and the 0.19.1 physical-iPhone matrix was explicitly waived by the maintainer rather than executed; it is unverified, not a Pass.
 
 ## Troubleshooting
 
@@ -386,7 +386,7 @@ Every other symptom, including import refusals and Sync protection reasons, is c
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Apple Shortcuts guide](docs/APPLE_SHORTCUT.md)
 - [Starter templates](templates/README.md)
-- [0.10.0 iPhone evidence](docs/release-evidence/0.10.0-iphone.md) · [0.12.0 iPhone evidence](docs/release-evidence/0.12.0-iphone.md) · [0.17.0 iPhone waiver record](docs/release-evidence/0.17.0-iphone.md) · [0.18.0 iPhone waiver and Mac-emulation record](docs/release-evidence/0.18.0-iphone.md) · [0.19.0 iPhone waiver and Mac-emulation record](docs/release-evidence/0.19.0-iphone.md)
+- [0.10.0 iPhone evidence](docs/release-evidence/0.10.0-iphone.md) · [0.12.0 iPhone evidence](docs/release-evidence/0.12.0-iphone.md) · [0.17.0 iPhone waiver record](docs/release-evidence/0.17.0-iphone.md) · [0.18.0 iPhone waiver and Mac-emulation record](docs/release-evidence/0.18.0-iphone.md) · [0.19.0 iPhone waiver and Mac-emulation record](docs/release-evidence/0.19.0-iphone.md) · [0.19.1 iPhone waiver and Mac-startup record](docs/release-evidence/0.19.1-iphone.md)
 - [Manual real-iPhone release checklist](docs/manual-iphone-release-checklist.md)
 - [Changelog](CHANGELOG.md)
 
