@@ -83,6 +83,10 @@ Every affected knowledge base still received a durable per-base Undo entry. Afte
 
 There are two intentional cases: an imported subject can be path-free because it has never been linked on this device, or a previously linked Markdown file can be temporarily missing. In the second case, the plugin retains the prior path binding and keeps the subject in the placeholder queue. Let Sync finish; if a file returns at that same path, the binding resolves automatically. You can also deliberately link another eligible note. Do not treat the placeholder as proof that the file was deleted on every device.
 
+If the same knowledge-base and Library counts arrived on another device, the exact bound Markdown file is present, but its row still says **No linked note**, first update KBCC to 0.19.1 or newer. Version 0.19.0 could retain a startup record snapshot created before Obsidian finished populating the local vault; the stored path and note were intact, but the open view could continue showing a false placeholder. After updating, wait for the green Sync check and reload Obsidian. As a temporary 0.19.0 workaround, wait for Sync to finish and then disable and re-enable KBCC before relinking anything.
+
+If organization or Libraries did not arrive at all, check **Settings → Sync → Vault configuration sync** on every device. Obsidian Sync requires **Active community plugin list** and **Installed community plugin list** to be enabled manually on each device. Confirm the active configuration profile contains <code>plugins/ent-vault-command-center/data.json</code>; a profile such as <code>.obsidian-mobile</code> uses a different configuration directory. See Obsidian's [Sync settings and selective syncing](https://help.obsidian.md/sync/settings). Absolute Mac paths do not need to match because KBCC stores vault-relative paths.
+
 - **Create empty note** creates a new local note where the profile permits.
 - **Create from template** copies a local template.
 - **Link existing note** resolves the portable identity to a chosen note.

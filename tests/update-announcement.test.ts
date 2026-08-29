@@ -448,7 +448,7 @@ test("onLayoutReady owns automatic presentation and unload prevents a late or du
   active.ready();
   active.ready();
   assert.equal(active.opened.length, 1);
-  assert.equal(active.subscriptions(), 4, "layout readiness installs one owned listener set");
+  assert.equal(active.subscriptions(), 5, "layout readiness installs one owned listener set");
 
   const unloaded = createLifecycle();
   await unloaded.plugin.onload();

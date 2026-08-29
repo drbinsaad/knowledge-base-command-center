@@ -164,9 +164,12 @@ When a Generic base stored in pre-v15 plugin data is upgraded, its former `prima
 When upgrading a synced vault on several devices:
 
 1. Install the same current release line everywhere. Every device that can edit the synced plugin data must run the same release as the newest device before organization work resumes.
-2. Let the plugin file and <code>data.json</code> finish syncing before organizing, importing, or exporting recovery.
-3. Confirm the same knowledge bases and counts on each device.
-4. Export new recovery files after identity convergence.
+2. With Obsidian Sync, open **Settings → Sync → Vault configuration sync** separately on every device and enable **Active community plugin list** and **Installed community plugin list**. Obsidian documents these as opt-in, device-specific settings; see [Sync settings and selective syncing](https://help.obsidian.md/sync/settings). If the device uses an override configuration profile such as <code>.obsidian-mobile</code>, enable them for that active profile.
+3. Let the plugin files and <code>data.json</code> finish syncing, wait for Obsidian's green Sync check, then reload or restart Obsidian before organizing, importing, or exporting recovery. Community-plugin configuration typically requires a reload.
+4. Confirm the same knowledge bases, counts, and linked-note states on each device.
+5. Export new recovery files after identity convergence.
+
+KBCC stores Markdown bindings as paths relative to the vault root. Different absolute locations such as <code>/Users/alice/Vault</code> and <code>/Users/bob/Vault</code> are expected and do not break a link when both devices opened the same vault root. The synced organization itself lives in the active configuration profile under <code>plugins/ent-vault-command-center/data.json</code>; syncing only the Markdown notes is not enough.
 
 Identical pristine upgrades can converge through Sync. If exactly one same-origin copy was edited before convergence, that edited copy wins because the other has no unique work. Two independently edited copies are not guessed together; the plugin preserves data and enters a protected read-only state.
 

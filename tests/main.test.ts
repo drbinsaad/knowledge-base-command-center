@@ -7917,6 +7917,143 @@ test("a non-indexed syndrome linked to an ordinary generic note survives cache r
   assert.equal(sourceMutationCount(), 0);
 });
 
+test("layout and metadata readiness repair linked Library records cached before synced files arrive", async () => {
+  const linkedFile = new TFile("Reference/Usher syndrome.md");
+  const lateResolvedFile = new TFile("Reference/Pendred syndrome.md");
+  const files: TFile[] = [];
+  const frontmatterByPath = {
+    [linkedFile.path]: { title: "Usher syndrome", tags: ["reference"] },
+    [lateResolvedFile.path]: { title: "Pendred syndrome", tags: ["reference"] },
+  };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.primaryFolder = "Knowledge Base";
+  const libraryId = "reading";
+  const subjectId = "subject-usher-syndrome";
+  data.portableIndex = {
+    version: 1,
+    groups: [{ id: "group-syndromes", title: "Syndromes", order: 0 }],
+    subjects: [
+      {
+        id: subjectId,
+        title: "Usher syndrome",
+        groupId: "group-syndromes",
+        parentId: null,
+        order: 0,
+        indexed: false,
+        configuredId: "",
+        recordKind: "syndrome",
+        libraryId,
+      },
+      {
+        id: "subject-pendred-syndrome",
+        title: "Pendred syndrome",
+        groupId: "group-syndromes",
+        parentId: null,
+        order: 1,
+        indexed: false,
+        configuredId: "",
+        recordKind: "syndrome",
+        libraryId,
+      },
+    ],
+    resolvedPathBySubjectId: {
+      [subjectId]: linkedFile.path,
+      "subject-pendred-syndrome": lateResolvedFile.path,
+    },
+    libraries: [{
+      id: libraryId,
+      name: "Reading",
+      singularName: "Item",
+      icon: "book-open",
+      order: 0,
+      sourceKind: null,
+      archivedAt: null,
+    }],
+    libraryLayouts: {
+      [libraryId]: [{
+        id: "reading-heading",
+        title: "Reading",
+        collapsed: false,
+        subjects: [subjectId, "subject-pendred-syndrome"],
+        subheadings: [],
+      }],
+    },
+  };
+
+  const { plugin } = pluginWithFiles(data, files, frontmatterByPath);
+  let layoutReady: (() => void) | null = null;
+  let metadataResolved: (() => void) | null = null;
+  const scheduledRefreshes: boolean[] = [];
+  const app = plugin.app as unknown as {
+    vault: { on: (name: string, callback: (...args: unknown[]) => void) => unknown };
+    workspace: {
+      onLayoutReady: (callback: () => void) => void;
+      getLeavesOfType: (type: string) => unknown[];
+    };
+    metadataCache: { on: (name: string, callback: (...args: unknown[]) => void) => unknown };
+  };
+  app.vault.on = () => ({ unsubscribe: () => {} });
+  app.metadataCache.on = (name, callback) => {
+    if (name === "resolved") metadataResolved = callback;
+    return { unsubscribe: () => {} };
+  };
+  app.workspace.onLayoutReady = (callback) => { layoutReady = callback; };
+  app.workspace.getLeavesOfType = (type) => type === VIEW_TYPE ? [{}] : [];
+  (plugin as unknown as {
+    manifest: { id: string; name: string; version: string };
+    registerObsidianProtocolHandler: () => void;
+  }).manifest = {
+    id: "ent-vault-command-center",
+    name: "Knowledge Base Command Center",
+    version: "0.19.0",
+  };
+  (plugin as unknown as { registerObsidianProtocolHandler: () => void }).registerObsidianProtocolHandler = () => {};
+  (plugin as unknown as { scheduleRefresh: (invalidateRecords?: boolean) => void }).scheduleRefresh = (invalidateRecords = true) => {
+    scheduledRefreshes.push(invalidateRecords);
+  };
+
+  await plugin.onload();
+  assert.ok(layoutReady, "startup must defer vault listeners and final cache reconciliation until layout readiness");
+  const cachedBeforeInventory = plugin.getRecord(linkedFile.path);
+  assert.equal(cachedBeforeInventory?.role, "placeholder");
+  assert.equal(cachedBeforeInventory?.isPlaceholder, true);
+
+  // Obsidian Sync can finish materializing a file after plugin load but before
+  // layout readiness. The create event is then missed because listeners are
+  // intentionally installed only by the layout-ready callback.
+  files.push(linkedFile);
+  assert.equal(plugin.getRecord(linkedFile.path), cachedBeforeInventory, "the pre-layout projection remains stale without reconciliation");
+
+  layoutReady();
+
+  assert.deepEqual(scheduledRefreshes, [false], "a restored Command Center view reloads from the repaired cache");
+  const reconciled = plugin.getRecord(linkedFile.path);
+  assert.equal(reconciled?.role, "library");
+  assert.equal(reconciled?.libraryId, libraryId);
+  assert.equal(reconciled?.portableId, subjectId);
+  assert.equal(reconciled?.isPlaceholder, undefined);
+
+  const cachedBeforeMetadataResolution = plugin.getRecord(lateResolvedFile.path);
+  assert.equal(cachedBeforeMetadataResolution?.role, "placeholder");
+  files.push(lateResolvedFile);
+  assert.equal(plugin.getRecord(lateResolvedFile.path), cachedBeforeMetadataResolution,
+    "initial inventory can expand after layout readiness without a create event");
+  assert.ok(metadataResolved, "startup must own Obsidian's final metadata-resolution fence");
+
+  metadataResolved();
+
+  assert.deepEqual(scheduledRefreshes, [false, false], "both readiness repairs reload a restored Command Center view");
+  const resolvedAfterMetadataFence = plugin.getRecord(lateResolvedFile.path);
+  assert.equal(resolvedAfterMetadataFence?.role, "library");
+  assert.equal(resolvedAfterMetadataFence?.libraryId, libraryId);
+  assert.equal(resolvedAfterMetadataFence?.portableId, "subject-pendred-syndrome");
+  assert.equal(resolvedAfterMetadataFence?.isPlaceholder, undefined);
+
+  metadataResolved();
+  assert.deepEqual(scheduledRefreshes, [false, false], "the initial metadata fence reconciles only once");
+});
+
 test("custom libraries support stable CRUD, locale-invariant names, ordering, archive, and restore", async () => {
   const data = migrateData(null);
   data.settings.workspaceMode = "generic";
