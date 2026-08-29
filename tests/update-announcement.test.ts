@@ -14,6 +14,7 @@ import {
   UPDATE_ANNOUNCEMENT_0_17_0,
   UPDATE_ANNOUNCEMENT_0_18_0,
   UPDATE_ANNOUNCEMENT_0_19_0,
+  UPDATE_ANNOUNCEMENT_0_19_1,
   type UpdateAnnouncement,
 } from "../src/update-announcement.ts";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
@@ -131,6 +132,22 @@ test("0.19.0 has curated in-place creation and return-navigation news", () => {
   assert.equal(
     UPDATE_ANNOUNCEMENT_0_19_0.releaseUrl,
     "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.19.0",
+  );
+});
+
+test("0.19.1 has curated cross-Mac startup reconciliation news", () => {
+  const upgrade = planUpdateAnnouncement("0.19.1", "0.19.0", true);
+  assert.equal(upgrade.announcement, UPDATE_ANNOUNCEMENT_0_19_1);
+  assert.equal(UPDATE_ANNOUNCEMENT_0_19_1.highlights.length, 4);
+  const highlights = UPDATE_ANNOUNCEMENT_0_19_1.highlights.join("\n");
+  assert.match(highlights, /workspace layout becomes ready/u);
+  assert.match(highlights, /initial metadata scan finishes/u);
+  assert.match(highlights, /false No linked note placeholders/u);
+  assert.match(highlights, /does not change synced KBCC organization/u);
+  assert.match(highlights, /enabled on each device/u);
+  assert.equal(
+    UPDATE_ANNOUNCEMENT_0_19_1.releaseUrl,
+    "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.19.1",
   );
 });
 
