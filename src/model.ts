@@ -338,7 +338,22 @@ export function emptyCurriculumTree(): CurriculumTreeResult {
   return { domains: [], parentByPath: new Map(), childrenByPath: new Map(), nodeByPath: new Map(), depthLimitedPaths: [] };
 }
 
-export interface SavedView {
+export interface SearchViewFilters {
+  scope?: "all" | "current" | "library";
+  availability?: "all" | "linked" | "placeholders";
+  linkedFirst?: boolean;
+}
+
+/** Omit defaults so existing saved views and return routes retain their shape. */
+export function cleanSearchViewFilters(value: Record<string, unknown>): SearchViewFilters {
+  return {
+    ...(value.scope === "current" || value.scope === "library" ? { scope: value.scope } : {}),
+    ...(value.availability === "linked" || value.availability === "placeholders" ? { availability: value.availability } : {}),
+    ...(value.linkedFirst === true ? { linkedFirst: true } : {}),
+  };
+}
+
+export interface SavedView extends SearchViewFilters {
   id: string;
   name: string;
   tab: MainTab;
@@ -511,6 +526,14 @@ export interface KnowledgeBaseEntry {
   data: PluginData;
 }
 
+export interface DeletedKnowledgeBaseCausality {
+  /** Binds the optional proof to one exact legacy-compatible deletion timestamp. */
+  deletedAt: number;
+  semanticHead: string;
+  semanticHash: string;
+  semanticLineage: string[];
+}
+
 export interface PluginStore {
   kind: typeof STORE_KIND;
   version: typeof STORE_VERSION;
@@ -520,6 +543,8 @@ export interface PluginStore {
   bases: KnowledgeBaseEntry[];
   /** Stable IDs permanently removed from this vault. Tombstones prevent Sync from resurrecting them. */
   deletedBaseIds: Record<string, number>;
+  /** Optional observed endpoints; older builds can discard these safely, causing conservative rescue. */
+  deletedBaseCausality?: Record<string, DeletedKnowledgeBaseCausality>;
 }
 
 export interface DeviceLocalKnowledgeBaseState {
@@ -985,6 +1010,32 @@ function isSemanticFingerprint(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{16}$/i.test(value);
 }
 
+/** Invalid optional deletion proof must cause extra rescue, never suppress it. */
+export function readDeletedBaseCausality(input: unknown, deletedAt: number): DeletedKnowledgeBaseCausality | null {
+  if (!isPlainRecord(input) || input.deletedAt !== deletedAt
+    || !Number.isFinite(deletedAt) || deletedAt <= 0
+    || !isSemanticFingerprint(input.semanticHead) || !isSemanticFingerprint(input.semanticHash)
+    || !Array.isArray(input.semanticLineage) || input.semanticLineage.length > MAX_SEMANTIC_LINEAGE
+    || !input.semanticLineage.every(isSemanticFingerprint)) return null;
+  const semanticHead = input.semanticHead.toLowerCase();
+  const semanticHash = input.semanticHash.toLowerCase();
+  const semanticLineage = input.semanticLineage.map((head: string) => head.toLowerCase());
+  if (semanticLineage.includes(semanticHead) || new Set(semanticLineage).size !== semanticLineage.length
+    || (semanticHead === semanticHash && semanticLineage.length > 0)) return null;
+  return { deletedAt, semanticHead, semanticHash, semanticLineage };
+}
+
+/** Record only the causal endpoint the deleting device has actually observed. */
+export function createDeletedBaseCausality(entry: KnowledgeBaseEntry, deletedAt: number): DeletedKnowledgeBaseCausality | null {
+  if (entry.semanticHash !== semanticEntryFingerprint(entry)) return null;
+  return readDeletedBaseCausality({
+    deletedAt,
+    semanticHead: entry.semanticHead,
+    semanticHash: entry.semanticHash,
+    semanticLineage: entry.semanticLineage,
+  }, deletedAt);
+}
+
 /**
  * Preserve the newest occurrence of each ancestor and bound the causal proof.
  * Dropped old ancestry can only produce a false conflict, never a false win.
@@ -1360,7 +1411,9 @@ function sameMigrationEnvelopeMetadata(
       !== JSON.stringify(canonicalJsonValue(parentStore.deletedBaseIds))
     || canonicalJsonValue(parentStore.deletedBaseIds) === undefined
     || JSON.stringify(canonicalJsonValue(parentStore.deletedBaseIds))
-      !== JSON.stringify(canonicalJsonValue(after.deletedBaseIds))) return false;
+      !== JSON.stringify(canonicalJsonValue(after.deletedBaseIds))
+    || canonicalJsonString(before.deletedBaseCausality ?? {}) !== canonicalJsonString(parentStore.deletedBaseCausality ?? {})
+    || canonicalJsonString(parentStore.deletedBaseCausality ?? {}) !== canonicalJsonString(after.deletedBaseCausality ?? {})) return false;
   return parentStore.bases.every((parent) => {
     const repaired = after.bases.find((entry) => entry.id === parent.id);
     return Boolean(repaired
@@ -3059,6 +3112,7 @@ function cleanSavedViews(input: unknown): SavedView[] {
       name,
       tab,
       query,
+      ...cleanSearchViewFilters(view),
     });
   }
   return views;
@@ -3789,6 +3843,8 @@ export function migrateStore(input: unknown, now = Date.now()): PluginStore {
     throw new Error(`The knowledge-base store contains more than ${MAX_DELETED_KNOWLEDGE_BASE_IDS.toLocaleString()} permanent-deletion tombstones.`);
   }
   const deletedBaseIds: Record<string, number> = {};
+  const deletedBaseCausality: Record<string, DeletedKnowledgeBaseCausality> = {};
+  const rawDeletedBaseCausality = isPlainRecord(value.deletedBaseCausality) ? value.deletedBaseCausality : {};
   for (const [rawId, rawTimestamp] of deletedEntries) {
     const id = cleanKnowledgeBaseId(rawId, "Deleted knowledge base");
     validateLoadedNumber(rawTimestamp, `Deleted knowledge base ${id} timestamp`);
@@ -3796,6 +3852,10 @@ export function migrateStore(input: unknown, now = Date.now()): PluginStore {
     if (!Number.isFinite(deletedAt) || deletedAt <= 0) throw new Error(`Deleted knowledge base ${id} has an invalid timestamp.`);
     if (ids.has(id)) throw new Error(`Deleted knowledge base ${id} is still present in the base list.`);
     deletedBaseIds[id] = deletedAt;
+    // Iterate only bounded, validated tombstone IDs; orphan or malformed proof
+    // is not authority and falls back to the legacy conservative-rescue path.
+    const proof = readDeletedBaseCausality(rawDeletedBaseCausality[id], deletedAt);
+    if (proof) deletedBaseCausality[id] = proof;
   }
   if (!bases.some((entry) => entry.archivedAt === null)) throw new Error("At least one knowledge base must remain available.");
   const activeBaseId = cleanKnowledgeBaseId(value.activeBaseId, "Active knowledge base");
@@ -3808,7 +3868,10 @@ export function migrateStore(input: unknown, now = Date.now()): PluginStore {
       : rawVaultId || migratedVaultIdFromInterimEnvelope({ bases, deletedBaseIds }),
     "Vault",
   );
-  return { kind: STORE_KIND, version: STORE_VERSION, vaultId, activeBaseId, bases, deletedBaseIds };
+  return {
+    kind: STORE_KIND, version: STORE_VERSION, vaultId, activeBaseId, bases, deletedBaseIds,
+    ...(Object.keys(deletedBaseCausality).length > 0 ? { deletedBaseCausality } : {}),
+  };
 }
 
 /** Normalize Library definitions, layouts, and navigation after migration or restoration. */

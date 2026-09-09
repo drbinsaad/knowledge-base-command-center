@@ -2,6 +2,7 @@ import { Modal, Notice, setIcon } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
 import { createOpenedBaseGuard, type OpenedBaseGuard } from "./modals";
 import { formatLocalAge, type SyncRecoveryCenterSnapshot } from "./sync-recovery";
+import { ExportImportCenterModal } from "./portability-modal";
 
 export class SyncRecoveryCenterModal extends Modal {
   private openedBaseId = "";
@@ -10,6 +11,7 @@ export class SyncRecoveryCenterModal extends Modal {
   private focusTimer: number | null = null;
   private announcementTimer: number | null = null;
   private recheckAnnouncement = "";
+  private diagnosticsOpen = false;
 
   constructor(private readonly plugin: EntVaultCommandCenterPlugin) {
     super(plugin.app);
@@ -78,7 +80,9 @@ export class SyncRecoveryCenterModal extends Modal {
     });
     const modeIcon = mode.createSpan({ attr: { "aria-hidden": "true" } });
     setIcon(modeIcon, snapshot.readOnly ? "shield-alert" : "shield-check");
-    mode.createSpan({ text: snapshot.readOnly ? "Protected read-only" : "Writable" });
+    mode.createSpan({ text: snapshot.readOnly ? "Protected read-only"
+      : snapshot.semanticCommitState === "committed" ? "Local changes saved"
+        : snapshot.semanticCommitState === "pending" ? "Local changes awaiting save" : "Local save not yet confirmed" });
     const recheckStatus = intro.createDiv({
       cls: "ent-cc-sync-recovery-recheck-status",
       attr: { role: "status", "aria-live": "polite", "aria-atomic": "true" },
@@ -90,10 +94,33 @@ export class SyncRecoveryCenterModal extends Modal {
       attr: { role: "region", "aria-label": "Local Sync and Recovery diagnostics", tabindex: "0" },
     });
     this.renderActiveBase(scroll, snapshot);
-    this.renderTimeline(scroll, snapshot, now);
+    const nextSteps = this.section(scroll, "Recovery and next steps", "archive-restore");
+    nextSteps.createEl("p", { text: `Last recovery export: ${formatLocalAge(snapshot.newestRecoveryExportAt, now)}.` });
+    nextSteps.createEl("p", { text: snapshot.readOnly
+      ? "Preserve plugin data and recovery files before troubleshooting. This screen cannot confirm whether another device has finished syncing."
+      : "Keep a private organization backup before major changes. Back up Markdown notes and attachments separately using your vault backup tools." });
+    if (!snapshot.readOnly) {
+      this.actionButton(nextSteps, "download", "Back up organization…", () => {
+        this.close();
+        new ExportImportCenterModal(this.plugin, "export", undefined, "backup").open();
+      });
+    }
+    if (snapshot.readOnly) this.renderProtection(scroll, snapshot);
     this.renderRecovery(scroll, snapshot, now);
-    this.renderProtection(scroll, snapshot);
-    this.renderDevice(scroll, snapshot);
+    const diagnostics = scroll.createEl("details", { cls: "ent-cc-sync-recovery-diagnostics" });
+    diagnostics.open = this.diagnosticsOpen;
+    diagnostics.addEventListener("toggle", () => { this.diagnosticsOpen = diagnostics.open; });
+    diagnostics.createEl("summary", { text: "Technical diagnostics" });
+    const causalFacts = this.section(diagnostics, "Organization fingerprints", "fingerprint").createEl("dl", { cls: "ent-cc-sync-recovery-facts" });
+    this.fact(causalFacts, "Semantic revision", snapshot.semanticRevision.toLocaleString());
+    this.fact(causalFacts, "Semantic head", snapshot.semanticHeadSummary);
+    diagnostics.createEl("p", {
+      cls: "ent-cc-sync-recovery-note",
+      text: "The head is a shortened non-secret fingerprint for comparison. Vault and knowledge-base identifiers are intentionally hidden.",
+    });
+    this.renderTimeline(diagnostics, snapshot, now);
+    if (!snapshot.readOnly) this.renderProtection(diagnostics, snapshot);
+    this.renderDevice(diagnostics, snapshot);
     scroll.createDiv({
       cls: "ent-cc-sync-recovery-boundary",
       text: "A quiet local history is not proof that remote changes have finished. Use your sync provider's own supported status surface before switching devices.",
@@ -116,17 +143,11 @@ export class SyncRecoveryCenterModal extends Modal {
     const facts = section.createEl("dl", { cls: "ent-cc-sync-recovery-facts" });
     this.fact(facts, "Name", snapshot.activeBaseName);
     this.fact(facts, "Profile", snapshot.workspaceProfile);
-    this.fact(facts, "Semantic revision", snapshot.semanticRevision.toLocaleString());
-    this.fact(facts, "Semantic head", snapshot.semanticHeadSummary);
     this.fact(facts, "Local commit state", snapshot.semanticCommitState === "committed"
       ? "Matches the last committed local snapshot"
       : snapshot.semanticCommitState === "pending"
         ? "Live semantic state differs from the last committed local snapshot"
         : "No committed local snapshot is available");
-    section.createEl("p", {
-      cls: "ent-cc-sync-recovery-note",
-      text: "The head is a shortened non-secret fingerprint for comparison. Vault and knowledge-base identifiers are intentionally hidden.",
-    });
   }
 
   private renderTimeline(parent: HTMLElement, snapshot: SyncRecoveryCenterSnapshot, now: number): void {

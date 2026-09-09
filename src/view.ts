@@ -1,5 +1,7 @@
 import { ItemView, Menu, Notice, Platform, setIcon, TFile, WorkspaceLeaf, normalizePath } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
+import { captureViewFocus, restoreViewFocus, readableStatus, relativeUpdatedTime, recordAvailabilitySummary } from "./view-state";
+import { cleanSearchViewFilters, type SearchViewFilters } from "./model";
 import type { CatalogPlacementTarget } from "./main";
 import { IndexManagerModal, type ManagerTab } from "./index-manager";
 import { ExportImportCenterModal } from "./portability-modal";
@@ -133,6 +135,7 @@ interface LibraryMembership extends Membership {
 
 interface CreateKnowledgeNoteFormContext {
   createLabel?: string;
+  hideCollectionToggle?: boolean;
   contextNotice?: string;
   tokenContext?: TemplateTokenContext;
   /** Optional combined creator for flows that must commit their own filing. */
@@ -456,7 +459,7 @@ function iconButton(parent: HTMLElement, icon: string, label: string, className 
   return button;
 }
 
-const PLACEHOLDER_STATUS_LABEL = "No linked note";
+const PLACEHOLDER_STATUS_LABEL = "No note";
 const RECORD_KEYBOARD_SHORTCUTS = "Enter Space M P";
 
 /** Render a non-interactive icon without hiding its meaning from assistive technology. */
@@ -491,9 +494,10 @@ export function createQuickEntryButton(parent: HTMLElement, onActivate: () => vo
 }
 
 /** Marks a disclosure control so assistive technology can announce open/closed state. */
-function disclosureButton(parent: HTMLElement, collapsed: boolean, label: string): HTMLButtonElement {
+function disclosureButton(parent: HTMLElement, collapsed: boolean, label: string, key = label): HTMLButtonElement {
   const button = iconButton(parent, collapsed ? "chevron-right" : "chevron-down", `${collapsed ? "Expand" : "Collapse"} ${label}`, "ent-cc-disclosure");
   button.setAttribute("aria-expanded", String(!collapsed));
+  button.setAttribute("data-kbcc-focus", `disclosure:${key}`);
   return button;
 }
 
@@ -667,6 +671,12 @@ export class EntVaultCommandCenterView extends ItemView {
   } | null = null;
   private curriculum: CurriculumTreeResult = emptyCurriculumTree();
   private query = "";
+  private searchScope: "all" | "current" | "library" = "all";
+  private searchAvailability: "all" | "linked" | "placeholders" = "all";
+  private searchLinkedFirst = false;
+  private viewDensity: "comfortable" | "compact" = "comfortable";
+  private workspaceOptionsOpen = false;
+  private inspectorSelectedByUser = false;
   private parsedQuery: ParsedQuery = parseQuery("");
   private searchDebounce: number | null = null;
   private setupTimer: number | null = null;
@@ -885,6 +895,10 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   async reload(withinOperation = false): Promise<void> {
+    const focusBefore = captureViewFocus(this.contentEl);
+    const listScrollBefore = this.paneLayout === "wide" ? this.treeEl?.scrollTop ?? 0 : this.workspaceEl?.scrollTop ?? 0;
+    const detailScrollBefore = this.paneLayout === "wide" ? this.inspectorEl?.scrollTop ?? 0
+      : this.inspectorEl?.querySelector<HTMLElement>(".ent-cc-inspector-body")?.scrollTop ?? 0;
     this.measureAndApplyPaneLayout(false);
     const activeBaseId = this.plugin.getActiveKnowledgeBaseId();
     const dataEpoch = this.currentDataEpoch();
@@ -918,13 +932,17 @@ export class EntVaultCommandCenterView extends ItemView {
       if (baseChanged) {
         this.query = "";
         this.parsedQuery = parseQuery("");
+        this.searchScope = "all";
+        this.searchAvailability = "all";
+        this.searchLinkedFirst = false;
+        this.inspectorSelectedByUser = false;
+        this.mobileInspectorOpen = false;
+        this.mobileInspectorNeedsFocus = false;
+        this.mobileTreeScrollTop = 0;
+        this.mobileInspectorScrollTop = 0;
       }
       this.editMode = false;
       this.curriculumArrangeMode = false;
-      this.mobileInspectorOpen = false;
-      this.mobileInspectorNeedsFocus = false;
-      this.mobileTreeScrollTop = 0;
-      this.mobileInspectorScrollTop = 0;
       this.collapsedQueues = new Set(this.plugin.data.collapsed.queues);
       this.collapsedCurriculumDomains = new Set(this.plugin.data.collapsed.curriculumDomains);
       this.collapsedCurriculumNodes = new Set(this.plugin.data.collapsed.curriculumNodes);
@@ -939,6 +957,7 @@ export class EntVaultCommandCenterView extends ItemView {
       .some((tab) => tab.id === this.plugin.data.activeTab)
       && !this.plugin.isDataReadOnly()) {
       this.plugin.data.activeTab = "curriculum";
+      if (this.searchScope === "library") this.searchScope = "current";
       await this.plugin.saveViewState(withinOperation);
       if (!this.guardLoadedBase()) return;
     }
@@ -947,6 +966,9 @@ export class EntVaultCommandCenterView extends ItemView {
       this.plugin.data.curriculumVisual,
       this.plugin.data.settings.workspaceMode === "ent-clinical",
     );
+    if (!baseChanged && this.hasGlobalSearch() && this.globalSearchResultKey !== this.globalSearchKey()) {
+      this.pendingReturnScroll = { searchKey: this.globalSearchKey(), listScrollTop: listScrollBefore, detailScrollTop: detailScrollBefore };
+    }
     // Ordinary vault changes can refresh only the result tree. Keeping the
     // input node alive prevents iOS from dismissing the software keyboard.
     if (searchWasFocused && !baseChanged && !dataChanged && this.treeEl) {
@@ -958,7 +980,11 @@ export class EntVaultCommandCenterView extends ItemView {
       if (!this.isCompactInspectorLayout() && this.inspectorEl) this.renderInspector();
       return;
     }
-    this.render();
+    this.render(!baseChanged);
+    if (!baseChanged && this.contentEl?.ownerDocument) {
+      this.restoreReturnScrollPosition(listScrollBefore, detailScrollBefore);
+      restoreViewFocus(this.contentEl, focusBefore);
+    }
     if (searchWasFocused && !baseChanged) {
       const replacement = this.contentEl.querySelector<HTMLInputElement>('.ent-cc-search-box input[type="search"]');
       replacement?.focus({ preventScroll: true });
@@ -1004,6 +1030,10 @@ export class EntVaultCommandCenterView extends ItemView {
       this.currentDataEpoch(),
       this.currentSearchGeneration(),
       query,
+      this.searchScope,
+      this.searchAvailability,
+      this.searchLinkedFirst,
+      this.searchScope === "library" ? libraryIdForTab(this.plugin.data.activeTab) : "",
     ].join("\u0000");
   }
 
@@ -1012,7 +1042,21 @@ export class EntVaultCommandCenterView extends ItemView {
       this.plugin.getActiveKnowledgeBaseId(),
       this.currentDataEpoch(),
       this.currentSearchGeneration(),
+      this.searchScope,
+      this.searchAvailability,
+      this.searchLinkedFirst,
+      this.searchScope === "library" ? libraryIdForTab(this.plugin.data.activeTab) : "",
     ].join("\u0000");
+  }
+
+  private currentSearchFilters(): SearchViewFilters {
+    return cleanSearchViewFilters({ scope: this.searchScope, availability: this.searchAvailability, linkedFirst: this.searchLinkedFirst });
+  }
+
+  private restoreSearchFilters(filters: SearchViewFilters, tab: MainTab): void {
+    this.searchScope = filters.scope === "library" && !libraryIdForTab(tab) ? "current" : filters.scope ?? "all";
+    this.searchAvailability = filters.availability ?? "all";
+    this.searchLinkedFirst = filters.linkedFirst ?? false;
   }
 
   private cancelPendingGlobalSearch(): void {
@@ -1035,6 +1079,10 @@ export class EntVaultCommandCenterView extends ItemView {
     void this.plugin.searchKnowledgeBases(query, {
       limit: MAX_RENDERED_SEARCH_RESULTS,
       isCancelled: cancelled,
+      ...((this.searchScope ?? "all") !== "all" ? { baseIds: [this.plugin.getActiveKnowledgeBaseId()] } : {}),
+      ...(this.searchScope === "library" ? { libraryId: libraryIdForTab(this.plugin.data.activeTab) ?? undefined } : {}),
+      availability: this.searchAvailability,
+      linkedFirst: this.searchLinkedFirst,
     }).then((result) => {
       if (!result || cancelled()) {
         if (requestGeneration === this.globalSearchRequestGeneration && this.globalSearchPendingKey === key) {
@@ -1860,13 +1908,14 @@ export class EntVaultCommandCenterView extends ItemView {
         icon: "file-plus-2",
       },
       ...(!this.plugin.isClinicalMode() ? [{ id: "index-existing", title: `Add existing note to ${settings.indexLabel}`, description: `Index any eligible Markdown note without moving or editing its file.`, icon: "list-plus" }] : []),
+      ...(this.plugin.isClinicalMode() ? [{ id: "vault-note", title: "Link an existing vault note", description: "Add a Markdown note to a collection without moving or modifying the note.", icon: "file-plus-2" }] : []),
+      { id: "current-note", title: "Add current note", description: "Place the currently open note in a collection.", icon: "panel-top" },
       ...(!activeLibraryAcceptsManualAdd && addableLibraries.length > 0 ? [
         { id: "choose-library", title: "Add to library…", description: "Choose a library, then create, select, or use the current note without changing Markdown.", icon: "library" },
       ] : []),
       { id: "new-library", title: "New library…", description: "Create another top-level section with its own headings and subheadings.", icon: "library-big" },
       { id: "existing-topic", title: `Add indexed ${settings.itemSingular}`, description: `Choose from ${settings.indexLabel} and place it under any collection heading or subheading.`, icon: "library" },
-      { id: "vault-note", title: "Link an existing vault note", description: "Add a Markdown note to a collection without moving or modifying the note.", icon: "file-plus-2" },
-      { id: "current-note", title: "Add current note", description: "Place the currently open note in a collection.", icon: "panel-top" },
+      ...(!this.plugin.isClinicalMode() ? [{ id: "vault-note", title: "Link an existing vault note to a collection", description: "Add a Markdown note to a collection without moving or modifying the note.", icon: "file-plus-2" }] : []),
     ];
     if (this.plugin.isClinicalMode()) actions.push({ id: "proposal", title: "Create topic proposal", description: "Capture an unverified clinical scaffold in the Topic Inbox for later promotion.", icon: "inbox" });
     if (this.plugin.isClinicalMode() && settings.enableAdvancedCanonicalActions) {
@@ -2372,6 +2421,8 @@ export class EntVaultCommandCenterView extends ItemView {
       },
       onSubmit: async (value) => {
         if (!ownsBase()) return;
+        const currentPlacementIssue = placementIssue?.();
+        if (currentPlacementIssue) throw new Error(currentPlacementIssue);
         const file = createNote
           ? await createNote(value)
           : await this.plugin.createKnowledgeNote(value, modalContext.tokenContext);
@@ -2520,6 +2571,50 @@ export class EntVaultCommandCenterView extends ItemView {
       if (!ownsBase()) return;
       this.openCollectionPicker(file.path);
     }).open();
+  }
+
+  private startCollectionNote(target: Membership, create: boolean): void {
+    if (!this.guardLoadedBase()) return;
+    const ownsBase = this.createOpenedBaseGuard();
+    const currentTarget = (): CollectionTarget | undefined => collectionTargets(this.plugin.data.collections)
+      .find((candidate) => candidate.headingId === target.headingId && candidate.subheadingId === target.subheadingId);
+    const placementIssue = (): string | null => {
+      if (!ownsBase()) return "The active knowledge base changed. Close and reopen this action.";
+      if (this.plugin.isDataReadOnly()) return "Organization is read-only.";
+      return currentTarget() ? null : "That collection destination no longer exists. Reopen the action.";
+    };
+    const label = currentTarget()?.label;
+    const issue = placementIssue();
+    if (issue || !label) { new Notice(issue ?? "That collection destination no longer exists."); return; }
+    const place = async (file: TFile): Promise<void> => {
+      const assertCurrentFile = (): void => {
+        if (file.extension.toLocaleLowerCase() !== "md" || this.app.vault.getAbstractFileByPath(file.path) !== file) {
+          throw new Error("That Markdown note is no longer available. Reopen the action and choose it again.");
+        }
+      };
+      const issue = placementIssue();
+      if (issue) throw new Error(issue);
+      assertCurrentFile();
+      await this.plugin.mutate("Add note to collection", () => {
+        const issue = placementIssue();
+        if (issue) throw new Error(issue);
+        assertCurrentFile();
+        if (!this.addMembership(file.path, target)) throw new Error("That collection destination no longer exists.");
+      });
+    };
+    if (create) {
+      this.startCreateKnowledgeNote({}, false, place, `Note created and added to ${label}.`, {
+        contextNotice: `This note will be added to ${label}. The collection destination is fixed for this action.`,
+        hideCollectionToggle: true,
+        placementIssue,
+      });
+    } else {
+      new VaultFilePickerModal(this.app, this.plugin.getVaultNoteFiles(false), `Add existing note to ${label}`, async (file) => {
+        if (!ownsBase()) return;
+        await place(file);
+        if (ownsBase()) new Notice(`Added to ${label}. The source note stayed in place.`);
+      }).open();
+    }
   }
 
   public startAddCurrentNote(explicitPath?: string): void {
@@ -2753,6 +2848,11 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private render(preserveBrowseLimits = false): void {
+    const focusedControl = this.mobileInspectorNeedsFocus ? null : captureViewFocus(this.contentEl);
+    // Native details toggle events are queued; read the live state before
+    // replacement so an immediate keyboard action cannot close the panel.
+    const currentOptions = this.contentEl.querySelector<HTMLDetailsElement>(".ent-cc-workspace-options");
+    if (currentOptions) this.workspaceOptionsOpen = currentOptions.open;
     this.indexProvenanceCache = new WeakMap<object, IndexMembershipProvenanceData>();
     // A full route/tab render returns to the bounded initial page. Incremental
     // "Show more" actions use renderTree() and therefore preserve their limit.
@@ -2770,6 +2870,7 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     this.contentEl.empty();
     this.contentEl.addClass("ent-cc-view");
+    this.contentEl.toggleClass("is-density-compact", this.viewDensity === "compact");
     this.applyPaneLayoutClasses();
     const shell = this.contentEl.createDiv({ cls: `ent-cc-shell is-pane-${this.paneLayout}` });
 
@@ -2789,6 +2890,7 @@ export class EntVaultCommandCenterView extends ItemView {
       this.treeEl = null;
       this.createInspector(shell);
       this.renderInspector();
+      restoreViewFocus(this.contentEl, focusedControl);
       return;
     }
 
@@ -2813,18 +2915,21 @@ export class EntVaultCommandCenterView extends ItemView {
     const health = titleBlock.createDiv({ cls: "ent-cc-health-summary", attr: { "aria-label": "Vault knowledge summary" } });
     this.populateHealthSummary(health);
 
-    const actions = header.createDiv({ cls: "ent-cc-header-actions" });
+    const primaryActions = header.createDiv({ cls: "ent-cc-header-actions" });
     const readOnly = typeof this.plugin.isDataReadOnly === "function" && this.plugin.isDataReadOnly();
     if (!this.plugin.data.settings.setupComplete) {
-      const setup = actions.createEl("button", { cls: "ent-cc-button ent-cc-add-button", type: "button" });
+      const setup = primaryActions.createEl("button", { cls: "ent-cc-button ent-cc-add-button", type: "button" });
       setIcon(setup.createSpan(), "settings-2");
       setup.createSpan({ text: "Set up" });
       disableWhenReadOnly(setup, readOnly, "Set up");
       setup.addEventListener("click", () => this.openSetupWizard());
     }
-    const quickEntry = createQuickEntryButton(actions, () => this.openQuickEntry(this.app.workspace.getActiveFile()?.path));
-    disableWhenReadOnly(quickEntry, readOnly, "Quick entry");
-    const organize = actions.createEl("button", {
+    const globalAdd = primaryActions.createEl("button", { cls: "ent-cc-button ent-cc-add-button ent-cc-primary-button ent-cc-main-add", type: "button" });
+    setIcon(globalAdd.createSpan(), "plus");
+    globalAdd.createSpan({ text: "Add" });
+    disableWhenReadOnly(globalAdd, readOnly, "Add");
+    globalAdd.addEventListener("click", () => this.openAddActions());
+    const organize = primaryActions.createEl("button", {
       cls: "ent-cc-button ent-cc-note-organizer-launch",
       type: "button",
       attr: {
@@ -2832,6 +2937,16 @@ export class EntVaultCommandCenterView extends ItemView {
         title: "Organize notes across knowledge bases",
       },
     });
+    const options = primaryActions.createEl("details", { cls: "ent-cc-workspace-options" });
+    options.open = this.workspaceOptionsOpen;
+    options.addEventListener("toggle", () => {
+      if (options.isConnected) this.workspaceOptionsOpen = options.open;
+    });
+    options.createEl("summary", {
+      cls: "ent-cc-button", text: "Workspace options",
+      attr: { "data-kbcc-focus": "workspace-options" },
+    });
+    const actions = options.createDiv({ cls: "ent-cc-workspace-options-actions" });
     setIcon(organize.createSpan(), "network");
     organize.createSpan({ text: "Organize" });
     const organizerReadOnlyNotice = "Organizing notes is unavailable while organization data is read-only.";
@@ -2872,17 +2987,12 @@ export class EntVaultCommandCenterView extends ItemView {
       }
       this.plugin.openNoteOrganizerDrop(event.dataTransfer);
     });
-    const globalAdd = actions.createEl("button", { cls: "ent-cc-button ent-cc-add-button", type: "button" });
-    setIcon(globalAdd.createSpan(), "plus");
-    globalAdd.createSpan({ text: "Add" });
-    disableWhenReadOnly(globalAdd, readOnly, "Add");
-    globalAdd.addEventListener("click", () => this.openAddActions());
     if (this.plugin.data.activeTab === "curriculum") {
       const manage = actions.createEl("button", { cls: "ent-cc-button", type: "button" });
       setIcon(manage.createSpan(), "list-tree");
       manage.createSpan({ text: "Manage" });
       manage.addEventListener("click", () => this.openIndexManager());
-      const arrange = actions.createEl("button", {
+      const arrange = (this.curriculumArrangeMode ? primaryActions : actions).createEl("button", {
         cls: `ent-cc-button ${this.curriculumArrangeMode ? "is-active" : ""}`,
         type: "button",
         attr: { "aria-pressed": String(this.curriculumArrangeMode) },
@@ -2892,7 +3002,8 @@ export class EntVaultCommandCenterView extends ItemView {
       disableWhenReadOnly(arrange, readOnly, "Arrange Index");
       arrange.addEventListener("click", () => {
         this.curriculumArrangeMode = !this.curriculumArrangeMode;
-        this.render();
+        this.render(true);
+        if (!this.curriculumArrangeMode) this.contentEl.querySelector<HTMLElement>(".ent-cc-workspace-options summary")?.focus({ preventScroll: true });
       });
     }
     if (this.plugin.data.activeTab === "collections") {
@@ -2901,15 +3012,19 @@ export class EntVaultCommandCenterView extends ItemView {
       add.createSpan({ text: "New collection" });
       disableWhenReadOnly(add, readOnly, "Create a collection");
       add.addEventListener("click", () => this.promptNewCollection());
-      const edit = actions.createEl("button", {
+      const edit = (this.editMode ? primaryActions : actions).createEl("button", {
         cls: `ent-cc-button ${this.editMode ? "is-active" : ""}`,
         type: "button",
         attr: { "aria-pressed": String(this.editMode) },
       });
       setIcon(edit.createSpan(), "pencil");
-      edit.createSpan({ text: this.editMode ? "Finish" : "Edit" });
+      edit.createSpan({ text: this.editMode ? "Done" : "Edit" });
       disableWhenReadOnly(edit, readOnly, "Edit collections");
-      edit.addEventListener("click", () => { this.editMode = !this.editMode; this.render(); });
+      edit.addEventListener("click", () => {
+        this.editMode = !this.editMode;
+        this.render(true);
+        if (!this.editMode) this.contentEl.querySelector<HTMLElement>(".ent-cc-workspace-options summary")?.focus({ preventScroll: true });
+      });
     }
     const activeLibraryId = libraryIdForTab(this.plugin.data.activeTab);
     const activeLibrary = activeLibraryId ? this.plugin.getLibrary(activeLibraryId) : null;
@@ -2919,7 +3034,7 @@ export class EntVaultCommandCenterView extends ItemView {
       addHeading.createSpan({ text: "New heading" });
       disableWhenReadOnly(addHeading, readOnly, "Create a Library heading");
       addHeading.addEventListener("click", () => this.promptNewLibraryHeading(activeLibraryId));
-      const edit = actions.createEl("button", {
+      const edit = (this.editMode ? primaryActions : actions).createEl("button", {
         cls: `ent-cc-button ${this.editMode ? "is-active" : ""}`,
         type: "button",
         attr: { "aria-pressed": String(this.editMode) },
@@ -2930,7 +3045,8 @@ export class EntVaultCommandCenterView extends ItemView {
       edit.addEventListener("click", () => {
         if (this.editMode) {
           this.editMode = false;
-          this.render();
+          this.render(true);
+          this.contentEl.querySelector<HTMLElement>(".ent-cc-workspace-options summary")?.focus({ preventScroll: true });
           return;
         }
         const ownsBase = this.createOpenedBaseGuard();
@@ -2952,6 +3068,19 @@ export class EntVaultCommandCenterView extends ItemView {
     disableWhenReadOnly(redo, readOnly, "Redo an organization change");
     redo.addEventListener("click", () => this.run(() => this.plugin.redo()));
     iconButton(actions, "ellipsis-vertical", "Command center actions").addEventListener("click", (event) => this.showGlobalMenu(event));
+    const density = actions.createEl("button", {
+      cls: "ent-cc-button ent-cc-density-toggle", type: "button",
+      text: this.viewDensity === "compact" ? "Comfortable" : "Compact",
+      attr: { "aria-label": this.viewDensity === "compact" ? "Use comfortable view density" : "Use compact view density", "aria-pressed": String(this.viewDensity === "compact"), "data-kbcc-focus": "density" },
+    });
+    density.addEventListener("click", () => {
+      this.viewDensity = this.viewDensity === "compact" ? "comfortable" : "compact";
+      const focus = captureViewFocus(this.contentEl);
+      const scroll = this.paneLayout === "wide" ? this.treeEl?.scrollTop ?? 0 : this.workspaceEl?.scrollTop ?? 0;
+      this.render(true);
+      this.restoreReturnScrollPosition(scroll, 0);
+      restoreViewFocus(this.contentEl, focus);
+    });
 
     this.renderTabs(shell);
     this.renderSearch(shell);
@@ -2973,8 +3102,10 @@ export class EntVaultCommandCenterView extends ItemView {
     if (!compact) {
       this.createInspector(workspace);
       this.renderInspector();
+      workspace.toggleClass("is-inspector-collapsed", !this.inspectorSelectedByUser);
     } else {
       this.inspectorEl = null;
+      workspace.addClass("is-inspector-collapsed");
     }
 
     const footer = shell.createDiv({ cls: "ent-cc-footer" });
@@ -2982,6 +3113,7 @@ export class EntVaultCommandCenterView extends ItemView {
     footer.createSpan({ text: this.plugin.isClinicalMode()
       ? "Personal organization stays separate. New clinical scaffolds are unverified and never set review approval."
       : "Personal organization and visual hierarchy stay in plugin data. Index actions never move or rewrite source notes." });
+    restoreViewFocus(this.contentEl, focusedControl);
   }
 
   private renderLegacyIndexSourceWarning(parent: HTMLElement): void {
@@ -3034,8 +3166,13 @@ export class EntVaultCommandCenterView extends ItemView {
   private renderTabs(parent: HTMLElement): void {
     const tabs = tabDefinitions(this.plugin.data.settings, this.records, this.plugin.getLibraries());
     const bar = parent.createDiv({ cls: "ent-cc-tabs", attr: { role: "tablist", "aria-label": "Command center sections" } });
+    let libraryGroup: HTMLElement | null = null;
     for (const tab of tabs) {
-      const button = bar.createEl("button", {
+      if (libraryIdForTab(tab.id) && !libraryGroup) {
+        libraryGroup = bar.createDiv({ cls: "ent-cc-library-tabs", attr: { role: "group", "aria-label": "Libraries" } });
+        libraryGroup.createSpan({ cls: "ent-cc-library-tabs-label", text: "Libraries", attr: { "aria-hidden": "true" } });
+      }
+      const button = (libraryIdForTab(tab.id) ? libraryGroup ?? bar : bar).createEl("button", {
         cls: `ent-cc-tab ${this.plugin.data.activeTab === tab.id ? "is-active" : ""}`,
         attr: {
           id: this.tabElementId(tab.id),
@@ -3048,7 +3185,7 @@ export class EntVaultCommandCenterView extends ItemView {
       });
       setIcon(button.createSpan(), tab.icon);
       button.createSpan({ cls: "ent-cc-tab-label", text: tab.label });
-      button.createSpan({ text: String(this.tabCount(tab.id)), cls: "ent-cc-tab-count" });
+      this.updateTabCountBadge(button.createSpan({ cls: "ent-cc-tab-count" }), tab.id);
       button.addEventListener("click", () => this.run(() => this.changeTab(tab.id)));
       button.addEventListener("keydown", (event) => {
         const index = tabs.findIndex((candidate) => candidate.id === tab.id);
@@ -3082,6 +3219,9 @@ export class EntVaultCommandCenterView extends ItemView {
   private async changeTab(tab: MainTab, focusTab = false): Promise<void> {
     if (!this.guardLoadedBase()) return;
     this.plugin.data.activeTab = tab;
+    if (this.searchScope === "library" && !libraryIdForTab(tab)) this.searchScope = "current";
+    this.inspectorSelectedByUser = false;
+    this.mobileInspectorOpen = false;
     this.editMode = false;
     this.curriculumArrangeMode = false;
     await this.plugin.saveViewState();
@@ -3107,9 +3247,10 @@ export class EntVaultCommandCenterView extends ItemView {
       activeTab: this.plugin.data.activeTab,
       selectedPath,
       query: this.query,
+      ...this.currentSearchFilters(),
       // A wide inspector is already visible beside the list. Preserve that
       // semantic detail route so a later compact return opens the same record.
-      detailVisible: Boolean(selectedPath) && (!compact || this.mobileInspectorOpen),
+      detailVisible: Boolean(selectedPath) && Boolean(compact ? this.mobileInspectorOpen : this.inspectorSelectedByUser),
       browseRowLimit: Math.min(MAX_KBCC_RETURN_BROWSE_LIMIT, Math.max(1, this.browseRowLimit)),
       browseStructureLimit: Math.min(MAX_KBCC_RETURN_BROWSE_LIMIT, Math.max(1, this.browseStructureLimit)),
       listScrollTop: Math.max(0, compact
@@ -3131,6 +3272,7 @@ export class EntVaultCommandCenterView extends ItemView {
     this.globalSearchResultKey = "";
     this.globalSearchResultScopeKey = "";
     this.query = state.query;
+    this.restoreSearchFilters(state, state.activeTab);
     this.parsedQuery = parseQuery(state.query);
     this.plugin.data.activeTab = state.activeTab;
     this.plugin.data.selectedPath = state.selectedPath && this.recordByPath.has(state.selectedPath)
@@ -3141,9 +3283,10 @@ export class EntVaultCommandCenterView extends ItemView {
     this.mobileTreeScrollTop = state.listScrollTop;
     this.mobileInspectorScrollTop = state.detailScrollTop;
     this.mobileInspectorOpen = state.detailVisible && Boolean(this.plugin.data.selectedPath);
+    this.inspectorSelectedByUser = this.mobileInspectorOpen;
     this.mobileInspectorNeedsFocus = false;
     if (!await this.persistReturnedViewStateBestEffort()) return false;
-    this.pendingReturnScroll = state.query.trim()
+    this.pendingReturnScroll = this.hasGlobalSearch()
       ? {
           searchKey: this.globalSearchKey(),
           listScrollTop: state.listScrollTop,
@@ -3170,6 +3313,8 @@ export class EntVaultCommandCenterView extends ItemView {
     this.query = "";
     this.parsedQuery = parseQuery("");
     this.plugin.data.activeTab = homeTab;
+    this.restoreSearchFilters({}, homeTab);
+    this.inspectorSelectedByUser = false;
     this.plugin.data.selectedPath = "";
     this.mobileInspectorOpen = false;
     this.mobileInspectorNeedsFocus = false;
@@ -3239,18 +3384,29 @@ export class EntVaultCommandCenterView extends ItemView {
     return libraryId ? this.records.filter((record) => record.libraryId === libraryId).length : 0;
   }
 
+  private updateTabCountBadge(badge: HTMLElement, tab: MainTab): void {
+    const count = this.tabCount(tab);
+    const units = `${tab === "collections" ? "member " : ""}${count === 1 ? "entry" : "entries"}`;
+    badge.setText(tab === "collections" ? `${count} ${count === 1 ? "member" : "members"}` : String(count));
+    badge.setAttribute("aria-label", `${count} ${units}`);
+    badge.setAttribute("title", `${count} ${units}`);
+  }
+
   private populateHealthSummary(health: HTMLElement): void {
     health.empty();
-    const indexCount = this.plugin.getIndexRecords().length;
+    const indexRecords = this.plugin.getIndexRecords();
+    const indexCount = indexRecords.length;
+    const placeholders = indexRecords.filter((record) => record.isPlaceholder).length;
+    health.createSpan({ text: `${indexCount} index entries` });
+    health.createSpan({ text: `${indexCount - placeholders} linked notes` });
+    health.createSpan({ text: `${placeholders} without linked notes` });
     const proposalCount = this.records.filter((record) => record.role === "proposal").length;
     if (this.plugin.isClinicalMode()) {
       const reviewedCount = this.records.filter((record) => record.reviewStatus === "reviewed").length;
-      health.createSpan({ text: `${indexCount} index entries` });
-      health.createSpan({ text: `${reviewedCount} human-reviewed` });
+      health.createSpan({ text: `${reviewedCount} marked reviewed` });
       health.createSpan({ text: `${proposalCount} inbox` });
       return;
     }
-    health.createSpan({ text: `${indexCount} index entries` });
     health.createSpan({ text: `${proposalCount} inbox` });
     health.createSpan({ text: `${this.plugin.data.collections.length} collections` });
     health.createSpan({ text: `${this.plugin.data.pinnedPaths.length} pinned` });
@@ -3268,7 +3424,8 @@ export class EntVaultCommandCenterView extends ItemView {
     this.contentEl.querySelectorAll<HTMLElement>(".ent-cc-tab").forEach((tab) => {
       const id = tab.getAttribute("data-tab") as MainTab | null;
       if (!id || !availableTabs.has(id)) return;
-      tab.querySelector<HTMLElement>(".ent-cc-tab-count")?.setText(String(this.tabCount(id)));
+      const badge = tab.querySelector<HTMLElement>(".ent-cc-tab-count");
+      if (badge) this.updateTabCountBadge(badge, id);
     });
   }
 
@@ -3285,6 +3442,7 @@ export class EntVaultCommandCenterView extends ItemView {
         ? "Search all bases…  domain:pediatric  priority:P1  type:procedure"
         : `Search all bases by title, ID, ${this.plugin.data.settings.groupLabel.toLowerCase()}, or path…`,
       attr: {
+        id: `ent-cc-search-${this.viewInstanceId}`,
         "aria-label": `Search and filter ${this.plugin.data.settings.itemPlural}`,
         autocapitalize: "none",
         enterkeyhint: "search",
@@ -3324,17 +3482,18 @@ export class EntVaultCommandCenterView extends ItemView {
       // user can already see, not the query from the previous render.
       this.parsedQuery = parseQuery(this.query);
       clear.hidden = !this.query;
-      if (bulkButton) bulkButton.disabled = readOnly || !this.query.trim();
+      if (bulkButton) bulkButton.disabled = readOnly || !this.hasGlobalSearch();
       this.scheduleSearchRefresh();
     });
     input.addEventListener("keydown", (event) => {
+      if (event.isComposing) return;
       if (event.key === "Escape" && this.query) {
         this.cancelPendingGlobalSearch();
         this.query = "";
         this.parsedQuery = parseQuery("");
         input.value = "";
         clear.hidden = true;
-        if (bulkButton) bulkButton.disabled = true;
+        if (bulkButton) bulkButton.disabled = readOnly || !this.hasGlobalSearch();
         this.renderTree();
         this.resetSearchScrollPosition();
         this.timerWindow.requestAnimationFrame(() => this.resetSearchScrollPosition());
@@ -3351,7 +3510,7 @@ export class EntVaultCommandCenterView extends ItemView {
       this.parsedQuery = parseQuery("");
       input.value = "";
       clear.hidden = true;
-      if (bulkButton) bulkButton.disabled = true;
+      if (bulkButton) bulkButton.disabled = readOnly || !this.hasGlobalSearch();
       this.renderTree();
       this.resetSearchScrollPosition();
       this.timerWindow.requestAnimationFrame(() => this.resetSearchScrollPosition());
@@ -3365,7 +3524,7 @@ export class EntVaultCommandCenterView extends ItemView {
       "folder-plus",
       `Add current-base matches from ${this.plugin.data.settings.workspaceName} to a collection`,
     );
-    bulkButton.disabled = readOnly || !this.query.trim();
+    bulkButton.disabled = readOnly || !this.hasGlobalSearch();
     disableWhenReadOnly(bulkButton, readOnly, "Add search results to a collection");
     bulkButton.addEventListener("click", () => this.addMatchingRecordsToCollection());
     const saved = searchRow.createEl("button", { cls: "ent-cc-button ent-cc-saved-button", type: "button" });
@@ -3373,6 +3532,33 @@ export class EntVaultCommandCenterView extends ItemView {
     saved.createSpan({ text: "Saved" });
     saved.addEventListener("click", (event) => this.showSavedViews(event));
     this.countEl = searchRow.createDiv({ cls: "ent-cc-topic-count" });
+    const options = parent.createDiv({ cls: "ent-cc-search-options" });
+    const scopeLabel = options.createEl("label", { cls: "ent-cc-search-option", text: "Search in" });
+    const scope = scopeLabel.createEl("select", { cls: "ent-cc-search-scope", attr: { "aria-label": "Search scope", "data-kbcc-focus": "search-scope" } });
+    for (const [value, label] of [["all", "All bases"], ["current", "This base"], ...(libraryIdForTab(this.plugin.data.activeTab) ? [["library", "This Library"]] : [])]) {
+      scope.createEl("option", { value, text: label });
+    }
+    scope.value = this.searchScope;
+    const availabilityLabel = options.createEl("label", { cls: "ent-cc-search-option", text: "Availability" });
+    const availability = availabilityLabel.createEl("select", { cls: "ent-cc-search-availability", attr: { "aria-label": "Note availability", "data-kbcc-focus": "search-availability" } });
+    for (const [value, label] of [["all", "All entries"], ["linked", "Linked notes"], ["placeholders", "No note"]]) availability.createEl("option", { value, text: label });
+    availability.value = this.searchAvailability;
+    const linkedLabel = options.createEl("label", { cls: "ent-cc-search-option ent-cc-linked-first" });
+    const linkedFirst = linkedLabel.createEl("input", { type: "checkbox", cls: "ent-cc-search-linked-first", attr: { "aria-label": "Show linked notes first", "data-kbcc-focus": "linked-first" } });
+    linkedFirst.checked = this.searchLinkedFirst;
+    linkedLabel.createSpan({ text: "Linked notes first" });
+    const updateScope = (): void => {
+      this.searchScope = scope.value === "library" ? "library" : scope.value === "current" ? "current" : "all";
+      this.searchAvailability = availability.value === "linked" ? "linked" : availability.value === "placeholders" ? "placeholders" : "all";
+      this.searchLinkedFirst = linkedFirst.checked;
+      if (bulkButton) bulkButton.disabled = readOnly || !this.hasGlobalSearch();
+      this.cancelPendingGlobalSearch();
+      this.renderTree();
+      this.resetSearchScrollPosition();
+    };
+    scope.addEventListener("change", updateScope);
+    availability.addEventListener("change", updateScope);
+    linkedFirst.addEventListener("change", updateScope);
 
     const chips = parent.createDiv({ cls: "ent-cc-filter-chips" });
     if (this.plugin.isClinicalMode()) {
@@ -3492,33 +3678,44 @@ export class EntVaultCommandCenterView extends ItemView {
   private updateCount(visible: number): void {
     if (!this.countEl) return;
     this.countEl.empty();
-    if (this.query.trim()) {
+    if (this.hasGlobalSearch()) {
+      const scopeLabel = this.searchScope === "library" ? "This Library" : this.searchScope === "current" ? "This base" : "All available bases";
       if (this.globalSearchErrorKey === this.globalSearchKey()) {
         this.countEl.createSpan({ text: "Search failed" });
-        this.countEl.createSpan({ text: " · All available bases", cls: "ent-cc-muted" });
+        this.countEl.createSpan({ text: ` · ${scopeLabel}`, cls: "ent-cc-muted" });
         return;
       }
       if (this.globalSearchPendingKey === this.globalSearchKey()) {
         this.countEl.createSpan({ text: "Searching…" });
-        this.countEl.createSpan({ text: " · All available bases", cls: "ent-cc-muted" });
+        this.countEl.createSpan({ text: ` · ${scopeLabel}`, cls: "ent-cc-muted" });
         return;
       }
       this.countEl.createSpan({ text: `${visible} ${visible === 1 ? "result" : "results"}` });
-      this.countEl.createSpan({ text: " · All available bases", cls: "ent-cc-muted" });
+      this.countEl.createSpan({ text: ` · ${scopeLabel}`, cls: "ent-cc-muted" });
       return;
     }
     if (this.plugin.data.activeTab === "queues") {
       const uniqueVisible = uniqueRecords(queueRecords(this.smartQueues())).filter((record) => matchesParsedQuery(record, this.parsedQuery)).length;
       this.countEl.createSpan({ text: `${visible} queue entries · ${uniqueVisible} unique` });
     } else {
-      const settings = this.plugin.data.settings;
-      this.countEl.createSpan({ text: `${visible} ${visible === 1 ? settings.itemSingular : settings.itemPlural}` });
+      const tab = this.plugin.data.activeTab;
+      const paths = tab === "collections" ? new Set(collectionPaths(this.plugin.data.collections)) : null;
+      const records = this.recordsForActiveTab().filter((record) => !paths || paths.has(record.path));
+      const collectionCount = this.plugin.data.collections.length;
+      this.countEl.createSpan({ text: `${paths ? `${collectionCount} ${collectionCount === 1 ? "collection" : "collections"} · ` : ""}${recordAvailabilitySummary(records)}` });
     }
     this.countEl.createSpan({ text: ` · ${titleForTab(this.plugin.data.activeTab, this.plugin.data.settings, this.records, this.plugin.getLibraries(true))}`, cls: "ent-cc-muted" });
   }
 
+  private hasGlobalSearch(): boolean {
+    return Boolean(this.query?.trim()) || (this.searchScope ?? "all") !== "all"
+      || (this.searchAvailability ?? "all") !== "all" || Boolean(this.searchLinkedFirst);
+  }
+
   private renderTree(): void {
     if (!this.treeEl) return;
+    const focused = captureViewFocus(this.treeEl);
+    const listScroll = this.treeEl.scrollTop;
     // A drag payload belongs to the exact tree that created it. Undo, Redo,
     // Sync reloads, tab changes, and organization edits all replace this token
     // through renderTree(), so a late drop cannot mutate newer organization.
@@ -3547,13 +3744,14 @@ export class EntVaultCommandCenterView extends ItemView {
 
     let visible = 0;
     const tab = this.plugin.data.activeTab;
-    if (!this.query.trim()) {
+    const searching = this.hasGlobalSearch();
+    if (!searching) {
       this.browseRowsRendered = 0;
       this.browseRowsOmitted = 0;
       this.browseStructuresRendered = 0;
       this.browseStructuresOmitted = 0;
     }
-    if (this.query.trim()) {
+    if (searching) {
       visible = this.renderGlobalSearchResults(body);
     } else if (tab === "curriculum") {
       visible = this.renderCurriculum(body);
@@ -3567,26 +3765,28 @@ export class EntVaultCommandCenterView extends ItemView {
     } else {
       visible = this.renderLibrary(body, this.recordsForActiveTab());
     }
-    if (!this.query.trim() && (this.browseRowsOmitted > 0 || this.browseStructuresOmitted > 0)) {
+    if (!searching && (this.browseRowsOmitted > 0 || this.browseStructuresOmitted > 0)) {
       this.renderBrowseLimit(body);
     }
-    const globalSearchPending = Boolean(this.query.trim() && this.globalSearchPendingKey === this.globalSearchKey());
-    const globalSearchFailed = Boolean(this.query.trim() && this.globalSearchErrorKey === this.globalSearchKey());
+    const globalSearchPending = Boolean(searching && this.globalSearchPendingKey === this.globalSearchKey());
+    const globalSearchFailed = Boolean(searching && this.globalSearchErrorKey === this.globalSearchKey());
     if (visible === 0
       && !globalSearchPending
       && !globalSearchFailed
-      && !(tab === "collections" && this.plugin.data.collections.length === 0)
-      && !(tab === "inbox" && !this.query)
+      && !(!searching && tab === "collections")
+      && !(!searching && tab === "inbox")
       // Library rendering owns its empty state so it can offer a direct
       // catalog-specific Add action and explain that Markdown stays intact.
-      && !(libraryIdForTab(tab) && !this.query)) {
-      if (tab === "curriculum" && !this.query && !this.plugin.isClinicalMode()) this.renderKnowledgeIndexEmpty(body);
-      else body.createDiv({ cls: "ent-cc-empty", text: this.query ? "No records match this search." : "No records in this section." });
+      && !(!searching && libraryIdForTab(tab))) {
+      if (!searching && tab === "curriculum" && !this.plugin.isClinicalMode()) this.renderKnowledgeIndexEmpty(body);
+      else body.createDiv({ cls: "ent-cc-empty", text: searching ? "No entries match these filters. Try All bases or All entries." : "No records in this section." });
     }
     this.updateCount(visible);
-    if (this.query) resultCount.setText(globalSearchPending
+    if (searching) resultCount.setText(globalSearchPending
       ? "Searching…"
       : globalSearchFailed ? "Search failed" : `${visible} ${visible === 1 ? "result" : "results"}`);
+    this.treeEl.scrollTop = listScroll;
+    restoreViewFocus(this.treeEl, focused);
   }
 
   private renderBrowseLimit(parent: HTMLElement): void {
@@ -3608,14 +3808,19 @@ export class EntVaultCommandCenterView extends ItemView {
     const nextStructures = Math.min(MAX_RENDERED_BROWSE_STRUCTURES, this.browseStructuresOmitted);
     const showMore = message.createEl("button", {
       cls: "ent-cc-button",
+      attr: { "data-kbcc-focus": "browse-more" },
       text: nextRecords > 0
         ? `Show ${nextRecords.toLocaleString()} more`
         : `Show ${nextStructures.toLocaleString()} more sections`,
     });
     showMore.addEventListener("click", () => {
+      const previousRows = this.browseRowsRendered;
       this.browseRowLimit += MAX_RENDERED_BROWSE_RECORDS;
       this.browseStructureLimit += MAX_RENDERED_BROWSE_STRUCTURES;
       this.renderTree();
+      if (!this.treeEl?.querySelector('[data-kbcc-focus="browse-more"]')) {
+        (this.treeEl?.querySelectorAll<HTMLElement>(".ent-cc-subject-title")[previousRows] ?? this.treeEl)?.focus({ preventScroll: true });
+      }
     });
   }
 
@@ -3654,7 +3859,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private treeHeaderTitle(): string {
-    if (this.query.trim()) return "Search results / Library / Record";
+    if (this.hasGlobalSearch()) return "Search results / Library / Record";
     const tab = this.plugin.data.activeTab;
     const settings = this.plugin.data.settings;
     if (tab === "curriculum") return this.curriculumArrangeMode
@@ -3769,6 +3974,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const leading = row.createSpan({ cls: "ent-cc-leading-icon" });
     setIcon(leading, "library");
     const title = row.createEl("button", { cls: "ent-cc-row-title", text: domain.domain, attr: { dir: "auto" } });
+    title.setAttribute("data-kbcc-focus", `domain:${domain.domain}`);
     title.addEventListener("click", () => {
       if (collapsed) this.collapsedCurriculumDomains.delete(domain.domain); else this.collapsedCurriculumDomains.add(domain.domain);
       this.persistCollapseState();
@@ -3801,7 +4007,7 @@ export class EntVaultCommandCenterView extends ItemView {
     });
     row.addClass(`ent-cc-depth-${Math.min(depth, 12)}`);
     if (node.children.length > 0) {
-      const disclosure = disclosureButton(row, collapsed, record.title);
+      const disclosure = disclosureButton(row, collapsed, record.title, record.path);
       disclosure.addEventListener("click", () => {
         if (collapsed) this.collapsedCurriculumNodes.delete(record.path); else this.collapsedCurriculumNodes.add(record.path);
         this.persistCollapseState();
@@ -3828,6 +4034,7 @@ export class EntVaultCommandCenterView extends ItemView {
         type: "button",
         dir: "auto",
         "aria-keyshortcuts": RECORD_KEYBOARD_SHORTCUTS,
+        "data-kbcc-focus": `record:${record.path}`,
         "aria-label": `${record.title}, ${this.recordRoleName(record)}.${provenance ? ` ${provenance.ariaLabel}.` : ""}`,
       },
     });
@@ -3947,12 +4154,13 @@ export class EntVaultCommandCenterView extends ItemView {
     const row = section.createDiv({ cls: `ent-cc-row ${isHeading ? "ent-cc-heading-row" : "ent-cc-subheading-row"}` });
     if (!isHeading) row.addClass(`ent-cc-depth-${Math.min(depth - 2, 12)}`);
     const toggle = (): void => this.toggleLayoutNode(context, node.id);
-    disclosureButton(row, collapsed, node.title).addEventListener("click", toggle);
+    disclosureButton(row, collapsed, node.title, `${context.kind}:${context.heading.id}:${node.id}`).addEventListener("click", toggle);
     const leading = row.createSpan({ cls: "ent-cc-leading-icon" });
     setIcon(leading, isHeading
       ? (isLibrary ? libraryIcon(context.library) : mutable ? "folders" : "library")
       : "folder");
     const title = row.createEl("button", { cls: "ent-cc-row-title", text: node.title, attr: { dir: "auto" } });
+    title.setAttribute("data-kbcc-focus", `heading:${context.kind}:${context.heading.id}:${node.id}`);
     title.addEventListener("click", toggle);
     const resolved = this.resolvedLayoutCount(context, node);
     row.createSpan({ text: String(resolved), cls: "ent-cc-row-count" });
@@ -3982,6 +4190,15 @@ export class EntVaultCommandCenterView extends ItemView {
     if (mutable && this.editMode) applyNodeDrop(row);
     if (collapsed) return;
     const content = section.createDiv({ cls: isHeading ? "ent-cc-heading-body" : "ent-cc-subheading-body" });
+    if (!isLibrary && layoutSubjects(node).length === 0 && childSubheadings(node).length === 0) {
+      const empty = content.createDiv({ cls: "ent-cc-empty-collection" });
+      empty.createSpan({ text: "No notes in this collection yet." });
+      for (const [label, create] of [["Add existing note", false], ["Create note", true]] as const) {
+        const add = empty.createEl("button", { cls: "ent-cc-button", text: label, type: "button" });
+        disableWhenReadOnly(add, this.plugin.isDataReadOnly(), `${label} in this collection`);
+        add.addEventListener("click", () => this.startCollectionNote(membership, create));
+      }
+    }
     if (mutable && this.editMode) applyNodeDrop(content);
     const level = Math.min(depth, MAX_LAYOUT_DEPTH);
     for (const record of this.matchingLayoutRecords(context, node)) {
@@ -4013,6 +4230,7 @@ export class EntVaultCommandCenterView extends ItemView {
         : queue.id === "imported-placeholders" ? "file-question"
           : "sparkles");
     const title = row.createEl("button", { cls: "ent-cc-row-title", text: queue.title, attr: { title: queue.description, dir: "auto" } });
+    title.setAttribute("data-kbcc-focus", `queue:${queue.id}`);
     title.addEventListener("click", () => {
       if (collapsed) this.collapsedQueues.delete(queue.id); else this.collapsedQueues.add(queue.id);
       this.persistCollapseState();
@@ -4134,6 +4352,11 @@ export class EntVaultCommandCenterView extends ItemView {
     results: BoundedKnowledgeBaseSearchResultSet<KnowledgeBaseSearchSource>,
     stale: boolean,
   ): number {
+    const otherBases = (results.counts ?? []).filter(({ total, source }) => total > 0
+      && !results.groups.some((group) => group.source.baseId === source.baseId));
+    for (const { source, total } of otherBases) {
+      parent.createDiv({ cls: "ent-cc-search-other-base", text: `${source.baseName}: ${total.toLocaleString()} matching entries beyond this page. Switch to this base and choose This base to narrow the search.`, attr: { role: "status" } });
+    }
     if (results.total > results.rendered) {
       parent.createDiv({
         cls: "ent-cc-search-limit",
@@ -4259,11 +4482,11 @@ export class EntVaultCommandCenterView extends ItemView {
     provenance: IndexMembershipProvenance | null,
   ): void {
     const metadata = row.createSpan({
-      cls: `ent-cc-subject-id ${provenance ? "has-membership-provenance" : ""}`,
-      attr: { dir: "auto" },
+      cls: `ent-cc-subject-id ${provenance && provenance.kind !== "imported-placeholder" ? "has-membership-provenance" : ""}`,
+      attr: { dir: "auto", ...(provenance ? { title: provenance.ariaLabel } : {}) },
     });
     metadata.createSpan({ cls: "ent-cc-subject-id-value", text });
-    if (provenance) {
+    if (provenance && provenance.kind !== "imported-placeholder") {
       metadata.createSpan({
         cls: "ent-cc-membership-provenance",
         text: provenance.label,
@@ -4340,6 +4563,7 @@ export class EntVaultCommandCenterView extends ItemView {
         dir: "auto",
         "aria-keyshortcuts": RECORD_KEYBOARD_SHORTCUTS,
         "aria-label": `${record.title}, ${this.recordRoleName(record, sourceData)}${source ? ` in ${source.baseName}` : ""}.${provenance ? ` ${provenance.ariaLabel}.` : ""}`,
+        "data-kbcc-focus": `record:${source?.baseId ?? this.plugin.getActiveKnowledgeBaseId()}:${record.path}`,
       },
     });
     if (selected) title.setAttribute("aria-current", "true");
@@ -4570,6 +4794,7 @@ export class EntVaultCommandCenterView extends ItemView {
   private selectRecord(path: string): void {
     if (!this.guardLoadedBase()) return;
     this.plugin.data.selectedPath = path;
+    this.inspectorSelectedByUser = true;
     const compact = this.isCompactInspectorLayout();
     if (compact) {
       this.mobileTreeScrollTop = this.workspaceEl?.scrollTop ?? 0;
@@ -4585,6 +4810,7 @@ export class EntVaultCommandCenterView extends ItemView {
     this.scheduleSelectionSave();
     if (compact) this.render(true);
     else {
+      this.workspaceEl?.removeClass("is-inspector-collapsed");
       this.syncSelectedRecordRows(path);
       this.renderInspector();
     }
@@ -4679,6 +4905,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const body = this.inspectorEl.createDiv({ cls: "ent-cc-inspector-body" });
     body.createDiv({ cls: "ent-cc-inspector-kind", text: this.recordRoleName(record) });
     body.createEl("h3", { text: record.title, attr: { id: titleId, dir: "auto" } });
+    if (!record.isPlaceholder) body.createDiv({ cls: "ent-cc-updated-label", text: relativeUpdatedTime(record.mtime), attr: record.mtime > 0 ? { title: new Date(record.mtime).toLocaleString() } : {} });
     this.inspectorEl.setAttribute("aria-labelledby", `${labelId} ${titleId}`);
     const readOnly = typeof this.plugin.isDataReadOnly === "function" && this.plugin.isDataReadOnly();
     if (record.isPlaceholder) {
@@ -4716,7 +4943,7 @@ export class EntVaultCommandCenterView extends ItemView {
     if (this.plugin.isClinicalMode() || record.reviewStatus || record.safetyCritical) {
       const statusLine = body.createDiv({ cls: "ent-cc-status-line" });
       if (this.plugin.isClinicalMode() || record.reviewStatus) statusLine.createSpan({
-        text: record.reviewStatus || "review metadata missing",
+        text: record.reviewStatus ? readableStatus(record.reviewStatus) : "Review metadata missing",
         cls: `ent-cc-status-pill ${record.reviewStatus === "reviewed" ? "is-reviewed" : "is-unverified"}`,
       });
       if (record.safetyCritical) statusLine.createSpan({ text: "Safety-critical", cls: "ent-cc-status-pill is-critical" });
@@ -4791,10 +5018,10 @@ export class EntVaultCommandCenterView extends ItemView {
     this.inspectorField(body, "Knowledge type", record.topicKind || record.kind);
     if (this.plugin.isClinicalMode()) {
       this.inspectorField(body, "Priority", record.priority || "—", record.priority === "P1" ? "is-urgent" : "");
-      this.inspectorField(body, "Synthesis", record.synthesisStatus || "—");
+      this.inspectorField(body, "Synthesis", readableStatus(record.synthesisStatus));
       this.inspectorField(body, "Sources", String(record.sourceCount), record.sourceCount === 0 ? "is-urgent" : "");
-      if (record.kind === "medication") this.inspectorField(body, "Dose status", record.doseStatus || "—", record.doseStatus !== "reviewed" ? "is-urgent" : "");
-      if (record.kind === "syndrome") this.inspectorField(body, "Image status", record.imageStatus || "—", record.imageStatus === "absent" ? "is-urgent" : "");
+      if (record.kind === "medication") this.inspectorField(body, "Dose status", readableStatus(record.doseStatus), record.doseStatus !== "reviewed" ? "is-urgent" : "");
+      if (record.kind === "syndrome") this.inspectorField(body, "Image status", readableStatus(record.imageStatus), record.imageStatus === "absent" ? "is-urgent" : "");
     }
     this.inspectorField(body, "Path", record.path, "is-path");
     if (record.aiLock) this.inspectorField(body, "AI lock", "Locked — structural editing disabled", "is-urgent");
@@ -5050,13 +5277,16 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private matchingRecordsForCurrentView(): VaultRecord[] {
     // Toolbar actions can run while the visual search refresh is debounced.
-    return matchingKnowledgeBaseRecords(this.records, this.query);
+    const libraryId = this.searchScope === "library" ? libraryIdForTab(this.plugin.data.activeTab) : null;
+    return matchingKnowledgeBaseRecords(this.records, this.query).filter((record) => (!libraryId || record.libraryId === libraryId)
+      && (this.searchAvailability !== "linked" || !record.isPlaceholder)
+      && (this.searchAvailability !== "placeholders" || record.isPlaceholder));
   }
 
   private addMatchingRecordsToCollection(): void {
     const ownsBase = this.createOpenedBaseGuard();
     const baseName = this.plugin.data.settings.workspaceName;
-    if (!this.query.trim()) {
+    if (!this.hasGlobalSearch()) {
       new Notice("Enter a search or filter first.");
       return;
     }
@@ -6217,6 +6447,9 @@ export class EntVaultCommandCenterView extends ItemView {
     menu.addItem((item) => item.setTitle("Add or create…").setIcon("plus").onClick(() => {
       if (ownsBase()) this.openAddActions();
     }));
+    menu.addItem((item) => item.setTitle("Quick entry…").setIcon("zap").setDisabled(this.plugin.isDataReadOnly?.() ?? false).onClick(() => {
+      if (ownsBase()) this.openQuickEntry(this.app.workspace.getActiveFile()?.path);
+    }));
     menu.addItem((item) => item.setTitle("Organize vault notes across knowledge bases…").setIcon("network").onClick(() => {
       this.plugin.openNoteOrganizer();
     }));
@@ -6554,7 +6787,7 @@ export class EntVaultCommandCenterView extends ItemView {
       onSubmit: async (name) => {
         if (!ownsBase()) return;
         await this.plugin.mutate(`Save view “${name}”`, () => {
-          this.plugin.data.savedViews.push({ id: makeId("view"), name, tab: this.plugin.data.activeTab, query: this.query });
+          this.plugin.data.savedViews.push({ id: makeId("view"), name, tab: this.plugin.data.activeTab, query: this.query, ...this.currentSearchFilters() });
         });
       },
     }).open();
@@ -6573,6 +6806,7 @@ export class EntVaultCommandCenterView extends ItemView {
         const libraryId = libraryIdForTab(view.tab);
         const library = libraryId ? this.plugin.getLibrary(libraryId) : null;
         this.plugin.data.activeTab = libraryId && library?.archivedAt !== null ? "curriculum" : view.tab;
+        this.restoreSearchFilters(view, this.plugin.data.activeTab);
         if (libraryId && (!library || library.archivedAt !== null)) {
           new Notice("That saved view points to an archived or removed library. Opened the knowledge index instead; the saved search text was preserved.");
         }

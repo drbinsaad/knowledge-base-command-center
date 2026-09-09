@@ -4,6 +4,20 @@ Complete this checklist on a physical iPhone before tagging a release that chang
 
 Do not use private notes, patient information, or copyrighted source material in screenshots, recordings, logs, or issue attachments.
 
+For 0.20.0, begin with the shorter [device, VoiceOver, and two-device Sync smoke record](release-evidence/next-release-smoke.md) and its [candidate-specific evidence and authorization](release-evidence/0.20.0-iphone.md). Its physical-device rows remain explicitly unexecuted. The historical release records below remain unchanged.
+
+## 0.20.0 candidate record and sign-off
+
+- Candidate version and commit: 0.20.0 / the merged commit carrying release tag `0.20.0`
+- Date: 2026-09-09
+- Physical-device tester: None; no physical iPhone was connected
+- Physical iPhone, Dynamic Type, VoiceOver, Arabic/RTL, touch, software keyboard, safe areas, background/interruption, iOS performance and controlled two-device Sync: Unverified — not executed on a physical iPhone or controlled device pair
+- Supplemental evidence: Real Obsidian 1.14.1 in a disposable synthetic vault verified Settings labels, safe confirmation cancellation, search correctness/cancellation, and compact Settings geometry at 320, 390, 900 and 1200px. Automated Chromium/WebKit checks complement these desktop-runtime observations; none is a physical-device Pass.
+- Update-window check: the candidate links to exactly `https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.20.0`; its physical-device behavior remains unverified.
+- Authorization: After these specific untested scopes were reported with the tested local candidate, the maintainer directed **“publish”**. This maintainer-authorized waiver applies to 0.20.0 only and must not be reused.
+- Final result: Maintainer-authorized waiver — physical-iPhone matrix not executed; physical-device and two-device Sync status remains **Unverified**, not a physical-device Pass
+- Tester signature or initials: Unsigned — no physical-device tester
+
 ## 0.19.1 candidate record
 
 - Candidate version and commit: 0.19.1 / the merged commit containing this record and carrying release tag `0.19.1`
@@ -93,7 +107,7 @@ Record **Pass**, **Fail**, or **Not applicable** plus a short observation for ev
 16. Open base management, archive and restore a disposable base, and confirm long names, confirmations, safe areas, and the 50-base-limit message do not clip.
 17. Use Accessibility Inspector to confirm interactive controls meet a 44 × 44 point target, including Library tabs, Library-manager controls, the legacy-folder review actions and checkboxes, heading/subheading titles at every nesting depth, and their **…** menus; labels and modal focus are meaningful, the review's visual and VoiceOver focus order agree, busy state is announced, and layout remains operable at the largest Dynamic Type setting.
 18. In a disposable synced copy, remove only the plugin's local mobile `data.json` while the plugin is disabled (preserve the desktop copy and all backups), then enable the candidate on iPhone before Sync redelivers that file. Open the view once, let Sync finish, and confirm the established bases, headings, and subjects are adopted instead of an empty store. Repeat with one disposable local organization edit before delivery; confirm a private `knowledge-base-command-center-conflict-*.json` appears under `Knowledge Base Command Center Exports/` before the established store is adopted. Verify that the rescue contains plugin organization and paths but no Markdown note bodies.
-19. Open Quick Entry from the Command Center header and from Obsidian's mobile **Open** menu. Confirm the hub fits in portrait and landscape, every action remains reachable at the largest Dynamic Type setting, and dismissing any picker makes no change.
+19. Open the **Add** chooser from the Command Center header and Quick Entry from its command or Obsidian's mobile **Open** menu. Confirm both fit in portrait and landscape, every action remains reachable at the largest Dynamic Type setting, and dismissing any picker makes no change.
 20. Under **Settings → Mobile → Manage toolbar options**, scroll to the bottom, choose **Add global command**, search for **Quick entry**, and add the hub plus one focused Quick Entry command. Run both toolbar actions, confirm their icons and labels are meaningful, and confirm the plugin installed no default hotkey.
 21. In a custom Library that has headings and nested subheadings, use Quick Entry to create a note, add the current note, and add an existing note. For each action choose a specific nested subheading, confirm the picker shows its full path, such as **Heading / Sub / Sub-sub**, and confirm the resulting record appears only at that placement without moving or rewriting Markdown. Repeat in an empty custom Library; create the requested first heading, cancel the following action, and confirm only the empty heading was created and Undo removes it.
 22. Create an Apple Shortcut using **Open URLs** for each exact Quick Entry URL: `obsidian://kbcc-quick-entry`, `obsidian://kbcc-create-subject`, `obsidian://kbcc-create-heading`, `obsidian://kbcc-create-subheading`, `obsidian://kbcc-create-note`, `obsidian://kbcc-add-current-note`, and `obsidian://kbcc-add-existing-note`. Confirm each opens only its matching blank guarded hub/form/picker and that current-note capture uses the note active in Obsidian. Then add `?title=Private`, `?path=Private/Note.md`, `?content=Private`, and one unknown query key to every URL; confirm each modified URL fails closed without opening a form, creating or classifying a note, or exposing its value in a notice or log.

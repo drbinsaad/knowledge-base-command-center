@@ -37,6 +37,7 @@ import {
   configuredGroupFromPath,
   configuredGroupFromIndexRoot,
   createDefaultStore,
+  createDeletedBaseCausality,
   createDeviceLocalPluginState,
   createDeviceLocalPluginStateWithReport,
   deviceHistoryStackFingerprint,
@@ -1247,6 +1248,39 @@ test("v11 store parsing validates and bounds permanent-deletion tombstones", () 
     (_, index) => [`base-deleted-${index}`, index + 1],
   ));
   assert.throws(() => migrateStore(oversized, 300), /permanent-deletion tombstones/i);
+});
+
+test("deletion causal metadata survives serialization while old timestamp stores remain loadable", () => {
+  const store = createDefaultStore(migrateData(null), 100, "vault-deletion-proof");
+  const removed = createKnowledgeBaseEntry(migrateData(null), "base-removed", 100);
+  const proof = createDeletedBaseCausality(removed, 300);
+  assert.ok(proof);
+  store.deletedBaseIds[removed.id] = 300;
+  store.deletedBaseCausality = { [removed.id]: proof };
+  const restored = migrateStore(JSON.parse(JSON.stringify(store)), 400);
+  assert.deepEqual(restored.deletedBaseIds, { [removed.id]: 300 });
+  assert.deepEqual(restored.deletedBaseCausality, store.deletedBaseCausality);
+  delete store.deletedBaseCausality;
+  const legacy = migrateStore(store, 400);
+  assert.deepEqual(legacy.deletedBaseIds, restored.deletedBaseIds);
+  assert.equal(legacy.deletedBaseCausality, undefined);
+});
+
+test("malformed and orphan deletion proof loses authority without losing the tombstone", () => {
+  const store = createDefaultStore(migrateData(null), 100, "vault-invalid-deletion-proof");
+  const removed = createKnowledgeBaseEntry(migrateData(null), "base-removed", 100);
+  const proof = createDeletedBaseCausality(removed, 300);
+  assert.ok(proof);
+  store.deletedBaseIds[removed.id] = 300;
+  const raw = store as unknown as Record<string, unknown>;
+  for (const invalid of [[], null, { ...proof, deletedAt: 301 }, { ...proof, semanticHash: "bogus" }, { ...proof, semanticLineage: Array(65).fill("0123456789abcdef") }]) {
+    raw.deletedBaseCausality = { [removed.id]: invalid, "base-orphan": proof };
+    const restored = migrateStore(raw, 400);
+    assert.deepEqual(restored.deletedBaseIds, { [removed.id]: 300 });
+    assert.equal(restored.deletedBaseCausality, undefined);
+  }
+  removed.data.pinnedPaths = ["Unadvertised.md"];
+  assert.equal(createDeletedBaseCausality(removed, 300), null, "untrusted entry metadata must never become deletion proof");
 });
 
 test("collection cloning preserves multi-membership while isolating mutations", () => {

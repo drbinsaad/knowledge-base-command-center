@@ -1,0 +1,56 @@
+/* Synthetic host theme only. Every KBCC component comes from src/view.ts. */
+:root {
+  --font-interface: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-ui-smaller: 11px; --font-ui-small: 13px; --font-ui-medium: 15px;
+  --font-text-size: 16px; --radius-s: 4px; --radius-m: 8px;
+  --background-primary: #ffffff; --background-secondary: #f4f5f8;
+  --background-secondary-alt: #eeeef3; --background-modifier-border: #d8dae3;
+  --background-modifier-hover: #e8e9f1; --background-modifier-form-field: #ffffff;
+  --background-modifier-error: #fbe9e9; --background-modifier-cover: #0006;
+  --text-normal: #242635; --text-muted: #616777; --text-faint: #858b99;
+  --text-accent: #6845d8; --text-on-accent: #ffffff; --text-warning: #936100;
+  --text-error: #b53b42; --color-red: #b53b42; --color-green: #26866d;
+  --interactive-accent: #7952db; --interactive-accent-hover: #6742c7;
+  --interactive-normal: #ffffff; --interactive-hover: #eeeef4;
+  --icon-color: currentColor; --icon-size: 18px; --input-height: 32px;
+}
+.theme-dark {
+  --background-primary: #1c1f27; --background-secondary: #242833;
+  --background-secondary-alt: #292e3a; --background-modifier-border: #3b4252;
+  --background-modifier-hover: #31394a; --background-modifier-form-field: #222733;
+  --background-modifier-error: #492d34; --text-normal: #e4e7ef;
+  --text-muted: #a8b0c2; --text-faint: #8892a7; --text-accent: #bd9df7;
+  --text-warning: #f3c268; --text-error: #ff858b; --color-green: #6fd3b1;
+  --interactive-normal: #2b3140; --interactive-hover: #343e51;
+}
+*, *::before, *::after { box-sizing: border-box; }
+html, body { width: 100%; height: 100%; margin: 0; }
+body { font: 14px var(--font-interface); color: var(--text-normal); background: var(--background-primary); }
+button, input, select, textarea { font: inherit; color: inherit; }
+button, select { background: var(--interactive-normal); border: 1px solid var(--background-modifier-border); border-radius: 5px; padding: 6px 10px; }
+button { cursor: pointer; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+input, textarea { background: var(--background-modifier-form-field); border: 1px solid var(--background-modifier-border); padding: 6px 8px; }
+svg { vertical-align: middle; flex-shrink: 0; }
+#kbcc-view { height: 100%; width: 100%; overflow: hidden; }
+.modal-container { position: fixed; z-index: 1000; inset: 0; background: var(--background-modifier-cover); display: flex; align-items: center; justify-content: center; }
+.modal { display: flex; flex-direction: column; position: relative; max-height: 90vh; width: 600px; max-width: 94vw; padding: 20px; background: var(--background-primary); }
+.modal-close-button { position: absolute; top: 8px; right: 8px; padding: 4px; border: 0; width: 32px; height: 32px; background: transparent; }
+.modal-title { flex: 0 0 auto; }
+.modal-content { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.setting-item { display: flex; align-items: center; gap: 16px; padding: 12px 0; border-top: 1px solid var(--background-modifier-border); }
+.setting-item-info { min-width: 0; flex: 1; }
+.setting-item-name { font-weight: 550; }
+.setting-item-description { color: var(--text-muted); font-size: 12px; margin-top: 4px; line-height: 1.4; }
+.setting-item-control { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.setting-item-control input[type="text"] { width: 200px; max-width: 100%; }
+button.mod-cta { background: var(--interactive-accent); color: var(--text-on-accent); }
+/* The native 1200px Obsidian Settings popout had 700px of content width.
+   This optional fixture includes the existing host's 20px padding per side;
+   it does not impose a different row direction or override KBCC controls. */
+.kbcc-browser-native-settings-width { max-width: 740px; margin-inline: auto; }
+@media (max-width: 600px) {
+  .setting-item { flex-direction: column; align-items: stretch; gap: 8px; }
+  .setting-item-control { justify-content: flex-start; }
+  .setting-item-control input[type="text"] { width: 100%; }
+}

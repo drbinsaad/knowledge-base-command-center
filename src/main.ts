@@ -39,6 +39,7 @@ import {
   configuredGroupFromIndexRoot,
   curriculumContainerKey,
   createDefaultStore,
+  createDeletedBaseCausality,
   createDeviceLocalPluginState,
   createDeviceLocalPluginStateWithReport,
   deviceHistoryStackFingerprint,
@@ -188,6 +189,8 @@ import {
   type KnowledgeBaseSearchResultSet,
   type KnowledgeBaseSearchSource,
 } from "./search";
+import { createSearchCheckpoint, sortSearchInventory } from "./search-inventory";
+import { queueAppAdapterWrite, queueAppLogicalOperation } from "./app-operation-queue";
 import { EntCommandCenterSettingsTab } from "./settings";
 import { EntVaultCommandCenterView, VIEW_TYPE } from "./view";
 import {
@@ -548,6 +551,10 @@ export interface KnowledgeBaseSearchOptions {
   isCancelled?: () => boolean;
   limit?: number;
   yieldEvery?: number;
+  baseIds?: readonly string[];
+  libraryId?: string;
+  availability?: "all" | "linked" | "placeholders";
+  linkedFirst?: boolean;
 }
 
 export interface CatalogPlacementTarget {
@@ -696,6 +703,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   /** Saves that may have reached data.json before their promise rejected. */
   private rejectedSemanticAttemptsByBase = new Map<string, RejectedSemanticAttempt[]>();
   private dataEpoch = 0;
+  /** UI ownership: local object replacements and meaningful settled external changes. */
+  private surfaceEpoch = 0;
+  /** Only settled semantic reloads invalidate an already prepared Organizer review. */
+  private organizerReviewGeneration = 0;
   private operationIdleResolvers: Array<() => void> = [];
   private refreshTimer: number | null = null;
   /** Window that created the pending refresh timer; timer IDs are per-window. */
@@ -1263,6 +1274,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (this.data !== next) {
       this.data = next;
       this.dataEpoch += 1;
+      if (!this.externalReloadBusy) this.surfaceEpoch += 1;
     }
   }
 
@@ -1491,6 +1503,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     ]);
     const changedTombstoneIds = [...tombstoneIds].filter((id) => (
       baseline.deletedBaseIds[id] !== attempted.deletedBaseIds[id]
+      || canonicalJsonString(baseline.deletedBaseCausality?.[id] ?? null)
+        !== canonicalJsonString(attempted.deletedBaseCausality?.[id] ?? null)
     ));
     if (removedBaseIds.length > 0 || changedTombstoneIds.length > 0) {
       return {
@@ -1509,7 +1523,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       };
     }
     for (const entry of createdEntries) {
-      this.store.deletedBaseIds[entry.id] = Math.max(Date.now(), entry.updatedAt + 1);
+      const deletedAt = Math.max(Date.now(), entry.updatedAt + 1);
+      this.store.deletedBaseIds[entry.id] = deletedAt;
+      const proof = createDeletedBaseCausality(entry, deletedAt);
+      if (proof) (this.store.deletedBaseCausality ??= {})[entry.id] = proof;
     }
     return { changed: true, unsafeReason: "" };
   }
@@ -3471,45 +3488,24 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (!this.appWriteBarrier) this.activateAppWriteBarrier();
     const barrier = this.appWriteBarrier;
     if (!barrier) return Promise.reject(new Error("The cross-instance logical-operation barrier is unavailable."));
-    const guardedOperation = async (): Promise<T> => {
-      if (barrier.uncertainty && !allowReadOnlyDrain) {
-        this.adoptSharedPersistenceUncertainty();
-        throw new Error(barrier.uncertainty.message);
-      }
-      this.activeLogicalOperationDepth += 1;
-      try {
-        return await operation();
-      } finally {
-        this.activeLogicalOperationDepth -= 1;
-      }
-    };
-    const queued = barrier.logicalTail.then(guardedOperation, guardedOperation);
-    barrier.logicalTail = queued.then(() => undefined, () => undefined);
-    return queued;
+    return queueAppLogicalOperation(barrier, operation, {
+      allowReadOnlyDrain,
+      adoptUncertainty: () => { this.adoptSharedPersistenceUncertainty(); },
+      enter: () => { this.activeLogicalOperationDepth += 1; },
+      leave: () => { this.activeLogicalOperationDepth -= 1; },
+    });
   }
 
   private enqueueAppAdapterWrite(write: () => Promise<void>): Promise<void> {
     if (!this.appWriteBarrier) this.activateAppWriteBarrier();
     const barrier = this.appWriteBarrier;
     if (!barrier) throw new Error("The cross-instance adapter-write barrier is unavailable.");
-    const generation = this.appWriteGeneration;
-    const guardedWrite = async (): Promise<void> => {
-      if (barrier.uncertainty) {
-        this.adoptSharedPersistenceUncertainty();
-        throw new Error(barrier.uncertainty.message);
-      }
-      // A logical transaction registered before replacement owns its complete
-      // compensation. The replacement waits on logicalTail, so allowing that
-      // already-started transaction to finish is safer than fencing its second
-      // write after the first may have reached data.json.
-      if ((this.unloaded || barrier.generation !== generation) && this.activeLogicalOperationDepth === 0) {
-        throw new Error("This plugin instance was replaced before its queued write could start.");
-      }
-      await write();
-    };
-    const operation = barrier.tail.then(guardedWrite, guardedWrite);
-    barrier.tail = operation.then(() => undefined, () => undefined);
-    return operation;
+    return queueAppAdapterWrite(barrier, write, {
+      generation: this.appWriteGeneration,
+      isUnloaded: () => this.unloaded,
+      hasActiveLogicalOperation: () => this.activeLogicalOperationDepth !== 0,
+      adoptUncertainty: () => { this.adoptSharedPersistenceUncertainty(); },
+    });
   }
 
   private announceOperationsIdle(): void {
@@ -4101,6 +4097,22 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.externalReloadCaptures.push(this.captureExternalPluginData(this.adapterWriteGeneration));
     this.externalReloadPending = true;
     if (this.externalReloadPromise) return this.externalReloadPromise;
+    let settledReviewVersion = this.noteOrganizerReviewVersion();
+    let settledSurfaceSemanticVersion = this.activeBaseSemanticVersion();
+    let reviewChanged = false;
+    const publishPresentationOwnership = (): void => {
+      const surfaceVersion = this.activeBaseSemanticVersion();
+      if (settledSurfaceSemanticVersion !== surfaceVersion) {
+        this.surfaceEpoch += 1;
+        settledSurfaceSemanticVersion = surfaceVersion;
+      }
+      const reviewVersion = this.noteOrganizerReviewVersion();
+      if (settledReviewVersion !== reviewVersion) {
+        this.organizerReviewGeneration += 1;
+        settledReviewVersion = reviewVersion;
+        reviewChanged = true;
+      }
+    };
     let operation: Promise<void>;
     let reloadOutcome: ExternalReloadOutcome = "blocked";
     const reload = async (): Promise<void> => {
@@ -4202,7 +4214,20 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
             // open view on the pre-merge tree. Re-armed below so a capture
             // that arrives mid-refresh drains under the guard again.
             this.externalReloadBusy = false;
-            await this.refreshViews(false);
+            // A valid synced endpoint can still need deterministic cleanup
+            // (for example duplicate pins). Reconcile inside this worker's
+            // existing transaction before any view captures its surface owner:
+            // a public save here would queue behind the reload awaiting it,
+            // and publishing before cleanup would stale freshly rendered UI.
+            // Closed views keep their prior lazy-reconciliation behavior.
+            if (!this.isDataReadOnly() && this.app.workspace.getLeavesOfType(VIEW_TYPE)
+              .some((leaf) => leaf.view instanceof EntVaultCommandCenterView)) {
+              await this.reconcileRecords(this.getRecords(), true);
+            }
+            // The full reload promise still fences UI callbacks, including
+            // both normalization and the following presentation await.
+            publishPresentationOwnership();
+            await this.refreshViews(false, true);
           } catch (error) {
             console.error("Knowledge Base Command Center reloaded synced data but could not refresh its views", error);
             new Notice("Synced knowledge-base data was reloaded, but the view could not refresh. Reopen the command center to update it.", 8000);
@@ -4212,13 +4237,19 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         } while (this.externalReloadPending || this.externalReloadCaptures.length > 0);
       } finally {
         if (this.externalReloadPromise === operation) {
+          publishPresentationOwnership();
           this.externalReloadPromise = null;
           this.externalReloadBusy = false;
           this.recordExternalReload(reloadOutcome);
-          if (reloadOutcome === "applied") {
-            if (this.dismissActiveNoteOrganizer()) {
-              new Notice("Synced knowledge-base data changed while the note organizer was open. The organizer was closed; reopen it to review the latest bases and memberships.", 10000);
+          if (reviewChanged) {
+            try {
+              await this.activeNoteOrganizerModal?.refreshAfterExternalChange();
+            } catch (error) {
+              console.error("Knowledge Base Command Center could not refresh the Organizer draft", error);
+              new Notice("Your organizer draft is still open, but its destinations could not refresh. Keep the draft and retry after checking local recovery status.", 10000);
             }
+          }
+          if (reloadOutcome === "applied") {
             this.maybeShowLegacyIndexReview();
           }
         }
@@ -4242,6 +4273,21 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   getActiveKnowledgeBaseId(): string { return this.store.activeBaseId; }
   getDataEpoch(): number { return this.dataEpoch; }
   getExternalChangeGeneration(): number { return this.externalChangeGeneration; }
+  isExternalReloadInProgress(): boolean { return this.externalReloadBusy || this.externalReloadPromise !== null; }
+  getBaseSurfaceVersion(): string {
+    return JSON.stringify([this.appWriteGeneration, this.unloaded, this.deviceLocalPersistenceSuppressed,
+      this.store.vaultId, this.store.activeBaseId, this.surfaceEpoch, this.dataCompatibilityWarning]);
+  }
+
+  private activeBaseSemanticVersion(): string {
+    const entry = this.requireActiveBase();
+    return JSON.stringify([this.store.vaultId, entry.id, entry.createdAt, entry.semanticHead, entry.semanticHash, this.dataCompatibilityWarning]);
+  }
+
+  private noteOrganizerReviewVersion(): string {
+    return JSON.stringify([this.store.vaultId, this.dataCompatibilityWarning,
+      this.store.bases.map((entry) => [entry.id, entry.createdAt, entry.archivedAt, entry.semanticHead, entry.semanticHash])]);
+  }
   getSearchGeneration(): number { return this.searchGeneration; }
   /**
    * O(1) invalidation token for eligible Markdown-note projections. The shared
@@ -4702,7 +4748,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   private async prepareNoteOrganizer(draft: NoteOrganizerDraft): Promise<OrganizerPreparedPlan> {
     this.assertDataWritable();
-    if (this.baseOperationBusy || this.dataTransactionBusy || this.directSaveBusyCount > 0 || this.externalReloadBusy) {
+    if (this.baseOperationBusy || this.dataTransactionBusy || this.directSaveBusyCount > 0 || this.isExternalReloadInProgress()) {
       throw new Error("Finish the current knowledge-base or Sync operation before preparing the organizer review.");
     }
     const rawDraft = asUnknownRecord(draft);
@@ -4813,7 +4859,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       );
     });
     const plan = createNoteOrganizerPlan(this.store, facts, directives, {
-      expectedExternalGeneration: this.externalChangeGeneration,
+      expectedExternalGeneration: this.organizerReviewGeneration,
     });
     const token: PreparedNoteOrganizerCommit = {
       kind: "knowledge-base-command-center-prepared-note-organizer",
@@ -4901,6 +4947,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private async applyPreparedNoteOrganizer(preparedToken: unknown): Promise<OrganizerApplyResult> {
+    this.assertDataWritable();
+    if (this.isExternalReloadInProgress()) throw new Error("Wait for the synced update to finish, then refresh the review.");
     if (!preparedToken || typeof preparedToken !== "object") throw new Error("The prepared organizer review is unavailable.");
     const token = preparedToken as PreparedNoteOrganizerCommit;
     if (!this.preparedNoteOrganizerCommits.has(token)
@@ -4951,7 +4999,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     // Validate before joining the queued store transaction, then repeat inside
     // it so waiting behind Settings, Sync, or another App instance cannot turn
     // the displayed review into a different organization change.
-    applyNoteOrganizerPlan(this.store, token.plan, currentFacts(), this.externalChangeGeneration);
+    applyNoteOrganizerPlan(this.store, token.plan, currentFacts(), this.organizerReviewGeneration);
     let batchHistory: NoteOrganizerBatchHistoryToken | null = null;
     await this.commitBaseStoreChange(() => {
       const beforeStore = cloneJsonValue(this.store);
@@ -4959,7 +5007,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         this.store,
         token.plan,
         currentFacts(),
-        this.externalChangeGeneration,
+        this.organizerReviewGeneration,
       );
       batchHistory = createNoteOrganizerBatchHistoryToken(beforeStore, candidate, {
         id: token.plan.id,
@@ -6007,7 +6055,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         && Object.keys(this.store.deletedBaseIds).length >= MAX_DELETED_KNOWLEDGE_BASE_IDS) {
         throw new Error(`This vault already contains ${MAX_DELETED_KNOWLEDGE_BASE_IDS.toLocaleString()} permanent-deletion tombstones. No older tombstone was discarded; export your bases before changing plugin data manually.`);
       }
-      this.store.deletedBaseIds[id] = Math.max(Date.now(), entry.updatedAt + 1);
+      const deletedAt = Math.max(Date.now(), entry.updatedAt + 1);
+      this.store.deletedBaseIds[id] = deletedAt;
+      const proof = createDeletedBaseCausality(entry, deletedAt);
+      if (proof) (this.store.deletedBaseCausality ??= {})[id] = proof;
       this.store.bases.splice(index, 1);
     });
   }
@@ -6955,24 +7006,27 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return new Map(Object.entries(projected));
   }
 
-  private filesForSearchEntry(
+  private *filesForSearchEntry(
     entry: KnowledgeBaseEntry,
     snapshot: KnowledgeBaseSearchVaultSnapshot,
-  ): readonly TFile[] {
+  ): Generator<TFile> {
     const settings = entry.data.settings;
-    const candidates = new Map<string, TFile>();
-    const addPath = (path: string): void => {
+    const candidates = new Set<string>();
+    const addPath = function* (path: string): Generator<TFile> {
       const file = snapshot.filesByPath.get(path);
-      if (file) candidates.set(file.path, file);
+      if (file && !candidates.has(file.path)) {
+        candidates.add(file.path);
+        yield file;
+      }
     };
-    const addRoot = (folder: string): void => {
+    const addRoot = function* (folder: string): Generator<TFile> {
       if (folder.trim() === INDEX_FOLDER_VAULT_ROOT) {
-        for (const file of snapshot.files) candidates.set(file.path, file);
+        for (const file of snapshot.files) yield* addPath(file.path);
         return;
       }
       const clean = normalizePath(folder).replace(/^\/+|\/+$/gu, "");
       if (!clean) return;
-      addPath(clean);
+      yield* addPath(clean);
       const prefix = `${clean}/`;
       let low = 0;
       let high = snapshot.files.length;
@@ -6984,24 +7038,23 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       for (let index = low; index < snapshot.files.length; index += 1) {
         const file = snapshot.files[index];
         if (!file?.path.startsWith(prefix)) break;
-        candidates.set(file.path, file);
+        yield* addPath(file.path);
       }
     };
 
     if (settings.workspaceMode === "ent-clinical") {
-      addRoot(this.projectPendingRenamePath(settings.primaryFolder));
+      yield* addRoot(this.projectPendingRenamePath(settings.primaryFolder));
     } else {
-      for (const source of entry.data.indexFolderSources) addRoot(this.projectPendingRenamePath(source.path));
+      for (const source of entry.data.indexFolderSources) yield* addRoot(this.projectPendingRenamePath(source.path));
     }
-    addRoot(this.projectPendingRenamePath(settings.proposalFolder));
+    yield* addRoot(this.projectPendingRenamePath(settings.proposalFolder));
     if (settings.workspaceMode === "ent-clinical") {
-      for (const root of [PROCEDURE_ROOT, MEDICATION_ROOT, SYNDROME_ROOT, "07 Evidence Updates/"]) addRoot(root);
-      for (const file of snapshot.clinicalProposalFiles) candidates.set(file.path, file);
+      for (const root of [PROCEDURE_ROOT, MEDICATION_ROOT, SYNDROME_ROOT, "07 Evidence Updates/"]) yield* addRoot(root);
+      for (const file of snapshot.clinicalProposalFiles) yield* addPath(file.path);
     }
-    for (const path of this.referencedPaths(entry.data, entry.id)) addPath(this.projectPendingRenamePath(path));
-    for (const path of this.excludedPaths(entry.data, entry.id)) addPath(this.projectPendingRenamePath(path));
-    for (const path of Object.keys(entry.data.indexGroupByPath)) addPath(this.projectPendingRenamePath(path));
-    return [...candidates.values()];
+    for (const path of this.referencedPaths(entry.data, entry.id)) yield* addPath(this.projectPendingRenamePath(path));
+    for (const path of this.excludedPaths(entry.data, entry.id)) yield* addPath(this.projectPendingRenamePath(path));
+    for (const path of Object.keys(entry.data.indexGroupByPath)) yield* addPath(this.projectPendingRenamePath(path));
   }
 
   private rebuildRecordLinkIndex(records: VaultRecord[]): void {
@@ -7031,9 +7084,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   ): Promise<KnowledgeBaseSearchResultSet<KnowledgeBaseSearchSource> | null> {
     const requestGeneration = this.searchGeneration;
     const activeBaseId = this.store.activeBaseId;
-    const entries = this.getKnowledgeBases()
+    const allEntries = this.getKnowledgeBases()
       .sort((a, b) => Number(b.id === activeBaseId) - Number(a.id === activeBaseId)
         || a.data.settings.workspaceName.localeCompare(b.data.settings.workspaceName));
+    const entries = options.baseIds ? allEntries.filter((entry) => options.baseIds?.includes(entry.id)) : allEntries;
     const sources: KnowledgeBaseSearchSource[] = entries.map((entry) => ({
       baseId: entry.id,
       baseName: entry.data.settings.workspaceName,
@@ -7043,25 +7097,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       sources,
       parseQuery(query),
       options.limit ?? DEFAULT_CROSS_BASE_SEARCH_LIMIT,
+      options.linkedFirst,
     );
     const cancelled = (): boolean => requestGeneration !== this.searchGeneration || Boolean(options.isCancelled?.());
-    const yieldEvery = Math.max(1, Math.floor(options.yieldEvery ?? 750));
-    const useTimeBudget = options.yieldEvery === undefined;
-    const now = (): number => performance.now();
-    let sliceStartedAt = now();
-    let workSinceYield = 0;
-    const checkpoint = async (): Promise<boolean> => {
-      workSinceYield += 1;
-      if (cancelled()) return false;
-      if (workSinceYield < yieldEvery && (!useTimeBudget || now() - sliceStartedAt < 4)) return true;
-      workSinceYield = 0;
-      await new Promise<void>((resolve) => {
-        if (typeof window === "undefined") queueMicrotask(resolve);
-        else window.activeWindow.setTimeout(resolve, 0);
-      });
-      sliceStartedAt = now();
-      return !cancelled();
-    };
+    const checkpoint = createSearchCheckpoint(cancelled, options.yieldEvery);
     if (cancelled()) return null;
 
     const needsVaultSnapshot = entries.some((entry) => {
@@ -7070,9 +7109,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     let vaultSnapshot = this.knowledgeBaseSearchVaultSnapshot;
     if (needsVaultSnapshot && vaultSnapshot?.generation !== requestGeneration) vaultSnapshot = null;
     if (needsVaultSnapshot && !vaultSnapshot) {
-      const files = [...this.app.vault.getMarkdownFiles()]
-        .sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
-      const filesByPath = new Map(files.map((file) => [file.path, file]));
+      const files = await sortSearchInventory(this.app.vault.getMarkdownFiles(), checkpoint);
+      if (!files) return null;
+      const filesByPath = new Map<string, TFile>();
+      for (const file of files) {
+        filesByPath.set(file.path, file);
+        const ready = checkpoint();
+        if (ready === false || (ready !== true && !await ready)) return null;
+      }
       // Resolve the union of path-eligible files before touching metadata. A
       // generic base may link a few hundred notes in a 250k-file vault; reading
       // every unrelated cache entry made the first cross-base query scale with
@@ -7085,10 +7129,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         generation: requestGeneration,
       };
       const eligiblePaths = new Set<string>();
-      for (const entry of entries) {
-        for (const file of this.filesForSearchEntry(entry, structuralSnapshot)) eligiblePaths.add(file.path);
+      for (const entry of allEntries) {
+        for (const file of this.filesForSearchEntry(entry, structuralSnapshot)) {
+          eligiblePaths.add(file.path);
+          const ready = checkpoint();
+          if (ready === false || (ready !== true && !await ready)) return null;
+        }
       }
-      const hasClinicalBase = entries.some((entry) => entry.data.settings.workspaceMode === "ent-clinical");
+      const hasClinicalBase = allEntries.some((entry) => entry.data.settings.workspaceMode === "ent-clinical");
       const clinicalProposalFiles: TFile[] = [];
       const frontmatterByPath = new Map<string, Record<string, unknown>>();
       for (const file of files) {
@@ -7097,20 +7145,21 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         // the vault to preserve that contract. Generic-only searches read
         // metadata strictly for their pre-scoped union.
         if (!hasClinicalBase && !eligiblePaths.has(file.path)) {
-          if (!await checkpoint()) return null;
+          const ready = checkpoint();
+          if (ready === false || (ready !== true && !await ready)) return null;
           continue;
         }
         const frontmatter = asUnknownRecord(this.app.metadataCache.getFileCache(file)?.frontmatter);
         const clinicalProposal = hasClinicalBase && frontmatter.type === "topic-proposal";
         if (eligiblePaths.has(file.path) || clinicalProposal) frontmatterByPath.set(file.path, frontmatter);
         if (clinicalProposal) clinicalProposalFiles.push(file);
-        if (!await checkpoint()) return null;
+        const ready = checkpoint();
+        if (ready === false || (ready !== true && !await ready)) return null;
       }
       if (cancelled()) return null;
       vaultSnapshot = { files, filesByPath, clinicalProposalFiles, frontmatterByPath, generation: requestGeneration };
       this.knowledgeBaseSearchVaultSnapshot = vaultSnapshot;
     }
-    const files = vaultSnapshot?.files ?? [];
     const frontmatterByPath = vaultSnapshot?.frontmatterByPath ?? new Map<string, Record<string, unknown>>();
 
     for (let baseIndex = 0; baseIndex < entries.length; baseIndex += 1) {
@@ -7118,15 +7167,33 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       const entry = entries[baseIndex];
       if (!entry) continue;
       const cached = this.recordsCacheByBase.get(entry.id) ?? this.getInactiveSearchRecords(entry.id);
-      const scannedRecords: VaultRecord[] | null = cached ? null : [];
-      const entryFiles = cached || !vaultSnapshot ? files : this.filesForSearchEntry(entry, vaultSnapshot);
+      const retentionCapacity = Math.max(0, MAX_INACTIVE_SEARCH_CACHED_RECORDS - this.inactiveSearchCachedRecordCount);
+      // Active projections are never retained by search; a cache miss beyond
+      // the stable working-set budget must stream, not accumulate a second
+      // unbounded copy that is rejected only after the entire base is scanned.
+      let scannedRecords: VaultRecord[] | null = !cached && entry.id !== activeBaseId && retentionCapacity > 0 ? [] : null;
+      const entryFiles: TFile[] = [];
+      if (!cached && vaultSnapshot) {
+        for (const file of this.filesForSearchEntry(entry, vaultSnapshot)) {
+          entryFiles.push(file);
+          const ready = checkpoint();
+          if (ready === false || (ready !== true && !await ready)) return null;
+        }
+      }
       const scan: Iterable<VaultRecord | null> = cached ?? this.iterateRecordScanForEntry(entry, entryFiles, frontmatterByPath);
       for (const record of scan) {
-        if (record && scannedRecords) scannedRecords.push(record);
-        if (record) collector.consider(baseIndex, record);
-        if (!await checkpoint()) return null;
+        if (record && scannedRecords) {
+          if (scannedRecords.length < retentionCapacity) scannedRecords.push(record);
+          else scannedRecords = null;
+        }
+        if (record && (!options.libraryId || record.libraryId === options.libraryId)
+          && (options.availability !== "linked" || !record.isPlaceholder)
+          && (options.availability !== "placeholders" || record.isPlaceholder)) collector.consider(baseIndex, record);
+        const ready = checkpoint();
+        if (ready === false || (ready !== true && !await ready)) return null;
       }
-      if (scannedRecords && entry.id !== activeBaseId) this.retainInactiveSearchRecords(entry.id, scannedRecords);
+      if (cancelled()) return null;
+      if (scannedRecords) this.retainInactiveSearchRecords(entry.id, scannedRecords);
     }
     return cancelled() ? null : collector.finish();
   }

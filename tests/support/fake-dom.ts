@@ -234,11 +234,15 @@ export class FakeElement {
   }
 
   empty(): void {
-    this.children.splice(0);
+    const focused = this.ownerDocument.activeElement;
+    if (focused && focused !== this && this.contains(focused)) this.ownerDocument.activeElement = null;
+    for (const child of this.children.splice(0)) child.parentElement = null;
     this.ownText = "";
   }
 
   remove(): void {
+    const focused = this.ownerDocument.activeElement;
+    if (focused && this.contains(focused)) this.ownerDocument.activeElement = null;
     const parent = this.parentElement;
     if (parent) {
       const index = parent.children.indexOf(this);

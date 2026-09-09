@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.20.0
+
+### Safety
+
+- Permanent base deletion now records the causal state that the deleting device observed. Unseen offline edits are preserved in conflict rescue before deletion, regardless of wall-clock ordering. Legacy timestamp-only tombstones rescue conservatively; a failed rescue blocks adoption. Upgrade every editing device to receive the corrected merge behavior.
+- Identical external reloads preserve open Organizer drafts and prepared reviews. Relevant changes keep selected notes and destination choices, invalidate Apply, and offer a fresh review. Pending reloads still fence writes, including the presentation phase. Removed destinations are never silently replaced.
+- Reconcile accepted external metadata inside the reload's existing operation before rendering, avoiding a nested-save queue stall and keeping newly rendered controls valid after cleanup.
+- Attachment heading and marker insertion now excludes BOM-aware YAML frontmatter and shares the same body-boundary parser as Quick Append.
+
+### Workspace
+
+- Preserve pagination, selection, scrolling, and keyboard focus across same-route refreshes and disclosures. Show-more focus remains on a live control or the first newly revealed row.
+- Separate entry counts from linked notes and placeholders, group Library navigation, and provide explicit search scope, availability, and linked-first controls. Saved searches and note-return routes preserve filters; older saved routes keep their original broad-search defaults.
+- Add comfortable/compact density, readable status text, actionable empty Collections, and an inspector that stays collapsed until needed.
+- Simplify create-note and first-run forms with optional details, and organize export around transfer, private backup, and custom-selection purposes. Recovery status and next actions precede technical diagnostics.
+- Restore readable Settings, recovery, and import-completion button labels that native icons previously replaced. Compact Settings spacing now fits its controls instead of reserving a 320px-tall blank area; selectors and Manage buttons retain 44px mobile touch targets.
+
+### Engineering and verification
+
+- Chunk and cancel cold-search inventory preparation before expensive work; extract search inventory, view focus/state, presentation guards, and shared operation queues into independently tested helpers.
+- Use elapsed-time search checkpoints and bounded projection retention to reduce unnecessary timer waits and allocations. In the synthetic Chromium 250,000-note / 50-base benchmark, cold searches improved from 9.92–10.06 seconds to 2.33–2.61 seconds, and repeat searches from 3.69–3.75 seconds to 1.20–1.32 seconds, with identical counts and results. These measurements exclude real vault I/O and physical-device performance.
+- Update development dependency resolutions for `fast-uri` and `js-yaml`; preserve browser failure artifacts in CI and include nested runtime modules in coverage.
+- Add real production-renderer browser tests alongside the existing layout fixtures, with desktop/phone-sized light/dark checks, focus, refresh, scoped search, and modal interaction regressions.
+- The final local 0.20.0 gate passed 1,176 runtime tests, 87 Chromium/WebKit browser cases, all three performance budgets, ten release tests, coverage floors, typecheck, lint, dependency audit, bundle limits and the three-file archive privacy check. GitHub Actions repeats the release gate on Node 22 before publishing.
+- Raise the measured JavaScript bundle ceilings to 1,140,000 raw bytes / 300,000 gzip bytes to cover this feature set with a small integration margin; retain the stylesheet ceilings.
+- After the untested physical-iPhone, VoiceOver, and controlled two-device Sync scope was explicitly reported, the maintainer directed publication. This candidate-specific maintainer-authorized waiver leaves those checks unverified for 0.20.0 only; desktop Obsidian and Chromium/WebKit emulation do not establish a physical-device Pass. See the [0.20.0 evidence record](https://github.com/drbinsaad/knowledge-base-command-center/blob/0.20.0/docs/release-evidence/0.20.0-iphone.md).
+
 ## 0.19.1
 
 ### Fixed

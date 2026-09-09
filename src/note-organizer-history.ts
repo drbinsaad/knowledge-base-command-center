@@ -170,6 +170,7 @@ function storeEnvelopeGuard(store: PluginStore): string {
     version: store.version,
     vaultId: store.vaultId,
     deletedBaseIds: store.deletedBaseIds,
+    deletedBaseCausality: store.deletedBaseCausality ?? {},
     baseIds: store.bases.map((entry) => entry.id),
   });
 }

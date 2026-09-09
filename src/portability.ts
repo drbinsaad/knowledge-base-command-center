@@ -9,6 +9,7 @@ import {
   childSubheadings,
   cleanLibraryLayouts,
   cleanLibraryNoteProfiles,
+  cleanSearchViewFilters,
   cloneCollections,
   cloneJsonValue,
   codeUnitCompare,
@@ -1601,7 +1602,7 @@ function parseSavedViews(input: unknown, packageVersion: PortableExportVersion):
     if (!isMainTab(tab)) throw new Error(`Saved view ${id} has an unsupported tab.`);
     const query = typeof view.query === "string" ? view.query : "";
     if (query.length > MAX_SAVED_VIEW_QUERY_LENGTH) throw new Error(`Saved view ${id} query is too long.`);
-    return { id, name: safeTitle(view.name, `Saved view ${index + 1} name`), tab, query };
+    return { id, name: safeTitle(view.name, `Saved view ${index + 1} name`), tab, query, ...cleanSearchViewFilters(view) };
   });
   return { version: 1, views };
 }

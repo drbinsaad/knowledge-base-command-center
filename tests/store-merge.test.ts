@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   boundedSemanticLineage,
   createDefaultStore,
+  createDeletedBaseCausality,
   createKnowledgeBaseEntry,
   MAX_KNOWLEDGE_BASES,
   MAX_SEMANTIC_LINEAGE,
@@ -449,11 +450,93 @@ test("a tombstoned base edited after the deletion surfaces a losing conflict for
     [{ baseId: research.id, winner: "local" }],
   );
 
-  // Deleting an unedited copy stays a silent, rescue-free drop.
+  // A legacy timestamp cannot prove even an older copy was already observed.
   const staleResearch = structuredClone(research);
   staleResearch.updatedAt = 250;
   const staleDevice = store([structuredClone(ent), staleResearch], "base-ent");
-  assert.deepEqual(mergeKnowledgeBaseStores(staleDevice, deletingDevice, "base-ent").semanticConflicts, []);
+  assert.equal(mergeKnowledgeBaseStores(staleDevice, deletingDevice, "base-ent").semanticConflicts.length, 1);
+});
+
+test("causal deletions rescue unseen offline edits regardless of timestamp or merge direction", () => {
+  const ent = entry("base-ent", "ENT", 100);
+  const research = entry("base-research", "Research", 100);
+  const archived = structuredClone(research);
+  advanceEntry(archived, () => { archived.archivedAt = 200; }, 200);
+  const deleting = store([ent], ent.id);
+  deleting.deletedBaseIds[research.id] = 300;
+  const proof = createDeletedBaseCausality(archived, 300);
+  assert.ok(proof);
+  deleting.deletedBaseCausality = { [research.id]: proof };
+
+  for (const editedAt of [150, 250, 300, 500]) {
+    const edited = structuredClone(research);
+    advanceEntry(edited, () => { edited.data.pinnedPaths = ["Research/Offline work.md"]; }, editedAt);
+    const editing = store([structuredClone(ent), edited], ent.id);
+    for (const [left, right, winner] of [[editing, deleting, "incoming"], [deleting, editing, "local"]] as const) {
+      const merged = mergeKnowledgeBaseStores(left, right);
+      assert.equal(merged.store.bases.some((base) => base.id === research.id), false);
+      assert.deepEqual(merged.semanticConflicts.map((conflict) => ({ baseId: conflict.baseId, winner: conflict.winner })), [{ baseId: research.id, winner }]);
+    }
+  }
+});
+
+test("causal deletions quietly remove only observed endpoints or trusted ancestors", () => {
+  const ent = entry("base-ent", "ENT", 100);
+  const research = entry("base-research", "Research", 100);
+  const archived = structuredClone(research);
+  advanceEntry(archived, () => { archived.archivedAt = 200; }, 200);
+  const deleting = store([ent], ent.id);
+  deleting.deletedBaseIds[research.id] = 300;
+  const proof = createDeletedBaseCausality(archived, 300);
+  assert.ok(proof);
+  deleting.deletedBaseCausality = { [research.id]: proof };
+  for (const observed of [research, archived]) {
+    const stale = store([structuredClone(ent), structuredClone(observed)], ent.id);
+    for (const [left, right] of [[stale, deleting], [deleting, stale]]) {
+      assert.deepEqual(mergeKnowledgeBaseStores(left, right).semanticConflicts, []);
+    }
+  }
+  const tampered = structuredClone(archived);
+  tampered.data.pinnedPaths = ["Research/Unadvertised edit.md"];
+  assert.equal(mergeKnowledgeBaseStores(store([ent, tampered]), deleting).semanticConflicts.length, 1);
+  const reusedHead = structuredClone(tampered);
+  reusedHead.semanticHash = semanticEntryFingerprint(reusedHead);
+  assert.equal(mergeKnowledgeBaseStores(store([ent, reusedHead]), deleting).semanticConflicts.length, 1, "the same head cannot vouch for a different payload");
+});
+
+test("legacy or invalid deletion proof always rescues and proof merge is deterministic", () => {
+  const ent = entry("base-ent", "ENT", 100);
+  const research = entry("base-research", "Research", 100);
+  const survivor = store([ent, research], ent.id);
+  const deleting = store([structuredClone(ent)], ent.id);
+  deleting.deletedBaseIds[research.id] = 300;
+  const proof = createDeletedBaseCausality(research, 300);
+  assert.ok(proof);
+  for (const invalid of [undefined, { ...proof, deletedAt: 299 }, { ...proof, semanticHead: "invalid" }, { ...proof, semanticLineage: [proof.semanticHead] }]) {
+    deleting.deletedBaseCausality = invalid ? { [research.id]: invalid } : undefined;
+    assert.equal(mergeKnowledgeBaseStores(survivor, deleting).semanticConflicts.length, 1);
+    assert.equal(mergeKnowledgeBaseStores(deleting, survivor).semanticConflicts.length, 1);
+  }
+  deleting.deletedBaseCausality = { [research.id]: proof };
+  const olderClient = structuredClone(deleting);
+  delete olderClient.deletedBaseCausality;
+  const left = mergeKnowledgeBaseStores(deleting, olderClient);
+  const right = mergeKnowledgeBaseStores(olderClient, deleting);
+  assert.deepEqual(left.store, right.store);
+  assert.deepEqual(left.store.deletedBaseCausality, deleting.deletedBaseCausality);
+  assert.equal(left.incomingNeedsWriteback, true, "retained causal proof is written back when an older client omitted it");
+  olderClient.deletedBaseIds[research.id] = 400;
+  assert.equal(mergeKnowledgeBaseStores(deleting, olderClient).store.deletedBaseCausality, undefined, "proof for an older timestamp cannot suppress rescue for a newer deletion");
+
+  const independentlyObserved = structuredClone(research);
+  advanceEntry(independentlyObserved, () => { independentlyObserved.data.pinnedPaths = ["Research/Other branch.md"]; }, 200);
+  const otherProof = createDeletedBaseCausality(independentlyObserved, 300);
+  assert.ok(otherProof);
+  const otherDeletion = structuredClone(deleting);
+  otherDeletion.deletedBaseCausality = { [research.id]: otherProof };
+  const before = JSON.stringify([deleting, otherDeletion]);
+  assert.deepEqual(mergeKnowledgeBaseStores(deleting, otherDeletion).store, mergeKnowledgeBaseStores(otherDeletion, deleting).store);
+  assert.equal(JSON.stringify([deleting, otherDeletion]), before, "proof selection cannot mutate either input");
 });
 
 test("concurrent permanent deletions that would remove every available base are rejected without mutation", () => {

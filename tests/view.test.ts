@@ -617,6 +617,11 @@ test("the Add menu defaults to the active custom library and exposes the library
   }
   assert.equal(titles.includes("Add to library…"), true);
   assert.equal(titles.includes("New library…"), true);
+  assert.deepEqual(titles.slice(0, 3), [
+    `Create ${data.settings.itemSingular}`,
+    `Add existing note to ${data.settings.indexLabel}`,
+    "Add current note",
+  ], "everyday note actions precede Library and structure management");
 });
 
 test("the active-library Add menu dispatches both existing-note and current-note classification", async () => {
@@ -7199,6 +7204,7 @@ test("Command Center return capture reads the live wide and compact scroll owner
     inspectorEl: HTMLElement | null;
     query: string;
     mobileInspectorOpen: boolean;
+    inspectorSelectedByUser: boolean;
     mobileTreeScrollTop: number;
     mobileInspectorScrollTop: number;
     browseRowLimit: number;
@@ -7221,6 +7227,7 @@ test("Command Center return capture reads the live wide and compact scroll owner
   view.inspectorEl = inspector;
   view.query = "status:reviewed";
   view.mobileInspectorOpen = true;
+  view.inspectorSelectedByUser = true;
   view.mobileTreeScrollTop = 0;
   view.mobileInspectorScrollTop = 0;
   view.browseRowLimit = 900;

@@ -12,9 +12,12 @@ export default defineConfig({
     ? [["line"], ["html", { open: "never", outputFolder: "output/playwright/report" }]]
     : "line",
   use: {
-    browserName: "chromium",
     screenshot: "only-on-failure",
     trace: "retain-on-failure",
     video: "off",
   },
+  projects: [
+    { name: "chromium", use: { browserName: "chromium" } },
+    { name: "webkit", testMatch: /production-view\.spec\.ts/u, use: { browserName: "webkit" } },
+  ],
 });

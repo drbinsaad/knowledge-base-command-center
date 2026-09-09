@@ -41,6 +41,41 @@ test("missing heading and end targets append without rewriting frontmatter", () 
   );
 });
 
+test("attachment heading insertion ignores YAML comments and preserves frontmatter bytes", () => {
+  for (const eol of ["\n", "\r\n", "\r"]) {
+    for (const closing of ["---", "... \t"]) {
+      for (const bom of ["", "\uFEFF"]) {
+        const frontmatter = ["--- \t", "# Attachments", "title: Example", "# Other", "status: draft", closing, ""].join(eol);
+        const body = ["", "## Attachments", "Existing attachment text", "", "## Notes", "Keep this", ""].join(eol);
+        const source = `${bom}${frontmatter}${body}`;
+        const result = insertAttachmentReference(source, "![[scan.png]]", "heading", "", "Attachments");
+        assert.ok(result.startsWith(`${bom}${frontmatter}`));
+        assert.equal(result.replace(`![[scan.png]]${eol}`, ""), source);
+        assert.ok(result.indexOf("![[scan.png]]") > result.indexOf("Existing attachment text"));
+      }
+    }
+  }
+});
+
+test("attachment marker and fence scanning ignore YAML block-scalar examples", () => {
+  const frontmatter = "---\nexample: |\n  ```markdown\n  <!-- kbcc:attachments -->\n  ## Attachments\ntitle: Example\n---\n";
+  const body = "\n<!-- kbcc:attachments -->\nExisting\n\n## Notes\nKeep\n";
+  const source = frontmatter + body;
+  const result = insertAttachmentReference(source, "![[scan.png]]", "marker", "<!-- kbcc:attachments -->", "Attachments");
+  assert.ok(result.startsWith(frontmatter));
+  assert.equal(result.replace("![[scan.png]]\n", ""), source);
+  assert.match(result, /Existing\n!\[\[scan\.png\]\]\n\n## Notes/u);
+  const missingHeading = insertAttachmentReference(frontmatter + "\nBody\n", "![[scan.png]]", "heading", "", "Attachments");
+  assert.ok(missingHeading.startsWith(frontmatter));
+  assert.match(missingHeading, /Body\n\n## Attachments\n\n!\[\[scan\.png\]\]\n$/u);
+});
+
+test("attachment insertion rejects unclosed frontmatter for every durable target", () => {
+  for (const target of ["heading", "marker", "end"] as const) {
+    assert.throws(() => insertAttachmentReference("\uFEFF---\n# Attachments\ntitle: Example", "![[scan.png]]", target, "# Attachments", "Attachments"), /frontmatter is not closed/u);
+  }
+});
+
 test("inserting into a mixed-EOL note rewrites no existing line ending", () => {
   const source = "# Topic\n\n## Attachments\r\n\r\n![[one.png]]\n\n## Notes\n- Keep\n";
   const output = insertAttachmentReference(source, "![[two.png]]", "heading", "", "Attachments");

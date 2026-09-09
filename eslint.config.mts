@@ -33,6 +33,11 @@ export default defineConfig(
   },
   ...obsidianmd.configs.recommended,
   {
+    // The browser host implements Obsidian's helpers with native DOM APIs.
+    files: ["tests/browser/obsidian-browser.ts"],
+    rules: { "obsidianmd/prefer-create-el": "off" },
+  },
+  {
     files: ["*.mjs", "scripts/**/*.mjs", "tests/**/*.{ts,mjs}"],
     languageOptions: {
       globals: {

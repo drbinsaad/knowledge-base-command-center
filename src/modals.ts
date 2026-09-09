@@ -1,5 +1,6 @@
 import { App, FuzzyMatch, FuzzySuggestModal, Modal, Notice, Platform, prepareFuzzySearch, Setting, TFile, TFolder, normalizePath, setIcon } from "obsidian";
 import type { DropdownComponent, TextComponent, ToggleComponent } from "obsidian";
+export { createOpenedBaseGuard, type OpenedBaseGuard, type OpenedBaseGuardHost, type OpenedBaseGuardOptions } from "./opened-base-guard";
 import {
   canonicalPath,
   childSubheadings,
@@ -78,65 +79,6 @@ export type OwnerWindow = Window & { URL: typeof URL };
  */
 export function modalOwnerWindow(contentEl?: { ownerDocument?: Document | null } | null): OwnerWindow {
   return contentEl?.ownerDocument?.defaultView ?? (window.activeWindow as OwnerWindow | null) ?? window;
-}
-
-export interface OpenedBaseGuardHost {
-  data: unknown;
-  getActiveKnowledgeBaseId(): string;
-  getDataEpoch?(): number;
-  getExternalChangeGeneration?(): number;
-}
-
-export interface OpenedBaseGuardOptions {
-  /** Shown at most once per guard, so a stale surface cannot spam notices. */
-  message: string;
-  /** Runs before the notice; modals use it to close themselves. */
-  onStale?: () => void;
-  /** Overrides the captured base id when the caller already resolved one. */
-  openedBaseId?: string;
-  /** Overrides the captured data epoch for surfaces that render older data. */
-  openedDataEpoch?: number;
-}
-
-export interface OpenedBaseGuard {
-  /** Reports ownership and, on a stale base, closes and notices exactly once. */
-  (): boolean;
-  /** Same comparison with no side effect, for silent focus/announce timers. */
-  owns(): boolean;
-}
-
-/**
- * One stale-base guard for every surface that can outlive the data it rendered.
- *
- * Ownership is the conjunction of four facts: the live data object identity,
- * the active knowledge-base id, the data epoch, and the external-change
- * generation. Identity catches a replacement object that reused an id; the
- * generation catches a synced data.json that arrived without swapping the
- * active object. Both were previously checked in the settings tab only.
- */
-export function createOpenedBaseGuard(
-  host: OpenedBaseGuardHost,
-  options: OpenedBaseGuardOptions,
-): OpenedBaseGuard {
-  const openedData = host.data;
-  const openedBaseId = options.openedBaseId ?? host.getActiveKnowledgeBaseId();
-  const openedDataEpoch = options.openedDataEpoch ?? host.getDataEpoch?.() ?? 0;
-  const openedExternalGeneration = host.getExternalChangeGeneration?.() ?? 0;
-  let noticeShown = false;
-  const owns = (): boolean => host.data === openedData
-    && host.getActiveKnowledgeBaseId() === openedBaseId
-    && (host.getDataEpoch?.() ?? 0) === openedDataEpoch
-    && (host.getExternalChangeGeneration?.() ?? 0) === openedExternalGeneration;
-  const guard = (): boolean => {
-    if (owns()) return true;
-    options.onStale?.();
-    if (!noticeShown) {
-      noticeShown = true;
-      new Notice(options.message, 8000);
-    }
-    return false;
-  };
-  return Object.assign(guard, { owns });
 }
 
 export interface GuardedTimerRequest {
@@ -623,6 +565,7 @@ export interface NoteDestinationSeed {
 
 export interface KnowledgeNoteModalOptions {
   itemSingular: string;
+  hideCollectionToggle?: boolean;
   /** Optional workflow-specific label, such as Medication, while still creating a Markdown note. */
   createLabel?: string;
   /** Visible workflow context that remains available in the compact mobile sheet. */
@@ -782,7 +725,9 @@ export class KnowledgeNoteModal extends Modal {
         modalOwnerWindow(this.contentEl).setTimeout(() => text.inputEl.focus(), 40);
       });
 
-    new Setting(formBody)
+    const advanced = formBody.createEl("details", { cls: "ent-cc-note-advanced" });
+    advanced.createEl("summary", { text: "Storage and template details" });
+    new Setting(advanced)
       .setName("Destination folder")
       .setDesc("Vault-relative folder. Leave empty to create at the vault root.")
       .addText((text) => {
@@ -811,7 +756,7 @@ export class KnowledgeNoteModal extends Modal {
 
     const templateSetting = new Setting(formBody)
       .setName("Template")
-      .setDesc("Supports legacy {{title}}, {{date}}, and {{time}} tokens. {{yaml:id}}, {{yaml:category}}, {{yaml:parent}}, {{yaml:library}}, and {{yaml:type}} insert YAML-safe quoted scalars. Other syntax is copied unchanged.")
+      .setDesc("Copy a Markdown template. Token reference is under storage and template details.")
       .addButton((button) => {
         this.templateButton = button.buttonEl;
         button.buttonEl.setAttribute("aria-label", "Choose note template");
@@ -831,6 +776,9 @@ export class KnowledgeNoteModal extends Modal {
     this.templateSettingEl = templateSetting.settingEl;
     this.templateSettingEl.addClass("ent-cc-template-setting");
     this.updateTemplateButton();
+    advanced.createEl("p", {
+      text: "Template reference: {{title}}, {{date}}, and {{time}} are replaced. {{yaml:id}}, {{yaml:category}}, {{yaml:parent}}, {{yaml:library}}, and {{yaml:type}} insert YAML-safe quoted scalars. Other syntax is copied unchanged.",
+    });
 
     const collectionSetting = new Setting(formBody)
       .setName("Add to a collection after creation")
@@ -841,6 +789,9 @@ export class KnowledgeNoteModal extends Modal {
       });
     this.collectionToggleSettingEl = collectionSetting.settingEl;
     this.collectionToggleSettingEl.addClass("ent-cc-collection-toggle-setting");
+    this.collectionToggleSettingEl.toggleClass("is-hidden", Boolean(this.options.hideCollectionToggle));
+    // Keep the daily capture choices together; technical storage controls follow.
+    formBody.appendChild(advanced);
 
     const preview = formBody.createDiv({ cls: "ent-cc-path-preview" });
     preview.createDiv({ cls: "ent-cc-path-preview-label", text: "New note path" });
@@ -1060,6 +1011,8 @@ export function missingSetupFolderHint(
 export class WorkspaceSetupModal extends Modal {
   private value: WorkspaceSetupValue;
   private errorEl: HTMLElement | null = null;
+  private advancedEl: HTMLDetailsElement | null = null;
+  private advancedOpen = false;
 
   constructor(app: App, initial: PluginSettings, private readonly onSubmit: (value: WorkspaceSetupValue) => void | Promise<void>) {
     super(app);
@@ -1090,13 +1043,21 @@ export class WorkspaceSetupModal extends Modal {
     this.contentEl.addClass("ent-cc-modal", "ent-cc-topic-editor");
     this.titleEl.setText("Set up your knowledge base");
     this.contentEl.createEl("p", { cls: "ent-cc-modal-lead", text: "This configures only the plugin view. Existing notes stay exactly where they are, and the index starts empty until you add a note or explicitly link a folder." });
+    this.contentEl.createEl("p", { text: "Start with a name. After setup, add existing notes and choose their destination. You can customize these options later." });
+    let fieldParent = this.contentEl;
     const textField = (name: string, description: string, key: Exclude<keyof WorkspaceSetupValue, "defaultNewNoteMode">, placeholder: string): void => {
-      new Setting(this.contentEl).setName(name).setDesc(description).addText((text) => text
+      new Setting(fieldParent).setName(name).setDesc(description).addText((text) => text
         .setPlaceholder(placeholder)
         .setValue(this.value[key])
         .onChange((value) => { this.value[key] = value; }));
     };
     textField("Command center name", "You can change it later in Settings.", "workspaceName", "My Knowledge Base");
+    const advanced = this.contentEl.createEl("details", { cls: "ent-cc-setup-advanced" });
+    advanced.createEl("summary", { text: "Customize labels, folders, and templates" });
+    advanced.open = this.advancedOpen;
+    advanced.addEventListener("toggle", () => { this.advancedOpen = advanced.open; });
+    this.advancedEl = advanced;
+    fieldParent = advanced;
     textField("Header description", "Short explanation shown below the command center name.", "workspaceSubtitle", "Search, organize, arrange, and create notes.");
     textField("Index name", "For example: Knowledge Index, Projects, Research Library.", "indexLabel", "Knowledge Index");
     textField("Item singular", "For example: note, project, paper.", "itemSingular", "note");
@@ -1104,7 +1065,7 @@ export class WorkspaceSetupModal extends Modal {
     textField("Group name", "For example: Category, Area, Course, or Department.", "groupLabel", "Group");
     const folderExists = (path: string): boolean => this.app.vault.getAbstractFileByPath(normalizePath(path)) instanceof TFolder;
     let homeFolder = "";
-    new Setting(this.contentEl)
+    new Setting(advanced)
       .setName("Keep everything in one folder (optional)")
       .setDesc(HOME_FOLDER_FIELD_DESCRIPTION)
       .addText((text) => {
@@ -1127,7 +1088,7 @@ export class WorkspaceSetupModal extends Modal {
       placeholder: string,
       consequence: string,
     ): void => {
-      const row = new Setting(this.contentEl).setName(name);
+      const row = new Setting(advanced).setName(name);
       const updateHint = (value: string): void => {
         row.setDesc(missingSetupFolderHint(value, consequence, folderExists) ?? description);
       };
@@ -1150,7 +1111,7 @@ export class WorkspaceSetupModal extends Modal {
     textField("Templates folder", "Leave empty to allow any Markdown note as a template.", "templatesFolder", "Templates");
     textField("Exports folder", "JSON backups, portable exports, and rescue files are written here.", "exportsFolder", DEFAULT_EXPORTS_FOLDER);
 
-    new Setting(this.contentEl)
+    new Setting(advanced)
       .setName("Default starting content")
       .setDesc("You can override this for every note you create.")
       .addDropdown((dropdown) => dropdown
@@ -1158,7 +1119,7 @@ export class WorkspaceSetupModal extends Modal {
         .setValue(this.value.defaultNewNoteMode)
         .onChange((value) => { this.value.defaultNewNoteMode = value as NewNoteMode; }));
 
-    new Setting(this.contentEl)
+    new Setting(advanced)
       .setName("Default template")
       .setDesc("Optional. Supports {{title}}, {{date}}, and {{time}}.")
       .addButton((button) => {
@@ -1184,28 +1145,33 @@ export class WorkspaceSetupModal extends Modal {
   }
 
   private async submit(): Promise<void> {
+    // Any validation error must leave its editable fields discoverable.
+    const showError = (message: string): void => {
+      if (this.advancedEl) this.advancedEl.open = true;
+      this.errorEl?.setText(message);
+    };
     for (const key of ["workspaceName", "indexLabel", "itemSingular", "itemPlural", "groupLabel", "inboxLabel"] as const) {
       this.value[key] = this.value[key].trim();
-      if (!this.value[key]) { this.errorEl?.setText("Name and item labels cannot be empty."); return; }
+      if (!this.value[key]) { showError("Name and item labels cannot be empty."); return; }
     }
     this.value.workspaceSubtitle = this.value.workspaceSubtitle.trim();
     for (const key of ["primaryFolder", "proposalFolder", "defaultNoteFolder", "templatesFolder", "exportsFolder"] as const) this.value[key] = this.value[key].trim().replace(/^\/+|\/+$/g, "");
     if (!this.value.proposalFolder) {
-      this.errorEl?.setText(INBOX_FOLDER_REQUIRED_MESSAGE);
+      showError(INBOX_FOLDER_REQUIRED_MESSAGE);
       return;
     }
     if (!this.value.exportsFolder) this.value.exportsFolder = DEFAULT_EXPORTS_FOLDER;
     for (const key of ["idProperty", "groupProperty", "parentProperty"] as const) this.value[key] = this.value[key].trim();
     this.value.defaultTemplatePath = this.value.defaultTemplatePath.trim().replace(/^\/+/, "");
     if (this.value.defaultNewNoteMode === "template" && !this.value.defaultTemplatePath) {
-      this.errorEl?.setText("Choose a default template, or use empty note as the default.");
+      showError("Choose a default template, or use empty note as the default.");
       return;
     }
     try {
       await this.onSubmit({ ...this.value });
       this.close();
     } catch (error) {
-      this.errorEl?.setText(errorMessage(error));
+      showError(errorMessage(error));
     }
   }
 }

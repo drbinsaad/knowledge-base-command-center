@@ -2,9 +2,9 @@ import { readFile, stat } from "node:fs/promises";
 import { gzipSync } from "node:zlib";
 
 const budgets = [
-  // Measured Organizer release-candidate ceilings retain a small explicit
-  // margin while still rejecting another accidental feature-sized increase.
-  { file: "main.js", raw: 1_120_000, gzip: 295_000 },
+  // The reviewed safety, scoped-search, and progressive-disclosure build measures
+  // about 1.13 MB raw / 295 kB gzip. Keep a small, explicit integration margin.
+  { file: "main.js", raw: 1_140_000, gzip: 300_000 },
   { file: "styles.css", raw: 150_000, gzip: 20_500 },
 ];
 

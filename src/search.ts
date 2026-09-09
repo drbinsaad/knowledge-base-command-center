@@ -48,6 +48,7 @@ export interface KnowledgeBaseSearchResultSet<TSource extends KnowledgeBaseSearc
 interface RankedCandidate {
   baseIndex: number;
   rank: number;
+  availabilityRank: number;
   record: VaultRecord;
 }
 
@@ -99,7 +100,8 @@ export function knowledgeBaseSearchRank(record: VaultRecord, parsedQuery: Parsed
 }
 
 function compareCandidates(a: RankedCandidate, b: RankedCandidate): number {
-  return a.rank - b.rank
+  return a.availabilityRank - b.availabilityRank
+    || a.rank - b.rank
     || a.baseIndex - b.baseIndex
     || a.record.title.localeCompare(b.record.title)
     || a.record.path.localeCompare(b.record.path);
@@ -122,6 +124,7 @@ export class BoundedKnowledgeBaseSearchCollector<TSource extends KnowledgeBaseSe
     private readonly sources: readonly TSource[],
     private readonly parsedQuery: ParsedQuery,
     limit = DEFAULT_CROSS_BASE_SEARCH_LIMIT,
+    private readonly linkedFirst = false,
   ) {
     this.limit = Math.max(0, Math.floor(limit));
     this.totals = sources.map(() => 0);
@@ -135,7 +138,7 @@ export class BoundedKnowledgeBaseSearchCollector<TSource extends KnowledgeBaseSe
     this.matchedRecords += 1;
     this.totals[baseIndex] = (this.totals[baseIndex] ?? 0) + 1;
     if (this.limit === 0) return;
-    const candidate = { baseIndex, record, rank: knowledgeBaseSearchRank(record, this.parsedQuery) };
+    const candidate = { baseIndex, record, rank: knowledgeBaseSearchRank(record, this.parsedQuery), availabilityRank: this.linkedFirst && record.isPlaceholder ? 1 : 0 };
     if (this.heap.length < this.limit) {
       this.heap.push(candidate);
       this.siftUp(this.heap.length - 1);

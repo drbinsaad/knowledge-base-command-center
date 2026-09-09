@@ -479,14 +479,17 @@ test("read-only organization disables write-only controls before activation", as
 
   await view.reload();
 
-  const quickEntry = content.querySelector(".ent-cc-quick-entry-button");
+  assert.equal(content.querySelector(".ent-cc-quick-entry-button"), null, "Add is the only primary creation entry point");
+  const workspaceOptions = content.querySelector(".ent-cc-workspace-options");
+  assert.equal(workspaceOptions?.tagName.toLowerCase(), "details", "management actions belong to a native disclosure");
+  assert.equal(workspaceOptions?.querySelector("summary")?.textContent, "Workspace options");
   const organize = content.querySelector(".ent-cc-note-organizer-launch");
   const add = content.querySelector(".ent-cc-header-actions .ent-cc-add-button");
   const arrange = content.querySelector(".ent-cc-header-actions button[aria-pressed]");
   const searchButtons = content.querySelectorAll(".ent-cc-search-row button");
   const saveSearch = searchButtons.find((button) => button.getAttribute("title")?.startsWith("Save this search"));
   const bulkCollection = searchButtons.find((button) => button.getAttribute("title")?.includes("search results"));
-  for (const control of [quickEntry, organize, add, arrange, saveSearch, bulkCollection]) {
+  for (const control of [organize, add, arrange, saveSearch, bulkCollection]) {
     assert.ok(control);
     assert.equal(control.disabled, true);
     assert.match(control.getAttribute("title") ?? "", /read-only/u);
@@ -835,7 +838,7 @@ test("stacked-pane CSS responds to leaf classes without viewport-relative view s
   const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
   assert.match(styles, /\.ent-cc-view\.is-pane-wide \.ent-cc-workspace\s*\{[^}]*grid-template-columns:/s);
   assert.match(styles, /\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-header\s*\{[^}]*flex-direction: column;/s);
-  assert.match(styles, /\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-header-actions\s*\{[^}]*overflow-x: auto;/s);
+  assert.match(styles, /\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-header-actions\s*\{[^}]*flex-wrap: wrap;[^}]*overflow: visible;/s);
   assert.match(styles, /\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-search-row\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\) repeat\(3, 44px\);/s);
   assert.match(styles, /\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-shell\.is-inspector-route \.ent-cc-inspector\.is-mobile-open/s);
   assert.match(styles, /\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-shell\.is-inspector-route \.ent-cc-related-record,\s*\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-shell\.is-inspector-route \.ent-cc-study-action\s*\{\s*min-height:\s*44px;/s);
@@ -1525,9 +1528,9 @@ test("compact record route re-renders restore scroll without stealing focus from
   openNoteButton.focus();
   harness.render();
   assert.equal(
-    dom.document.activeElement === openNoteButton,
+    dom.document.activeElement === content.querySelector(".ent-cc-inspector-actions button"),
     true,
-    "a background refresh keeps focus where the user put it instead of re-focusing the Back button",
+    "a background refresh restores the replacement Open note control instead of leaving focus on a detached node or the Back button",
   );
   assert.equal(content.querySelector(".ent-cc-inspector-body")?.scrollTop, 64, "scroll restoration still runs on background refreshes");
 

@@ -1,6 +1,6 @@
 {
   "name": "knowledge-base-command-center",
-  "version": "0.19.1",
+  "version": "0.20.0",
   "private": true,
   "type": "module",
   "description": "Configurable visual knowledge index, note creator, collections, and smart queues for Obsidian.",
@@ -38,7 +38,7 @@
     "test:coverage": "node scripts/run-runtime-tests.mjs --coverage",
     "test:performance": "node --import tsx --import ./tests/support/register.mjs --test tests/performance-budget.perf.ts",
     "test:layout": "playwright test",
-    "test:layout:install": "playwright install chromium",
+    "test:layout:install": "playwright install chromium webkit",
     "test:release": "node --experimental-strip-types --test tests/release.test.ts",
     "verify-release": "npm run test:release",
     "verify-community": "node scripts/verify-community.mjs",

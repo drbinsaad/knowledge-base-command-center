@@ -614,6 +614,43 @@ test("per-note custom and skip overrides reach the authoritative preparation", a
   assert.equal(harness.drafts[0]?.overrides[1]?.destinations.length, 0);
 });
 
+test("external changes preserve the selected-note draft and expire only its prepared review", async () => {
+  const vaultNotes = notes(2);
+  const harness = hostHarness(vaultNotes);
+  const surface = await openModal(harness.host, vaultNotes.map((note) => note.path));
+  button(surface.content, "Choose destinations").click();
+  button(surface.content, "Prepare review").click();
+  await settle();
+  const originalDraft = structuredClone(harness.drafts[0]);
+  await surface.modal.refreshAfterExternalChange();
+  assert.equal(surface.closed(), 0);
+  assert.match(surface.content.textContent, /Your selected notes and destination choices are kept/u);
+  assert.equal(button(surface.content, "Apply organization").disabled, true);
+  button(surface.content, "Refresh review").click();
+  await settle();
+  assert.deepEqual(harness.drafts[1], originalDraft);
+  assert.equal(button(surface.content, "Apply organization").disabled, false);
+});
+
+test("removed Collection destinations remain unavailable instead of being silently replaced", async () => {
+  const vaultNotes = notes(1);
+  let bases = [structuredClone(BASE)];
+  const harness = hostHarness(vaultNotes);
+  harness.host.getBases = () => bases;
+  const surface = await openModal(harness.host, [vaultNotes[0].path]);
+  button(surface.content, "Choose destinations").click();
+  const state = surface.modal as unknown as { destinations: Array<{ collections: { mode: string; targets: Array<{ headingId: string; subheadingId: string | null }> } }> };
+  state.destinations[0].collections = { mode: "add", targets: [{ headingId: "board-review", subheadingId: "congenital" }] };
+  bases = [{ ...structuredClone(BASE), collections: [{ id: "different", name: "Different", subheadings: [] }] }];
+  await surface.modal.refreshAfterExternalChange();
+  assert.deepEqual(state.destinations[0].collections.targets, [{ headingId: "board-review", subheadingId: "congenital" }]);
+  assert.match(surface.content.textContent, /Unavailable — choose another destination/u);
+  button(surface.content, "Prepare review").click();
+  await settle();
+  assert.equal(harness.drafts.length, 0, "invalid destinations never reach authoritative preparation");
+  assert.match(surface.content.textContent, /choose an available Collection/u);
+});
+
 test("current-base text and full destination rerenders restore deterministic focus", async () => {
   const vaultNotes: OrganizerVaultNode[] = [
     { kind: "note", name: "Same", path: "A/Same.md" },
@@ -780,6 +817,22 @@ test("a stale Apply rejection stays on Review and invalidates the prepared token
   assert.ok(button(surface.content, "Refresh review"));
   assert.equal((button(surface.content, "Apply organization") as unknown as { disabled: boolean }).disabled, true);
   assert.equal(surface.closed(), 0);
+});
+
+test("an external change during preparation cannot enable the old review", async () => {
+  const pending = deferred<OrganizerPreparedPlan>();
+  const vaultNotes = notes(1);
+  const harness = hostHarness(vaultNotes);
+  harness.host.prepare = () => pending.promise;
+  const surface = await openModal(harness.host, [vaultNotes[0].path]);
+  button(surface.content, "Choose destinations").click();
+  button(surface.content, "Prepare review").click();
+  await surface.modal.refreshAfterExternalChange();
+  pending.resolve(prepared());
+  await settle();
+  assert.equal(surface.closed(), 0);
+  assert.match(surface.content.textContent, /data changed while preparing.*draft is kept/u);
+  assert.equal(surface.content.querySelectorAll("button").some((item) => item.textContent === "Apply organization"), false);
 });
 
 test("forced dismissal during prepare suppresses every late render", async () => {

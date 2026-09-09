@@ -43,15 +43,19 @@ Do not mix assets from different releases.
 
 ## First-run setup
 
-The setup wizard asks for:
+Start by naming your knowledge base, then finish setup. Choose **Add** to select an existing note and its destination; your Index does not automatically adopt storage folders.
 
-- the Command Center name and description;
+Expand **Customize labels, folders, and templates** only when you want to change the defaults. It contains:
+
+- the header description;
 - Index, item, group, and Inbox labels;
 - the Inbox folder, default new-note storage folder, templates folder, and export folder;
 - optional ID, group, and parent frontmatter property names; and
 - whether new notes start empty or from a chosen default template.
 
 Most choices can be changed later in **Settings → Community plugins → Knowledge Base Command Center**. Settings change the plugin view; they do not move existing notes.
+
+For the first session, try this short loop: add one existing note, find it with search, select it to inspect its details, then use **Organize** to review another placement. Entry totals distinguish actual linked notes from placeholders awaiting a note. Keep advanced mappings and template customization for when you need them.
 
 The settings page keeps **Index membership**, **Note storage and creation**, and **Portable blueprint and link progress** in separate groups. A linked folder is membership authority; an Inbox, default creation, template, attachment, export, or Library creation folder is a location/workflow choice only.
 
@@ -122,7 +126,7 @@ The Organizer bulk-organizes existing notes only. It does not bulk-create Markdo
 Quick entry opens one focused hub for the active knowledge base. It can switch bases, create a No note subject, create Index/Collection/Library headings or subheadings, create an empty or template-based note, and add the current or an existing note.
 
 - **Desktop ribbon:** choose the lightning-bolt **Open quick entry** action. On mobile, Obsidian places ribbon actions in the **Open** menu.
-- **Inside the Command Center:** choose **Quick entry** in the header.
+- **Inside the Command Center:** use **Add** for the common capture actions; open the complete **Quick entry…** hub from the Command palette.
 - **Keyboard:** open **Settings → Hotkeys**, search for `Quick entry`, and assign only the combinations you want. The plugin installs no default hotkeys.
 - **iPhone or iPad toolbar:** open **Settings → Mobile → Manage toolbar options**, scroll to the bottom, choose **Add global command**, then search for and select **Quick entry…**, a focused Quick Entry or Quick Append command, or an **Open Library: _Library name_** command. An Open Library command can also be assigned as Obsidian's Quick Action.
 - **Apple Shortcuts:** use **Open URLs** with one exact action-only URL:

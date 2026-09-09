@@ -24,7 +24,7 @@ npm ci
 npm run test:layout:install
 ~~~
 
-The second command installs the local Chromium binary used only by the rendered-layout regression suite. CI installs it automatically.
+The second command installs the local Chromium and WebKit binaries used by browser regression tests. CI installs them automatically.
 
 Run the complete local gate:
 
@@ -32,7 +32,9 @@ Run the complete local gate:
 npm run check
 ~~~
 
-The check task runs strict typechecking, zero-warning lint and JSON validation, automatically discovered runtime tests with core/UI coverage thresholds, large-vault cross-base-search and maximum Note Organizer performance budgets, a production build and bundle-size budget, Community-oriented static checks, release verification, and real-Chromium geometry tests.
+The check task runs strict typechecking, zero-warning lint and JSON validation, automatically discovered runtime tests with core/UI coverage thresholds, large-vault cross-base-search and maximum Note Organizer performance budgets, a production build and bundle-size budget, Community-oriented static checks, release verification, and Chromium/WebKit browser tests.
+
+The browser suite also bundles the production Command Center and dialog renderers with a narrow synthetic Obsidian host. Chromium and WebKit exercise keyboard navigation, search, refresh, expanded lists, and form/recovery controls in native browser DOM. This complements the existing Chromium CSS fixtures; it is not an Obsidian or physical-device integration pass. CI retains its reports, failure screenshots, and traces for 14 days. To capture desktop/mobile light/dark renderer screenshots locally, set `KBCC_BROWSER_SCREENSHOT_DIR` to an absolute directory outside this repository when running `npm run test:layout`.
 
 ## Repository map
 

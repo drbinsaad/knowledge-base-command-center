@@ -174,15 +174,16 @@ test("rendered Index rows expose exact desktop text, compact text, and full ARIA
     source: { baseId: "base-a", baseName: "Main", data, records: [placeholder] },
     showIndexProvenance: true,
   });
-  assert.equal(placeholderParent.querySelector(".ent-cc-subject-id-value")?.textContent, "No linked note");
-  assert.equal(placeholderParent.querySelector(".ent-cc-membership-provenance")?.textContent, "Imported placeholder");
-  assert.equal(placeholderParent.querySelector(".ent-cc-placeholder-badge")?.textContent, "No linked note");
+  assert.equal(placeholderParent.querySelector(".ent-cc-subject-id-value")?.textContent, "No note");
+  assert.equal(placeholderParent.querySelector(".ent-cc-membership-provenance"), null, "placeholder origin stays in the tooltip and inspector instead of repeating its status");
+  assert.equal(placeholderParent.querySelector(".ent-cc-subject-id")?.getAttribute("title"), "Index membership: Imported placeholder");
+  assert.equal(placeholderParent.querySelector(".ent-cc-placeholder-badge")?.textContent, "No note");
   assert.equal(
     placeholderParent.querySelector(".ent-cc-placeholder-badge")?.getAttribute("aria-label"),
-    "No linked note. Index membership: Imported placeholder.",
+    "No note. Index membership: Imported placeholder.",
   );
   assert.equal(placeholderParent.querySelector(".ent-cc-membership-badge"), null, "compact panes expose one canonical placeholder badge");
-  assert.match(placeholderParent.querySelector(".ent-cc-subject-title")?.getAttribute("aria-label") ?? "", /No linked note/u);
+  assert.match(placeholderParent.querySelector(".ent-cc-subject-title")?.getAttribute("aria-label") ?? "", /No note/u);
   assert.doesNotMatch(placeholderParent.textContent, /No note yet/u);
 
   const clinicalData = migrateData(null);
