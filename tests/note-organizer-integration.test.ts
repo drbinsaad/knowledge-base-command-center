@@ -10,6 +10,8 @@ import {
   createDefaultStore,
   createKnowledgeBaseEntry,
   migrateData,
+  semanticEntryFingerprint,
+  nextSemanticHead,
 } from "../src/model";
 import {
   MAX_KBCC_RETURN_ROUTES,
@@ -30,6 +32,7 @@ import type {
   NoteOrganizerSelectionSnapshot,
 } from "../src/note-organizer-surfaces";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom";
+import { createOpenedBaseGuard } from "../src/opened-base-guard";
 
 interface OrganizerPluginHarness {
   loadedData: unknown;
@@ -1235,7 +1238,7 @@ test("a restricted membership entry point reports the protected-area reason inst
   assert.doesNotMatch(Notice.messages.at(-1) ?? "", /changed, moved, or became unavailable/iu);
 });
 
-test("an accepted external reload dismisses an open Organizer with an explanation", async () => {
+test("a no-op external reload keeps the same Organizer draft open", async () => {
   Notice.messages.length = 0;
   const file = new TFile("Notes/Reload.md");
   const store = createDefaultStore(genericBase("Reload", "Notes"), 1, "vault-note-organizer-external-reload");
@@ -1245,12 +1248,102 @@ test("an accepted external reload dismisses an open Organizer with an explanatio
   await harness.loadPluginData(false);
   plugin.openNoteOrganizer([file.path]);
   assert.ok(harness.activeNoteOrganizerModal);
+  const modal = harness.activeNoteOrganizerModal;
+  const surfaceVersion = plugin.getBaseSurfaceVersion();
+  const externalGeneration = plugin.getExternalChangeGeneration();
 
   harness.loadedData = structuredClone(store);
   await plugin.onExternalSettingsChange();
 
-  assert.equal(harness.activeNoteOrganizerModal, null);
-  assert.match(Notice.messages.at(-1) ?? "", /Synced knowledge-base data changed.*organizer was closed.*latest bases and memberships/iu);
+  assert.equal(harness.activeNoteOrganizerModal, modal);
+  assert.equal(plugin.getBaseSurfaceVersion(), surfaceVersion);
+  assert.ok(plugin.getExternalChangeGeneration() > externalGeneration, "write fencing still observes every notification");
+  assert.equal(Notice.messages.some((message) => /organizer was closed/iu.test(message)), false);
+});
+
+test("a prepared Organizer review survives a settled no-op reload but not a semantic update", async () => {
+  for (const changed of [false, true]) {
+    const file = new TFile("Notes/Draft.md");
+    Object.assign(file.stat, { mtime: 10, size: 20 });
+    const store = createDefaultStore(genericBase("Draft", "Notes"), 1, `vault-draft-${String(changed)}`);
+    const plugin = new EntVaultCommandCenterPlugin(organizerApp([file]) as never, {} as never);
+    const harness = plugin as unknown as OrganizerPluginHarness;
+    harness.loadedData = store;
+    await harness.loadPluginData(false);
+    const option = harness.noteOrganizerBaseOptions()[0];
+    const prepared = await harness.prepareNoteOrganizer({
+      version: 1, source: "command", selectedPaths: [file.path], overrides: [],
+      destinations: [{
+        baseId: store.activeBaseId,
+        primary: { mode: "index", libraryId: null, headingId: option.indexHeadings[0].id, subheadingId: null },
+        collections: { mode: "keep", targets: [] },
+      }],
+    });
+    const incoming = structuredClone(store);
+    if (changed) {
+      const entry = incoming.bases[0];
+      const parentHead = entry.semanticHead;
+      entry.data.settings.workspaceName = "Remote update";
+      entry.semanticRevision += 1;
+      entry.semanticHash = semanticEntryFingerprint(entry);
+      entry.semanticHead = nextSemanticHead(parentHead, entry.semanticHash);
+      entry.semanticLineage = [parentHead, ...entry.semanticLineage];
+    }
+    harness.loadedData = incoming;
+    await plugin.onExternalSettingsChange();
+    assert.equal(plugin.isDataReadOnly(), false);
+    let commits = 0;
+    harness.commitBaseStoreChange = async (change) => { commits += 1; await change(); };
+    if (changed) {
+      await assert.rejects(() => harness.applyPreparedNoteOrganizer(prepared.preparedToken));
+      assert.equal(commits, 0);
+    } else {
+      await harness.applyPreparedNoteOrganizer(prepared.preparedToken);
+      assert.equal(commits, 1);
+      assert.ok(plugin.data.directIndexPaths.includes(file.path));
+    }
+  }
+});
+
+test("a pending external reload fences Apply without consuming an otherwise valid Organizer token", async () => {
+  const file = new TFile("Notes/Pending.md");
+  Object.assign(file.stat, { mtime: 10, size: 20 });
+  const store = createDefaultStore(genericBase("Pending", "Notes"), 1, "vault-draft-pending");
+  const plugin = new EntVaultCommandCenterPlugin(organizerApp([file]) as never, {} as never);
+  const harness = plugin as unknown as OrganizerPluginHarness & { loadData(): Promise<unknown> };
+  harness.loadedData = store;
+  await harness.loadPluginData(false);
+  const option = harness.noteOrganizerBaseOptions()[0];
+  const prepared = await harness.prepareNoteOrganizer({
+    version: 1, source: "command", selectedPaths: [file.path], overrides: [],
+    destinations: [{
+      baseId: store.activeBaseId,
+      primary: { mode: "index", libraryId: null, headingId: option.indexHeadings[0].id, subheadingId: null },
+      collections: { mode: "keep", targets: [] },
+    }],
+  });
+  let resolveRead: (value: unknown) => void = () => undefined;
+  let resolveRefresh: () => void = () => undefined;
+  let announceRefresh: () => void = () => undefined;
+  const refreshing = new Promise<void>((resolve) => { announceRefresh = resolve; });
+  const refreshed = new Promise<void>((resolve) => { resolveRefresh = resolve; });
+  const guard = createOpenedBaseGuard(plugin, { message: "Changed." });
+  plugin.refreshViews = async () => { announceRefresh(); await refreshed; };
+  harness.loadData = () => new Promise((resolve) => { resolveRead = resolve; });
+  const reload = plugin.onExternalSettingsChange();
+  assert.equal(plugin.isExternalReloadInProgress(), true);
+  await assert.rejects(() => harness.applyPreparedNoteOrganizer(prepared.preparedToken), /synced|Sync/iu);
+  resolveRead(structuredClone(store));
+  await refreshing;
+  assert.equal(plugin.isExternalReloadInProgress(), true, "presentation await is still part of the UI fence");
+  assert.equal(guard.owns(), false);
+  await assert.rejects(() => harness.applyPreparedNoteOrganizer(prepared.preparedToken), /synced|Sync/iu);
+  resolveRefresh();
+  await reload;
+  assert.equal(guard.owns(), true);
+  harness.commitBaseStoreChange = async (change) => { await change(); };
+  await harness.applyPreparedNoteOrganizer(prepared.preparedToken);
+  assert.ok(plugin.data.directIndexPaths.includes(file.path));
 });
 
 test("safe text drops open exact vault notes and operating-system files fail closed", () => {

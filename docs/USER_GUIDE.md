@@ -54,7 +54,7 @@ Removing or hiding a record affects only the active knowledge base. For a note s
 
 Generic bases migrated from pre-v15 data temporarily keep the old `primaryFolder` as a reviewable **legacy linked-folder source** so the pre-upgrade result set does not disappear. The Command Center and Settings keep a warning visible until you choose **Review…** or run **Review legacy index source…** from the Command palette. The review lists only real Markdown notes currently available on this device whose membership depends on that source alone. It initially selects all notes for preservation when they fit within the direct-membership limit; use the filter, **Clear all notes**, or individual checkboxes as needed. Before **Apply review & unlink** becomes available, confirm that Obsidian Sync has finished and the folder's Markdown contents are complete on this device. A missing non-root source blocks Apply, and zero local candidates is never treated as proof that every synced copy is empty. Apply makes selected notes direct members and removes the folder rule in one Undo-protected transaction. An unusually large source that cannot fit is left unselected and explains its capacity instead of truncating the choice. **Keep linked** records an intentional dynamic-folder choice and remains safe when a folder is temporarily unavailable. **Not now** changes nothing, and the warning remains. None of these actions edits, moves, renames, or deletes Markdown.
 
-Index rows show **Direct**, **Linked folder**, **Imported placeholder**, or **Protected source** so membership authority is visible. Compact panes use shorter equivalents while keeping the full explanation available to assistive technology. Choose **Why this appears** from a record menu or inspector to see every authority that applies at once, including the exact linked sources, exclusion, primary Library, Collections, pin and Next state. Its Markdown path is labelled separately as storage location and never presented as a membership rule.
+Linked Index rows show **Direct**, **Linked folder**, or **Protected source** so membership authority is visible. An unresolved placeholder shows one **No note** status; its imported provenance remains available in the tooltip, accessible label, and inspector. Compact panes use shorter equivalents while keeping the full explanation available to assistive technology. Choose **Why this appears** from a record menu or inspector to see every authority that applies at once, including the exact linked sources, exclusion, primary Library, Collections, pin and Next state. Its Markdown path is labelled separately as storage location and never presented as a membership rule.
 
 The ENT preset protects canonical source classification and folder scope. It still permits personal visual organization where the profile allows it.
 
@@ -93,6 +93,8 @@ The ENT clinical preset keeps its destination-aware safeguards. Notes in restric
 Choose **Prepare review** to build exact before/after rows for every effective note/base destination. The review reports changed, unchanged, and skipped rows and states: **0 files moved · 0 files renamed · 0 Markdown files rewritten · 0 folder links changed**. Preparing a review does not change organization.
 
 **Apply organization** accepts only that opaque prepared result. Immediately before and during the transaction, the plugin revalidates the exact Markdown file objects and their modification facts, every affected destination and heading, the knowledge-base state, and the observed Sync generation. If a file, destination, or synced plugin state changed, Apply fails closed before a partial organization result. Choose **Refresh review**, inspect the new before/after rows, and Apply again only when they are correct.
+
+An unchanged external reload keeps the Organizer and its prepared review open. A changed organization snapshot preserves selected notes, destinations, and per-note overrides, but requires a refreshed review before Apply. Removed destinations remain visibly unavailable until you choose replacements; the plugin never silently substitutes another destination. Actions pause while an external reload is still settling.
 
 Each affected knowledge base receives its ordinary restart-durable per-base Undo entry. Before the primary plugin-store mutation, a multi-base Organizer Apply stages the exact required-Undo snapshot for every affected base as one protected batch. If those aggregate snapshots cannot fit within the shared 4 MiB device-local history budget, the whole Apply is refused without a partial organization change. Split the affected bases across batches; because each Undo entry is an exact whole-base snapshot, selecting fewer notes while targeting the same bases may not reduce this journal size. The newest multi-base Organizer batch also has two session-only commands:
 
@@ -242,6 +244,8 @@ Switching the destination re-seeds the folder, content mode, and template with t
 - an optional default template; and
 - optional Collection membership.
 
+The create form puts title, destination, and starting content first. Expand **Storage and template details** to change the folder or read the token reference; the final path preview stays visible without expanding those details.
+
 Templates may use <code>{{title}}</code>, <code>{{date}}</code>, and <code>{{time}}</code>. Other template syntax is copied unchanged. The path preview shows the destination before creation. Missing destination folders are created safely, and existing files are never overwritten.
 
 When creation has an explicit Library context, templates may also use these quoted-scalar tokens:
@@ -261,7 +265,7 @@ Notes created through the primary action join only the destination explicitly ch
 
 ## Quick entry and shortcuts
 
-Open Quick entry from the lightning-bolt desktop ribbon action or the Command Center header. On mobile, Obsidian places ribbon actions in its **Open** menu. The hub shows the active knowledge base and offers:
+Open Quick entry from the lightning-bolt desktop ribbon action or the **Quick entry…** command. The Command Center header uses **Add** for capture and **Organize** for existing-note placement; layout and management controls are under **Workspace options**. On mobile, Obsidian places ribbon actions in its **Open** menu. The Quick entry hub shows the active knowledge base and offers:
 
 - switch knowledge base;
 - create a portable **No note** subject;
@@ -355,7 +359,9 @@ For a protected clinical topic, the ENT preset substitutes **Create unverified p
 
 ## Search
 
-A non-empty query searches every available, non-archived knowledge base. Results from the active base appear first; remaining bases are ordered by workspace name. Each result set is then grouped by primary Index/Library section.
+Search defaults to every available, non-archived knowledge base. Choose **All bases**, **This base**, or **This Library** in the visible scope control; the Library scope is available while a Library is selected. **Note availability** selects all entries, linked notes, or placeholders. **Show linked notes first** prioritizes usable notes without merging similarly named entries.
+
+Results from the active base appear first; remaining bases are ordered by workspace name. Each result set is then grouped by primary Index/Library section. Saved searches and note-bound return routes retain the scope, availability, and linked-first choice. Older saved searches default to All bases, all entries, and relevance order instead of inheriting the last search's filters.
 
 Activating a result from another base switches the active base. A note-backed result selects and opens the record. A placeholder opens its create/link actions.
 
@@ -388,6 +394,8 @@ The available filters are:
 Unknown <code>word:</code> filters fail closed instead of becoming unexpectedly broad text searches.
 
 Search reports the full match count but renders at most the strongest 300 rows. Browse views render at most 300 record rows and 300 structural sections at once, with **Show more** for the next page.
+
+Ordinary same-route metadata and background refreshes preserve expanded pages, selection, scroll position, and keyboard focus. Intentional navigation starts with the bounded first page. Entry counts distinguish linked Markdown notes from placeholders; they are not a claim that every outline entry has a note file. The optional compact density changes presentation in this view only.
 
 ## Obsidian Bases view
 

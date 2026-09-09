@@ -55,6 +55,7 @@ import {
 } from "./portable-import-preview";
 
 type CenterMode = "export" | "import";
+type ExportPurpose = "transfer" | "backup" | "custom";
 type ComponentKey = "workspace" | "index" | "collections" | "study" | "savedViews" | "recovery";
 type BusyAction = "export" | "import" | "file";
 type LibraryDescriptor = Pick<PortableLibraryDefinition, "id" | "name" | "singularName" | "icon" | "order" | "sourceKind">;
@@ -218,6 +219,7 @@ function selectionWithLibraryIds(selection: PortableExportSelection, libraryIds:
 export class ExportImportCenterModal extends Modal {
   private mode: CenterMode;
   private exportSelection = cloneSelection(EMPTY_PORTABLE_SELECTION);
+  private customSelectionOpen = false;
   private importSelection = cloneSelection(EMPTY_PORTABLE_SELECTION);
   private importValue: PortableExportV1 | null = null;
   private importSourceLabel = "";
@@ -258,10 +260,13 @@ export class ExportImportCenterModal extends Modal {
     private readonly plugin: EntVaultCommandCenterPlugin,
     initialMode: CenterMode = "export",
     private readonly onComplete?: (dataChanged: boolean) => void,
+    purpose: ExportPurpose = "transfer",
   ) {
     super(plugin.app);
     this.mode = initialMode;
     this.exportSelection = completePortableSelection(this.activeExportLibraries().map((library) => library.id));
+    if (purpose === "backup") this.exportSelection.recovery = true;
+    this.customSelectionOpen = purpose === "custom";
   }
 
   onOpen(): void {
@@ -423,9 +428,21 @@ export class ExportImportCenterModal extends Modal {
       });
     }
     this.renderExportPresets();
+    const custom = parent.createEl("details", { cls: "ent-cc-export-custom" });
+    custom.open = this.customSelectionOpen;
+    custom.addEventListener("toggle", () => { this.customSelectionOpen = custom.open; });
+    custom.createEl("summary", { text: "Customize included sections", attr: { "data-portability-focus": "export-custom-summary" } });
     this.renderComponentToggles(this.exportSelection, undefined, (selection) => {
       this.exportSelection = selection;
       if (!selection.recovery) this.exportRecoveryConfirmed = false;
+    }, "", "", custom);
+    new Setting(custom).addButton((button) => {
+      button.buttonEl.dataset.portabilityFocus = "preset-clear";
+      button.setButtonText("Clear selection").setDisabled(Boolean(this.busyAction)).onClick(() => {
+        this.exportSelection = cloneSelection(EMPTY_PORTABLE_SELECTION);
+        this.exportRecoveryConfirmed = false;
+        this.rerenderFromControl("preset-clear");
+      });
     });
 
     const selection = normalizePortableSelection(this.exportSelection);
@@ -490,33 +507,34 @@ export class ExportImportCenterModal extends Modal {
     const parent = this.renderParent();
     const compatibilityReadOnly = this.plugin.isDataReadOnly();
     new Setting(parent)
-      .setName("Quick selection")
-      .setDesc("Portable set is for cross-vault transfer. All + private recovery additionally creates exact-path recovery that is locked to this vault and requires separate confirmation.")
+      .setName("What would you like to export?")
+      .setDesc("Transfer your structure to another vault, back up organization for this vault, or choose custom sections. None of these includes note bodies or attachments.")
       .addButton((button) => {
         button.buttonEl.dataset.portabilityFocus = "preset-portable";
-        button.setButtonText("Portable set").setDisabled(Boolean(this.busyAction)).onClick(() => {
+        button.setButtonText("Transfer structure").setDisabled(Boolean(this.busyAction)).onClick(() => {
           this.exportSelection = completePortableSelection(this.activeExportLibraries().map((library) => library.id));
           this.exportRecoveryConfirmed = false;
+          this.customSelectionOpen = false;
           this.rerenderFromControl("preset-portable");
         });
       })
       .addButton((button) => {
         button.buttonEl.dataset.portabilityFocus = "preset-everything";
-        button.setButtonText("All + private recovery").setDisabled(Boolean(this.busyAction) || compatibilityReadOnly).onClick(() => {
+        button.setButtonText("Back up organization for this vault").setDisabled(Boolean(this.busyAction) || compatibilityReadOnly).onClick(() => {
           this.exportSelection = {
             ...completePortableSelection(this.activeExportLibraries().map((library) => library.id)),
             recovery: true,
           };
           this.exportRecoveryConfirmed = false;
+          this.customSelectionOpen = false;
           this.rerenderFromControl("preset-everything");
         });
       })
       .addButton((button) => {
-        button.buttonEl.dataset.portabilityFocus = "preset-clear";
-        button.setButtonText("Clear").setDisabled(Boolean(this.busyAction)).onClick(() => {
-          this.exportSelection = cloneSelection(EMPTY_PORTABLE_SELECTION);
-          this.exportRecoveryConfirmed = false;
-          this.rerenderFromControl("preset-clear");
+        button.buttonEl.dataset.portabilityFocus = "preset-custom";
+        button.setButtonText("Custom selection").setDisabled(Boolean(this.busyAction)).onClick(() => {
+          this.customSelectionOpen = true;
+          this.rerenderFromControl("export-custom-summary");
         });
       });
   }
@@ -767,10 +785,11 @@ export class ExportImportCenterModal extends Modal {
           ? `This knowledge base now has ${completed.totalPlaceholders} unresolved placeholder${completed.totalPlaceholders === 1 ? "" : "s"}; ${completed.exactCandidatePlaceholders} ${completed.exactCandidatePlaceholders === 1 ? "has" : "have"} exact local title or ID candidates for deliberate review. Markdown notes were not changed.`
           : "The import succeeded, but its placeholder queue summary could not be refreshed. Open the queue to retry the live projection. Markdown notes were not changed.",
     });
+    // Native ButtonComponent.setIcon replaces the label, so keep these
+    // recovery actions as text buttons for visible and accessible names.
     new Setting(parent)
       .addButton((button) => button
         .setButtonText("Undo import")
-        .setIcon("undo-2")
         .setDisabled(Boolean(this.busyAction) || !this.completedImportUndoToken)
         .onClick(() => this.run("import", async () => {
           if (!this.guardOpenedBase()) return;
@@ -786,7 +805,6 @@ export class ExportImportCenterModal extends Modal {
         })))
       .addButton((button) => button
         .setButtonText("Open placeholder queue")
-        .setIcon("file-question")
         .setCta()
         .setDisabled(Boolean(this.busyAction)
           || (placeholderSummaryAvailable && completed.totalPlaceholders === 0))
@@ -807,8 +825,8 @@ export class ExportImportCenterModal extends Modal {
     onChange: (selection: PortableExportSelection) => void,
     recoveryBlockReason = "",
     workspaceBlockReason = "",
+    parent = this.renderParent(),
   ): void {
-    const parent = this.renderParent();
     const normalizedSelection = normalizePortableSelection(selection);
     const normalizedAvailable = available ? normalizePortableSelection(available) : undefined;
     parent.createEl("h3", { text: available ? "Sections in this file" : "Sections to export" });

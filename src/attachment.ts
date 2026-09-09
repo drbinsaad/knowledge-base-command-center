@@ -1,5 +1,6 @@
 import { normalizePath } from "obsidian";
 import { sanitizeFileName } from "./model";
+import { markdownBodyStartLine } from "./follow-up";
 
 export const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
 
@@ -38,7 +39,7 @@ interface DocumentLine {
  */
 function documentLines(markdown: string): DocumentLine[] {
   const lines: DocumentLine[] = [];
-  const breaks = /\r?\n/gu;
+  const breaks = /\r\n|\n|\r/gu;
   let start = 0;
   for (let match = breaks.exec(markdown); match !== null; match = breaks.exec(markdown)) {
     lines.push({ text: markdown.slice(start, match.index), start, eol: match[0] });
@@ -64,10 +65,14 @@ function spliceLine(markdown: string, lines: readonly DocumentLine[], index: num
   return `${markdown.slice(0, offset)}${reference}${eol}${markdown.slice(offset)}`;
 }
 
-function fenceState(lines: readonly DocumentLine[]): { outside: boolean[]; unclosed: boolean } {
+function fenceState(lines: readonly DocumentLine[], bodyStart: number): { outside: boolean[]; unclosed: boolean } {
   const outside: boolean[] = [];
   let fence: { character: "`" | "~"; length: number } | null = null;
-  for (const line of lines) {
+  for (const [index, line] of lines.entries()) {
+    if (index < bodyStart) {
+      outside.push(false);
+      continue;
+    }
     if (!fence) {
       // CommonMark allows at most three spaces of indentation before a fence;
       // deeper indentation is indented-code content, exactly as follow-up.ts
@@ -104,7 +109,8 @@ export function insertAttachmentReference(
   if (!cleanReference) return markdown;
   const eol = documentEol(markdown);
   const lines = documentLines(markdown);
-  const { outside: outsideFence, unclosed } = fenceState(lines);
+  const bodyStart = markdownBodyStartLine(lines.map((line) => line.text));
+  const { outside: outsideFence, unclosed } = fenceState(lines, bodyStart);
   if (unclosed) throw new Error("The note contains an unclosed fenced code block. Close it before inserting an attachment link.");
   if (target === "end") return appendLine(markdown, cleanReference, eol);
   if (target === "marker") {

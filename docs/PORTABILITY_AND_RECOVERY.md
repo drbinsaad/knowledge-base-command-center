@@ -6,7 +6,7 @@ Knowledge Base Command Center separates portable organization from private same-
 
 | Artifact | Intended use | Path exposure |
 | --- | --- | --- |
-| **Portable set** | Move selected workspace organization to another vault or knowledge base. | Index and Libraries are path-free. Workspace settings can contain configured vault-relative folders; saved queries are literal. |
+| **Transfer structure** | Move selected workspace organization to another vault or knowledge base. | Index and Libraries are path-free. Workspace settings can contain configured vault-relative folders; saved queries are literal. |
 | **Multi-base portfolio** | Move selected components from as many as 50 available knowledge bases in one bounded bundle, with an independent ordinary portable package for each base. | The same portable boundaries apply independently to every package; private recovery is forbidden. |
 | **Same-vault recovery** | Restore one knowledge base in the vault that created it. | Contains exact vault-relative note paths and private plugin organization. |
 | **Complete vault backup** | Recover Markdown notes, attachments, Obsidian configuration, and plugin data. | Contains the vault's actual files and should be protected accordingly. |
@@ -29,15 +29,21 @@ The single-base center operates on the active knowledge base. A portfolio can in
 | **Saved views** | Named sections and literal search queries. A query can contain a path if it was typed. |
 | **Same-vault recovery** | Private restoration data for the active base, including exact direct-note memberships, linked-folder rules, exclusions, and other vault-relative paths. |
 
-The default **Portable set** selects workspace settings, the Index blueprint, every active Library, Collections, study state, and saved views. Each Library can be deselected independently, including an empty Library whose identity and hierarchy must be preserved.
+The default **Transfer structure** preset selects workspace settings, the Index blueprint, every active Library, Collections, study state, and saved views. **Custom selection** expands the included sections. Each Library can be deselected independently, including an empty Library whose identity and hierarchy must be preserved.
 
 Archived Libraries are not offered as portable sections. Confirmed private recovery preserves their definitions and state.
 
 Collections and study state carry only the portable identities they reference. They do not silently select or replace a complete Index or complete Library.
 
-**All + private recovery** adds same-vault recovery. Selecting it does not make that recovery portable. The Export button remains disabled until the separate private-path confirmation is accepted, and the summary names every selected Library before JSON is created.
+**Back up organization for this vault** adds same-vault recovery. Selecting it does not make that recovery portable. The Export button remains disabled until the separate private-path confirmation is accepted, and the summary names every selected Library before JSON is created. This is not a backup of Markdown note bodies or attachments.
 
-The complete Portable set is not necessarily path-free. Deselect Workspace settings when configured vault-relative folders should not be shared, and deselect Saved views when literal queries may disclose a private term or path.
+The complete transfer preset is not necessarily path-free. Deselect Workspace settings when configured vault-relative folders should not be shared, and deselect Saved views when literal queries may disclose a private term or path.
+
+The Sync & recovery center leads with local save status, the last recovery export, and next actions. Expand **Technical diagnostics** for semantic fingerprints and device-local details. These are local facts, not proof that Obsidian Sync or another device has finished.
+
+### Offline edits and base deletion
+
+Updated builds record which causal base state a permanent deletion observed. A surviving offline edit that cannot be proven to precede that observed state is preserved in a private conflict-rescue envelope before deletion settles, even if its clock time is earlier. Old timestamp-only tombstones conservatively cause rescue too. If rescue cannot be written, adoption stops in protected read-only mode. This protects organization; deleting a KBCC base still never deletes Markdown notes. Older plugin builds do not gain this logic automatically: update every device that edits the vault's KBCC organization.
 
 In a Generic base, a default new-note or Library creation folder is only a storage setting. It does not become Index membership when Workspace settings are exported or imported. Direct note membership and explicit linked-folder rules are distinct organization state: portable blueprints omit their vault paths, while private same-vault recovery retains them exactly.
 

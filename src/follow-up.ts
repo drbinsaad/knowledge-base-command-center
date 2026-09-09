@@ -259,6 +259,15 @@ function decodedYamlKey(line: string): string | null {
   return raw.startsWith("'") ? raw.slice(1, -1).replace(/''/gu, "'") : raw;
 }
 
+/** First Markdown-body line; shared by note insertion and the frontmatter write gate. */
+export function markdownBodyStartLine(lines: readonly string[]): number {
+  const first = (lines[0] ?? "").replace(/^\uFEFF/u, "");
+  if (!/^---[ \t]*$/u.test(first)) return 0;
+  const closingIndex = lines.findIndex((line, index) => index > 0 && /^(?:---|\.\.\.)[ \t]*$/u.test(line));
+  if (closingIndex < 0) throw new Error("This note has malformed YAML frontmatter: the YAML frontmatter is not closed.");
+  return closingIndex + 1;
+}
+
 /**
  * One fail-closed ai_lock gate shared by every operation that may rewrite a
  * note. Only an absent key or one explicit unquoted false/null declaration is
@@ -268,9 +277,9 @@ function decodedYamlKey(line: string): string | null {
 export function assertMarkdownAiLockWritable(content: string): void {
   const normalized = content.startsWith("\uFEFF") ? content.slice(1) : content;
   const lines = normalized.split(/\r\n|\n|\r/u);
-  if (!/^---[ \t]*$/u.test(lines[0] ?? "")) return;
-  const closingIndex = lines.findIndex((line, index) => index > 0 && /^(?:---|\.\.\.)[ \t]*$/u.test(line));
-  if (closingIndex < 0) throw new Error("This note has malformed YAML frontmatter because the block is not closed.");
+  const bodyStart = markdownBodyStartLine(lines);
+  if (bodyStart === 0) return;
+  const closingIndex = bodyStart - 1;
   let lockOccurrences = 0;
   for (let index = 1; index < closingIndex; index += 1) {
     const line = lines[index] ?? "";
@@ -413,22 +422,13 @@ function splitMarkdownLines(content: string): MarkdownLine[] {
 }
 
 function markIgnoredMarkdown(lines: MarkdownLine[], hasBom: boolean): void {
-  let firstContentLine = 0;
   if (hasBom && lines[0]) {
     lines[0].text = lines[0].text.slice(1);
     lines[0].start += 1;
-    firstContentLine = 0;
   }
-  if (lines[firstContentLine]?.text === "---") {
-    let closing = -1;
-    for (let index = firstContentLine + 1; index < lines.length; index += 1) {
-      if (lines[index]?.text === "---" || lines[index]?.text === "...") {
-        closing = index;
-        break;
-      }
-    }
-    if (closing < 0) fail("the YAML frontmatter is not closed.");
-    for (let index = firstContentLine; index <= closing; index += 1) {
+  const bodyStart = markdownBodyStartLine(lines.map((line) => line.text));
+  if (bodyStart > 0) {
+    for (let index = 0; index < bodyStart; index += 1) {
       const line = lines[index];
       if (line) line.ignored = true;
     }

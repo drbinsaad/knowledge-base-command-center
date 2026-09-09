@@ -554,6 +554,7 @@ function storeGuard(store: PluginStore): string {
     vaultId: store.vaultId,
     activeBaseId: store.activeBaseId,
     deletedBaseIds: store.deletedBaseIds,
+    deletedBaseCausality: store.deletedBaseCausality ?? {},
     bases: store.bases.map((entry) => ({
       id: entry.id,
       createdAt: entry.createdAt,

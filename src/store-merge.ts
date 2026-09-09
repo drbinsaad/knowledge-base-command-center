@@ -14,12 +14,14 @@ import {
   pristineProvisionalMigratedStoreFingerprint,
   provisionalInterimEnvelopeVaultFingerprint,
   provisionalMigratedVaultFingerprint,
+  readDeletedBaseCausality,
   resetPluginViewState,
   semanticEntryFingerprint,
   semanticPluginDataProjection,
   STORE_KIND,
   STORE_VERSION,
   type KnowledgeBaseEntry,
+  type DeletedKnowledgeBaseCausality,
   type PluginStore,
   objectFromEntries,
 } from "./model";
@@ -286,19 +288,34 @@ export function mergeKnowledgeBaseStores(
   if (Object.keys(deletedBaseIds).length > MAX_DELETED_KNOWLEDGE_BASE_IDS) {
     throw new Error(`Synced knowledge-base changes contain more than ${MAX_DELETED_KNOWLEDGE_BASE_IDS.toLocaleString()} permanent-deletion tombstones. No tombstone was discarded.`);
   }
+  const deletedBaseCausality: Record<string, DeletedKnowledgeBaseCausality> = {};
+  for (const [id, deletedAt] of Object.entries(deletedBaseIds)) {
+    const proofs = [local.deletedBaseCausality?.[id], incoming.deletedBaseCausality?.[id]]
+      .map((input) => readDeletedBaseCausality(input, deletedAt))
+      .filter((proof): proof is DeletedKnowledgeBaseCausality => proof !== null)
+      .sort((left, right) => codeUnitCompare(canonicalJsonString(left), canonicalJsonString(right)));
+    // One deterministically selected proof keeps merge commutative and bounded.
+    // Omitting another branch's proof can only cause an additional rescue.
+    if (proofs[0]) deletedBaseCausality[id] = proofs[0];
+  }
   const byId = new Map<string, KnowledgeBaseEntry>();
   const semanticConflicts: SemanticStoreConflict[] = [];
-  // A tombstone still deletes deterministically, but a copy of the base that
-  // was edited AFTER the deletion carries work the deleting device never saw.
-  // Classify that copy as a losing conflict so the merge worker rescues its
-  // whole envelope before the deletion is adopted; a plain drop would be the
-  // only merge outcome with no durable copy of the losing payload.
+  // Wall-clock ordering cannot prove that a deleting device observed an edit.
+  // Rescue every surviving copy unless trusted causal evidence proves it was
+  // already included in the deletion, including all legacy timestamp-only cases.
   const tombstonedEditConflict = (
     entry: KnowledgeBaseEntry,
     winner: "local" | "incoming",
   ): SemanticStoreConflict | null => {
     const deletedAt = deletedTimestamps.get(entry.id);
-    if (deletedAt === undefined || entry.updatedAt <= deletedAt) return null;
+    if (deletedAt === undefined) return null;
+    const proof = deletedBaseCausality[entry.id];
+    const trustedEntry = entry.semanticHash === semanticEntryFingerprint(entry);
+    const alreadyObserved = trustedEntry && proof && (
+      (proof.semanticHead === entry.semanticHead && proof.semanticHash === entry.semanticHash)
+      || (proof.semanticHead !== entry.semanticHead && proof.semanticLineage.includes(entry.semanticHead))
+    );
+    if (alreadyObserved) return null;
     return {
       baseId: entry.id,
       revision: entry.semanticRevision,
@@ -353,11 +370,13 @@ export function mergeKnowledgeBaseStores(
     activeBaseId,
     bases,
     deletedBaseIds,
+    ...(Object.keys(deletedBaseCausality).length > 0 ? { deletedBaseCausality } : {}),
   };
   const normalizeForComparison = (value: PluginStore): string => canonicalJsonString(
     {
       bases: sortedEntries(value.bases).map((entry) => semanticEntryForComparison(entry)),
       deletedBaseIds: value.deletedBaseIds,
+      deletedBaseCausality: value.deletedBaseCausality ?? {},
     },
   );
   return {

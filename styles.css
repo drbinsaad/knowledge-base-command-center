@@ -188,8 +188,8 @@
 .ent-cc-membership-provenance {
   max-width: 100%;
   overflow: hidden;
-  color: var(--text-muted);
-  font-size: 0.64rem;
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -218,9 +218,9 @@
   padding: 1px 6px;
   border: 1px solid var(--ent-cc-border);
   border-radius: 999px;
-  color: var(--text-muted);
+  color: var(--text-normal);
   background: var(--background-primary);
-  font-size: 10px;
+  font-size: var(--font-ui-small);
   font-weight: 700;
   line-height: 1;
   white-space: nowrap;
@@ -273,8 +273,8 @@
   padding: 1px 7px;
   border: 1px dashed var(--text-faint);
   border-radius: 999px;
-  color: var(--text-muted);
-  font-size: 10px;
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
   font-weight: 700;
   line-height: 1;
   white-space: nowrap;
@@ -286,12 +286,12 @@
 
 .ent-cc-status-pill.is-placeholder {
   border-style: dashed;
-  color: var(--text-muted);
+  color: var(--text-normal);
 }
 
 .ent-cc-placeholder-help {
   margin: 0 0 14px;
-  color: var(--text-muted);
+  color: var(--text-normal);
   line-height: 1.45;
 }
 
@@ -585,8 +585,8 @@
   flex-wrap: wrap;
   gap: 5px 11px;
   margin-top: 8px;
-  color: var(--text-faint);
-  font-size: 0.75rem;
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
   font-variant-numeric: tabular-nums;
 }
 
@@ -739,9 +739,10 @@
 }
 
 .ent-cc-topic-count {
-  flex: 0 0 auto;
-  color: var(--text-muted);
-  font-size: 11px;
+  flex: 0 1 auto;
+  max-width: 50%;
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
   font-variant-numeric: tabular-nums;
 }
 
@@ -1179,8 +1180,8 @@
 .ent-cc-row-count,
 .ent-cc-subject-id,
 .ent-cc-priority {
-  color: var(--text-faint);
-  font-size: 10px;
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
   font-variant-numeric: tabular-nums;
   text-align: end;
 }
@@ -1194,7 +1195,6 @@
   border: 1px solid var(--ent-cc-border);
   border-radius: 4px;
   text-overflow: ellipsis;
-  text-transform: lowercase;
   white-space: nowrap;
 }
 
@@ -1202,7 +1202,7 @@
 .ent-cc-priority-urgent,
 .ent-cc-priority-critical {
   border-color: color-mix(in srgb, var(--ent-cc-amber) 55%, var(--ent-cc-border));
-  color: var(--ent-cc-amber);
+  color: var(--text-normal);
 }
 
 .ent-cc-safety-dot {
@@ -1292,11 +1292,11 @@
   gap: 16px;
   min-height: 38px;
   border-bottom: 1px solid var(--ent-cc-border);
-  font-size: 11px;
+  font-size: var(--font-ui-small);
 }
 
 .ent-cc-meta-key {
-  color: var(--text-faint);
+  color: var(--text-normal);
 }
 
 .ent-cc-meta-value {
@@ -1434,7 +1434,7 @@
   }
 
   .ent-cc-subject-id {
-    font-size: 0.75rem;
+    font-size: var(--font-ui-small);
   }
 }
 
@@ -1607,7 +1607,7 @@
 
 .ent-cc-priority.is-urgent {
   border-color: color-mix(in srgb, var(--ent-cc-amber) 55%, var(--ent-cc-border));
-  color: var(--ent-cc-amber);
+  color: var(--text-normal);
 }
 
 .ent-cc-safety-badge,
@@ -1695,22 +1695,20 @@
   padding: 3px 7px;
   border: 1px solid var(--ent-cc-border);
   border-radius: 999px;
-  color: var(--text-muted);
-  font-size: 0.6875rem;
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
   font-weight: 750;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
 }
 
 .ent-cc-status-pill.is-unverified,
 .ent-cc-status-pill.is-critical {
   border-color: color-mix(in srgb, var(--ent-cc-amber) 45%, var(--ent-cc-border));
-  color: var(--ent-cc-amber);
+  color: var(--text-normal);
 }
 
 .ent-cc-status-pill.is-reviewed {
   border-color: color-mix(in srgb, var(--ent-cc-accent) 45%, var(--ent-cc-border));
-  color: var(--ent-cc-accent);
+  color: var(--text-normal);
 }
 
 .ent-cc-primary-button {
@@ -4268,6 +4266,8 @@
   }
 
   .ent-cc-base-setting .setting-item-control {
+    /* The row is vertical here: do not turn its desktop width basis into height. */
+    flex: 0 0 auto;
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 8px;
@@ -4278,6 +4278,11 @@
   .ent-cc-base-setting-manage {
     min-width: 0;
     min-height: 44px;
+  }
+
+  .ent-cc-base-setting-select {
+    /* WebKit native selects do not honor min-height alone. */
+    height: 44px;
   }
 
   .ent-cc-knowledge-base-modal {
@@ -4414,18 +4419,12 @@
 }
 
 .ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-header-actions {
-  display: grid;
+  display: flex;
+  flex-wrap: wrap;
   width: 100%;
   max-width: 100%;
-  grid-auto-columns: max-content;
-  grid-auto-flow: column;
-  grid-template-columns: none;
   gap: 8px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  overscroll-behavior-x: contain;
-  scrollbar-width: none;
-  -webkit-overflow-scrolling: touch;
+  overflow: visible;
 }
 
 .ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-header-actions::-webkit-scrollbar,
@@ -4476,7 +4475,6 @@
 }
 
 .ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-filter-hint,
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-topic-count,
 .ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-saved-button span:last-child,
 .ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-filter-chips.is-hint-only {
   display: none;
@@ -4489,6 +4487,12 @@
   grid-template-columns: minmax(0, 1fr) repeat(3, 44px);
   gap: 8px;
   padding-inline: 14px;
+}
+
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-topic-count {
+  display: block;
+  grid-column: 1 / -1;
+  max-width: none;
 }
 
 .ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-search-box {
@@ -6367,3 +6371,145 @@
   }
 }
 /* End active-note knowledge-base status. */
+
+/* Workspace controls: readable search scopes, grouped Libraries, and local density. */
+.ent-cc-search-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  padding: 4px 20px 10px;
+}
+
+.ent-cc-search-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+}
+
+.ent-cc-search-option select {
+  min-height: 36px;
+  max-width: 100%;
+  font-size: var(--font-ui-small);
+}
+
+.ent-cc-linked-first {
+  min-height: 36px;
+  cursor: pointer;
+}
+
+.ent-cc-library-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-inline-start: 1px solid var(--background-modifier-border);
+  padding-inline-start: 12px;
+  margin-inline-start: 6px;
+}
+
+.ent-cc-library-tabs-label {
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  white-space: nowrap;
+  padding-inline-end: 2px;
+}
+
+.ent-cc-view.is-pane-wide .ent-cc-workspace.is-inspector-collapsed {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.ent-cc-workspace.is-inspector-collapsed > .ent-cc-inspector {
+  display: none;
+}
+
+.ent-cc-updated-label,
+.ent-cc-search-other-base {
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  line-height: 1.5;
+  margin-block: 6px 12px;
+}
+
+.ent-cc-empty-collection {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 24px;
+  color: var(--text-normal);
+}
+
+.ent-cc-view .ent-cc-density-toggle {
+  color: var(--text-muted);
+}
+
+.ent-cc-view .ent-cc-header-actions {
+  align-items: flex-start;
+  flex-wrap: wrap;
+  max-width: 400px;
+}
+
+.ent-cc-workspace-options {
+  min-width: 0;
+}
+
+.ent-cc-workspace-options[open] {
+  flex-basis: 100%;
+}
+
+.ent-cc-view .ent-cc-workspace-options summary {
+  display: list-item;
+  min-height: 44px;
+  padding: 10px 12px;
+  cursor: pointer;
+  list-style-position: inside;
+}
+
+.ent-cc-workspace-options-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-top: 8px;
+}
+
+.ent-cc-view .ent-cc-workspace-options-actions .ent-cc-history-action {
+  display: inline-flex;
+}
+
+@media (pointer: fine) {
+  .ent-cc-view.is-pane-wide:not(.is-density-compact) .ent-cc-subject-row {
+    min-height: 44px;
+  }
+
+  .ent-cc-view.is-pane-wide.is-density-compact .ent-cc-subject-row {
+    min-height: 32px;
+    padding-block: 2px;
+  }
+
+  .ent-cc-view.is-pane-wide.is-density-compact .ent-cc-subject-title {
+    min-height: 28px;
+  }
+}
+
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-search-options {
+  gap: 4px 12px;
+  padding-inline: 12px;
+}
+
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-search-option select,
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-linked-first {
+  min-height: 44px;
+  font-size: 16px;
+}
+
+/* WebKit's native select ignores min-height; keep its touch target explicit. */
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-search-option select {
+  height: 44px;
+}
+
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-empty-collection .ent-cc-button {
+  min-height: 44px;
+}

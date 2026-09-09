@@ -499,6 +499,9 @@ export class NoteOrganizerModal extends Modal {
   private prepared: OrganizerPreparedPlan | null = null;
   private preparedUsable = false;
   private loading = true;
+  private snapshotGeneration = 0;
+  private snapshotInitialized = false;
+  private externalChangeMessage = "";
   private busy = false;
   private closingAfterApply = false;
   private loadError = "";
@@ -548,6 +551,19 @@ export class NoteOrganizerModal extends Modal {
     this.close();
   }
 
+  /** Keep the user's selection and destination draft; only the review expires. */
+  async refreshAfterExternalChange(): Promise<void> {
+    if (!this.modalOpen) return;
+    this.preparedUsable = false;
+    this.externalChangeMessage = "Knowledge-base data changed. Your selected notes and destination choices are kept. Check any unavailable destinations and refresh the review before applying.";
+    this.liveMessage = this.externalChangeMessage;
+    const active = this.contentEl.ownerDocument.activeElement;
+    if (active && this.contentEl.contains(active)) {
+      this.pendingFocusKey = active.getAttribute("data-organizer-focus");
+    }
+    await this.loadSnapshot();
+  }
+
   onOpen(): void {
     this.modalOpen = true;
     this.modalEl.addClass("ent-cc-note-organizer-modal");
@@ -565,6 +581,7 @@ export class NoteOrganizerModal extends Modal {
 
   onClose(): void {
     this.modalOpen = false;
+    this.snapshotGeneration += 1;
     this.cancelSearchTimer();
     this.contentEl.empty();
     this.renderRootEl = null;
@@ -582,23 +599,34 @@ export class NoteOrganizerModal extends Modal {
   }
 
   private async loadSnapshot(): Promise<void> {
+    const generation = ++this.snapshotGeneration;
     try {
       const [nodes, bases] = await Promise.all([
         this.host.getVaultSnapshot(),
         this.host.getBases(),
       ]);
+      if (!this.modalOpen || generation !== this.snapshotGeneration) return;
       this.vaultNodes = nodes;
       this.searchIndex = buildNoteOrganizerSearchIndex(nodes);
+      this.searchPageCache = null;
+      this.selectionStatsCache = null;
       this.bases = bases;
-      this.selectPreseededPaths();
-      this.destinations = bases.length > 0 ? [this.createDestination(bases[0]?.id ?? "")] : [];
-      this.liveMessage = `${this.selectedPaths.size.toLocaleString()} Markdown notes selected.`;
+      if (!this.snapshotInitialized) {
+        this.selectPreseededPaths();
+        this.destinations = bases.length > 0 ? [this.createDestination(bases[0]?.id ?? "")] : [];
+        this.snapshotInitialized = true;
+      }
+      this.loadError = "";
+      this.liveMessage = this.externalChangeMessage || `${this.selectedPaths.size.toLocaleString()} Markdown notes selected.`;
     } catch (error) {
+      if (!this.modalOpen || generation !== this.snapshotGeneration) return;
       this.loadError = `Could not load the organizer: ${errorText(error)}`;
       this.liveMessage = this.loadError;
     } finally {
-      this.loading = false;
-      if (this.modalOpen) this.render();
+      if (generation === this.snapshotGeneration) {
+        this.loading = false;
+        if (this.modalOpen) this.render();
+      }
     }
   }
 
@@ -656,6 +684,9 @@ export class NoteOrganizerModal extends Modal {
         text: this.actionError,
         attr: { role: "alert", tabindex: "-1", "data-organizer-focus": "action-error" },
       });
+    }
+    if (this.externalChangeMessage) {
+      renderRoot.createDiv({ cls: "ent-cc-note-organizer-warning", text: this.externalChangeMessage, attr: { role: "status" } });
     }
     const panel = renderRoot.createDiv({
       cls: "ent-cc-note-organizer-panel",
@@ -1468,10 +1499,7 @@ export class NoteOrganizerModal extends Modal {
       },
     );
     const heading = headings.find((item) => item.id === headingId);
-    if (!heading || heading.subheadings.length === 0) {
-      destination.primary.subheadingId = null;
-      return;
-    }
+    if ((!heading || heading.subheadings.length === 0) && !destination.primary.subheadingId) return;
     this.labeledSelect(
       section,
       "Subheading",
@@ -1479,7 +1507,7 @@ export class NoteOrganizerModal extends Modal {
       destination.primary.subheadingId ?? "",
       [
         { value: "", label: "Heading root" },
-        ...heading.subheadings.map((item) => ({ value: item.id, label: item.name })),
+        ...(heading?.subheadings ?? []).map((item) => ({ value: item.id, label: item.name })),
       ],
       (value) => {
         destination.primary.subheadingId = value || null;
@@ -1563,8 +1591,7 @@ export class NoteOrganizerModal extends Modal {
     }
     for (const [index, target] of destination.collections.targets.entries()) {
       const row = section.createDiv({ cls: "ent-cc-note-organizer-collection-target" });
-      const collection = base.collections.find((item) => item.id === target.headingId) ?? base.collections[0] ?? null;
-      if (collection && target.headingId !== collection.id) target.headingId = collection.id;
+      const collection = base.collections.find((item) => item.id === target.headingId) ?? null;
       this.labeledSelect(
         row,
         "Collection",
@@ -1578,7 +1605,7 @@ export class NoteOrganizerModal extends Modal {
           this.render();
         },
       );
-      if (collection && collection.subheadings.length > 0) {
+      if (target.subheadingId || (collection && collection.subheadings.length > 0)) {
         this.labeledSelect(
           row,
           "Subheading",
@@ -1586,7 +1613,7 @@ export class NoteOrganizerModal extends Modal {
           target.subheadingId ?? "",
           [
             { value: "", label: "Heading root" },
-            ...collection.subheadings.map((item) => ({ value: item.id, label: item.name })),
+            ...(collection?.subheadings ?? []).map((item) => ({ value: item.id, label: item.name })),
           ],
           (value) => {
             target.subheadingId = value || null;
@@ -1594,8 +1621,6 @@ export class NoteOrganizerModal extends Modal {
             this.render();
           },
         );
-      } else {
-        target.subheadingId = null;
       }
       const remove = row.createEl("button", {
         cls: "ent-cc-note-organizer-remove",
@@ -1776,6 +1801,7 @@ export class NoteOrganizerModal extends Modal {
 
   private async prepareReview(): Promise<void> {
     if (this.busy) return;
+    const snapshotGeneration = this.snapshotGeneration;
     const draft = snapshotNoteOrganizerDraft(this.source, this.selectedPaths, this.destinations, this.overrides);
     const localErrors = validateNoteOrganizerDraft(draft, this.bases);
     if (localErrors.length > 0) {
@@ -1793,8 +1819,15 @@ export class NoteOrganizerModal extends Modal {
     try {
       const prepared = await this.host.prepare(draft);
       if (!this.modalOpen) return;
+      if (snapshotGeneration !== this.snapshotGeneration) {
+        this.preparedUsable = false;
+        this.actionError = "Knowledge-base data changed while preparing. Your draft is kept; prepare the review again.";
+        this.liveMessage = this.actionError;
+        return;
+      }
       this.prepared = prepared;
       this.preparedUsable = prepared.errors.length === 0;
+      this.externalChangeMessage = "";
       this.reviewPage = 0;
       this.stage = "review";
       this.pendingFocusKey = "stage-heading:review";
@@ -1877,6 +1910,9 @@ export class NoteOrganizerModal extends Modal {
     const select = parent.createEl("select", { attr: { "aria-label": label, dir: "auto" } });
     const focusKey = requestedFocusKey ?? `select:${label}`;
     select.setAttribute("data-organizer-focus", focusKey);
+    if (value && !options.some((option) => option.value === value)) {
+      select.createEl("option", { text: "Unavailable — choose another destination", attr: { value, disabled: "" } });
+    }
     for (const option of options) {
       select.createEl("option", { text: option.label, attr: { value: option.value, dir: "auto" } });
     }

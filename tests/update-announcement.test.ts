@@ -15,6 +15,7 @@ import {
   UPDATE_ANNOUNCEMENT_0_18_0,
   UPDATE_ANNOUNCEMENT_0_19_0,
   UPDATE_ANNOUNCEMENT_0_19_1,
+  UPDATE_ANNOUNCEMENT_0_20_0,
   type UpdateAnnouncement,
 } from "../src/update-announcement.ts";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
@@ -149,6 +150,31 @@ test("0.19.1 has curated cross-Mac startup reconciliation news", () => {
     UPDATE_ANNOUNCEMENT_0_19_1.releaseUrl,
     "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.19.1",
   );
+});
+
+test("0.20.0 has curated workspace and safety news without replaying it", () => {
+  const upgrade = planUpdateAnnouncement("0.20.0", "0.19.1", true);
+  assert.equal(upgrade.announcement, UPDATE_ANNOUNCEMENT_0_20_0);
+  assert.equal(upgrade.nextHighestObservedVersion, "0.20.0");
+  assert.equal(UPDATE_ANNOUNCEMENT_0_20_0.highlights.length, 5);
+  const highlights = UPDATE_ANNOUNCEMENT_0_20_0.highlights.join("\n");
+  for (const claim of [
+    /explicit search scope/u,
+    /keyboard focus survive same-page refreshes/u,
+    /Settings and import-completion buttons keep readable labels/u,
+    /compact mobile Settings spacing/u,
+    /Unseen offline edits are preserved in conflict rescue/u,
+    /YAML frontmatter/u,
+    /cold-search preparation is chunked and cancellable/u,
+  ]) assert.match(highlights, claim);
+  assert.equal(
+    UPDATE_ANNOUNCEMENT_0_20_0.releaseUrl,
+    "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.20.0",
+  );
+  const repeat = planUpdateAnnouncement("0.20.0", upgrade.nextHighestObservedVersion, true);
+  assert.equal(repeat.announcement, null);
+  assert.equal(repeat.shouldPersist, false);
+  assert.equal(planUpdateAnnouncement("0.20.0", null, false).announcement, null, "fresh installs establish a baseline without an upgrade notice");
 });
 
 test("downgrades never replay an announcement and prerelease precedence stays deterministic", () => {

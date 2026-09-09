@@ -33,7 +33,9 @@ function withSettingButtons<T>(run: (buttons: CapturedButton[]) => T): T {
     const captured: CapturedButton = { label: "", disabled: false, click: null };
     const component = {
       setButtonText(value: string): typeof component { captured.label = value; return component; },
-      setIcon(): typeof component { return component; },
+      // Obsidian 1.14.1 replaces the button contents when setting an icon,
+      // including any visible text previously set with setButtonText.
+      setIcon(): typeof component { captured.label = ""; return component; },
       setDisabled(value: boolean): typeof component { captured.disabled = value; return component; },
       setCta(): typeof component { return component; },
       onClick(value: () => void): typeof component { captured.click = value; return component; },
@@ -49,6 +51,111 @@ function withSettingButtons<T>(run: (buttons: CapturedButton[]) => T): T {
     else Reflect.deleteProperty(prototype, "addButton");
   }
 }
+
+test("captured buttons model Obsidian icon replacement without losing disabled state or callbacks", () => {
+  const dom = createFakeDom();
+  const content = asHtmlElement(dom.document.body.createDiv());
+  const action = (): void => {};
+  withSettingButtons((buttons) => {
+    new Setting(content).addButton((button) => button
+      .setButtonText("Text replaced by icon")
+      .setDisabled(true)
+      .onClick(action)
+      .setIcon("undo-2"));
+    new Setting(content).addButton((button) => button
+      .setIcon("file-question")
+      .setButtonText("Visible text restored"));
+    assert.deepEqual(buttons.map((button) => button.label), ["", "Visible text restored"]);
+    assert.equal(buttons[0]?.disabled, true);
+    assert.equal(buttons[0]?.click, action);
+  });
+});
+
+interface CompletedImportOutcome {
+  subjectCatalogImported: boolean;
+  placeholderSummaryAvailable: boolean;
+  addedSubjects: number;
+  matchedSubjects: number;
+  unresolvedSubjects: number;
+  totalPlaceholders: number;
+  exactCandidatePlaceholders: number;
+}
+
+function completedImportHarness(undoToken: string | null, busyAction: "import" | null = null) {
+  const dom = createFakeDom();
+  const content = asHtmlElement(dom.document.body.createDiv());
+  const events: string[] = [];
+  const center = Object.create(ExportImportCenterModal.prototype) as unknown as {
+    contentEl: HTMLElement;
+    panelEl: HTMLElement | null;
+    completedImportUndoToken: string | null;
+    busyAction: "import" | null;
+    guardOpenedBase(): boolean;
+    close(): void;
+    plugin: { openPlaceholderResolutionQueue(): void };
+    renderCompletedImport(value: CompletedImportOutcome): void;
+  };
+  center.contentEl = content;
+  center.panelEl = null;
+  center.completedImportUndoToken = undoToken;
+  center.busyAction = busyAction;
+  center.guardOpenedBase = () => true;
+  center.close = () => { events.push("close"); };
+  center.plugin = { openPlaceholderResolutionQueue: () => { events.push("queue"); } };
+  return { center, content, events };
+}
+
+const completedCatalogImport: CompletedImportOutcome = {
+  subjectCatalogImported: true,
+  placeholderSummaryAvailable: true,
+  addedSubjects: 3,
+  matchedSubjects: 2,
+  unresolvedSubjects: 1,
+  totalPlaceholders: 7,
+  exactCandidatePlaceholders: 4,
+};
+
+for (const scenario of [
+  { name: "ordinary catalog import", catalog: true, summaryAvailable: true, placeholders: 7, undoToken: "saved-import", busy: false, disabled: [false, false, false] },
+  { name: "resolved catalog import", catalog: true, summaryAvailable: true, placeholders: 0, undoToken: "saved-import", busy: false, disabled: [false, true, false] },
+  { name: "recovery or non-catalog import without an Undo token", catalog: false, summaryAvailable: false, placeholders: 0, undoToken: null, busy: false, disabled: [true, false, false] },
+  { name: "busy recovery or non-catalog completion", catalog: false, summaryAvailable: false, placeholders: 0, undoToken: "saved-import", busy: true, disabled: [true, true, true] },
+] as const) {
+  test(`completed ${scenario.name} retains visible button labels and correct disabled states`, () => {
+    const { center, content } = completedImportHarness(scenario.undoToken, scenario.busy ? "import" : null);
+    withSettingButtons((buttons) => {
+      center.renderCompletedImport({
+        ...completedCatalogImport,
+        subjectCatalogImported: scenario.catalog,
+        placeholderSummaryAvailable: scenario.summaryAvailable,
+        totalPlaceholders: scenario.placeholders,
+      });
+      assert.deepEqual(buttons.map((button) => button.label), ["Undo import", "Open placeholder queue", "Close"]);
+      assert.deepEqual(buttons.map((button) => button.disabled), [...scenario.disabled]);
+      if (!scenario.catalog) assert.match(content.textContent, /No subject catalog was imported.*placeholder queue was not rescanned/u);
+    });
+  });
+}
+
+test("completed import queue and close buttons retain their guarded actions", () => {
+  const { center, events } = completedImportHarness("saved-import");
+  withSettingButtons((buttons) => {
+    center.renderCompletedImport(completedCatalogImport);
+    const queue = buttons.find((button) => button.label === "Open placeholder queue");
+    const close = buttons.find((button) => button.label === "Close");
+    assert.ok(queue?.click, "the visible queue button must keep its action");
+    assert.ok(close?.click, "the visible Close button must keep its action");
+    assert.equal(queue.disabled, false);
+    assert.equal(close.disabled, false);
+    queue.click();
+    assert.deepEqual(events, ["close", "queue"]);
+    center.guardOpenedBase = () => false;
+    queue.click();
+    assert.deepEqual(events, ["close", "queue"], "a stale completion must not open another base's queue");
+    close.click();
+    assert.deepEqual(events, ["close", "queue", "close"]);
+  });
+});
 
 test("post-import handoff reports the queue and refuses to undo a newer operation", async () => {
   const dom = createFakeDom();
@@ -98,6 +205,7 @@ test("post-import handoff reports the queue and refuses to undo a newer operatio
     assert.match(content.textContent, /3 new subjects/u);
     assert.match(content.textContent, /7 unresolved placeholders/u);
     assert.deepEqual(buttons.map((button) => button.label), ["Undo import", "Open placeholder queue", "Close"]);
+    assert.deepEqual(buttons.map((button) => button.disabled), [false, false, false]);
 
     Notice.messages.length = 0;
     buttons[0]?.click?.();

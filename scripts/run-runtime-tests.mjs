@@ -34,7 +34,7 @@ if (options.has("--coverage")) {
     "--test-coverage-lines=80",
     "--test-coverage-branches=75",
     "--test-coverage-functions=70",
-    "--test-coverage-include=src/*.ts",
+    "--test-coverage-include=src/**/*.ts",
   );
 }
 nodeArguments.push("--test", ...testFiles);

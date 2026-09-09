@@ -9,7 +9,7 @@
 
 ![Abstract illustration of interconnected knowledge cards](docs/assets/hero.png)
 
-_Abstract AI-generated concept artwork, not a product screenshot. Real, sanitized captures appear below; see [asset provenance](docs/assets/README.md)._
+_Abstract AI-generated concept artwork, not a product screenshot. A current renderer preview and historical real-app captures appear below; see [asset provenance](docs/assets/README.md)._
 
 Build each Index from notes you explicitly add and, when you want dynamic folder membership, folders you explicitly link. A default new-note folder controls storage only: putting a note there never enrolls it in the Index by itself. From there you arrange, group, nest, pin, and classify records into Libraries and Collections — and all of that organization lives in the plugin's own data, not in your Markdown. Your files stay exactly where you put them, with the frontmatter you wrote. One installation can hold several independent knowledge bases, so research, study, and project work never bleed into each other. Everything is local: the plugin makes no network request, has no account, and sends no telemetry.
 
@@ -21,7 +21,13 @@ Build each Index from notes you explicitly add and, when you want dynamic folder
 
 _Diagram, not a screenshot._ The plugin reads paths and cached frontmatter for direct note memberships and explicit linked-folder rules, then builds structure in **its own data**. A note's storage folder is otherwise irrelevant to Index membership. Collections can nest up to five levels, records can sit in several places at once, and Generic organization never rewrites your Markdown. Uninstall and every file is exactly where you left it.
 
-### In the app
+### Current Generic workspace
+
+![KBCC Generic workspace production renderer showing synthetic research notes, scoped search, and workspace options](docs/assets/generic-browser-desktop.png)
+
+_Captured from the actual KBCC view renderer and stylesheet on 2026-09-09, during the implementation later versioned as 0.20.0. The browser test host supplies synthetic notes, theme variables, and test icons; this is not an Obsidian app capture or physical-device evidence. [Provenance and reproducibility](docs/assets/README.md)._
+
+### Historical real-app captures
 
 ![Knowledge Base Command Center desktop view showing the Medications Library](docs/assets/workspace-desktop.png)
 
@@ -151,13 +157,13 @@ Depending on profile and current organization, the remaining smart queues surfac
 
 ### Search across every knowledge base
 
-A non-empty search covers every available, non-archived knowledge base, grouping results by base and Library with the active base first. Selecting a result from another base switches the active base before opening it.
+A non-empty search defaults to every available, non-archived knowledge base, grouping results by base and Library with the active base first. **Search in** can restrict results to the current base or the current Library. **Availability** selects all entries, linked notes, or placeholders, and **Linked notes first** prioritizes records with notes. Selecting a result from another base switches the active base before opening it. Saved searches retain these choices.
 
 Search is Unicode-aware and folds diacritics, straight and curly apostrophes, Arabic tatweel and presentation forms, common Arabic/Persian ya and kaf variants, and Arabic/Persian digits. Advanced filters include `domain:`, `priority:`, `kind:`, `type:`, `status:`, `review:`, `source:`, `safety:`, `dose:`, and `image:`; an unknown `word:` filter fails closed rather than becoming an unexpectedly broad text search. Broad searches report the full count and state **Showing the first 300 of _N_ results.** Browse views expose **Show more** instead of building an unbounded mobile DOM.
 
 ### Quick entry, hotkeys, and Apple Shortcut URLs
 
-Quick entry opens from the lightning-bolt desktop ribbon action, the Command Center header, a hotkey you assign, the mobile toolbar, or a fixed Obsidian URL. Its focused commands create a **No note** subject, a heading, a subheading, or a note; add the current or an existing note; and open Quick append. Library capture always asks for the exact heading or subheading first.
+Quick entry opens from the lightning-bolt desktop ribbon action, **Workspace options → Command center actions → Quick entry…**, a hotkey you assign, the mobile toolbar, or a fixed Obsidian URL. Its focused commands create a **No note** subject, a heading, a subheading, or a note; add the current or an existing note; and open Quick append. Library capture always asks for the exact heading or subheading first.
 
 Every active Library also gets its own **Open Library: …** global command, usable as a hotkey, a mobile toolbar button, or Obsidian's mobile Quick Action.
 
@@ -229,7 +235,7 @@ The manifest is mobile-compatible and the plugin ships mobile layouts throughout
 
 The bundle is built to a 2018 JavaScript baseline so it can run on older mobile web views, and that baseline is enforced rather than assumed: the compiler is pinned to exactly that language level, so using a newer built-in method fails the build instead of shipping unpolyfilled. Version 0.13.1 fixed four such methods that had been reaching devices — the most serious ran while classifying note paths and needed iOS Safari 15.4 or newer.
 
-Physical-device claims are kept separate from automated coverage: see the completed-but-partial [0.10.0 iPhone evidence note](docs/release-evidence/0.10.0-iphone.md), the explicitly unverified [0.17.0](docs/release-evidence/0.17.0-iphone.md), [0.18.0](docs/release-evidence/0.18.0-iphone.md), [0.19.0](docs/release-evidence/0.19.0-iphone.md), and [0.19.1](docs/release-evidence/0.19.1-iphone.md) waiver records, and the [manual iPhone release checklist](docs/manual-iphone-release-checklist.md) rather than assuming any release checklist passed. The 0.19.1 record separately identifies its supplemental Mac Obsidian startup-cache recovery coverage and its limits.
+Physical-device claims are kept separate from automated coverage: see the [0.20.0 device and Sync waiver record](docs/release-evidence/0.20.0-iphone.md), the historical completed-but-partial [0.10.0 iPhone evidence note](docs/release-evidence/0.10.0-iphone.md), and the [manual iPhone release checklist](docs/manual-iphone-release-checklist.md) rather than assuming any release checklist passed. The historical [0.19.1 record](docs/release-evidence/0.19.1-iphone.md) separately identifies its supplemental Mac Obsidian startup-cache recovery coverage and its limits. Physical iPhone, VoiceOver, and controlled two-device Sync remain unverified for 0.20.0.
 
 ### Right-to-left and bidirectional text
 
@@ -347,7 +353,7 @@ Follow the complete [backup and restore procedure](docs/PORTABILITY_AND_RECOVERY
 | --- | --- |
 | Obsidian | 1.13.0 or newer |
 | Desktop | Uses Obsidian-compatible APIs; no Electron- or Node-only runtime dependency |
-| iPhone and iPad | Supported through touch menus and mobile layouts; the [0.19.1 physical-device record](docs/release-evidence/0.19.1-iphone.md) is explicitly waived and unverified, so do not assume the release checklist passed |
+| iPhone and iPad | Supported through touch menus and mobile layouts; the [0.20.0 physical-device record](docs/release-evidence/0.20.0-iphone.md) is explicitly waived and unverified, so do not assume the release checklist passed |
 | Android | The manifest is mobile-compatible, but this repository does not currently document a complete physical-Android test pass |
 | Network | No plugin network requests, analytics, telemetry, accounts, advertising, or payments |
 
@@ -367,7 +373,7 @@ Follow the complete [backup and restore procedure](docs/PORTABILITY_AND_RECOVERY
 - The Organizer rejects any vault-qualified `obsidian://open` drop URI, including one naming the current vault. Use an unqualified vault-relative path or one of the supported menu/tree entry points.
 - The bundle targets a 2018 JavaScript baseline for older mobile web views. Newer built-in methods are rejected at build time rather than polyfilled, so a feature needing one has to be written differently or the baseline has to be raised deliberately.
 - Same-vault recovery is intentionally not portable between vaults.
-- Real-iPhone keyboard, safe-area, Dynamic Type, landscape, import/export, Sync-startup, and destructive recovery behavior needs explicit physical-device evidence. Automated DOM checks and Mac Obsidian testing are not substitutes, and the 0.19.1 physical-iPhone matrix was explicitly waived by the maintainer rather than executed; it is unverified, not a Pass.
+- Real-iPhone keyboard, safe-area, Dynamic Type, landscape, import/export, Sync-startup, and destructive recovery behavior needs explicit physical-device evidence. Automated DOM checks and Mac Obsidian testing are not substitutes. The 0.20.0 physical-iPhone, VoiceOver, and controlled two-device Sync scope was explicitly waived by the maintainer rather than executed; it is unverified, not a Pass.
 
 ## Troubleshooting
 

@@ -351,6 +351,8 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
   }
 
   getSettingDefinitions(): SettingDefinitionItem[] {
+    // Keep action labels visible: native ButtonComponent.setIcon replaces text.
+    // Intentionally icon-only controls must provide their own accessible name.
     // Settings search can ask for definitions while an onChange save is still
     // pending. Never bless that uncommitted live value as the rollback point.
     if (this.pendingSettingsSaves === 0 && this.bufferedTextSaveTimer === null) {
@@ -438,7 +440,6 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
               row.settingEl.addClass("ent-cc-legacy-warning");
               row.addButton((button) => button
                 .setButtonText("Review…")
-                .setIcon("list-checks")
                 .setCta()
                 .setDisabled(readOnly)
                 .onClick(() => {
@@ -489,7 +490,6 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
               button.buttonEl.addClass("ent-cc-base-setting-manage");
               button
                 .setButtonText("Manage…")
-                .setIcon("library")
                 .setDisabled(readOnly)
                 .onClick(() => new ManageKnowledgeBasesModal(this.host as EntVaultCommandCenterPlugin).open());
             });
@@ -521,7 +521,6 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
           (row) => {
             row.addButton((button) => button
               .setButtonText("Manage…")
-              .setIcon("library")
               .setDisabled(readOnly)
               .onClick(() => {
                 if (!ownsConfiguredBase()) return;
@@ -536,7 +535,6 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
           (row) => {
             row.addButton((button) => button
               .setButtonText("Configure…")
-              .setIcon("file-cog")
               .setDisabled(readOnly || allLibraries.length === 0)
               .onClick(() => {
                 if (!ownsConfiguredBase()) return;
@@ -748,7 +746,6 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
           (row) => {
             row.addButton((button) => button
               .setButtonText("Link folder…")
-              .setIcon("folder-plus")
               .setDisabled(readOnly)
               .onClick(() => {
                 if (!ownsConfiguredBase()) return;
@@ -778,7 +775,6 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
               row.settingEl.addClass("ent-cc-legacy-warning");
               row.addButton((button) => button
                 .setButtonText("Review…")
-                .setIcon("list-checks")
                 .setCta()
                 .setDisabled(readOnly)
                 .onClick(() => {
@@ -788,7 +784,6 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
               if (legacyReviewPreparationError) {
                 row.addButton((button) => button
                   .setButtonText("Keep linked")
-                  .setIcon("link")
                   .setDisabled(readOnly)
                   .onClick(() => {
                     if (!ownsConfiguredBase()) return;
@@ -809,7 +804,6 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
             } else {
               row.addButton((button) => button
                 .setButtonText("Unlink")
-                .setIcon("unlink")
                 .setDisabled(readOnly)
                 .onClick(() => {
                   if (!ownsConfiguredBase()) return;

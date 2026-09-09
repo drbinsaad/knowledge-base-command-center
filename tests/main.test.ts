@@ -15,6 +15,7 @@ import {
   BUILTIN_LIBRARY_DEFINITIONS,
   buildCurriculumTree,
   createDefaultStore,
+  createDeletedBaseCausality,
   createDeviceLocalPluginState,
   createDeviceLocalPluginStateWithReport,
   createKnowledgeBaseEntry,
@@ -71,6 +72,7 @@ import {
   type PortfolioImportMapping,
 } from "../src/portfolio.ts";
 import { EntVaultCommandCenterView, VIEW_TYPE } from "../src/view.ts";
+import { createOpenedBaseGuard, type OpenedBaseGuard } from "../src/opened-base-guard.ts";
 import { createVaultRenameJournal, type VaultRenameJournal } from "../src/vault-rename-journal.ts";
 
 interface TestPluginBase {
@@ -1921,8 +1923,14 @@ test("permanent deletion accepts only an unchanged archived base and never touch
   await plugin.deleteArchivedKnowledgeBase(archived.id, archived.updatedAt);
 
   assert.deepEqual(plugin.getKnowledgeBases(true).map((entry) => entry.id), ["base-default"]);
-  const saved = plugin.savedData.at(-1) as { deletedBaseIds?: Record<string, number> };
+  const saved = plugin.savedData.at(-1) as PluginStore;
   assert.ok((saved.deletedBaseIds?.[archived.id] ?? 0) > archived.updatedAt);
+  assert.deepEqual(saved.deletedBaseCausality?.[archived.id], {
+    deletedAt: saved.deletedBaseIds[archived.id],
+    semanticHead: archived.semanticHead,
+    semanticHash: archived.semanticHash,
+    semanticLineage: archived.semanticLineage,
+  }, "permanent deletion records exactly the archived endpoint this device observed");
   assert.equal(plugin.getKnowledgeBases().length, 1);
   assert.equal(sourceMutationCount(), 0);
   assert.equal(vaultEnumerationCount(), 0);
@@ -3593,6 +3601,65 @@ test("same-revision semantic conflicts rescue the losing complete envelope befor
   assert.equal(plugin.dataCompatibilityWarning, "");
 });
 
+test("deletion Sync rescues earlier offline work before settling, including legacy tombstones", async () => {
+  for (const withProof of [false, true]) {
+    const local = createDefaultStore(migrateData(null), 100, `vault-offline-deletion-${withProof}`);
+    const researchData = migrateData(null);
+    researchData.settings.workspaceName = "Research";
+    const observed = createKnowledgeBaseEntry(researchData, "base-research", 100);
+    const edited = structuredClone(observed);
+    edited.data.pinnedPaths = ["Research/Offline work.md"];
+    edited.updatedAt = 250;
+    edited.semanticRevision += 1;
+    edited.semanticHash = semanticEntryFingerprint(edited);
+    edited.semanticHead = nextSemanticHead(observed.semanticHead, edited.semanticHash);
+    edited.semanticLineage = boundedSemanticLineage([observed.semanticHead], edited.semanticHead);
+    local.bases.push(edited);
+    const incoming = structuredClone(local);
+    incoming.bases = incoming.bases.filter((entry) => entry.id !== observed.id);
+    incoming.deletedBaseIds[observed.id] = 300;
+    if (withProof) {
+      const proof = createDeletedBaseCausality(observed, 300);
+      assert.ok(proof);
+      incoming.deletedBaseCausality = { [observed.id]: proof };
+    }
+    const plugin = pluginWith(local);
+    await plugin.loadPluginData();
+    const log = recordRescueWrites(plugin);
+    plugin.refreshViews = async () => { log.events.push("refresh"); };
+    plugin.loadedData = incoming;
+
+    await plugin.onExternalSettingsChange();
+
+    assert.equal(log.events[0], "rescue");
+    assert.equal(plugin.dataCompatibilityWarning, "");
+    assert.equal(plugin.getKnowledgeBases(true).some((entry) => entry.id === observed.id), false);
+    assert.deepEqual(rescuedStores(log)[0]?.bases.find((entry) => entry.id === observed.id)?.data.pinnedPaths, ["Research/Offline work.md"]);
+  }
+});
+
+test("a failed deletion rescue retains offline organization and blocks adoption", async () => {
+  const local = createDefaultStore(migrateData(null), 100, "vault-offline-deletion-failure");
+  const researchData = migrateData(null);
+  researchData.settings.workspaceName = "Research";
+  researchData.pinnedPaths = ["Research/Offline work.md"];
+  local.bases.push(createKnowledgeBaseEntry(researchData, "base-research", 250));
+  const incoming = structuredClone(local);
+  incoming.bases = incoming.bases.filter((entry) => entry.id !== "base-research");
+  incoming.deletedBaseIds["base-research"] = 300;
+  const plugin = pluginWith(local);
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+  recordRescueWrites(plugin, () => { throw new Error("simulated deletion rescue failure"); });
+  plugin.loadedData = incoming;
+
+  await plugin.onExternalSettingsChange();
+
+  assert.match(plugin.dataCompatibilityWarning, /could not be preserved.*read-only/i);
+  assert.deepEqual(plugin.getKnowledgeBases(true).find((entry) => entry.id === "base-research")?.data.pinnedPaths, ["Research/Offline work.md"]);
+  assert.equal(plugin.savedData.length, 0);
+});
+
 test("a failed same-revision conflict rescue fails closed and retains the captured payload", async () => {
   const localData = migrateData(null);
   localData.settings.workspaceName = "Local organization";
@@ -4338,6 +4405,54 @@ test("an incompatible capture in a later Sync worker rescues the committed valid
   await restarted.loadPluginData(false);
   assert.equal(restarted.dataCompatibilityWarning, "");
   assert.deepEqual(restarted.data.nextStudyPaths, ["Remote-before-future.md"]);
+});
+
+test("external Sync normalizes a valid descendant inside its queue before binding rendered controls", async () => {
+  const initial = createDefaultStore(migrateData(null), 100, "vault-reload-reconcile-owner");
+  const plugin = pluginWith(initial);
+  await plugin.loadPluginData(false);
+  const incoming = structuredClone(initial);
+  const incomingBase = incoming.bases[0];
+  assert.ok(incomingBase);
+  advanceStoreEntry(incomingBase, () => {
+    incomingBase.data.pinnedPaths = ["A.md", "A.md"];
+  }, 200);
+  plugin.loadedData = incoming;
+  const oldGuard = createOpenedBaseGuard(plugin, { message: "Old controls." });
+  let renderedGuard: OpenedBaseGuard | null = null;
+  let versionAtRender = "";
+  let rendered = 0;
+  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView;
+  view.reload = async (withinOperation = false) => {
+    assert.equal(withinOperation, true, "refresh inherits the reload's logical transaction");
+    assert.deepEqual(plugin.data.pinnedPaths, ["A.md"], "cleanup precedes presentation");
+    assert.equal(await plugin.reconcileRecords(plugin.getRecords(), withinOperation), false, "view cleanup is already settled");
+    renderedGuard = createOpenedBaseGuard(plugin, { message: "Rendered controls." });
+    versionAtRender = plugin.getBaseSurfaceVersion();
+    assert.equal(renderedGuard.owns(), false, "UI remains fenced throughout presentation");
+    rendered += 1;
+  };
+  plugin.app.workspace.getLeavesOfType = (type) => type === VIEW_TYPE ? [{ view } as never] : [];
+
+  await bounded(plugin.onExternalSettingsChange(), "reconciliation inside external reload");
+
+  assert.equal(rendered, 1);
+  assert.equal(plugin.isExternalReloadInProgress(), false);
+  assert.equal(plugin.getBaseSurfaceVersion(), versionAtRender);
+  assert.equal((renderedGuard as OpenedBaseGuard | null)?.owns(), true);
+  assert.equal(oldGuard.owns(), false);
+  assert.equal(plugin.isDataReadOnly(), false);
+  const saved = plugin.savedData.at(-1) as PluginStore;
+  assert.deepEqual(saved.bases[0]?.data.pinnedPaths, ["A.md"]);
+  assert.ok(saved.bases[0]?.semanticLineage.includes(incomingBase.semanticHead), "cleanup descends from the accepted endpoint");
+
+  // A subsequent settled no-op retains this surface and performs no primary save.
+  const writes = plugin.savedData.length;
+  const settledGuard = renderedGuard as OpenedBaseGuard | null;
+  plugin.loadedData = structuredClone(saved);
+  await bounded(plugin.onExternalSettingsChange(), "no-op after reconciliation");
+  assert.equal(plugin.savedData.length, writes);
+  assert.equal(settledGuard?.owns(), true);
 });
 
 test("external Sync starts a fresh worker for a callback during worker finalization", async () => {
@@ -12612,7 +12727,7 @@ test("search projection candidates are restricted to each configured base plus e
         frontmatterByPath: ReadonlyMap<string, Record<string, unknown>>;
         generation: number;
       },
-    ): readonly TFile[];
+    ): Iterable<TFile>;
   };
   const snapshot = {
     files,
@@ -12622,14 +12737,14 @@ test("search projection candidates are restricted to each configured base plus e
     generation: 1,
   };
 
-  const genericCandidates = internal.filesForSearchEntry(entry, snapshot);
+  const genericCandidates = [...internal.filesForSearchEntry(entry, snapshot)];
   assert.equal(genericCandidates.length, rootFiles.length + 1);
   assert.equal(genericCandidates.some((file) => file.path === manual.path), true);
   assert.equal(genericCandidates.some((file) => file.path.startsWith("Unrelated/")), false);
   assert.equal(genericCandidates.some((file) => file.path === proposal.path), false);
 
   entry.data.settings.workspaceMode = "ent-clinical";
-  const clinicalCandidates = internal.filesForSearchEntry(entry, snapshot);
+  const clinicalCandidates = [...internal.filesForSearchEntry(entry, snapshot)];
   assert.equal(clinicalCandidates.some((file) => file.path === proposal.path), true);
 });
 

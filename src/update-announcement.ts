@@ -229,6 +229,20 @@ export const UPDATE_ANNOUNCEMENT_0_19_1: UpdateAnnouncement = {
   releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.19.1",
 };
 
+export const UPDATE_ANNOUNCEMENT_0_20_0: UpdateAnnouncement = {
+  version: "0.20.0",
+  title: "What’s new in Knowledge Base Command Center 0.20.0",
+  intro: "A clearer workspace, more dependable navigation, and stronger safeguards for your organization.",
+  highlights: [
+    "Choose an explicit search scope, filter linked notes or placeholders, and show linked notes first. Saved searches and note-return routes keep these choices.",
+    "Expanded lists, selected records, scrolling, and keyboard focus survive same-page refreshes. Counts now distinguish entries, linked notes, and placeholders.",
+    "Create-note, setup, export, and recovery dialogs put common actions first. Settings and import-completion buttons keep readable labels, with compact mobile Settings spacing.",
+    "Unseen offline edits are preserved in conflict rescue before a base deletion is adopted. Unchanged reloads keep Organizer drafts and reviews; changed data still requires a fresh review.",
+    "Attachment insertion respects YAML frontmatter, and cold-search preparation is chunked and cancellable so larger inventories remain responsive.",
+  ],
+  releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.20.0",
+};
+
 const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_12_0.version, UPDATE_ANNOUNCEMENT_0_12_0],
   [UPDATE_ANNOUNCEMENT_0_12_1.version, UPDATE_ANNOUNCEMENT_0_12_1],
@@ -246,6 +260,7 @@ const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_18_0.version, UPDATE_ANNOUNCEMENT_0_18_0],
   [UPDATE_ANNOUNCEMENT_0_19_0.version, UPDATE_ANNOUNCEMENT_0_19_0],
   [UPDATE_ANNOUNCEMENT_0_19_1.version, UPDATE_ANNOUNCEMENT_0_19_1],
+  [UPDATE_ANNOUNCEMENT_0_20_0.version, UPDATE_ANNOUNCEMENT_0_20_0],
 ]);
 
 function parseSemanticVersion(value: string): ParsedSemanticVersion | null {

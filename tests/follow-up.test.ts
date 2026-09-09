@@ -139,6 +139,15 @@ test("preserves CRLF throughout inserted Markdown and during reverse undo", () =
   assert.equal(reverseFollowUpAppend(result.content, result.undo), original);
 });
 
+test("Quick Append shares the BOM and whitespace-tolerant YAML boundary with attachments", () => {
+  const frontmatter = "\uFEFF--- \t\nexample: |\n  ```markdown\n  <!-- kbcc-follow-up:start:v1 -->\n  ## Follow-up notes\n... \t\n";
+  const source = frontmatter + "\n# Note\nBody\n";
+  const result = append(source);
+  assert.ok(result.content.startsWith(frontmatter));
+  assert.equal(result.operation, "created-block");
+  assert.equal(reverseFollowUpAppend(result.content, result.undo), source);
+});
+
 test("ignores exact-looking markers in YAML and fenced code", () => {
   const original = [
     "---",

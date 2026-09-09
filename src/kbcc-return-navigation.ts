@@ -1,4 +1,4 @@
-import { isValidLibraryId, libraryIdFromTab, type MainTab } from "./model";
+import { cleanSearchViewFilters, isValidLibraryId, libraryIdFromTab, type MainTab, type SearchViewFilters } from "./model";
 
 export const KBCC_RETURN_NAVIGATION_VERSION = 1;
 export const MAX_KBCC_RETURN_ROUTES = 24;
@@ -9,7 +9,7 @@ const MAX_ROUTE_QUERY_LENGTH = 10_000;
 const MAX_ROUTE_SCROLL = 1_000_000_000;
 
 /** Volatile Command Center UI state needed to return to the exact prior page. */
-export interface KbccReturnViewState {
+export interface KbccReturnViewState extends SearchViewFilters {
   activeTab: MainTab;
   selectedPath: string;
   query: string;
@@ -99,6 +99,7 @@ function parseViewState(input: unknown, label: string): KbccReturnViewState {
     activeTab: strictMainTab(value.activeTab, `${label} active tab`),
     selectedPath: strictPath(value.selectedPath, `${label} selected path`, true),
     query: strictText(value.query, `${label} query`, MAX_ROUTE_QUERY_LENGTH, true),
+    ...cleanSearchViewFilters(value),
     detailVisible: value.detailVisible,
     browseRowLimit: strictBrowseLimit(value.browseRowLimit, `${label} row limit`),
     browseStructureLimit: strictBrowseLimit(value.browseStructureLimit, `${label} structure limit`),
