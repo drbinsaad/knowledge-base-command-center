@@ -2,7 +2,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 let rendererBundle: string;
@@ -26,21 +26,25 @@ test.beforeAll(async () => {
   hostStyles = host;
 });
 
-async function openView(page: Page, options: { mobile?: boolean; dark?: boolean; count?: number } = {}): Promise<void> {
+async function openView(page: Page, options: { mobile?: boolean; dark?: boolean; count?: number; phoneChrome?: boolean; width?: number; height?: number; largeText?: boolean } = {}): Promise<void> {
   const errors: string[] = [];
   failures.set(page, errors);
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
-  await page.setViewportSize(options.mobile ? { width: 390, height: 844 } : { width: 1440, height: 960 });
-  await page.goto(`about:blank#mobile=${Boolean(options.mobile)}&count=${options.count ?? 650}`);
-  await page.setContent(`<!doctype html><html lang="en"><head><meta charset="utf-8"><title>KBCC production renderer · synthetic vault</title></head><body class="${options.dark ? "theme-dark" : "theme-light"}${options.mobile ? " is-mobile" : ""}"><main id="kbcc-view" class="view-content"></main></body></html>`);
+  await page.setViewportSize({ width: options.width ?? (options.mobile ? 390 : 1440), height: options.height ?? (options.mobile ? 844 : 960) });
+  await page.goto(`about:blank#mobile=${Boolean(options.mobile)}&count=${options.count ?? 650}${options.phoneChrome ? "&scenario=mobile-space" : ""}`);
+  const content = '<main id="kbcc-view" class="view-content"></main>';
+  const host = options.phoneChrome ? `<div class="kbcc-browser-phone-frame"><header class="kbcc-browser-app-chrome" aria-label="Synthetic top app chrome">Obsidian host space · synthetic fixture</header>${content}<footer class="kbcc-browser-app-chrome" aria-label="Synthetic bottom app toolbar">App toolbar · outside the plugin</footer></div>` : content;
+  await page.setContent(`<!doctype html><html lang="en"><head><meta charset="utf-8"><title>KBCC production renderer · synthetic vault</title></head><body class="${options.dark ? "theme-dark" : "theme-light"}${options.mobile ? " is-mobile" : ""}${options.largeText ? " kbcc-browser-large-text" : ""}">${host}</body></html>`);
   await page.addStyleTag({ content: hostStyles });
   await page.addStyleTag({ content: productStyles });
   await page.addScriptTag({ content: rendererBundle });
   await expect.poll(() => page.evaluate(() => Boolean((window as unknown as { kbccBrowserHarness?: { ready: boolean } }).kbccBrowserHarness?.ready))).toBe(true);
   await expect(page).toHaveTitle("KBCC production renderer · synthetic vault");
-  await expect(page.getByRole("heading", { name: "Research workspace", exact: true })).toBeVisible();
+  if (!options.mobile && !options.phoneChrome) await expect(page.getByRole("heading", { name: "Research workspace", exact: true })).toBeVisible();
+  if (options.mobile) await expect(page.locator(".ent-cc-base-switcher-name")).toHaveText(options.phoneChrome ? "My knowledge base" : "Research workspace");
   await expect(page.locator(".ent-cc-shell")).toBeVisible();
+  await page.evaluate(() => new Promise<void>((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve()))));
 }
 
 async function refresh(page: Page, replaceData = false): Promise<void> {
@@ -60,6 +64,19 @@ async function captureEvidence(page: Page, name: string): Promise<void> {
   await page.screenshot({ path: path.join(directory, `${test.info().project.name}-${name}.png`), fullPage: false });
 }
 
+async function clickRenderedCenter(page: Page, target: Locator, touch = false): Promise<void> {
+  const rect = await target.boundingBox();
+  if (!rect) throw new Error("Pointer target has no visible bounds");
+  expect(await target.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    return element.contains(document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2));
+  }), "Rendered pointer target must be unobscured").toBe(true);
+  // Locator actions can recenter sticky controls using their normal-flow box;
+  // preserve the real user's scroll position and use the verified screen point.
+  if (touch) await page.touchscreen.tap(rect.x + rect.width / 2, rect.y + rect.height / 2);
+  else await page.mouse.click(rect.x + rect.width / 2, rect.y + rect.height / 2);
+}
+
 async function openSettings(page: Page, options: { readOnly?: boolean; reviewUnavailable?: boolean; noLibraries?: boolean; holdSave?: boolean } = {}): Promise<void> {
   await page.evaluate((value) => (window as unknown as { kbccBrowserHarness: { openSettings(options: typeof value): void } }).kbccBrowserHarness.openSettings(value), options);
   await expect(page.getByRole("main", { name: "Settings test host" })).toBeVisible();
@@ -71,6 +88,404 @@ function settingsRow(page: Page, name: string) {
 
 async function settingsSnapshot(page: Page): Promise<{ reviews: string[]; unlinked: string[]; kept: string[]; saves: number }> {
   return page.evaluate(() => (window as unknown as { kbccBrowserHarness: { settingsSnapshot(): { reviews: string[]; unlinked: string[]; kept: string[]; saves: number } } }).kbccBrowserHarness.settingsSnapshot());
+}
+
+async function mobileBrowseGeometry(page: Page) {
+  return page.evaluate(() => {
+    const leaf = document.getElementById("kbcc-view");
+    const workspace = leaf?.querySelector<HTMLElement>(".ent-cc-workspace");
+    const tree = workspace?.querySelector<HTMLElement>(".ent-cc-tree-panel");
+    if (!leaf || !workspace || !tree) throw new Error("Missing mobile browse surface");
+    const leafRect = leaf.getBoundingClientRect();
+    const workspaceRect = workspace.getBoundingClientRect();
+    const treeRect = tree.getBoundingClientRect();
+    const toolbar = workspace.querySelector<HTMLElement>(".ent-cc-mobile-toolbar");
+    const toolbarBottom = toolbar && getComputedStyle(toolbar).position === "sticky" ? toolbar.getBoundingClientRect().bottom : 0;
+    const top = Math.max(leafRect.top, workspaceRect.top, treeRect.top, toolbarBottom, 0);
+    const bottom = Math.min(leafRect.bottom, workspaceRect.bottom, treeRect.bottom, window.visualViewport?.height ?? window.innerHeight);
+    const rows = Array.from(workspace.querySelectorAll<HTMLElement>(".ent-cc-subject-row")).map((row) => {
+      const rect = row.getBoundingClientRect();
+      return { title: row.querySelector(".ent-cc-subject-title")?.textContent ?? "", top: rect.top, bottom: rect.bottom, height: rect.height };
+    });
+    return {
+      leafHeight: leafRect.height, usableHeight: Math.max(0, bottom - top),
+      fullyVisibleRows: rows.filter((row) => row.top >= top - 1 && row.bottom <= bottom + 1 && row.height >= 44),
+      rowCount: rows.length, documentOverflow: document.documentElement.scrollWidth - window.innerWidth,
+    };
+  });
+}
+
+test("mobile browse disclosures preserve accessible state, filters, focus and list scroll on refresh", async ({ page }) => {
+  await openView(page, { mobile: true, phoneChrome: true });
+  const details = page.locator(".ent-cc-workspace-options");
+  const detailsToggle = details.locator(":scope > summary");
+  const filters = page.locator(".ent-cc-mobile-filters");
+  const filtersToggle = filters.locator(":scope > summary");
+  await expect(detailsToggle).toHaveText("Details");
+  await expect(filtersToggle).toHaveAccessibleName("Filters");
+  for (const toggle of [detailsToggle, filtersToggle]) expect((await toggle.boundingBox())?.height).toBeGreaterThanOrEqual(44);
+  await expect(details).not.toHaveAttribute("open");
+  await expect(filters).not.toHaveAttribute("open");
+  await expect(page.getByRole("heading", { name: "My knowledge base", exact: true })).toBeHidden();
+  await expect(page.getByRole("combobox", { name: "Search scope" })).toBeHidden();
+  await detailsToggle.focus();
+  await page.keyboard.press("Enter");
+  await expect(details).toHaveAttribute("open", "");
+  await expect(page.locator(".ent-cc-health-summary")).toBeVisible();
+  await refresh(page, true);
+  await expect(details).toHaveAttribute("open", "");
+  await expect(detailsToggle).toBeFocused();
+  await page.keyboard.press("Enter");
+  await filtersToggle.focus();
+  await page.keyboard.press("Enter");
+  await expect(filters).toHaveAttribute("open", "");
+  const scope = page.getByRole("combobox", { name: "Search scope" });
+  const availability = page.getByRole("combobox", { name: "Note availability" });
+  const linkedFirst = page.getByRole("checkbox", { name: "Show linked notes first" });
+  await scope.selectOption("library");
+  await availability.selectOption("linked");
+  await linkedFirst.check();
+  await linkedFirst.focus();
+  await refresh(page, true);
+  await expect(filters).toHaveAttribute("open", "");
+  await expect(linkedFirst).toBeFocused();
+  await expect(scope).toHaveValue("library");
+  await expect(availability).toHaveValue("linked");
+  await expect(linkedFirst).toBeChecked();
+  await expect(filtersToggle).toHaveText("Filters (3)");
+  await expect(filtersToggle).toHaveAccessibleName("Filters: This Library, Linked notes, Linked notes first");
+  await filtersToggle.click();
+  await expect(filters).not.toHaveAttribute("open");
+  await page.locator(".ent-cc-workspace").evaluate((owner) => { owner.scrollTop = owner.scrollHeight; });
+  const before = await page.locator(".ent-cc-workspace").evaluate((owner) => owner.scrollTop);
+  expect(before).toBeGreaterThan(200);
+  await refresh(page, true);
+  await page.evaluate(() => new Promise<void>((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve()))));
+  await expect.poll(() => page.locator(".ent-cc-workspace").evaluate((owner) => owner.scrollTop)).toBeCloseTo(before, 0);
+  await expect.poll(async () => (await mobileBrowseGeometry(page)).fullyVisibleRows.map((row) => row.title)).toContain("Reference 17");
+  await filtersToggle.click();
+  await expect(scope).toHaveValue("library");
+  await expect(availability).toHaveValue("linked");
+  await expect(linkedFirst).toBeChecked();
+  await captureEvidence(page, "browse-filters-restored");
+});
+
+test("mobile browse keyboard viewport keeps focused search reachable while later results scroll", async ({ page }, testInfo) => {
+  await openView(page, { mobile: true, phoneChrome: true });
+  const input = page.locator('.ent-cc-search-box input[type="search"]');
+  const clear = page.getByRole("button", { name: "Clear search", exact: true });
+  await page.locator(".ent-cc-workspace").evaluate((owner) => { owner.scrollTop = owner.scrollHeight; });
+  await input.fill("Reference");
+  await expect(page.locator(".ent-cc-search-base-group .ent-cc-subject-row")).toHaveCount(17);
+  // Model visualViewport shrink without pretending Chromium/WebKit automation
+  // opens an actual iPhone software keyboard. Native app checks remain separate.
+  await page.evaluate(() => {
+    if (!window.visualViewport) throw new Error("Browser has no visual viewport");
+    Object.defineProperty(window.visualViewport, "height", { configurable: true, value: 440 });
+    window.visualViewport.dispatchEvent(new Event("resize"));
+  });
+  await expect(page.locator(".ent-cc-shell")).toHaveClass(/is-virtual-keyboard-open/u);
+  await page.locator(".ent-cc-workspace").evaluate((owner) => { owner.scrollTop = owner.scrollHeight; });
+  const geometry = await page.evaluate(() => {
+    const selectors = ['.ent-cc-search-box input[type="search"]', ".ent-cc-search-clear", ".ent-cc-workspace", ".ent-cc-tree-panel"];
+    return selectors.map((selector) => {
+      const element = document.querySelector<HTMLElement>(selector);
+      if (!element) throw new Error(`Missing ${selector}`);
+      const rect = element.getBoundingClientRect();
+      return { selector, top: rect.top, bottom: rect.bottom, height: rect.height, overflowY: getComputedStyle(element).overflowY, scrollTop: element.scrollTop };
+    });
+  });
+  await testInfo.attach("keyboard-viewport-geometry", { body: JSON.stringify(geometry, null, 2), contentType: "application/json" });
+  for (const control of geometry.slice(0, 2)) {
+    expect(control.top, JSON.stringify(geometry)).toBeGreaterThanOrEqual(108);
+    expect(control.bottom, JSON.stringify(geometry)).toBeLessThanOrEqual(441);
+    expect(control.height).toBeGreaterThanOrEqual(44);
+  }
+  expect(geometry[2].scrollTop).toBeGreaterThan(200);
+  expect(geometry[3].overflowY).toBe("visible");
+  expect((await mobileBrowseGeometry(page)).fullyVisibleRows.map((row) => row.title)).toContain("Reference 17");
+  await expect(input).toBeFocused();
+  await expect(clear).toBeVisible();
+  await captureEvidence(page, "browse-keyboard-scrolled");
+  await page.evaluate(() => {
+    const events: unknown[] = [];
+    (window as unknown as { kbccSearchEvents: unknown[] }).kbccSearchEvents = events;
+    for (const type of ["mousedown", "mouseup", "click", "focus", "blur"]) document.addEventListener(type, (event) => {
+      const target = event.target as HTMLElement;
+      const rect = document.querySelector(".ent-cc-search-clear")?.getBoundingClientRect();
+      events.push({ type, target: target.className || target.tagName, active: document.activeElement?.tagName, shell: document.querySelector(".ent-cc-shell")?.className, clearTop: rect?.top, clearBottom: rect?.bottom });
+    }, true);
+  });
+  await clear.click();
+  await testInfo.attach("search-clear-pointer-events", { body: JSON.stringify(await page.evaluate(() => (window as unknown as { kbccSearchEvents: unknown[] }).kbccSearchEvents), null, 2), contentType: "application/json" });
+  await expect(input).toHaveValue("");
+  await expect(input).toBeFocused();
+  await page.evaluate(() => {
+    if (!window.visualViewport) throw new Error("Browser has no visual viewport");
+    Reflect.deleteProperty(window.visualViewport, "height");
+    window.visualViewport.dispatchEvent(new Event("resize"));
+  });
+  await input.blur();
+  await expect(page.locator(".ent-cc-shell")).not.toHaveClass(/is-search-focused|is-virtual-keyboard-open/u);
+  await expect.poll(async () => (await mobileBrowseGeometry(page)).fullyVisibleRows.length).toBeGreaterThanOrEqual(5);
+});
+
+test("mobile browse inspector Back restores the scrolled list and selected row focus", async ({ page }) => {
+  await openView(page, { mobile: true, phoneChrome: true, dark: true });
+  await page.locator(".ent-cc-workspace").evaluate((owner) => { owner.scrollTop = owner.scrollHeight; });
+  const before = await page.locator(".ent-cc-workspace").evaluate((owner) => owner.scrollTop);
+  const selected = page.getByRole("button", { name: /^Reference 17,/u });
+  await selected.click();
+  const back = page.getByRole("button", { name: "Back to main page", exact: true });
+  await expect(back).toBeFocused();
+  await expect(page.getByRole("button", { name: "Open note", exact: true })).toBeVisible();
+  await refresh(page, true);
+  await back.click();
+  await page.evaluate(() => new Promise<void>((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve()))));
+  await expect(selected).toBeFocused();
+  await expect.poll(() => page.locator(".ent-cc-workspace").evaluate((owner) => owner.scrollTop)).toBeCloseTo(before, 0);
+  expect((await mobileBrowseGeometry(page)).fullyVisibleRows.map((row) => row.title)).toContain("Reference 17");
+  await captureEvidence(page, "browse-inspector-return-dark");
+});
+
+async function expectExactKeyboardResultActivation(page: Page, testInfo: TestInfo, touch: boolean): Promise<void> {
+  await openView(page, { mobile: true, phoneChrome: true });
+  const input = page.locator('.ent-cc-search-box input[type="search"]');
+  await input.fill("Reference");
+  await expect(page.locator(".ent-cc-search-base-group .ent-cc-subject-row")).toHaveCount(17);
+  await page.evaluate(() => {
+    if (!window.visualViewport) throw new Error("Browser has no visual viewport");
+    Object.defineProperty(window.visualViewport, "height", { configurable: true, value: 440 });
+    window.visualViewport.dispatchEvent(new Event("resize"));
+  });
+  await expect(page.locator(".ent-cc-shell")).toHaveClass(/is-virtual-keyboard-open/u);
+  await page.locator(".ent-cc-workspace").evaluate((owner) => { owner.scrollTop = owner.scrollHeight; });
+  await expect(input).toBeFocused();
+  const intended = page.getByRole("button", { name: /^Reference 17,/u });
+  const bounds = await intended.boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds!.y).toBeGreaterThanOrEqual(160);
+  expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(440);
+  if (touch) await intended.tap();
+  else await intended.click();
+  const selectedPath = await page.evaluate(() => (window as unknown as { kbccBrowserHarness: { snapshot(): { selectedPath: string } } }).kbccBrowserHarness.snapshot().selectedPath);
+  await testInfo.attach("keyboard-result-pointer", { body: JSON.stringify({ pointer: touch ? "touch" : "mouse", intended: "Resources/Reference 17.md", selectedPath, bounds }, null, 2), contentType: "application/json" });
+  expect(selectedPath).toBe("Resources/Reference 17.md");
+  await expect(page.getByRole("button", { name: "Back to main page", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Reference 17", exact: true })).toBeVisible();
+  await captureEvidence(page, `browse-keyboard-exact-result-${touch ? "touch" : "mouse"}`);
+  const back = page.getByRole("button", { name: "Back to main page", exact: true });
+  const backBounds = await back.boundingBox();
+  expect(backBounds!.y + backBounds!.height).toBeLessThanOrEqual(440);
+  if (touch) await back.tap();
+  else await back.click();
+  await expect(intended).toBeFocused();
+  const returnFocus = await intended.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    const toolbar = document.querySelector(".ent-cc-mobile-toolbar")?.getBoundingClientRect();
+    const leaf = document.getElementById("kbcc-view")!.getBoundingClientRect();
+    return { top: rect.top, bottom: rect.bottom, toolbarBottom: toolbar?.bottom ?? leaf.top, leafBottom: leaf.bottom, hit: element.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)) };
+  });
+  expect(returnFocus.top, JSON.stringify(returnFocus)).toBeGreaterThanOrEqual(returnFocus.toolbarBottom);
+  expect(returnFocus.bottom).toBeLessThanOrEqual(returnFocus.leafBottom);
+  expect(returnFocus.hit).toBe(true);
+  await page.keyboard.press(testInfo.project.name === "webkit" ? "Alt+Tab" : "Tab");
+  await expect(page.getByRole("button", { name: "Actions for Reference 17", exact: true })).toBeFocused();
+  await page.keyboard.press(testInfo.project.name === "webkit" ? "Alt+Shift+Tab" : "Shift+Tab");
+  await expect(intended).toBeFocused();
+  for (let index = 16; index >= 5; index -= 1) {
+    const name = `Reference ${String(index).padStart(2, "0")}`;
+    await page.keyboard.press(testInfo.project.name === "webkit" ? "Alt+Shift+Tab" : "Shift+Tab");
+    await expect(page.getByRole("button", { name: `Actions for ${name}`, exact: true })).toBeFocused();
+    await page.keyboard.press(testInfo.project.name === "webkit" ? "Alt+Shift+Tab" : "Shift+Tab");
+    const previousTitle = page.getByRole("button", { name: new RegExp(`^${name},`, "u") });
+    await expect(previousTitle).toBeFocused();
+    const previousBounds = await previousTitle.boundingBox();
+    const toolbarBottom = await page.locator(".ent-cc-mobile-toolbar").evaluate((element) => element.getBoundingClientRect().bottom);
+    expect(previousBounds!.y, "Reverse keyboard navigation must not focus a note behind the sticky toolbar").toBeGreaterThanOrEqual(toolbarBottom);
+  }
+  if (touch) await input.tap();
+  else await input.click();
+  await expect(input).toBeFocused();
+  await page.locator(".ent-cc-workspace").evaluate((owner) => { owner.scrollTop = owner.scrollHeight; });
+  const clear = page.getByRole("button", { name: "Clear search", exact: true });
+  await page.evaluate(() => {
+    const events: unknown[] = [];
+    (window as unknown as { kbccClearTouchEvents: unknown[] }).kbccClearTouchEvents = events;
+    for (const type of ["pointerdown", "pointerup", "touchstart", "touchend", "click", "blur", "focus"]) document.addEventListener(type, (event) => {
+      const target = event.target as Element;
+      events.push({ type, target: target.closest("button")?.getAttribute("aria-label") ?? target.tagName, prevented: event.defaultPrevented, active: document.activeElement?.tagName });
+    }, true);
+  });
+  await clickRenderedCenter(page, clear, touch);
+  await testInfo.attach("clear-after-back-pointer-events", { body: JSON.stringify(await page.evaluate(() => (window as unknown as { kbccClearTouchEvents: unknown[] }).kbccClearTouchEvents), null, 2), contentType: "application/json" });
+  await expect(input).toHaveValue("");
+  await expect(input).toBeFocused();
+  await captureEvidence(page, `browse-keyboard-clear-after-back-${touch ? "touch" : "mouse"}`);
+}
+
+test("mobile browse pointer-clicking a scrolled keyboard search result opens the exact intended note", async ({ page }, testInfo) => {
+  await expectExactKeyboardResultActivation(page, testInfo, false);
+});
+
+test.describe("mobile touch pointer", () => {
+  test.use({ hasTouch: true });
+  test("mobile browse touching a scrolled keyboard search result opens the exact intended note", async ({ page }, testInfo) => {
+    await expectExactKeyboardResultActivation(page, testInfo, true);
+  });
+});
+
+test("narrow nonmobile panes retain desktop controls and scroll hierarchy", async ({ page }) => {
+  await openView(page, { width: 390, height: 844, count: 8 });
+  await expect(page.locator(".ent-cc-shell")).not.toHaveClass(/is-mobile-browse/u);
+  await expect(page.locator(".ent-cc-workspace-options > summary")).toHaveText("Workspace options");
+  await expect(page.getByRole("combobox", { name: "Search scope" })).toBeVisible();
+  await expect(page.locator(".ent-cc-mobile-filters")).toHaveCount(0);
+  await expect(page.locator(".ent-cc-workspace .ent-cc-header")).toHaveCount(0);
+  await captureEvidence(page, "browse-narrow-desktop-unchanged");
+});
+
+const phoneBrowseScenarios = [
+  { width: 390, height: 844, largeText: false },
+  { width: 402, height: 874, largeText: false },
+  { width: 320, height: 740, largeText: false },
+  { width: 390, height: 844, largeText: true },
+] as const;
+
+test("mobile sticky Filters stays bounded after a short viewport and larger text change", async ({ page }, testInfo) => {
+  await openView(page, { mobile: true, phoneChrome: true });
+  await page.locator(".ent-cc-workspace").evaluate((owner) => { owner.scrollTop = owner.scrollHeight; });
+  const filters = page.locator(".ent-cc-mobile-filters");
+  await filters.locator(":scope > summary").click();
+  await expect(filters).toHaveAttribute("open", "");
+  await page.setViewportSize({ width: 390, height: 520 });
+  await page.evaluate(() => document.body.classList.add("kbcc-browser-large-text"));
+  const panel = page.locator(".ent-cc-mobile-filter-panel");
+  await expect.poll(() => panel.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeGreaterThan(20);
+  const saved = filters.getByRole("button", { name: "Saved", exact: true });
+  await saved.scrollIntoViewIfNeeded();
+  await saved.focus();
+  await expect(saved).toBeFocused();
+  const geometry = await panel.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    const leaf = document.getElementById("kbcc-view")!.getBoundingClientRect();
+    const toolbar = document.querySelector(".ent-cc-mobile-toolbar")!.getBoundingClientRect();
+    const saved = element.querySelector(".ent-cc-saved-button")!.getBoundingClientRect();
+    return { top: rect.top, bottom: rect.bottom, scrollTop: element.scrollTop, leafBottom: leaf.bottom, toolbarBottom: toolbar.bottom, savedTop: saved.top, savedBottom: saved.bottom };
+  });
+  await testInfo.attach("mobile-sticky-short-expanded", { body: JSON.stringify(geometry, null, 2), contentType: "application/json" });
+  expect(geometry.scrollTop).toBeGreaterThan(0);
+  expect(geometry.top).toBeGreaterThanOrEqual(geometry.toolbarBottom - 1);
+  expect(geometry.bottom).toBeLessThanOrEqual(geometry.leafBottom);
+  expect(geometry.savedTop).toBeGreaterThanOrEqual(geometry.top - 1);
+  expect(geometry.savedBottom).toBeLessThanOrEqual(geometry.bottom + 1);
+  await captureEvidence(page, "sticky-short-expanded-large-text");
+  await filters.locator(":scope > summary").click();
+  await expect(filters).not.toHaveAttribute("open");
+  await page.locator(".ent-cc-workspace").evaluate((owner) => { owner.scrollTop = owner.scrollHeight; });
+  expect((await mobileBrowseGeometry(page)).fullyVisibleRows.map((row) => row.title)).toContain("Reference 17");
+});
+
+for (const scenario of phoneBrowseScenarios) {
+  test(`mobile sticky controls ${scenario.width}x${scenario.height}${scenario.largeText ? " enlarged text" : ""}: tabs and search remain reachable at the last row`, async ({ page }, testInfo) => {
+    await openView(page, { mobile: true, phoneChrome: true, ...scenario });
+    await page.locator(".ent-cc-workspace").evaluate((owner) => { owner.scrollTop = owner.scrollHeight; });
+    const geometry = await page.evaluate(() => {
+      const leaf = document.getElementById("kbcc-view")!;
+      const rect = leaf.getBoundingClientRect();
+      const bounds = (selector: string) => {
+        const element = leaf.querySelector<HTMLElement>(selector);
+        if (!element) throw new Error(`Missing ${selector}`);
+        const box = element.getBoundingClientRect();
+        const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+        return { top: box.top, bottom: box.bottom, height: box.height, hit: Boolean(hit && element.contains(hit)) };
+      };
+      return {
+        leafTop: rect.top, leafBottom: rect.bottom,
+        tabs: bounds('.ent-cc-tab[aria-selected="true"]'),
+        search: bounds('.ent-cc-search-box input[type="search"]'),
+        filters: bounds(".ent-cc-mobile-filters > summary"),
+        base: bounds(".ent-cc-base-switcher"),
+        details: bounds(".ent-cc-workspace-options > summary"),
+        add: bounds(".ent-cc-main-add"),
+        counts: bounds(".ent-cc-topic-count"),
+      };
+    });
+    await testInfo.attach("mobile-sticky-last-row", { body: JSON.stringify(geometry, null, 2), contentType: "application/json" });
+    await captureEvidence(page, `sticky-last-row-${scenario.width}${scenario.largeText ? "-large-text" : ""}`);
+    for (const control of [geometry.tabs, geometry.search, geometry.filters]) {
+      expect(control.top, JSON.stringify(geometry)).toBeGreaterThanOrEqual(geometry.leafTop - 1);
+      expect(control.bottom).toBeLessThanOrEqual(geometry.leafBottom);
+      expect(control.height).toBeGreaterThanOrEqual(44);
+      expect(control.hit, "Control center must receive input, not sit under another layer").toBe(true);
+    }
+    expect(Math.max(geometry.search.bottom, geometry.filters.bottom) - geometry.tabs.top, "Only compact tabs and search should remain pinned").toBeLessThanOrEqual(144);
+    for (const extra of [geometry.base, geometry.add, geometry.details, geometry.counts]) expect(extra.bottom).toBeLessThanOrEqual(geometry.leafTop + 1);
+    expect((await mobileBrowseGeometry(page)).fullyVisibleRows.map((row) => row.title)).toContain("Reference 17");
+    const workspace = page.locator(".ent-cc-workspace");
+    const beforeFiltersScroll = await workspace.evaluate((owner) => owner.scrollTop);
+    const filters = page.locator(".ent-cc-mobile-filters");
+    const summary = filters.locator(":scope > summary");
+    await clickRenderedCenter(page, summary);
+    await expect(filters).toHaveAttribute("open", "");
+    await page.evaluate(() => new Promise<void>((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve()))));
+    expect(await workspace.evaluate((owner) => owner.scrollTop), "Opening Filters at a deep scroll must not move the underlying list").toBeCloseTo(beforeFiltersScroll, 0);
+    const expanded = await filters.evaluate((element) => {
+      const panel = element.querySelector<HTMLElement>(".ent-cc-mobile-filter-panel");
+      if (!panel) throw new Error("Expanded Filters needs its own bounded overflow surface");
+      const rect = panel.getBoundingClientRect();
+      const toolbar = element.closest(".ent-cc-mobile-toolbar")!.getBoundingClientRect();
+      return { top: rect.top, bottom: rect.bottom, height: rect.height, clientHeight: panel.clientHeight, scrollHeight: panel.scrollHeight, overflowY: getComputedStyle(panel).overflowY, toolbarHeight: toolbar.height };
+    });
+    await testInfo.attach("mobile-sticky-expanded-filters", { body: JSON.stringify(expanded, null, 2), contentType: "application/json" });
+    expect(expanded.toolbarHeight, "Expanded controls must not enlarge the pinned toolbar").toBeLessThanOrEqual(144);
+    expect(expanded.overflowY).toMatch(/^(auto|scroll)$/u);
+    expect(expanded.height).toBeLessThanOrEqual(geometry.leafBottom - expanded.top);
+    expect(expanded.top).toBeGreaterThanOrEqual(geometry.leafTop);
+    expect(expanded.bottom).toBeLessThanOrEqual(geometry.leafBottom);
+    const saved = filters.getByRole("button", { name: "Saved", exact: true });
+    await saved.scrollIntoViewIfNeeded();
+    await saved.focus();
+    await expect(saved).toBeFocused();
+    const savedBounds = await saved.boundingBox();
+    expect(savedBounds!.y).toBeGreaterThanOrEqual(expanded.top - 1);
+    expect(savedBounds!.y + savedBounds!.height).toBeLessThanOrEqual(expanded.bottom + 1);
+    expect(await workspace.evaluate((owner) => owner.scrollTop), "Reaching the final filter action must scroll the panel, not the notes").toBeCloseTo(beforeFiltersScroll, 0);
+    await captureEvidence(page, `sticky-expanded-filters-${scenario.width}${scenario.largeText ? "-large-text" : ""}`);
+    await page.keyboard.press("Escape");
+    await expect(filters).not.toHaveAttribute("open");
+    await expect(summary).toBeFocused();
+    expect(await workspace.evaluate((owner) => owner.scrollTop), "Escape must return focus without moving the note position").toBeCloseTo(beforeFiltersScroll, 0);
+    await clickRenderedCenter(page, summary);
+    await expect(filters).toHaveAttribute("open", "");
+    await clickRenderedCenter(page, summary);
+    await expect(filters).not.toHaveAttribute("open");
+    expect(await workspace.evaluate((owner) => owner.scrollTop), "Closing Filters must preserve the note position").toBeCloseTo(beforeFiltersScroll, 0);
+  });
+}
+
+for (const scenario of phoneBrowseScenarios) {
+  test(`mobile browse space ${scenario.width}x${scenario.height}${scenario.largeText ? " enlarged text" : ""}: five rows fit before search focus`, async ({ page }, testInfo) => {
+    await openView(page, { mobile: true, phoneChrome: true, ...scenario });
+    await expect(page.locator(".ent-cc-shell")).not.toHaveClass(/is-search-focused/u);
+    await expect(page.locator('.ent-cc-search-box input[type="search"]')).not.toBeFocused();
+    await expect(page.getByRole("tab", { name: /Resources/u })).toHaveAttribute("aria-selected", "true");
+    const before = await mobileBrowseGeometry(page);
+    await testInfo.attach("mobile-browse-first-viewport", { body: JSON.stringify(before, null, 2), contentType: "application/json" });
+    await captureEvidence(page, `browse-space-${scenario.width}${scenario.largeText ? "-large-text" : ""}`);
+    expect(before.rowCount).toBe(17);
+    expect(before.usableHeight, JSON.stringify(before)).toBeGreaterThanOrEqual(240);
+    expect(before.fullyVisibleRows.length, JSON.stringify(before)).toBeGreaterThanOrEqual(5);
+    expect(before.documentOverflow).toBeLessThanOrEqual(1);
+    // Exercise the production workspace scroll owner, not the clipped shell.
+    await page.evaluate(() => {
+      const owner = document.querySelector<HTMLElement>(".ent-cc-workspace");
+      if (!owner) throw new Error("Missing browse scroll owner");
+      owner.scrollTop = owner.scrollHeight;
+    });
+    await expect.poll(async () => (await mobileBrowseGeometry(page)).fullyVisibleRows.map((row) => row.title)).toContain("Reference 17");
+    expect((await mobileBrowseGeometry(page)).fullyVisibleRows.map((row) => row.title)).not.toEqual(before.fullyVisibleRows.map((row) => row.title));
+  });
 }
 
 for (const scenario of [
@@ -145,19 +560,19 @@ for (const scenario of [
 
 for (const mobile of [false, true]) {
   const viewport = mobile ? "mobile" : "desktop";
-  test(`production 0.20.0 update announcement ${viewport}: readable news and reachable actions`, async ({ page }, testInfo) => {
+  test(`production 0.20.1 update announcement ${viewport}: readable news and reachable actions`, async ({ page }, testInfo) => {
     await openView(page, { mobile, count: 8 });
     await openModal(page, "whats-new");
-    const dialog = page.getByRole("dialog", { name: "What’s new in Knowledge Base Command Center 0.20.0", exact: true });
-    await expect(dialog).toHaveAccessibleDescription("A clearer workspace, more dependable navigation, and stronger safeguards for your organization.");
-    const body = dialog.getByRole("region", { name: "Version 0.20.0 highlights", exact: true });
-    await expect(body.getByRole("listitem")).toHaveCount(5);
-    await expect(body).toContainText("explicit search scope");
-    await expect(body).toContainText("compact mobile Settings spacing");
-    const link = dialog.getByRole("link", { name: "Read the complete 0.20.0 release notes on GitHub (opens in your browser)", exact: true });
+    const dialog = page.getByRole("dialog", { name: "What’s new in Knowledge Base Command Center 0.20.1", exact: true });
+    await expect(dialog).toHaveAccessibleDescription("More room for notes, with navigation and search within reach while browsing compact mobile views.");
+    const body = dialog.getByRole("region", { name: "Version 0.20.1 highlights", exact: true });
+    await expect(body.getByRole("listitem")).toHaveCount(4);
+    await expect(body).toContainText("Tabs and Search/Filters stay visible while browsing");
+    await expect(body).toContainText("bounded, scrollable panel");
+    const link = dialog.getByRole("link", { name: "Read the complete 0.20.1 release notes on GitHub (opens in your browser)", exact: true });
     const continueButton = dialog.getByRole("button", { name: "Continue", exact: true });
     await expect(link).toHaveText("Read complete release notes");
-    await expect(link).toHaveAttribute("href", "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.20.0");
+    await expect(link).toHaveAttribute("href", "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.20.1");
     await expect(link).toHaveAttribute("target", "_blank");
     await expect(link).toHaveAttribute("rel", "noopener noreferrer");
     for (const action of [link, continueButton]) {
@@ -165,7 +580,7 @@ for (const mobile of [false, true]) {
       expect(await action.evaluate((element) => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
     }
     expect(await dialog.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
-    await captureEvidence(page, `whats-new-0.20.0-${viewport}`);
+    await captureEvidence(page, `whats-new-0.20.1-${viewport}`);
     await body.getByRole("listitem").last().scrollIntoViewIfNeeded();
     await expect(body.getByRole("listitem").last()).toBeInViewport();
     await expect(continueButton).toBeInViewport();
@@ -588,10 +1003,12 @@ for (const mobile of [false, true]) {
       const geometry = await page.evaluate(() => ({ width: document.documentElement.clientWidth, content: document.documentElement.scrollWidth }));
       expect(geometry.content).toBeLessThanOrEqual(geometry.width + 1);
       if (mobile) {
+        await page.locator(".ent-cc-mobile-filters > summary").click();
         for (const label of ["Search scope", "Note availability"]) {
           const target = await page.getByRole("combobox", { name: label }).boundingBox();
           expect(target?.height, `${label} must keep a 44px mobile target`).toBeGreaterThanOrEqual(44);
         }
+        await page.locator(".ent-cc-mobile-filters > summary").click();
       }
       const input = page.locator('.ent-cc-search-box input[type="search"]');
       await input.fill("Research note 003");

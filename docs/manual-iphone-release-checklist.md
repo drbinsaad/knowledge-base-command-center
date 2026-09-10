@@ -4,7 +4,20 @@ Complete this checklist on a physical iPhone before tagging a release that chang
 
 Do not use private notes, patient information, or copyrighted source material in screenshots, recordings, logs, or issue attachments.
 
-For 0.20.0, begin with the shorter [device, VoiceOver, and two-device Sync smoke record](release-evidence/next-release-smoke.md) and its [candidate-specific evidence and authorization](release-evidence/0.20.0-iphone.md). Its physical-device rows remain explicitly unexecuted. The historical release records below remain unchanged.
+For 0.20.1, begin with the shorter [device, VoiceOver, and two-device Sync smoke record](release-evidence/next-release-smoke.md) and its [candidate-specific evidence and authorization](release-evidence/0.20.1-iphone.md). Its physical-device rows remain explicitly unexecuted. The historical release records below remain unchanged.
+
+## 0.20.1 candidate record and sign-off
+
+- Candidate version and commit: 0.20.1 / the merged commit carrying release tag `0.20.1`
+- Date: 2026-09-10
+- Physical-device tester: None; no final sticky-header build was tested on a physical iPhone
+- Physical iPhone, Dynamic Type, VoiceOver, Arabic/RTL, touch, software keyboard, safe areas, background/interruption, iOS performance and controlled two-device Sync: Unverified — not executed on a physical iPhone or controlled device pair
+- Supplemental implementation evidence: A disposable synthetic Mac Obsidian vault exercised four viewport sizes and four interaction checks; Chromium/WebKit automation covered sticky navigation/search, bounded Filters, browse space, Back/Clear, focus, and desktop geometry. These are not physical-device results. Fresh versioned release checks are recorded separately in the candidate evidence file.
+- Evidence boundary: The maintainer's earlier iPhone screenshot predates the final sticky-toolbar change and is not final-build sign-off.
+- Update-window check: the candidate links to exactly `https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.20.1`; its physical-device behavior remains unverified.
+- Authorization: After the tested local sticky-header build and the unverified physical-device scope were reported, the maintainer directed **“publish”**. This maintainer-authorized waiver applies to 0.20.1 only and must not be reused.
+- Final result: Maintainer-authorized waiver — physical-iPhone matrix not executed; physical-device and two-device Sync status remains **Unverified**, not a physical-device Pass
+- Tester signature or initials: Unsigned — no physical-device tester
 
 ## 0.20.0 candidate record and sign-off
 

@@ -8,6 +8,7 @@ export interface FakeEventInit {
   dataTransfer?: DataTransfer | null;
   key?: string;
   metaKey?: boolean;
+  pointerId?: number;
   relatedTarget?: FakeElement | null;
   shiftKey?: boolean;
 }
@@ -20,6 +21,7 @@ export class FakeEvent {
   defaultPrevented = false;
   readonly key: string;
   readonly metaKey: boolean;
+  readonly pointerId: number;
   propagationStopped = false;
   readonly relatedTarget: FakeElement | null;
   readonly shiftKey: boolean;
@@ -33,6 +35,7 @@ export class FakeEvent {
     this.dataTransfer = init.dataTransfer ?? null;
     this.key = init.key ?? "";
     this.metaKey = init.metaKey ?? false;
+    this.pointerId = init.pointerId ?? 0;
     this.relatedTarget = init.relatedTarget ?? null;
     this.shiftKey = init.shiftKey ?? false;
   }
@@ -214,9 +217,17 @@ export class FakeElement {
   }
 
   appendChild(child: FakeElement): FakeElement {
+    if (child === this || child.contains(this)) throw new Error("A fake DOM element cannot contain itself.");
+    // Native insertion moves an existing node instead of retaining it under
+    // both parents. Reusing the normal removal path also clears detached focus.
+    child.remove();
     child.parentElement = this;
     this.children.push(child);
     return child;
+  }
+
+  append(...children: FakeElement[]): void {
+    for (const child of children) this.appendChild(child);
   }
 
   createEl(tag: string, options: FakeElementOptions = {}): FakeElement {
@@ -282,20 +293,21 @@ export class FakeElement {
 }
 
 class FakeEventTarget {
-  private readonly listeners = new Map<string, Set<() => void>>();
+  private readonly listeners = new Map<string, Set<FakeListener>>();
 
-  addEventListener(type: string, listener: () => void): void {
-    const listeners = this.listeners.get(type) ?? new Set<() => void>();
+  addEventListener(type: string, listener: FakeListener): void {
+    const listeners = this.listeners.get(type) ?? new Set<FakeListener>();
     listeners.add(listener);
     this.listeners.set(type, listeners);
   }
 
-  removeEventListener(type: string, listener: () => void): void { this.listeners.get(type)?.delete(listener); }
+  removeEventListener(type: string, listener: FakeListener): void { this.listeners.get(type)?.delete(listener); }
 
   listenerCount(type: string): number { return this.listeners.get(type)?.size ?? 0; }
 
-  dispatch(type: string): void {
-    for (const listener of this.listeners.get(type) ?? []) listener();
+  dispatch(type: string, init: FakeEventInit = {}): void {
+    const event = new FakeEvent(type, init);
+    for (const listener of [...(this.listeners.get(type) ?? [])]) listener(event);
   }
 }
 

@@ -13,6 +13,8 @@ The header contains:
 
 Switching knowledge bases changes every open Command Center view because the active base is plugin-wide. Archived bases do not appear in navigation or search until restored.
 
+In compact mobile views, the header shows the base switcher, **Add**, and **Details**. Open Details for the overview, statistics, Organize, and secondary actions. While browsing, section tabs and **Search/Filters** stay visible and the overview and result statistics scroll away. Filters opens a bounded panel below the toolbar; scroll inside it for additional controls or press Escape to close it with a keyboard. Focusing search hides secondary controls to leave more room for the software keyboard. The desktop layout is unchanged.
+
 ## Knowledge Index
 
 The Index of a new Generic base starts with no folder-authoritative membership. A note joins when you explicitly add that note or when you explicitly link a folder whose rule supplies eligible descendants. The default new-note folder controls storage only and never enrolls a note by itself.
