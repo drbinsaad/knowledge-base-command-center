@@ -33,6 +33,12 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 input, textarea { background: var(--background-modifier-form-field); border: 1px solid var(--background-modifier-border); padding: 6px 8px; }
 svg { vertical-align: middle; flex-shrink: 0; }
 #kbcc-view { height: 100%; width: 100%; overflow: hidden; }
+/* Optional phone fixture reserves space for native app chrome instead of
+   granting the plugin an entire browser viewport. It is not an Obsidian skin. */
+.kbcc-browser-phone-frame { height: 100%; display: grid; grid-template-rows: 108px minmax(0, 1fr) 80px; }
+.kbcc-browser-app-chrome { display: flex; align-items: center; justify-content: center; padding: 16px; color: var(--text-muted); background: var(--background-secondary); border-block: 1px solid var(--background-modifier-border); text-align: center; }
+.kbcc-browser-phone-frame > #kbcc-view { min-height: 0; }
+.kbcc-browser-large-text { font-size: 17.5px; --font-ui-small: 16.25px; --font-ui-medium: 18.75px; --font-text-size: 20px; }
 .modal-container { position: fixed; z-index: 1000; inset: 0; background: var(--background-modifier-cover); display: flex; align-items: center; justify-content: center; }
 .modal { display: flex; flex-direction: column; position: relative; max-height: 90vh; width: 600px; max-width: 94vw; padding: 20px; background: var(--background-primary); }
 .modal-close-button { position: absolute; top: 8px; right: 8px; padding: 4px; border: 0; width: 32px; height: 32px; background: transparent; }

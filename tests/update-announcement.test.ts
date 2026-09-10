@@ -16,6 +16,7 @@ import {
   UPDATE_ANNOUNCEMENT_0_19_0,
   UPDATE_ANNOUNCEMENT_0_19_1,
   UPDATE_ANNOUNCEMENT_0_20_0,
+  UPDATE_ANNOUNCEMENT_0_20_1,
   type UpdateAnnouncement,
 } from "../src/update-announcement.ts";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
@@ -191,6 +192,24 @@ test("downgrades never replay an announcement and prerelease precedence stays de
 
   const localBuild = planUpdateAnnouncement("0.12.0+local", "0.11.0", true);
   assert.equal(localBuild.announcement, null, "a non-release build cannot borrow the stable tag announcement");
+});
+
+test("0.20.1 has curated mobile browsing news without replaying it", () => {
+  const upgrade = planUpdateAnnouncement("0.20.1", "0.20.0", true);
+  assert.equal(upgrade.announcement, UPDATE_ANNOUNCEMENT_0_20_1);
+  assert.equal(upgrade.nextHighestObservedVersion, "0.20.1");
+  assert.equal(UPDATE_ANNOUNCEMENT_0_20_1.highlights.length, 4);
+  const highlights = UPDATE_ANNOUNCEMENT_0_20_1.highlights.join("\n");
+  assert.match(highlights, /compact header/u);
+  assert.match(highlights, /Tabs and Search\/Filters stay visible while browsing/u);
+  assert.match(highlights, /bounded, scrollable panel/u);
+  assert.match(highlights, /Back.*keyboard focus.*Clear works after returning/u);
+  assert.match(highlights, /Desktop layouts.*notes.*stored organization.*unchanged/u);
+  assert.equal(UPDATE_ANNOUNCEMENT_0_20_1.releaseUrl, "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.20.1");
+  const repeat = planUpdateAnnouncement("0.20.1", upgrade.nextHighestObservedVersion, true);
+  assert.equal(repeat.announcement, null);
+  assert.equal(repeat.shouldPersist, false);
+  assert.equal(planUpdateAnnouncement("0.20.1", null, false).announcement, null);
 });
 
 test("malformed local version state is bounded and recoverable without trusting partial values", () => {

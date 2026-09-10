@@ -9,7 +9,7 @@ import { SyncRecoveryCenterModal } from "../../src/sync-recovery-modal";
 import { NoteOrganizerModal, type NoteOrganizerHost } from "../../src/note-organizer-modal";
 import { EntCommandCenterSettingsTab } from "../../src/settings";
 import { UpdateAnnouncementModal } from "../../src/update-announcement-modal";
-import { UPDATE_ANNOUNCEMENT_0_20_0 } from "../../src/update-announcement";
+import { UPDATE_ANNOUNCEMENT_0_20_1 } from "../../src/update-announcement";
 
 function record(index: number, overrides: Partial<VaultRecord> = {}): VaultRecord {
   return {
@@ -34,12 +34,17 @@ interface SearchOptions {
 
 const parameters = new URLSearchParams(location.hash.slice(1));
 Platform.isMobile = parameters.get("mobile") === "true";
-const count = Number(parameters.get("count") ?? 650);
+const mobileSpace = parameters.get("scenario") === "mobile-space";
+const count = mobileSpace ? 8 : Number(parameters.get("count") ?? 650);
 const data = migrateData(null);
 Object.assign(data.settings, {
   workspaceMode: "generic", workspaceName: "Research workspace",
   workspaceSubtitle: "Synthetic notes for browser regression tests",
   setupComplete: true, enableHoverPreview: false,
+});
+if (mobileSpace) Object.assign(data.settings, {
+  workspaceName: "My knowledge base",
+  workspaceSubtitle: "Search, organize, arrange, and create notes without moving source files. Keep your research and reference notes together.",
 });
 data.activeTab = "curriculum";
 data.indexGroupOrder = ["Research"];
@@ -48,6 +53,19 @@ data.portableIndex.libraryLayouts.reading = [];
 const records = Array.from({ length: count }, (_, index) => record(index));
 records.push(record(count, { path: "Reading/Search reference.md", title: "Search reference", libraryId: "reading", role: "library" }));
 records.push(record(count + 1, { path: portablePlaceholderPath("draft-search"), title: "Search draft", portableId: "draft-search", isPlaceholder: true }));
+if (mobileSpace) {
+  records.splice(count);
+  data.portableIndex.libraries[0].name = "Resources";
+  records.push(...Array.from({ length: 17 }, (_, index) => record(index, {
+    path: `Resources/Reference ${String(index + 1).padStart(2, "0")}.md`,
+    title: `Reference ${String(index + 1).padStart(2, "0")}`, libraryId: "reading", role: "library", domain: "Resources",
+  })));
+  records.push(...Array.from({ length: 714 }, (_, index) => record(index, {
+    path: portablePlaceholderPath(`pending-${index}`), title: `Unlinked subject ${index + 1}`, portableId: `pending-${index}`, isPlaceholder: true,
+  })));
+  data.activeTab = "library:reading";
+  data.pinnedPaths = records.slice(0, 2).map((item) => item.path);
+}
 data.directIndexPaths = records.filter((item) => !item.libraryId && !item.portableId).map((item) => item.path);
 data.collections = [{ id: "favorites", title: "Reading this week", collapsed: false, subjects: records.slice(0, 4).map((item) => item.path), subheadings: [] }];
 const store = createDefaultStore(data, 1, "browser-synthetic-vault");
@@ -276,7 +294,7 @@ const harness = {
     } else if (kind === "sync") {
       openedModal = new SyncRecoveryCenterModal(plugin as unknown as EntVaultCommandCenterPlugin);
     } else if (kind === "whats-new") {
-      openedModal = new UpdateAnnouncementModal(app as never, UPDATE_ANNOUNCEMENT_0_20_0);
+      openedModal = new UpdateAnnouncementModal(app as never, UPDATE_ANNOUNCEMENT_0_20_1);
     } else {
       organizer = new NoteOrganizerModal(organizerHost, { preselectedPaths: [files[0].path, files[1].path] });
       openedModal = organizer;

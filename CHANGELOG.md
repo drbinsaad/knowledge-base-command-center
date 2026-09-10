@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.20.1
+
+### Mobile browsing
+
+- Replace the large overview in compact mobile views with a base switcher, Add, and Details. Keep the title, statistics, Organize, and secondary actions available inside Details, leaving more space for notes.
+- Keep section tabs and Search/Filters visible while browsing. The overview and result statistics scroll away; desktop layouts remain unchanged. Focused search reduces the pinned controls further to leave room for the keyboard.
+- Open Filters in a bounded, independently scrollable panel below the toolbar without moving the note list. Keep keyboard-focused rows clear of the toolbar and leave bottom clearance for Obsidian's navigation controls.
+- Preserve the intended search result, query, list position, and keyboard focus through inspector Back and same-page refreshes. Fix touch Clear activation after returning from a result, and clean up pointer, scroll, and resize listeners across view changes.
+- This update changes presentation and interaction only; it does not change the stored data format or move, rename, delete, or rewrite notes and organization.
+
+### Verification
+
+- Add production-renderer Chromium/WebKit regressions for mobile browse space, sticky controls, bounded Filters, touch/mouse search and Back/Clear, keyboard focus, enlarged text, and unchanged desktop geometry. Release checks enforce existing coverage, performance, bundle, privacy, and metadata gates without raising their limits.
+- The versioned local gate passed 1,188 runtime tests, 117 Chromium/WebKit browser cases, all three performance budgets, ten release tests, coverage floors, typecheck, lint, dependency audit, bundle limits, and the three-file archive privacy check. GitHub Actions repeats the release gate on Node 22 before publishing.
+- After the untested physical-iPhone, VoiceOver, and controlled two-device Sync scope was explicitly reported, the maintainer directed publication. This candidate-specific maintainer-authorized waiver leaves those checks unverified for 0.20.1 only; desktop Obsidian and Chromium/WebKit emulation do not establish a physical-device Pass. See the [0.20.1 evidence record](https://github.com/drbinsaad/knowledge-base-command-center/blob/0.20.1/docs/release-evidence/0.20.1-iphone.md).
+
 ## 0.20.0
 
 ### Safety

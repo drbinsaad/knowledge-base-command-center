@@ -676,6 +676,7 @@ export class EntVaultCommandCenterView extends ItemView {
   private searchLinkedFirst = false;
   private viewDensity: "comfortable" | "compact" = "comfortable";
   private workspaceOptionsOpen = false;
+  private mobileFiltersOpen = false;
   private inspectorSelectedByUser = false;
   private parsedQuery: ParsedQuery = parseQuery("");
   private searchDebounce: number | null = null;
@@ -716,6 +717,8 @@ export class EntVaultCommandCenterView extends ItemView {
   private browseStructuresOmitted = 0;
   private viewClosed = false;
   private searchViewportWindow: Window | null = null;
+  private searchPointerCleanup: (() => void) | null = null;
+  private mobileToolbarCleanup: (() => void) | null = null;
   private paneLayout: PaneLayout = "narrow";
   private paneWidth = 0;
   private paneLayoutRenderInProgress = false;
@@ -764,6 +767,8 @@ export class EntVaultCommandCenterView extends ItemView {
 
   async onClose(): Promise<void> {
     this.viewClosed = true;
+    this.clearSearchPointerInteraction();
+    this.unbindMobileToolbarLayout();
     this.globalSearchRequestGeneration += 1;
     this.globalSearchPendingKey = "";
     this.pendingReturnScroll = null;
@@ -828,6 +833,12 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private handleWindowMigration(migratedWindow: Window): void {
     if (this.viewClosed) return;
+    this.clearSearchPointerInteraction();
+    this.unbindMobileToolbarLayout();
+    const searchRow = this.contentEl?.querySelector<HTMLElement>(".ent-cc-search-row");
+    if (searchRow && !searchRow.contains(this.contentEl.ownerDocument.activeElement)) {
+      this.contentEl.querySelector<HTMLElement>(".ent-cc-shell")?.removeClass("is-search-focused");
+    }
     // The callback argument is Obsidian's authoritative destination window.
     // ownerDocument is expected to agree after adoption, while the explicit
     // value also keeps this deterministic during the migration callback.
@@ -849,6 +860,7 @@ export class EntVaultCommandCenterView extends ItemView {
     this.bindSearchViewportLayout();
     this.measureAndApplyPaneLayout();
     this.syncSearchViewportLayout();
+    this.bindMobileToolbarLayout();
     if (setupPending) this.scheduleSetupPrompt();
     if (searchPending) this.scheduleSearchRefresh(0);
     if (selectionPending) this.scheduleSelectionSave();
@@ -2848,11 +2860,15 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private render(preserveBrowseLimits = false): void {
+    this.clearSearchPointerInteraction();
+    this.unbindMobileToolbarLayout();
     const focusedControl = this.mobileInspectorNeedsFocus ? null : captureViewFocus(this.contentEl);
     // Native details toggle events are queued; read the live state before
     // replacement so an immediate keyboard action cannot close the panel.
     const currentOptions = this.contentEl.querySelector<HTMLDetailsElement>(".ent-cc-workspace-options");
     if (currentOptions) this.workspaceOptionsOpen = currentOptions.open;
+    const currentFilters = this.contentEl.querySelector<HTMLDetailsElement>(".ent-cc-mobile-filters");
+    if (currentFilters) this.mobileFiltersOpen = currentFilters.open;
     this.indexProvenanceCache = new WeakMap<object, IndexMembershipProvenanceData>();
     // A full route/tab render returns to the bounded initial page. Incremental
     // "Show more" actions use renderTree() and therefore preserve their limit.
@@ -2861,6 +2877,7 @@ export class EntVaultCommandCenterView extends ItemView {
       this.browseStructureLimit = MAX_RENDERED_BROWSE_STRUCTURES;
     }
     const compact = this.isCompactInspectorLayout();
+    const mobileBrowse = Platform.isMobile && compact;
     if (compact && this.mobileInspectorOpen) {
       const currentBody = this.inspectorEl?.querySelector<HTMLElement>(".ent-cc-inspector-body");
       if (currentBody && !this.paneLayoutRenderInProgress) this.mobileInspectorScrollTop = currentBody.scrollTop;
@@ -2894,10 +2911,11 @@ export class EntVaultCommandCenterView extends ItemView {
       return;
     }
 
+    shell.toggleClass("is-mobile-browse", mobileBrowse);
     const header = shell.createDiv({ cls: "ent-cc-header" });
     const titleBlock = header.createDiv({ cls: "ent-cc-title-block" });
     const kickerRow = titleBlock.createDiv({ cls: "ent-cc-title-kicker-row" });
-    kickerRow.createDiv({ cls: "ent-cc-kicker", text: "Knowledge operations" });
+    if (!mobileBrowse) kickerRow.createDiv({ cls: "ent-cc-kicker", text: "Knowledge operations" });
     const baseSwitcher = kickerRow.createEl("button", {
       cls: "ent-cc-base-switcher",
       type: "button",
@@ -2910,8 +2928,8 @@ export class EntVaultCommandCenterView extends ItemView {
     baseSwitcher.createSpan({ cls: "ent-cc-base-switcher-name", text: this.plugin.data.settings.workspaceName, attr: { dir: "auto" } });
     setIcon(baseSwitcher.createSpan({ cls: "ent-cc-base-switcher-icon" }), "chevrons-up-down");
     baseSwitcher.addEventListener("click", (event) => this.showKnowledgeBaseMenu(event));
-    titleBlock.createEl("h1", { text: this.plugin.data.settings.workspaceName, attr: { dir: "auto" } });
-    titleBlock.createEl("p", { text: this.plugin.data.settings.workspaceSubtitle });
+    const workspaceTitle = titleBlock.createEl("h1", { text: this.plugin.data.settings.workspaceName, attr: { dir: "auto" } });
+    const workspaceSubtitle = titleBlock.createEl("p", { text: this.plugin.data.settings.workspaceSubtitle });
     const health = titleBlock.createDiv({ cls: "ent-cc-health-summary", attr: { "aria-label": "Vault knowledge summary" } });
     this.populateHealthSummary(health);
 
@@ -2943,10 +2961,21 @@ export class EntVaultCommandCenterView extends ItemView {
       if (options.isConnected) this.workspaceOptionsOpen = options.open;
     });
     options.createEl("summary", {
-      cls: "ent-cc-button", text: "Workspace options",
+      cls: "ent-cc-button", text: mobileBrowse ? "Details" : "Workspace options",
       attr: { "data-kbcc-focus": "workspace-options" },
     });
+    if (mobileBrowse) {
+      const detailsCopy = options.createDiv({ cls: "ent-cc-title-block ent-cc-mobile-details-copy" });
+      detailsCopy.append(workspaceTitle, workspaceSubtitle, health);
+    }
     const actions = options.createDiv({ cls: "ent-cc-workspace-options-actions" });
+    if (mobileBrowse) {
+      // Keep one instance of each action and its native disclosure semantics.
+      // The phone's first row is reserved for base selection, Add, and Details.
+      const setup = primaryActions.querySelector<HTMLElement>(".ent-cc-add-button:not(.ent-cc-main-add)");
+      if (setup) actions.append(setup);
+      actions.append(organize);
+    }
     setIcon(organize.createSpan(), "network");
     organize.createSpan({ text: "Organize" });
     const organizerReadOnlyNotice = "Organizing notes is unavailable while organization data is read-only.";
@@ -3082,11 +3111,20 @@ export class EntVaultCommandCenterView extends ItemView {
       restoreViewFocus(this.contentEl, focus);
     });
 
-    this.renderTabs(shell);
-    this.renderSearch(shell);
+    const mobileToolbar = mobileBrowse ? shell.createDiv({ cls: "ent-cc-mobile-toolbar" }) : undefined;
+    this.renderTabs(mobileToolbar ?? shell);
+    this.renderSearch(shell, mobileToolbar);
 
     const workspace = shell.createDiv({ cls: "ent-cc-workspace" });
     this.workspaceEl = workspace;
+    if (mobileBrowse) {
+      // The existing compact scroll owner now includes the chrome, so even
+      // expanded controls can scroll away. Desktop keeps its original panes.
+      // Warnings remain visible and never enter either disclosure.
+      for (const child of Array.from(shell.children)) {
+        if (child !== workspace) workspace.append(child);
+      }
+    }
     const panelId = `ent-cc-record-panel-${this.viewInstanceId}`;
     this.treeEl = workspace.createDiv({
       cls: "ent-cc-tree-panel",
@@ -3114,6 +3152,7 @@ export class EntVaultCommandCenterView extends ItemView {
       ? "Personal organization stays separate. New clinical scaffolds are unverified and never set review approval."
       : "Personal organization and visual hierarchy stay in plugin data. Index actions never move or rewrite source notes." });
     restoreViewFocus(this.contentEl, focusedControl);
+    this.bindMobileToolbarLayout();
   }
 
   private renderLegacyIndexSourceWarning(parent: HTMLElement): void {
@@ -3208,6 +3247,15 @@ export class EntVaultCommandCenterView extends ItemView {
       if (this.viewClosed
         || (typeof this.contentEl?.contains === "function" && !this.contentEl.contains(tablist))) return;
       const active = tablist.querySelector<HTMLElement>('[aria-selected="true"]');
+      if (active && Platform.isMobile && this.isCompactInspectorLayout()) {
+        // The phone tab bar lives inside the vertical browse owner. Revealing
+        // an active tab must pan only its horizontal strip, never pull a
+        // refreshed or restored list back up to the header.
+        const barRect = tablist.getBoundingClientRect();
+        const activeRect = active.getBoundingClientRect();
+        tablist.scrollLeft += activeRect.left - barRect.left + (activeRect.width - barRect.width) / 2;
+        return;
+      }
       active?.scrollIntoView({ block: "nearest", inline: "center" });
     }, 0);
   }
@@ -3356,14 +3404,26 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private restoreReturnScrollPosition(listScrollTop: number, detailScrollTop: number): void {
+    const compact = this.paneLayout !== "wide";
+    const listOwner = compact ? this.workspaceEl : this.treeEl;
+    const inspectorBody = this.inspectorEl?.querySelector<HTMLElement>(".ent-cc-inspector-body");
+    const detailOwner = compact ? inspectorBody : this.inspectorEl;
+    const baseId = this.plugin.getActiveKnowledgeBaseId();
+    const tab = this.plugin.data.activeTab;
+    const query = this.query;
+    const scope = this.searchScope;
+    const availability = this.searchAvailability;
+    const linkedFirst = this.searchLinkedFirst;
     const apply = (): void => {
-      if (this.viewClosed) return;
-      const compact = this.paneLayout !== "wide";
-      const listOwner = compact ? this.workspaceEl : this.treeEl;
-      const inspectorBody = this.inspectorEl?.querySelector<HTMLElement>(".ent-cc-inspector-body");
-      const detailOwner = compact ? inspectorBody : this.inspectorEl;
-      if (listOwner) listOwner.scrollTop = listScrollTop;
-      if (detailOwner) detailOwner.scrollTop = detailScrollTop;
+      if (this.viewClosed || this.plugin.getActiveKnowledgeBaseId() !== baseId || this.plugin.data.activeTab !== tab
+        || this.query !== query || this.searchScope !== scope
+        || this.searchAvailability !== availability || this.searchLinkedFirst !== linkedFirst) return;
+      // A later navigation may replace the leaf before these frames run.
+      // Never apply this route's position to its replacement scroll owner.
+      if (listOwner && listOwner === (compact ? this.workspaceEl : this.treeEl)) listOwner.scrollTop = listScrollTop;
+      const currentDetailOwner = compact
+        ? this.inspectorEl?.querySelector<HTMLElement>(".ent-cc-inspector-body") : this.inspectorEl;
+      if (detailOwner && detailOwner === currentDetailOwner) detailOwner.scrollTop = detailScrollTop;
     };
     apply();
     this.timerWindow.requestAnimationFrame(() => {
@@ -3429,16 +3489,19 @@ export class EntVaultCommandCenterView extends ItemView {
     });
   }
 
-  private renderSearch(parent: HTMLElement): void {
-    const searchRow = parent.createDiv({ cls: "ent-cc-search-row" });
+  private renderSearch(parent: HTMLElement, mobileToolbar?: HTMLElement): void {
+    const mobileBrowse = Platform.isMobile && this.isCompactInspectorLayout();
+    const searchContainer = mobileBrowse ? (mobileToolbar ?? parent).createDiv({ cls: "ent-cc-mobile-search" }) : parent;
+    const searchRow = searchContainer.createDiv({ cls: "ent-cc-search-row" });
     const box = searchRow.createDiv({ cls: "ent-cc-search-box" });
     const readOnly = this.plugin.isDataReadOnly();
     let bulkButton: HTMLButtonElement | null = null;
+    const searchPointerIds = new Set<number>();
     setIcon(box.createSpan({ cls: "ent-cc-search-icon" }), "search");
     const input = box.createEl("input", {
       type: "search",
       value: this.query,
-      placeholder: this.plugin.isClinicalMode()
+      placeholder: mobileBrowse ? `Search ${this.plugin.data.settings.itemPlural.toLowerCase()}…` : this.plugin.isClinicalMode()
         ? "Search all bases…  domain:pediatric  priority:P1  type:procedure"
         : `Search all bases by title, ID, ${this.plugin.data.settings.groupLabel.toLowerCase()}, or path…`,
       attr: {
@@ -3452,29 +3515,73 @@ export class EntVaultCommandCenterView extends ItemView {
     const clear = iconButton(box, "x", "Clear search", "ent-cc-search-clear");
     clear.type = "button";
     clear.hidden = !this.query;
+    clear.addEventListener("pointerdown", (event) => {
+      // Keep mouse/pen focus stable until click. Cancelling touch pointer-down
+      // suppresses WebKit's synthesized click, so touch uses the shared
+      // pointer/blur guard below and retains its native activation sequence.
+      if (Platform.isMobile && event.pointerType !== "touch") event.preventDefault();
+    });
     input.addEventListener("focus", () => {
       if (Platform.isMobile) {
         parent.addClass("is-search-focused");
         this.syncSearchViewportLayout();
         this.timerWindow.requestAnimationFrame(() => {
+          if (this.viewClosed || !this.contentEl.contains(input) || input.ownerDocument.activeElement !== input) return;
           this.syncSearchViewportLayout();
           this.resetSearchScrollPosition();
         });
         this.resetSearchScrollPosition();
       }
     });
-    input.addEventListener("blur", () => {
+    const scheduleSearchBlur = (): void => {
       this.timerWindow.setTimeout(() => {
-        if (this.viewClosed || !this.contentEl.contains(searchRow) || !this.contentEl.contains(parent)) return;
+        if (this.viewClosed || searchPointerIds.size > 0
+          || !this.contentEl.contains(searchRow) || !this.contentEl.contains(parent)) return;
         if (!searchRow.contains(input.ownerDocument.activeElement)) {
           parent.removeClass("is-search-focused", "is-virtual-keyboard-open");
           parent.style.removeProperty("--ent-cc-search-visual-height");
           parent.style.removeProperty("--ent-cc-search-visual-shift");
+          this.syncMobileToolbarLayout();
           const tablist = parent.querySelector<HTMLElement>(".ent-cc-tabs");
           if (tablist) this.revealActiveTab(tablist);
         }
       }, 0);
-    });
+    };
+    input.addEventListener("blur", scheduleSearchBlur);
+    if (mobileBrowse) {
+      parent.addEventListener("pointerdown", (event) => {
+        if (!parent.classList.contains("is-search-focused")) return;
+        searchPointerIds.add(event.pointerId);
+        if (this.searchPointerCleanup) return;
+        const ownerWindow = parent.ownerDocument.defaultView;
+        if (!ownerWindow) return;
+        // A pointer-induced input blur precedes its native click on WebKit.
+        // Keep the result under the pointer until that action finishes. Do not
+        // capture/prevent the pointer: native scrolling and long-press remain.
+        const cleanup = (): void => {
+          searchPointerIds.clear();
+          ownerWindow.removeEventListener("pointerdown", trackPointer, true);
+          ownerWindow.removeEventListener("pointerup", finishPointer, true);
+          ownerWindow.removeEventListener("pointercancel", finishPointer, true);
+          ownerWindow.removeEventListener("blur", finish);
+          if (this.searchPointerCleanup === cleanup) this.searchPointerCleanup = null;
+        };
+        const finish = (): void => {
+          cleanup();
+          scheduleSearchBlur();
+        };
+        const trackPointer = (started: PointerEvent): void => { searchPointerIds.add(started.pointerId); };
+        const finishPointer = (ended: PointerEvent): void => {
+          searchPointerIds.delete(ended.pointerId);
+          if (searchPointerIds.size === 0) finish();
+        };
+        this.searchPointerCleanup = cleanup;
+        ownerWindow.addEventListener("pointerdown", trackPointer, true);
+        ownerWindow.addEventListener("pointerup", finishPointer, true);
+        ownerWindow.addEventListener("pointercancel", finishPointer, true);
+        ownerWindow.addEventListener("blur", finish);
+      });
+    }
     input.addEventListener("input", () => {
       if (this.query !== input.value) this.cancelPendingGlobalSearch();
       this.query = input.value;
@@ -3531,8 +3638,32 @@ export class EntVaultCommandCenterView extends ItemView {
     setIcon(saved.createSpan(), "book-marked");
     saved.createSpan({ text: "Saved" });
     saved.addEventListener("click", (event) => this.showSavedViews(event));
-    this.countEl = searchRow.createDiv({ cls: "ent-cc-topic-count" });
-    const options = parent.createDiv({ cls: "ent-cc-search-options" });
+    const filters = mobileBrowse ? searchContainer.createEl("details", { cls: "ent-cc-mobile-filters" }) : null;
+    let filtersSummary: HTMLElement | null = null;
+    if (filters) {
+      filters.open = this.mobileFiltersOpen;
+      filters.addEventListener("toggle", () => {
+        if (filters.isConnected) {
+          this.mobileFiltersOpen = filters.open;
+          this.syncMobileToolbarLayout();
+        }
+      });
+      filtersSummary = filters.createEl("summary", {
+        cls: "ent-cc-button",
+        text: "Filters",
+        attr: { "data-kbcc-focus": "mobile-filters" },
+      });
+      filters.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape" || !filters.open) return;
+        event.preventDefault();
+        event.stopPropagation();
+        filters.open = false;
+        this.mobileFiltersOpen = false;
+        filtersSummary?.focus({ preventScroll: true });
+      });
+    }
+    const filterPanel = filters?.createDiv({ cls: "ent-cc-mobile-filter-panel" });
+    const options = (filterPanel ?? parent).createDiv({ cls: "ent-cc-search-options" });
     const scopeLabel = options.createEl("label", { cls: "ent-cc-search-option", text: "Search in" });
     const scope = scopeLabel.createEl("select", { cls: "ent-cc-search-scope", attr: { "aria-label": "Search scope", "data-kbcc-focus": "search-scope" } });
     for (const [value, label] of [["all", "All bases"], ["current", "This base"], ...(libraryIdForTab(this.plugin.data.activeTab) ? [["library", "This Library"]] : [])]) {
@@ -3547,10 +3678,24 @@ export class EntVaultCommandCenterView extends ItemView {
     const linkedFirst = linkedLabel.createEl("input", { type: "checkbox", cls: "ent-cc-search-linked-first", attr: { "aria-label": "Show linked notes first", "data-kbcc-focus": "linked-first" } });
     linkedFirst.checked = this.searchLinkedFirst;
     linkedLabel.createSpan({ text: "Linked notes first" });
+    const updateFiltersSummary = (): void => {
+      if (!filtersSummary) return;
+      const activeCount = Number(this.searchScope !== "all") + Number(this.searchAvailability !== "all") + Number(this.searchLinkedFirst);
+      filtersSummary.setText(activeCount ? `Filters (${activeCount})` : "Filters");
+      const activeLabels = [
+        this.searchScope === "library" ? "This Library" : this.searchScope === "current" ? "This base" : "",
+        this.searchAvailability === "linked" ? "Linked notes" : this.searchAvailability === "placeholders" ? "No note" : "",
+        this.searchLinkedFirst ? "Linked notes first" : "",
+      ].filter(Boolean);
+      filtersSummary.setAttribute("aria-label", activeLabels.length ? `Filters: ${activeLabels.join(", ")}` : "Filters");
+      filtersSummary.toggleClass("is-active", activeCount > 0);
+    };
+    updateFiltersSummary();
     const updateScope = (): void => {
       this.searchScope = scope.value === "library" ? "library" : scope.value === "current" ? "current" : "all";
       this.searchAvailability = availability.value === "linked" ? "linked" : availability.value === "placeholders" ? "placeholders" : "all";
       this.searchLinkedFirst = linkedFirst.checked;
+      updateFiltersSummary();
       if (bulkButton) bulkButton.disabled = readOnly || !this.hasGlobalSearch();
       this.cancelPendingGlobalSearch();
       this.renderTree();
@@ -3560,7 +3705,7 @@ export class EntVaultCommandCenterView extends ItemView {
     availability.addEventListener("change", updateScope);
     linkedFirst.addEventListener("change", updateScope);
 
-    const chips = parent.createDiv({ cls: "ent-cc-filter-chips" });
+    const chips = (filterPanel ?? parent).createDiv({ cls: "ent-cc-filter-chips" });
     if (this.plugin.isClinicalMode()) {
       const definitions = [
         ["priority:P1", "P1"], ["source:gap", "Source gaps"], ["status:unverified", "Unverified"], ["safety:true", "Safety-critical"],
@@ -3589,6 +3734,11 @@ export class EntVaultCommandCenterView extends ItemView {
       chips.addClass("is-hint-only");
       chips.createSpan({ text: "Tip: fuzzy-search the title, path, configured ID, or group. Advanced field filters remain available.", cls: "ent-cc-filter-hint" });
     }
+    if (filterPanel) {
+      const searchActions = filterPanel.createDiv({ cls: "ent-cc-mobile-search-actions" });
+      searchActions.append(save, bulkButton, saved);
+    }
+    this.countEl = (mobileBrowse ? parent : searchRow).createDiv({ cls: "ent-cc-topic-count" });
     this.searchStatusEl = parent.createDiv({ cls: "ent-cc-search-status", attr: { role: "status", "aria-live": "polite" } });
   }
 
@@ -3603,6 +3753,56 @@ export class EntVaultCommandCenterView extends ItemView {
     if (this.treeEl) this.treeEl.scrollTop = 0;
   }
 
+  private clearSearchPointerInteraction(): void {
+    this.searchPointerCleanup?.();
+    this.searchPointerCleanup = null;
+  }
+
+  private readonly syncMobileToolbarLayout = (): void => {
+    const workspace = this.workspaceEl;
+    const toolbar = workspace?.querySelector?.<HTMLElement>(".ent-cc-mobile-toolbar");
+    const ownerWindow = toolbar?.ownerDocument.defaultView;
+    if (!workspace || !toolbar || !ownerWindow || this.viewClosed) return;
+    const bounds = toolbar.getBoundingClientRect();
+    const viewport = ownerWindow.visualViewport;
+    const bottom = Math.min(
+      workspace.getBoundingClientRect().bottom - (Number.parseFloat(ownerWindow.getComputedStyle(workspace).paddingBottom) || 0),
+      (viewport?.offsetTop ?? 0) + (viewport?.height ?? ownerWindow.innerHeight),
+    );
+    workspace.style.setProperty("--ent-cc-toolbar-height", `${bounds.height}px`);
+    toolbar.style.setProperty("--ent-cc-filter-height", `${Math.max(0, Math.min(320, workspace.clientHeight / 2, bottom - bounds.bottom - 8))}px`);
+  };
+
+  private bindMobileToolbarLayout(): void {
+    this.unbindMobileToolbarLayout();
+    const workspace = this.workspaceEl;
+    const toolbar = workspace?.querySelector?.<HTMLElement>(".ent-cc-mobile-toolbar");
+    const ownerWindow = toolbar?.ownerDocument.defaultView;
+    if (!workspace || !toolbar || !ownerWindow || this.viewClosed) return;
+    const Observer = (ownerWindow as Window & { ResizeObserver?: typeof ResizeObserver }).ResizeObserver;
+    let active = true;
+    const sync = (): void => {
+      if (active && this.workspaceEl === workspace && toolbar.ownerDocument.defaultView === ownerWindow) this.syncMobileToolbarLayout();
+    };
+    const observer = Observer ? new Observer(sync) : null;
+    observer?.observe(toolbar);
+    observer?.observe(workspace);
+    workspace.addEventListener("scroll", sync, { passive: true });
+    this.mobileToolbarCleanup = () => {
+      active = false;
+      observer?.disconnect();
+      workspace.removeEventListener("scroll", sync);
+      workspace.style.removeProperty("--ent-cc-toolbar-height");
+      toolbar.style.removeProperty("--ent-cc-filter-height");
+    };
+    this.syncMobileToolbarLayout();
+  }
+
+  private unbindMobileToolbarLayout(): void {
+    this.mobileToolbarCleanup?.();
+    this.mobileToolbarCleanup = null;
+  }
+
   private readonly syncSearchViewportLayout = (): void => {
     const shell = this.contentEl?.querySelector<HTMLElement>(".ent-cc-shell");
     if (!shell) return;
@@ -3610,6 +3810,7 @@ export class EntVaultCommandCenterView extends ItemView {
       shell.style.removeProperty("--ent-cc-search-visual-height");
       shell.style.removeProperty("--ent-cc-search-visual-shift");
       shell.removeClass("is-virtual-keyboard-open");
+      this.syncMobileToolbarLayout();
       return;
     }
     const viewWindow = this.searchViewportWindow ?? this.contentEl.ownerDocument.defaultView;
@@ -3628,6 +3829,7 @@ export class EntVaultCommandCenterView extends ItemView {
     shell.style.setProperty("--ent-cc-search-visual-height", `${layout.height}px`);
     shell.style.setProperty("--ent-cc-search-visual-shift", `${layout.shift}px`);
     shell.toggleClass("is-virtual-keyboard-open", layout.keyboardOpen);
+    this.syncMobileToolbarLayout();
   };
 
   private bindSearchViewportLayout(): void {
@@ -3715,7 +3917,8 @@ export class EntVaultCommandCenterView extends ItemView {
   private renderTree(): void {
     if (!this.treeEl) return;
     const focused = captureViewFocus(this.treeEl);
-    const listScroll = this.treeEl.scrollTop;
+    const listOwner = this.paneLayout === "wide" ? this.treeEl : this.workspaceEl ?? this.treeEl;
+    const listScroll = listOwner.scrollTop;
     // A drag payload belongs to the exact tree that created it. Undo, Redo,
     // Sync reloads, tab changes, and organization edits all replace this token
     // through renderTree(), so a late drop cannot mutate newer organization.
@@ -3785,7 +3988,7 @@ export class EntVaultCommandCenterView extends ItemView {
     if (searching) resultCount.setText(globalSearchPending
       ? "Searching…"
       : globalSearchFailed ? "Search failed" : `${visible} ${visible === 1 ? "result" : "results"}`);
-    this.treeEl.scrollTop = listScroll;
+    listOwner.scrollTop = listScroll;
     restoreViewFocus(this.treeEl, focused);
   }
 
@@ -4837,9 +5040,10 @@ export class EntVaultCommandCenterView extends ItemView {
     this.mobileInspectorOpen = false;
     this.mobileInspectorNeedsFocus = false;
     this.render(true);
+    const workspace = this.workspaceEl;
     this.timerWindow.setTimeout(() => {
-      if (this.viewClosed || this.mobileInspectorOpen) return;
-      if (this.workspaceEl) this.workspaceEl.scrollTop = this.mobileTreeScrollTop;
+      if (this.viewClosed || this.mobileInspectorOpen || this.workspaceEl !== workspace) return;
+      if (workspace) workspace.scrollTop = this.mobileTreeScrollTop;
       const selected = this.treeEl?.querySelector<HTMLElement>(".ent-cc-subject-row.is-selected .ent-cc-subject-title");
       (selected ?? this.treeEl)?.focus({ preventScroll: true });
     }, 0);

@@ -5260,6 +5260,558 @@ test("mobile search resets both possible result scroll containers", () => {
   assert.equal(tree.scrollTop, 0);
 });
 
+function mobileSearchPointerHarness(): {
+  dom: ReturnType<typeof createFakeDom>;
+  shell: FakeElement;
+  input: FakeElement;
+  result: FakeElement;
+  view: {
+    onClose(): Promise<void>;
+    render(): void;
+    handleWindowMigration(owner: Window): void;
+    bindPaneLayout(): void;
+    bindSearchViewportLayout(): void;
+    measureAndApplyPaneLayout(): void;
+  };
+  flushTimers: () => void;
+} {
+  const dom = createFakeDom();
+  const timers = new Map<number, () => void>();
+  let timerId = 0;
+  dom.window.setTimeout = (callback) => {
+    assert.equal(typeof callback, "function");
+    const id = ++timerId;
+    timers.set(id, callback as () => void);
+    return id;
+  };
+  dom.window.clearTimeout = (id) => { timers.delete(id); };
+  dom.window.visualViewport.height = 430;
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.settings.setupComplete = true;
+  const plugin = {
+    data,
+    getActiveKnowledgeBaseId: () => "base-pointer",
+    getDataEpoch: () => 0,
+    getIndexRecords: () => [],
+    isDataReadOnly: () => false,
+    isClinicalMode: () => false,
+    getLibraries: () => [],
+    canVisuallyMoveAcrossGroups: () => false,
+    getIndexCandidateFiles: () => [],
+  };
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: dom.window });
+  let realView: EntVaultCommandCenterView;
+  try {
+    realView = new EntVaultCommandCenterView({ app: {} } as never, plugin as never);
+  } finally {
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+  const view = realView as unknown as {
+    contentEl: HTMLElement;
+    renderSearch(parent: HTMLElement): void;
+    render(): void;
+    onClose(): Promise<void>;
+    handleWindowMigration(owner: Window): void;
+    bindPaneLayout(): void;
+    bindSearchViewportLayout(): void;
+    measureAndApplyPaneLayout(): void;
+  };
+  const content = dom.document.body.createDiv({ cls: "view-content" });
+  content.clientHeight = 780;
+  content.setBoundingClientRect({ top: 64, bottom: 844 });
+  const shell = content.createDiv({ cls: "ent-cc-shell is-mobile-browse" });
+  shell.setBoundingClientRect({ top: 64, bottom: 844 });
+  view.contentEl = asHtmlElement(content);
+  view.renderSearch(asHtmlElement(shell));
+  const input = shell.querySelector('input[type="search"]');
+  assert.ok(input);
+  const result = shell.createEl("button", { text: "Synthetic result" });
+  return {
+    dom, shell, input, result, view,
+    flushTimers: () => {
+      for (const [id, callback] of [...timers]) {
+        if (!timers.delete(id)) continue;
+        callback();
+      }
+    },
+  };
+}
+
+test("mobile browse toolbar reuses only navigation and search while the workspace remains the browse owner", async () => {
+  const platform = Platform as unknown as { isMobile: boolean };
+  const previousMobile = platform.isMobile;
+  try {
+    for (const mobile of [true, false]) {
+      platform.isMobile = mobile;
+      for (const paneLayout of ["narrow", "compact", "wide"] as const) {
+        const { dom, view } = mobileSearchPointerHarness();
+        const rendered = view as typeof view & { paneLayout: string; workspaceEl: HTMLElement | null; treeEl: HTMLElement | null };
+        rendered.paneLayout = paneLayout;
+        view.render();
+        const shell = dom.document.body.querySelector(".ent-cc-shell");
+        const workspace = shell?.querySelector(".ent-cc-workspace");
+        const toolbar = shell?.querySelector(".ent-cc-mobile-toolbar");
+        const tabs = shell?.querySelector(".ent-cc-tabs");
+        const search = shell?.querySelector(".ent-cc-mobile-search");
+        const count = shell?.querySelector(".ent-cc-topic-count");
+        const header = shell?.querySelector(".ent-cc-header");
+        const tree = shell?.querySelector(".ent-cc-tree-panel");
+        const mobileBrowse = mobile && paneLayout !== "wide";
+        const context = `${mobile ? "mobile" : "desktop"} ${paneLayout}`;
+        assert.ok(shell && workspace && tabs && count && header && tree, context);
+        assert.equal(rendered.workspaceEl, workspace, `${context}: retain the workspace owner`);
+        assert.equal(rendered.treeEl, tree, `${context}: retain the production tree`);
+        assert.equal(tree.parentElement, workspace, `${context}: no new nested notes scroll wrapper`);
+        assert.equal(shell.querySelectorAll(".ent-cc-tabs").length, 1, `${context}: no duplicated navigation`);
+        assert.equal(shell.querySelectorAll('input[type="search"]').length, 1, `${context}: no duplicated search input`);
+        assert.equal(shell.querySelectorAll(".ent-cc-topic-count").length, 1, `${context}: no duplicated result count`);
+        if (mobileBrowse) {
+          assert.ok(toolbar && search, context);
+          assert.equal(toolbar.parentElement, workspace, `${context}: sticky chrome shares the existing owner`);
+          assert.equal(tabs.parentElement, toolbar);
+          assert.equal(search.parentElement, toolbar);
+          assert.equal(header.parentElement, workspace, `${context}: base/Add/Details can scroll away`);
+          assert.equal(count.parentElement, workspace, `${context}: result metadata is not pinned`);
+          assert.equal(toolbar.contains(header), false);
+          assert.equal(toolbar.contains(tree), false);
+          assert.equal(toolbar.contains(count), false);
+        } else {
+          assert.equal(toolbar, null, `${context}: desktop and wide layouts retain the original structure`);
+          assert.equal(search, null);
+          assert.equal(header.parentElement, shell);
+          assert.equal(tabs.parentElement, shell);
+        }
+        await view.onClose();
+      }
+    }
+  } finally {
+    platform.isMobile = previousMobile;
+  }
+});
+
+test("mobile toolbar preserves live disclosure state, active filter labels, and filter focus across render", async () => {
+  const platform = Platform as unknown as { isMobile: boolean };
+  const previousMobile = platform.isMobile;
+  platform.isMobile = true;
+  try {
+    const { dom, view } = mobileSearchPointerHarness();
+    const rendered = view as typeof view & {
+      searchScope: string;
+      searchAvailability: string;
+      searchLinkedFirst: boolean;
+      renderTree(): void;
+    };
+    // Exercise actual header/search rendering without coupling this structural
+    // regression to an asynchronous search provider or simulated CSS geometry.
+    rendered.renderTree = () => undefined;
+    rendered.searchScope = "current";
+    rendered.searchAvailability = "linked";
+    rendered.searchLinkedFirst = true;
+    view.render();
+    const details = dom.document.body.querySelector(".ent-cc-workspace-options") as FakeElement & { open: boolean };
+    const filters = dom.document.body.querySelector(".ent-cc-mobile-filters") as FakeElement & { open: boolean };
+    const availability = filters.querySelector(".ent-cc-search-availability");
+    assert.ok(details && filters && availability);
+    details.open = true;
+    filters.open = true;
+    availability.focus();
+    // Deliberately do not dispatch toggle: native events are queued, and a
+    // refresh must read the current details.open state before replacing DOM.
+    view.render();
+    const nextDetails = dom.document.body.querySelector(".ent-cc-workspace-options") as FakeElement & { open: boolean };
+    const nextFilters = dom.document.body.querySelector(".ent-cc-mobile-filters") as FakeElement & { open: boolean };
+    const summary = nextFilters.querySelector("summary");
+    assert.notEqual(nextDetails, details);
+    assert.notEqual(nextFilters, filters);
+    assert.equal(nextDetails.open, true);
+    assert.equal(nextFilters.open, true);
+    assert.equal(nextFilters.querySelector(".ent-cc-search-scope")?.value, "current");
+    assert.equal(nextFilters.querySelector(".ent-cc-search-availability")?.value, "linked");
+    assert.equal(summary?.textContent, "Filters (3)");
+    assert.equal(summary?.getAttribute("aria-label"), "Filters: This base, Linked notes, Linked notes first");
+    assert.equal(dom.document.activeElement, nextFilters.querySelector(".ent-cc-search-availability"));
+
+    nextDetails.open = false;
+    nextFilters.open = false;
+    summary?.focus();
+    view.render();
+    const closedDetails = dom.document.body.querySelector(".ent-cc-workspace-options") as FakeElement & { open: boolean };
+    const closedFilters = dom.document.body.querySelector(".ent-cc-mobile-filters") as FakeElement & { open: boolean };
+    assert.equal(closedDetails.open, false);
+    assert.equal(closedFilters.open, false);
+    assert.equal(dom.document.activeElement, closedFilters.querySelector("summary"));
+    assert.equal(closedFilters.querySelector("summary")?.textContent, "Filters (3)", "closing the panel does not clear active filters");
+    await view.onClose();
+  } finally {
+    platform.isMobile = previousMobile;
+  }
+});
+
+function captureMobileToolbarObservers(dom: ReturnType<typeof createFakeDom>): Array<{
+  observed: Element[];
+  disconnected: boolean;
+  fire(): void;
+}> {
+  const observers: Array<{ observed: Element[]; disconnected: boolean; fire(): void }> = [];
+  class ToolbarObserver {
+    observed: Element[] = [];
+    disconnected = false;
+    constructor(private readonly callback: ResizeObserverCallback) { observers.push(this); }
+    observe(element: Element): void { this.observed.push(element); }
+    disconnect(): void { this.disconnected = true; }
+    fire(): void { this.callback([], this as unknown as ResizeObserver); }
+  }
+  Object.defineProperty(dom.window, "ResizeObserver", { configurable: true, value: ToolbarObserver });
+  return observers;
+}
+
+test("mobile toolbar Filters handles Escape only while open and restores its summary without scrolling", async () => {
+  const platform = Platform as unknown as { isMobile: boolean };
+  const previousMobile = platform.isMobile;
+  platform.isMobile = true;
+  try {
+    const { dom, view } = mobileSearchPointerHarness();
+    view.render();
+    const workspace = dom.document.body.querySelector(".ent-cc-workspace");
+    const filters = workspace?.querySelector(".ent-cc-mobile-filters") as FakeElement & { open: boolean };
+    const summary = filters?.querySelector("summary");
+    const control = filters?.querySelector(".ent-cc-search-availability");
+    assert.ok(workspace && filters && summary && control);
+    const focusOptions: Array<FocusOptions | undefined> = [];
+    const originalFocus = summary.focus.bind(summary);
+    summary.focus = (options) => { focusOptions.push(options); originalFocus(options); };
+    workspace.scrollTop = 512;
+    for (const [open, key] of [[true, "Enter"], [true, "ArrowDown"], [false, "Escape"]] as const) {
+      filters.open = open;
+      control.focus();
+      const event = control.dispatch("keydown", { key });
+      assert.equal(filters.open, open);
+      assert.equal(event.defaultPrevented, false, `${key}, open=${open}: preserve unrelated native key behavior`);
+      assert.equal(event.propagationStopped, false);
+      assert.equal(dom.document.activeElement, control);
+      assert.equal(focusOptions.length, 0);
+    }
+    filters.open = true;
+    const escape = control.dispatch("keydown", { key: "Escape" });
+    assert.equal(filters.open, false);
+    assert.equal(escape.defaultPrevented, true);
+    assert.equal(dom.document.activeElement, summary);
+    assert.deepEqual(focusOptions, [{ preventScroll: true }]);
+    assert.equal(workspace.scrollTop, 512);
+    view.render();
+    const replacement = dom.document.body.querySelector(".ent-cc-mobile-filters") as FakeElement & { open: boolean };
+    assert.equal(replacement.open, false, "a refresh cannot reopen the Escape-dismissed panel");
+    assert.equal(dom.document.activeElement, replacement.querySelector("summary"));
+    await view.onClose();
+  } finally {
+    platform.isMobile = previousMobile;
+  }
+});
+
+test("mobile toolbar measurements bound Filters to visible space without changing scroll or focus", async () => {
+  const platform = Platform as unknown as { isMobile: boolean };
+  const previousMobile = platform.isMobile;
+  platform.isMobile = true;
+  try {
+    const { dom, view } = mobileSearchPointerHarness();
+    const observers = captureMobileToolbarObservers(dom);
+    dom.window.getComputedStyle = () => ({ paddingBottom: "80px", getPropertyValue: () => "" });
+    view.render();
+    view.bindSearchViewportLayout();
+    const workspace = dom.document.body.querySelector(".ent-cc-workspace");
+    const toolbar = workspace?.querySelector(".ent-cc-mobile-toolbar");
+    assert.ok(workspace && toolbar);
+    workspace.clientHeight = 780;
+    workspace.setBoundingClientRect({ top: 64, bottom: 844 });
+    toolbar.setBoundingClientRect({ top: 64, bottom: 168 });
+    const row = workspace.createEl("button", { text: "Synthetic focused note" });
+    row.focus();
+    workspace.scrollTop = 512;
+    assert.deepEqual(observers[0]?.observed, [toolbar, workspace]);
+    for (const [height, offsetTop, expected] of [[844, 0, 320], [430, 0, 254], [430, 120, 320], [190, 0, 14], [150, 0, 0]]) {
+      dom.window.visualViewport.height = height;
+      dom.window.visualViewport.offsetTop = offsetTop;
+      observers[0]?.fire();
+      assert.equal(workspace.style.getPropertyValue("--ent-cc-toolbar-height"), "104px");
+      assert.equal(toolbar.style.getPropertyValue("--ent-cc-filter-height"), `${expected}px`, `viewport ${height}, offset ${offsetTop}`);
+      assert.equal(workspace.scrollTop, 512, "a resize must not reset the current list position");
+      assert.equal(dom.document.activeElement, row, "measurement must not steal focus");
+    }
+    dom.window.visualViewport.height = 300;
+    dom.window.visualViewport.offsetTop = 0;
+    dom.window.visualViewport.dispatch("resize");
+    assert.equal(toolbar.style.getPropertyValue("--ent-cc-filter-height"), "124px", "viewport changes resize Filters even while search is not focused");
+    workspace.clientHeight = 200;
+    dom.window.visualViewport.height = 844;
+    observers[0]?.fire();
+    assert.equal(toolbar.style.getPropertyValue("--ent-cc-filter-height"), "100px", "a short host never gives Filters more than half its height");
+    await view.onClose();
+    assert.equal(observers[0]?.disconnected, true);
+    assert.equal(dom.window.visualViewport.listenerCount("resize"), 0);
+    assert.equal(dom.window.visualViewport.listenerCount("scroll"), 0);
+    assert.equal(dom.window.listenerCount("resize"), 0);
+  } finally {
+    platform.isMobile = previousMobile;
+  }
+});
+
+test("mobile toolbar cleanup fences old observer and scroll callbacks after render, close, and window migration", async () => {
+  const platform = Platform as unknown as { isMobile: boolean };
+  const previousMobile = platform.isMobile;
+  platform.isMobile = true;
+  try {
+    for (const interrupt of ["render", "close", "migration"] as const) {
+      const { dom, view } = mobileSearchPointerHarness();
+      const observers = captureMobileToolbarObservers(dom);
+      view.render();
+      const oldWorkspace = dom.document.body.querySelector(".ent-cc-workspace");
+      const oldToolbar = oldWorkspace?.querySelector(".ent-cc-mobile-toolbar");
+      assert.ok(oldWorkspace && oldToolbar);
+      assert.equal(observers.length, 1);
+      let nextObservers: ReturnType<typeof captureMobileToolbarObservers> | undefined;
+      if (interrupt === "close") await view.onClose();
+      else if (interrupt === "render") view.render();
+      else {
+        const nextDom = createFakeDom();
+        nextObservers = captureMobileToolbarObservers(nextDom);
+        Object.defineProperty(dom.document, "defaultView", { value: nextDom.window });
+        nextDom.window.document = dom.document;
+        // This models ownership adoption, not a physical browser pop-out.
+        // Keep the existing pane observer and its render triggers independent.
+        view.bindPaneLayout = () => undefined;
+        view.measureAndApplyPaneLayout = () => undefined;
+        view.handleWindowMigration(nextDom.window as unknown as Window);
+        assert.equal(nextObservers.length, 1);
+      }
+      assert.equal(observers[0]?.disconnected, true, `${interrupt}: disconnect the old owner observer`);
+      const currentWorkspace = dom.document.body.querySelector(".ent-cc-workspace");
+      const currentToolbar = currentWorkspace?.querySelector(".ent-cc-mobile-toolbar");
+      assert.ok(currentWorkspace && currentToolbar);
+      const sentinelToolbarHeight = `${currentToolbar.getBoundingClientRect().height + 123}px`;
+      const sentinelFilterHeight = `${currentWorkspace.clientHeight + 234}px`;
+      currentWorkspace.style.setProperty("--ent-cc-toolbar-height", sentinelToolbarHeight);
+      currentToolbar.style.setProperty("--ent-cc-filter-height", sentinelFilterHeight);
+      observers[0]?.fire();
+      assert.equal(currentWorkspace.style.getPropertyValue("--ent-cc-toolbar-height"), sentinelToolbarHeight, `${interrupt}: a queued old observer cannot rewrite the current owner`);
+      assert.equal(currentToolbar.style.getPropertyValue("--ent-cc-filter-height"), sentinelFilterHeight);
+      if (interrupt !== "migration") {
+        oldWorkspace.dispatch("scroll");
+        assert.equal(currentWorkspace.style.getPropertyValue("--ent-cc-toolbar-height"), sentinelToolbarHeight, `${interrupt}: remove old workspace scroll listener`);
+      } else {
+        currentWorkspace.setBoundingClientRect({ top: 64, bottom: 844 });
+        currentWorkspace.clientHeight = 780;
+        currentToolbar.setBoundingClientRect({ top: 64, bottom: 168 });
+        nextObservers?.[0]?.fire();
+        assert.equal(currentWorkspace.style.getPropertyValue("--ent-cc-toolbar-height"), "104px", "the migrated owner continues observing its own toolbar");
+      }
+      await view.onClose();
+      for (const observer of [...observers, ...(nextObservers ?? [])]) assert.equal(observer.disconnected, true);
+    }
+  } finally {
+    platform.isMobile = previousMobile;
+  }
+});
+
+test("Clear retains native touch activation and clears only through its shared click handler", async () => {
+  const platform = Platform as unknown as { isMobile: boolean };
+  const previousMobile = platform.isMobile;
+  const originalAddDescriptor = Object.getOwnPropertyDescriptor(FakeElement.prototype, "addEventListener");
+  assert.ok(originalAddDescriptor?.value);
+  const originalAddListener = originalAddDescriptor.value as FakeElement["addEventListener"];
+  let pointerDown: ((event: { pointerType: string; preventDefault(): void }) => void) | undefined;
+  // Capture this production listener directly because the shared fake DOM does
+  // not model pointer types or native synthesized clicks. Browser tests cover
+  // real WebKit touch dispatch; these assertions pin the cancellation policy.
+  FakeElement.prototype.addEventListener = function captureClearPointer(type, listener): void {
+    if (type === "pointerdown" && this.hasClass("ent-cc-search-clear")) {
+      pointerDown = listener as unknown as typeof pointerDown;
+    }
+    originalAddListener.call(this, type, listener);
+  };
+  platform.isMobile = true;
+  let harness: ReturnType<typeof mobileSearchPointerHarness> | undefined;
+  try {
+    harness = mobileSearchPointerHarness();
+  } finally {
+    Object.defineProperty(FakeElement.prototype, "addEventListener", originalAddDescriptor);
+    platform.isMobile = previousMobile;
+  }
+  try {
+    platform.isMobile = true;
+    const { dom, shell, input, view } = harness;
+    const clear = shell.querySelector(".ent-cc-search-clear");
+    const rendered = view as typeof view & { query: string; renderTree(): void };
+    let renders = 0;
+    rendered.renderTree = () => { renders += 1; };
+    assert.ok(clear && pointerDown);
+    const resetQuery = (): void => {
+      rendered.query = "reference";
+      input.value = "reference";
+      clear.hidden = false;
+    };
+    for (const pointerType of ["mouse", "pen", "touch"]) {
+      resetQuery();
+      const before = renders;
+      let cancelled = false;
+      pointerDown({ pointerType, preventDefault: () => { cancelled = true; } });
+      assert.equal(cancelled, pointerType !== "touch", `${pointerType}: keep WebKit touch's synthesized click enabled`);
+      for (const event of ["pointermove", "pointerup", "pointercancel", "touchend"]) clear.dispatch(event);
+      assert.equal(rendered.query, "reference", `${pointerType}: no drag, cancellation, or end-event activation`);
+      assert.equal(renders, before);
+      clear.click();
+      assert.equal(rendered.query, "");
+      assert.equal(input.value, "");
+      assert.equal(clear.hidden, true);
+      assert.equal(renders, before + 1, `${pointerType}: exactly one action on the normal click path`);
+      assert.equal(dom.document.activeElement, input);
+    }
+    for (const key of ["Enter", " "]) {
+      resetQuery();
+      const before = renders;
+      clear.focus();
+      clear.dispatch("keydown", { key });
+      clear.dispatch("keyup", { key });
+      assert.equal(renders, before, "keyboard activation has no extra keydown/up action");
+      // Native buttons deliver a click for keyboard activation; the fake DOM
+      // requires that shared activation event to be dispatched explicitly.
+      clear.click();
+      assert.equal(rendered.query, "");
+      assert.equal(renders, before + 1);
+      assert.equal(dom.document.activeElement, input);
+    }
+    platform.isMobile = false;
+    let desktopCancelled = false;
+    pointerDown({ pointerType: "mouse", preventDefault: () => { desktopCancelled = true; } });
+    assert.equal(desktopCancelled, false, "desktop pointer defaults remain unchanged");
+    await view.onClose();
+  } finally {
+    platform.isMobile = previousMobile;
+  }
+});
+
+test("mobile search pointer completion and cancellation release deferred blur without cancelling the row action", async () => {
+  const platform = Platform as unknown as { isMobile: boolean };
+  const previousMobile = platform.isMobile;
+  platform.isMobile = true;
+  try {
+    // These explicitly dispatched events test the state machine, not native
+    // touch synthesis, hit testing, or browser pointer/click task ordering.
+    for (const endEvent of ["pointerup", "pointercancel", "blur"] as const) {
+      for (const refocus of [false, true]) {
+        const harness = mobileSearchPointerHarness();
+        const { dom, shell, input, result, flushTimers } = harness;
+        input.focus();
+        const down = result.dispatch("pointerdown", { pointerId: 7 });
+        assert.equal(down.defaultPrevented, false, "row pointers retain their native default action");
+        assert.equal(down.propagationStopped, false, "row pointers are not captured by stopping propagation");
+        for (const type of ["pointerdown", "pointerup", "pointercancel", "blur"]) {
+          assert.equal(dom.window.listenerCount(type), 1);
+        }
+        input.blur();
+        flushTimers();
+        assert.equal(shell.hasClass("is-search-focused"), true, "blur must not move a held pointer target");
+        dom.window.dispatch("pointercancel", { pointerId: 99 });
+        flushTimers();
+        assert.equal(shell.hasClass("is-search-focused"), true, "unrelated pointers cannot end the gesture");
+        if (refocus) input.focus();
+        dom.window.dispatch(endEvent, { pointerId: 7 });
+        assert.equal(shell.hasClass("is-search-focused"), true, "normal completion leaves the native click task a stable target");
+        for (const type of ["pointerdown", "pointerup", "pointercancel", "blur"]) {
+          assert.equal(dom.window.listenerCount(type), 0, `${endEvent} removes ${type} listener`);
+        }
+        flushTimers();
+        assert.equal(shell.hasClass("is-search-focused"), refocus, `${endEvent} rechecks current focus after the action`);
+        if (!refocus) {
+          assert.equal(shell.hasClass("is-virtual-keyboard-open"), false);
+          assert.equal(shell.style.getPropertyValue("--ent-cc-search-visual-height"), "");
+          assert.equal(shell.style.getPropertyValue("--ent-cc-search-visual-shift"), "");
+        }
+        await harness.view.onClose();
+      }
+    }
+  } finally {
+    platform.isMobile = previousMobile;
+  }
+});
+
+test("mobile search holds blur until every overlapping pointer ends", async () => {
+  const platform = Platform as unknown as { isMobile: boolean };
+  const previousMobile = platform.isMobile;
+  platform.isMobile = true;
+  try {
+    const { dom, shell, input, result, view, flushTimers } = mobileSearchPointerHarness();
+    input.focus();
+    result.dispatch("pointerdown", { pointerId: 7 });
+    input.blur();
+    // Dispatch on the owner window deliberately: a second finger may start
+    // outside the browse shell while the first gesture is still held.
+    dom.window.dispatch("pointerdown", { pointerId: 8 });
+    dom.window.dispatch("pointerup", { pointerId: 7 });
+    flushTimers();
+    assert.equal(shell.hasClass("is-search-focused"), true);
+    assert.equal(dom.window.listenerCount("pointercancel"), 1);
+    dom.window.dispatch("pointercancel", { pointerId: 8 });
+    flushTimers();
+    assert.equal(shell.hasClass("is-search-focused"), false);
+    for (const type of ["pointerdown", "pointerup", "pointercancel", "blur"]) {
+      assert.equal(dom.window.listenerCount(type), 0);
+    }
+    await view.onClose();
+  } finally {
+    platform.isMobile = previousMobile;
+  }
+});
+
+test("mobile search interrupted gestures release old-window listeners on render, close, and migration", async () => {
+  const platform = Platform as unknown as { isMobile: boolean };
+  const previousMobile = platform.isMobile;
+  platform.isMobile = true;
+  try {
+    for (const interrupt of ["render", "close", "migration"] as const) {
+      const { dom, shell, input, result, view, flushTimers } = mobileSearchPointerHarness();
+      input.focus();
+      result.dispatch("pointerdown", { pointerId: 7 });
+      input.blur();
+      flushTimers();
+      assert.equal(shell.hasClass("is-search-focused"), true);
+      if (interrupt === "close") {
+        await view.onClose();
+      } else if (interrupt === "render") {
+        view.render();
+      } else {
+        const nextDom = createFakeDom();
+        // Model owner-window adoption, without claiming real browser window
+        // migration. Keep unrelated resize-observer mechanics out of scope.
+        Object.defineProperty(dom.document, "defaultView", { value: nextDom.window });
+        nextDom.window.document = dom.document;
+        view.bindPaneLayout = () => undefined;
+        view.bindSearchViewportLayout = () => undefined;
+        view.measureAndApplyPaneLayout = () => undefined;
+        view.handleWindowMigration(nextDom.window as unknown as Window);
+        assert.equal(shell.hasClass("is-search-focused"), false, "migration normalizes an unfocused live shell");
+        assert.equal(shell.hasClass("is-virtual-keyboard-open"), false);
+        input.focus();
+        result.dispatch("pointerdown", { pointerId: 9 });
+        input.blur();
+        flushTimers();
+        assert.equal(shell.hasClass("is-search-focused"), true, "the migrated shell can start a fresh hold");
+        nextDom.window.dispatch("pointercancel", { pointerId: 9 });
+        assert.equal(shell.hasClass("is-search-focused"), false, "the new owner releases its own gesture");
+      }
+      for (const type of ["pointerdown", "pointerup", "pointercancel", "blur"]) {
+        assert.equal(dom.window.listenerCount(type), 0, `${interrupt} removes old-window ${type}`);
+      }
+      flushTimers();
+      await view.onClose();
+    }
+  } finally {
+    platform.isMobile = previousMobile;
+  }
+});
+
 test("compact record inspector traps forward focus at its last control", () => {
   let firstFocusCount = 0;
   let prevented = false;
@@ -7259,9 +7811,9 @@ test("Command Center return capture reads the live wide and compact scroll owner
 
 test("Command Center return restores its exact route and unrelated notes can open a clean home", async () => {
   const dom = createFakeDom();
-  const workspace = asHtmlElement(dom.document.body.createDiv());
   const content = asHtmlElement(dom.document.body.createDiv());
-  const inspector = asHtmlElement(dom.document.body.createDiv());
+  const workspace = asHtmlElement(content.createDiv());
+  const inspector = asHtmlElement(content.createDiv());
   const inspectorBody = asHtmlElement(inspector.createDiv({ cls: "ent-cc-inspector-body" }));
   const selected = record("Notes/Selected.md", "Selected");
   const data = migrateData(null);
@@ -7430,6 +7982,79 @@ test("Command Center return restores its exact route and unrelated notes can ope
     2,
     "each navigation truthfully reports that only restart persistence failed",
   );
+});
+
+test("queued return scroll restoration cannot affect replaced owners or a changed route", () => {
+  for (const paneLayout of ["compact", "wide"] as const) {
+    for (const change of ["none", "replace", "base", "tab", "query", "scope", "availability", "linked-first", "close"] as const) {
+      for (const when of ["first frame", "second frame"] as const) {
+        const { document } = createFakeDom();
+        const content = asHtmlElement(document.body.createDiv());
+        const workspace = asHtmlElement(content.createDiv());
+        const tree = asHtmlElement(workspace.createDiv());
+        const inspector = asHtmlElement(content.createDiv());
+        const inspectorBody = asHtmlElement(inspector.createDiv({ cls: "ent-cc-inspector-body" }));
+        const frames: Array<() => void> = [];
+        const data = migrateData(null);
+        let baseId = "base-first";
+        const view = Object.create(EntVaultCommandCenterView.prototype) as unknown as {
+          plugin: { data: PluginData; getActiveKnowledgeBaseId(): string };
+          paneLayout: "compact" | "wide";
+          contentEl: HTMLElement;
+          workspaceEl: HTMLElement;
+          treeEl: HTMLElement;
+          inspectorEl: HTMLElement;
+          query: string;
+          searchScope: "all" | "current" | "library";
+          searchAvailability: "all" | "linked" | "placeholders";
+          searchLinkedFirst: boolean;
+          viewClosed: boolean;
+          timerWindow: { requestAnimationFrame(callback: () => void): number };
+          restoreReturnScrollPosition(list: number, detail: number): void;
+        };
+        Object.assign(view, {
+          plugin: { data, getActiveKnowledgeBaseId: () => baseId },
+          paneLayout, contentEl: content, workspaceEl: workspace, treeEl: tree, inspectorEl: inspector,
+          query: "original query", searchScope: "all", searchAvailability: "all", searchLinkedFirst: false,
+          viewClosed: false,
+          timerWindow: { requestAnimationFrame: (callback: () => void) => frames.push(callback) },
+        });
+        let listOwner = paneLayout === "wide" ? tree : workspace;
+        let detailOwner = paneLayout === "wide" ? inspector : inspectorBody;
+        view.restoreReturnScrollPosition(712, 93);
+        assert.equal(listOwner.scrollTop, 712);
+        assert.equal(detailOwner.scrollTop, 93);
+        assert.equal(frames.length, 1);
+        if (when === "second frame") frames.shift()?.();
+
+        if (change === "replace") {
+          content.empty();
+          view.workspaceEl = asHtmlElement(content.createDiv());
+          view.treeEl = asHtmlElement(view.workspaceEl.createDiv());
+          view.inspectorEl = asHtmlElement(content.createDiv());
+          const nextBody = asHtmlElement(view.inspectorEl.createDiv({ cls: "ent-cc-inspector-body" }));
+          listOwner = paneLayout === "wide" ? view.treeEl : view.workspaceEl;
+          detailOwner = paneLayout === "wide" ? view.inspectorEl : nextBody;
+        } else if (change === "base") baseId = "base-second";
+        else if (change === "tab") data.activeTab = "collections";
+        else if (change === "query") view.query = "new query";
+        else if (change === "scope") view.searchScope = "current";
+        else if (change === "availability") view.searchAvailability = "linked";
+        else if (change === "linked-first") view.searchLinkedFirst = true;
+        else if (change === "close") view.viewClosed = true;
+        if (change !== "replace") {
+          assert.equal(listOwner, paneLayout === "wide" ? view.treeEl : view.workspaceEl,
+            "query and filter changes reuse the same owner; DOM identity alone cannot fence them");
+        }
+        listOwner.scrollTop = 17;
+        detailOwner.scrollTop = 29;
+        while (frames.length) frames.shift()?.();
+        const context = `${paneLayout}, ${change}, before ${when}`;
+        assert.equal(listOwner.scrollTop, change === "none" ? 712 : 17, context);
+        assert.equal(detailOwner.scrollTop, change === "none" ? 93 : 29, context);
+      }
+    }
+  }
 });
 
 test("a deferred global search applies the matching return scroll after results render", async () => {
