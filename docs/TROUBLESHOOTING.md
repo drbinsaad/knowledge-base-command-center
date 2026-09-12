@@ -104,9 +104,11 @@ Use **… → Manage libraries** to edit the Library definition. Open that Libra
 
 Deleting a heading leaves its records under the explicit Unplaced section. It does not delete notes. Removing a nested subheading instead moves its records and child subheadings up under its parent. Permanent deletion is available only after a custom Library is archived and requires choosing a destination for any remaining subjects.
 
-## Visual movement on iPhone
+## Visual movement on iPhone and iPad
 
-Choose **Arrange**, tap the row's **…** button, then use Move under, Move to group, Indent, Outdent, Move up/down, or Make top-level. Desktop drag-and-drop is optional and is not expected on touch devices.
+Open **Details → Arrange** (or **Edit** in Collections), then drag the grip beside the subject—not its title. Drop on a highlighted heading/subheading, or use the middle of an Index subject to nest it. Upper/lower edges reorder records. Swipe outside the grip to scroll; **Details → Undo** reverses a completed move. Clear search and filters before arranging.
+
+If the view refreshes, Sync changes organization, the device rotates, or the app backgrounds during the drag, it cancels without moving the subject. Try again after the view settles. The row's **…** menu also offers Move under, Move to group, Indent, Outdent, Move up/down, or Make top-level where applicable. Rearranging headings themselves still uses their menus. The new gesture path needs physical-device verification; report the iPad/iPhone model, iPadOS/iOS and Obsidian versions, and whether you used a finger, Pencil, or trackpad if a problem remains.
 
 To move a subheading itself rather than a record, tap that subheading's **…** button and use **Move under…** or **Outdent one level**. The move takes the subheading's records and everything nested inside it. If a destination you expect is missing, it is either inside the subheading you are moving or it would push the branch past the five-level limit; the plugin says so rather than showing an empty list.
 

@@ -1,6 +1,27 @@
-# 0.21.0 device and Sync smoke record
+# 0.22.0 device and Sync smoke record
 
-Candidate: 0.21.0, including all-width compact iPad browsing and the shorter active-note organization flow with explicit Index parents. This is the active candidate smoke record. Historical 0.20.1 and 0.20.0 observations are retained below and in their separate release records.
+Candidate: 0.22.0, including handle-based touch arrangement and mobile Undo/Redo. This is the active candidate smoke record; earlier observations below are historical.
+
+Status: **Physical iPhone/iPad, Apple Pencil, device trackpad, VoiceOver, software/hardware keyboard interruptions and controlled two-device Sync checks are Unexecuted.** The maintainer directed **Publish** after this gap was reported. The [candidate-specific authorization](0.22.0-iphone.md) accepts that scope as unverified; no previous waiver is reused and no row becomes a device Pass.
+
+Run the [0.22.0 touch checklist](../manual-iphone-release-checklist.md) in a synthetic vault. Record the exact build hashes, date, device/OS/Obsidian versions, input device and observed results.
+
+| Flow | Pass criteria | Result |
+| --- | --- | --- |
+| Finger arrangement | Grip-only dragging nests/reorders Index subjects and complete subtrees without sidebar takeover or accidental note opening. Invalid self/descendant targets are refused. | Unexecuted |
+| Libraries and Collections | Deep/collapsed destinations, Unplaced Library records and cross-heading placement work; only the dragged Collection membership moves. | Unexecuted |
+| Scrolling and other input | Ordinary row swipes scroll, edge auto-scroll stops on release, and iPad trackpad/Pencil input works without disabling normal navigation. | Unexecuted |
+| Cancellation | Extra touches, Escape, rotation/Split View resize, backgrounding, stale refresh and release outside the list leave no mutation or stuck gesture. | Unexecuted |
+| History and restart | Details → Undo/Redo restores exact organization; restart preserves placement and all Markdown hashes remain unchanged. | Unexecuted |
+| Accessibility and keyboards | Large text, RTL, VoiceOver and keyboard menu alternatives remain clear and reachable with separate disclosure/grip/title/menu targets. | Unexecuted |
+| Controlled Sync | Two-device delivery and concurrent changes preserve correct organization; a drag based on stale data cancels safely. | Unexecuted |
+| Update announcement | The 0.22.0 upgrade appears once, presents readable highlights and links to the exact immutable release. | Unexecuted |
+
+The implementation passed 1,320 runtime tests and 171 browser checks before release metadata. Actual Obsidian desktop mobile emulation verified trusted touch, history/reload, Library placement, normal scrolling and unchanged hashes for 26 synthetic notes. These are supplemental results only. Versioned local and Node 22 release gates are separate from device evidence.
+
+## Historical 0.21.0 device and Sync smoke record
+
+Historical candidate: 0.21.0, including all-width compact iPad browsing and the shorter active-note organization flow with explicit Index parents. It is not the active candidate. Historical 0.20.1 and 0.20.0 observations are retained below and in their separate release records.
 
 Status: **Physical iPhone/iPad, VoiceOver, physical hardware-keyboard, and controlled two-device Sync checks are Unexecuted.** Browser automation and real Mac Obsidian mobile emulation are supplemental only and must not be recorded as device passes.
 

@@ -24,7 +24,7 @@ The initial hierarchy uses:
 - the configured group property or direct subfolders for top-level groups; and
 - the configured parent property for parent/child relationships.
 
-Choose **Arrange** to create a separate visual hierarchy. On desktop, drag records where a valid drop target is offered. On touch devices, use each row's **…** menu to:
+Choose **Arrange** to create a separate visual hierarchy. On desktop, drag records where a valid drop target is offered. On iPhone and iPad, drag a record's grip handle: the middle of another record nests it, the upper/lower edge reorders it, and a group heading moves it to that group's top level. A highlighted destination and a placement message show what will happen before release. The row's **…** menu remains available to:
 
 - Move under;
 - Move to group;
@@ -189,7 +189,7 @@ Open the Library and choose **New heading** or **Arrange**. Library structure ca
 
 Any heading or subheading below the depth cap offers **Add subheading**. One branch can hold up to five levels, counting the top heading as level 1. Pickers show a nested destination with its full path, such as **Heading / Sub / Sub-sub**.
 
-Deleting a heading does not delete its records or notes. The records remain Unplaced until deliberately moved. Removing a nested subheading moves its records and child subheadings up under its parent. Desktop supports drag-and-drop; touch devices use labelled heading, subheading, and row menus, and **Move under…** and **Outdent one level** on a subheading menu rearrange the nesting itself without dragging.
+Deleting a heading does not delete its records or notes. The records remain Unplaced until deliberately moved. Removing a nested subheading moves its records and child subheadings up under its parent. In **Arrange**, drag a record's grip to a heading or subheading, or above/below another record. iPhone and iPad support this handle-based movement, including Unplaced records and iPad trackpad input. Labelled menus remain available; **Move under…** and **Outdent one level** on a subheading menu rearrange the headings themselves without dragging.
 
 The **…** menu for each custom-Library heading or nested subheading also offers **Create note here…**. It opens the established Library creation form with the full destination breadcrumb fixed and visible, applies the Library's creation profile, and expands every owning ancestor after successful placement. The plugin validates the exact base, Library, heading path, writable state, destination path, and collision state both when the menu is used and again immediately before Markdown creation. A stale condition detected before creation writes no file. If the destination changes or placement fails while creation is already in flight, KBCC moves only the exact file it created to Obsidian's recoverable trash after proving its content is still unchanged. If that proof fails, KBCC preserves the file, reports its exact path, and directs you to **Add existing note**. Protected built-in sections omit the action.
 
@@ -229,6 +229,16 @@ In the ENT preset, custom Libraries use these creation profiles. Protected sourc
 Collections are personal reusable lists across the Index and Libraries. A record can belong to several Collection headings or subheadings without duplication or file movement.
 
 Use a record's menu or inspector to add it to a Collection. In Arrange mode, Collection headings and subheadings can be created, renamed, reordered, or removed, and any heading or subheading below the five-level cap offers **Add subheading**. Removing a nested subheading moves its memberships and child subheadings up under its parent. Removing Collection membership does not change the record's primary Index/Library classification.
+
+### Touch arrangement
+
+On iPhone or iPad, open **Details → Arrange** in the Index or a Library, or **Details → Edit** in Collections. Drag the grip beside a record to move it; swipe anywhere outside the grip to scroll normally. Hold the dragged record near the list's top or bottom edge to scroll farther. The pinned search toolbar is not a drop destination.
+
+Release over a highlighted destination to place the record. Releasing outside the list, rotating/resizing the view, switching apps, or a refreshed/synced organization cancels the gesture. With a hardware keyboard, Escape also cancels. A tap on the grip does not move or open the note.
+
+Use **Details → Undo** to restore the previous position; **Redo** reapplies it. A Collection move changes only the dragged membership, leaving occurrences in other Collections intact. Index moves preserve a subject's descendant subtree. These moves change plugin organization only, not Markdown files. Headings and subheadings themselves are rearranged through their **…** menus. Screen-reader and keyboard users can use those same labelled menus instead of dragging.
+
+Physical iPhone/iPad gesture verification for this implementation remains pending; desktop-browser and Obsidian mobile-emulation tests do not replace device testing.
 
 ## Smart queues
 

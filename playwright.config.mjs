@@ -18,6 +18,6 @@ export default defineConfig({
   },
   projects: [
     { name: "chromium", use: { browserName: "chromium" } },
-    { name: "webkit", testMatch: /production-view\.spec\.ts/u, use: { browserName: "webkit" } },
+    { name: "webkit", testMatch: /(?:production-view|touch-drag)\.spec\.ts/u, use: { browserName: "webkit" } },
   ],
 });

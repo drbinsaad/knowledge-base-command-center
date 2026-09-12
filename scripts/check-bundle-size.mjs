@@ -2,10 +2,10 @@ import { readFile, stat } from "node:fs/promises";
 import { gzipSync } from "node:zlib";
 
 const budgets = [
-  // iPad routing and safe, searchable nested Index placement add about 15 kB raw
-  // / 4 kB gzip over 0.20.1. Keep this feature's small integration margin explicit.
-  { file: "main.js", raw: 1_160_000, gzip: 305_000 },
-  { file: "styles.css", raw: 150_000, gzip: 20_600 },
+  // Handle-only pointer gestures and guarded mobile organization add about
+  // 16.4 kB raw / 4.8 kB gzip JS and 1.7 kB raw / 0.3 kB gzip CSS over 0.21.0.
+  { file: "main.js", raw: 1_175_000, gzip: 309_000 },
+  { file: "styles.css", raw: 153_000, gzip: 21_100 },
 ];
 
 for (const budget of budgets) {
