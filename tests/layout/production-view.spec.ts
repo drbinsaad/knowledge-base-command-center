@@ -1002,15 +1002,27 @@ test.describe("iPad compact browsing", () => {
     }
     await page.keyboard.press("Escape");
     const input = page.locator('.ent-cc-search-box input[type="search"]');
+    await expect(page.locator(".ent-cc-search-pending")).toHaveCount(0);
+    const previousTree = await page.locator(".ent-cc-tree-body").elementHandle();
+    if (!previousTree) throw new Error("Missing pre-query results tree");
     await input.fill("Research note");
+    // Filters already render these same 80 rows before typing. Their count
+    // cannot prove the debounced query finished; await its actual tree rebuild
+    // and completed results before choosing a new scroll position.
+    await expect.poll(() => previousTree.evaluate((element) => element.isConnected)).toBe(false);
+    await previousTree.dispose();
+    await expect(page.locator(".ent-cc-search-pending")).toHaveCount(0);
     // The fixture also has a Library note whose searchable context can match;
     // require every intended Research row without assuming it is excluded.
     await expect(page.getByRole("button", { name: /^Research note \d{3},/u })).toHaveCount(80);
     await input.blur();
     await expect(page.locator(".ent-cc-shell")).not.toHaveClass(/is-search-focused/u);
+    // Query navigation also resets scrolling on the following animation frame.
+    await page.evaluate(() => new Promise<void>((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve()))));
     await workspace.evaluate((owner) => { owner.scrollTop = owner.scrollHeight; });
     const before = await workspace.evaluate((owner) => owner.scrollTop);
     const selected = page.getByRole("button", { name: /^Research note 079,/u });
+    await expect(selected).toBeInViewport({ ratio: 1 });
     await clickRenderedCenter(page, selected, true);
     for (const size of [{ width: 1366, height: 1024 }, { width: 600, height: 820 }, { width: 1024, height: 1366 }]) {
       await page.setViewportSize(size);
