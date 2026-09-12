@@ -11,6 +11,7 @@ import {
   isSafeObjectKey,
   limitSnapshotStack,
   MAX_KNOWLEDGE_BASES,
+  MAX_CURRICULUM_DEPTH,
   MAX_LIBRARIES,
   MAX_TRANSFER_COLLECTIONS,
   MAX_TRANSFER_LIST_ITEMS,
@@ -21,6 +22,8 @@ import {
   pathIsInIndexFolderSources,
   pathIsInsideFolder,
   pluginDataSemanticallyEqual,
+  portableSubjectIdFromPath,
+  portablePlaceholderPath,
   semanticEntryFingerprint,
   snapshotPersonal,
   subjectLibraryId,
@@ -74,11 +77,27 @@ export interface NoteOrganizerFileFact {
   configuredId: string;
   indexEligible: boolean;
   suggestedIndexGroup: string;
+  /** Fresh effective-tree projection; the host re-reads this at both Apply fences. */
+  indexPlacement?: NoteOrganizerIndexPlacementFact;
+}
+
+export interface NoteOrganizerIndexPlacementFact {
+  currentParentPath: string | null;
+  currentParentLabel: string;
+  hasChildren: boolean;
+  target: {
+    path: string;
+    /** Full breadcrumb of the destination parent, not only its last title. */
+    label: string;
+    groupTitle: string;
+    /** Root through parent-of-target; excludes the target itself. */
+    ancestorPaths: string[];
+  } | null;
 }
 
 export type NoteOrganizerPrimaryDirective =
   | { mode: "keep" }
-  | { mode: "index"; groupTitle?: string }
+  | { mode: "index"; groupTitle?: string; parentPath?: string | null }
   | { mode: "library"; libraryId: string; headingId?: string; subheadingId?: string }
   | { mode: "none" };
 
@@ -124,7 +143,7 @@ export interface NoteOrganizerLayoutMembership {
 
 export type NoteOrganizerPrimaryState =
   | { kind: "none" }
-  | { kind: "index"; groupTitle: string }
+  | { kind: "index"; groupTitle: string; parentPath?: string | null; parentLabel?: string }
   | {
     kind: "library";
     libraryId: string;
@@ -241,6 +260,7 @@ interface BaseMutationContext {
   portableChildIdsByParentId: Map<string, string[]>;
   visualChildPathsByParentPath: Map<string, string[]>;
   visualOrderKeysByPath: Map<string, string[]>;
+  indexParentByPath: Map<string, { parentPath: string | null; parentLabel: string }>;
   seed: string;
 }
 
@@ -312,6 +332,39 @@ function safePath(value: unknown, label: string): string {
   return path;
 }
 
+function safeIndexPath(value: unknown, label: string): string {
+  if (typeof value === "string" && portableSubjectIdFromPath(value)) {
+    return portablePlaceholderPath(safeStableId(portableSubjectIdFromPath(value), label));
+  }
+  return safePath(value, label);
+}
+
+function normalizeIndexPlacement(value: unknown): NoteOrganizerIndexPlacementFact {
+  if (!value || typeof value !== "object" || Array.isArray(value)) fail("The Index placement facts are unavailable. Refresh the review.");
+  const input = value as Record<string, unknown>;
+  const currentParentPath = input.currentParentPath === null ? null : safeIndexPath(input.currentParentPath, "Current Index parent");
+  const currentParentLabel = safeText(input.currentParentLabel, "Current Index parent label", MAX_TRANSFER_TEXT_LENGTH, currentParentPath === null);
+  if (typeof input.hasChildren !== "boolean") fail("The Index child facts are invalid.");
+  let target: NoteOrganizerIndexPlacementFact["target"] = null;
+  if (input.target !== null) {
+    if (!input.target || typeof input.target !== "object" || Array.isArray(input.target)) fail("The Index destination facts are invalid.");
+    const candidate = input.target as Record<string, unknown>;
+    if (!Array.isArray(candidate.ancestorPaths) || candidate.ancestorPaths.length > MAX_CURRICULUM_DEPTH - 2) {
+      fail(`The Index destination exceeds the ${MAX_CURRICULUM_DEPTH}-level hierarchy limit.`);
+    }
+    const path = safeIndexPath(candidate.path, "Index destination parent");
+    const ancestorPaths = candidate.ancestorPaths.map((ancestor) => safeIndexPath(ancestor, "Index destination ancestor"));
+    if (new Set([path, ...ancestorPaths]).size !== ancestorPaths.length + 1) fail("The Index destination hierarchy contains a cycle.");
+    target = {
+      path,
+      label: safeText(candidate.label, "Index destination label", MAX_TRANSFER_TEXT_LENGTH),
+      groupTitle: safeText(candidate.groupTitle, "Index destination group", MAX_ORGANIZATION_LABEL_LENGTH),
+      ancestorPaths,
+    };
+  }
+  return { currentParentPath, currentParentLabel, hasChildren: input.hasChildren, target };
+}
+
 function safeNonNegativeInteger(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     fail(`${label} must be a non-negative integer.`);
@@ -375,6 +428,7 @@ function normalizeFact(rawInput: unknown, index: number): NoteOrganizerFileFact 
       MAX_ORGANIZATION_LABEL_LENGTH,
       true,
     ),
+    ...(input.indexPlacement === undefined ? {} : { indexPlacement: normalizeIndexPlacement(input.indexPlacement) }),
   };
 }
 
@@ -392,6 +446,7 @@ function normalizeFacts(inputs: readonly NoteOrganizerFileFact[]): NoteOrganizer
       normalized.title,
       normalized.configuredId,
       normalized.suggestedIndexGroup,
+      ...(normalized.indexPlacement ? [JSON.stringify(normalized.indexPlacement)] : []),
     ].join("\0")).byteLength;
     if (textBytes > MAX_NOTE_ORGANIZER_INPUT_TEXT_BYTES) {
       fail("Selected note facts exceed the 8 MB text safety limit. Organize fewer notes at once.");
@@ -421,7 +476,13 @@ function normalizePrimary(input: NoteOrganizerPrimaryDirective | undefined, labe
     const groupTitle = input.groupTitle === undefined
       ? undefined
       : safeText(input.groupTitle, `${label} Index group`, MAX_ORGANIZATION_LABEL_LENGTH, true) || undefined;
-    return groupTitle ? { mode: "index", groupTitle } : { mode: "index" };
+    return {
+      mode: "index",
+      ...(groupTitle ? { groupTitle } : {}),
+      ...(input.parentPath === undefined ? {} : {
+        parentPath: input.parentPath === null ? null : safeIndexPath(input.parentPath, `${label} Index parent`),
+      }),
+    };
   }
   if (input.mode === "library") {
     const libraryId = safeStableId(input.libraryId, `${label} Library`);
@@ -674,6 +735,9 @@ function validateDirective(
       );
     }
   }
+  if (directive.primary.mode === "index" && directive.primary.parentPath !== undefined) {
+    validateExplicitIndexParent(context, fact, directive.primary);
+  }
   if (directive.primary.mode !== "keep") {
     const owners = context.ownerIdsByPath.get(fact.path) ?? [];
     if (owners.length > 1) fail(`“${fact.title}” has more than one portable identity in “${entry.data.settings.workspaceName}”. Repair it before organizing the note.`);
@@ -855,6 +919,10 @@ function createBaseContext(
     portableChildIdsByParentId,
     visualChildPathsByParentPath,
     visualOrderKeysByPath,
+    indexParentByPath: new Map(facts.filter((fact) => fact.indexPlacement !== undefined).map((fact) => [fact.path, {
+      parentPath: fact.indexPlacement!.currentParentPath,
+      parentLabel: fact.indexPlacement!.currentParentLabel,
+    }])),
     seed,
   };
 }
@@ -1116,17 +1184,19 @@ function assertNoDependentHierarchy(
   const refuse = (detail: string): never => fail(
     `Cannot reorganize “${fact.title}” because ${detail}. Detach or reorganize that hierarchy first; the Organizer will not silently change related notes.`,
   );
-  if (subject?.parentId) {
+  const explicitParent = directive.mode === "index" && directive.parentPath !== undefined;
+  if (explicitParent && fact.indexPlacement?.hasChildren) refuse("it has dependent Index children");
+  if (!explicitParent && subject?.parentId) {
     const parent = context.subjectById.get(subject.parentId);
     refuse(`it is nested under “${parent?.title || subject.parentId}”`);
   }
-  if (Object.prototype.hasOwnProperty.call(data.curriculumVisual.parentByPath, fact.path)) {
+  if (!explicitParent && Object.prototype.hasOwnProperty.call(data.curriculumVisual.parentByPath, fact.path)) {
     const parentPath = data.curriculumVisual.parentByPath[fact.path];
     refuse(parentPath ? `its visual parent is “${parentPath}”` : "it has an explicit visual root placement");
   }
   const orderKeys = (context.visualOrderKeysByPath.get(fact.path) ?? [])
     .filter((key) => Object.prototype.hasOwnProperty.call(data.curriculumVisual.orderByContainer, key));
-  if (orderKeys.length > 0) refuse(`it participates in the visual sibling order “${orderKeys[0]}”`);
+  if (!explicitParent && orderKeys.length > 0) refuse(`it participates in the visual sibling order “${orderKeys[0]}”`);
 
   const portableChildId = subject ? context.portableChildIdsByParentId.get(subject.id)?.[0] : undefined;
   if (portableChildId) {
@@ -1138,6 +1208,32 @@ function assertNoDependentHierarchy(
   const childOrderKey = `parent:${fact.path}`;
   if (Object.prototype.hasOwnProperty.call(data.curriculumVisual.orderByContainer, childOrderKey)) {
     refuse(`dependent child order “${childOrderKey}” is attached to it`);
+  }
+}
+
+/** Explicit leaf placement may change its own parent, never a dependent subtree. */
+function validateExplicitIndexParent(
+  context: BaseMutationContext,
+  fact: NoteOrganizerFileFact,
+  directive: Extract<NoteOrganizerPrimaryDirective, { mode: "index" }>,
+): void {
+  const placement = fact.indexPlacement;
+  if (!placement) fail("Fresh Index hierarchy facts are required. Refresh the review.");
+  const target = placement.target;
+  if ((target?.path ?? null) !== directive.parentPath) fail("The Index parent no longer matches the reviewed destination.");
+  if (!target) return;
+  if (target.path === fact.path || target.ancestorPaths.includes(fact.path)) fail("A note cannot be placed under itself or its descendants.");
+  const group = requestedIndexGroupTitle(context, fact, currentOwner(context, fact.path), directive);
+  if (normalizedNameKey(target.groupTitle) !== normalizedNameKey(group)) fail("An Index subheading must stay in its parent’s group.");
+  const placeholderId = portableSubjectIdFromPath(target.path);
+  const owners = context.ownerIdsByPath.get(target.path) ?? [];
+  const subject = placeholderId ? context.subjectById.get(placeholderId) : currentOwner(context, target.path);
+  if (placeholderId && (!subject || context.entry.data.portableIndex.resolvedPathBySubjectId[placeholderId])) {
+    fail("The Index placeholder parent was removed or linked to a note. Refresh the review.");
+  }
+  if (owners.length > 1 || (owners.length === 1 && !subject)
+    || (subject && (!subject.indexed || normalizedNameKey(context.groupById.get(subject.groupId)?.title ?? "") !== normalizedNameKey(target.groupTitle)))) {
+    fail("The Index parent has an ambiguous or incompatible portable placement. Refresh the review.");
   }
 }
 
@@ -1181,6 +1277,7 @@ function primaryDirectiveIsExactNoOp(
   if (directive.mode === "index") {
     if (current.kind !== "index"
       || current.groupTitle !== requestedIndexGroupTitle(context, fact, subject, directive)) return false;
+    if (directive.parentPath !== undefined && current.parentPath !== directive.parentPath) return false;
     const automaticFolderOnly = subject === null
       && !context.directIndexPaths.has(fact.path)
       && !context.manualIndexPaths.has(fact.path)
@@ -1223,12 +1320,16 @@ function applyPrimary(
   }
   if (directive.mode === "index") {
     const groupTitle = requestedIndexGroupTitle(context, fact, existingSubject, directive);
-    const groupId = ensureIndexGroup(context, groupTitle, tracker);
+    const parentPath = directive.parentPath;
+    const parentId = parentPath ? portableSubjectIdFromPath(parentPath) || currentOwner(context, parentPath)?.id || null : null;
+    // Portable parent edges require identical group IDs, not merely matching titles.
+    const groupId = (parentId ? context.subjectById.get(parentId)?.groupId : null)
+      ?? ensureIndexGroup(context, groupTitle, tracker);
     const subject = ensureSubject(context, fact, null, groupId, tracker);
     setSubjectLibraryLayoutPlacement(context, subject.id, null, tracker);
     assignSubjectField(subject, "indexed", true, tracker);
     assignSubjectField(subject, "libraryId", null, tracker);
-    assignSubjectField(subject, "parentId", null, tracker);
+    assignSubjectField(subject, "parentId", parentId, tracker);
     assignSubjectField(subject, "groupId", groupId, tracker);
     reconcileSubjectPlacement(context, beforePlacement, subject);
     setDirectMembership(context, fact.path, true, tracker);
@@ -1239,7 +1340,28 @@ function applyPrimary(
       data.indexGroupOrder.push(groupTitle);
       mark(tracker);
     }
-    resetVisualPlacement(context, fact.path, tracker);
+    if (parentPath === undefined) {
+      resetVisualPlacement(context, fact.path, tracker);
+    } else {
+      // Preserve unrelated sibling ordering; only this explicitly selected leaf moves.
+      for (const key of context.visualOrderKeysByPath.get(fact.path) ?? []) {
+        const paths = data.curriculumVisual.orderByContainer[key];
+        if (!paths) continue;
+        const remaining = paths.filter((path) => path !== fact.path);
+        if (remaining.length) data.curriculumVisual.orderByContainer[key] = remaining;
+        else delete data.curriculumVisual.orderByContainer[key];
+        mark(tracker);
+      }
+      if (data.curriculumVisual.parentByPath[fact.path] !== parentPath
+        || !Object.prototype.hasOwnProperty.call(data.curriculumVisual.parentByPath, fact.path)) {
+        data.curriculumVisual.parentByPath[fact.path] = parentPath;
+        mark(tracker);
+      }
+      context.indexParentByPath.set(fact.path, {
+        parentPath,
+        parentLabel: fact.indexPlacement?.target?.label ?? "",
+      });
+    }
     return;
   }
   const library = context.libraryById.get(directive.libraryId) ?? null;
@@ -1382,7 +1504,7 @@ function primaryState(
           || context.groupById.get(subject.groupId)?.title
           || fact.suggestedIndexGroup
           || "Ungrouped";
-        return { kind: "index", groupTitle };
+        return { kind: "index", groupTitle, ...context.indexParentByPath.get(fact.path) };
       }
     } else {
       const requestedLibraryId = subjectLibraryId(subject);
@@ -1421,6 +1543,7 @@ function primaryState(
       groupTitle: data.indexGroupByPath[fact.path]
         || fact.suggestedIndexGroup
         || "Ungrouped",
+      ...context.indexParentByPath.get(fact.path),
     };
   }
   return { kind: "none" };
@@ -1443,7 +1566,7 @@ function membershipState(context: BaseMutationContext, fact: NoteOrganizerFileFa
 
 function describePrimary(state: NoteOrganizerPrimaryState): string {
   if (state.kind === "none") return "No primary placement";
-  if (state.kind === "index") return `Index — ${state.groupTitle}`;
+  if (state.kind === "index") return `Index — ${state.groupTitle}${state.parentPath ? ` / ${state.parentLabel || state.parentPath}` : ""}`;
   const placement = state.placement ? ` / ${state.placement.label}` : " / Unplaced";
   return `Library “${state.libraryName}”${placement}${state.protectedSource ? " (protected source)" : ""}`;
 }
@@ -1657,6 +1780,17 @@ export function createNoteOrganizerPlan(
   const facts = normalizeFacts(fileFactInputs);
   const directives = normalizeDirectives(directiveInputs);
   verifyFactsMatchDirectives(facts, directives);
+  const directiveByPair = new Map(directives.map((directive) => [pairKey(directive.baseId, directive.path), directive]));
+  for (const fact of facts) {
+    const directive = directiveByPair.get(pairKey(fact.baseId, fact.path));
+    if (directive?.primary.mode !== "index" || directive.primary.parentPath === undefined || !fact.indexPlacement?.target) continue;
+    const target = fact.indexPlacement.target;
+    for (const path of [target.path, ...target.ancestorPaths]) {
+      if (path === fact.path) continue; // The dedicated self/cycle check gives the actionable error.
+      const related = directiveByPair.get(pairKey(fact.baseId, path));
+      if (related && related.primary.mode !== "keep") fail("An Index parent or ancestor cannot be reorganized in the same review as its child. Organize the hierarchy separately.");
+    }
+  }
   const now = options.now ?? Date.now();
   if (!Number.isSafeInteger(now) || now <= 0) fail("The organizer plan timestamp is invalid.");
   const expectedExternalGeneration = options.expectedExternalGeneration ?? 0;

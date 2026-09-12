@@ -4,7 +4,32 @@ Complete this checklist on a physical iPhone before tagging a release that chang
 
 Do not use private notes, patient information, or copyrighted source material in screenshots, recordings, logs, or issue attachments.
 
-For 0.20.1, begin with the shorter [device, VoiceOver, and two-device Sync smoke record](release-evidence/next-release-smoke.md) and its [candidate-specific evidence and authorization](release-evidence/0.20.1-iphone.md). Its physical-device rows remain explicitly unexecuted. The historical release records below remain unchanged.
+For 0.21.0, begin with the shorter [iPhone/iPad, VoiceOver, hardware-keyboard, and two-device Sync smoke record](release-evidence/next-release-smoke.md) and its [candidate-specific evidence and authorization](release-evidence/0.21.0-iphone.md). Its physical-device rows remain explicitly unexecuted. The historical release records below remain unchanged.
+
+## 0.21.0 candidate record and sign-off
+
+- Candidate version and commit: 0.21.0 / the release commit intended for tag `0.21.0`; recorded before tagging
+- Date: 2026-09-12
+- Physical-device tester: None for this candidate
+- Physical iPhone/iPad, iOS/iPadOS, portrait/landscape and Split View, touch, software and physical hardware keyboards, Dynamic Type, VoiceOver, Arabic/RTL, safe areas, interruption, device performance, and controlled two-device Sync: **Unverified — not executed**
+- Supplemental implementation evidence: 1,226 runtime tests, 141 Chromium/WebKit browser cases, three performance budgets and ten release tests passed before 0.21.0 metadata was assigned. Real Obsidian 1.13.7 desktop mobile emulation completed ten checks covering wide single-column browsing, sticky controls, the native single-note choose/review/save flow, exact Undo/Redo, canonical reload/prefill, unchanged hashes for all 26 synthetic Markdown files, and no captured renderer errors. None is a physical-device result.
+- Versioned local release gate: On Node 25.8.1, 1,229 runtime tests, 141 browser cases, three performance budgets and ten release checks passed, with enforced coverage, typecheck, zero-warning lint/JSON, build, bundle and Community checks. The audit found zero vulnerabilities and the three-file archive passed privacy checks. Exact measurements and archive checksum are in the [candidate evidence](release-evidence/0.21.0-iphone.md). Node 22 CI and publication results were not yet verified; no physical-device row is executed by these local results.
+- Authorization: After this candidate's results and remaining physical-device gap were explicitly reported, the maintainer directed **“Publish”**. This candidate-specific waiver applies only to 0.21.0; no earlier waiver is reused.
+- Final physical-device result: Maintainer-authorized waiver — the physical iPhone/iPad matrix and controlled two-device Sync remain **Unverified**, not a device Pass
+- Tester signature or initials: Unsigned — no physical-device tester
+
+## 0.21.0 iPad and single-note organization additions
+
+Status: **Unverified — not executed on a physical iPhone or iPad.** Record device/build details and an observed Pass or Fail only after execution. These additions do not replace the broader checklist or make historical results current.
+
+1. On a physical iPad, test landscape above 1050 CSS pixels, portrait, and Split View. Confirm one full-width browse column remains at every width, selecting a record opens focused detail, and **Back to main page** restores the intended row, query, scroll position and visible focus. The compact layout must not become the desktop two-column inspector just because the tablet is wide.
+2. On both iPhone and iPad, scroll deeply with the keyboard closed. Confirm tabs and Search/Filters remain pinned while base/Add/Details and statistics scroll away. Exercise Filters, rotation and split resizing; then repeat with the software keyboard and a physical hardware keyboard, including reverse focus traversal. No focused row or primary action may be hidden by the toolbar or native chrome.
+3. Open a single existing note through its editor organization badge, current-note command, and supported context menu. Confirm **Choose location → Review** starts directly with that exact note and its current Index or Library placement. The full global/multi-note Organizer must retain its Notes stage. Confirm the separate membership-summary command still opens a read-only all-base summary.
+4. Choose an Index heading and a nested real-note or unresolved-placeholder parent using full breadcrumbs. Use **Find a heading or note** in a list longer than 300 choices; filtering must retain the chosen location, and **Directly under this index heading** must explicitly select root. Cancel without change; then review and save one synthetic leaf move. Verify unrelated children remain unchanged, Markdown hashes are unchanged, Undo/Redo restore exact organization, and restart prefills the saved location. An unchanged review must close with **Done — no changes needed** without a write.
+5. Switch knowledge bases and use **More options: Collections and other bases**. Confirm each chosen base's current destinations load, existing Library headings and nested subheadings prefill correctly, and ambiguous placement is not silently resolved. Remove or replace the selected note or parent between review and save, and deliver a controlled Sync update while the modal is open; each stale attempt must fail safely rather than choose another note or root. Verify ENT source eligibility and group constraints remain authoritative.
+6. Repeat the short flow in portrait and landscape with the largest Dynamic Type, Arabic/RTL, VoiceOver, software keyboard and a physical hardware keyboard. Confirm native selects, search, stage controls and footer actions are reachable, labels and state announcements are coherent, selected values remain readable, hidden advanced controls take no space, and touch targets remain at least 44 × 44 points.
+7. In a controlled synthetic device pair, save an explicit Index parent, finish Sync, and verify the same parent and portable identity on the other device after restart. Repeat in the opposite direction, with delayed delivery and offline concurrent organization edits. Verify reconciliation, rescue and Undo behavior without changing Markdown; automated tests do not execute this row.
+8. Upgrade a disposable existing installation to 0.21.0. Verify the update window's highlights, focus, scrolling and actions with VoiceOver and large text; it appears automatically once and can be reopened without stacking. Its release link must be exactly `https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.21.0`; verify availability after publication.
 
 ## 0.20.1 candidate record and sign-off
 

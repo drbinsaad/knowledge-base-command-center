@@ -2,10 +2,10 @@ import { readFile, stat } from "node:fs/promises";
 import { gzipSync } from "node:zlib";
 
 const budgets = [
-  // The reviewed safety, scoped-search, and progressive-disclosure build measures
-  // about 1.13 MB raw / 295 kB gzip. Keep a small, explicit integration margin.
-  { file: "main.js", raw: 1_140_000, gzip: 300_000 },
-  { file: "styles.css", raw: 150_000, gzip: 20_500 },
+  // iPad routing and safe, searchable nested Index placement add about 15 kB raw
+  // / 4 kB gzip over 0.20.1. Keep this feature's small integration margin explicit.
+  { file: "main.js", raw: 1_160_000, gzip: 305_000 },
+  { file: "styles.css", raw: 150_000, gzip: 20_600 },
 ];
 
 for (const budget of budgets) {

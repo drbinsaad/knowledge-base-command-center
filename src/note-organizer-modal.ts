@@ -50,6 +50,9 @@ export interface OrganizerBaseOption {
   libraries: readonly OrganizerLibraryOption[];
   /** Each top-level layout heading is one Collection; its children are exact subheading targets. */
   collections: readonly OrganizerHeadingOption[];
+  /** Current placement of the one preselected note; never applied without review. */
+  initialPrimary?: OrganizerPrimaryDraft;
+  indexRestriction?: string;
 }
 
 export interface OrganizerPrimaryDraft {
@@ -138,7 +141,7 @@ export interface OrganizerApplyResult {
 export interface NoteOrganizerHost {
   app: App;
   getVaultSnapshot(): Promise<readonly OrganizerVaultNode[]> | readonly OrganizerVaultNode[];
-  getBases(): Promise<readonly OrganizerBaseOption[]> | readonly OrganizerBaseOption[];
+  getBases(detailedBaseIds?: readonly string[]): Promise<readonly OrganizerBaseOption[]> | readonly OrganizerBaseOption[];
   isReadOnly?(): boolean;
   prepare(draft: NoteOrganizerDraft): Promise<OrganizerPreparedPlan>;
   applyPrepared(preparedToken: unknown): Promise<OrganizerApplyResult>;
@@ -147,6 +150,7 @@ export interface NoteOrganizerHost {
 export interface NoteOrganizerModalOptions {
   source?: NoteOrganizerSource;
   preselectedPaths?: readonly string[];
+  singleNote?: boolean;
   onApplied?: (result: OrganizerApplyResult) => void;
   onClosed?: () => void;
 }
@@ -479,6 +483,8 @@ export class NoteOrganizerModal extends Modal {
   private readonly overrides = new Map<string, OrganizerOverrideState>();
   private readonly source: NoteOrganizerSource;
   private readonly preselectedPaths: readonly string[];
+  private readonly singleNote: boolean;
+  private advancedOpen = false;
   private readonly onApplied: ((result: OrganizerApplyResult) => void) | null;
   private readonly onClosed: (() => void) | null;
   private vaultNodes: readonly OrganizerVaultNode[] = [];
@@ -490,6 +496,7 @@ export class NoteOrganizerModal extends Modal {
   private stage: OrganizerStage = "notes";
   private queryInput = "";
   private query = "";
+  private readonly parentQueries = new Map<number, string>();
   private searchTimer: number | null = null;
   private searchTimerWindow: Window | null = null;
   private treePage = 0;
@@ -521,6 +528,7 @@ export class NoteOrganizerModal extends Modal {
     super(host.app);
     this.source = options.source ?? "command";
     this.preselectedPaths = options.preselectedPaths ?? [];
+    this.singleNote = options.singleNote === true && this.preselectedPaths.length === 1;
     this.onApplied = options.onApplied ?? null;
     this.onClosed = options.onClosed ?? null;
   }
@@ -567,8 +575,9 @@ export class NoteOrganizerModal extends Modal {
   onOpen(): void {
     this.modalOpen = true;
     this.modalEl.addClass("ent-cc-note-organizer-modal");
+    this.modalEl.toggleClass("is-single-note", this.singleNote);
     this.contentEl.addClass("ent-cc-note-organizer-root");
-    this.titleEl.setText("Organize vault notes");
+    this.titleEl.setText(this.singleNote ? "Organize this note" : "Organize vault notes");
     this.titleEl.setAttribute("id", `${this.instanceId}-title`);
     this.modalEl.setAttribute("role", "dialog");
     this.modalEl.setAttribute("aria-modal", "true");
@@ -598,12 +607,17 @@ export class NoteOrganizerModal extends Modal {
     }
   }
 
-  private async loadSnapshot(): Promise<void> {
+  private async loadSnapshot(resetDestination?: OrganizerDestinationState): Promise<void> {
     const generation = ++this.snapshotGeneration;
+    const resetBaseId = resetDestination?.baseId;
     try {
+      const detailedBaseIds = new Set(this.destinations.map((destination) => destination.baseId));
+      for (const override of this.overrides.values()) {
+        for (const destination of override.destinations) detailedBaseIds.add(destination.baseId);
+      }
       const [nodes, bases] = await Promise.all([
         this.host.getVaultSnapshot(),
-        this.host.getBases(),
+        this.host.getBases([...detailedBaseIds]),
       ]);
       if (!this.modalOpen || generation !== this.snapshotGeneration) return;
       this.vaultNodes = nodes;
@@ -611,9 +625,14 @@ export class NoteOrganizerModal extends Modal {
       this.searchPageCache = null;
       this.selectionStatsCache = null;
       this.bases = bases;
+      if (resetDestination && resetDestination.baseId === resetBaseId && this.singleNote) {
+        const initial = bases.find((base) => base.id === resetBaseId)?.initialPrimary;
+        if (initial) resetDestination.primary = { ...initial };
+      }
       if (!this.snapshotInitialized) {
         this.selectPreseededPaths();
         this.destinations = bases.length > 0 ? [this.createDestination(bases[0]?.id ?? "")] : [];
+        if (this.singleNote) this.stage = "destinations";
         this.snapshotInitialized = true;
       }
       this.loadError = "";
@@ -639,10 +658,11 @@ export class NoteOrganizerModal extends Modal {
   }
 
   private createDestination(baseId: string): OrganizerDestinationState {
+    const initial = this.singleNote ? this.bases.find((base) => base.id === baseId)?.initialPrimary : undefined;
     return {
       key: this.nextDestinationKey++,
       baseId,
-      primary: { mode: "keep", libraryId: null, headingId: null, subheadingId: null },
+      primary: initial ? { ...initial } : { mode: this.singleNote ? "index" : "keep", libraryId: null, headingId: null, subheadingId: null },
       collections: { mode: "keep", targets: [], clearAllConfirmed: false },
     };
   }
@@ -655,7 +675,9 @@ export class NoteOrganizerModal extends Modal {
     this.renderProgress(renderRoot);
     renderRoot.createDiv({
       cls: "ent-cc-note-organizer-boundary",
-      text: "Organization is stored only in KBCC plugin data. Folder selection is a one-time snapshot; it never links a folder. Markdown files stay where they are and are never rewritten.",
+      text: this.singleNote
+        ? "Choose where this note appears in KBCC. Its file, folder, and Markdown stay unchanged."
+        : "Organization is stored only in KBCC plugin data. Folder selection is a one-time snapshot; it never links a folder. Markdown files stay where they are and are never rewritten.",
       attr: { id: `${this.instanceId}-boundary`, role: "note" },
     });
     if (this.host.isReadOnly?.() === true) {
@@ -726,8 +748,8 @@ export class NoteOrganizerModal extends Modal {
       attr: { "aria-label": "Organizer progress" },
     });
     const stages: Array<{ id: OrganizerStage; label: string }> = [
-      { id: "notes", label: "Notes" },
-      { id: "destinations", label: "Destinations" },
+      ...(!this.singleNote ? [{ id: "notes" as const, label: "Notes" }] : []),
+      { id: "destinations", label: this.singleNote ? "Choose location" : "Destinations" },
       { id: "review", label: "Review" },
     ];
     const activeIndex = stages.findIndex((item) => item.id === this.stage);
@@ -1242,23 +1264,28 @@ export class NoteOrganizerModal extends Modal {
   private renderDestinations(parent: HTMLElement): void {
     const intro = parent.createDiv({ cls: "ent-cc-note-organizer-section-heading" });
     intro.createEl("h3", {
-      text: "Choose knowledge-base destinations",
+      text: this.singleNote ? this.noteName(this.preselectedPaths[0] ?? "") : "Choose knowledge-base destinations",
       attr: { tabindex: "-1", "data-organizer-focus": "stage-heading:destinations" },
     });
-    intro.createEl("p", { text: `${this.selectedPaths.size.toLocaleString()} selected notes inherit the shared destinations unless you choose Skip or Custom below.` });
+    intro.createEl("p", { text: this.singleNote ? this.preselectedPaths[0] ?? "" : `${this.selectedPaths.size.toLocaleString()} selected notes inherit the shared destinations unless you choose Skip or Custom below.`, attr: { dir: "auto" } });
+    if (this.singleNoteUnavailable()) {
+      parent.createDiv({ cls: "ent-cc-note-organizer-error", text: "This note is no longer available. Close this window and open the note again.", attr: { role: "alert" } });
+      return;
+    }
     if (this.bases.length === 0) {
       parent.createDiv({ cls: "ent-cc-note-organizer-error", text: "Create a KBCC knowledge base before organizing notes.", attr: { role: "alert" } });
       return;
     }
     const shared = parent.createDiv({ cls: "ent-cc-note-organizer-destination-section" });
     const sharedHeading = shared.createDiv({ cls: "ent-cc-note-organizer-destination-heading" });
-    sharedHeading.createEl("h4", { text: "Shared destinations" });
+    if (!this.singleNote) sharedHeading.createEl("h4", { text: "Shared destinations" });
     const add = sharedHeading.createEl("button", {
       cls: "ent-cc-note-organizer-secondary-button",
       text: "Add knowledge base",
       attr: { type: "button", "data-organizer-focus": "add-base:shared" },
     });
     add.disabled = this.busy || this.destinations.length >= this.bases.length;
+    add.hidden = this.singleNote && !this.advancedOpen;
     add.addEventListener("click", () => {
       const used = new Set(this.destinations.map((item) => item.baseId));
       const base = this.bases.find((item) => !used.has(item.id));
@@ -1267,10 +1294,27 @@ export class NoteOrganizerModal extends Modal {
       this.destinations.push(destination);
       this.invalidatePrepared();
       this.pendingFocusKey = `field:shared-${destination.key}-base`;
+      this.loading = true;
       this.render();
+      void this.loadSnapshot(destination);
     });
     this.renderDestinationList(shared, this.destinations, "shared");
-    this.renderOverrides(parent);
+    if (this.singleNote) {
+      const more = parent.createEl("button", {
+        cls: "ent-cc-note-organizer-secondary-button", text: this.advancedOpen ? "Hide advanced options" : "More options: Collections and other bases",
+        attr: { type: "button", "aria-expanded": String(this.advancedOpen), "data-organizer-focus": "advanced-options" },
+      });
+      more.addEventListener("click", () => {
+        this.advancedOpen = !this.advancedOpen;
+        this.pendingFocusKey = "advanced-options";
+        this.render();
+      });
+    } else this.renderOverrides(parent);
+  }
+
+  private singleNoteUnavailable(): boolean {
+    return this.singleNote && (this.selectedPaths.size !== 1
+      || this.searchIndex?.rowByPath.get(this.preselectedPaths[0] ?? "")?.node.kind !== "note");
   }
 
   private renderOverrides(parent: HTMLElement): void {
@@ -1340,7 +1384,9 @@ export class NoteOrganizerModal extends Modal {
           override.destinations.push(destination);
           this.invalidatePrepared();
           this.pendingFocusKey = `field:custom-${path}-${destination.key}-base`;
+          this.loading = true;
           this.render();
+          void this.loadSnapshot(destination);
         });
         this.renderDestinationList(custom, override.destinations, `custom-${path}`);
       }
@@ -1395,6 +1441,7 @@ export class NoteOrganizerModal extends Modal {
         attr: { type: "button", "aria-label": "Remove this knowledge base destination" },
       });
       setIcon(remove, "trash-2");
+      if (this.singleNote && !this.advancedOpen && destinations.length === 1) header.hidden = true;
       remove.addEventListener("click", () => {
         const index = destinations.findIndex((item) => item.key === destination.key);
         if (index >= 0) destinations.splice(index, 1);
@@ -1413,13 +1460,15 @@ export class NoteOrganizerModal extends Modal {
           destination.primary = { mode: "keep", libraryId: null, headingId: null, subheadingId: null };
           destination.collections = { mode: "keep", targets: [], clearAllConfirmed: false };
           this.invalidatePrepared();
+          this.loading = true;
           this.render();
+          void this.loadSnapshot(destination);
         },
       );
       baseSelect.setAttribute("data-organizer-field", "base");
       const base = this.bases.find((item) => item.id === destination.baseId) ?? null;
       this.renderPrimaryEditor(card, destination, base, ownerKey);
-      this.renderCollectionsEditor(card, destination, base, ownerKey);
+      if (!this.singleNote || this.advancedOpen || destination.collections.mode !== "keep") this.renderCollectionsEditor(card, destination, base, ownerKey);
     }
   }
 
@@ -1430,10 +1479,10 @@ export class NoteOrganizerModal extends Modal {
     ownerKey: string,
   ): void {
     const section = parent.createEl("fieldset", { cls: "ent-cc-note-organizer-fieldset" });
-    section.createEl("legend", { text: "Primary placement" });
+    section.createEl("legend", { text: this.singleNote ? "Location" : "Primary placement" });
     this.labeledSelect(
       section,
-      "Action",
+      this.singleNote ? "Place in" : "Action",
       `${ownerKey}-${destination.key}-primary-mode`,
       destination.primary.mode,
       [
@@ -1454,6 +1503,9 @@ export class NoteOrganizerModal extends Modal {
       },
     );
     if (!base || (destination.primary.mode !== "index" && destination.primary.mode !== "library")) return;
+    if (destination.primary.mode === "index" && base.indexRestriction) {
+      section.createDiv({ cls: "ent-cc-note-organizer-warning", text: base.indexRestriction, attr: { role: "note" } });
+    }
     let headings: readonly OrganizerHeadingOption[] = [];
     if (destination.primary.mode === "library") {
       const libraryId = destination.primary.libraryId ?? base.libraries[0]?.id ?? "";
@@ -1484,7 +1536,7 @@ export class NoteOrganizerModal extends Modal {
     }
     this.labeledSelect(
       section,
-      "Heading",
+      destination.primary.mode === "index" ? "Index heading" : "Heading",
       `${ownerKey}-${destination.key}-primary-heading`,
       headingId,
       [
@@ -1499,14 +1551,19 @@ export class NoteOrganizerModal extends Modal {
       },
     );
     const heading = headings.find((item) => item.id === headingId);
-    if ((!heading || heading.subheadings.length === 0) && !destination.primary.subheadingId) return;
+    if ((!heading || heading.subheadings.length === 0) && !destination.primary.subheadingId && destination.primary.mode !== "index") return;
+    if (destination.primary.mode === "index" && heading?.sourceDerived) return;
+    if (destination.primary.mode === "index" && heading && heading.subheadings.length > 12) {
+      this.renderIndexParentPicker(section, destination, heading, ownerKey);
+      return;
+    }
     this.labeledSelect(
       section,
-      "Subheading",
+      destination.primary.mode === "index" ? "Under heading or note" : "Subheading",
       `${ownerKey}-${destination.key}-primary-subheading`,
       destination.primary.subheadingId ?? "",
       [
-        { value: "", label: "Heading root" },
+        { value: "", label: destination.primary.mode === "index" ? "Directly under this index heading" : "Heading root" },
         ...(heading?.subheadings ?? []).map((item) => ({ value: item.id, label: item.name })),
       ],
       (value) => {
@@ -1515,6 +1572,48 @@ export class NoteOrganizerModal extends Modal {
         this.render();
       },
     );
+  }
+
+  /** Filter locally without rebuilding the focused input or changing the draft. */
+  private renderIndexParentPicker(
+    section: HTMLElement,
+    destination: OrganizerDestinationState,
+    heading: OrganizerHeadingOption,
+    ownerKey: string,
+  ): void {
+    const search = section.createEl("input", {
+      type: "search", cls: "ent-cc-note-organizer-search",
+      attr: { "aria-label": "Find a heading or note", placeholder: "Find a heading or note", "data-organizer-focus": `parent-search:${destination.key}` },
+    });
+    search.value = this.parentQueries.get(destination.key) ?? "";
+    search.disabled = this.busy;
+    const select = this.labeledSelect(section, "Under heading or note",
+      `${ownerKey}-${destination.key}-primary-subheading`, destination.primary.subheadingId ?? "", [], (value) => {
+        destination.primary.subheadingId = value || null;
+        this.invalidatePrepared();
+        this.render();
+      });
+    const status = section.createDiv({ cls: "ent-cc-note-organizer-page-status", attr: { role: "status", "aria-live": "polite" } });
+    const selected = heading.subheadings.find((item) => item.id === destination.primary.subheadingId);
+    const update = (): void => {
+      const query = normalizedSearchText(search.value);
+      const matches = heading.subheadings.filter((item) => normalizedSearchText(`${item.name} ${item.id}`).includes(query));
+      const visible = matches.slice(0, 300);
+      if (selected && !visible.some((item) => item.id === selected.id)) visible.unshift(selected);
+      select.empty();
+      select.createEl("option", { text: "Directly under this index heading", attr: { value: "" } });
+      if (destination.primary.subheadingId && !selected) {
+        select.createEl("option", { text: "Unavailable — choose another destination", attr: { value: destination.primary.subheadingId, disabled: "" } });
+      }
+      for (const item of visible) select.createEl("option", { text: item.name, attr: { value: item.id, dir: "auto" } });
+      select.value = destination.primary.subheadingId ?? "";
+      status.setText(`${matches.length.toLocaleString()} matching locations.${matches.length > 300 ? " Showing the first 300; narrow your search." : ""}${selected && !matches.includes(selected) ? " Your current selection is kept." : ""}`);
+    };
+    search.addEventListener("input", () => {
+      this.parentQueries.set(destination.key, search.value);
+      update();
+    });
+    update();
   }
 
   private renderCollectionsEditor(
@@ -1643,7 +1742,7 @@ export class NoteOrganizerModal extends Modal {
       text: "Review exact organization changes",
       attr: { tabindex: "-1", "data-organizer-focus": "stage-heading:review" },
     });
-    intro.createEl("p", { text: "This review was prepared against the host’s current knowledge-base state. Apply uses its exact immutable prepared token." });
+    intro.createEl("p", { text: this.singleNote ? "Check the location below, then save. Other notes stay unchanged, and you can Undo this organization change." : "This review was prepared against the host’s current knowledge-base state. Apply uses its exact immutable prepared token." });
     const prepared = this.prepared;
     if (!prepared) {
       parent.createDiv({ cls: "ent-cc-note-organizer-error", text: "No prepared review is available. Return to Destinations and prepare it again.", attr: { role: "alert" } });
@@ -1745,7 +1844,7 @@ export class NoteOrganizerModal extends Modal {
     cancel.disabled = this.busy;
     cancel.addEventListener("click", () => this.close());
     const navigation = footer.createDiv({ cls: "ent-cc-note-organizer-footer-navigation" });
-    if (this.stage !== "notes") {
+    if (this.stage !== "notes" && (!this.singleNote || this.stage === "review")) {
       const back = navigation.createEl("button", {
         cls: "ent-cc-note-organizer-secondary-button",
         text: this.stage === "review" ? "Back to destinations" : "Back to notes",
@@ -1775,32 +1874,42 @@ export class NoteOrganizerModal extends Modal {
     } else if (this.stage === "destinations") {
       const review = navigation.createEl("button", {
         cls: "ent-cc-note-organizer-primary-button",
-        text: "Prepare review",
+        text: this.singleNote ? "Review placement" : "Prepare review",
         attr: { type: "button", "data-organizer-focus": "footer-prepare" },
       });
       review.disabled = this.busy
+        || this.loading || Boolean(this.loadError)
+        || this.singleNoteUnavailable()
         || this.selectedPaths.size === 0
         || this.bases.length === 0
         || this.host.isReadOnly?.() === true;
       review.addEventListener("click", () => { void this.prepareReview(); });
     } else {
+      const unchanged = this.singleNote && this.prepared?.summary.changeCount === 0;
       const apply = navigation.createEl("button", {
         cls: "ent-cc-note-organizer-primary-button",
-        text: this.busy ? "Applying…" : "Apply organization",
+        text: this.busy ? "Applying…" : unchanged ? "Done — no changes needed" : this.singleNote ? "Save organization" : "Apply organization",
         attr: { type: "button", "data-organizer-focus": "footer-apply" },
       });
       apply.disabled = this.busy
+        || this.loading || Boolean(this.loadError)
+        || this.singleNoteUnavailable()
         || !this.prepared
         || !this.preparedUsable
         || this.prepared.errors.length > 0
         || this.host.isReadOnly?.() === true;
-      apply.addEventListener("click", () => { void this.applyPrepared(); });
+      apply.addEventListener("click", () => {
+        if (unchanged && !apply.disabled) {
+          this.discardConfirmed = true;
+          this.close();
+        } else void this.applyPrepared();
+      });
     }
     if (this.busy) navigation.createDiv({ cls: "ent-cc-note-organizer-working", text: "Creating or applying a restart-safe KBCC transaction…", attr: { role: "status" } });
   }
 
   private async prepareReview(): Promise<void> {
-    if (this.busy) return;
+    if (this.busy || this.loading || this.loadError || this.singleNoteUnavailable()) return;
     const snapshotGeneration = this.snapshotGeneration;
     const draft = snapshotNoteOrganizerDraft(this.source, this.selectedPaths, this.destinations, this.overrides);
     const localErrors = validateNoteOrganizerDraft(draft, this.bases);
@@ -1847,7 +1956,7 @@ export class NoteOrganizerModal extends Modal {
 
   private async applyPrepared(): Promise<void> {
     const prepared = this.prepared;
-    if (this.busy || !prepared || !this.preparedUsable || prepared.errors.length > 0) return;
+    if (this.busy || this.loading || this.loadError || this.singleNoteUnavailable() || !prepared || !this.preparedUsable || prepared.errors.length > 0) return;
     if (this.host.isReadOnly?.() === true) {
       this.actionError = "KBCC is read-only. Resolve the current data or Sync condition before applying this review.";
       this.pendingFocusKey = "action-error";
@@ -1945,10 +2054,11 @@ export class NoteOrganizerModal extends Modal {
 
   private restorePendingFocus(): void {
     const key = this.pendingFocusKey;
-    this.pendingFocusKey = null;
     if (!key) return;
     const controls = Array.from(this.contentEl.querySelectorAll<HTMLElement>("[data-organizer-focus]"));
     const target = controls.find((element) => element.getAttribute("data-organizer-focus") === key);
+    if (!target && this.loading) return;
+    this.pendingFocusKey = null;
     if (!target) return;
     if (target.getAttribute("role") === "treeitem") {
       const treeItems = this.contentEl.querySelectorAll<HTMLElement>("[role=\"treeitem\"]");

@@ -249,6 +249,149 @@ test("pane-width observation ignores hidden zero widths and stops after cleanup"
   assert.deepEqual(widths, [1200, 800]);
 });
 
+test("tablet portrait and landscape keep mobile browse routing above the desktop wide breakpoint", async () => {
+  const platform = Platform as unknown as { isMobile: boolean };
+  const previousMobile = platform.isMobile;
+  try {
+    for (const mobile of [true, false]) {
+      platform.isMobile = mobile;
+      for (const [width, height] of [[1050, 1366], [1180, 820], [1366, 1024]]) {
+        const dom = createFakeDom();
+        const source = searchSource("base-tablet", "Tablet base", [record("Knowledge Base/Airway.md", "Airway")]);
+        source.data.settings.setupComplete = true;
+        const view = createView(dom.window, [source]);
+        const content = dom.document.body.createDiv({ cls: "view-content" });
+        content.setBoundingClientRect({ width, height });
+        view.contentEl = asHtmlElement(content);
+        await view.reload();
+        const context = `${mobile ? "tablet" : "desktop"} ${width}x${height}`;
+        assert.equal(content.getAttribute("data-pane-layout"), mobile ? "compact" : "wide", context);
+        assert.equal(Boolean(content.querySelector(".ent-cc-shell.is-mobile-browse")), mobile, context);
+        assert.equal(Boolean(content.querySelector(".ent-cc-mobile-toolbar")), mobile, context);
+        assert.equal(Boolean(content.querySelector(".ent-cc-mobile-filter-panel")), mobile, context);
+        assert.equal(content.querySelector(".ent-cc-workspace-options summary")?.textContent, mobile ? "Details" : "Workspace options", context);
+        assert.equal(content.querySelector(".ent-cc-inspector")?.getAttribute("role") ?? null, mobile ? null : "complementary", context);
+        assert.ok(content.querySelector(".ent-cc-subject-title"), `${context}: the same Index record remains available`);
+        await view.onClose();
+      }
+    }
+  } finally {
+    platform.isMobile = previousMobile;
+  }
+});
+
+test("tablet rotation and split panes preserve filters, focus, list scroll and inspector Back", async () => {
+  const platform = Platform as unknown as { isMobile: boolean };
+  const previousMobile = platform.isMobile;
+  platform.isMobile = true;
+  try {
+    const dom = createFakeDom();
+    const selected = record("Knowledge Base/Airway.md", "Airway");
+    const source = searchSource("base-tablet", "Tablet base", [selected]);
+    source.data.settings.setupComplete = true;
+    const view = createView(dom.window, [source]);
+    const content = dom.document.body.createDiv({ cls: "view-content" });
+    content.setBoundingClientRect({ width: 1024, height: 1366 });
+    view.contentEl = asHtmlElement(content);
+    const harness = view as unknown as {
+      mobileTreeScrollTop: number;
+      query: string;
+      searchScope: string;
+      searchAvailability: string;
+      searchLinkedFirst: boolean;
+      selectRecord(path: string): void;
+      closeMobileInspector(): void;
+    };
+    harness.query = "Air";
+    harness.searchScope = "current";
+    harness.searchAvailability = "linked";
+    harness.searchLinkedFirst = true;
+    await view.reload();
+    const initialWorkspace = content.querySelector(".ent-cc-workspace");
+    const initialFilters = content.querySelector(".ent-cc-mobile-filters");
+    assert.ok(initialWorkspace && initialFilters);
+    (initialFilters as unknown as HTMLDetailsElement).open = true;
+    initialFilters.querySelector(".ent-cc-search-availability")?.focus();
+    initialWorkspace.scrollTop = 219;
+
+    for (const [width, height] of [[1366, 1024], [600, 1024], [1050, 1366], [1366, 1024]]) {
+      content.setBoundingClientRect({ width, height });
+      view.onResize();
+      const workspace = content.querySelector(".ent-cc-workspace");
+      const filters = content.querySelector(".ent-cc-mobile-filters");
+      assert.equal(content.getAttribute("data-pane-layout"), width < 680 ? "narrow" : "compact");
+      assert.ok(workspace && filters);
+      assert.equal(workspace.scrollTop, 219);
+      assert.equal((filters as unknown as HTMLDetailsElement).open, true);
+      assert.equal(dom.document.activeElement, filters.querySelector(".ent-cc-search-availability"));
+      assert.equal(harness.query, "Air");
+      assert.equal(harness.searchScope, "current");
+      assert.equal(harness.searchAvailability, "linked");
+      assert.equal(harness.searchLinkedFirst, true);
+      assert.equal(filters.querySelector("summary")?.textContent, "Filters (3)");
+    }
+
+    harness.selectRecord(selected.path);
+    assert.ok(content.querySelector(".ent-cc-shell.is-inspector-route"));
+    assert.equal(content.querySelector(".ent-cc-inspector")?.getAttribute("role"), "dialog");
+    assert.equal(content.querySelector(".ent-cc-workspace"), null, "detail occupies the leaf instead of sharing a desktop grid");
+    const inspectorBody = content.querySelector(".ent-cc-inspector-body");
+    assert.ok(inspectorBody);
+    inspectorBody.scrollTop = 88;
+    for (const [width, height] of [[1050, 1366], [600, 1024], [1366, 1024]]) {
+      content.setBoundingClientRect({ width, height });
+      view.onResize();
+      assert.equal(content.querySelector(".ent-cc-inspector")?.getAttribute("role"), "dialog");
+      assert.equal(content.querySelector(".ent-cc-inspector-body")?.scrollTop, 88);
+      assert.equal(content.querySelector(".ent-cc-workspace"), null);
+      assert.equal(harness.mobileTreeScrollTop, 219);
+    }
+    harness.closeMobileInspector();
+    assert.equal(content.querySelector(".ent-cc-workspace")?.scrollTop, 219);
+    assert.ok(content.querySelector(".ent-cc-mobile-toolbar"));
+    assert.equal(source.data.selectedPath, selected.path);
+    assert.equal(harness.query, "Air");
+    assert.equal(dom.document.activeElement, content.querySelector(".ent-cc-subject-row.is-selected .ent-cc-subject-title"));
+    await view.onClose();
+  } finally {
+    platform.isMobile = previousMobile;
+  }
+});
+
+test("wide tablet compact controls preserve compatibility warnings and read-only boundaries", async () => {
+  const platform = Platform as unknown as { isMobile: boolean };
+  const previousMobile = platform.isMobile;
+  platform.isMobile = true;
+  try {
+    const dom = createFakeDom();
+    const view = createView(dom.window) as unknown as EntVaultCommandCenterView & {
+      plugin: { dataCompatibilityWarning: string; isDataReadOnly(): boolean };
+    };
+    view.plugin.dataCompatibilityWarning = "Synthetic newer-data warning";
+    view.plugin.isDataReadOnly = () => true;
+    const content = dom.document.body.createDiv({ cls: "view-content" });
+    content.setBoundingClientRect({ width: 1366, height: 1024 });
+    view.contentEl = asHtmlElement(content);
+    await view.reload();
+    const warning = content.querySelector(".ent-cc-compatibility-warning");
+    const details = content.querySelector(".ent-cc-workspace-options");
+    assert.ok(warning && details);
+    assert.equal(warning.getAttribute("role"), "alert");
+    assert.equal(details.contains(warning), false, "closing Details must not hide compatibility warnings");
+    assert.equal(details.querySelector("summary")?.textContent, "Details");
+    const searchActions = content.querySelectorAll(".ent-cc-mobile-search-actions button");
+    for (const control of [content.querySelector(".ent-cc-main-add"), content.querySelector(".ent-cc-note-organizer-launch"), ...searchActions.slice(0, 2)]) {
+      assert.ok(control);
+      assert.equal(control.disabled, true);
+    }
+    assert.equal(searchActions.length, 3, "Save search, Add matches and Saved remain in Filters");
+    assert.equal(content.querySelector('input[type="search"]')?.disabled, false, "read-only data remains searchable");
+    await view.onClose();
+  } finally {
+    platform.isMobile = previousMobile;
+  }
+});
+
 test("stacked-pane transitions preserve active list and detail scroll owners in both directions", async () => {
   const dom = createFakeDom();
   const observers = installResizeObserver(dom.window);

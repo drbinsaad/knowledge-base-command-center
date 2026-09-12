@@ -1,7 +1,7 @@
 import { Platform, Setting, TFile, type Modal, type SettingDefinitionItem } from "obsidian";
 import type EntVaultCommandCenterPlugin from "../../src/main";
 import { EntVaultCommandCenterView } from "../../src/view";
-import { canonicalJsonString, createDefaultStore, migrateData, parseQuery, portablePlaceholderPath, snapshotPersonal, type VaultRecord } from "../../src/model";
+import { buildCurriculumTree, canonicalJsonString, createDefaultStore, createKnowledgeBaseEntry, migrateData, parseQuery, portablePlaceholderPath, snapshotPersonal, type VaultRecord } from "../../src/model";
 import { BoundedKnowledgeBaseSearchCollector } from "../../src/search";
 import { KnowledgeNoteModal, WorkspaceSetupModal } from "../../src/modals";
 import { ExportImportCenterModal } from "../../src/portability-modal";
@@ -9,7 +9,9 @@ import { SyncRecoveryCenterModal } from "../../src/sync-recovery-modal";
 import { NoteOrganizerModal, type NoteOrganizerHost } from "../../src/note-organizer-modal";
 import { EntCommandCenterSettingsTab } from "../../src/settings";
 import { UpdateAnnouncementModal } from "../../src/update-announcement-modal";
-import { UPDATE_ANNOUNCEMENT_0_20_1 } from "../../src/update-announcement";
+import { UPDATE_ANNOUNCEMENT_0_21_0 } from "../../src/update-announcement";
+import { applyNoteOrganizerPlan, createNoteOrganizerPlan, type NoteOrganizerDirective, type NoteOrganizerFileFact, type NoteOrganizerPrimaryState } from "../../src/note-organizer";
+import { organizerIndexPlacement, organizerIndexTrail } from "../../src/note-organizer-index";
 
 function record(index: number, overrides: Partial<VaultRecord> = {}): VaultRecord {
   return {
@@ -170,6 +172,117 @@ const organizerHost: NoteOrganizerHost = {
   applyPrepared: async () => { throw new Error("Browser renderer tests do not exercise the persistence writer; use the plugin integration suite."); },
 };
 
+// This separate fixture exercises the production modal and pure prepare/apply
+// engine against an isolated, in-memory store. main.ts owns the real draft
+// adapter and persistence writer; its integration suite covers that boundary.
+const quickNotePath = "Research/Selected research note.md";
+const quickParentPath = "Research/Methods.md";
+const quickRecords = [
+  record(0, { path: quickNotePath, title: "Selected research note", domain: "General" }),
+  record(1, { path: "Research/Evidence.md", title: "Evidence" }),
+  record(2, { path: "Research/Study design.md", title: "Study design" }),
+  record(3, { path: quickParentPath, title: "Methods" }),
+  ...Array.from({ length: 14 }, (_, index) => record(index + 4, { path: `Research/Topic ${index + 1}.md`, title: `Topic ${index + 1}` })),
+];
+const quickData = migrateData(null);
+Object.assign(quickData.settings, { workspaceMode: "generic", workspaceName: "Quick organizer synthetic base", setupComplete: true });
+quickData.indexGroupOrder = ["General", "Research"];
+quickData.directIndexPaths = quickRecords.map((item) => item.path);
+quickData.indexGroupByPath = Object.fromEntries(quickRecords.map((item) => [item.path, item.domain]));
+quickData.curriculumVisual.parentByPath = {
+  [quickNotePath]: null,
+  "Research/Study design.md": "Research/Evidence.md",
+  [quickParentPath]: "Research/Study design.md",
+};
+quickData.collections = [{ id: "quick-reading", title: "Reading this week", collapsed: false, subjects: [], subheadings: [] }];
+let quickStore = createDefaultStore(quickData, 1, "browser-quick-organizer-synthetic-vault");
+const secondQuickData = migrateData(quickData);
+secondQuickData.settings.workspaceName = "Second synthetic base";
+quickStore.bases.push(createKnowledgeBaseEntry(secondQuickData, "quick-second-base", 1));
+const quickOriginal = canonicalJsonString(quickStore);
+const quickCounters = { prepared: 0, applied: 0 };
+type QuickPlan = ReturnType<typeof createNoteOrganizerPlan>;
+let quickToken: { plan: QuickPlan; directives: NoteOrganizerDirective[]; consumed: boolean } | null = null;
+function quickTree(baseId: string) {
+  const base = quickStore.bases.find((item) => item.id === baseId);
+  if (!base) throw new Error("Synthetic organizer base unavailable");
+  const currentRecords = quickRecords.map((item) => ({ ...item, domain: base.data.indexGroupByPath[item.path] ?? item.domain }));
+  return { base, tree: buildCurriculumTree(currentRecords, base.data.curriculumVisual, false) };
+}
+function quickFacts(directives: readonly NoteOrganizerDirective[]): NoteOrganizerFileFact[] {
+  return directives.map((directive) => {
+    const item = quickRecords.find((candidate) => candidate.path === directive.path);
+    if (!item) throw new Error("Synthetic organizer note unavailable");
+    const { base, tree } = quickTree(directive.baseId);
+    return {
+      path: item.path, baseId: base.id, title: item.title, mtime: 1000, size: 250,
+      exists: true, markdown: true, eligible: true, sourceKind: "topic", sourceRole: "supporting",
+      configuredId: "", indexEligible: true, suggestedIndexGroup: item.domain,
+      ...(directive.primary?.mode === "index" && directive.primary.parentPath !== undefined
+        ? { indexPlacement: organizerIndexPlacement(base.data, tree, item.path, directive.primary.parentPath) } : {}),
+    };
+  });
+}
+function quickPrimaryLabel(primary: NoteOrganizerPrimaryState): string {
+  if (primary.kind === "none") return "No primary placement";
+  if (primary.kind === "library") return `Library — ${primary.libraryName}${primary.placement ? ` / ${primary.placement.label}` : " / Unplaced"}`;
+  return `Index — ${primary.groupTitle} / ${primary.parentPath ? primary.parentLabel || primary.parentPath : "Heading root"}`;
+}
+const quickOrganizerHost: NoteOrganizerHost = {
+  app: app as never,
+  getVaultSnapshot: async () => quickRecords.map((item) => ({ kind: "note", name: item.title, path: item.path })),
+  getBases: async () => quickStore.bases.map((entry) => {
+    const { base, tree } = quickTree(entry.id);
+    const group = base.data.indexGroupByPath[quickNotePath] ?? "General";
+    return {
+      id: base.id, name: base.data.settings.workspaceName, current: base.id === quickStore.activeBaseId,
+      indexName: "Knowledge Index",
+      indexHeadings: ["General", "Research"].map((name) => ({
+        id: name, name, subheadings: quickRecords.filter((item) => item.path !== quickNotePath && tree.nodeByPath.get(item.path)?.record.domain === name)
+          .map((item) => ({ id: item.path, name: organizerIndexTrail(tree, item.path).label })),
+      })),
+      initialPrimary: { mode: "index", libraryId: null, headingId: group, subheadingId: tree.parentByPath.get(quickNotePath) ?? null },
+      libraries: [], collections: [{ id: "quick-reading", name: "Reading this week", subheadings: [] }],
+    };
+  }),
+  prepare: async (draft) => {
+    if (draft.overrides.length || draft.selectedPaths.length !== 1 || draft.selectedPaths[0] !== quickNotePath) throw new Error("Unexpected quick organizer fixture selection");
+    const directives: NoteOrganizerDirective[] = draft.destinations.map((destination) => {
+      const primary = destination.primary;
+      if (primary.mode === "library") throw new Error("The quick fixture has no Libraries");
+      return {
+        path: quickNotePath, baseId: destination.baseId,
+        primary: primary.mode === "index" ? { mode: "index", groupTitle: primary.headingId ?? "General", parentPath: primary.subheadingId } : { mode: primary.mode },
+        collections: destination.collections.mode === "keep" ? { mode: "keep" } : {
+          mode: destination.collections.mode,
+          targets: destination.collections.targets.map((target) => ({ headingId: target.headingId, ...(target.subheadingId ? { subheadingId: target.subheadingId } : {}) })),
+        },
+      };
+    });
+    const plan = createNoteOrganizerPlan(quickStore, quickFacts(directives), directives, { now: 1000 + quickCounters.prepared });
+    quickToken = { plan, directives, consumed: false };
+    quickCounters.prepared += 1;
+    return {
+      preparedToken: quickToken, warnings: [], errors: [],
+      summary: { noteCount: 1, baseCount: plan.summary.requestedBaseCount, changeCount: plan.diffs.length, unchangedCount: plan.summary.noOpDirectiveCount, skippedCount: 0 },
+      reviewRows: plan.reviews.map((review) => ({
+        path: review.path, noteTitle: review.title, baseId: review.baseId, baseName: review.baseName,
+        outcome: review.changed ? "change" : "unchanged",
+        before: { primary: quickPrimaryLabel(review.before.primary), collections: review.before.collections.map((item) => item.label) },
+        after: { primary: quickPrimaryLabel(review.after.primary), collections: review.after.collections.map((item) => item.label) },
+      })),
+    };
+  },
+  applyPrepared: async (token) => {
+    if (!quickToken || token !== quickToken || quickToken.consumed) throw new Error("Exact synthetic prepared token was not preserved");
+    const { plan, directives } = quickToken;
+    quickStore = applyNoteOrganizerPlan(quickStore, plan, quickFacts(directives), 0);
+    quickToken.consumed = true;
+    quickCounters.applied += 1;
+    return { changedNotes: plan.summary.selectedNoteCount, changedBases: plan.summary.changedBaseCount, changeCount: plan.diffs.length };
+  },
+};
+
 let settingsTab: EntCommandCenterSettingsTab | null = null;
 let settingsContainer: HTMLElement | null = null;
 let settingsEpoch = 0;
@@ -277,7 +390,7 @@ const harness = {
   releaseSettingsSave() { releaseSettingsSave?.(); releaseSettingsSave = null; },
   settingsSnapshot() { return settingsActions; },
   async close() { settingsTab?.hide(); settingsContainer?.remove(); organizer?.dismissImmediately(); openedModal?.close(); await view.onClose(); },
-  openModal(kind: "note" | "setup" | "export" | "sync" | "organizer" | "whats-new") {
+  openModal(kind: "note" | "setup" | "export" | "sync" | "organizer" | "quick-organizer" | "whats-new") {
     openedModal?.close();
     if (kind === "note") {
       openedModal = new KnowledgeNoteModal(app as never, {
@@ -294,7 +407,10 @@ const harness = {
     } else if (kind === "sync") {
       openedModal = new SyncRecoveryCenterModal(plugin as unknown as EntVaultCommandCenterPlugin);
     } else if (kind === "whats-new") {
-      openedModal = new UpdateAnnouncementModal(app as never, UPDATE_ANNOUNCEMENT_0_20_1);
+      openedModal = new UpdateAnnouncementModal(app as never, UPDATE_ANNOUNCEMENT_0_21_0);
+    } else if (kind === "quick-organizer") {
+      organizer = new NoteOrganizerModal(quickOrganizerHost, { singleNote: true, source: "file-menu", preselectedPaths: [quickNotePath] });
+      openedModal = organizer;
     } else {
       organizer = new NoteOrganizerModal(organizerHost, { preselectedPaths: [files[0].path, files[1].path] });
       openedModal = organizer;
@@ -302,6 +418,19 @@ const harness = {
     openedModal.open();
   },
   async refreshOrganizer() { await organizer?.refreshAfterExternalChange(); },
+  quickOrganizerSnapshot() {
+    const { base, tree } = quickTree(quickStore.activeBaseId);
+    const subjects = base.data.portableIndex.subjects;
+    const selectedSubject = subjects.find((item) => base.data.portableIndex.resolvedPathBySubjectId[item.id] === quickNotePath);
+    return {
+      ...quickCounters, unchanged: canonicalJsonString(quickStore) === quickOriginal,
+      parent: tree.parentByPath.get(quickNotePath) ?? null, group: base.data.indexGroupByPath[quickNotePath],
+      undoCount: base.data.undoStack.length, activeBase: quickStore.activeBaseId,
+      parents: Object.fromEntries([...tree.parentByPath].filter(([item]) => item !== quickNotePath)),
+      collections: base.data.collections.filter((item) => item.subjects.includes(quickNotePath) || Boolean(selectedSubject && item.subjects.includes(selectedSubject.id))).map((item) => item.title),
+      secondBase: canonicalJsonString(quickStore.bases.find((item) => item.id === "quick-second-base")),
+    };
+  },
   snapshot() { return { activeTab: data.activeTab, recordCount: records.length, selectedPath: data.selectedPath, submittedTitles, completedImportActions }; },
 };
 Object.assign(window, { kbccBrowserHarness: harness });

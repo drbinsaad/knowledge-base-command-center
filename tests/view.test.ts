@@ -5346,10 +5346,15 @@ test("mobile browse toolbar reuses only navigation and search while the workspac
   try {
     for (const mobile of [true, false]) {
       platform.isMobile = mobile;
-      for (const paneLayout of ["narrow", "compact", "wide"] as const) {
+      for (const width of [390, 900, 1050, 1366]) {
         const { dom, view } = mobileSearchPointerHarness();
-        const rendered = view as typeof view & { paneLayout: string; workspaceEl: HTMLElement | null; treeEl: HTMLElement | null };
-        rendered.paneLayout = paneLayout;
+        const rendered = view as typeof view & {
+          paneLayout: string;
+          workspaceEl: HTMLElement | null;
+          treeEl: HTMLElement | null;
+          applyPaneWidth(width: number, allowRender: boolean): void;
+        };
+        rendered.applyPaneWidth(width, false);
         view.render();
         const shell = dom.document.body.querySelector(".ent-cc-shell");
         const workspace = shell?.querySelector(".ent-cc-workspace");
@@ -5359,8 +5364,10 @@ test("mobile browse toolbar reuses only navigation and search while the workspac
         const count = shell?.querySelector(".ent-cc-topic-count");
         const header = shell?.querySelector(".ent-cc-header");
         const tree = shell?.querySelector(".ent-cc-tree-panel");
-        const mobileBrowse = mobile && paneLayout !== "wide";
-        const context = `${mobile ? "mobile" : "desktop"} ${paneLayout}`;
+        const mobileBrowse = mobile;
+        const expectedLayout = width < 680 ? "narrow" : mobile || width < 1050 ? "compact" : "wide";
+        const context = `${mobile ? "mobile" : "desktop"} ${width}px`;
+        assert.equal(rendered.paneLayout, expectedLayout, context);
         assert.ok(shell && workspace && tabs && count && header && tree, context);
         assert.equal(rendered.workspaceEl, workspace, `${context}: retain the workspace owner`);
         assert.equal(rendered.treeEl, tree, `${context}: retain the production tree`);
@@ -5379,7 +5386,7 @@ test("mobile browse toolbar reuses only navigation and search while the workspac
           assert.equal(toolbar.contains(tree), false);
           assert.equal(toolbar.contains(count), false);
         } else {
-          assert.equal(toolbar, null, `${context}: desktop and wide layouts retain the original structure`);
+          assert.equal(toolbar, null, `${context}: desktop layouts retain the original structure`);
           assert.equal(search, null);
           assert.equal(header.parentElement, shell);
           assert.equal(tabs.parentElement, shell);

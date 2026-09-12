@@ -13,7 +13,7 @@ The header contains:
 
 Switching knowledge bases changes every open Command Center view because the active base is plugin-wide. Archived bases do not appear in navigation or search until restored.
 
-In compact mobile views, the header shows the base switcher, **Add**, and **Details**. Open Details for the overview, statistics, Organize, and secondary actions. While browsing, section tabs and **Search/Filters** stay visible and the overview and result statistics scroll away. Filters opens a bounded panel below the toolbar; scroll inside it for additional controls or press Escape to close it with a keyboard. Focusing search hides secondary controls to leave more room for the software keyboard. The desktop layout is unchanged.
+iPhone and iPad use the compact, single-column workspace at every width, including iPad landscape and Split View. The header shows the base switcher, **Add**, and **Details**. Open Details for the overview, statistics, Organize, and secondary actions. While browsing, section tabs and **Search/Filters** stay pinned and the overview and result statistics scroll away, leaving room for the notes. Filters opens a bounded panel below the toolbar; scroll inside it for additional controls or press Escape to close it with a keyboard. Focusing search hides secondary controls to leave more room for the software keyboard. The desktop layout is unchanged. This describes the implemented layout, not completed physical-device verification.
 
 ## Knowledge Index
 
@@ -64,9 +64,22 @@ The ENT preset protects canonical source classification and folder scope. It sti
 
 The Global Note Organizer coordinates existing-note organization across the whole KBCC installation. Open it with **Organize** in the Command Center, **Organize vault notes across knowledge bases…** in the Command palette, or **Organize current note across knowledge bases…** for the active Markdown note. Here **knowledge base** and **Base** mean a KBCC knowledge base; the Organizer does not read or edit native Obsidian `.base` definitions.
 
+### Organize the current note
+
+Activate the editor's **KBCC organization indicator**, or run **Organize current note across knowledge bases…**, to start directly at **Choose location → Review**. The original note is fixed; there is no vault tree or per-note override step. Existing Index or Library placement prefills the controls, including its heading and parent where available. Choosing another knowledge base loads that base's current destinations before you continue.
+
+1. Choose **Knowledge base** and **Place in**.
+2. For the Index, choose **Index heading**, then **Under heading or note**. Choose **Directly under this index heading** for the root, or a full breadcrumb for an existing indexed note or unresolved placeholder parent. A parent placeholder is a destination, not a Markdown file being created or selected for organization. Larger lists offer **Find a heading or note**; filtering keeps your selected destination even when it does not match the query, and shows at most 300 matching choices at once.
+3. Optionally open **More options: Collections and other bases** to add Collection targets or additional knowledge-base destinations.
+4. Choose **Review placement**, inspect the exact before/after locations, then **Save organization**. If nothing would change, **Done — no changes needed** closes without applying a transaction.
+
+An explicit Index parent change moves only the selected leaf, not its dependent subtree. Notes with dependent children must be organized separately; self-parenting, cycles, incompatible groups, and stale destinations are rejected. Protected ENT Index eligibility and source-group constraints still apply. Choosing durable placement for a note supplied only by a linked folder is disclosed in the review; its folder rule is not changed.
+
+The same guarded Save and Undo described below apply. If the original note disappears, review/save is disabled rather than selecting a different note with the same name. If a chosen parent disappears or changes, refresh the review and choose an available destination; KBCC never silently replaces it with the heading root.
+
 ### Choose notes
 
-The **Notes** step mirrors the vault's folder hierarchy and selects only eligible Markdown files. You can select individual notes or a folder, up to 5,000 selected Markdown notes in one review. A folder selection is expanded immediately into the current descendant-note paths and is therefore a one-time snapshot:
+The full Organizer's **Notes** step mirrors the vault's folder hierarchy and selects only eligible Markdown files. You can select individual notes or a folder, up to 5,000 selected Markdown notes in one review. A folder selection is expanded immediately into the current descendant-note paths and is therefore a one-time snapshot:
 
 - it does not create or modify an Index linked-folder rule;
 - future notes placed in that folder are not included automatically;
@@ -83,7 +96,7 @@ The **Destinations** step starts with shared destinations. Add each KBCC knowled
 
 | Area | Choices | Result |
 | --- | --- | --- |
-| **Primary placement** | Keep current, place in an Index heading, place in a Library heading/subheading or Unplaced, or remove the primary placement | Maintains at most one primary Index or Library placement in that base. |
+| **Primary placement** | Keep current, place in an Index heading or under an eligible indexed parent, place in a Library heading/subheading or Unplaced, or remove the primary placement | Maintains at most one primary Index or Library placement in that base. |
 | **Collections** | Keep current, add selected targets, or replace with the selected targets | Collection memberships remain independent of the primary placement and can be additive. Replacing with no targets removes Collections only in that target base. |
 
 Notes use the shared destinations by default. Under **Per-note behavior**, choose **Skip this note** to leave one selected note unchanged, or **Custom destinations** to give it a different set of bases and placements. A knowledge base omitted from a note's effective destinations is not changed; existing Index, Library, and Collection memberships in that other base remain in place. One review may contain at most 20,000 effective note/base directives after shared destinations and overrides are resolved; split a larger job into separately reviewed batches.
@@ -92,9 +105,9 @@ The ENT clinical preset keeps its destination-aware safeguards. Notes in restric
 
 ### Review, Apply, and Undo
 
-Choose **Prepare review** to build exact before/after rows for every effective note/base destination. The review reports changed, unchanged, and skipped rows and states: **0 files moved · 0 files renamed · 0 Markdown files rewritten · 0 folder links changed**. Preparing a review does not change organization.
+Choose **Prepare review** in the full Organizer, or **Review placement** in the single-note flow, to build exact before/after rows for every effective note/base destination. The review reports changed, unchanged, and skipped rows and states: **0 files moved · 0 files renamed · 0 Markdown files rewritten · 0 folder links changed**. Preparing a review does not change organization.
 
-**Apply organization** accepts only that opaque prepared result. Immediately before and during the transaction, the plugin revalidates the exact Markdown file objects and their modification facts, every affected destination and heading, the knowledge-base state, and the observed Sync generation. If a file, destination, or synced plugin state changed, Apply fails closed before a partial organization result. Choose **Refresh review**, inspect the new before/after rows, and Apply again only when they are correct.
+**Apply organization** (or **Save organization** for one note) accepts only that exact prepared result. Immediately before and during the transaction, the plugin revalidates the exact Markdown file objects and their modification facts, every affected destination and heading, an explicit Index parent's ancestor chain, the knowledge-base state, and the observed Sync generation. If a file, destination, or synced plugin state changed, Apply fails closed before a partial organization result. Choose **Refresh review**, inspect the new before/after rows, and Apply again only when they are correct.
 
 An unchanged external reload keeps the Organizer and its prepared review open. A changed organization snapshot preserves selected notes, destinations, and per-note overrides, but requires a refreshed review before Apply. Removed destinations remain visibly unavailable until you choose replacements; the plugin never silently substitutes another destination. Actions pause while an external reload is still settling.
 
@@ -107,7 +120,7 @@ Those coordinated commands remain available only in the plugin session that appl
 
 ### Active-note indicator
 
-Every open Markdown editor gets an interactive KBCC organization indicator. Activate it—or run **Show current note’s knowledge-base memberships**—to open a read-only all-base summary, then choose **Organize…** if a change is needed.
+Every open Markdown editor gets an interactive KBCC organization indicator. Activate it to open the current note's **Choose location → Review** flow directly. For a read-only all-base summary instead, run **Show current note’s knowledge-base memberships** or use **Show KBCC memberships** in the note's context menu; that summary still offers **Organize…** when a change is needed.
 
 The indicator conveys state through icon, accessible label, tooltip, class, and an optional multi-base count; color is supplementary:
 
@@ -419,7 +432,7 @@ The properties may point to supported note, file, or formula values. Native Base
 
 Selecting a record opens its inspector with identity, path/status information, note or study actions, and resolved related knowledge.
 
-A wide Obsidian leaf keeps the Index and inspector side by side. Compact or narrow leaves—including desktop stacked tabs, side-by-side splits, pop-out windows, and phones—open the selected record as a focused detail route. **Back to main page** or Escape returns to the same compact row and list position. Expanding the leaf restores the two-column inspector without clearing the current selection or search.
+A wide desktop Obsidian leaf keeps the Index and inspector side by side. Compact or narrow desktop leaves—including stacked tabs, side-by-side splits, and pop-out windows—open the selected record as a focused detail route. iPhone and iPad use that focused route at every width, including tablet landscape and Split View. **Back to main page** or Escape returns to the same row and list position. Expanding a desktop leaf restores the two-column inspector without clearing the current selection or search; widening an iPad view retains the compact single-column layout.
 
 ## Saved views, snapshots, and history
 
