@@ -256,6 +256,20 @@ export const UPDATE_ANNOUNCEMENT_0_20_1: UpdateAnnouncement = {
   releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.20.1",
 };
 
+export const UPDATE_ANNOUNCEMENT_0_21_0: UpdateAnnouncement = {
+  version: "0.21.0",
+  title: "What’s new in Knowledge Base Command Center 0.21.0",
+  intro: "A compact workspace for iPad and a shorter path from an open note to its exact place in your knowledge base.",
+  highlights: [
+    "iPad keeps the compact, single-column workspace at every width, including landscape and Split View. Tabs and Search/Filters stay pinned while the overview scrolls away.",
+    "Activate the editor’s KBCC indicator or the current-note command to go directly through Choose location → Review → Save organization. Existing Index or Library placement is prefilled.",
+    "Choose an Index heading and an Under heading or note destination by its full breadcrumb, including nested notes and unresolved placeholder parents. Search larger parent lists without losing your selection.",
+    "More options: Collections and other bases keeps Collection targets and multi-base organization available. An unchanged review offers Done — no changes needed.",
+    "Explicit Index moves affect only the selected leaf, never its dependent subtree. Protected ENT constraints, exact review, Undo, and stale-state guards remain in place; organizing never moves or rewrites Markdown.",
+  ],
+  releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.21.0",
+};
+
 const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_12_0.version, UPDATE_ANNOUNCEMENT_0_12_0],
   [UPDATE_ANNOUNCEMENT_0_12_1.version, UPDATE_ANNOUNCEMENT_0_12_1],
@@ -275,6 +289,7 @@ const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_19_1.version, UPDATE_ANNOUNCEMENT_0_19_1],
   [UPDATE_ANNOUNCEMENT_0_20_0.version, UPDATE_ANNOUNCEMENT_0_20_0],
   [UPDATE_ANNOUNCEMENT_0_20_1.version, UPDATE_ANNOUNCEMENT_0_20_1],
+  [UPDATE_ANNOUNCEMENT_0_21_0.version, UPDATE_ANNOUNCEMENT_0_21_0],
 ]);
 
 function parseSemanticVersion(value: string): ParsedSemanticVersion | null {

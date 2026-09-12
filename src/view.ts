@@ -4919,7 +4919,10 @@ export class EntVaultCommandCenterView extends ItemView {
   private applyPaneWidth(width: number, allowRender = true): void {
     if (!Number.isFinite(width) || width <= 0) return;
     const previous = this.paneLayout;
-    const next = classifyPaneWidth(width);
+    const measuredLayout = classifyPaneWidth(width);
+    // Tablets keep the mobile browse/detail route even when landscape or a
+    // large screen crosses the desktop two-column breakpoint.
+    const next = Platform.isMobile && measuredLayout === "wide" ? "compact" : measuredLayout;
     const modeChanged = next !== previous;
     this.paneWidth = width;
     this.paneLayout = next;

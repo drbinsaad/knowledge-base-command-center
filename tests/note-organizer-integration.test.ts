@@ -10,8 +10,10 @@ import {
   createDefaultStore,
   createKnowledgeBaseEntry,
   migrateData,
+  portablePlaceholderPath,
   semanticEntryFingerprint,
   nextSemanticHead,
+  snapshotPersonal,
 } from "../src/model";
 import {
   MAX_KBCC_RETURN_ROUTES,
@@ -21,11 +23,13 @@ import {
   type KbccReturnRoute,
   type KbccReturnViewState,
 } from "../src/kbcc-return-navigation";
-import type {
-  NoteOrganizerDraft,
-  OrganizerApplyResult,
-  OrganizerBaseOption,
-  OrganizerPreparedPlan,
+import {
+  NoteOrganizerModal,
+  type NoteOrganizerDraft,
+  type OrganizerApplyResult,
+  type OrganizerBaseOption,
+  type OrganizerPreparedPlan,
+  type OrganizerVaultNode,
 } from "../src/note-organizer-modal";
 import type {
   NoteOrganizerSelectedVaultItem,
@@ -37,7 +41,7 @@ import { createOpenedBaseGuard } from "../src/opened-base-guard";
 interface OrganizerPluginHarness {
   loadedData: unknown;
   loadPluginData(persistMigration?: boolean): Promise<void>;
-  noteOrganizerBaseOptions(): OrganizerBaseOption[];
+  noteOrganizerBaseOptions(notePath?: string, detailedBaseIds?: readonly string[]): OrganizerBaseOption[];
   prepareNoteOrganizer(draft: NoteOrganizerDraft): Promise<OrganizerPreparedPlan>;
   applyPreparedNoteOrganizer(token: unknown): Promise<OrganizerApplyResult>;
   applyNoteOrganizerBatchHistory(direction: "undo" | "redo"): Promise<void>;
@@ -100,6 +104,390 @@ function organizerApp(files: readonly TFile[]) {
   };
 }
 
+async function indexParentOrganizerFixture() {
+  const selected = new TFile("Research/Selected note.md");
+  const parent = new TFile("Research/Actual parent.md");
+  const unrelated = new TFile("Research/Unrelated note.md");
+  const files = new Map([selected, parent, unrelated].map((file, index) => {
+    Object.assign(file.stat, { mtime: 100 + index, size: 200 + index });
+    return [file.path, file] as const;
+  }));
+  const data = genericBase("Index parent fixture", "Knowledge");
+  data.indexGroupOrder = ["General", "Other"];
+  data.directIndexPaths = [parent.path, unrelated.path];
+  data.indexGroupByPath = { [parent.path]: "General", [unrelated.path]: "Other" };
+  data.portableIndex.groups = [
+    { id: "group-general", title: "General", order: 0 },
+    { id: "group-other", title: "Other", order: 1 },
+  ];
+  data.portableIndex.subjects = [
+    { id: "heading-a", title: "Heading A", groupId: "group-general", parentId: null, order: 0, indexed: true, configuredId: "", recordKind: "topic", libraryId: null },
+    { id: "heading-b", title: "Heading B", groupId: "group-general", parentId: "heading-a", order: 1, indexed: true, configuredId: "", recordKind: "topic", libraryId: null },
+    { id: "existing-child", title: "Existing child", groupId: "group-general", parentId: "heading-b", order: 2, indexed: true, configuredId: "", recordKind: "topic", libraryId: null },
+    { id: "other-heading", title: "Other heading", groupId: "group-other", parentId: null, order: 3, indexed: true, configuredId: "", recordKind: "topic", libraryId: null },
+  ];
+  const headingAPath = portablePlaceholderPath("heading-a");
+  const targetPath = portablePlaceholderPath("heading-b");
+  const childPath = portablePlaceholderPath("existing-child");
+  // Generic Index membership is explicit for unresolved subjects as well as files.
+  data.directIndexPaths.push(headingAPath, targetPath, childPath, portablePlaceholderPath("other-heading"));
+  data.curriculumVisual.parentByPath[headingAPath] = parent.path;
+  data.curriculumVisual.parentByPath[targetPath] = headingAPath;
+  data.curriculumVisual.parentByPath[childPath] = targetPath;
+  data.curriculumVisual.orderByContainer[`parent:${parent.path}`] = [headingAPath];
+  data.curriculumVisual.orderByContainer[`parent:${targetPath}`] = [childPath];
+  const app = organizerApp([...files.values()]);
+  app.vault.getMarkdownFiles = () => [...files.values()];
+  app.vault.getAbstractFileByPath = (path) => files.get(path) ?? null;
+  let vaultMutationCalls = 0;
+  const unexpectedVaultMutation = async (): Promise<never> => {
+    vaultMutationCalls += 1;
+    throw new Error("Index placement must not mutate Markdown files or folders.");
+  };
+  Object.assign(app.vault, {
+    create: unexpectedVaultMutation, createFolder: unexpectedVaultMutation,
+    modify: unexpectedVaultMutation, rename: unexpectedVaultMutation, delete: unexpectedVaultMutation,
+  });
+  Object.assign(app.fileManager, { processFrontMatter: unexpectedVaultMutation });
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never);
+  const harness = plugin as unknown as OrganizerPluginHarness;
+  harness.loadedData = createDefaultStore(data, 1, "vault-index-parent-integration");
+  await harness.loadPluginData(false);
+  const commits: Array<{ requireUndo: boolean | undefined; bases: readonly string[]; label: string }> = [];
+  harness.commitBaseStoreChange = async (change, requireUndo, bases = [], label = "multi-base change") => {
+    commits.push({ requireUndo, bases, label });
+    await change();
+    plugin.invalidateRecordCache();
+  };
+  const personalState = () => {
+    const snapshot = snapshotPersonal(plugin.data, "Integration checkpoint", false, true);
+    snapshot.at = 0;
+    return snapshot;
+  };
+  const draftFor = (headingId: string, subheadingId: string | null): NoteOrganizerDraft => ({
+    version: 1, source: "command", selectedPaths: [selected.path], overrides: [],
+    destinations: [{
+      baseId: plugin.getActiveKnowledgeBaseId(),
+      primary: { mode: "index", libraryId: null, headingId, subheadingId },
+      collections: { mode: "keep", targets: [] },
+    }],
+  });
+  return { plugin, harness, app, files, selected, parent, unrelated, headingAPath, targetPath, childPath, commits, personalState, draftFor, vaultMutationCalls: () => vaultMutationCalls };
+}
+
+test("Organizer Index options expose the effective note tree including placeholder-parent breadcrumbs", async () => {
+  const { plugin, harness, parent, targetPath, headingAPath } = await indexParentOrganizerFixture();
+  const option = harness.noteOrganizerBaseOptions().find((base) => base.current);
+  const general = option?.indexHeadings.find((heading) => heading.name === "General");
+  const other = option?.indexHeadings.find((heading) => heading.name === "Other");
+  assert.ok(general && other);
+  assert.ok(general.subheadings.some((target) => target.id === parent.path), "an indexed Markdown note is a selectable visual parent");
+  const headingA = general.subheadings.find((target) => target.id === headingAPath);
+  const nested = general.subheadings.find((target) => target.id === targetPath);
+  assert.ok(headingA && nested, "unresolved portable headings stay valid Index targets without fabricated files");
+  assert.match(headingA.name, /Actual parent.*Heading A/u);
+  assert.match(nested.name, /Actual parent.*Heading A.*Heading B/u);
+  assert.equal(other.subheadings.some((target) => target.id === targetPath), false, "each parent belongs to its exact group");
+  assert.equal(new Set(general.subheadings.map((target) => target.id)).size, general.subheadings.length);
+  const editingParent = harness.noteOrganizerBaseOptions(parent.path).find((base) => base.current);
+  const editingParentTargets = editingParent?.indexHeadings.flatMap((heading) => heading.subheadings) ?? [];
+  assert.equal(editingParentTargets.some((target) => target.id === parent.path || target.id === targetPath || target.id === headingAPath), false, "a single note cannot choose itself or its descendants as a parent");
+  plugin.onunload();
+});
+
+test("one reviewed Index parent placement preserves other descendants and exact Undo and Redo", async () => {
+  const fixture = await indexParentOrganizerFixture();
+  const { plugin, harness, selected, targetPath, childPath, commits, personalState, draftFor } = fixture;
+  const general = harness.noteOrganizerBaseOptions()[0]?.indexHeadings.find((heading) => heading.name === "General");
+  assert.ok(general);
+  const before = personalState();
+  const subjectsBefore = structuredClone(plugin.data.portableIndex.subjects);
+  const prepared = await harness.prepareNoteOrganizer(draftFor(general.id, targetPath));
+  assert.deepEqual(prepared.errors, []);
+  assert.match(prepared.reviewRows[0]?.after.primary ?? "", /Actual parent.*Heading A.*Heading B/u, "the exact parent must be visible before Apply");
+  assert.deepEqual(personalState(), before, "preparing a parent placement changes no live data");
+  const applied = await harness.applyPreparedNoteOrganizer(prepared.preparedToken);
+  assert.equal(applied.changedNotes, 1);
+  assert.equal(applied.changedBases, 1);
+  assert.equal(plugin.data.curriculumVisual.parentByPath[selected.path], targetPath);
+  const selectedOwner = Object.entries(plugin.data.portableIndex.resolvedPathBySubjectId).find(([, path]) => path === selected.path)?.[0];
+  assert.ok(selectedOwner);
+  assert.equal(plugin.data.portableIndex.subjects.find((subject) => subject.id === selectedOwner)?.parentId, "heading-b");
+  assert.deepEqual(plugin.data.portableIndex.subjects.filter((subject) => subject.id !== selectedOwner), subjectsBefore, "unselected parent and descendant identities are unchanged");
+  assert.equal(plugin.data.curriculumVisual.orderByContainer[`parent:${targetPath}`]?.includes(childPath), true, "existing children are not detached or dropped");
+  assert.deepEqual(commits[0], { requireUndo: true, bases: [plugin.getActiveKnowledgeBaseId()], label: "Note Organizer" });
+  const after = personalState();
+  await harness.applyNoteOrganizerBatchHistory("undo");
+  assert.deepEqual(personalState(), before, "one Undo restores the entire exact pre-placement personal state");
+  await harness.applyNoteOrganizerBatchHistory("redo");
+  assert.deepEqual(personalState(), after, "one Redo restores the exact reviewed placement");
+  assert.equal(commits.length, 3);
+  assert.equal(fixture.vaultMutationCalls(), 0, "Apply and its history never change Markdown or folders");
+  plugin.onunload();
+});
+
+test("Organizer prepare rejects missing and wrong-group Index parent choices without silently using group root", async () => {
+  const fixture = await indexParentOrganizerFixture();
+  const { plugin, harness, targetPath, commits, personalState, draftFor } = fixture;
+  const base = harness.noteOrganizerBaseOptions()[0];
+  const general = base?.indexHeadings.find((heading) => heading.name === "General");
+  const other = base?.indexHeadings.find((heading) => heading.name === "Other");
+  assert.ok(general && other);
+  const before = personalState();
+  await assert.rejects(() => harness.prepareNoteOrganizer(draftFor(general.id, "kbcc-placeholder:missing-parent")), /parent|subheading|unavailable|no longer/iu);
+  await assert.rejects(() => harness.prepareNoteOrganizer(draftFor(other.id, targetPath)), /parent|subheading|unavailable|group/iu);
+  assert.deepEqual(personalState(), before);
+  assert.equal(commits.length, 0);
+  assert.equal(fixture.vaultMutationCalls(), 0);
+  plugin.onunload();
+});
+
+test("prepared Index placement rejects a replaced target or ancestor both before and inside the commit queue", async () => {
+  for (const scenario of [
+    { targetKind: "real parent", queued: false },
+    { targetKind: "placeholder below real ancestor", queued: false },
+    { targetKind: "real parent", queued: true },
+    { targetKind: "placeholder below real ancestor", queued: true },
+  ] as const) {
+    const fixture = await indexParentOrganizerFixture();
+    const { plugin, harness, files, parent, targetPath, commits, personalState, draftFor } = fixture;
+    const general = harness.noteOrganizerBaseOptions()[0]?.indexHeadings.find((heading) => heading.name === "General");
+    assert.ok(general);
+    const before = personalState();
+    const target = scenario.targetKind === "real parent" ? parent.path : targetPath;
+    const prepared = await harness.prepareNoteOrganizer(draftFor(general.id, target));
+    const replaceAncestor = () => {
+      const replacement = new TFile(parent.path);
+      Object.assign(replacement.stat, parent.stat);
+      files.set(parent.path, replacement);
+    };
+    if (scenario.queued) {
+      harness.commitBaseStoreChange = async (change, requireUndo, bases = [], label = "multi-base change") => {
+        commits.push({ requireUndo, bases, label });
+        replaceAncestor();
+        await change();
+      };
+    } else {
+      replaceAncestor();
+    }
+    await assert.rejects(() => harness.applyPreparedNoteOrganizer(prepared.preparedToken), /parent|ancestor|replaced|changed|moved|unavailable/iu, scenario.targetKind);
+    assert.equal(commits.length, scenario.queued ? 1 : 0, `${scenario.targetKind}: reject at the applicable queue boundary`);
+    assert.equal(harness.canUndoNoteOrganizerBatch(), false, "a stale destination creates no successful history token");
+    assert.deepEqual(personalState(), before);
+    assert.equal(fixture.vaultMutationCalls(), 0);
+    plugin.onunload();
+  }
+});
+
+test("an explicit blank Index subheading moves only the selected leaf to group root and is not a no-op", async () => {
+  const fixture = await indexParentOrganizerFixture();
+  const { plugin, harness, selected, targetPath, childPath, personalState, draftFor } = fixture;
+  const general = harness.noteOrganizerBaseOptions()[0]?.indexHeadings.find((heading) => heading.name === "General");
+  assert.ok(general);
+  const nested = await harness.prepareNoteOrganizer(draftFor(general.id, targetPath));
+  await harness.applyPreparedNoteOrganizer(nested.preparedToken);
+  const beforeRootMove = personalState();
+  const root = await harness.prepareNoteOrganizer(draftFor(general.id, null));
+  assert.equal(root.summary.changeCount, 1, "a parent-only change must be included in review");
+  assert.match(root.reviewRows[0]?.before.primary ?? "", /Heading A.*Heading B/u);
+  assert.equal(root.reviewRows[0]?.after.primary, "Index — General / Heading root");
+  assert.deepEqual(personalState(), beforeRootMove);
+  await harness.applyPreparedNoteOrganizer(root.preparedToken);
+  assert.equal(plugin.data.curriculumVisual.parentByPath[selected.path], null);
+  const ownerId = Object.entries(plugin.data.portableIndex.resolvedPathBySubjectId).find(([, path]) => path === selected.path)?.[0];
+  assert.ok(ownerId);
+  assert.equal(plugin.data.portableIndex.subjects.find((subject) => subject.id === ownerId)?.parentId, null);
+  assert.equal(plugin.data.curriculumVisual.orderByContainer[`parent:${targetPath}`]?.includes(childPath), true);
+  const unchanged = await harness.prepareNoteOrganizer(draftFor(general.id, null));
+  assert.equal(unchanged.summary.changeCount, 0, "reselecting the same explicit root remains idempotent");
+  await harness.applyNoteOrganizerBatchHistory("undo");
+  assert.deepEqual(personalState(), beforeRootMove, "Undo restores the exact previous parent placement");
+  assert.equal(fixture.vaultMutationCalls(), 0);
+  plugin.onunload();
+});
+
+test("a real indexed Markdown parent without a portable owner remains an exact visual destination", async () => {
+  const fixture = await indexParentOrganizerFixture();
+  const { plugin, harness, selected, parent, headingAPath, personalState, draftFor } = fixture;
+  const general = harness.noteOrganizerBaseOptions()[0]?.indexHeadings.find((heading) => heading.name === "General");
+  assert.ok(general);
+  const before = personalState();
+  assert.equal(Object.values(plugin.data.portableIndex.resolvedPathBySubjectId).includes(parent.path), false);
+  const prepared = await harness.prepareNoteOrganizer(draftFor(general.id, parent.path));
+  assert.match(prepared.reviewRows[0]?.after.primary ?? "", /Index.*General.*Actual parent/u);
+  await harness.applyPreparedNoteOrganizer(prepared.preparedToken);
+  assert.equal(plugin.data.curriculumVisual.parentByPath[selected.path], parent.path);
+  assert.equal(plugin.data.curriculumVisual.parentByPath[headingAPath], parent.path);
+  assert.equal(Object.values(plugin.data.portableIndex.resolvedPathBySubjectId).filter((path) => path === parent.path).length, 0, "choosing a parent does not create ownership on an unrelated note");
+  await harness.applyNoteOrganizerBatchHistory("undo");
+  assert.deepEqual(personalState(), before);
+  assert.equal(fixture.vaultMutationCalls(), 0);
+  plugin.onunload();
+});
+
+test("editing a real Index ancestor invalidates a prepared placeholder placement and requires fresh review", async () => {
+  const fixture = await indexParentOrganizerFixture();
+  const { plugin, harness, parent, targetPath, commits, personalState, draftFor } = fixture;
+  const general = harness.noteOrganizerBaseOptions()[0]?.indexHeadings.find((heading) => heading.name === "General");
+  assert.ok(general);
+  const before = personalState();
+  const prepared = await harness.prepareNoteOrganizer(draftFor(general.id, targetPath));
+  const originalMtime = parent.stat.mtime;
+  parent.stat.mtime += 1;
+  await assert.rejects(() => harness.applyPreparedNoteOrganizer(prepared.preparedToken), /parent|ancestor|changed|refresh/iu);
+  assert.equal(commits.length, 0);
+  assert.deepEqual(personalState(), before);
+  parent.stat.mtime = originalMtime;
+  await assert.rejects(() => harness.applyPreparedNoteOrganizer(prepared.preparedToken), /stale|already used/iu, "an invalidated review cannot be resurrected by restoring file stats");
+  const refreshed = await harness.prepareNoteOrganizer(draftFor(general.id, targetPath));
+  const applied = await harness.applyPreparedNoteOrganizer(refreshed.preparedToken);
+  assert.equal(applied.changedNotes, 1);
+  assert.equal(fixture.vaultMutationCalls(), 0);
+  plugin.onunload();
+});
+
+test("fresh Index ancestor projection is checked even when its file identity and stats are unchanged", async () => {
+  for (const queued of [false, true]) {
+    const fixture = await indexParentOrganizerFixture();
+    const { plugin, harness, app, parent, targetPath, commits, personalState, draftFor } = fixture;
+    const general = harness.noteOrganizerBaseOptions()[0]?.indexHeadings.find((heading) => heading.name === "General");
+    assert.ok(general);
+    const before = personalState();
+    const prepared = await harness.prepareNoteOrganizer(draftFor(general.id, targetPath));
+    const changeParentProjection = () => {
+      const cache = app.metadataCache as { getFileCache(file: TFile): { frontmatter: Record<string, unknown> } };
+      cache.getFileCache = (file) => ({ frontmatter: file === parent ? { title: "Changed ancestor label" } : {} });
+    };
+    if (queued) {
+      harness.commitBaseStoreChange = async (change, requireUndo, bases = [], label = "multi-base change") => {
+        commits.push({ requireUndo, bases, label });
+        changeParentProjection();
+        await change();
+      };
+    } else {
+      changeParentProjection();
+    }
+    await assert.rejects(() => harness.applyPreparedNoteOrganizer(prepared.preparedToken), /changed|stale|review|refresh/iu);
+    assert.equal(commits.length, queued ? 1 : 0);
+    assert.deepEqual(personalState(), before, "changed destination meaning cannot silently alter an immutable review");
+    assert.equal(fixture.vaultMutationCalls(), 0);
+    plugin.onunload();
+  }
+});
+
+test("active-note organization opens directly at its exact Index location with only that note selected", async () => {
+  const fixture = await indexParentOrganizerFixture();
+  const { plugin, harness, app, files, selected, targetPath, personalState, draftFor } = fixture;
+  const general = harness.noteOrganizerBaseOptions()[0]?.indexHeadings.find((heading) => heading.name === "General");
+  assert.ok(general);
+  const prepared = await harness.prepareNoteOrganizer(draftFor(general.id, targetPath));
+  await harness.applyPreparedNoteOrganizer(prepared.preparedToken);
+  const beforeOpen = personalState();
+  let vaultEnumerations = 0;
+  app.vault.getMarkdownFiles = () => {
+    vaultEnumerations += 1;
+    return [...files.values()];
+  };
+  plugin.openNoteOrganizer([selected.path]);
+  const modal = harness.activeNoteOrganizerModal;
+  assert.ok(modal instanceof NoteOrganizerModal);
+  const dom = createFakeDom();
+  const root = dom.document.body.createDiv();
+  const title = root.createEl("h2");
+  const content = root.createDiv();
+  Object.assign(modal, { modalEl: asHtmlElement(root), titleEl: asHtmlElement(title), contentEl: asHtmlElement(content) });
+  modal.onOpen(); // The Obsidian Modal stub does not dispatch lifecycle callbacks.
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(title.textContent, "Organize this note");
+  assert.equal(root.classList.contains("is-single-note"), true);
+  const buttons = content.querySelectorAll("button").map((button) => button.textContent);
+  const progress = content.querySelectorAll(".ent-cc-note-organizer-progress-step").map((step) => step.textContent);
+  assert.equal(progress.some((step) => step.includes("Choose location")), true);
+  assert.equal(progress.some((step) => step.includes("Notes")), false, "the full-vault selection stage is not part of this entry point");
+  assert.equal(buttons.includes("Review placement"), true);
+  const headingSelect = content.querySelectorAll("select").find((select) => select.getAttribute("aria-label") === "Index heading");
+  const parentSelect = content.querySelectorAll("select").find((select) => select.getAttribute("aria-label") === "Under heading or note");
+  assert.equal(headingSelect?.value, general.id);
+  assert.equal(parentSelect?.value, targetPath, "the current parent is visible without reopening the hierarchy wizard");
+  const state = modal as unknown as { selectedPaths: Set<string>; vaultNodes: OrganizerVaultNode[] };
+  assert.deepEqual([...state.selectedPaths], [selected.path]);
+  const notePaths: string[] = [];
+  const collectNotes = (nodes: readonly OrganizerVaultNode[]): void => {
+    for (const node of nodes) {
+      if (node.kind === "note") notePaths.push(node.path);
+      else collectNotes(node.children);
+    }
+  };
+  collectNotes(state.vaultNodes);
+  assert.deepEqual(notePaths, [selected.path], "single-note mode takes an exact file snapshot, not the whole-vault selection tree");
+  assert.ok(vaultEnumerations <= 1, "opening permits one cold active-base Index projection, not a second full-vault selection scan");
+  assert.deepEqual(personalState(), beforeOpen, "opening and prefilling a note never edits its organization");
+  assert.equal(fixture.vaultMutationCalls(), 0);
+  modal.onClose();
+  assert.equal(harness.activeNoteOrganizerModal, null);
+  plugin.onunload();
+});
+
+for (const placement of ["nested", "unplaced", "duplicate"] as const) {
+  test(`single-note Library prefill preserves the ${placement} current location without changing data`, async () => {
+    const file = new TFile("Reading/Airway reference.md");
+    const data = genericBase("Reading base", "Knowledge");
+    const libraryId = "library-reading";
+    const ownerId = "subject-airway-reference";
+    data.portableIndex.libraries.push({ id: libraryId, name: "Reading", singularName: "Reading note", icon: "book-open", order: 0, sourceKind: null, archivedAt: null });
+    data.portableIndex.groups.push({ id: "group-reading", title: "Books", order: 0 });
+    data.portableIndex.subjects.push({ id: ownerId, title: "Airway reference", groupId: "group-reading", parentId: null, order: 0, indexed: false, configuredId: "", recordKind: "note", libraryId });
+    data.portableIndex.resolvedPathBySubjectId[ownerId] = file.path;
+    data.portableIndex.libraryLayouts[libraryId] = [{
+      id: "heading-books", title: "Books", collapsed: false, subjects: [],
+      subheadings: [{
+        id: "section-textbooks", title: "Textbooks", collapsed: false, subjects: [],
+        subheadings: [{ id: "section-airway", title: "Airway", collapsed: false, subjects: placement === "unplaced" ? [] : [ownerId], subheadings: [] }],
+      }],
+    }];
+    const plugin = new EntVaultCommandCenterPlugin(organizerApp([file]) as never, {} as never);
+    const harness = plugin as unknown as OrganizerPluginHarness;
+    harness.loadedData = createDefaultStore(data, 1, `vault-library-prefill-${placement}`);
+    await harness.loadPluginData(false);
+    // Exercise defensive live-state handling without the load migration deduplicating it first.
+    if (placement === "duplicate") plugin.data.portableIndex.libraryLayouts[libraryId].push({ id: "heading-journals", title: "Journals", collapsed: false, subjects: [ownerId], subheadings: [] });
+    const before = structuredClone(plugin.data);
+    const base = harness.noteOrganizerBaseOptions(file.path).find((option) => option.current);
+    assert.ok(base);
+    assert.deepEqual(base.initialPrimary, placement === "duplicate"
+      ? { mode: "keep", libraryId: null, headingId: null, subheadingId: null }
+      : { mode: "library", libraryId, headingId: placement === "nested" ? "heading-books" : null, subheadingId: placement === "nested" ? "section-airway" : null });
+    if (placement === "nested") assert.equal(base.libraries.find((library) => library.id === libraryId)?.headings[0]?.subheadings.find((subheading) => subheading.id === "section-airway")?.name, "Books / Textbooks / Airway");
+
+    plugin.openNoteOrganizer([file.path]);
+    const modal = harness.activeNoteOrganizerModal;
+    assert.ok(modal instanceof NoteOrganizerModal);
+    const dom = createFakeDom();
+    const root = dom.document.body.createDiv();
+    const title = root.createEl("h2");
+    const content = root.createDiv();
+    Object.assign(modal, { modalEl: asHtmlElement(root), titleEl: asHtmlElement(title), contentEl: asHtmlElement(content) });
+    modal.onOpen();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    const selectValue = (label: string) => content.querySelectorAll("select").find((select) => select.getAttribute("aria-label") === label)?.value;
+    assert.equal(selectValue("Place in"), placement === "duplicate" ? "keep" : "library");
+    if (placement !== "duplicate") {
+      assert.equal(selectValue("Library"), libraryId);
+      assert.equal(selectValue("Heading"), placement === "nested" ? "heading-books" : "");
+      assert.equal(selectValue("Subheading"), placement === "nested" ? "section-airway" : undefined);
+    } else {
+      assert.equal(selectValue("Library"), undefined, "ambiguous membership is not silently collapsed into one location");
+    }
+    assert.deepEqual(plugin.data, before, "opening must not normalize, repair, or move existing Library memberships");
+    modal.onClose();
+    plugin.onunload();
+  });
+}
+
 test("editor indicator distinguishes organized and neutral notes without relying on color", async () => {
   const file = new TFile("Notes/Airway.md");
   const replacementFile = new TFile("Notes/Immediate replacement.md");
@@ -148,7 +536,7 @@ test("editor indicator distinguishes organized and neutral notes without relying
   await (plugin as unknown as { loadPluginData(): Promise<void> }).loadPluginData();
   let opened = "";
   let returned = "";
-  plugin.openNoteOrganizerMembership = (path) => { opened = path; };
+  plugin.openNoteOrganizer = (paths = []) => { opened = paths[0] ?? ""; };
   plugin.returnToKbcc = async (path) => { returned = path; };
 
   plugin.syncNoteOrganizerIndicators();
@@ -173,7 +561,7 @@ test("editor indicator distinguishes organized and neutral notes without relying
   membership?.activate();
   returnAction?.activate();
   await Promise.resolve();
-  assert.equal(opened, replacementFile.path, "an immediate file change cannot send the membership action to the prior note");
+  assert.equal(opened, replacementFile.path, "an immediate file change cannot send the organize action to the prior note");
   assert.equal(returned, replacementFile.path, "an immediate file change cannot send Return to the prior note");
   view.file = file;
 

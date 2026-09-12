@@ -17,6 +17,7 @@ import {
   UPDATE_ANNOUNCEMENT_0_19_1,
   UPDATE_ANNOUNCEMENT_0_20_0,
   UPDATE_ANNOUNCEMENT_0_20_1,
+  UPDATE_ANNOUNCEMENT_0_21_0,
   type UpdateAnnouncement,
 } from "../src/update-announcement.ts";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
@@ -212,6 +213,46 @@ test("0.20.1 has curated mobile browsing news without replaying it", () => {
   assert.equal(planUpdateAnnouncement("0.20.1", null, false).announcement, null);
 });
 
+test("0.21.0 has curated iPad and direct note-placement news with an exact stable release URL", () => {
+  const upgrade = planUpdateAnnouncement("0.21.0", "0.20.1", true);
+  assert.equal(upgrade.announcement, UPDATE_ANNOUNCEMENT_0_21_0);
+  assert.equal(upgrade.nextHighestObservedVersion, "0.21.0");
+  assert.equal(upgrade.shouldPersist, true);
+  assert.equal(UPDATE_ANNOUNCEMENT_0_21_0.version, "0.21.0");
+  assert.equal(UPDATE_ANNOUNCEMENT_0_21_0.title, "What’s new in Knowledge Base Command Center 0.21.0");
+  assert.equal(UPDATE_ANNOUNCEMENT_0_21_0.highlights.length, 5);
+  const highlights = UPDATE_ANNOUNCEMENT_0_21_0.highlights.join("\n");
+  for (const claim of [
+    /iPad.*single-column workspace at every width.*landscape and Split View/u,
+    /Tabs and Search\/Filters stay pinned/u,
+    /editor’s KBCC indicator.*current-note command.*Choose location → Review → Save organization/u,
+    /Existing Index or Library placement is prefilled/u,
+    /Index heading.*Under heading or note.*full breadcrumb.*placeholder parents/u,
+    /Search larger parent lists without losing your selection/u,
+    /More options: Collections and other bases/u,
+    /selected leaf, never its dependent subtree/u,
+    /Protected ENT constraints.*exact review, Undo, and stale-state guards/u,
+    /never moves or rewrites Markdown/u,
+  ]) assert.match(highlights, claim);
+  assert.equal(UPDATE_ANNOUNCEMENT_0_21_0.releaseUrl, "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.21.0");
+});
+
+test("0.21.0 is one-time upgrade news, not a fresh-install, downgrade or local-build announcement", () => {
+  const upgrade = planUpdateAnnouncement("0.21.0", "0.20.1", true);
+  const repeat = planUpdateAnnouncement("0.21.0", upgrade.nextHighestObservedVersion, true);
+  assert.equal(repeat.announcement, null);
+  assert.equal(repeat.shouldPersist, false);
+  const fresh = planUpdateAnnouncement("0.21.0", null, false);
+  assert.equal(fresh.announcement, null);
+  assert.equal(fresh.nextHighestObservedVersion, "0.21.0");
+  const downgrade = planUpdateAnnouncement("0.20.1", "0.21.0", true);
+  assert.equal(downgrade.announcement, null);
+  assert.equal(downgrade.nextHighestObservedVersion, "0.21.0");
+  assert.equal(downgrade.shouldPersist, false);
+  assert.equal(planUpdateAnnouncement("0.21.0-rc.1", "0.20.1", true).announcement, null);
+  assert.equal(planUpdateAnnouncement("0.21.0+local", "0.20.1", true).announcement, null);
+});
+
 test("malformed local version state is bounded and recoverable without trusting partial values", () => {
   for (const malformed of [
     "bad",
@@ -280,6 +321,28 @@ test("plugin lifecycle persists before opening and never repeats within a sessio
   const reloaded = announcementPlugin(localStorage, opens);
   reloaded.maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
   assert.equal(opens.length, 1);
+});
+
+test("the 0.20.1 to 0.21.0 lifecycle upgrade persists the new marker and never replays after reload", () => {
+  const localStorage = new Map<string, unknown>();
+  const opens: UpdateAnnouncement[] = [];
+  announcementPlugin(localStorage, opens, { version: "0.20.1" })
+    .maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
+  opens.length = 0;
+  const upgraded = announcementPlugin(localStorage, opens, { version: "0.21.0" });
+  upgraded.openUpdateAnnouncement = (announcement) => {
+    assert.equal(
+      (localStorage.get(SYNC_RECOVERY_LOCAL_STATE_KEY) as { highestPluginVersionSeen?: unknown })?.highestPluginVersionSeen,
+      "0.21.0",
+      "the new version marker is persisted before presentation",
+    );
+    opens.push(announcement);
+  };
+  upgraded.maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
+  upgraded.maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
+  announcementPlugin(localStorage, opens, { version: "0.21.0" })
+    .maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
+  assert.deepEqual(opens, [UPDATE_ANNOUNCEMENT_0_21_0]);
 });
 
 test("two replacement instances with stale local snapshots share one synchronous App-lifetime claim", () => {

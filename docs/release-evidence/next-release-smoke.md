@@ -1,6 +1,43 @@
-# 0.20.1 device and Sync smoke record
+# 0.21.0 device and Sync smoke record
 
-Candidate: 0.20.1, including the final compact sticky toolbar and touch-aware Clear handling. This is the active candidate smoke record; historical 0.20.0 evidence remains in its [separate release record](0.20.0-iphone.md).
+Candidate: 0.21.0, including all-width compact iPad browsing and the shorter active-note organization flow with explicit Index parents. This is the active candidate smoke record. Historical 0.20.1 and 0.20.0 observations are retained below and in their separate release records.
+
+Status: **Physical iPhone/iPad, VoiceOver, physical hardware-keyboard, and controlled two-device Sync checks are Unexecuted.** Browser automation and real Mac Obsidian mobile emulation are supplemental only and must not be recorded as device passes.
+
+After the tested candidate and its remaining physical-device gap were explicitly reported, the maintainer directed **“Publish”**. The [0.21.0 candidate-specific waiver](0.21.0-iphone.md) records authorization with that scope unverified. It changes no row to Pass, and no previous release's authorization is reused.
+
+Use only a disposable synthetic vault and the [manual physical-device checklist](../manual-iphone-release-checklist.md), including its 0.21.0 additions. For every executed row, record the exact candidate hash, date, device, operating system, Obsidian version, Sync provider where applicable, and sanitized observations. No physical-device tester or controlled device pair has executed these rows for this candidate.
+
+| Flow | Pass criteria | Result |
+| --- | --- | --- |
+| iPhone browse space | Real native chrome, safe areas and bottom toolbar leave useful note rows visible; the full list remains reachable without horizontal overflow in portrait and landscape. | Unexecuted |
+| iPad and Split View | Above 1050 CSS pixels, in portrait/landscape and Split View, the list stays single-column and full-width; focused detail and Back preserve the exact route, query, selection and scroll. | Unexecuted |
+| Sticky controls and Filters | Tabs and Search/Filters stay pinned while the overview/counts scroll away; opening, scrolling and closing Filters does not jump the list or hide focus. | Unexecuted |
+| Software and physical hardware keyboards | Search, parent filtering, native selects, reverse traversal and footer actions remain usable through keyboard/viewport changes, rotation and split resizing; focus is not covered. | Unexecuted |
+| Short active-note flow | The visible badge/current-note command opens Choose location directly for the exact note; Index/Library placement prefills, another base loads its destinations, and the read-only membership summary remains separate. | Unexecuted |
+| Explicit Index parent and root | Full breadcrumbs identify real-note and placeholder parents; lists over 300 can be searched without losing selection; explicit root, exact review/save, no-change close, Undo/Redo and restart retain the intended placement without changing Markdown or unrelated descendants. | Unexecuted |
+| Stale and protected destinations | Removed/replaced notes, changed parents/ancestors, unavailable bases and intervening Sync cannot silently change the destination. ENT eligibility, group and protected Library constraints remain enforced. | Unexecuted |
+| Bulk and advanced organization | The global/multi-note Notes stage, Collections and additional bases remain operable; exact reviewed transactions and Undo never partially change selected bases. | Unexecuted |
+| Dynamic Type and Arabic/RTL | At the largest supported text size, mixed-direction note/base/heading names, tabs, controls and footer actions remain readable without clipping or overlap. | Unexecuted |
+| VoiceOver | Names, selected state, stage/busy announcements, control order and focus after refresh, Back, cancellation and close are meaningful in both browse and organization flows. | Unexecuted |
+| Cold start and interruption | Restart, delayed metadata, background/foreground and interrupted operations preserve usable routes and do not leave a stuck action. | Unexecuted |
+| File picker, export and recovery | Native picker cancellation can be retried without false busy state; synthetic export/recovery boundaries and cancellation remain safe. | Unexecuted |
+| Controlled two-device Sync | Verify saved parent/portable identity after handoff in both directions, restart and delayed delivery; test offline concurrent edits and reconciliation/rescue without changing Markdown. | Unexecuted |
+| Update announcement | Upgrade to 0.21.0; verify readable highlights, native controls, VoiceOver order, one-time automatic display and the exact `https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.21.0` link after publication. | Unexecuted |
+
+Skipped rows remain **Unexecuted**, with reasons recorded; this waiver is not a physical-device Pass. Any later observations must preserve the unverified status at publication authorization.
+
+## 0.21.0 supplemental implementation checks
+
+On 2026-09-12, before assigning 0.21.0 release metadata, the implementation passed 1,226 runtime tests, 141 Chromium/WebKit browser cases, three performance budgets, ten release tests, coverage floors, typecheck, lint/JSON, build, applicable bundle budgets and Community checks. Real Obsidian 1.13.7 on macOS additionally completed ten synthetic-vault checks: wide compact/sticky layout, native choose/review/save, exact Undo/Redo, canonical reload and prefill, independently checked serialized organization, 44-pixel controls and hidden-control footprint. All 26 synthetic Markdown hashes were unchanged, with no captured renderer errors.
+
+Those observations execute none of the physical-device or Sync rows above. The [0.21.0 evidence record](0.21.0-iphone.md) separates implementation evidence from the fresh versioned release gate and publication checks.
+
+The subsequent versioned 0.21.0 local gate on Node 25.8.1 passed 1,229 runtime tests, 141 browser cases (78 Chromium, 63 WebKit), three performance budgets and ten release checks, with no failures or skips and no browser flakes or reported errors. Coverage was 87.72% lines, 81.64% branches and 82.30% functions. Typecheck, zero-warning lint, six JSON validations, build, bundle and Community checks passed; the dependency audit reported zero vulnerabilities. The archive contained exactly the three runtime assets and passed its privacy check. Exact byte measurements and the ZIP checksum are recorded in the candidate evidence. Node 22 CI and publication results were not yet verified; every physical-device and controlled Sync row remains **Unexecuted**.
+
+## Historical 0.20.1 device and Sync smoke record
+
+Historical candidate: 0.20.1, including the final compact sticky toolbar and touch-aware Clear handling. This retained record is not the active candidate; historical 0.20.0 evidence remains in its [separate release record](0.20.0-iphone.md).
 
 Status: **Physical iPhone, VoiceOver, and two-device Sync checks are unexecuted.** Automated Chromium/WebKit results and browser-renderer screenshots must not be recorded as device passes. The historical 0.19.1 evidence remains unchanged.
 

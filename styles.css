@@ -5332,6 +5332,18 @@
   color: var(--text-normal);
 }
 
+.ent-cc-note-organizer-modal.is-single-note {
+  max-width: 720px;
+}
+
+.ent-cc-note-organizer-modal [hidden] {
+  display: none;
+}
+
+.ent-cc-note-organizer-modal.is-single-note .ent-cc-note-organizer-progress {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .ent-cc-note-organizer-render-root {
   display: flex;
   min-height: 0;
@@ -5688,6 +5700,7 @@
 .ent-cc-note-organizer-field select,
 .ent-cc-note-organizer-override-mode {
   width: 100%;
+  height: 44px;
   min-height: 44px;
 }
 

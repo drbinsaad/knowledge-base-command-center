@@ -166,6 +166,7 @@ async function openModal(
   preselectedPaths: readonly string[] = [],
   onClosed?: () => void,
   configureWindow?: (window: FakeWindow) => void,
+  singleNote = false,
 ): Promise<ModalHarness> {
   const dom = createFakeDom();
   configureWindow?.(dom.window);
@@ -173,7 +174,7 @@ async function openModal(
   const title = root.createEl("h2");
   const content = root.createDiv();
   let closeCount = 0;
-  const modal = new NoteOrganizerModal(host, { source: "files-menu", preselectedPaths, onClosed });
+  const modal = new NoteOrganizerModal(host, { source: "files-menu", preselectedPaths, onClosed, singleNote });
   Object.assign(modal, {
     modalEl: asHtmlElement(root),
     titleEl: asHtmlElement(title),
@@ -199,6 +200,361 @@ function selectByLabel(content: FakeElement, label: string): FakeElement {
   assert.ok(found, `missing select: ${label}`);
   return found;
 }
+
+function changeSelect(content: FakeElement, label: string, value: string): void {
+  const select = selectByLabel(content, label);
+  select.value = value;
+  select.dispatch("change");
+}
+
+async function openSingleNote(host: NoteOrganizerHost, path: string): Promise<ModalHarness> {
+  return openModal(host, [path], undefined, undefined, true);
+}
+
+test("single-note entry starts at location with two stages and no vault tree or per-note overrides", async () => {
+  const vaultNotes = notes(2);
+  const harness = hostHarness(vaultNotes);
+  const path = vaultNotes[0].path;
+  const surface = await openSingleNote(harness.host, path);
+  assert.equal(surface.modalRoot.querySelector("h2")?.textContent, "Organize this note");
+  assert.equal(surface.modalRoot.classList.contains("is-single-note"), true);
+  const steps = surface.content.querySelectorAll(".ent-cc-note-organizer-progress-step");
+  assert.equal(steps.length, 2);
+  assert.match(steps[0].textContent, /Choose location/u);
+  assert.equal(steps[0].getAttribute("aria-current"), "step");
+  assert.equal(surface.content.querySelector('[role="tree"]'), null);
+  assert.equal(surface.content.querySelector(".ent-cc-note-organizer-overrides"), null);
+  assert.equal(surface.content.querySelectorAll("button").some((item) => item.textContent === "Back to notes"), false);
+  assert.equal(selectByLabel(surface.content, "Place in").value, "index");
+  assert.equal(selectByLabel(surface.content, "Index heading").value, "pediatric");
+  assert.equal(selectByLabel(surface.content, "Under heading or note").value, "");
+  assert.equal(button(surface.content, "Review placement").disabled, false);
+  button(surface.content, "Review placement").click();
+  await settle();
+  assert.deepEqual(harness.drafts[0].selectedPaths, [path]);
+  assert.deepEqual(harness.drafts[0].overrides, []);
+  assert.match(surface.content.querySelectorAll(".ent-cc-note-organizer-progress-step")[1].textContent, /Review/u);
+  assert.equal(button(surface.content, "Save organization").disabled, false);
+});
+
+test("single-note mode requires exactly one preselection and never replaces the bulk flow", async () => {
+  const vaultNotes = notes(2);
+  for (const paths of [[], vaultNotes.map((note) => note.path)]) {
+    const surface = await openModal(hostHarness(vaultNotes).host, paths, undefined, undefined, true);
+    assert.equal(surface.modalRoot.classList.contains("is-single-note"), false);
+    assert.equal(surface.content.querySelectorAll(".ent-cc-note-organizer-progress-step").length, 3);
+    assert.ok(surface.content.querySelector('[role="tree"]'));
+  }
+});
+
+test("single-note existing Index and Library placements prefill exact identities without preparing or applying", async () => {
+  const path = notes(1)[0].path;
+  const placements: NonNullable<OrganizerBaseOption["initialPrimary"]>[] = [
+    { mode: "index", libraryId: null, headingId: "pediatric", subheadingId: "airway" },
+    { mode: "library", libraryId: "sources", headingId: "books", subheadingId: "textbooks" },
+  ];
+  for (const initialPrimary of placements) {
+    const base = { ...BASE, initialPrimary };
+    const harness = hostHarness(notes(1), [base]);
+    const surface = await openSingleNote(harness.host, path);
+    assert.equal(selectByLabel(surface.content, "Place in").value, initialPrimary.mode);
+    if (initialPrimary.mode === "index") {
+      assert.equal(selectByLabel(surface.content, "Index heading").value, "pediatric");
+      assert.equal(selectByLabel(surface.content, "Under heading or note").value, "airway");
+    } else {
+      assert.equal(selectByLabel(surface.content, "Library").value, "sources");
+      assert.equal(selectByLabel(surface.content, "Heading").value, "books");
+      assert.equal(selectByLabel(surface.content, "Subheading").value, "textbooks");
+    }
+    assert.deepEqual(harness.drafts, []);
+    assert.deepEqual(harness.appliedTokens, []);
+    button(surface.content, "Review placement").click();
+    await settle();
+    assert.deepEqual(harness.drafts[0].destinations[0].primary, initialPrimary);
+  }
+});
+
+test("single-note heading and parent choice reach the exact review and Save returns its opaque token once", async () => {
+  const path = notes(1)[0].path;
+  const parentPath = "kbcc-placeholder:research-parent";
+  const base: OrganizerBaseOption = {
+    ...BASE,
+    indexHeadings: [...BASE.indexHeadings, { id: "research", name: "Research", subheadings: [{ id: parentPath, name: "Evidence / Research parent (no note)" }] }],
+  };
+  const token = Object.freeze({ transaction: "exact-single-note-token" });
+  const harness = hostHarness(notes(1), [base]);
+  harness.setPrepared(prepared(1, token));
+  const surface = await openSingleNote(harness.host, path);
+  changeSelect(surface.content, "Under heading or note", "airway");
+  changeSelect(surface.content, "Index heading", "research");
+  assert.equal(selectByLabel(surface.content, "Under heading or note").value, "", "a new group cannot inherit the old parent");
+  changeSelect(surface.content, "Under heading or note", parentPath);
+  const choice = { mode: "index", libraryId: null, headingId: "research", subheadingId: parentPath };
+  button(surface.content, "Review placement").click();
+  await settle();
+  assert.deepEqual(harness.drafts[0].destinations[0].primary, choice);
+  assert.deepEqual(harness.drafts[0].selectedPaths, [path]);
+  assert.deepEqual(harness.drafts[0].overrides, []);
+  assert.match(surface.content.textContent, /Before.*After/isu);
+  assert.match(surface.content.textContent, /Markdown files rewritten/u);
+  button(surface.content, "Back to destinations").click();
+  assert.equal(selectByLabel(surface.content, "Under heading or note").value, parentPath);
+  button(surface.content, "Review placement").click();
+  await settle();
+  const pending = deferred<{ changedNotes: number; changedBases: number; changeCount: number }>();
+  harness.host.applyPrepared = (received) => { harness.appliedTokens.push(received); return pending.promise; };
+  button(surface.content, "Save organization").click();
+  button(surface.content, "Applying…").click();
+  assert.deepEqual(harness.appliedTokens, [token]);
+  assert.equal(harness.appliedTokens[0], token);
+  pending.resolve({ changedNotes: 1, changedBases: 1, changeCount: 1 });
+  await settle();
+  assert.equal(surface.closed(), 1);
+});
+
+test("single-note advanced options expose Collections and other bases without per-note overrides or losing location", async () => {
+  const harness = hostHarness(notes(1), [BASE, SECOND_BASE]);
+  const surface = await openSingleNote(harness.host, notes(1)[0].path);
+  changeSelect(surface.content, "Under heading or note", "airway");
+  assert.equal(button(surface.content, "Add knowledge base").hidden, true);
+  assert.equal(surface.content.querySelectorAll("legend").some((item) => item.textContent === "Collections"), false);
+  button(surface.content, "More options: Collections and other bases").click();
+  assert.equal(button(surface.content, "Hide advanced options").getAttribute("aria-expanded"), "true");
+  assert.equal(surface.content.ownerDocument.activeElement?.getAttribute("data-organizer-focus"), "advanced-options");
+  assert.equal(button(surface.content, "Add knowledge base").hidden, false);
+  changeSelect(surface.content, "Action", "add");
+  button(surface.content, "Add target").click();
+  changeSelect(surface.content, "Subheading", "congenital");
+  button(surface.content, "Add knowledge base").click();
+  await settle();
+  assert.equal(surface.content.querySelectorAll(".ent-cc-note-organizer-destination-card").length, 2);
+  assert.equal(selectByLabel(surface.content, "Under heading or note").value, "airway");
+  assert.equal(surface.content.querySelector(".ent-cc-note-organizer-overrides"), null);
+  button(surface.content, "Review placement").click();
+  await settle();
+  assert.equal(harness.drafts[0].destinations.length, 2);
+  assert.deepEqual(harness.drafts[0].destinations[0].collections.targets, [{ headingId: "board-review", subheadingId: "congenital" }]);
+  assert.equal(harness.drafts[0].destinations[0].primary.subheadingId, "airway");
+  assert.deepEqual(harness.drafts[0].overrides, []);
+});
+
+test("single-note external refresh expires Save while retaining the chosen location and original note", async () => {
+  const harness = hostHarness(notes(1));
+  const path = notes(1)[0].path;
+  const surface = await openSingleNote(harness.host, path);
+  changeSelect(surface.content, "Under heading or note", "airway");
+  button(surface.content, "Review placement").click();
+  await settle();
+  const original = structuredClone(harness.drafts[0]);
+  await surface.modal.refreshAfterExternalChange();
+  const save = button(surface.content, "Save organization");
+  assert.equal(save.disabled, true);
+  save.click();
+  assert.deepEqual(harness.appliedTokens, []);
+  button(surface.content, "Refresh review").click();
+  await settle();
+  assert.deepEqual(harness.drafts[1], original);
+  assert.equal(button(surface.content, "Save organization").disabled, false);
+});
+
+test("single-note removed Index parent remains unavailable instead of silently becoming the heading root", async () => {
+  let bases = [structuredClone(BASE)];
+  const harness = hostHarness(notes(1));
+  harness.host.getBases = () => bases;
+  const surface = await openSingleNote(harness.host, notes(1)[0].path);
+  changeSelect(surface.content, "Under heading or note", "airway");
+  bases = [{ ...structuredClone(BASE), indexHeadings: [{ id: "pediatric", name: "Pediatric", subheadings: [] }] }];
+  await surface.modal.refreshAfterExternalChange();
+  assert.equal(selectByLabel(surface.content, "Under heading or note").value, "airway");
+  assert.match(surface.content.textContent, /Unavailable — choose another destination/u);
+  button(surface.content, "Review placement").click();
+  await settle();
+  assert.deepEqual(harness.drafts, []);
+  assert.match(surface.content.textContent, /subheading is unavailable/u);
+});
+
+test("single-note base change loads fresh details before prefill and fences an older async response", async () => {
+  const harness = hostHarness(notes(1), [BASE, SECOND_BASE]);
+  const requests: string[][] = [];
+  const pending = deferred<readonly OrganizerBaseOption[]>();
+  let calls = 0;
+  harness.host.getBases = (ids) => {
+    requests.push([...(ids ?? [])]);
+    calls += 1;
+    if (calls === 2) return pending.promise;
+    return [BASE, { ...SECOND_BASE, initialPrimary: { mode: "library", libraryId: "sources", headingId: "books", subheadingId: "textbooks" } }];
+  };
+  const surface = await openSingleNote(harness.host, notes(1)[0].path);
+  changeSelect(surface.content, "Knowledge base", SECOND_BASE.id);
+  assert.deepEqual(requests[1], [SECOND_BASE.id]);
+  assert.match(surface.content.textContent, /Loading Markdown notes and KBCC destinations/u);
+  assert.equal(surface.content.querySelectorAll("button").some((item) => item.textContent === "Review placement"), false);
+  pending.resolve([BASE, { ...SECOND_BASE, initialPrimary: { mode: "library", libraryId: "sources", headingId: "books", subheadingId: "textbooks" } }]);
+  await settle();
+  assert.equal(selectByLabel(surface.content, "Knowledge base").value, SECOND_BASE.id);
+  assert.equal(selectByLabel(surface.content, "Place in").value, "library");
+  assert.equal(selectByLabel(surface.content, "Subheading").value, "textbooks");
+  assert.equal(surface.content.ownerDocument.activeElement?.getAttribute("data-organizer-focus"), "field:shared-1-base");
+
+  const old = deferred<readonly OrganizerBaseOption[]>();
+  harness.host.getBases = () => old.promise;
+  changeSelect(surface.content, "Knowledge base", BASE.id);
+  harness.host.getBases = () => [{ ...BASE, name: "Fresh current base" }, SECOND_BASE];
+  await surface.modal.refreshAfterExternalChange();
+  old.resolve([{ ...BASE, name: "Stale current base", initialPrimary: { mode: "library", libraryId: "sources", headingId: "books", subheadingId: "textbooks" } }, SECOND_BASE]);
+  await settle();
+  assert.match(selectByLabel(surface.content, "Knowledge base").textContent, /Fresh current base/u);
+  assert.doesNotMatch(surface.content.textContent, /Stale current base/u);
+  assert.notEqual(selectByLabel(surface.content, "Place in").value, "library", "late details cannot overwrite the current draft");
+  assert.deepEqual(harness.drafts, []);
+  assert.deepEqual(harness.appliedTokens, []);
+});
+
+test("single-note unavailable original path never selects another note with the same name", async () => {
+  const original = "Original/Same.md";
+  const replacement: OrganizerVaultNode = { kind: "note", name: "Same", path: "Other/Same.md" };
+  const harness = hostHarness([replacement]);
+  const surface = await openSingleNote(harness.host, original);
+  assert.match(surface.content.textContent, /This note is no longer available/u);
+  assert.match(surface.content.textContent, /Original\/Same\.md/u);
+  assert.equal(button(surface.content, "Review placement").disabled, true);
+  button(surface.content, "Review placement").click();
+  await settle();
+  assert.deepEqual(harness.drafts, []);
+  assert.deepEqual(harness.appliedTokens, []);
+  assert.equal(surface.content.querySelector('[role="tree"]'), null);
+});
+
+test("single-note unchanged review offers Done without Apply and retains stale, error and read-only fences", async () => {
+  for (const state of ["ready", "stale", "error", "read-only"] as const) {
+    const harness = hostHarness(notes(1));
+    const unchanged = prepared();
+    unchanged.summary = { noteCount: 1, baseCount: 1, changeCount: 0, unchangedCount: 1, skippedCount: 0 };
+    unchanged.reviewRows = unchanged.reviewRows.map((row) => ({ ...row, outcome: "unchanged", before: row.after }));
+    if (state === "error") unchanged.errors = ["The selected destination is no longer available."];
+    harness.setPrepared(unchanged);
+    let readOnly = false;
+    harness.host.isReadOnly = () => readOnly;
+    const surface = await openSingleNote(harness.host, notes(1)[0].path);
+    button(surface.content, "Review placement").click();
+    await settle();
+    if (state === "stale") await surface.modal.refreshAfterExternalChange();
+    if (state === "read-only") {
+      readOnly = true;
+      button(surface.content, "Back to destinations").click();
+      assert.equal(button(surface.content, "Review placement").disabled, true);
+      readOnly = false;
+      button(surface.content, "Review placement").click();
+      await settle();
+      readOnly = true;
+      (surface.modal as unknown as { render(): void }).render();
+    }
+    const done = button(surface.content, "Done — no changes needed");
+    assert.equal(done.disabled, state !== "ready");
+    done.click();
+    await settle();
+    assert.deepEqual(harness.appliedTokens, [], "a no-change review never joins an Apply transaction");
+    assert.equal(surface.closed(), state === "ready" ? 1 : 0);
+    if (state === "ready") assert.equal((surface.modal as unknown as { discardConfirmed: boolean }).discardConfirmed, true, "Done must not open a discard confirmation for unchanged data");
+  }
+});
+
+test("single-note removal after review disables Save and preserves the exact missing path without substitution", async () => {
+  const original: OrganizerVaultNode = { kind: "note", name: "Same", path: "Original/Same.md" };
+  const replacement: OrganizerVaultNode = { kind: "note", name: "Same", path: "Other/Same.md" };
+  let snapshot: readonly OrganizerVaultNode[] = [original, replacement];
+  const harness = hostHarness(snapshot);
+  harness.host.getVaultSnapshot = () => snapshot;
+  const surface = await openSingleNote(harness.host, original.path);
+  button(surface.content, "Review placement").click();
+  await settle();
+  snapshot = [replacement];
+  await surface.modal.refreshAfterExternalChange();
+  assert.equal(button(surface.content, "Save organization").disabled, true);
+  button(surface.content, "Save organization").click();
+  assert.deepEqual(harness.appliedTokens, []);
+  button(surface.content, "Back to destinations").click();
+  assert.match(surface.content.textContent, /This note is no longer available/u);
+  assert.match(surface.content.textContent, /Original\/Same\.md/u);
+  assert.equal(button(surface.content, "Review placement").disabled, true);
+  button(surface.content, "Review placement").click();
+  await settle();
+  assert.equal(harness.drafts.length, 1);
+  assert.deepEqual(harness.drafts[0].selectedPaths, [original.path]);
+});
+
+test("Index parent search filters in place without changing the selected location or focused input", async () => {
+  const path = notes(1)[0].path;
+  const selectedPath = "Vault/Chosen.md";
+  const locations = Array.from({ length: 20 }, (_, index) => ({ id: `Vault/Parent ${index}.md`, name: `Heading / Parent ${index}` }));
+  locations.push({ id: selectedPath, name: "Heading / Chosen parent" });
+  const initialPrimary: NonNullable<OrganizerBaseOption["initialPrimary"]> = { mode: "index", libraryId: null, headingId: "many", subheadingId: selectedPath };
+  const base: OrganizerBaseOption = { ...BASE, indexHeadings: [{ id: "many", name: "Many parents", subheadings: locations }], initialPrimary };
+  const harness = hostHarness(notes(1), [base]);
+  const surface = await openSingleNote(harness.host, path);
+  const search = surface.content.querySelectorAll("input").find((input) => input.getAttribute("aria-label") === "Find a heading or note");
+  assert.ok(search);
+  const select = selectByLabel(surface.content, "Under heading or note");
+  search.focus();
+  search.value = "PARENT 19";
+  search.dispatch("input");
+  assert.equal(surface.content.ownerDocument.activeElement, search);
+  assert.equal(selectByLabel(surface.content, "Under heading or note"), select, "typing updates options without rebuilding controls");
+  assert.equal(select.value, selectedPath);
+  assert.deepEqual(select.querySelectorAll("option").map((option) => option.getAttribute("value")), ["", selectedPath, "Vault/Parent 19.md"]);
+  assert.match(surface.content.textContent, /1 matching locations.*Your current selection is kept/u);
+  search.value = "no location matches this";
+  search.dispatch("input");
+  assert.equal(select.querySelectorAll("option").length, 2);
+  assert.equal(select.value, selectedPath, "empty results do not silently choose root");
+  assert.deepEqual(harness.drafts, []);
+  assert.deepEqual(harness.appliedTokens, []);
+  button(surface.content, "Review placement").click();
+  await settle();
+  assert.deepEqual(harness.drafts[0].destinations[0].primary, initialPrimary);
+
+  const small = await openSingleNote(hostHarness(notes(1), [{ ...base, initialPrimary: undefined, indexHeadings: [{ id: "small", name: "Small", subheadings: locations.slice(0, 12) }] }]).host, path);
+  assert.equal(small.content.querySelectorAll("input").some((input) => input.getAttribute("aria-label") === "Find a heading or note"), false, "small lists retain the simple picker");
+});
+
+test("Index parent search caps large lists at 300 matches while retaining selected and unavailable destinations", async () => {
+  const path = notes(1)[0].path;
+  const locations = Array.from({ length: 500 }, (_, index) => ({ id: `Vault/Parent ${index}.md`, name: `Heading / Parent ${index}` }));
+  for (const selectedPath of [locations[499].id, "Vault/Removed parent.md"]) {
+    const missing = selectedPath === "Vault/Removed parent.md";
+    const base: OrganizerBaseOption = {
+      ...BASE,
+      indexHeadings: [{ id: "many", name: "Many parents", subheadings: locations }],
+      initialPrimary: { mode: "index", libraryId: null, headingId: "many", subheadingId: selectedPath },
+    };
+    const harness = hostHarness(notes(1), [base]);
+    const surface = await openSingleNote(harness.host, path);
+    const select = selectByLabel(surface.content, "Under heading or note");
+    const options = select.querySelectorAll("option");
+    assert.equal(options.length, 302, "only 300 matches plus root and the selected/unavailable destination are mounted");
+    assert.equal(select.value, selectedPath);
+    assert.match(surface.content.textContent, /500 matching locations.*Showing the first 300; narrow your search/u);
+    const selected = options.find((option) => option.getAttribute("value") === selectedPath);
+    assert.ok(selected);
+    if (missing) {
+      assert.equal(selected.getAttribute("disabled"), "");
+      assert.equal(selected.textContent, "Unavailable — choose another destination");
+    }
+    const search = surface.content.querySelectorAll("input").find((input) => input.getAttribute("aria-label") === "Find a heading or note");
+    assert.ok(search);
+    search.value = "Parent 499";
+    search.dispatch("input");
+    assert.equal(select.value, selectedPath);
+    assert.equal(select.querySelectorAll("option").length, missing ? 3 : 2);
+    if (missing) {
+      assert.equal(select.querySelectorAll("option").find((option) => option.getAttribute("value") === selectedPath)?.getAttribute("disabled"), "");
+      button(surface.content, "Review placement").click();
+      await settle();
+      assert.deepEqual(harness.drafts, []);
+      assert.match(surface.content.textContent, /subheading is unavailable/u);
+    }
+  }
+});
 
 test("a 250k-node search indexes once and queries in one bounded pass", () => {
   const children = notes(250_000, "Vault/Large");
@@ -543,6 +899,27 @@ test("ArrowRight reaches a child that begins the next normal or search page", as
   );
 });
 
+test("custom bulk destinations hydrate their Index parents and retain them on refresh", async () => {
+  const selected = notes(2);
+  const harness = hostHarness(selected, [BASE, SECOND_BASE]);
+  const requests: string[][] = [];
+  harness.host.getBases = (ids) => {
+    requests.push([...(ids ?? [])]);
+    return [BASE, SECOND_BASE];
+  };
+  const surface = await openModal(harness.host, selected.map((note) => note.path));
+  button(surface.content, "Choose destinations").click();
+  const behavior = selectByLabel(surface.content, "Behavior for Topic 00000");
+  behavior.value = "custom";
+  behavior.dispatch("change");
+  button(surface.content, "Add custom knowledge base").click();
+  await settle();
+  assert.deepEqual(new Set(requests.at(-1)), new Set([BASE.id, SECOND_BASE.id]));
+  assert.match(surface.content.ownerDocument.activeElement?.getAttribute("data-organizer-focus") ?? "", /custom-.*-base$/u);
+  await surface.modal.refreshAfterExternalChange();
+  assert.deepEqual(new Set(requests.at(-1)), new Set([BASE.id, SECOND_BASE.id]), "a custom-only base keeps its parent options after Sync refresh");
+});
+
 test("draft validation preserves exact primary and collection heading targets", () => {
   const selected = new Set(["Knowledge Base/ENT/Laryngomalacia.md"]);
   const destination = {
@@ -664,6 +1041,7 @@ test("current-base text and full destination rerenders restore deterministic foc
   assert.match(baseSelect.textContent, /ENT knowledge base — Current/u);
 
   button(surface.content, "Add knowledge base").click();
+  await settle();
   assert.equal(surface.content.ownerDocument.activeElement?.getAttribute("data-organizer-focus"), "field:shared-2-base");
   const destinationRemovers = surface.content.querySelectorAll("button").filter((candidate) => (
     candidate.getAttribute("aria-label") === "Remove this knowledge base destination"

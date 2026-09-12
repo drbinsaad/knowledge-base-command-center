@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createDefaultStore,
+  cleanPortableIndex,
   createKnowledgeBaseEntry,
   DEFAULT_DATA,
   DEFAULT_SETTINGS,
   MAX_TRANSFER_LIST_ITEMS,
+  MAX_CURRICULUM_DEPTH,
+  portablePlaceholderPath,
   semanticEntryFingerprint,
   type KnowledgeBaseEntry,
   type LayoutHeading,
@@ -18,6 +21,7 @@ import {
   createNoteOrganizerPlan,
   type NoteOrganizerDirective,
   type NoteOrganizerFileFact,
+  type NoteOrganizerIndexPlacementFact,
   type NoteOrganizerPlan,
 } from "../src/note-organizer.ts";
 
@@ -167,6 +171,200 @@ function addSubject(
 function clonePlan(plan: Readonly<NoteOrganizerPlan>): NoteOrganizerPlan {
   return structuredClone(plan);
 }
+
+function indexPlacement(parentPath: string | null, overrides: Partial<NoteOrganizerIndexPlacementFact> = {}): NoteOrganizerIndexPlacementFact {
+  return {
+    currentParentPath: null,
+    currentParentLabel: "",
+    hasChildren: false,
+    target: parentPath ? { path: parentPath, label: "Heading / Parent", groupTitle: "Topics", ancestorPaths: [] } : null,
+    ...overrides,
+  };
+}
+
+test("explicit Index parent places only the selected leaf with breadcrumb review and exact durable Undo", () => {
+  const base = entry("base-a", "Alpha");
+  const path = "Vault/Leaf.md";
+  const oldParent = "Vault/Old parent.md";
+  const parent = "Vault/Parent.md";
+  addSubject(base.data, path, { id: "leaf", indexed: true, groupTitle: "Topics" });
+  addSubject(base.data, parent, { id: "parent", indexed: true, groupTitle: "Topics" });
+  base.data.portableIndex.subjects.find((subject) => subject.id === "leaf")!.parentId = "old-parent";
+  base.data.curriculumVisual.parentByPath[path] = oldParent;
+  base.data.curriculumVisual.parentByPath["Vault/Sibling.md"] = oldParent;
+  base.data.curriculumVisual.orderByContainer[`parent:${oldParent}`] = ["Vault/First.md", path, "Vault/Sibling.md"];
+  base.data.curriculumVisual.orderByContainer[`parent:${parent}`] = ["Vault/Existing.md"];
+  const store = storeWith([base]);
+  const before = structuredClone(store);
+  const facts = [fact("base-a", path, { indexPlacement: indexPlacement(parent, { currentParentPath: oldParent, currentParentLabel: "Old heading / Old parent" }) })];
+  const directives: NoteOrganizerDirective[] = [{ baseId: "base-a", path, primary: { mode: "index", groupTitle: "Topics", parentPath: parent } }];
+  const plan = createNoteOrganizerPlan(store, facts, directives, { now: 910, expectedExternalGeneration: 3 });
+  assert.equal(plan.diffs.length, 1);
+  assert.match(plan.diffs[0].primaryChange!, /Old heading \/ Old parent.*Heading \/ Parent/u);
+  assert.equal(plan.reviews[0].after.primary.kind === "index" && plan.reviews[0].after.primary.parentPath, parent);
+  const applied = applyNoteOrganizerPlan(store, plan, facts, 3);
+  const after = applied.bases[0].data;
+  assert.equal(after.portableIndex.subjects.find((subject) => subject.id === "leaf")!.parentId, "parent");
+  assert.equal(cleanPortableIndex(after.portableIndex).subjects.find((subject) => subject.id === "leaf")!.parentId, "parent", "parent edge survives persisted-model normalization even with duplicate group titles");
+  assert.equal(after.curriculumVisual.parentByPath[path], parent);
+  assert.equal(after.curriculumVisual.parentByPath["Vault/Sibling.md"], oldParent);
+  assert.deepEqual(after.curriculumVisual.orderByContainer[`parent:${oldParent}`], ["Vault/First.md", "Vault/Sibling.md"]);
+  assert.deepEqual(after.curriculumVisual.orderByContainer[`parent:${parent}`], ["Vault/Existing.md"]);
+  const undo = after.undoStack.at(-1)!;
+  assert.deepEqual(undo.curriculumVisual, before.bases[0].data.curriculumVisual);
+  assert.deepEqual(undo.portableIndex, before.bases[0].data.portableIndex);
+  assert.deepEqual(store, before, "preparation and Apply never mutate caller state");
+});
+
+test("explicit Index root detaches a selected leaf and exact parent choice preserves hidden state without Undo", () => {
+  const base = entry("base-a", "Alpha");
+  const path = "Vault/Leaf.md";
+  const parent = "Vault/Parent.md";
+  addSubject(base.data, path, { id: "leaf", indexed: true, groupTitle: "Topics" });
+  addSubject(base.data, parent, { id: "parent", indexed: true, groupTitle: "Topics" });
+  base.data.portableIndex.subjects.find((subject) => subject.id === "leaf")!.parentId = "parent";
+  base.data.curriculumVisual.parentByPath[path] = parent;
+  base.data.curriculumVisual.orderByContainer[`parent:${parent}`] = [path, "Vault/Sibling.md"];
+  const store = storeWith([base]);
+  const exactFacts = [fact("base-a", path, { indexPlacement: indexPlacement(parent, { currentParentPath: parent, currentParentLabel: "Heading / Parent" }) })];
+  const exact = createNoteOrganizerPlan(store, exactFacts, [{ baseId: "base-a", path, primary: { mode: "index", groupTitle: "Topics", parentPath: parent } }]);
+  assert.equal(exact.operations.length, 0);
+  assert.deepEqual(applyNoteOrganizerPlan(store, exact, exactFacts, 0), store);
+  const rootFacts = [fact("base-a", path, { indexPlacement: indexPlacement(null, { currentParentPath: parent, currentParentLabel: "Heading / Parent" }) })];
+  const root = createNoteOrganizerPlan(store, rootFacts, [{ baseId: "base-a", path, primary: { mode: "index", groupTitle: "Topics", parentPath: null } }]);
+  const after = applyNoteOrganizerPlan(store, root, rootFacts, 0).bases[0].data;
+  assert.equal(after.curriculumVisual.parentByPath[path], null);
+  assert.equal(after.portableIndex.subjects.find((subject) => subject.id === "leaf")!.parentId, null);
+  assert.deepEqual(after.curriculumVisual.orderByContainer[`parent:${parent}`], ["Vault/Sibling.md"]);
+});
+
+test("an unresolved portable Index placeholder is a valid destination, never a selected Markdown source", () => {
+  const base = entry("base-a", "Alpha");
+  const path = "Vault/Leaf.md";
+  const parent = portablePlaceholderPath("placeholder-parent");
+  addSubject(base.data, parent, { id: "placeholder-parent", indexed: true, groupTitle: "Topics" });
+  delete base.data.portableIndex.resolvedPathBySubjectId["placeholder-parent"];
+  const store = storeWith([base]);
+  const facts = [fact("base-a", path, { indexPlacement: indexPlacement(parent) })];
+  const directives: NoteOrganizerDirective[] = [{ baseId: "base-a", path, primary: { mode: "index", groupTitle: "Topics", parentPath: parent } }];
+  const plan = createNoteOrganizerPlan(store, facts, directives);
+  const after = applyNoteOrganizerPlan(store, plan, facts, 0).bases[0].data;
+  assert.equal(after.portableIndex.subjects.find((subject) => after.portableIndex.resolvedPathBySubjectId[subject.id] === path)?.parentId, "placeholder-parent");
+  assert.equal(after.curriculumVisual.parentByPath[path], parent);
+  assert.throws(() => createNoteOrganizerPlan(store, [fact("base-a", parent)], [{ baseId: "base-a", path: parent, primary: { mode: "index" } }]), /Markdown/u);
+  for (const update of ["removed", "resolved", "non-index"] as const) {
+    const changed = structuredClone(base);
+    if (update === "removed") changed.data.portableIndex.subjects = [];
+    if (update === "resolved") changed.data.portableIndex.resolvedPathBySubjectId["placeholder-parent"] = "Vault/Linked.md";
+    if (update === "non-index") changed.data.portableIndex.subjects[0].indexed = false;
+    assert.throws(() => createNoteOrganizerPlan(storeWith([changed]), facts, directives), /placeholder parent|incompatible portable placement/u);
+  }
+});
+
+test("explicit parent rejects missing facts, mismatched destination, cycles, cross-group and excessive depth", () => {
+  const store = storeWith([entry("base-a", "Alpha")]);
+  const path = "Vault/Leaf.md";
+  const parent = "Vault/Parent.md";
+  const directive: NoteOrganizerDirective = { baseId: "base-a", path, primary: { mode: "index", groupTitle: "Topics", parentPath: parent } };
+  assert.throws(() => createNoteOrganizerPlan(store, [fact("base-a", path)], [directive]), /Fresh Index hierarchy facts/u);
+  const target = indexPlacement(parent).target!;
+  const cases: Array<[NoteOrganizerIndexPlacementFact, RegExp]> = [
+    [indexPlacement(null), /no longer matches/u],
+    [indexPlacement(path), /no longer matches/u],
+    [indexPlacement(parent, { target: { ...target, ancestorPaths: [path] } }), /itself or its descendants/u],
+    [indexPlacement(parent, { target: { ...target, ancestorPaths: [parent] } }), /cycle/u],
+    [indexPlacement(parent, { target: { ...target, groupTitle: "Other" } }), /parent’s group/u],
+    [indexPlacement(parent, { target: { ...target, ancestorPaths: Array.from({ length: MAX_CURRICULUM_DEPTH - 1 }, (_, index) => `Vault/Ancestor${index}.md`) } }), /hierarchy limit/u],
+  ];
+  for (const [placement, error] of cases) {
+    assert.throws(() => createNoteOrganizerPlan(store, [fact("base-a", path, { indexPlacement: placement })], [directive]), error);
+  }
+  assert.throws(() => createNoteOrganizerPlan(store, [fact("base-a", path, { indexPlacement: indexPlacement(path) })], [{ ...directive, primary: { mode: "index", groupTitle: "Topics", parentPath: path } }]), /itself or its descendants/u);
+});
+
+test("explicit parent never implicitly moves effective, portable or visual child subtrees", () => {
+  const path = "Vault/Leaf.md";
+  const parent = "Vault/Parent.md";
+  for (const source of ["effective", "portable", "visual", "order"] as const) {
+    const base = entry("base-a", "Alpha");
+    addSubject(base.data, path, { id: "leaf", indexed: true, groupTitle: "Topics" });
+    if (source === "portable") {
+      addSubject(base.data, "Vault/Child.md", { id: "child", indexed: true, groupTitle: "Topics" });
+      base.data.portableIndex.subjects.find((subject) => subject.id === "child")!.parentId = "leaf";
+    }
+    if (source === "visual") base.data.curriculumVisual.parentByPath["Vault/Child.md"] = path;
+    if (source === "order") base.data.curriculumVisual.orderByContainer[`parent:${path}`] = ["Vault/Child.md"];
+    const store = storeWith([base]);
+    const before = structuredClone(store);
+    assert.throws(() => createNoteOrganizerPlan(store, [fact("base-a", path, { indexPlacement: indexPlacement(parent, { hasChildren: source === "effective" }) })], [{ baseId: "base-a", path, primary: { mode: "index", groupTitle: "Topics", parentPath: parent } }]), /dependent.*will not silently change related notes/u);
+    assert.deepEqual(store, before);
+  }
+});
+
+test("explicit parent cannot bypass protected clinical eligibility or source group", () => {
+  const base = entry("base-a", "ENT", "ent-clinical");
+  const path = "Vault/Leaf.md";
+  const parent = "Vault/Parent.md";
+  const store = storeWith([base]);
+  const directive: NoteOrganizerDirective = { baseId: "base-a", path, primary: { mode: "index", groupTitle: "Topics", parentPath: parent } };
+  assert.throws(() => createNoteOrganizerPlan(store, [fact("base-a", path, { indexPlacement: indexPlacement(parent) })], [directive]), /cannot enter the protected/u);
+  assert.throws(() => createNoteOrganizerPlan(store, [fact("base-a", path, { indexEligible: true, suggestedIndexGroup: "Pediatric", indexPlacement: indexPlacement(parent) })], [directive]), /Protected clinical grouping/u);
+});
+
+test("explicit linked-folder placement discloses durable enrollment and never changes folder authority", () => {
+  const base = entry("base-a", "Alpha");
+  const path = "Vault/Leaf.md";
+  base.data.indexFolderSources = [{ id: "folder", path: "Vault", recursive: true, origin: "user" }];
+  const store = storeWith([base]);
+  const facts = [fact("base-a", path, { suggestedIndexGroup: "Topics", indexPlacement: indexPlacement(null) })];
+  const plan = createNoteOrganizerPlan(store, facts, [{ baseId: "base-a", path, primary: { mode: "index", groupTitle: "Topics", parentPath: null } }]);
+  assert.equal(plan.diffs.length, 1);
+  assert.equal(plan.diffs[0].primaryChange, null);
+  assert.equal(plan.diffs[0].portableIdentity, "created");
+  const after = applyNoteOrganizerPlan(store, plan, facts, 0).bases[0].data;
+  assert.ok(after.directIndexPaths.includes(path));
+  assert.deepEqual(after.indexFolderSources, base.data.indexFolderSources);
+});
+
+test("Apply revalidates exact parent and ancestor facts alongside Sync and destination-base guards", () => {
+  const base = entry("base-a", "Alpha");
+  const path = "Vault/Leaf.md";
+  const parent = "Vault/Parent.md";
+  const store = storeWith([base]);
+  const facts = [fact("base-a", path, { indexPlacement: indexPlacement(parent) })];
+  const directives: NoteOrganizerDirective[] = [{ baseId: "base-a", path, primary: { mode: "index", groupTitle: "Topics", parentPath: parent } }];
+  const plan = createNoteOrganizerPlan(store, facts, directives, { expectedExternalGeneration: 4 });
+  for (const update of ["parent", "ancestor", "children", "label"] as const) {
+    const changed = structuredClone(facts);
+    const placement = changed[0].indexPlacement!;
+    if (update === "parent") placement.target!.path = "Vault/Replacement.md";
+    if (update === "ancestor") placement.target!.ancestorPaths = ["Vault/Ancestor.md"];
+    if (update === "children") placement.hasChildren = true;
+    if (update === "label") placement.target!.label = "Changed parent";
+    assert.throws(() => applyNoteOrganizerPlan(store, plan, changed, 4), /changed, moved, disappeared, or were reclassified/u);
+  }
+  assert.throws(() => applyNoteOrganizerPlan(store, plan, facts, 5), /Synced plugin data changed/u);
+  const changedStore = structuredClone(store);
+  changedStore.bases[0].data.indexGroupOrder.push("Changed destination");
+  assert.throws(() => applyNoteOrganizerPlan(changedStore, plan, facts, 4), /changed after/u);
+});
+
+test("a parent or ancestor primary change cannot share its child's explicit placement plan", () => {
+  const base = entry("base-a", "Alpha");
+  const path = "Vault/Leaf.md";
+  const parent = "Vault/Parent.md";
+  const ancestor = "Vault/Ancestor.md";
+  const store = storeWith([base]);
+  for (const related of [parent, ancestor]) {
+    const placement = indexPlacement(parent);
+    placement.target!.ancestorPaths = [ancestor];
+    const facts = [fact("base-a", path, { indexPlacement: placement }), fact("base-a", related)];
+    assert.throws(() => createNoteOrganizerPlan(store, facts, [
+      { baseId: "base-a", path, primary: { mode: "index", groupTitle: "Topics", parentPath: parent } },
+      { baseId: "base-a", path: related, primary: { mode: "none" } },
+    ]), /parent or ancestor cannot be reorganized/u);
+  }
+});
 
 test("one exact plan organizes many notes across many bases without touching source or active-base state", () => {
   const first = entry("base-a", "Alpha");

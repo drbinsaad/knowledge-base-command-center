@@ -51,7 +51,7 @@ async function refresh(page: Page, replaceData = false): Promise<void> {
   await page.evaluate((replace) => (window as unknown as { kbccBrowserHarness: { refresh(replaceData: boolean): Promise<void> } }).kbccBrowserHarness.refresh(replace), replaceData);
 }
 
-async function openModal(page: Page, kind: "note" | "setup" | "export" | "sync" | "organizer" | "whats-new"): Promise<void> {
+async function openModal(page: Page, kind: "note" | "setup" | "export" | "sync" | "organizer" | "quick-organizer" | "whats-new"): Promise<void> {
   await page.evaluate((value) => (window as unknown as { kbccBrowserHarness: { openModal(kind: string): void } }).kbccBrowserHarness.openModal(value), kind);
   await expect(page.getByRole("dialog")).toBeVisible();
 }
@@ -88,6 +88,193 @@ function settingsRow(page: Page, name: string) {
 
 async function settingsSnapshot(page: Page): Promise<{ reviews: string[]; unlinked: string[]; kept: string[]; saves: number }> {
   return page.evaluate(() => (window as unknown as { kbccBrowserHarness: { settingsSnapshot(): { reviews: string[]; unlinked: string[]; kept: string[]; saves: number } } }).kbccBrowserHarness.settingsSnapshot());
+}
+
+interface QuickOrganizerSnapshot {
+  prepared: number;
+  applied: number;
+  unchanged: boolean;
+  parent: string | null;
+  group: string;
+  undoCount: number;
+  activeBase: string;
+  parents: Record<string, string | null>;
+  collections: string[];
+  secondBase: string;
+}
+
+async function quickOrganizerSnapshot(page: Page): Promise<QuickOrganizerSnapshot> {
+  return page.evaluate(() => (window as unknown as { kbccBrowserHarness: { quickOrganizerSnapshot(): QuickOrganizerSnapshot } }).kbccBrowserHarness.quickOrganizerSnapshot());
+}
+
+for (const device of [
+    { name: "iPhone390", width: 390, height: 844, mobile: true },
+    { name: "iPad1180", width: 1180, height: 820, mobile: true },
+    { name: "desktop1440", width: 1440, height: 960, mobile: false },
+]) {
+  test.describe(`single-note quick Organizer ${device.name}`, () => {
+    test.use({ hasTouch: device.mobile });
+    test("exact two-step placement, searchable parent, Back and real engine save", async ({ page }) => {
+      await openView(page, { ...device, count: 8 });
+      await openModal(page, "quick-organizer");
+      const dialog = page.getByRole("dialog", { name: "Organize this note", exact: true });
+      const original = await quickOrganizerSnapshot(page);
+      await expect(dialog.locator(".ent-cc-note-organizer-progress-step")).toHaveCount(2);
+      await expect(dialog.locator(".ent-cc-note-organizer-progress-step").first()).toContainText("Choose location");
+      await expect(dialog.getByRole("heading", { name: "Selected research note", exact: true })).toBeVisible();
+      await expect(dialog.getByRole("button", { name: "Choose destinations", exact: true })).toHaveCount(0);
+      await expect(dialog.getByRole("button", { name: "Add knowledge base", exact: true })).toHaveCount(0);
+      await expect(dialog.getByRole("combobox", { name: "Action", exact: true })).toHaveCount(0);
+      await expect(dialog.locator(".ent-cc-note-organizer-card-header")).toHaveCSS("display", "none");
+      expect(await dialog.locator("[hidden]").evaluateAll((elements) => elements.every((element) => element.getBoundingClientRect().height === 0))).toBe(true);
+      const base = dialog.getByRole("combobox", { name: "Knowledge base", exact: true });
+      const mode = dialog.getByRole("combobox", { name: "Place in", exact: true });
+      const heading = dialog.getByRole("combobox", { name: "Index heading", exact: true });
+      const parent = dialog.getByRole("combobox", { name: "Under heading or note", exact: true });
+      await expect(mode).toHaveValue("index");
+      await expect(heading).toHaveValue("General");
+      await expect(parent).toHaveValue("");
+      expect((await dialog.boundingBox())?.width).toBeLessThanOrEqual(720);
+      await captureEvidence(page, `quick-location-${device.name}`);
+
+      // A real asynchronous base reload must return focus to the live select.
+      await base.focus();
+      await base.selectOption("quick-second-base");
+      await expect(base).toBeFocused();
+      await base.selectOption(original.activeBase);
+      await expect(base).toBeFocused();
+      await heading.focus();
+      await heading.selectOption("Research");
+      await expect(heading).toBeFocused();
+      const search = dialog.getByRole("searchbox", { name: "Find a heading or note", exact: true });
+      await expect(parent.locator("option")).toHaveCount(18);
+      await search.fill("Methods");
+      await expect(search).toBeFocused();
+      await expect(parent.locator("option")).toHaveCount(2);
+      await page.keyboard.press("Tab");
+      await expect(parent).toBeFocused();
+      await parent.selectOption("Research/Methods.md");
+      await expect(parent).toBeFocused();
+      await expect(parent.locator("option:checked")).toHaveText("Evidence / Study design / Methods");
+      await search.fill("unmatched filter");
+      await expect(parent).toHaveValue("Research/Methods.md");
+      await expect(dialog.getByRole("status")).toContainText(["0 matching locations. Your current selection is kept."]);
+      await search.fill("Methods");
+      for (const control of [mode, heading, search, parent, dialog.getByRole("button", { name: "Review placement", exact: true })]) {
+        const rect = await control.boundingBox();
+        expect(rect?.height, "Organizer control remains a 44px target").toBeGreaterThanOrEqual(44);
+        expect(rect?.width).toBeGreaterThanOrEqual(44);
+      }
+      await parent.scrollIntoViewIfNeeded();
+      await captureEvidence(page, `quick-parent-${device.name}`);
+      if (device.mobile) {
+        // This is a reduced browser viewport, not a physical iOS keyboard.
+        // Verify the editor remains operable when keyboard-sized space is lost.
+        await search.focus();
+        await page.setViewportSize({ width: device.width, height: device.height - 300 });
+        await expect(search).toBeFocused();
+        await parent.scrollIntoViewIfNeeded();
+        expect(await parent.evaluate((element) => {
+          const rect = element.getBoundingClientRect();
+          const panel = element.closest(".ent-cc-note-organizer-panel")!.getBoundingClientRect();
+          return rect.top >= panel.top - 1 && rect.bottom <= panel.bottom + 1;
+        }), "Parent control remains reachable in a reduced viewport").toBe(true);
+        const footerBounds = await dialog.locator(".ent-cc-note-organizer-footer").boundingBox();
+        expect((footerBounds?.y ?? 0) + (footerBounds?.height ?? 0)).toBeLessThanOrEqual(device.height - 300);
+        await page.setViewportSize({ width: device.width, height: device.height });
+        await expect(parent).toHaveValue("Research/Methods.md");
+      }
+      expect((await quickOrganizerSnapshot(page)).unchanged).toBe(true);
+      const review = dialog.getByRole("button", { name: "Review placement", exact: true });
+      await review.scrollIntoViewIfNeeded();
+      await clickRenderedCenter(page, review, device.mobile);
+      await expect(dialog.getByRole("heading", { name: "Review exact organization changes", exact: true })).toBeFocused();
+      await expect(dialog.locator(".ent-cc-note-organizer-review-row")).toHaveCount(1);
+      await expect(dialog.getByText("Primary: Index — General / Heading root", { exact: true })).toBeVisible();
+      await expect(dialog.getByText("Primary: Index — Research / Evidence / Study design / Methods", { exact: true })).toBeVisible();
+      await expect(dialog.getByText("0 files moved · 0 files renamed · 0 Markdown files rewritten · 0 folder links changed", { exact: true })).toBeVisible();
+      expect((await quickOrganizerSnapshot(page)).unchanged).toBe(true);
+      const afterLocation = dialog.getByText("Primary: Index — Research / Evidence / Study design / Methods", { exact: true });
+      await afterLocation.scrollIntoViewIfNeeded();
+      expect(await afterLocation.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        const panel = element.closest(".ent-cc-note-organizer-panel")!.getBoundingClientRect();
+        return rect.top >= panel.top - 1 && rect.bottom <= panel.bottom + 1;
+      }), "Exact destination can be read above the pinned footer before Save").toBe(true);
+      await captureEvidence(page, `quick-review-${device.name}`);
+      await dialog.getByRole("button", { name: "Back to destinations", exact: true }).click();
+      await expect(parent).toHaveValue("Research/Methods.md");
+      await expect(search).toHaveValue("Methods");
+      await expect(dialog.getByRole("heading", { name: "Selected research note", exact: true })).toBeFocused();
+      await review.click();
+      const save = dialog.getByRole("button", { name: "Save organization", exact: true });
+      await expect(save).toBeEnabled();
+      await save.scrollIntoViewIfNeeded();
+      await clickRenderedCenter(page, save, device.mobile);
+      await expect(dialog).toHaveCount(0);
+      const saved = await quickOrganizerSnapshot(page);
+      expect(saved).toMatchObject({ prepared: 2, applied: 1, unchanged: false, parent: "Research/Methods.md", group: "Research", undoCount: 1, activeBase: original.activeBase });
+      expect(saved.parents).toEqual(original.parents);
+      expect(saved.secondBase).toBe(original.secondBase);
+      expect(saved.collections).toEqual([]);
+
+      // Reopening seeds the exact saved parent, and a no-op closes without
+      // applying another candidate or adding another Undo snapshot.
+      await openModal(page, "quick-organizer");
+      await expect(heading).toHaveValue("Research");
+      await expect(parent).toHaveValue("Research/Methods.md");
+      await review.click();
+      const done = dialog.getByRole("button", { name: "Done — no changes needed", exact: true });
+      await expect(done).toBeEnabled();
+      await done.click();
+      await expect(dialog).toHaveCount(0);
+      expect(await quickOrganizerSnapshot(page)).toMatchObject({ prepared: 3, applied: 1, undoCount: 1 });
+    });
+
+    test("advanced Collections and other bases remain reachable and exact", async ({ page }) => {
+      await openView(page, { ...device, count: 8 });
+      await openModal(page, "quick-organizer");
+      const dialog = page.getByRole("dialog", { name: "Organize this note", exact: true });
+      const original = await quickOrganizerSnapshot(page);
+      const advanced = dialog.getByRole("button", { name: "More options: Collections and other bases", exact: true });
+      await expect(advanced).toHaveAttribute("aria-expanded", "false");
+      await advanced.focus();
+      await page.keyboard.press("Enter");
+      const hideAdvanced = dialog.getByRole("button", { name: "Hide advanced options", exact: true });
+      await expect(hideAdvanced).toHaveAttribute("aria-expanded", "true");
+      await expect(hideAdvanced).toBeFocused();
+      await dialog.getByRole("button", { name: "Add knowledge base", exact: true }).click();
+      await expect(dialog.getByRole("combobox", { name: "Knowledge base", exact: true })).toHaveCount(2);
+      await dialog.getByRole("combobox", { name: "Knowledge base", exact: true }).nth(1).selectOption("quick-second-base");
+      await dialog.getByRole("button", { name: "Remove this knowledge base destination", exact: true }).nth(1).click();
+      await expect(dialog.getByRole("combobox", { name: "Knowledge base", exact: true })).toHaveCount(1);
+      await dialog.getByRole("combobox", { name: "Action", exact: true }).selectOption("add");
+      await dialog.getByRole("button", { name: "Add target", exact: true }).click();
+      await expect(dialog.getByRole("combobox", { name: "Collection", exact: true })).toHaveValue("quick-reading");
+      await expect(dialog.getByRole("combobox", { name: "Collection", exact: true })).toBeFocused();
+      await hideAdvanced.click();
+      // A non-default Collection draft must remain visible, never silently
+      // disappear when the optional controls are collapsed.
+      await expect(dialog.getByRole("combobox", { name: "Collection", exact: true })).toBeVisible();
+      await expect(dialog.getByRole("button", { name: "Add knowledge base", exact: true })).toHaveCount(0);
+      expect((await quickOrganizerSnapshot(page)).unchanged).toBe(true);
+      const review = dialog.getByRole("button", { name: "Review placement", exact: true });
+      await review.scrollIntoViewIfNeeded();
+      await captureEvidence(page, `quick-advanced-${device.name}`);
+      await clickRenderedCenter(page, review, device.mobile);
+      await expect(dialog.locator(".ent-cc-note-organizer-review-row")).toHaveCount(1);
+      await expect(dialog.getByText("Collections: Reading this week", { exact: true })).toBeVisible();
+      const save = dialog.getByRole("button", { name: "Save organization", exact: true });
+      await save.scrollIntoViewIfNeeded();
+      await clickRenderedCenter(page, save, device.mobile);
+      await expect(dialog).toHaveCount(0);
+      const saved = await quickOrganizerSnapshot(page);
+      expect(saved).toMatchObject({ prepared: 1, applied: 1, parent: null, group: "General", undoCount: 1, collections: ["Reading this week"] });
+      expect(saved.parents).toEqual(original.parents);
+      expect(saved.secondBase).toBe(original.secondBase);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
+    });
+  });
 }
 
 async function mobileBrowseGeometry(page: Page) {
@@ -560,19 +747,22 @@ for (const scenario of [
 
 for (const mobile of [false, true]) {
   const viewport = mobile ? "mobile" : "desktop";
-  test(`production 0.20.1 update announcement ${viewport}: readable news and reachable actions`, async ({ page }, testInfo) => {
+  test(`production 0.21.0 update announcement ${viewport}: readable news and reachable actions`, async ({ page }, testInfo) => {
     await openView(page, { mobile, count: 8 });
     await openModal(page, "whats-new");
-    const dialog = page.getByRole("dialog", { name: "What’s new in Knowledge Base Command Center 0.20.1", exact: true });
-    await expect(dialog).toHaveAccessibleDescription("More room for notes, with navigation and search within reach while browsing compact mobile views.");
-    const body = dialog.getByRole("region", { name: "Version 0.20.1 highlights", exact: true });
-    await expect(body.getByRole("listitem")).toHaveCount(4);
-    await expect(body).toContainText("Tabs and Search/Filters stay visible while browsing");
-    await expect(body).toContainText("bounded, scrollable panel");
-    const link = dialog.getByRole("link", { name: "Read the complete 0.20.1 release notes on GitHub (opens in your browser)", exact: true });
+    const dialog = page.getByRole("dialog", { name: "What’s new in Knowledge Base Command Center 0.21.0", exact: true });
+    await expect(dialog).toHaveAccessibleDescription("A compact workspace for iPad and a shorter path from an open note to its exact place in your knowledge base.");
+    const body = dialog.getByRole("region", { name: "Version 0.21.0 highlights", exact: true });
+    await expect(body.getByRole("listitem")).toHaveCount(5);
+    await expect(body).toContainText("iPad keeps the compact, single-column workspace at every width");
+    await expect(body).toContainText("Choose location → Review → Save organization");
+    await expect(body).toContainText("including nested notes and unresolved placeholder parents");
+    await expect(body).toContainText("Done — no changes needed");
+    await expect(body).toContainText("organizing never moves or rewrites Markdown");
+    const link = dialog.getByRole("link", { name: "Read the complete 0.21.0 release notes on GitHub (opens in your browser)", exact: true });
     const continueButton = dialog.getByRole("button", { name: "Continue", exact: true });
     await expect(link).toHaveText("Read complete release notes");
-    await expect(link).toHaveAttribute("href", "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.20.1");
+    await expect(link).toHaveAttribute("href", "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.21.0");
     await expect(link).toHaveAttribute("target", "_blank");
     await expect(link).toHaveAttribute("rel", "noopener noreferrer");
     for (const action of [link, continueButton]) {
@@ -580,10 +770,11 @@ for (const mobile of [false, true]) {
       expect(await action.evaluate((element) => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
     }
     expect(await dialog.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
-    await captureEvidence(page, `whats-new-0.20.1-${viewport}`);
+    await captureEvidence(page, `whats-new-0.21.0-${viewport}`);
     await body.getByRole("listitem").last().scrollIntoViewIfNeeded();
-    await expect(body.getByRole("listitem").last()).toBeInViewport();
+    await expect(body.getByRole("listitem").last()).toBeInViewport({ ratio: 1 });
     await expect(continueButton).toBeInViewport();
+    await captureEvidence(page, `whats-new-0.21.0-${viewport}-last-highlight`);
     await link.focus();
     await page.keyboard.press(testInfo.project.name === "webkit" ? "Alt+Tab" : "Tab");
     await expect(continueButton).toBeFocused();
@@ -686,6 +877,171 @@ for (const mobile of [false, true]) {
     }
   });
 }
+
+test.describe("iPad compact browsing", () => {
+  test.use({ hasTouch: true });
+
+  for (const size of [
+    { width: 1366, height: 1024 },
+    { width: 1180, height: 820 },
+    { width: 1024, height: 1366 },
+    { width: 600, height: 820 },
+  ]) {
+    test(`iPad ${size.width}x${size.height}: full-width notes and sticky controls stay usable`, async ({ page }, testInfo) => {
+      await openView(page, { mobile: true, count: 80, ...size });
+      const leaf = page.locator("#kbcc-view");
+      await expect(leaf).toHaveAttribute("data-pane-layout", size.width < 680 ? "narrow" : "compact");
+      await expect(page.locator(".ent-cc-shell")).toHaveClass(/is-mobile-browse/u);
+      const details = page.locator(".ent-cc-workspace-options");
+      await expect(details).not.toHaveAttribute("open");
+      await expect(details.locator(":scope > summary")).toHaveText("Details");
+      await expect(page.getByRole("heading", { name: "Research workspace", exact: true })).toBeHidden();
+      await expect(page.locator(".ent-cc-inspector")).toHaveCount(0);
+      const firstViewport = await mobileBrowseGeometry(page);
+      await testInfo.attach("ipad-first-viewport", { body: JSON.stringify(firstViewport, null, 2), contentType: "application/json" });
+      expect(firstViewport.fullyVisibleRows.length).toBeGreaterThanOrEqual(8);
+      expect(firstViewport.usableHeight).toBeGreaterThan(size.height / 2);
+      expect(firstViewport.documentOverflow).toBeLessThanOrEqual(1);
+      await captureEvidence(page, `ipad-first-${size.width}x${size.height}`);
+
+      const workspace = page.locator(".ent-cc-workspace");
+      await workspace.evaluate((owner) => { owner.scrollTop = owner.scrollHeight; });
+      const before = await workspace.evaluate((owner) => owner.scrollTop);
+      expect(before).toBeGreaterThan(500);
+      const geometry = await workspace.evaluate((owner) => {
+        const leaf = owner.closest(".ent-cc-view")!.getBoundingClientRect();
+        const tree = owner.querySelector<HTMLElement>(".ent-cc-tree-panel")!;
+        const toolbar = owner.querySelector(".ent-cc-mobile-toolbar")!.getBoundingClientRect();
+        const controls = ['.ent-cc-tab[aria-selected="true"]', '.ent-cc-search-box input[type="search"]', ".ent-cc-mobile-filters > summary"].map((selector) => {
+          const element = owner.querySelector(selector)!;
+          const rect = element.getBoundingClientRect();
+          return { top: rect.top, bottom: rect.bottom, height: rect.height, hit: element.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)) };
+        });
+        return { leafTop: leaf.top, leafBottom: leaf.bottom, leafWidth: leaf.width, treeWidth: tree.getBoundingClientRect().width, overflowY: getComputedStyle(owner).overflowY, treeOverflowY: getComputedStyle(tree).overflowY, toolbarTop: toolbar.top, toolbarHeight: toolbar.height, headerBottom: owner.querySelector(".ent-cc-header")!.getBoundingClientRect().bottom, controls };
+      });
+      await testInfo.attach("ipad-sticky-geometry", { body: JSON.stringify(geometry, null, 2), contentType: "application/json" });
+      expect(geometry.treeWidth).toBeGreaterThanOrEqual(geometry.leafWidth - 1);
+      expect(geometry.overflowY).toBe("auto");
+      expect(geometry.treeOverflowY).toBe("visible");
+      expect(geometry.toolbarTop).toBeCloseTo(geometry.leafTop, 0);
+      expect(geometry.toolbarHeight).toBeLessThanOrEqual(144);
+      expect(geometry.headerBottom).toBeLessThanOrEqual(geometry.leafTop);
+      for (const control of geometry.controls) {
+        expect(control.top).toBeGreaterThanOrEqual(geometry.leafTop);
+        expect(control.bottom).toBeLessThanOrEqual(geometry.leafBottom);
+        expect(control.height).toBeGreaterThanOrEqual(44);
+        expect(control.hit).toBe(true);
+      }
+      await captureEvidence(page, `ipad-sticky-${size.width}x${size.height}`);
+      const filters = page.locator(".ent-cc-mobile-filters");
+      const summary = filters.locator(":scope > summary");
+      await clickRenderedCenter(page, summary, true);
+      await expect(filters).toHaveAttribute("open", "");
+      expect(await workspace.evaluate((owner) => owner.scrollTop)).toBeCloseTo(before, 0);
+      const panel = filters.locator(".ent-cc-mobile-filter-panel");
+      const panelBounds = await panel.boundingBox();
+      expect(panelBounds!.height).toBeGreaterThan(44);
+      expect(panelBounds!.height).toBeLessThanOrEqual(Math.min(322, size.height / 2));
+      expect(panelBounds!.y).toBeGreaterThanOrEqual(geometry.toolbarTop + geometry.toolbarHeight - 1);
+      expect(panelBounds!.y + panelBounds!.height).toBeLessThanOrEqual(geometry.leafBottom);
+      await expect(panel).toHaveCSS("overflow-y", "auto");
+      const saved = filters.getByRole("button", { name: "Saved", exact: true });
+      await saved.scrollIntoViewIfNeeded();
+      await saved.focus();
+      await expect(saved).toBeInViewport();
+      expect(await workspace.evaluate((owner) => owner.scrollTop)).toBeCloseTo(before, 0);
+      await captureEvidence(page, `ipad-filters-${size.width}x${size.height}`);
+      await page.keyboard.press("Escape");
+      await expect(filters).not.toHaveAttribute("open");
+      await expect(summary).toBeFocused();
+      expect(await workspace.evaluate((owner) => owner.scrollTop)).toBeCloseTo(before, 0);
+
+      const selected = page.getByRole("button", { name: /^Research note 079,/u });
+      await clickRenderedCenter(page, selected, true);
+      await expect(page.getByRole("heading", { name: "Research note 079", exact: true })).toBeVisible();
+      await expect(page.locator(".ent-cc-workspace")).toHaveCount(0);
+      const inspector = page.locator(".ent-cc-inspector");
+      await expect(inspector).toHaveAttribute("role", "dialog");
+      expect((await inspector.boundingBox())!.width).toBeGreaterThanOrEqual(geometry.leafWidth - 1);
+      const selectedPath = await page.evaluate(() => (window as unknown as { kbccBrowserHarness: { snapshot(): { selectedPath: string } } }).kbccBrowserHarness.snapshot().selectedPath);
+      expect(selectedPath).toBe("Research/Research note 079.md");
+      await captureEvidence(page, `ipad-detail-${size.width}x${size.height}`);
+      const back = page.getByRole("button", { name: "Back to main page", exact: true });
+      await expect(back).toBeFocused();
+      await refresh(page, true);
+      await clickRenderedCenter(page, back, true);
+      await expect(selected).toBeFocused();
+      await expect.poll(() => workspace.evaluate((owner) => owner.scrollTop)).toBeCloseTo(before, 0);
+      await expect(selected).toBeInViewport();
+      await captureEvidence(page, `ipad-back-${size.width}x${size.height}`);
+    });
+  }
+
+  test("iPad rotation and split view preserve active filters, query, scroll and inspector Back", async ({ page }) => {
+    await openView(page, { mobile: true, count: 80, width: 1024, height: 1366 });
+    const filters = page.locator(".ent-cc-mobile-filters");
+    const summary = filters.locator(":scope > summary");
+    await clickRenderedCenter(page, summary, true);
+    await page.getByRole("combobox", { name: "Search scope" }).selectOption("current");
+    await page.getByRole("combobox", { name: "Note availability" }).selectOption("linked");
+    const linkedFirst = page.getByRole("checkbox", { name: "Show linked notes first" });
+    await linkedFirst.check();
+    await linkedFirst.focus();
+    const workspace = page.locator(".ent-cc-workspace");
+    await workspace.evaluate((owner) => { owner.scrollTop = 600; });
+    for (const size of [{ width: 1366, height: 1024 }, { width: 600, height: 820 }, { width: 1024, height: 1366 }]) {
+      await page.setViewportSize(size);
+      await expect(page.locator("#kbcc-view")).toHaveAttribute("data-pane-layout", size.width < 680 ? "narrow" : "compact");
+      await expect(linkedFirst).toBeFocused();
+      await expect(linkedFirst).toBeChecked();
+      await expect(summary).toHaveText("Filters (3)");
+      await expect(filters).toHaveAttribute("open", "");
+      await expect(page.getByRole("combobox", { name: "Search scope" })).toHaveValue("current");
+      await expect(page.getByRole("combobox", { name: "Note availability" })).toHaveValue("linked");
+      await expect.poll(() => workspace.evaluate((owner) => owner.scrollTop)).toBeCloseTo(600, 0);
+    }
+    await page.keyboard.press("Escape");
+    const input = page.locator('.ent-cc-search-box input[type="search"]');
+    await input.fill("Research note");
+    // The fixture also has a Library note whose searchable context can match;
+    // require every intended Research row without assuming it is excluded.
+    await expect(page.getByRole("button", { name: /^Research note \d{3},/u })).toHaveCount(80);
+    await input.blur();
+    await expect(page.locator(".ent-cc-shell")).not.toHaveClass(/is-search-focused/u);
+    await workspace.evaluate((owner) => { owner.scrollTop = owner.scrollHeight; });
+    const before = await workspace.evaluate((owner) => owner.scrollTop);
+    const selected = page.getByRole("button", { name: /^Research note 079,/u });
+    await clickRenderedCenter(page, selected, true);
+    for (const size of [{ width: 1366, height: 1024 }, { width: 600, height: 820 }, { width: 1024, height: 1366 }]) {
+      await page.setViewportSize(size);
+      await expect(page.locator("#kbcc-view")).toHaveAttribute("data-pane-layout", size.width < 680 ? "narrow" : "compact");
+      await expect(page.locator(".ent-cc-inspector")).toHaveAttribute("role", "dialog");
+      await expect(page.locator(".ent-cc-workspace")).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Back to main page", exact: true })).toBeInViewport();
+    }
+    await clickRenderedCenter(page, page.getByRole("button", { name: "Back to main page", exact: true }), true);
+    await expect(selected).toBeFocused();
+    await expect(input).toHaveValue("Research note");
+    await expect(summary).toHaveText("Filters (3)");
+    await expect.poll(() => workspace.evaluate((owner) => owner.scrollTop)).toBeCloseTo(before, 0);
+    await captureEvidence(page, "ipad-rotation-back");
+  });
+});
+
+test("iPad routing leaves the 1440px desktop header and side inspector unchanged", async ({ page }) => {
+  await openView(page, { width: 1440, height: 960, count: 80 });
+  await expect(page.locator("#kbcc-view")).toHaveAttribute("data-pane-layout", "wide");
+  await expect(page.locator(".ent-cc-shell")).not.toHaveClass(/is-mobile-browse/u);
+  await expect(page.locator(".ent-cc-mobile-toolbar")).toHaveCount(0);
+  await expect(page.locator(".ent-cc-workspace-options > summary")).toHaveText("Workspace options");
+  await expect(page.getByRole("heading", { name: "Research workspace", exact: true })).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "Search scope" })).toBeVisible();
+  await page.getByRole("button", { name: /^Research note 000,/u }).click();
+  await expect(page.locator(".ent-cc-inspector")).toHaveAttribute("role", "complementary");
+  await expect(page.locator(".ent-cc-workspace")).toHaveCSS("display", "grid");
+  expect((await page.locator(".ent-cc-inspector").boundingBox())!.width).toBeLessThan(500);
+  await captureEvidence(page, "ipad-desktop-unchanged");
+});
 
 async function expectReadableMetadata(page: Page): Promise<void> {
   for (const selector of [".ent-cc-health-summary", ".ent-cc-subject-id"]) {

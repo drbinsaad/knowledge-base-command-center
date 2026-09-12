@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.21.0
+
+### iPad workspace
+
+- Keep the compact, single-column mobile layout on iPad at every width, including landscape and Split View. The Index fills the available width instead of sharing a small pane with the desktop inspector.
+- Keep tabs and Search/Filters pinned while the overview and counts scroll away. Desktop wide-pane layouts remain unchanged.
+
+### Easier note organization
+
+- Open an existing note's KBCC editor action or current-note command directly into **Choose location → Review**. Current Index or Library placement prefills the controls where available.
+- Choose an exact Index heading and nested indexed-note or unresolved-placeholder parent. Breadcrumbs distinguish destinations; large parent lists offer local search with at most 300 matching choices while retaining the current selection.
+- Review the exact before/after placement and **Save organization** in one Undo-protected transaction. An unchanged placement offers **Done — no changes needed**. **More options** keeps Collections and additional knowledge bases available; the full bulk workflow remains supported.
+- Recheck the selected note, target parent, ancestor chain, base state, and Sync generation before and inside the save transaction. Stale or incompatible destinations cannot silently fall back to the root. Explicit parent changes move only the selected leaf, never its dependent subtree; protected ENT source classification remains authoritative.
+- Preserve focus through asynchronous base changes and refuse review/save if the original note disappears. Fix hidden simple-mode controls occupying space and give native dropdowns an explicit 44px height.
+- Organization changes remain in plugin data: no Markdown files are created, moved, renamed, deleted, or rewritten by this workflow. Existing data formats and the stable plugin ID are unchanged.
+
+### Verification
+
+- Add iPad landscape, portrait, Split View, rotation, sticky controls, and desktop-preservation regressions, plus single-note entry, searchable nested placement, exact Save/Undo/Redo, prefill, stale-target, and focus checks.
+- The pre-versioned implementation passed 1,226 runtime tests, 141 Chromium/WebKit browser cases, three performance budgets, and ten release checks. A disposable Obsidian 1.13.7 desktop mobile-emulation run verified real UI Save, exact Undo/Redo, reload/prefill, and unchanged hashes for all 26 synthetic Markdown files. Versioned release checks are recorded separately in the candidate evidence.
+- The versioned local gate passed 1,229 runtime tests, 141 Chromium/WebKit browser cases, all three performance budgets, ten release tests, coverage floors, typecheck, lint, bundle limits, and the three-file archive privacy check. The dependency audit found zero vulnerabilities. Local validation used Node 25.8.1; GitHub Actions repeats the complete gate on the required Node 22 before publishing.
+- Keep the small feature budget explicit: JavaScript limits are 1,160,000 raw / 305,000 gzip bytes; CSS limits are 150,000 raw / 20,600 gzip bytes. No dependencies were added.
+- After the physical iPad/iPhone verification gap was explicitly reported, the maintainer directed **Publish** for this candidate. This candidate-specific waiver leaves physical touch, software keyboard, Dynamic Type, VoiceOver, and controlled two-device Sync unverified; automation and desktop emulation are not physical-device passes. See the [0.21.0 evidence record](https://github.com/drbinsaad/knowledge-base-command-center/blob/0.21.0/docs/release-evidence/0.21.0-iphone.md).
+
 ## 0.20.1
 
 ### Mobile browsing

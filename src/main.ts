@@ -22,6 +22,7 @@ import {
   applyCanonicalFrontmatter,
   buildCanonicalMarkdown,
   buildIndexDiagnostics,
+  buildCurriculumTree,
   buildProposalMarkdown,
   BUILTIN_LIBRARY_DEFINITIONS,
   BUILTIN_LIBRARY_IDS,
@@ -139,6 +140,7 @@ import {
   VaultRecord,
   WorkspaceMode,
   type IndexFolderSource,
+  type CurriculumTreeResult,
   type PendingRequiredUndoCommit,
   type PendingRequiredUndoBatchCommit,
   type PendingRequiredUndoBatchEntry,
@@ -243,6 +245,7 @@ import {
   type NoteOrganizerPlan,
   type NoteOrganizerPrimaryDirective,
 } from "./note-organizer";
+import { organizerIndexPlacement, organizerIndexTrail } from "./note-organizer-index";
 import {
   createNoteOrganizerBatchHistoryToken,
   projectNoteOrganizerBatchTransition,
@@ -258,6 +261,7 @@ import {
   type OrganizerDestinationDraft,
   type OrganizerHeadingOption,
   type OrganizerPreparedPlan,
+  type OrganizerPrimaryDraft,
   type OrganizerReviewRow,
   type OrganizerVaultNode,
 } from "./note-organizer-modal";
@@ -473,6 +477,7 @@ interface PreparedNoteOrganizerCommit {
   readonly kind: "knowledge-base-command-center-prepared-note-organizer";
   readonly plan: Readonly<NoteOrganizerPlan>;
   readonly fileIdentities: ReadonlyArray<{ readonly path: string; readonly file: TFile }>;
+  readonly indexFileIdentities: ReadonlyArray<{ path: string; file: TFile; mtime: number; size: number }>;
   consumed: boolean;
 }
 
@@ -4474,10 +4479,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return { id: heading.id, name: heading.title, subheadings };
   }
 
-  private noteOrganizerBaseOptions(): OrganizerBaseOption[] {
+  private noteOrganizerBaseOptions(notePath?: string, detailedBaseIds?: readonly string[]): OrganizerBaseOption[] {
     const activeBaseId = this.getActiveKnowledgeBaseId();
+    const detailed = new Set(detailedBaseIds ?? [activeBaseId]);
     return this.getKnowledgeBases().map((entry) => {
       const data = entry.data;
+      const records = detailed.has(entry.id) ? this.getRecordsForEntry(entry) : this.recordsCacheByBase.get(entry.id) ?? [];
+      const tree = buildCurriculumTree(records, data.curriculumVisual, data.settings.workspaceMode === "ent-clinical");
       const groups: string[] = [];
       const usedGroups = new Set<string>();
       const addGroup = (value: string): void => {
@@ -4493,30 +4501,71 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       for (const subject of data.portableIndex.subjects) {
         if (subject.indexed) addGroup(portableGroupById.get(subject.groupId) ?? "");
       }
-      for (const record of this.recordsCacheByBase.get(entry.id) ?? []) {
+      for (const record of records) {
         if (recordBelongsToIndex(record, data.settings.workspaceMode === "ent-clinical")) addGroup(record.domain);
       }
       if (groups.length === 0) addGroup("Ungrouped");
+      const file = notePath ? this.app.vault.getAbstractFileByPath(notePath) : null;
+      const record = notePath ? records.find((candidate) => candidate.path === notePath) ?? null : null;
+      const factContext = file instanceof TFile ? this.noteOrganizerFileFactContext(entry) : null;
+      const fact = file instanceof TFile && factContext ? this.noteOrganizerFileFact(file, entry, record, factContext) : null;
+      const protectedGroup = data.settings.workspaceMode === "ent-clinical" && !data.settings.allowClinicalVisualGroupMoves;
       const sourceDerivedName = data.settings.workspaceMode === "ent-clinical"
         && !data.settings.allowClinicalVisualGroupMoves
         ? "Canonical source group (per note)"
         : "Suggested group (per note)";
+      const childrenByGroup = new Map<string, Array<{ id: string; name: string }>>();
+      for (const node of tree.nodeByPath.values()) {
+        if (node.record.path === notePath) continue;
+        try {
+          const trail = organizerIndexTrail(tree, node.record.path);
+          if (notePath && trail.paths.includes(notePath)) continue;
+          const key = normalizedNameKey(node.record.domain);
+          const children = childrenByGroup.get(key) ?? [];
+          children.push({ id: node.record.path, name: trail.label });
+          childrenByGroup.set(key, children);
+        } catch { /* Invalid/depth-limited parents are not selectable. */ }
+      }
       const indexHeadings: OrganizerHeadingOption[] = [{
         id: "index-group-source-derived",
         name: sourceDerivedName,
         subheadings: [],
         sourceDerived: true,
-      }, ...groups.map((name): OrganizerHeadingOption => ({
+      }, ...groups.filter((name) => !protectedGroup || !fact || normalizedNameKey(name) === normalizedNameKey(fact.suggestedIndexGroup)).map((name): OrganizerHeadingOption => ({
         id: `index-group-${fingerprintText(`${entry.id}\0${normalizedNameKey(name)}`).slice(0, 24)}`,
         name,
-        subheadings: [],
+        subheadings: childrenByGroup.get(normalizedNameKey(name)) ?? [],
       }))];
+      let initialPrimary: OrganizerPrimaryDraft | undefined;
+      if (notePath) {
+        const heading = record && recordBelongsToIndex(record, data.settings.workspaceMode === "ent-clinical")
+          ? indexHeadings.find((candidate) => !candidate.sourceDerived && normalizedNameKey(candidate.name) === normalizedNameKey(record.domain)) : null;
+        initialPrimary = record?.libraryId || (fact && !fact.indexEligible && data.settings.workspaceMode === "ent-clinical")
+          ? { mode: "keep", libraryId: null, headingId: null, subheadingId: null }
+          : { mode: "index", libraryId: null, headingId: heading?.id ?? indexHeadings[0]?.id ?? null, subheadingId: heading ? tree.parentByPath.get(notePath) ?? null : null };
+        const ownerIds = factContext?.ownerIdsByPath.get(notePath) ?? [];
+        const owner = ownerIds.length === 1 ? factContext?.subjectById.get(ownerIds[0]) : null;
+        const libraryId = owner ? subjectLibraryId(owner) : null;
+        if (owner && libraryId && data.portableIndex.libraries.some((library) => library.id === libraryId && library.archivedAt === null)) {
+          const locations: OrganizerPrimaryDraft[] = [];
+          for (const libraryHeading of data.portableIndex.libraryLayouts[libraryId] ?? []) {
+            forEachLayoutNode([libraryHeading], (node) => {
+              if (node.subjects.includes(owner.id)) locations.push({ mode: "library", libraryId, headingId: libraryHeading.id, subheadingId: node === libraryHeading ? null : node.id });
+            });
+          }
+          if (locations.length <= 1) initialPrimary = locations[0] ?? { mode: "library", libraryId, headingId: null, subheadingId: null };
+        }
+      }
       return {
         id: entry.id,
         name: data.settings.workspaceName,
         current: entry.id === activeBaseId,
         indexName: data.settings.indexLabel,
         indexHeadings,
+        ...(initialPrimary ? { initialPrimary } : {}),
+        ...(fact && data.settings.workspaceMode === "ent-clinical" ? { indexRestriction: !fact.indexEligible
+          ? `This note is classified as ${fact.sourceKind}; the protected Index accepts topic notes. Choose a compatible Library instead.`
+          : protectedGroup ? `The ENT preset keeps this note in ${fact.suggestedIndexGroup}. Choose a parent within that heading; its source classification will not change.` : "" } : {}),
         libraries: data.portableIndex.libraries
           .filter((library) => library.archivedAt === null)
           .map((library) => ({
@@ -4532,8 +4581,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       || left.id.localeCompare(right.id));
   }
 
-  private noteOrganizerVaultSnapshot(): OrganizerVaultNode[] {
-    const files = this.app.vault.getMarkdownFiles()
+  private noteOrganizerVaultSnapshot(selectedPaths?: readonly string[]): OrganizerVaultNode[] {
+    const files = (selectedPaths
+      ? selectedPaths.map((path) => this.app.vault.getAbstractFileByPath(path)).filter((file): file is TFile => file instanceof TFile && file.extension.toLowerCase() === "md")
+      : this.app.vault.getMarkdownFiles())
       .filter((file) => !this.noteOrganizerPathIsRestricted(file.path))
       .sort((left, right) => left.path.localeCompare(right.path));
     if (files.length > MAX_NOTE_ORGANIZER_SELECTION_CANDIDATES) {
@@ -4724,7 +4775,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     } else if (destination.primary.mode === "index") {
       const heading = base.indexHeadings.find((candidate) => candidate.id === destination.primary.headingId);
       if (!heading) throw new Error(`Choose an exact ${base.indexName} section in “${base.name}”.`);
-      primary = heading.sourceDerived ? { mode: "index" } : { mode: "index", groupTitle: heading.name };
+      if (destination.primary.subheadingId && !heading.subheadings.some((item) => item.id === destination.primary.subheadingId)) {
+        throw new Error(`The selected ${base.indexName} subheading is unavailable. Choose its current location again.`);
+      }
+      primary = heading.sourceDerived ? { mode: "index" } : {
+        mode: "index", groupTitle: heading.name, parentPath: destination.primary.subheadingId ?? null,
+      };
     } else {
       if (!destination.primary.libraryId) throw new Error(`Choose a Library in “${base.name}”.`);
       primary = {
@@ -4746,6 +4802,39 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return { path, baseId: destination.baseId, primary, collections };
   }
 
+  private freshOrganizerIndexTree(entry: KnowledgeBaseEntry): CurriculumTreeResult {
+    const files = this.app.vault.getMarkdownFiles();
+    if (files.length > MAX_NOTE_ORGANIZER_SELECTION_CANDIDATES) throw new Error("This vault exceeds the safe Index destination scan limit.");
+    const records: VaultRecord[] = [];
+    for (const record of this.iterateRecordScanForEntry(entry, files)) if (record) records.push(record);
+    return buildCurriculumTree(records, entry.data.curriculumVisual, entry.data.settings.workspaceMode === "ent-clinical");
+  }
+
+  private withOrganizerIndexPlacement(
+    fact: NoteOrganizerFileFact,
+    entry: KnowledgeBaseEntry,
+    tree: CurriculumTreeResult,
+    targetPath: string | null,
+    identities?: Map<string, { path: string; file: TFile; mtime: number; size: number }>,
+  ): NoteOrganizerFileFact {
+    const indexPlacement = organizerIndexPlacement(entry.data, tree, fact.path, targetPath);
+    if (identities) {
+      const parentPaths = [indexPlacement.currentParentPath, targetPath];
+      for (const parent of parentPaths) {
+        if (!parent) continue;
+        for (const path of organizerIndexTrail(tree, parent).paths) {
+          if (isPortablePlaceholderPath(path)) continue;
+          const file = this.app.vault.getAbstractFileByPath(path);
+          if (!(file instanceof TFile) || file.extension.toLowerCase() !== "md") {
+            throw new Error("An Index parent or ancestor is no longer an available Markdown note. Refresh the location.");
+          }
+          identities.set(path, { path, file, mtime: file.stat.mtime, size: file.stat.size });
+        }
+      }
+    }
+    return { ...fact, indexPlacement };
+  }
+
   private async prepareNoteOrganizer(draft: NoteOrganizerDraft): Promise<OrganizerPreparedPlan> {
     this.assertDataWritable();
     if (this.baseOperationBusy || this.dataTransactionBusy || this.directSaveBusyCount > 0 || this.isExternalReloadInProgress()) {
@@ -4762,7 +4851,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const paths = [...new Set(draft.selectedPaths.map((path) => normalizePath(path)))];
     if (paths.length !== draft.selectedPaths.length) throw new Error("The organizer selection contains a duplicate or invalid note path.");
     const pathSet = new Set(paths);
-    const options = this.noteOrganizerBaseOptions();
+    const requestedOptions = [...draft.destinations];
+    for (const override of draft.overrides) requestedOptions.push(...override.destinations);
+    const options = this.noteOrganizerBaseOptions(undefined, [...new Set(requestedOptions.filter((destination) => destination.primary.mode === "index" && destination.primary.subheadingId).map((destination) => destination.baseId))]);
     const optionsByBaseId = new Map(options.map((base) => [base.id, base]));
     if (new Set(draft.overrides.map((override) => override.path)).size !== draft.overrides.length
       || draft.overrides.some((override) => !pathSet.has(override.path))) {
@@ -4847,16 +4938,25 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       recordsByBaseId.set(baseId, this.noteOrganizerRecordsForEntry(entry, baseFiles));
       factContextByBaseId.set(baseId, this.noteOrganizerFileFactContext(entry));
     }
+    const indexTrees = new Map<string, CurriculumTreeResult>();
+    const indexFileIdentities = new Map<string, { path: string; file: TFile; mtime: number; size: number }>();
     const facts = directives.map((directive) => {
       const file = filesByPath.get(directive.path);
       const entry = entriesById.get(directive.baseId);
       if (!file || !entry) throw new Error("A selected note or destination disappeared while preparing the review.");
-      return this.noteOrganizerFileFact(
+      const fact = this.noteOrganizerFileFact(
         file,
         entry,
         recordsByBaseId.get(entry.id)?.get(file.path) ?? null,
         factContextByBaseId.get(entry.id) as NoteOrganizerFileFactContext,
       );
+      if (directive.primary?.mode !== "index" || directive.primary.parentPath === undefined) return fact;
+      let tree = indexTrees.get(entry.id);
+      if (!tree) {
+        tree = this.freshOrganizerIndexTree(entry);
+        indexTrees.set(entry.id, tree);
+      }
+      return this.withOrganizerIndexPlacement(fact, entry, tree, directive.primary.parentPath, indexFileIdentities);
     });
     const plan = createNoteOrganizerPlan(this.store, facts, directives, {
       expectedExternalGeneration: this.organizerReviewGeneration,
@@ -4865,6 +4965,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       kind: "knowledge-base-command-center-prepared-note-organizer",
       plan,
       fileIdentities: [...filesByPath].map(([path, file]) => ({ path, file })),
+      indexFileIdentities: [...indexFileIdentities.values()],
       consumed: false,
     };
     this.preparedNoteOrganizerCommits.add(token);
@@ -4900,7 +5001,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         const describePrimary = (primary: typeof review.before.primary): string => primary.kind === "none"
           ? "No primary placement"
           : primary.kind === "index"
-            ? `Index — ${primary.groupTitle}`
+            ? `Index — ${primary.groupTitle}${primary.parentPath ? ` / ${primary.parentLabel || primary.parentPath}` : " / Heading root"}`
             : `Library — ${primary.libraryName}${primary.placement ? ` / ${primary.placement.label}` : " / Unplaced"}`;
         const warnings = diff
           && directive.primary?.mode === "index"
@@ -4959,6 +5060,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     token.consumed = true;
     const identityByPath = new Map(token.fileIdentities.map((identity) => [identity.path, identity]));
     const currentFacts = (): NoteOrganizerFileFact[] => {
+      for (const identity of token.indexFileIdentities) {
+        const file = this.app.vault.getAbstractFileByPath(identity.path);
+        if (!(file instanceof TFile) || file !== identity.file || file.stat.mtime !== identity.mtime || file.stat.size !== identity.size) {
+          throw new Error("An Index parent or ancestor changed, moved, or was replaced after review. Refresh the location.");
+        }
+      }
       const entriesById = new Map(token.plan.baseGuards.map((guard) => {
         const entry = this.store.bases.find((candidate) => candidate.id === guard.baseId && candidate.archivedAt === null);
         if (!entry) throw new Error(`Knowledge base “${guard.baseName}” is no longer available.`);
@@ -4980,6 +5087,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         recordsByBaseId.set(baseId, this.noteOrganizerRecordsForEntry(entry, baseFiles));
         factContextByBaseId.set(baseId, this.noteOrganizerFileFactContext(entry));
       }
+      const indexTrees = new Map<string, CurriculumTreeResult>();
       return token.plan.fileFacts.map((expected) => {
         const identity = identityByPath.get(expected.path);
         const current = this.app.vault.getAbstractFileByPath(expected.path);
@@ -4988,12 +5096,19 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         }
         const entry = entriesById.get(expected.baseId);
         if (!entry) throw new Error(`Destination knowledge base ${expected.baseId} is unavailable.`);
-        return this.noteOrganizerFileFact(
+        const fact = this.noteOrganizerFileFact(
           identity.file,
           entry,
           recordsByBaseId.get(entry.id)?.get(identity.path) ?? null,
           factContextByBaseId.get(entry.id) as NoteOrganizerFileFactContext,
         );
+        if (!expected.indexPlacement) return fact;
+        let tree = indexTrees.get(entry.id);
+        if (!tree) {
+          tree = this.freshOrganizerIndexTree(entry);
+          indexTrees.set(entry.id, tree);
+        }
+        return this.withOrganizerIndexPlacement(fact, entry, tree, expected.indexPlacement.target?.path ?? null);
       });
     };
     // Validate before joining the queued store transaction, then repeat inside
@@ -5118,14 +5233,15 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
     const modal = new NoteOrganizerModal({
       app: this.app,
-      getVaultSnapshot: () => this.noteOrganizerVaultSnapshot(),
-      getBases: () => this.noteOrganizerBaseOptions(),
+      getVaultSnapshot: () => this.noteOrganizerVaultSnapshot(selected.paths.length === 1 ? selected.paths : undefined),
+      getBases: (baseIds) => this.noteOrganizerBaseOptions(selected.paths.length === 1 ? selected.paths[0] : undefined, baseIds?.length ? baseIds : undefined),
       isReadOnly: () => this.isDataReadOnly(),
       prepare: (draft) => this.prepareNoteOrganizer(draft),
       applyPrepared: (token) => this.applyPreparedNoteOrganizer(token),
     }, {
       source,
       preselectedPaths: selected.paths,
+      singleNote: selected.paths.length === 1,
       onClosed: () => {
         if (this.activeNoteOrganizerModal === modal) this.activeNoteOrganizerModal = null;
         if (this.appWriteBarrier?.activeNoteOrganizerGeneration === this.appWriteGeneration) {
@@ -5370,7 +5486,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         const membershipElement = view.addAction("circle", "KBCC note organization", () => {
           const current = view.file;
           if (current instanceof TFile && current.extension.toLowerCase() === "md") {
-            this.openNoteOrganizerMembership(current.path);
+            this.openNoteOrganizer([current.path]);
           }
         });
         const returnElement = view.addAction("library-big", "Open Knowledge Base Command Center home", () => {
