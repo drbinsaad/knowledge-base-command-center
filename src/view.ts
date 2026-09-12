@@ -10,6 +10,7 @@ import { MAX_PORTABLE_PACKAGE_BYTES } from "./portability";
 import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge-base-modal";
 import { LibraryEditorModal, ManageLibrariesModal } from "./library-modal";
 import { resolveLibraryIconId } from "./library-icons";
+import { TouchDragController, type TouchDragTarget } from "./touch-drag";
 import {
   MAX_KBCC_RETURN_BROWSE_LIMIT,
   type KbccReturnViewState,
@@ -131,6 +132,35 @@ type CatalogDestination = "topic" | { libraryId: string };
 
 interface LibraryMembership extends Membership {
   libraryId: string;
+}
+
+type TouchOrigin =
+  | { kind: "index"; path: string }
+  | { kind: "library"; path: string; libraryId: string; membership: Membership | null }
+  | { kind: "collection"; path: string; membership: Membership };
+
+type TouchDestinationNode =
+  | { kind: "index"; group: string; path?: string }
+  | { kind: "library"; libraryId: string; membership: Membership; path?: string; subjectId?: string }
+  | { kind: "collection"; membership: Membership; path?: string };
+
+interface TouchMoveDestination {
+  node: TouchDestinationNode;
+  position: "before" | "inside" | "after";
+}
+
+interface TouchMoveSource {
+  origin: TouchOrigin;
+  data: PluginData;
+  baseId: string;
+  epoch: number;
+  generation: number;
+  externalGeneration: number;
+  renderToken: string;
+  tab: MainTab;
+  fingerprint: string;
+  recordFingerprint: string;
+  descendants: Set<string>;
 }
 
 interface CreateKnowledgeNoteFormContext {
@@ -733,6 +763,8 @@ export class EntVaultCommandCenterView extends ItemView {
   private libraryDragRenderToken = makeId("library-drag-render");
   /** In-flight drag payload; browsers keep dataTransfer unreadable during dragover. */
   private activeLibraryDrag: LibraryDragMembership | null = null;
+  private touchDrag: TouchDragController<TouchMoveSource, TouchMoveDestination> | null = null;
+  private touchTargets = new Map<HTMLElement, { node: TouchDestinationNode; label: string }>();
   private setupPromptShown = false;
   private loadedBaseId = "";
   private loadedDataEpoch = 0;
@@ -767,6 +799,7 @@ export class EntVaultCommandCenterView extends ItemView {
 
   async onClose(): Promise<void> {
     this.viewClosed = true;
+    this.destroyTouchDrag();
     this.clearSearchPointerInteraction();
     this.unbindMobileToolbarLayout();
     this.globalSearchRequestGeneration += 1;
@@ -795,6 +828,7 @@ export class EntVaultCommandCenterView extends ItemView {
 
   onResize(): void {
     if (this.viewClosed) return;
+    this.touchDrag?.cancel();
     const ownerWindow = this.contentEl.ownerDocument.defaultView;
     if (ownerWindow && ownerWindow !== this.timerWindow) {
       // Fallback for Obsidian builds or test hosts that do not expose
@@ -833,6 +867,7 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private handleWindowMigration(migratedWindow: Window): void {
     if (this.viewClosed) return;
+    this.destroyTouchDrag();
     this.clearSearchPointerInteraction();
     this.unbindMobileToolbarLayout();
     const searchRow = this.contentEl?.querySelector<HTMLElement>(".ent-cc-search-row");
@@ -2860,6 +2895,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private render(preserveBrowseLimits = false): void {
+    this.destroyTouchDrag();
     this.clearSearchPointerInteraction();
     this.unbindMobileToolbarLayout();
     const focusedControl = this.mobileInspectorNeedsFocus ? null : captureViewFocus(this.contentEl);
@@ -3916,6 +3952,7 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private renderTree(): void {
     if (!this.treeEl) return;
+    this.destroyTouchDrag();
     const focused = captureViewFocus(this.treeEl);
     const listOwner = this.paneLayout === "wide" ? this.treeEl : this.workspaceEl ?? this.treeEl;
     const listScroll = listOwner.scrollTop;
@@ -3927,6 +3964,7 @@ export class EntVaultCommandCenterView extends ItemView {
     this.parsedQuery = parseQuery(this.query);
     this.visualPlacementPaths = visualPlacementPathSet(this.plugin.data.curriculumVisual, this.plugin.data.indexGroupByPath);
     this.treeEl.empty();
+    this.initializeTouchDrag();
     this.treeEl.createDiv({
       cls: "ent-cc-visually-hidden",
       text: "Record shortcuts: Space selects. Enter opens a note or resolves a placeholder. When organization is writable, M adds to a collection and P pins.",
@@ -4144,7 +4182,7 @@ export class EntVaultCommandCenterView extends ItemView {
     if (this.curriculumArrangeMode) {
       const hint = parent.createDiv({ cls: "ent-cc-arrange-hint", attr: { role: "note" } });
       setIcon(hint.createSpan(), "move");
-      hint.createSpan({ text: `Drag onto a ${this.plugin.data.settings.itemSingular} to nest it; drop above or below to reorder${this.plugin.canVisuallyMoveAcrossGroups() ? "; drop into another group to move it visually" : ""}. On iPhone, use each row’s … menu.` });
+      hint.createSpan({ text: `Drag a row’s grip onto a ${this.plugin.data.settings.itemSingular} to nest it; drop above or below to reorder${this.plugin.canVisuallyMoveAcrossGroups() ? "; drop into another group to move it visually" : ""}. Scroll anywhere outside the grip. The … menu is also available.` });
     }
     for (const domain of this.curriculum.domains) {
       const matchingRoots = domain.roots.filter((node) => !this.query || this.curriculumNodeMatches(node));
@@ -4185,10 +4223,16 @@ export class EntVaultCommandCenterView extends ItemView {
     });
     row.createSpan({ text: String(domain.roots.reduce((sum, node) => sum + this.curriculumNodeCount(node), 0)), cls: "ent-cc-row-count" });
     iconButton(row, "ellipsis", `Manage ${domain.domain}`, "ent-cc-row-more ent-cc-group-more").addEventListener("click", () => this.openIndexManager("groups"));
-    if (this.curriculumArrangeMode) this.applyCurriculumDomainDrop(row, domain);
+    if (this.curriculumArrangeMode) {
+      this.applyCurriculumDomainDrop(row, domain);
+      this.registerTouchTarget(row, { kind: "index", group: domain.domain }, domain.domain);
+    }
     if (collapsed) return;
     const content = section.createDiv({ cls: "ent-cc-heading-body ent-cc-curriculum-domain-body" });
-    if (this.curriculumArrangeMode) this.applyCurriculumDomainDrop(content, domain);
+    if (this.curriculumArrangeMode) {
+      this.applyCurriculumDomainDrop(content, domain);
+      this.registerTouchTarget(content, { kind: "index", group: domain.domain }, domain.domain);
+    }
     for (const node of roots) this.renderCurriculumNode(content, node, 0);
   }
 
@@ -4219,7 +4263,10 @@ export class EntVaultCommandCenterView extends ItemView {
     } else {
       row.createSpan({ cls: "ent-cc-disclosure ent-cc-disclosure-spacer" });
     }
-    if (this.curriculumArrangeMode && !Platform.isMobile) {
+    if (this.touchDrag && this.curriculumArrangeMode) {
+      this.renderTouchHandle(row, record, { kind: "index", path: record.path });
+      this.registerTouchTarget(row, { kind: "index", group: record.domain, path: record.path }, record.title);
+    } else if (this.curriculumArrangeMode && !Platform.isMobile) {
       const handle = iconButton(row, "grip-vertical", `Drag ${record.title}`, "ent-cc-drag-handle");
       handle.draggable = true;
       handle.addEventListener("dragstart", (event) => this.writeCurriculumDrag(event, { kind: "curriculum-record", path: record.path }));
@@ -4389,6 +4436,9 @@ export class EntVaultCommandCenterView extends ItemView {
     const applyNodeDrop = (element: HTMLElement): void => {
       if (context.kind === "library") this.applyLibraryDrop(element, { libraryId: context.library.id, ...membership });
       else this.applyDrop(element, membership);
+      this.registerTouchTarget(element, context.kind === "library"
+        ? { kind: "library", libraryId: context.library.id, membership }
+        : { kind: "collection", membership }, node.title);
     };
     if (mutable && this.editMode) applyNodeDrop(row);
     if (collapsed) return;
@@ -4463,7 +4513,7 @@ export class EntVaultCommandCenterView extends ItemView {
     if (this.editMode) {
       const hint = parent.createDiv({ cls: "ent-cc-arrange-hint", attr: { role: "note" } });
       setIcon(hint.createSpan(), "list-tree");
-      hint.createSpan({ text: `Use each row’s … menu on iPhone. On desktop, drag records between headings or subheadings. This visual hierarchy is saved in plugin data; Markdown files are not moved or rewritten.` });
+      hint.createSpan({ text: "Drag a row’s grip to a heading or subheading, or above/below another record. Scroll outside the grip; the … menu is also available. Markdown files stay unchanged." });
     }
 
     for (const heading of layout) {
@@ -4733,7 +4783,16 @@ export class EntVaultCommandCenterView extends ItemView {
       cls: `ent-cc-row ent-cc-subject-row ent-cc-level-${level} ${record.isPlaceholder ? "ent-cc-placeholder-row" : ""} ${selected ? "is-selected" : ""}`,
       attr: { "data-record-path": record.path, "data-source-active": String(sourceIsActive) },
     });
-    if (libraryMembership && record.portableId && this.editMode && !Platform.isMobile) {
+    const touchLibraryId = this.touchDrag && record.portableId ? libraryIdForTab(this.plugin.data.activeTab) : null;
+    if (this.touchDrag && this.editMode && sourceIsActive && touchLibraryId) {
+      this.renderTouchHandle(row, record, { kind: "library", path: record.path, libraryId: touchLibraryId, membership: libraryMembership ?? null });
+      if (libraryMembership) this.registerTouchTarget(row, {
+        kind: "library", libraryId: touchLibraryId, membership: libraryMembership, path: record.path, subjectId: record.portableId,
+      }, record.title);
+    } else if (this.touchDrag && this.editMode && sourceIsActive && membership) {
+      this.renderTouchHandle(row, record, { kind: "collection", path: record.path, membership });
+      this.registerTouchTarget(row, { kind: "collection", membership, path: record.path }, record.title);
+    } else if (libraryMembership && record.portableId && this.editMode && !Platform.isMobile) {
       const handle = iconButton(row, "grip-vertical", `Drag ${record.title}`, "ent-cc-drag-handle");
       handle.draggable = true;
       handle.addEventListener("dragstart", (event) => this.writeLibraryDrag(event, {
@@ -7044,6 +7103,190 @@ export class EntVaultCommandCenterView extends ItemView {
       })));
     }
     menu.showAtMouseEvent(event);
+  }
+
+  private destroyTouchDrag(): void {
+    this.touchDrag?.destroy();
+    this.touchDrag = null;
+    this.touchTargets?.clear();
+  }
+
+  private initializeTouchDrag(): void {
+    if (!Platform.isMobile || this.viewClosed || this.plugin.isDataReadOnly() || this.hasGlobalSearch()
+      || !(this.plugin.data.activeTab === "curriculum" ? this.curriculumArrangeMode : this.editMode)
+      || !this.contentEl.ownerDocument?.defaultView) return;
+    this.touchTargets = new Map();
+    this.touchDrag = new TouchDragController({
+      root: this.contentEl,
+      getScrollContainer: () => this.paneLayout === "wide" ? this.treeEl : this.workspaceEl ?? this.treeEl,
+      getScrollBounds: (container) => {
+        const rect = container.getBoundingClientRect();
+        const toolbar = container.querySelector<HTMLElement>(".ent-cc-mobile-toolbar")?.getBoundingClientRect();
+        return { top: Math.max(rect.top, toolbar?.bottom ?? rect.top), bottom: rect.bottom };
+      },
+      isCurrent: (source) => this.touchSourceIsCurrent(source),
+      resolveTarget: (source, x, y) => this.resolveTouchTarget(source, x, y),
+      onDrop: (source, destination) => this.run(() => this.commitTouchMove(source, destination)),
+    });
+  }
+
+  /** Organization only: mutate() updates Undo before invoking its guarded action. */
+  private touchOrganizationFingerprint(): string {
+    const data = this.plugin.data;
+    return JSON.stringify([
+      data.curriculumVisual, data.indexGroupByPath, data.indexGroupOrder, data.indexGroupAliases,
+      data.collections, data.portableIndex, data.directIndexPaths, data.indexFolderSources,
+      data.excludedIndexPaths, data.displayNameByPath, data.settings,
+    ]);
+  }
+
+  private touchSourceIsCurrent(source: TouchMoveSource): boolean {
+    return !this.viewClosed && !this.plugin.isDataReadOnly() && !this.hasGlobalSearch()
+      && !this.plugin.isExternalReloadInProgress?.()
+      && this.plugin.data === source.data
+      && this.plugin.getActiveKnowledgeBaseId() === source.baseId && this.loadedBaseId === source.baseId
+      && this.currentDataEpoch() === source.epoch && this.loadedDataEpoch === source.epoch
+      && this.currentSearchGeneration() === source.generation
+      && (this.plugin.getExternalChangeGeneration?.() ?? 0) === source.externalGeneration
+      && this.libraryDragRenderToken === source.renderToken
+      && this.plugin.data.activeTab === source.tab
+      && (source.origin.kind === "index" ? this.curriculumArrangeMode : this.editMode);
+  }
+
+  private renderTouchHandle(row: HTMLElement, record: VaultRecord, origin: TouchOrigin): void {
+    row.addClass("has-touch-drag-handle");
+    const handle = iconButton(row, "grip-vertical", `Drag ${record.title}`, "ent-cc-drag-handle ent-cc-touch-drag-handle");
+    handle.setAttribute("data-kbcc-focus", `drag:${origin.kind}:${origin.path}`);
+    handle.setAttribute("aria-description", "Drag to move. Use the row’s actions menu for keyboard or assistive access.");
+    this.touchDrag?.registerHandle(handle, row, record.title, () => {
+      if (!this.guardLoadedBase()) return null;
+      const current = this.plugin.getRecord(record.path);
+      if (!current || JSON.stringify(current) !== JSON.stringify(record)) return null;
+      return {
+        origin, data: this.plugin.data, baseId: this.loadedBaseId, epoch: this.currentDataEpoch(),
+        generation: this.currentSearchGeneration(), externalGeneration: this.plugin.getExternalChangeGeneration?.() ?? 0,
+        renderToken: this.libraryDragRenderToken, tab: this.plugin.data.activeTab,
+        fingerprint: this.touchOrganizationFingerprint(), recordFingerprint: JSON.stringify(current),
+        descendants: origin.kind === "index" ? curriculumDescendantPaths(this.curriculum, record.path) : new Set(),
+      };
+    });
+  }
+
+  private registerTouchTarget(element: HTMLElement, node: TouchDestinationNode, label: string): void {
+    if (this.touchDrag) this.touchTargets.set(element, { node, label });
+  }
+
+  private resolveTouchTarget(source: TouchMoveSource, x: number, y: number): TouchDragTarget<TouchMoveDestination> | null {
+    let element = this.contentEl.ownerDocument.elementFromPoint(x, y) as HTMLElement | null;
+    while (element && this.treeEl?.contains(element)) {
+      const target = this.touchTargets.get(element);
+      if (target) {
+        const { node, label } = target;
+        // Never fall through an invalid row to its enclosing heading: dropping
+        // onto one's own child must not accidentally re-root the whole subtree.
+        if (node.kind !== source.origin.kind || node.path === source.origin.path) return null;
+        if (node.kind === "index") {
+          const record = this.recordByPath.get(source.origin.path);
+          if (!record || (node.path && source.descendants.has(node.path))
+            || (record.domain.toLowerCase() !== node.group.toLowerCase() && !this.plugin.canVisuallyMoveAcrossGroups())) return null;
+        }
+        if (node.kind === "library" && (source.origin.kind !== "library" || node.libraryId !== source.origin.libraryId)) return null;
+        const rect = element.getBoundingClientRect();
+        const fraction = (y - rect.top) / Math.max(1, rect.height);
+        const position = !node.path ? "inside"
+          : node.kind === "index" ? (fraction < 0.3 ? "before" : fraction > 0.7 ? "after" : "inside")
+            : fraction < 0.5 ? "before" : "after";
+        return {
+          element, position, label: `${position === "inside" ? "under" : position === "before" ? "before" : "after"} ${label}`,
+          destination: { node, position },
+        };
+      }
+      element = element.parentElement;
+    }
+    return null;
+  }
+
+  private async commitTouchMove(source: TouchMoveSource, destination: TouchMoveDestination): Promise<void> {
+    const assertCurrent = (): void => {
+      if (!this.touchSourceIsCurrent(source) || this.touchOrganizationFingerprint() !== source.fingerprint
+        || JSON.stringify(this.plugin.getRecord(source.origin.path)) !== source.recordFingerprint) {
+        throw new Error("The organization changed during the drag. Nothing was moved; try again.");
+      }
+    };
+    assertCurrent();
+    const { origin } = source;
+    const { node, position } = destination;
+    if (origin.kind !== node.kind || origin.path === node.path) return;
+    const record = this.plugin.getRecord(origin.path);
+    if (!record) return;
+    let expandedParent: string | null = null;
+    let expandedGroup: string | null = null;
+    if (origin.kind === "library" && node.kind === "library") {
+      if (origin.libraryId !== node.libraryId) return;
+      await this.plugin.moveLibraryRecordVisually(origin.path, origin.libraryId, origin.membership,
+        node.membership, node.subjectId ?? null, position, assertCurrent);
+    } else {
+      await this.plugin.mutate(`Move “${record.title}”`, () => {
+        assertCurrent();
+        if (origin.kind === "index" && node.kind === "index") {
+          const tree = buildCurriculumTree(this.plugin.getRecords(), this.plugin.data.curriculumVisual, this.plugin.isClinicalMode());
+          const current = tree.nodeByPath.get(origin.path)?.record;
+          const target = node.path ? tree.nodeByPath.get(node.path)?.record : null;
+          const group = tree.domains.find((domain) => domain.domain.toLowerCase() === node.group.toLowerCase());
+          if (!current || !group || (node.path && !target)) throw new Error("That index destination is no longer available.");
+          const descendants = curriculumDescendantPaths(tree, origin.path);
+          const parentPath = target ? (position === "inside" ? target.path : tree.parentByPath.get(target.path) ?? null) : null;
+          if ((target && descendants.has(target.path)) || parentPath === origin.path || (parentPath && descendants.has(parentPath))) {
+            throw new Error("A subject cannot be moved under itself or one of its children.");
+          }
+          const crossingGroups = current.domain.toLowerCase() !== group.domain.toLowerCase();
+          if (crossingGroups && !this.plugin.canVisuallyMoveAcrossGroups()) throw new Error("This move must stay inside the same group.");
+          // Headings merge case-insensitively, but parent placement compares
+          // exact group labels. Carry the target spelling through the subtree.
+          const destinationGroup = target?.domain ?? group.domain;
+          const siblings = (target
+            ? position === "inside" ? curriculumChildPaths(tree, target.path) : curriculumSiblingPaths(tree, target)
+            : group.roots.map((root) => root.record.path)).filter((path) => path !== origin.path);
+          const anchor = target && position !== "inside" ? siblings.indexOf(target.path) : siblings.length;
+          if (anchor < 0) throw new Error("That index destination changed. Try again.");
+          if (current.domain !== destinationGroup) {
+            if (!this.plugin.data.indexGroupOrder.includes(destinationGroup)) this.plugin.data.indexGroupOrder.push(destinationGroup);
+            for (const path of [origin.path, ...descendants]) this.plugin.data.indexGroupByPath[path] = destinationGroup;
+          }
+          moveCurriculumVisual(this.plugin.data.curriculumVisual, { ...current, domain: destinationGroup, folderOrder: destinationGroup },
+            parentPath, siblings, anchor + (target && position === "after" ? 1 : 0));
+          expandedParent = parentPath;
+          expandedGroup = group.domain;
+        } else if (origin.kind === "collection" && node.kind === "collection") {
+          const resolve = (membership: Membership): { node: LayoutNode; chain: LayoutNode[] } | null => {
+            const heading = this.plugin.data.collections.find((item) => item.id === membership.headingId);
+            if (!heading) return null;
+            return membership.subheadingId ? subheadingChain(heading, membership.subheadingId) : { node: heading, chain: [heading] };
+          };
+          const from = resolve(origin.membership);
+          const to = resolve(node.membership);
+          if (!from || !to || !from.node.subjects.includes(origin.path)
+            || (node.path && !to.node.subjects.includes(node.path))) throw new Error("That collection placement changed. Try again.");
+          // Resolve every identity before removing anything. Only the dragged
+          // occurrence moves; references in other collections remain intact.
+          const next = to.node.subjects.filter((path) => path !== origin.path);
+          const anchor = node.path ? next.indexOf(node.path) : next.length;
+          if (anchor < 0) throw new Error("That collection destination is no longer available.");
+          next.splice(anchor + (node.path && position === "after" ? 1 : 0), 0, origin.path);
+          from.node.subjects = from.node.subjects.filter((path) => path !== origin.path);
+          to.node.subjects = next;
+          for (const ancestor of to.chain) ancestor.collapsed = false;
+        }
+      }, { requireUndo: true });
+    }
+    if (origin.kind === "index" && node.kind === "index" && this.plugin.getActiveKnowledgeBaseId() === source.baseId
+      && this.currentDataEpoch() === source.epoch && !this.viewClosed) {
+      this.collapsedCurriculumDomains.delete(expandedGroup ?? node.group);
+      if (expandedParent) this.collapsedCurriculumNodes.delete(expandedParent);
+      this.persistCollapseState();
+      this.renderTree();
+    }
+    new Notice(`Moved “${record.title}”. Use Undo to restore its previous position.`);
   }
 
   private writeCurriculumDrag(event: DragEvent, payload: CurriculumDrag): void {

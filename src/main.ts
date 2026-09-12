@@ -13,6 +13,7 @@ import {
   type AttachmentOperationPolicy,
 } from "./attachment-modal";
 import { ENT_HIERARCHY_BASES_VIEW_TYPE, EntHierarchyBasesView, hierarchyBasesViewOptions } from "./bases-view";
+import { applyLibraryVisualMove, ensureLibraryCatalogGroup, type LibraryVisualMembership } from "./library-visual-move";
 import {
   applyPluginViewState,
   boundedSemanticLineage,
@@ -7947,26 +7948,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private ensureCatalogPortableGroup(libraryId: string, title: string): string {
-    const library = this.requireLibrary(libraryId);
-    const normalized = this.normalizedOrganizationLabel(title);
-    const otherKindGroupIds = new Set(this.data.portableIndex.subjects
-      .filter((subject) => subjectLibraryId(subject) !== libraryId)
-      .map((subject) => subject.groupId));
-    const targetKindGroupIds = new Set(this.data.portableIndex.subjects
-      .filter((subject) => subjectLibraryId(subject) === libraryId)
-      .map((subject) => subject.groupId));
-    const existing = this.data.portableIndex.groups.find((group) => targetKindGroupIds.has(group.id)
-      && !otherKindGroupIds.has(group.id)
-      && this.normalizedOrganizationLabel(group.title) === normalized);
-    if (existing) return existing.id;
-    let id = makeId(`${libraryId}-group`);
-    while (this.data.portableIndex.groups.some((group) => group.id === id)) id = makeId(`${libraryId}-group`);
-    this.data.portableIndex.groups.push({
-      id,
-      title: title.trim() || library.name,
-      order: this.data.portableIndex.groups.length,
-    });
-    return id;
+    return ensureLibraryCatalogGroup(this.data, libraryId, title);
   }
 
   private ensureTopicPortableGroup(title: string): string {
@@ -8034,6 +8016,27 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     target: CatalogPlacementTarget = {},
   ): Promise<void> {
     return this.assignRecordToDestination(path, libraryId, target);
+  }
+
+  /** Guarded touch/pen placement that preserves the current browsing route. */
+  async moveLibraryRecordVisually(
+    path: string,
+    libraryId: string,
+    source: LibraryVisualMembership | null,
+    destination: LibraryVisualMembership,
+    anchorSubjectId: string | null,
+    position: "before" | "inside" | "after",
+    assertCurrent: () => void,
+  ): Promise<void> {
+    assertCurrent();
+    const request = {
+      path, libraryId, source: source ? { ...source } : null,
+      destination: { ...destination }, anchorSubjectId, position,
+    };
+    await this.mutate("Move record within library", () => {
+      assertCurrent();
+      applyLibraryVisualMove(this.data, this.getRecord(path), request);
+    }, { includePortableIndex: true, requireUndo: true });
   }
 
   private async assignRecordToDestination(

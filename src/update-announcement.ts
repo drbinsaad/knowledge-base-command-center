@@ -270,6 +270,20 @@ export const UPDATE_ANNOUNCEMENT_0_21_0: UpdateAnnouncement = {
   releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.21.0",
 };
 
+export const UPDATE_ANNOUNCEMENT_0_22_0: UpdateAnnouncement = {
+  version: "0.22.0",
+  title: "What’s new in Knowledge Base Command Center 0.22.0",
+  intro: "Dedicated drag grips bring touch arrangement to iPad and iPhone. Physical-device verification remains pending; the row menus are still available as an alternative.",
+  highlights: [
+    "Open Details → Arrange in the Index or a Library, or Details → Edit in Collections, then drag a subject’s 44px grip with a finger, pen, or mobile trackpad.",
+    "Highlighted destinations let you nest Index subjects, reorder records above or below a neighbor, and place Library records into deep subheadings. Index moves carry the subject’s subtree; Collection moves leave its other memberships untouched.",
+    "Swipe outside grips to scroll normally, or hold a drag near the list’s edge to auto-scroll. Grips opt out of Obsidian’s sidebar-swipe gesture without suppressing ordinary row scrolling.",
+    "Details → Undo and Redo restore a completed move. Stale organization, invalid cycles, rotation, backgrounding, or a cancelled pointer stop the drag safely.",
+    "These moves change KBCC organization only; Markdown files stay unchanged. Desktop dragging and labelled row-menu alternatives remain available, including menus for rearranging headings themselves.",
+  ],
+  releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.22.0",
+};
+
 const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_12_0.version, UPDATE_ANNOUNCEMENT_0_12_0],
   [UPDATE_ANNOUNCEMENT_0_12_1.version, UPDATE_ANNOUNCEMENT_0_12_1],
@@ -290,6 +304,7 @@ const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_20_0.version, UPDATE_ANNOUNCEMENT_0_20_0],
   [UPDATE_ANNOUNCEMENT_0_20_1.version, UPDATE_ANNOUNCEMENT_0_20_1],
   [UPDATE_ANNOUNCEMENT_0_21_0.version, UPDATE_ANNOUNCEMENT_0_21_0],
+  [UPDATE_ANNOUNCEMENT_0_22_0.version, UPDATE_ANNOUNCEMENT_0_22_0],
 ]);
 
 function parseSemanticVersion(value: string): ParsedSemanticVersion | null {

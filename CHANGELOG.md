@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.22.0
+
+### Touch arrangement
+
+- Add dedicated 44px drag grips on iPad and iPhone in Index and Library **Arrange**, and Collection **Edit**. Nest an Index subject under another subject, reorder siblings, move a subtree into another allowed group, or place Library and Collection records under headings and deep subheadings.
+- Preview the destination with a highlight and release-to-place message. Scroll normally outside the grip; hold a drag near the list's top or bottom edge to auto-scroll. Desktop native dragging and labelled menu alternatives remain available.
+- Exempt only the drag grip from Obsidian's sidebar-swipe recognizer, preventing diagonal subject drags from opening the drawer. No global touch gestures are disabled.
+- Make **Undo** and **Redo** reachable in mobile **Details**. Every new drag move requires a protected Undo transaction. Index moves preserve descendants; Library moves preserve identity and classification while keeping the destination group consistent; Collection moves affect only the dragged membership.
+- Cancel stale or interrupted gestures on refresh, Sync changes, rotation/resizing, backgrounding, extra touches, Escape, or release outside a valid target. Reject self/descendant nesting and recheck source and destination inside the queued transaction.
+- Keep Markdown content, paths and frontmatter unchanged. No schema changes, dependencies, telemetry or network behavior were added.
+
+### Verification
+
+- The implementation passed 1,320 runtime tests, 171 Chromium/WebKit browser checks, three performance budgets and ten release checks, including the production build, coverage floors, lint, bundle and privacy-oriented static checks. The versioned release gate is recorded separately.
+- The final versioned local gate passed 1,323 runtime tests, all 171 browser cases, three performance budgets and ten release checks, with enforced coverage, typecheck, zero-warning lint, production build and archive privacy checks. The dependency audit found zero vulnerabilities. Node 22 CI and the tag workflow repeat the gate before publication.
+- Actual Obsidian 1.13.7 desktop mobile emulation verified trusted touch nesting without sidebar takeover, deep Library mouse/trackpad-style placement, exact Undo/Redo, reload persistence and normal row scrolling. All 26 synthetic Markdown hashes were unchanged, with no captured renderer errors. These checks are not physical-device passes.
+- JavaScript limits are 1,175,000 raw / 309,000 gzip bytes; CSS limits are 153,000 raw / 21,100 gzip bytes, explicitly accounting for the new gesture controller and safety guards.
+- After the remaining physical iPad/iPhone testing gap was explicitly reported, the maintainer directed **Publish** for this candidate. Physical touch/Pencil/trackpad, iOS/iPadOS, VoiceOver and controlled two-device Sync remain unverified. See the [0.22.0 evidence record](https://github.com/drbinsaad/knowledge-base-command-center/blob/0.22.0/docs/release-evidence/0.22.0-iphone.md).
+
 ## 0.21.0
 
 ### iPad workspace

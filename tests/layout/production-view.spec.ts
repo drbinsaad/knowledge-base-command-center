@@ -747,22 +747,22 @@ for (const scenario of [
 
 for (const mobile of [false, true]) {
   const viewport = mobile ? "mobile" : "desktop";
-  test(`production 0.21.0 update announcement ${viewport}: readable news and reachable actions`, async ({ page }, testInfo) => {
+  test(`production 0.22.0 update announcement ${viewport}: readable news and reachable actions`, async ({ page }, testInfo) => {
     await openView(page, { mobile, count: 8 });
     await openModal(page, "whats-new");
-    const dialog = page.getByRole("dialog", { name: "What’s new in Knowledge Base Command Center 0.21.0", exact: true });
-    await expect(dialog).toHaveAccessibleDescription("A compact workspace for iPad and a shorter path from an open note to its exact place in your knowledge base.");
-    const body = dialog.getByRole("region", { name: "Version 0.21.0 highlights", exact: true });
+    const dialog = page.getByRole("dialog", { name: "What’s new in Knowledge Base Command Center 0.22.0", exact: true });
+    await expect(dialog).toHaveAccessibleDescription("Dedicated drag grips bring touch arrangement to iPad and iPhone. Physical-device verification remains pending; the row menus are still available as an alternative.");
+    const body = dialog.getByRole("region", { name: "Version 0.22.0 highlights", exact: true });
     await expect(body.getByRole("listitem")).toHaveCount(5);
-    await expect(body).toContainText("iPad keeps the compact, single-column workspace at every width");
-    await expect(body).toContainText("Choose location → Review → Save organization");
-    await expect(body).toContainText("including nested notes and unresolved placeholder parents");
-    await expect(body).toContainText("Done — no changes needed");
-    await expect(body).toContainText("organizing never moves or rewrites Markdown");
-    const link = dialog.getByRole("link", { name: "Read the complete 0.21.0 release notes on GitHub (opens in your browser)", exact: true });
+    await expect(body).toContainText("Details → Arrange");
+    await expect(body).toContainText("44px grip");
+    await expect(body).toContainText("deep subheadings");
+    await expect(body).toContainText("Details → Undo and Redo");
+    await expect(body).toContainText("Markdown files stay unchanged");
+    const link = dialog.getByRole("link", { name: "Read the complete 0.22.0 release notes on GitHub (opens in your browser)", exact: true });
     const continueButton = dialog.getByRole("button", { name: "Continue", exact: true });
     await expect(link).toHaveText("Read complete release notes");
-    await expect(link).toHaveAttribute("href", "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.21.0");
+    await expect(link).toHaveAttribute("href", "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.22.0");
     await expect(link).toHaveAttribute("target", "_blank");
     await expect(link).toHaveAttribute("rel", "noopener noreferrer");
     for (const action of [link, continueButton]) {
@@ -770,11 +770,11 @@ for (const mobile of [false, true]) {
       expect(await action.evaluate((element) => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
     }
     expect(await dialog.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
-    await captureEvidence(page, `whats-new-0.21.0-${viewport}`);
+    await captureEvidence(page, `whats-new-0.22.0-${viewport}`);
     await body.getByRole("listitem").last().scrollIntoViewIfNeeded();
     await expect(body.getByRole("listitem").last()).toBeInViewport({ ratio: 1 });
     await expect(continueButton).toBeInViewport();
-    await captureEvidence(page, `whats-new-0.21.0-${viewport}-last-highlight`);
+    await captureEvidence(page, `whats-new-0.22.0-${viewport}-last-highlight`);
     await link.focus();
     await page.keyboard.press(testInfo.project.name === "webkit" ? "Alt+Tab" : "Tab");
     await expect(continueButton).toBeFocused();

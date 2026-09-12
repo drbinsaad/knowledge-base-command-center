@@ -2,9 +2,21 @@
 
 Complete this checklist on a physical iPhone before tagging a release that changes search, navigation, modals, import/export, Sync handling, or mobile styles. Simulator and automated DOM results may accompany this record but do not replace it.
 
+## 0.22.0 touch arrangement
+
+Status: **Maintainer-authorized waiver — not executed on a physical iPhone or iPad.** After the remaining physical-device gap was explicitly reported, the maintainer directed **Publish** for this candidate. The [0.22.0 evidence record](release-evidence/0.22.0-iphone.md) records this authorization without marking any device check as Pass. No prior release waiver is reused. Record the exact build hashes and device details before executing these checks in a synthetic vault.
+
+1. On iPhone and iPad (portrait, landscape, and Split View), enter Arrange. Finger-drag a subject by its 44px grip under another subject, above/below a sibling, and onto a group heading. Verify the complete subtree follows and cannot move into itself or a descendant.
+2. Drag Library records into a heading and through nested subheadings, including a collapsed destination and an Unplaced record. Verify the Library identity and destination breadcrumb persist after restart. Rearrange Collection memberships and confirm copies in other Collections stay untouched.
+3. Repeat using an iPad trackpad and Apple Pencil when available. Swipe outside grips to scroll normally; hold a drag near each list edge to auto-scroll, keeping the search rail usable. Releasing must immediately stop scrolling.
+4. Check no-op grip taps, release outside the list, Escape, a second finger, rotation/Split View resize, backgrounding, and an organization refresh during a drag. Each cancellation must leave organization unchanged with no stuck highlight or gesture.
+5. After a successful move use Details → Undo, then Redo, and restart. Verify exact organization and unchanged Markdown bytes. Repeat during a controlled two-device Sync change; stale drags must cancel, not apply to newer organization.
+6. Verify VoiceOver can use the labelled row-menu alternatives and that large text/RTL layouts preserve separate, reachable disclosure, grip, title, and menu controls.
+7. Upgrade a disposable installation to 0.22.0. Verify the announcement appears once, its highlights and Continue action stay reachable, and the release link is exactly `https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.22.0`.
+
 Do not use private notes, patient information, or copyrighted source material in screenshots, recordings, logs, or issue attachments.
 
-For 0.21.0, begin with the shorter [iPhone/iPad, VoiceOver, hardware-keyboard, and two-device Sync smoke record](release-evidence/next-release-smoke.md) and its [candidate-specific evidence and authorization](release-evidence/0.21.0-iphone.md). Its physical-device rows remain explicitly unexecuted. The historical release records below remain unchanged.
+For 0.22.0, begin with the shorter [iPhone/iPad, VoiceOver, hardware-keyboard, and two-device Sync smoke record](release-evidence/next-release-smoke.md) and its [candidate-specific evidence and authorization](release-evidence/0.22.0-iphone.md). Its physical-device rows remain explicitly unexecuted. The historical release records below remain unchanged.
 
 ## 0.21.0 candidate record and sign-off
 

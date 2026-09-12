@@ -1,7 +1,7 @@
 import { Platform, Setting, TFile, type Modal, type SettingDefinitionItem } from "obsidian";
 import type EntVaultCommandCenterPlugin from "../../src/main";
 import { EntVaultCommandCenterView } from "../../src/view";
-import { buildCurriculumTree, canonicalJsonString, createDefaultStore, createKnowledgeBaseEntry, migrateData, parseQuery, portablePlaceholderPath, snapshotPersonal, type VaultRecord } from "../../src/model";
+import { buildCurriculumTree, canonicalJsonString, clonePersonalOrganization, createDefaultStore, createKnowledgeBaseEntry, migrateData, parseQuery, portablePlaceholderPath, restoreSnapshot, snapshotPersonal, type LayoutHeading, type VaultRecord } from "../../src/model";
 import { BoundedKnowledgeBaseSearchCollector } from "../../src/search";
 import { KnowledgeNoteModal, WorkspaceSetupModal } from "../../src/modals";
 import { ExportImportCenterModal } from "../../src/portability-modal";
@@ -9,9 +9,10 @@ import { SyncRecoveryCenterModal } from "../../src/sync-recovery-modal";
 import { NoteOrganizerModal, type NoteOrganizerHost } from "../../src/note-organizer-modal";
 import { EntCommandCenterSettingsTab } from "../../src/settings";
 import { UpdateAnnouncementModal } from "../../src/update-announcement-modal";
-import { UPDATE_ANNOUNCEMENT_0_21_0 } from "../../src/update-announcement";
+import { UPDATE_ANNOUNCEMENT_0_22_0 } from "../../src/update-announcement";
 import { applyNoteOrganizerPlan, createNoteOrganizerPlan, type NoteOrganizerDirective, type NoteOrganizerFileFact, type NoteOrganizerPrimaryState } from "../../src/note-organizer";
 import { organizerIndexPlacement, organizerIndexTrail } from "../../src/note-organizer-index";
+import { applyLibraryVisualMove, type LibraryVisualMoveRequest } from "../../src/library-visual-move";
 
 function record(index: number, overrides: Partial<VaultRecord> = {}): VaultRecord {
   return {
@@ -37,6 +38,7 @@ interface SearchOptions {
 const parameters = new URLSearchParams(location.hash.slice(1));
 Platform.isMobile = parameters.get("mobile") === "true";
 const mobileSpace = parameters.get("scenario") === "mobile-space";
+const touchDrag = parameters.get("scenario") === "touch-drag";
 const count = mobileSpace ? 8 : Number(parameters.get("count") ?? 650);
 const data = migrateData(null);
 Object.assign(data.settings, {
@@ -70,6 +72,41 @@ if (mobileSpace) {
 }
 data.directIndexPaths = records.filter((item) => !item.libraryId && !item.portableId).map((item) => item.path);
 data.collections = [{ id: "favorites", title: "Reading this week", collapsed: false, subjects: records.slice(0, 4).map((item) => item.path), subheadings: [] }];
+if (touchDrag) {
+  records.splice(0, records.length,
+    ...["Alpha", "Beta", "Gamma", "Child"].map((title, index) => record(index, { path: `Research/${title}.md`, title })),
+    record(5, { path: "Other/Delta.md", title: "Delta", domain: "Other" }),
+    ...["Source A", "Source B", "Source C", "Source D"].map((title, index) => record(index + 10, {
+      path: `Reading/${title}.md`, title, libraryId: "reading", portableId: `source-${index}`, role: "library", domain: "Sources",
+    })),
+    ...Array.from({ length: Number(parameters.get("extra") ?? 0) }, (_, index) => record(index + 100, {
+      path: `Research/Extra ${String(index).padStart(3, "0")}.md`, title: `Extra ${String(index).padStart(3, "0")}`,
+    })),
+  );
+  data.settings.workspaceName = "Touch drag synthetic workspace";
+  data.indexGroupOrder = ["Research", "Other"];
+  data.directIndexPaths = records.filter((item) => !item.libraryId).map((item) => item.path);
+  data.curriculumVisual.parentByPath["Research/Child.md"] = "Research/Beta.md";
+  data.indexGroupByPath = Object.fromEntries(records.filter((item) => !item.libraryId).map((item) => [item.path, item.domain]));
+  data.portableIndex.groups = [{ id: "source-group", title: "Sources", order: 0 }];
+  data.portableIndex.subjects = records.filter((item) => item.portableId).map((item, order) => ({
+    id: item.portableId!, title: item.title, groupId: "source-group", parentId: null,
+    order, indexed: false, configuredId: "", recordKind: "note", libraryId: "reading",
+  }));
+  data.portableIndex.resolvedPathBySubjectId = Object.fromEntries(records.filter((item) => item.portableId).map((item) => [item.portableId!, item.path]));
+  data.portableIndex.libraryLayouts.reading = [{
+    id: "sources", title: "Sources", collapsed: false, subjects: ["source-0", "source-1"],
+    subheadings: [{ id: "studies", title: "Studies", collapsed: false, subjects: [], subheadings: [{
+      id: "trials", title: "Trials", collapsed: false, subjects: [], subheadings: [{
+        id: "randomized", title: "Randomized", collapsed: false, subjects: ["source-2"], subheadings: [],
+      }],
+    }] }],
+  }, { id: "references", title: "References", collapsed: false, subjects: [], subheadings: [] }];
+  data.collections = [
+    { id: "favorites", title: "Favorites", collapsed: false, subjects: ["Research/Alpha.md", "Research/Beta.md"], subheadings: [] },
+    { id: "review", title: "Review", collapsed: false, subjects: [], subheadings: [{ id: "next", title: "Next", collapsed: false, subjects: ["Research/Gamma.md"], subheadings: [] }] },
+  ];
+}
 const store = createDefaultStore(data, 1, "browser-synthetic-vault");
 const otherData = migrateData(data);
 otherData.settings.workspaceName = "Project workspace";
@@ -79,8 +116,17 @@ const sources = [
 ];
 let epoch = 0;
 let generation = 0;
+const touchDragActions = { mutations: [] as string[], undo: 0, redo: 0 };
+const hostSwipeTouches: Array<{ ignored: boolean; handle: boolean; trusted: boolean }> = [];
+function organizationFingerprint(): string {
+  return canonicalJsonString({ ...clonePersonalOrganization(data), portableIndex: data.portableIndex });
+}
+const initialOrganization = organizationFingerprint();
+const currentRecords = (): VaultRecord[] => touchDrag
+  ? records.map((item) => ({ ...item, domain: data.indexGroupByPath[item.path] ?? item.domain }))
+  : records;
 const completedImportActions = { undo: 0, placeholderQueue: 0, closed: [] as boolean[] };
-const files = records.filter((item) => !item.portableId).map((item) => new TFile(item.path));
+const files = records.filter((item) => touchDrag ? !item.isPlaceholder : !item.portableId).map((item) => new TFile(item.path));
 const app = {
   workspace: { getActiveFile: () => null, trigger: () => undefined },
   vault: { getAbstractFileByPath: (path: string) => files.find((file) => file.path === path) ?? null, getMarkdownFiles: () => files },
@@ -92,9 +138,9 @@ const plugin = {
   getDataEpoch: () => epoch,
   getExternalChangeGeneration: () => 0,
   getSearchGeneration: () => generation,
-  getRecords: () => records,
-  getIndexRecords: () => records.filter((item) => !item.libraryId),
-  getRecord: (path: string) => records.find((item) => item.path === path),
+  getRecords: currentRecords,
+  getIndexRecords: () => currentRecords().filter((item) => !item.libraryId),
+  getRecord: (path: string) => currentRecords().find((item) => item.path === path),
   getVaultId: () => "browser-synthetic-vault",
   librarySubjectCount: (id: string) => records.filter((item) => item.libraryId === id).length,
   getIndexCandidateFiles: () => files,
@@ -105,16 +151,58 @@ const plugin = {
   getLibrary: (id: string) => data.portableIndex.libraries.find((library) => library.id === id) ?? null,
   getKnowledgeBases: () => sources.map(({ source }) => ({ id: source.baseId, name: source.baseName, data: source.data, archivedAt: null })),
   getLegacyIndexReviewPlans: () => [],
-  getPortableSubject: () => null,
+  getPortableSubject: (id: string) => data.portableIndex.subjects.find((item) => item.id === id) ?? null,
   getRecordUnassignedLibraryFallback: () => null,
   getBacklinkPaths: () => [], resolveLink: () => null,
   isDataReadOnly: () => false, isClinicalMode: () => false,
-  canVisuallyMoveAcrossGroups: () => false, countMemberships: () => 0,
+  canVisuallyMoveAcrossGroups: () => touchDrag, countMemberships: () => 0,
+  initializeLibraryCatalog: async () => undefined,
+  moveLibraryRecordVisually: async (
+    path: string, libraryId: string, source: LibraryVisualMoveRequest["source"],
+    destination: LibraryVisualMoveRequest["destination"], anchorSubjectId: string | null,
+    position: LibraryVisualMoveRequest["position"], assertCurrent: () => void,
+  ) => {
+    assertCurrent();
+    await plugin.mutate("Move synthetic Library record visually", () => {
+      assertCurrent();
+      applyLibraryVisualMove(data, plugin.getRecord(path) ?? null, { path, libraryId, source, destination, anchorSubjectId, position });
+    });
+  },
   reconcileRecords: async () => false,
   saveViewState: async () => undefined, savePluginData: async () => undefined,
   // These counters verify production completion handlers cross the host
   // boundary; they do not simulate the real persistence writer or queue UI.
-  undo: async () => { completedImportActions.undo += 1; data.undoStack.pop(); },
+  // Production view drop callbacks own every organization edit. This synthetic
+  // host supplies only snapshot/restore and refresh, not filesystem persistence.
+  mutate: async (label: string, action: () => unknown) => {
+    if (!touchDrag) throw new Error("Mutation is available only in the isolated touch-drag fixture");
+    const before = snapshotPersonal(data, label, false, true);
+    await action();
+    data.undoStack.push(before);
+    data.redoStack = [];
+    touchDragActions.mutations.push(label);
+    generation += 1;
+    await view.reload();
+  },
+  undo: async () => {
+    if (!touchDrag) { completedImportActions.undo += 1; data.undoStack.pop(); return; }
+    const previous = data.undoStack.pop();
+    if (!previous) return;
+    data.redoStack.push(snapshotPersonal(data, previous.label, false, true));
+    restoreSnapshot(data, previous);
+    touchDragActions.undo += 1;
+    generation += 1;
+    await view.reload();
+  },
+  redo: async () => {
+    const next = data.redoStack.pop();
+    if (!touchDrag || !next) return;
+    data.undoStack.push(snapshotPersonal(data, next.label, false, true));
+    restoreSnapshot(data, next);
+    touchDragActions.redo += 1;
+    generation += 1;
+    await view.reload();
+  },
   openPlaceholderResolutionQueue: () => { completedImportActions.placeholderQueue += 1; },
   getSyncRecoveryCenterSnapshot: () => ({
     activeBaseName: data.settings.workspaceName, workspaceProfile: "Generic knowledge base",
@@ -147,6 +235,24 @@ const plugin = {
 };
 const content = document.getElementById("kbcc-view");
 if (!content) throw new Error("Missing browser test host");
+if (touchDrag) {
+  // Attribute-contract observer only, not an implementation of Obsidian's
+  // swipe recognizer. Its actual host integration is verified separately in
+  // the native app. Like the observed host, this bubbling ancestor listener
+  // checks truthy dataset.ignoreSwipe, not defaultPrevented on PointerEvents.
+  content.addEventListener("touchstart", (event) => {
+    let ignored = false;
+    let handle = false;
+    for (let target = event.target as Node | null; target; target = target.parentNode) {
+      if (target.nodeType !== Node.ELEMENT_NODE) continue;
+      const element = target as HTMLElement;
+      if (element.namespaceURI !== "http://www.w3.org/1999/xhtml") continue;
+      if (element.classList.contains("ent-cc-touch-drag-handle")) handle = true;
+      if (element.dataset.ignoreSwipe) ignored = true;
+    }
+    hostSwipeTouches.push({ ignored, handle, trusted: event.isTrusted });
+  });
+}
 const view = new EntVaultCommandCenterView({ app, contentEl: content } as never, plugin as unknown as EntVaultCommandCenterPlugin);
 let openedModal: Modal | null = null;
 let organizer: NoteOrganizerModal | null = null;
@@ -407,7 +513,7 @@ const harness = {
     } else if (kind === "sync") {
       openedModal = new SyncRecoveryCenterModal(plugin as unknown as EntVaultCommandCenterPlugin);
     } else if (kind === "whats-new") {
-      openedModal = new UpdateAnnouncementModal(app as never, UPDATE_ANNOUNCEMENT_0_21_0);
+      openedModal = new UpdateAnnouncementModal(app as never, UPDATE_ANNOUNCEMENT_0_22_0);
     } else if (kind === "quick-organizer") {
       organizer = new NoteOrganizerModal(quickOrganizerHost, { singleNote: true, source: "file-menu", preselectedPaths: [quickNotePath] });
       openedModal = organizer;
@@ -418,6 +524,28 @@ const harness = {
     openedModal.open();
   },
   async refreshOrganizer() { await organizer?.refreshAfterExternalChange(); },
+  touchDragSnapshot() {
+    const tree = buildCurriculumTree(currentRecords(), data.curriculumVisual, false);
+    const placements = (headings: LayoutHeading[]): Record<string, string[]> => {
+      const result: Record<string, string[]> = {};
+      const visit = (nodes: LayoutHeading[]): void => nodes.forEach((node) => {
+        result[node.id] = [...node.subjects];
+        visit(node.subheadings);
+      });
+      visit(headings);
+      return result;
+    };
+    return {
+      ...touchDragActions, undoCount: data.undoStack.length, redoCount: data.redoStack.length,
+      hostSwipeTouches: hostSwipeTouches.map((touch) => ({ ...touch })),
+      unchanged: organizationFingerprint() === initialOrganization,
+      fingerprint: organizationFingerprint(), parents: Object.fromEntries(tree.parentByPath),
+      groups: { ...data.indexGroupByPath },
+      roots: Object.fromEntries(tree.domains.map((domain) => [domain.domain, domain.roots.map((node) => node.record.path)])),
+      library: placements(data.portableIndex.libraryLayouts.reading), collections: placements(data.collections),
+      subjectGroups: Object.fromEntries(data.portableIndex.subjects.map((subject) => [subject.id, data.portableIndex.groups.find((group) => group.id === subject.groupId)?.title ?? null])),
+    };
+  },
   quickOrganizerSnapshot() {
     const { base, tree } = quickTree(quickStore.activeBaseId);
     const subjects = base.data.portableIndex.subjects;

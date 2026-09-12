@@ -6488,7 +6488,7 @@
   padding-top: 8px;
 }
 
-.ent-cc-view .ent-cc-workspace-options-actions .ent-cc-history-action {
+.ent-cc-view .ent-cc-header-actions .ent-cc-workspace-options-actions .ent-cc-history-action {
   display: inline-flex;
 }
 
@@ -6679,4 +6679,73 @@
 
 .ent-cc-view .is-mobile-browse.is-search-focused .ent-cc-tree-header {
   position: static;
+}
+
+/* Only the grip owns touch gestures; the rest of every row scrolls normally. */
+.ent-cc-view button.ent-cc-touch-drag-handle {
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  grid-column: 1;
+  grid-row: 1;
+  touch-action: none;
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+
+.ent-cc-view .ent-cc-curriculum-row.has-touch-drag-handle {
+  grid-template-columns: 44px 44px minmax(0, 1fr) max-content 44px;
+}
+
+.ent-cc-view .ent-cc-curriculum-row.has-touch-drag-handle .ent-cc-touch-drag-handle {
+  grid-column: 2;
+}
+
+.ent-cc-view .ent-cc-curriculum-row.has-touch-drag-handle .ent-cc-subject-title {
+  grid-column: 3;
+}
+
+.ent-cc-view .ent-cc-curriculum-row.has-touch-drag-handle .ent-cc-row-badges {
+  grid-column: 4;
+}
+
+.ent-cc-view .ent-cc-curriculum-row.has-touch-drag-handle .ent-cc-row-more {
+  grid-column: 5;
+}
+
+.ent-cc-view.is-touch-dragging {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.ent-cc-view.is-touch-dragging .is-drop-inside {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: -2px;
+  background: var(--ent-cc-accent-soft);
+}
+
+.ent-cc-touch-drag-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  pointer-events: none;
+}
+
+.is-touch-dragging > .ent-cc-touch-drag-status {
+  inset-inline: 12px;
+  bottom: 12px;
+  z-index: 10;
+  width: auto;
+  height: auto;
+  padding: 8px 12px;
+  clip-path: none;
+  border: 1px solid var(--interactive-accent);
+  border-radius: 8px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  text-align: center;
+  box-shadow: var(--shadow-s);
 }

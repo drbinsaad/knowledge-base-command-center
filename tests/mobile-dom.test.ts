@@ -894,7 +894,7 @@ test("mobile library hierarchy stays compact and exposes menu-based heading cont
     assert.equal(parent.querySelectorAll(".ent-cc-library-group").length, 1);
     assert.equal(parent.querySelectorAll(".ent-cc-library-subheading").length, 1);
     assert.equal(parent.querySelectorAll(".ent-cc-subject-row").length, 1);
-    assert.equal(parent.querySelectorAll(".ent-cc-drag-handle").length, 0, "touch uses the 44px ellipsis menus instead of desktop drag handles");
+    assert.equal(parent.querySelectorAll(".ent-cc-drag-handle").length, 0, "isolated rows without a gesture controller retain the 44px menu fallback");
     assert.ok(parent.querySelector(".ent-cc-heading-row .ent-cc-row-more"));
     assert.ok(parent.querySelector(".ent-cc-subheading-row .ent-cc-row-more"));
     assert.ok(parent.querySelector(".ent-cc-subject-row .ent-cc-row-more"));
@@ -1514,7 +1514,7 @@ test("a depth-three nested subheading keeps 44px menu-driven controls on mobile"
     assert.ok(depthThreeRow.querySelector("button.ent-cc-row-title"), "the depth-three title stays a 44px-height button target");
     assert.ok(depthThreeRow.querySelector(".ent-cc-row-more"), "the depth-three row keeps its 44px ellipsis menu");
     assert.ok(parent.querySelector(".ent-cc-subject-row.ent-cc-level-3 .ent-cc-row-more"), "the depth-three record row keeps its 44px ellipsis menu");
-    assert.equal(parent.querySelectorAll(".ent-cc-drag-handle").length, 0, "touch input never swaps the menus for desktop drag handles");
+    assert.equal(parent.querySelectorAll(".ent-cc-drag-handle").length, 0, "without a gesture controller the nested row retains its menu fallback");
   } finally {
     mobilePlatform.isMobile = previousMobile;
   }
@@ -1603,7 +1603,7 @@ test("touch subheading row menus offer the reparent actions that desktop reaches
   mobilePlatform.isMobile = true;
   try {
     assert.equal(view.renderLibrary(asHtmlElement(parent), [reference]), 1);
-    assert.equal(parent.querySelectorAll(".ent-cc-drag-handle").length, 0, "touch never offers the desktop drag path");
+    assert.equal(parent.querySelectorAll(".ent-cc-drag-handle").length, 0, "isolated mobile rows never fall back to desktop HTML drag events");
     const subheadingRows = parent.querySelectorAll(".ent-cc-library-subheading .ent-cc-subheading-row");
     assert.equal(subheadingRows.length, 3);
 
