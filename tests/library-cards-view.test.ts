@@ -30,7 +30,7 @@ function harness(records: VaultRecord[], layout: LayoutHeading[] = []) {
   const plugin = {
     data, getLibrary: (id: string) => data.portableIndex.libraries.find((library) => library.id === id),
     getActiveKnowledgeBaseId: () => "base-a", getDataEpoch: () => 0, isClinicalMode: () => false, isDataReadOnly: () => false,
-    getLibraryDisplayProfile: () => profile, getExternalLibraryImagesAllowed: () => false,
+    getLibraryDisplayProfile: () => profile,
   };
   const view = Object.create(EntVaultCommandCenterView.prototype) as {
     renderLibrary(parent: HTMLElement, records: VaultRecord[]): number;

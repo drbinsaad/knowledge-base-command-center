@@ -53,16 +53,17 @@ for (const imported of obsidianImports) {
   assert.doesNotMatch(imported, /(?:^|,)\s*(?:request|requestUrl)(?:\s+as\s+[\w$]+)?\s*(?:,|$)/, "runtime must not import Obsidian network APIs");
 }
 assert.doesNotMatch(runtime, /import\s+\*\s+as\s+[\w$]+\s+from\s*["']obsidian["']/, "runtime must use auditable named Obsidian imports");
-// Optional cover loads are the sole image-source sink, not a blanket claim that
-// the plugin can never cause a request. Behavioral tests cover the permission
-// gate; this invariant makes a second image-loading path require explicit review.
+// Vault covers are the sole image-source sink. Behavioral tests prove that
+// user-supplied URLs are rejected; static checks additionally flag new image
+// paths and any reintroduction of the private build's external-image switch.
 assert.deepEqual(sources.filter(([, content]) => /createEl\(["']img["']/.test(content)).map(([name]) => name), ["library-cover.ts"]);
 assert.equal((runtime.match(/setAttribute\(["']src["']/g) ?? []).length, 1);
 assert.doesNotMatch(runtime, /\.src\s*=/);
-assert.match(covers, /url\.protocol !== "https:"/);
-assert.match(covers, /if \(!allowExternal\) return \{ state: "external-blocked" \}/);
+assert.match(covers, /source: app\.vault\.getResourcePath\(image\)/);
+assert.equal((covers.match(/state: "ready", source:/g) ?? []).length, 1);
+assert.doesNotMatch(runtime, /allowExternal|getExternalLibraryImagesAllowed|setExternalLibraryImagesAllowed/);
 assert.match(covers, /referrerpolicy: "no-referrer"/);
-assert.match(main, /saveLocalStorage\(LIBRARY_IMAGE_PERMISSION_KEY/);
+assert.doesNotMatch(covers, /new URL\(/);
 assert.doesNotMatch(bundle, /\b(?:process\.|Buffer\b|__dirname\b|__filename\b)/, "built main.js must not use Node globals");
 assert.doesNotMatch(bundle, /(?:\.request(?:Url)?\b|\[\s*["']request(?:Url)?["']\s*\])/, "built main.js must not reference Obsidian network APIs");
 const bundledRequires = [...bundle.matchAll(/\brequire\s*\(\s*([^)]*?)\s*\)/g)].map((match) => match[1]);
@@ -94,4 +95,4 @@ assert.match(runtime, /deliverJsonExport\(this\.plugin, "backup"/);
 
 const enumerationCalls = runtime.match(/\.get(?:MarkdownFiles|Files|AllLoadedFiles)\s*\(/g) ?? [];
 const bulkReads = runtime.match(/\.(?:read|cachedRead)\s*\(/g) ?? [];
-process.stdout.write(`Community-oriented static verification passed: ${sourcePaths.length} runtime files plus built main.js (${bundle.length} bytes), ${enumerationCalls.length} enumeration call sites, ${bulkReads.length} targeted read call sites, no detected programmatic network APIs, one permission-gated cover-image sink, one clipboard writer, and no clipboard-read API.\n`);
+process.stdout.write(`Community-oriented static verification passed: ${sourcePaths.length} runtime files plus built main.js (${bundle.length} bytes), ${enumerationCalls.length} enumeration call sites, ${bulkReads.length} targeted read call sites, no detected programmatic network APIs, one vault-resolved cover-image sink, one clipboard writer, and no clipboard-read API.\n`);

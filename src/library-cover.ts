@@ -6,15 +6,14 @@ const IMAGE_EXTENSIONS = new Set(["avif", "bmp", "gif", "jpeg", "jpg", "png", "w
 const MAX_PROPERTY_TEXT_LENGTH = 160;
 
 export type LibraryCover =
-  | { state: "ready"; source: string; external?: boolean }
-  | { state: "empty" | "missing" | "blocked" | "external-blocked" };
+  | { state: "ready"; source: string }
+  | { state: "empty" | "missing" | "blocked" };
 
 /** Resolve only a selected cover property; no downloads or vault-wide scans. */
 export function resolveLibraryCover(
   app: Pick<App, "metadataCache" | "vault">,
   value: unknown,
   sourcePath: string,
-  allowExternal: boolean,
 ): LibraryCover {
   if (typeof value !== "string") return { state: "empty" };
   if (value.length > MAX_COVER_REFERENCE_LENGTH) return { state: "blocked" };
@@ -25,19 +24,9 @@ export function resolveLibraryCover(
   reference = reference.split("|", 1)[0].trim();
   if (!reference || /[<>\\\p{Cc}]/u.test(reference) || reference.startsWith("//")) return { state: "blocked" };
 
-  if (/^[a-z][a-z\d+.-]*:/iu.test(reference)) {
-    try {
-      const url = new URL(reference);
-      // Inspect one decoded path without rewriting the requested URL. Malformed
-      // escapes fail closed; a suffix check cannot verify a server's MIME type.
-      if (url.protocol !== "https:" || !url.hostname || url.username || url.password
-        || /\.svgz?$/iu.test(decodeURIComponent(url.pathname))) return { state: "blocked" };
-      if (!allowExternal) return { state: "external-blocked" };
-      return { state: "ready", source: url.href, external: true };
-    } catch {
-      return { state: "blocked" };
-    }
-  }
+  // No URL from note content can become an image source, even if an older
+  // private build left behind an external-image permission on this device.
+  if (/^[a-z][a-z\d+.-]*:/iu.test(reference)) return { state: "blocked" };
   // A local cover must resolve to an actual image file inside this vault.
   // Resource URLs are produced by Obsidian, never accepted from note content.
   if (reference.startsWith("/") || reference.includes("?") || reference.includes("[") || reference.includes("]")) return { state: "blocked" };
@@ -87,7 +76,7 @@ export function renderLibraryCover(parent: HTMLElement, cover: LibraryCover, pro
     frame.empty();
     frame.addClass("is-placeholder");
     setIcon(frame.createSpan({ attr: { "aria-hidden": "true" } }), "image");
-    frame.createSpan({ text: cover.state === "external-blocked" ? "External cover blocked" : cover.state === "empty" ? "No cover" : "Cover unavailable" });
+    frame.createSpan({ text: cover.state === "empty" ? "No cover" : "Cover unavailable" });
   };
   if (cover.state !== "ready") {
     placeholder();
@@ -99,19 +88,6 @@ export function renderLibraryCover(parent: HTMLElement, cover: LibraryCover, pro
     alt: "", width: String(width), height: String(height), loading: "lazy", decoding: "async",
     referrerpolicy: "no-referrer", draggable: "false",
   } });
-  if (cover.external) image.setAttribute("data-kbcc-external-cover", "true");
   image.addEventListener("error", placeholder, { once: true });
   image.setAttribute("src", cover.source);
-}
-
-/** Revoking this device's permission cancels existing remote images immediately. */
-export function clearExternalLibraryCovers(parent: HTMLElement): void {
-  for (const image of parent.querySelectorAll<HTMLImageElement>('img[data-kbcc-external-cover="true"]')) {
-    image.removeAttribute("src");
-    const frame = image.parentElement;
-    if (!frame) continue;
-    frame.empty();
-    frame.addClass("is-placeholder");
-    frame.createSpan({ text: "External cover blocked" });
-  }
 }

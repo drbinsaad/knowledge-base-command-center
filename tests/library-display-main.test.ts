@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { TFile } from "obsidian";
-import EntVaultCommandCenterPlugin, { LIBRARY_IMAGE_PERMISSION_KEY } from "../src/main";
+import EntVaultCommandCenterPlugin, { LEGACY_LIBRARY_IMAGE_PERMISSION_KEY } from "../src/main";
 import { EntVaultCommandCenterView } from "../src/view";
 import { applyPersonalBackupToData, createDefaultStore, createPersonalBackup, migrateData, parsePersonalBackup, type PluginStore } from "../src/model";
 import { normalizeLibraryDisplayProfile, type LibraryDisplayProfile } from "../src/library-display-profile";
 import { applyPortableExport, createPortableExport, EMPTY_PORTABLE_SELECTION, parsePortableExport } from "../src/portability";
+import { resolveLibraryCover } from "../src/library-cover";
 
 async function fixture(localState = new Map<string, unknown>(), storedData?: unknown) {
   const data = migrateData(null);
@@ -16,11 +17,10 @@ async function fixture(localState = new Map<string, unknown>(), storedData?: unk
   const file = new TFile("Books/Example.md");
   let mutations = 0;
   let failStorage = false;
-  let clearCalls = 0;
-  const permissionWrites: unknown[] = [];
+  const legacyPermissionReads: string[] = [];
+  const legacyPermissionWrites: unknown[] = [];
   const forbidden = (): never => { mutations += 1; throw new Error("Unexpected note mutation"); };
   const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView;
-  view.clearExternalLibraryImages = () => { clearCalls += 1; };
   view.reload = async () => {};
   const app = {
     vault: { configDir: ".obsidian", getMarkdownFiles: () => [file], getAbstractFileByPath: (path: string) => path === file.path ? file : null,
@@ -28,10 +28,13 @@ async function fixture(localState = new Map<string, unknown>(), storedData?: unk
     metadataCache: { getFileCache: () => ({ frontmatter: {} }), resolvedLinks: {} },
     fileManager: { renameFile: forbidden, processFrontMatter: forbidden },
     workspace: { getLeavesOfType: () => [{ view }] },
-    loadLocalStorage: (key: string) => structuredClone(localState.get(key) ?? null),
+    loadLocalStorage: (key: string) => {
+      if (key === LEGACY_LIBRARY_IMAGE_PERMISSION_KEY) legacyPermissionReads.push(key);
+      return structuredClone(localState.get(key) ?? null);
+    },
     saveLocalStorage: (key: string, value: unknown) => {
       if (failStorage) throw new Error("Synthetic storage failure");
-      if (key === LIBRARY_IMAGE_PERMISSION_KEY) permissionWrites.push(structuredClone(value));
+      if (key === LEGACY_LIBRARY_IMAGE_PERMISSION_KEY) legacyPermissionWrites.push(structuredClone(value));
       localState.set(key, structuredClone(value));
     },
   };
@@ -40,7 +43,7 @@ async function fixture(localState = new Map<string, unknown>(), storedData?: unk
   };
   plugin.loadedData = storedData ?? createDefaultStore(data, 1, "vault-library-display-test");
   await plugin.loadPluginData(false);
-  return { plugin, app, localState, permissionWrites, mutations: () => mutations, clearCalls: () => clearCalls,
+  return { plugin, app, localState, legacyPermissionReads, legacyPermissionWrites, mutations: () => mutations,
     failStorage: () => { failStorage = true; } };
 }
 
@@ -109,69 +112,71 @@ test("archive retains display settings; deleting an archived custom Library clea
   assert.equal(mutations(), 0);
 });
 
-test("external covers default off and explicit device permission never writes synced data or another device", async () => {
-  const { plugin, localState } = await fixture();
-  const saved = plugin.savedData.length;
-  assert.equal(plugin.getExternalLibraryImagesAllowed(), false);
-  await plugin.setExternalLibraryImagesAllowed(true);
-  assert.equal(plugin.getExternalLibraryImagesAllowed(), true);
-  assert.deepEqual(localState.get(LIBRARY_IMAGE_PERMISSION_KEY), { version: 1, externalImagesAllowed: true });
-  assert.equal(plugin.savedData.length, saved);
-  assert.equal((await fixture(localState)).plugin.getExternalLibraryImagesAllowed(), true);
-  assert.equal((await fixture()).plugin.getExternalLibraryImagesAllowed(), false);
-  assert.equal(JSON.stringify(plugin.data).includes("externalImagesAllowed"), false);
-});
+function assertOnlineCoversUnavailable(plugin: EntVaultCommandCenterPlugin): void {
+  assert.equal(Reflect.has(plugin, "getExternalLibraryImagesAllowed"), false);
+  assert.equal(Reflect.has(plugin, "setExternalLibraryImagesAllowed"), false);
+  assert.equal(resolveLibraryCover(plugin.app, "https://covers.invalid/book.png", "Books/Example.md").state, "blocked");
+}
 
-test("malformed and future external cover permissions fail closed", async () => {
-  for (const value of [true, "true", { version: 2, externalImagesAllowed: true }, { version: 1, externalImagesAllowed: "true" },
-    { version: 1, externalImagesAllowed: true, extra: 1 }, [1, true]]) {
-    const { plugin } = await fixture(new Map([[LIBRARY_IMAGE_PERMISSION_KEY, value]]));
-    assert.equal(plugin.getExternalLibraryImagesAllowed(), false);
+test("legacy image permission values are never read and cannot enable online covers", async () => {
+  for (const value of [null, true, "true", { version: 1, externalImagesAllowed: true },
+    { version: 1, externalImagesAllowed: false }, { version: 2, externalImagesAllowed: true },
+    { version: 1, externalImagesAllowed: "true" }, { version: 1, externalImagesAllowed: true, extra: 1 }, [1, true]]) {
+    const { plugin, legacyPermissionReads, legacyPermissionWrites } = await fixture(new Map([[LEGACY_LIBRARY_IMAGE_PERMISSION_KEY, value]]));
+    await plugin.setLibraryDisplayProfile("books", cards());
+    assertOnlineCoversUnavailable(plugin);
+    assert.deepEqual(legacyPermissionReads, []);
+    assert.deepEqual(legacyPermissionWrites, []);
+    assert.equal(JSON.stringify(plugin.data).includes("externalImagesAllowed"), false);
   }
-  const { plugin, app } = await fixture();
-  app.loadLocalStorage = () => { throw new Error("Unreadable"); };
-  assert.equal(plugin.getExternalLibraryImagesAllowed(), false);
 });
 
-test("failed permission enabling stays blocked and revocation strips image sources before a failed save", async () => {
-  const { plugin, failStorage, clearCalls } = await fixture();
-  failStorage();
-  await assert.rejects(plugin.setExternalLibraryImagesAllowed(true), /remain blocked/);
-  assert.equal(plugin.getExternalLibraryImagesAllowed(), false);
-  assert.equal(clearCalls(), 1);
-  const enabled = await fixture();
-  await enabled.plugin.setExternalLibraryImagesAllowed(true);
-  enabled.failStorage();
-  const pending = enabled.plugin.setExternalLibraryImagesAllowed(false);
-  assert.equal(enabled.plugin.getExternalLibraryImagesAllowed(), false, "revocation is synchronous");
-  assert.equal(enabled.clearCalls(), 1, "existing sources removed before awaiting storage");
-  await assert.rejects(pending, /blocked for this session/);
-  assert.equal(enabled.plugin.getExternalLibraryImagesAllowed(), false);
-});
-
-test("privacy reset revokes covers, clears the local key, and prevents re-enabling until restart", async () => {
-  const { plugin, localState, clearCalls } = await fixture();
-  await plugin.setExternalLibraryImagesAllowed(true);
+test("explicit local-data cleanup clears the inert legacy permission without writing synced data or notes", async () => {
+  const { plugin, localState, legacyPermissionReads, legacyPermissionWrites, mutations } = await fixture(new Map([
+    [LEGACY_LIBRARY_IMAGE_PERMISSION_KEY, { version: 1, externalImagesAllowed: true }],
+  ]));
   const saved = plugin.savedData.length;
   await plugin.clearDeviceLocalData();
-  assert.equal(plugin.getExternalLibraryImagesAllowed(), false);
-  assert.equal(localState.get(LIBRARY_IMAGE_PERMISSION_KEY), null);
-  assert.equal(clearCalls(), 1);
+  assert.equal(localState.get(LEGACY_LIBRARY_IMAGE_PERMISSION_KEY), null);
+  assert.deepEqual(legacyPermissionReads, []);
+  assert.deepEqual(legacyPermissionWrites, [null]);
+  assertOnlineCoversUnavailable(plugin);
   assert.equal(plugin.savedData.length, saved);
-  await assert.rejects(plugin.setExternalLibraryImagesAllowed(true), /Restart/);
+  assert.equal(mutations(), 0);
 });
 
-for (const allowed of [false, true]) {
-  test(`Workspace import, Undo/Redo, recovery and Sync cannot change ${allowed ? "allowed" : "blocked"} vault-local image permission`, async () => {
-    const current = await fixture();
-    const { plugin, localState, permissionWrites } = current;
-    if (allowed) await plugin.setExternalLibraryImagesAllowed(true);
-    const permissionBefore = structuredClone(localState.get(LIBRARY_IMAGE_PERMISSION_KEY));
-    const writesBefore = structuredClone(permissionWrites);
+test("failed legacy-key cleanup cannot re-enable online covers, including after restart", async () => {
+  const legacy = { version: 1, externalImagesAllowed: true };
+  const current = await fixture(new Map([[LEGACY_LIBRARY_IMAGE_PERMISSION_KEY, legacy]]));
+  current.failStorage();
+  await assert.rejects(current.plugin.clearDeviceLocalData(), /could not be cleared/);
+  assert.deepEqual(current.localState.get(LEGACY_LIBRARY_IMAGE_PERMISSION_KEY), legacy);
+  assertOnlineCoversUnavailable(current.plugin);
+  const restarted = await fixture(current.localState);
+  assertOnlineCoversUnavailable(restarted.plugin);
+  assert.deepEqual(current.legacyPermissionReads, []);
+  assert.deepEqual(restarted.legacyPermissionReads, []);
+});
+
+test("unavailable local storage has no online-image capability to enable", async () => {
+  const { plugin, app } = await fixture();
+  app.loadLocalStorage = () => { throw new Error("Unreadable"); };
+  Reflect.deleteProperty(app, "saveLocalStorage");
+  assertOnlineCoversUnavailable(plugin);
+  await assert.rejects(plugin.clearDeviceLocalData(), /device-local storage API is unavailable/);
+  assertOnlineCoversUnavailable(plugin);
+});
+
+for (const legacyAllowed of [false, true]) {
+  test(`Workspace import, Undo/Redo, recovery and Sync cannot enable online covers with legacy permission ${legacyAllowed}`, async () => {
+    const current = await fixture(new Map([[LEGACY_LIBRARY_IMAGE_PERMISSION_KEY, { version: 1, externalImagesAllowed: legacyAllowed }]]));
+    const { plugin, localState, legacyPermissionReads, legacyPermissionWrites } = current;
+    const permissionBefore = structuredClone(localState.get(LEGACY_LIBRARY_IMAGE_PERMISSION_KEY));
     const assertPermissionUnchanged = (): void => {
-      assert.equal(plugin.getExternalLibraryImagesAllowed(), allowed);
-      assert.deepEqual(localState.get(LIBRARY_IMAGE_PERMISSION_KEY), permissionBefore);
-      assert.deepEqual(permissionWrites, writesBefore, "no transfer or history action writes the permission key");
+      assertOnlineCoversUnavailable(plugin);
+      assert.deepEqual(localState.get(LEGACY_LIBRARY_IMAGE_PERMISSION_KEY), permissionBefore);
+      assert.deepEqual(legacyPermissionReads, [], "no transfer or history action reads legacy permission");
+      assert.deepEqual(legacyPermissionWrites, [], "only explicit cleanup may touch legacy permission");
       assert.equal(JSON.stringify(plugin.data).includes("externalImagesAllowed"), false);
     };
     const selection = { ...EMPTY_PORTABLE_SELECTION, workspace: true };
@@ -179,9 +184,9 @@ for (const allowed of [false, true]) {
     source.settings.libraryDisplayProfiles.books = cards();
     const rawPackage = createPortableExport(source, [], selection, "2026-09-13T00:00:00.000Z");
     assert.ok(rawPackage.components.workspace);
-    Object.assign(rawPackage, { externalImagesAllowed: !allowed });
-    Object.assign(rawPackage.components.workspace.settings, { externalImagesAllowed: !allowed });
-    Object.assign(rawPackage.components.workspace.settings.libraryDisplayProfiles.books, { externalImagesAllowed: !allowed });
+    Object.assign(rawPackage, { externalImagesAllowed: true });
+    Object.assign(rawPackage.components.workspace.settings, { externalImagesAllowed: true });
+    Object.assign(rawPackage.components.workspace.settings.libraryDisplayProfiles.books, { externalImagesAllowed: true });
     const value = parsePortableExport(rawPackage);
     await plugin.mutate("Import synthetic Workspace", () => {
       applyPortableExport(plugin.data, value, selection, "replace");
@@ -198,9 +203,9 @@ for (const allowed of [false, true]) {
     const recoverySource = structuredClone(plugin.data);
     recoverySource.settings.libraryDisplayProfiles.books.cardSize = "small";
     const rawRecovery = createPersonalBackup(recoverySource, "2026-09-13T00:00:00.000Z", plugin.getVaultId(), plugin.getActiveKnowledgeBaseId(), plugin.data.settings.workspaceName);
-    Object.assign(rawRecovery, { externalImagesAllowed: !allowed });
+    Object.assign(rawRecovery, { externalImagesAllowed: true });
     assert.ok(rawRecovery.libraryDisplayProfiles);
-    Object.assign(rawRecovery.libraryDisplayProfiles.books, { externalImagesAllowed: !allowed });
+    Object.assign(rawRecovery.libraryDisplayProfiles.books, { externalImagesAllowed: true });
     const recovery = parsePersonalBackup(rawRecovery);
     await plugin.mutate("Restore synthetic recovery", () => {
       applyPersonalBackupToData(plugin.data, recovery);
@@ -221,16 +226,17 @@ for (const allowed of [false, true]) {
     const incoming = structuredClone(remote.plugin.savedData.at(-1)) as PluginStore;
     const incomingBase = incoming.bases[0];
     assert.ok(incomingBase);
-    Object.assign(incoming, { externalImagesAllowed: !allowed });
-    Object.assign(incomingBase.data.settings, { externalImagesAllowed: !allowed });
-    Object.assign(incomingBase.data.settings.libraryDisplayProfiles.books, { externalImagesAllowed: !allowed });
+    Object.assign(incoming, { externalImagesAllowed: true });
+    Object.assign(incomingBase.data.settings, { externalImagesAllowed: true });
+    Object.assign(incomingBase.data.settings.libraryDisplayProfiles.books, { externalImagesAllowed: true });
     plugin.loadedData = incoming;
     await plugin.onExternalSettingsChange();
     assert.equal(plugin.isDataReadOnly(), false);
     assert.equal(plugin.getLibraryDisplayProfile("books").imageRatio, "landscape");
     assertPermissionUnchanged();
-    assert.equal(remote.plugin.getExternalLibraryImagesAllowed(), false);
-    assert.deepEqual(remote.permissionWrites, []);
+    assertOnlineCoversUnavailable(remote.plugin);
+    assert.deepEqual(remote.legacyPermissionReads, []);
+    assert.deepEqual(remote.legacyPermissionWrites, []);
     assert.equal(current.mutations() + remote.mutations(), 0);
   });
 }

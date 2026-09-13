@@ -380,11 +380,12 @@ test("device-local clear disclosure includes path-bearing rename and return hist
   assert.match(disclosure, /does not copy note bodies[^.]*search text can itself be sensitive/iu);
   assert.match(disclosure, /Neither local value syncs/iu);
   assert.match(disclosure, /Synced knowledge-base organization[^.]*not changed/iu);
-  assert.match(disclosure, /clears external Library-image permission and blocks new cover loads/iu);
-  assert.match(disclosure, /cannot undo requests already sent[^.]*browser cookies and image cache/iu);
+  assert.match(disclosure, /removes any legacy library-image permission from a private build/iu);
+  assert.match(disclosure, /Online cover loading is unavailable in this release/iu);
+  assert.match(disclosure, /Browser cookies and image cache are not cleared/iu);
 });
 
-test("failed device-local clear warns about retained image permission and restart without exposing failure details", async () => {
+test("failed device-local clear offers a retry without suggesting online-image controls or exposing failure details", async () => {
   for (const failure of ["Synthetic storage failure", "Synthetic busy-operation refusal"]) {
     Notice.messages.length = 0;
     const dom = createFakeDom();
@@ -407,9 +408,9 @@ test("failed device-local clear warns about retained image permission and restar
     assert.equal(clear.disabled, false);
     assert.equal(cancel.disabled, false);
     assert.equal(Notice.messages.length, 1);
-    assert.match(Notice.messages[0], /External-image permission may still be saved/iu);
-    assert.match(Notice.messages[0], /check Library settings after restarting[^.]*block external images there now/iu);
-    assert.doesNotMatch(Notice.messages[0], /are blocked for this session/iu, "a pre-operation refusal must not falsely claim successful revocation");
+    assert.match(Notice.messages[0], /Device-local plugin data could not be cleared\. Please retry\./iu);
+    assert.match(Notice.messages[0], /Synced knowledge-base data and Markdown notes were not changed/iu);
+    assert.doesNotMatch(Notice.messages[0], /permission|external images|revocation/iu, "there is no online-image permission to enable or block");
     assert.equal(Notice.messages[0].includes(failure), false);
   }
 });

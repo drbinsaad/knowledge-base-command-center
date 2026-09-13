@@ -19,7 +19,6 @@ export class LibrarySettingsModal extends Modal {
   private guardOpenedBase: OpenedBaseGuard;
   private originalLibraryFingerprint = "";
   private originalDisplayFingerprint = "";
-  private originalImagesAllowed = false;
   private section: LibrarySettingsSection = "general";
   private draft: LibraryDisplayProfile;
   private visiblePropertiesText: string;
@@ -94,7 +93,6 @@ export class LibrarySettingsModal extends Modal {
   private captureBaseline(): OpenedBaseGuard {
     this.originalLibraryFingerprint = JSON.stringify(this.plugin.getLibrary(this.library.id));
     this.originalDisplayFingerprint = JSON.stringify(this.plugin.getLibraryDisplayProfile(this.library.id));
-    this.originalImagesAllowed = this.plugin.getExternalLibraryImagesAllowed();
     return createOpenedBaseGuard(this.plugin, {
       message: "The knowledge base or library settings changed. Close and reopen Library settings before saving your draft.",
       onStale: () => this.markStale(),
@@ -112,8 +110,7 @@ export class LibrarySettingsModal extends Modal {
   private isCurrent(): boolean {
     if (!this.guardOpenedBase()) return false;
     if (JSON.stringify(this.plugin.getLibrary(this.library.id)) !== this.originalLibraryFingerprint
-      || JSON.stringify(this.plugin.getLibraryDisplayProfile(this.library.id)) !== this.originalDisplayFingerprint
-      || this.plugin.getExternalLibraryImagesAllowed() !== this.originalImagesAllowed) {
+      || JSON.stringify(this.plugin.getLibraryDisplayProfile(this.library.id)) !== this.originalDisplayFingerprint) {
       this.markStale();
       return false;
     }
@@ -225,22 +222,9 @@ export class LibrarySettingsModal extends Modal {
     preview.createDiv({ cls: "ent-cc-path-preview-label", text: "Display preview" });
     this.previewEl = preview.createDiv({ cls: "ent-cc-library-profile-summary-value" });
     this.updatePreview();
-    const permission = parent.createDiv({ cls: "ent-cc-library-image-permission" });
-    permission.createEl("h3", { text: "External images in this vault" });
-    const allowed = this.plugin.getExternalLibraryImagesAllowed();
-    permission.createEl("p", { text: "Vault images work offline. External image links contact their image hosts, which receive your IP address and may track image loads. This permission applies to all libraries in this vault on this device and is never enabled by saving or importing a display profile. Other vaults and devices keep their own permission." });
-    permission.createDiv({ text: allowed ? "External images are allowed in this vault on this device." : "External images are blocked in this vault on this device (default).", attr: { role: "status" } });
-    this.button(permission, allowed ? "Block external images" : "Allow external images…", () => {
-      if (allowed) void this.setImagesAllowed(false);
-      else {
-        if (!this.isCurrent()) return;
-        const confirmation = new ConfirmModal(this.app, "Allow external library images?", "Cover image hosts will receive your IP address and requested image URLs, and may track image loads. Allow external image loads for all libraries in this vault on this device? Other vaults and devices keep their own permission. Vault images do not require this permission.", "Allow external images", async () => {
-          if (this.isCurrent()) await this.setImagesAllowed(true);
-        });
-        confirmation.modalEl.addClass("ent-cc-image-consent");
-        confirmation.open();
-      }
-    }, !allowed);
+    const covers = parent.createDiv({ cls: "ent-cc-library-cover-info" });
+    covers.createEl("h3", { text: "Cover images" });
+    covers.createEl("p", { text: "Covers use images stored in this vault. Online images are not supported in this release." });
   }
 
   private renderCreation(parent: HTMLElement): void {
@@ -345,21 +329,6 @@ export class LibrarySettingsModal extends Modal {
       this.busy = false;
       this.error = errorMessage(error);
       this.render(focusLabel);
-    }
-  }
-
-  private async setImagesAllowed(allowed: boolean): Promise<void> {
-    // Revocation remains available even if Sync or a base switch made this draft stale.
-    if (allowed && (this.busy || !this.isCurrent())) return;
-    try {
-      await this.plugin.setExternalLibraryImagesAllowed(allowed);
-      this.originalImagesAllowed = this.plugin.getExternalLibraryImagesAllowed();
-      this.render(allowed ? "Block external images" : "Allow external images…");
-    } catch (error) {
-      // A failed permission write may still have revoked images for this session.
-      this.originalImagesAllowed = this.plugin.getExternalLibraryImagesAllowed();
-      this.error = errorMessage(error);
-      this.render(this.originalImagesAllowed ? "Block external images" : "Allow external images…");
     }
   }
 }

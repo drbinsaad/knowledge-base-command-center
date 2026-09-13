@@ -2,10 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { normalizeLibraryDisplayProfile, type LibraryDisplayProfile } from "../src/library-display-profile.ts";
 import { LibrarySettingsModal } from "../src/library-settings-modal.ts";
-import EntVaultCommandCenterPlugin from "../src/main.ts";
-import { ConfirmModal } from "../src/modals.ts";
 import type { LibraryDefinition } from "../src/model.ts";
-import { EntVaultCommandCenterView } from "../src/view.ts";
 import { asHtmlElement, createFakeDom, type FakeElement } from "./support/fake-dom.ts";
 
 function harness(libraryOverrides: Partial<LibraryDefinition> = {}) {
@@ -15,18 +12,22 @@ function harness(libraryOverrides: Partial<LibraryDefinition> = {}) {
     epoch: 0,
     externalGeneration: 0,
     readOnly: false,
-    allowed: false,
+    legacyPermissionReads: 0,
     library: {
       id: "books", name: "Books", singularName: "Book", icon: "book-open", order: 0,
       sourceKind: null, archivedAt: null, ...libraryOverrides,
     } as LibraryDefinition | null,
     profile: normalizeLibraryDisplayProfile(null),
     displayWrites: [] as Array<LibraryDisplayProfile | null>,
-    permissionWrites: [] as boolean[],
-    permissionWriteError: "",
   };
   const plugin = {
-    app: {},
+    app: {
+      loadLocalStorage: () => {
+        state.legacyPermissionReads += 1;
+        return { version: 1, externalImagesAllowed: true };
+      },
+      saveLocalStorage: () => { throw new Error("Library settings must not write image permission"); },
+    },
     data: {},
     getActiveKnowledgeBaseId: () => state.baseId,
     getDataEpoch: () => state.epoch,
@@ -34,17 +35,11 @@ function harness(libraryOverrides: Partial<LibraryDefinition> = {}) {
     isDataReadOnly: () => state.readOnly,
     getLibrary: () => state.library && { ...state.library },
     getLibraryDisplayProfile: () => normalizeLibraryDisplayProfile(state.profile),
-    getExternalLibraryImagesAllowed: () => state.allowed,
     getEffectiveLibraryNoteProfile: () => ({ folder: "Books", mode: "empty", templatePath: "" }),
     setLibraryDisplayProfile: async (_id: string, profile: LibraryDisplayProfile | null) => {
       state.displayWrites.push(profile && structuredClone(profile));
       state.profile = normalizeLibraryDisplayProfile(profile);
       state.epoch += 1;
-    },
-    setExternalLibraryImagesAllowed: async (allowed: boolean) => {
-      state.permissionWrites.push(allowed);
-      state.allowed = allowed;
-      if (state.permissionWriteError) throw new Error(state.permissionWriteError);
     },
   };
   assert.ok(state.library);
@@ -56,7 +51,6 @@ function harness(libraryOverrides: Partial<LibraryDefinition> = {}) {
   modal.titleEl = asHtmlElement(root.createEl("h2"));
   const actions = modal as unknown as {
     saveDisplay(reset: boolean): Promise<void>;
-    setImagesAllowed(allowed: boolean): Promise<void>;
     isCurrent(): boolean;
   };
   modal.onOpen();
@@ -100,13 +94,13 @@ test("Library settings has discoverable identity and creation controls, with pro
   assert.equal(builtIn.content.querySelectorAll("button").some((element) => element.textContent === "Delete permanently…"), false);
 });
 
-test("card display edits update the preview in place and save every selected field without changing image permission", async () => {
+test("card display edits update the preview in place and save every selected field without reading legacy image permission", async () => {
   const { actions, content, dom, state } = harness();
   button(content, "Display").click();
   assert.equal(dom.document.activeElement, button(content, "Display"), "section changes retain keyboard focus");
   assert.equal(input(content, "Layout").value, "list");
   assert.equal(input(content, "Image property").value, "cover");
-  assert.deepEqual(state.permissionWrites, []);
+  assert.equal(state.legacyPermissionReads, 0);
   change(content, "Layout", "cards");
   const cover = input(content, "Image property");
   cover.focus();
@@ -121,12 +115,11 @@ test("card display edits update the preview in place and save every selected fie
   assert.deepEqual(state.displayWrites, [{
     layout: "cards", imageProperty: "book_cover", cardSize: "large", imageRatio: "square", imageFit: "cover", visibleProperties: ["author", "reading_status", "year"],
   }]);
-  assert.deepEqual(state.permissionWrites, []);
-  assert.equal(state.allowed, false);
+  assert.equal(state.legacyPermissionReads, 0);
   assert.equal(actions.isCurrent(), true, "own saves rebaseline the editor");
 });
 
-test("visible property count is validated and reset restores defaults without granting external image permission", async () => {
+test("visible property count is validated and reset restores defaults without reading legacy image permission", async () => {
   const { actions, content, state } = harness();
   button(content, "Display").click();
   change(content, "Visible properties", "one,two,three,four,five,six,seven");
@@ -135,7 +128,7 @@ test("visible property count is validated and reset restores defaults without gr
   assert.match(content.textContent, /Choose at most 6 visible properties/);
   await actions.saveDisplay(true);
   assert.deepEqual(state.displayWrites, [null]);
-  assert.deepEqual(state.permissionWrites, []);
+  assert.equal(state.legacyPermissionReads, 0);
   assert.equal(input(content, "Layout").value, "list");
   assert.equal(input(content, "Visible properties").value, "author, reading_status");
 });
@@ -145,7 +138,6 @@ for (const [name, drift] of [
   ["external revision", (state: ReturnType<typeof harness>["state"]) => { state.externalGeneration += 1; }],
   ["display profile change", (state: ReturnType<typeof harness>["state"]) => { state.profile.layout = "cards"; }],
   ["library deletion", (state: ReturnType<typeof harness>["state"]) => { state.library = null; }],
-  ["permission change", (state: ReturnType<typeof harness>["state"]) => { state.allowed = true; }],
 ] as const) {
   test(`${name} fences a stale Library display draft`, async () => {
     const { actions, content, state } = harness();
@@ -159,39 +151,25 @@ for (const [name, drift] of [
   });
 }
 
-test("external images require the explicit warning confirmation, and privacy revocation remains available after a base switch", async () => {
+test("Library settings explains local-only covers and never offers an online-image enable or block control", async () => {
   const { actions, content, state } = harness();
-  button(content, "Display").click();
-  assert.match(content.textContent, /This permission applies to all libraries in this vault on this device/);
-  assert.match(content.textContent, /Other vaults and devices keep their own permission/);
-  assert.match(content.textContent, /External images are blocked in this vault on this device \(default\)/);
-  let confirmation: { message: string; modalEl: HTMLElement; onConfirm(): Promise<void> } | undefined;
-  const prior = Object.getOwnPropertyDescriptor(ConfirmModal.prototype, "open");
-  ConfirmModal.prototype.open = function (): void {
-    confirmation = this as unknown as typeof confirmation;
+  const assertLocalOnly = (): void => {
+    assert.match(content.querySelector(".ent-cc-library-cover-info")?.textContent ?? "", /Covers use images stored in this vault\. Online images are not supported in this release\./);
+    assert.equal(content.querySelectorAll("button").some((candidate) => /(?:allow|block).*(?:external|online).*image/iu.test(candidate.textContent)), false);
+    assert.equal(content.querySelector(".ent-cc-library-image-permission"), null);
+    assert.equal(state.legacyPermissionReads, 0, "a leftover permission value is never consulted");
   };
-  try {
-    button(content, "Allow external images…").click();
-    assert.deepEqual(state.permissionWrites, []);
-    assert.ok(confirmation);
-    assert.equal(confirmation.modalEl.classList.contains("ent-cc-image-consent"), true);
-    assert.match(confirmation.message, /IP address.*requested image URLs/);
-    assert.match(confirmation.message, /all libraries in this vault on this device/);
-    assert.match(confirmation.message, /Other vaults and devices keep their own permission/);
-    await confirmation.onConfirm();
-    assert.deepEqual(state.permissionWrites, [true]);
-    assert.deepEqual(state.displayWrites, []);
-    assert.match(content.textContent, /External images are allowed in this vault on this device\./);
-    state.baseId = "base-b";
-    await actions.setImagesAllowed(false);
-    assert.deepEqual(state.permissionWrites, [true, false]);
-    assert.equal(state.allowed, false);
-    assert.deepEqual(state.displayWrites, []);
-    assert.match(content.textContent, /External images are blocked in this vault on this device \(default\)/);
-  } finally {
-    if (prior) Object.defineProperty(ConfirmModal.prototype, "open", prior);
-    else Reflect.deleteProperty(ConfirmModal.prototype, "open");
-  }
+  button(content, "Display").click();
+  assertLocalOnly();
+  change(content, "Layout", "cards");
+  await actions.saveDisplay(false);
+  assertLocalOnly();
+  await actions.saveDisplay(true);
+  assertLocalOnly();
+  state.readOnly = true;
+  button(content, "General").click();
+  button(content, "Display").click();
+  assertLocalOnly();
 });
 
 test("read-only settings retain navigation, disable changes, and release viewport listeners on close", async () => {
@@ -210,67 +188,10 @@ test("read-only settings retain navigation, disable changes, and release viewpor
   assert.equal(dom.window.listenerCount("resize"), 0);
 });
 
-test("a failed permission revocation shows that images are blocked for the session and keeps revocation reachable in read-only mode", async () => {
-  const { actions, content, state } = harness();
-  button(content, "Display").click();
-  await actions.setImagesAllowed(true);
-  state.readOnly = true;
-  button(content, "Display").click();
-  assert.equal(button(content, "Block external images").disabled, false);
-  state.permissionWriteError = "External covers are blocked for this session, but the permission could not be cleared.";
-  await actions.setImagesAllowed(false);
-  assert.equal(state.allowed, false);
-  assert.match(content.textContent, /External images are blocked in this vault on this device/);
-  assert.match(content.textContent, /permission could not be cleared/);
-  assert.equal(button(content, "Allow external images…").disabled, true);
-});
-
 test("switching sections after the Library is deleted does not read another base's creation defaults", () => {
   const { content, state } = harness();
   state.library = null;
   assert.doesNotThrow(() => button(content, "Note creation").click());
   assert.match(content.textContent, /Reopen library settings to inspect/);
   assert.equal(content.textContent.includes("Destination: Books"), false);
-});
-
-test("privacy reset revokes cached consent and clears rendered covers even if local storage is unavailable", async () => {
-  let cleared = 0;
-  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView;
-  view.clearExternalLibraryImages = () => { cleared += 1; };
-  const app = {
-    workspace: { getLeavesOfType: () => [{ view }] },
-    loadLocalStorage: () => ({ version: 1, externalImagesAllowed: true }),
-  };
-  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never);
-  assert.equal(plugin.getExternalLibraryImagesAllowed(), true);
-  await assert.rejects(plugin.clearDeviceLocalData(), /device-local storage API is unavailable/);
-  assert.equal(plugin.getExternalLibraryImagesAllowed(), false);
-  assert.equal(cleared, 1);
-});
-
-test("re-enabling after a failed revocation still requires a fresh consent confirmation owned by the current base", async () => {
-  const { actions, content, state } = harness();
-  button(content, "Display").click();
-  await actions.setImagesAllowed(true);
-  state.permissionWriteError = "External covers are blocked for this session, but the permission could not be cleared.";
-  await actions.setImagesAllowed(false);
-  assert.equal(state.allowed, false);
-  assert.equal(actions.isCurrent(), true, "the session revocation does not invalidate an otherwise current display draft");
-  state.permissionWriteError = "";
-  let confirmation: { onConfirm(): Promise<void> } | undefined;
-  const prior = Object.getOwnPropertyDescriptor(ConfirmModal.prototype, "open");
-  ConfirmModal.prototype.open = function (): void { confirmation = this as unknown as typeof confirmation; };
-  try {
-    button(content, "Allow external images…").click();
-    assert.ok(confirmation);
-    assert.deepEqual(state.permissionWrites, [true, false]);
-    state.baseId = "base-b";
-    await confirmation.onConfirm();
-    assert.deepEqual(state.permissionWrites, [true, false]);
-    assert.equal(state.allowed, false);
-    assert.match(content.textContent, /Close and reopen Library settings/);
-  } finally {
-    if (prior) Object.defineProperty(ConfirmModal.prototype, "open", prior);
-    else Reflect.deleteProperty(ConfirmModal.prototype, "open");
-  }
 });

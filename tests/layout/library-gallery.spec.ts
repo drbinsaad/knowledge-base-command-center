@@ -11,6 +11,7 @@ let bundle: string;
 let css: string;
 let hostCss: string;
 const errorsByPage = new WeakMap<Page, string[]>();
+const networkByPage = new WeakMap<Page, string[]>();
 test.beforeAll(async () => {
   const [built, product, host] = await Promise.all([
     build({ entryPoints: [path.join(root, "tests/browser/view-harness.ts")], bundle: true, write: false,
@@ -23,9 +24,14 @@ test.beforeAll(async () => {
 
 async function open(page: Page, { mobile = true, width = 1180, height = 820, dark = false, galleryTitleStress = false } = {}): Promise<void> {
   const errors: string[] = [];
+  const network: string[] = [];
   errorsByPage.set(page, errors);
+  networkByPage.set(page, network);
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
+  // All fixture assets are inline or generated local image data. Any attempted
+  // network request is a regression, regardless of which hostname it targets.
+  await page.route("**/*", async (route) => { network.push(route.request().url()); await route.abort(); });
   await page.setViewportSize({ width, height });
   await page.goto(`about:blank#mobile=${mobile}&scenario=library-gallery&galleryTitleStress=${galleryTitleStress}`);
   await page.setContent(`<!doctype html><html lang="en"><head><meta charset="utf-8"><title>KBCC Library gallery · synthetic vault</title></head><body class="${dark ? "theme-dark" : "theme-light"}${mobile ? " is-mobile" : ""}"><main id="kbcc-view" class="view-content"></main></body></html>`);
@@ -96,7 +102,10 @@ async function expectFullCardTitle(card: Locator): Promise<void> {
   expect(geometry.separateAction).toBe(true);
 }
 
-test.afterEach(async ({ page }) => { expect(errorsByPage.get(page) ?? []).toEqual([]); });
+test.afterEach(async ({ page }) => {
+  expect(errorsByPage.get(page) ?? []).toEqual([]);
+  expect(networkByPage.get(page) ?? [], "Vault-only galleries do not request network assets").toEqual([]);
+});
 
 for (const device of [
   { name: "phone320", mobile: true, width: 320, height: 740 },
@@ -128,8 +137,6 @@ for (const device of [
       await expectCompactPlaceholder(placeholderCard.locator(".ent-cc-library-cover"));
     });
     test("Library cards keep hierarchy, readable covers, metadata and unobscured settings controls", async ({ page }) => {
-      let requests = 0;
-      await page.route("https://covers.invalid/**", async (route) => { requests += 1; await route.abort(); });
       await open(page, device);
       await expect(page.locator(".ent-cc-library-card-grid")).toHaveCount(3);
       await expect(page.locator(".ent-cc-library-card-grid").nth(0).locator(".ent-cc-library-card")).toHaveCount(4);
@@ -155,21 +162,12 @@ for (const device of [
       await expect(dialog.getByRole("button", { name: "Rename…", exact: true })).toBeVisible();
       await expect(dialog.getByRole("button", { name: "Archive…", exact: true })).toBeVisible();
       await dialog.getByRole("button", { name: "Display", exact: true }).click();
-      await expect(dialog.locator(".ent-cc-library-image-permission")).toContainText("all libraries in this vault on this device");
-      await dialog.getByRole("button", { name: "Allow external images…", exact: true }).click();
-      const consent = page.getByRole("dialog", { name: "Allow external library images?", exact: true });
-      await expect(consent).toContainText("all libraries in this vault on this device");
-      await expect(consent).toContainText("Other vaults and devices keep their own permission");
-      expect(await consent.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
-      for (const button of await consent.getByRole("button").all()) {
-        const bounds = await button.boundingBox();
-        expect(bounds?.width).toBeGreaterThanOrEqual(44);
-        expect(bounds?.height).toBeGreaterThanOrEqual(44);
-      }
-      await capture(page, `${device.name}-consent-scope`);
-      await consent.getByRole("button", { name: "Cancel", exact: true }).click();
-      await expect(consent).toHaveCount(0);
-      expect(requests).toBe(0, "reading and cancelling the consent disclosure must not load images");
+      await expect(dialog.locator(".ent-cc-library-cover-info")).toContainText("Covers use images stored in this vault. Online images are not supported in this release.");
+      await expect(dialog.getByRole("button", { name: /(?:Allow|Block) external images/u })).toHaveCount(0);
+      await expect(dialog.getByRole("textbox", { name: "Image property", exact: true })).toHaveValue("cover");
+      await dialog.locator(".ent-cc-library-cover-info").scrollIntoViewIfNeeded();
+      await capture(page, `${device.name}-vault-cover-guidance`);
+      expect(networkByPage.get(page)).toEqual([]);
       await expect(dialog.getByRole("combobox", { name: "Layout", exact: true })).toHaveValue("cards");
       expect((await dialog.getByRole("combobox", { name: "Layout", exact: true }).boundingBox())?.height).toBeGreaterThanOrEqual(44);
       await dialog.getByRole("combobox", { name: "Card size", exact: true }).selectOption("small");
@@ -190,7 +188,7 @@ for (const device of [
       await dialog.getByRole("button", { name: "Save display", exact: true }).click();
       await expect(page.locator(".ent-cc-library-card")).toHaveCount(0);
       await expect(page.locator(".ent-cc-subject-row")).toHaveCount(8);
-      expect(requests).toBe(0, "opening/importing/saving profiles must not load external images");
+      expect(networkByPage.get(page), "opening and saving profiles must not load network images").toEqual([]);
     });
   });
 }
@@ -199,8 +197,6 @@ test.describe("small Cards on a narrow phone", () => {
   test.use({ hasTouch: true });
 
   test("long LTR/RTL titles and blocked or missing cover labels fit the smallest cards", async ({ page }) => {
-    let requests = 0;
-    await page.route("https://covers.invalid/**", async (route) => { requests += 1; await route.abort(); });
     await open(page, { width: 320, height: 740, galleryTitleStress: true });
     await page.getByRole("button", { name: "Library settings", exact: true }).tap();
     const dialog = page.getByRole("dialog", { name: "Library settings — Books" });
@@ -215,7 +211,7 @@ test.describe("small Cards on a narrow phone", () => {
       for (const index of [4, 5, 6, 7]) await expectFullCardTitle(page.locator(".ent-cc-library-card").nth(index));
       for (const cover of await page.locator(".ent-cc-library-cover.is-placeholder").all()) await expectCompactPlaceholder(cover);
       const blocked = page.locator('.ent-cc-library-card[data-record-path="Reading/Book 3.md"] .ent-cc-library-cover');
-      await expect(blocked).toHaveText("External cover blocked");
+      await expect(blocked).toHaveText("Cover unavailable");
       await expect(page.locator('.ent-cc-library-card[data-record-path="Reading/Book 4.md"] .ent-cc-library-cover')).toHaveText("Cover unavailable");
       await expect(page.locator('.ent-cc-library-card[data-record-path="Reading/Book 5.md"] .ent-cc-library-cover')).toHaveText("No cover");
       await expect(page.locator('.ent-cc-library-card[data-record-path="Reading/Book 5.md"] .ent-cc-subject-title')).toHaveCSS("direction", "rtl");
@@ -225,35 +221,29 @@ test.describe("small Cards on a narrow phone", () => {
       await page.locator('.ent-cc-library-card[data-record-path="Reading/Book 5.md"]').scrollIntoViewIfNeeded();
       await capture(page, `phone320-small-${direction}-full-titles`);
     }
-    expect(requests).toBe(0, "small-card layout changes must not grant external-image permission");
+    expect(networkByPage.get(page), "small-card layout changes never load network images").toEqual([]);
   });
 });
 
-test("explicit remote permission loads only controlled image fixture; revoke removes remote sources", async ({ page }) => {
-  let requests = 0;
-  await page.route("https://covers.invalid/**", async (route) => {
-    requests += 1;
-    await route.fulfill({ contentType: "image/png", body: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWZkAAAAASUVORK5CYII=", "base64") });
-  });
+test("Library settings explain vault-only covers and offer no remote permission control", async ({ page }) => {
   await open(page, { mobile: false, width: 1440, height: 960 });
   const externalCover = page.locator('.ent-cc-library-card[data-record-path="Reading/Book 3.md"] .ent-cc-library-cover');
   await expectCompactPlaceholder(externalCover);
-  expect(requests).toBe(0);
+  await expect(externalCover).toHaveText("Cover unavailable");
+  await expect(externalCover.locator("img")).toHaveCount(0);
+  await expect(page.locator(".ent-cc-library-cover img").first()).toHaveJSProperty("naturalWidth", 400);
   await page.getByRole("button", { name: "Library settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Library settings — Books" });
   await dialog.getByRole("button", { name: "Display", exact: true }).click();
-  await dialog.getByRole("button", { name: "Allow external images…", exact: true }).click();
-  const confirm = page.getByRole("dialog", { name: "Allow external library images?", exact: true });
-  await expect(confirm).toContainText("IP address");
-  expect(requests).toBe(0);
-  await confirm.getByRole("button", { name: "Allow external images", exact: true }).click();
-  await expect(page.locator('img[data-kbcc-external-cover="true"]')).toHaveCount(1);
-  await expect.poll(() => requests).toBe(1);
-  await expect(page.locator('img[data-kbcc-external-cover="true"]')).toHaveAttribute("referrerpolicy", "no-referrer");
-  await dialog.getByRole("button", { name: "Block external images", exact: true }).click();
-  await expect(page.locator('img[data-kbcc-external-cover="true"]')).toHaveCount(0);
-  await expect(dialog).toContainText("External images are blocked");
-  await expectCompactPlaceholder(externalCover);
+  await expect(dialog.getByRole("heading", { name: "Cover images", exact: true })).toBeVisible();
+  await expect(dialog.locator(".ent-cc-library-cover-info")).toContainText("Covers use images stored in this vault. Online images are not supported in this release.");
+  await expect(dialog.getByRole("button", { name: /(?:Allow|Block) external images/u })).toHaveCount(0);
+  await expect(dialog.getByRole("textbox", { name: "Image property", exact: true })).toHaveValue("cover");
+  await dialog.getByRole("button", { name: "Save display", exact: true }).click();
+  await expect(externalCover.locator("img")).toHaveCount(0);
+  expect(networkByPage.get(page)).toEqual([]);
+  await dialog.locator(".ent-cc-library-cover-info").scrollIntoViewIfNeeded();
+  await capture(page, "vault-only-settings");
 });
 
 test("an image error replaces its portrait frame with a compact readable fallback", async ({ page }) => {

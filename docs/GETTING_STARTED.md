@@ -2,7 +2,7 @@
 
 Knowledge Base Command Center is an Obsidian plugin for building independent visual indexes over Markdown notes without making their storage folders authoritative. This guide covers installation, first-run setup, note creation, device updates, and safe migration from earlier plugin versions.
 
-This checkout includes unreleased Library settings and cover galleries. Published 0.22.0 assets do not contain these additions; the [external-image design proposal](LIBRARY_DISPLAY_AND_PRIVACY.md) remains pending independent and public release review.
+Version 0.23.0 adds Library settings, Cards and clearer navigation with local-vault covers only. Online cover loading is excluded; the [earlier online-cover proposal](LIBRARY_DISPLAY_AND_PRIVACY.md#deferred-online-cover-proposal) remains deferred and unapproved.
 
 ## Requirements
 
@@ -201,7 +201,7 @@ After updating, confirm the plugin is enabled before opening its workspace. For 
 
 An existing installation shows **What’s new in Knowledge Base Command Center _version_** once on this device after the update, where _version_ is the newly installed release. Its complete-release-notes action is a normal link to that exact GitHub release and contacts GitHub only after you activate it; the plugin performs no background version check or network request. Fresh installs establish the local version marker without showing update news. Use **Open what’s new** in the Command Palette whenever you want to reopen the window.
 
-The sanitized [0.10.0 iPhone evidence](release-evidence/0.10.0-iphone.md) remains the latest completed physical-device record. The [0.17.0](release-evidence/0.17.0-iphone.md), [0.18.0](release-evidence/0.18.0-iphone.md), and [0.19.0](release-evidence/0.19.0-iphone.md) evidence records and the [current manual checklist](manual-iphone-release-checklist.md) record their physical-iPhone matrices as maintainer-waived and unverified, not Passed. The 0.19.0 record identifies supplemental Mac Obsidian mobile-emulation coverage separately and does not treat it as iPhone evidence.
+The sanitized [0.10.0 iPhone evidence](release-evidence/0.10.0-iphone.md) remains historical, completed-but-partial physical-device evidence. The [0.23.0 candidate record](release-evidence/0.23.0-iphone.md) and [manual checklist](manual-iphone-release-checklist.md) separately record the fresh maintainer decision to publish local-cover-only changes with physical iPhone/iPad and controlled two-device Sync unverified. Earlier waivers and screenshots do not establish a pass for this candidate.
 
 ## Uninstall
 
@@ -209,7 +209,7 @@ Export current organization and back up the vault first. Run **Knowledge Base Co
 
 Removing the plugin folder removes its <code>data.json</code>, including synced knowledge-base definitions, settings, Libraries, Collections, pins, visual hierarchy, and named snapshots. It does not by itself reliably remove device-only routes, collapsed sections, Undo/Redo history, local Sync/Recovery facts, or update-announcement history because Obsidian stores those App-local values outside the plugin folder. A third, bounded rename-recovery journal may temporarily contain the vault identity and old/new vault-relative paths until an interrupted organization repair is durably completed. A fourth, bounded return-navigation history can contain the vault identity, up to 24 opened-note paths, their originating base and tab, a selected-record path, literal search text entered in KBCC, compact-detail state, and scroll positions. KBCC does not read or copy note bodies into this history, but user-entered search text can itself be sensitive; the history is not synced. The clear command removes all five plugin-owned App-local values without changing <code>data.json</code>, Markdown notes, attachments, or recovery export files, and local tracking stays suppressed until Obsidian restarts. Disable or uninstall in that same session. If the plugin was already removed without clearing them, reinstall and enable the same or a newer release, run the command, then remove it again.
 
-The fifth App-local value is external Library-image permission. Clearing local data revokes it and removes current external covers. A failed permission-clear write blocks images for the current session only; check Library settings again after restarting. Details are in [Local data](LOCAL_DATA.md).
+The fifth App-local key is a legacy external-image permission value from private test builds. It is ignored for image loading in 0.23.0 and included only for cleanup by Clear device-local data. A failed cleanup cannot enable online covers, including after restart. Details are in [Local data](LOCAL_DATA.md).
 
 ## Next
 

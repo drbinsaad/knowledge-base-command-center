@@ -2,7 +2,7 @@
 
 Knowledge Base Command Center separates portable organization from private same-vault restoration. Read this guide before sharing an export, replacing organization, or restoring recovery data.
 
-This source guide includes the unreleased Library-display changes. They are not a published update to 0.22.0; see the [pending design and privacy review](LIBRARY_DISPLAY_AND_PRIVACY.md).
+This guide covers version 0.23.0 Library-display formats. The release supports local-vault covers only; online loading is excluded and its [earlier proposal](LIBRARY_DISPLAY_AND_PRIVACY.md#deferred-online-cover-proposal) remains deferred and unapproved.
 
 ## Choose the right artifact
 
@@ -37,7 +37,7 @@ Archived Libraries are not offered as portable sections. Confirmed private recov
 
 Library display profiles contain only layout choices and property names: no cover URL, property value, image bytes, or permission to contact a server. To transfer them, select **Workspace settings**. Workspace format 3 includes dependency descriptors for every active Library with a display profile, even when that Library's catalog is unselected. Descriptors preserve stable identity without replacing an unselected destination Library's name, archive decision, or headings. Profiles for archived or missing Libraries are omitted from Workspace export. Importing a Library catalog alone leaves destination display settings unchanged. Older Workspace formats 1–2 preserve destination display preferences; format 3 applies the selected Workspace profiles.
 
-External-image permission is device-local and is never synced, exported, imported, or restored. Importing a cover property name or syncing a note with a cover URL cannot enable external loads on a device that has not opted in.
+Version 0.23.0 does not support online-image loading. Display profiles, synced notes, imports, recovery and Undo cannot enable it. The obsolete permission key from private test builds is App-local, inert, and excluded from all transfer formats.
 
 Collections and study state carry only the portable identities they reference. They do not silently select or replace a complete Index or complete Library.
 
@@ -103,9 +103,9 @@ Creating or linking preserves the portable identity and its Index/Library placem
 
 ## Portable format compatibility
 
-The unreleased source build writes portable format version 6 with Workspace format 3, adding Library display profiles and their stable-ID dependencies. Releases 0.13.0 through 0.22.0 wrote portable version 5. That format added nested Collection and Library subheadings—up to five levels in one branch, counting the top heading as level 1—to version 4's stable Library definitions and selective Library IDs.
+Version 0.23.0 writes portable format version 6 with Workspace format 3, adding Library display profiles and their stable-ID dependencies. Releases 0.13.0 through 0.22.0 wrote portable version 5. That format added nested Collection and Library subheadings—up to five levels in one branch, counting the top heading as level 1—to version 4’s stable Library definitions and selective Library IDs.
 
-The source build reads portable versions 1–6 and Workspace versions 1–3, so older flat packages still import. Legacy Procedures, Medications, and Syndromes catalogs migrate to reserved stable Library IDs. Non-topic identities in version 1 files are treated conservatively as Collection or study dependencies rather than authoritative complete Libraries. Imported content nested deeper than five levels keeps its records by merging them into the nearest allowed level.
+Version 0.23.0 reads portable versions 1–6 and Workspace versions 1–3, so older flat packages still import. Legacy Procedures, Medications, and Syndromes catalogs migrate to reserved stable Library IDs. Non-topic identities in version 1 files are treated conservatively as Collection or study dependencies rather than authoritative complete Libraries. Imported content nested deeper than five levels keeps its records by merging them into the nearest allowed level.
 
 Older plugin builds reject unsupported portable version 6 or Workspace version 3 rather than discarding display settings. An older build that encounters a synced version-16 store with version-16 knowledge-base data preserves it read-only instead of rewriting it. Update every importing and syncing device before applying a new export. Existing version-15 direct-note and linked-folder provenance remains required and is preserved during migration to version 16; the display feature does not reenroll storage folders.
 
@@ -144,7 +144,7 @@ Single-base import and export enforce a 10 MB ceiling plus per-list and aggregat
 
 Same-vault recovery starts unselected when an import file is opened. It must be selected and confirmed separately, is restored by itself, and is never described or executed as a merge with portable sections.
 
-Current version-12 recovery files from the unreleased source build embed:
+Current version-12 recovery files introduced in 0.23.0 embed:
 
 - source vault identity;
 - source knowledge-base ID and name;
@@ -159,7 +159,7 @@ Before an Undo snapshot or mutation starts, the plugin verifies that the source 
 
 ### Recovery versions
 
-- **Version 12:** current format in the unreleased source build, adding bounded Library display profiles to version 11's organization and identity protections. External-image permission is excluded.
+- **Version 12:** current format, introduced in 0.23.0, adding bounded Library display profiles to version 11’s organization and identity protections. Online-image permission is not included or supported.
 - **Version 11:** explicit direct Index membership, linked-folder source provenance, nested Collection and Library subheading layouts, dynamic Library definitions, and source vault/base/preset locks. Restoring it preserves destination display profiles for Library IDs that survive restoration.
 - **Version 10:** nested Collection and Library subheading layouts, dynamic Library definitions, and source vault/base/preset locks, but no trusted linked-folder provenance. When restored, the destination's linked sources are preserved and legacy membership is migrated conservatively.
 - **Version 9:** dynamic Library definitions and layouts plus the same identity locks, but its subheadings stay a single level deep.
@@ -168,7 +168,7 @@ Before an Undo snapshot or mutation starts, the plugin verifies that the source 
 - **Versions 1–6:** do not carry a trusted knowledge-base identity or preset and require a separate **base/preset unverified** override.
 - **Versions 1–5:** also lack a trusted vault identity and undergo a conservative unique-path preflight.
 
-All recovery formats before version 12 preserve destination display preferences where the restored Library identity still exists. Version 12 restores its own profiles, including an explicitly empty profile map. A display reset or recovery restore cannot grant, revoke, or undo device-local image permission.
+All recovery formats before version 12 preserve destination display preferences where the restored Library identity still exists. Version 12 restores its own profiles, including an explicitly empty profile map. No display reset or recovery restore can enable online covers or transfer the inert legacy image-permission key.
 
 A current recovery from a different vault or preset is hard-rejected. Restoring into a different base in the same vault is blocked by default. A distinct override must name both source and destination, followed by the normal destructive-restore confirmation, and it is available only when both bases have the same Generic or ENT preset.
 

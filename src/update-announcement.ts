@@ -284,6 +284,20 @@ export const UPDATE_ANNOUNCEMENT_0_22_0: UpdateAnnouncement = {
   releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.22.0",
 };
 
+export const UPDATE_ANNOUNCEMENT_0_23_0: UpdateAnnouncement = {
+  version: "0.23.0",
+  title: "What’s new in Knowledge Base Command Center 0.23.0",
+  intro: "Library Cards and clearer navigation, with covers loaded only from your vault. Physical iPhone/iPad testing remains unverified.",
+  highlights: [
+    "Choose List or Cards for each Library, then select its cover property, card size, image proportions, image fit and visible note properties. Missing covers stay compact and long titles remain readable.",
+    "Use Library settings to rename, customize, archive or restore a Library. Archived custom Libraries can be deleted with guarded reassignment; your Markdown notes stay in place.",
+    "All sections makes every tab reachable without a thick scrollbar. Section navigation preserves vertical reading position, supports right-to-left keyboard navigation, and keeps settings easy to reach.",
+    "Covers must be existing local vault images. Online image URLs are not loaded, and there is no external-image opt-in in this release. Any permission left by a private test build is inert.",
+    "Display preferences follow Library identity and support Undo, Sync and transfer. This release writes format-16 organization; update every syncing device before editing. Older builds protect newer data read-only.",
+  ],
+  releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.23.0",
+};
+
 const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_12_0.version, UPDATE_ANNOUNCEMENT_0_12_0],
   [UPDATE_ANNOUNCEMENT_0_12_1.version, UPDATE_ANNOUNCEMENT_0_12_1],
@@ -305,6 +319,7 @@ const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_20_1.version, UPDATE_ANNOUNCEMENT_0_20_1],
   [UPDATE_ANNOUNCEMENT_0_21_0.version, UPDATE_ANNOUNCEMENT_0_21_0],
   [UPDATE_ANNOUNCEMENT_0_22_0.version, UPDATE_ANNOUNCEMENT_0_22_0],
+  [UPDATE_ANNOUNCEMENT_0_23_0.version, UPDATE_ANNOUNCEMENT_0_23_0],
 ]);
 
 function parseSemanticVersion(value: string): ParsedSemanticVersion | null {

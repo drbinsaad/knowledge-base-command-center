@@ -3,7 +3,7 @@ import test from "node:test";
 import EntVaultCommandCenterPlugin, {
   DEVICE_LOCAL_STATE_KEY,
   KBCC_RETURN_NAVIGATION_STATE_KEY,
-  LIBRARY_IMAGE_PERMISSION_KEY,
+  LEGACY_LIBRARY_IMAGE_PERMISSION_KEY,
   SYNC_RECOVERY_LOCAL_STATE_KEY,
   VAULT_RENAME_JOURNAL_KEY,
   type CatalogPlacementTarget,
@@ -3244,7 +3244,7 @@ test("clearing device-local data resets in-memory view/history and all local key
     [SYNC_RECOVERY_LOCAL_STATE_KEY, null],
     [VAULT_RENAME_JOURNAL_KEY, null],
     [KBCC_RETURN_NAVIGATION_STATE_KEY, null],
-    [LIBRARY_IMAGE_PERMISSION_KEY, null],
+    [LEGACY_LIBRARY_IMAGE_PERMISSION_KEY, null],
   ]);
   assert.equal(localValues.get(DEVICE_LOCAL_STATE_KEY), null);
   assert.equal(localValues.get(SYNC_RECOVERY_LOCAL_STATE_KEY), null);

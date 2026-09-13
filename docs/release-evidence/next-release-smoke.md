@@ -1,6 +1,32 @@
-# 0.22.0 device and Sync smoke record
+# 0.23.0 device and Sync smoke record
 
-Candidate: 0.22.0, including handle-based touch arrangement and mobile Undo/Redo. This is the active candidate smoke record; earlier observations below are historical.
+Candidate: 0.23.0, including Library List/Cards, local-vault covers, Library management and section-navigation improvements. This is the active smoke record. Online cover loading is excluded; its original proposal remains deferred and has not completed independent published privacy review.
+
+Status: **Physical iPhone/iPad, VoiceOver, software/hardware keyboards, Pencil/trackpad, native scrolling and controlled two-device Sync checks are Unexecuted.** After requesting publication, the maintainer accepted this local-cover-only release with physical iPhone/iPad testing explicitly unverified. The [fresh candidate-specific authorization](0.23.0-iphone.md) is not a physical-device Pass and reuses no prior waiver.
+
+Use a disposable synthetic vault and the [0.23.0 manual checklist](../manual-iphone-release-checklist.md). For every executed row record the exact asset hashes, date, device/OS/Obsidian versions, input method, Sync provider if relevant, and sanitized observations. Desktop Chromium/WebKit and synthetic-host results execute none of these physical rows.
+
+| Flow | Pass criteria | Result |
+| --- | --- | --- |
+| iPhone/iPad reading space | Portrait, landscape and Split View retain a useful full-width list, native safe areas and reachable sticky search/navigation; all later content remains reachable. | Unexecuted |
+| Library List/Cards | Both layouts, full titles, compact missing covers and image/card options remain clear at narrow/wide sizes; local-vault raster covers load from the selected property. | Unexecuted |
+| Remote-cover denial | HTTP/HTTPS properties do not load images; no enable action exists. A legacy private-build allow value, restart, Sync and imports cannot enable loading. Local-vault covers still work. | Unexecuted |
+| Library settings and lifecycle | Rename/customize, archive/restore and guarded deletion behave as reviewed, preserve stable identity, do not rewrite notes and support exact Undo/Redo/restart. | Unexecuted |
+| All sections and tab rail | Touch/trackpad/keyboard selection reveals the selected section and preserves deep vertical reading position in LTR/RTL, without clipping controls. | Unexecuted |
+| Active-note organization | Choose location → Review prefills the intended Index/Library parent; exact breadcrumbs, stale-change rejection, save/restart and Undo preserve the intended location without rewriting Markdown. | Unexecuted |
+| Touch arrangement | Grip-only dragging and row-menu alternatives handle nested destinations; normal row scrolling, cancellation and Undo remain correct. | Unexecuted |
+| Software/hardware keyboards | Search, native controls, reverse focus traversal and modal actions stay reachable through viewport changes, rotation and split resizing. | Unexecuted |
+| Dynamic Type, RTL and VoiceOver | Largest text, Arabic/mixed-direction labels, announcements and focus order remain readable, coherent and operable. | Unexecuted |
+| Restart and interruption | Cold start, delayed metadata, backgrounding and cancellation preserve usable routes with no stuck action or unexpected image request. | Unexecuted |
+| Controlled two-device Sync | Both devices use 0.23.0 before schema-16 writes; display profiles/identities survive bidirectional handoff, delayed delivery, restart and concurrent-change reconciliation. | Unexecuted |
+| Migration, transfer and rollback | Disposable v6 portable, v3 Workspace and v12 recovery operations preserve their reviewed boundaries; downgrade restores matching old plugin assets and pre-upgrade data together. | Unexecuted |
+| Update announcement | Upgrade to 0.23.0 shows readable local-only scope/device limits once; actions are reachable and the exact immutable release URL resolves after publication. | Unexecuted |
+
+Skipped or waived rows remain **Unexecuted**. The [candidate evidence](0.23.0-iphone.md) separates local automated facts from physical-device and publication status. Detailed synthetic receipts and private test material must not be included in public evidence.
+
+## Historical 0.22.0 device and Sync smoke record
+
+Historical candidate: 0.22.0, including handle-based touch arrangement and mobile Undo/Redo. This is not the active candidate smoke record; its evidence and authorization remain historical.
 
 Status: **Physical iPhone/iPad, Apple Pencil, device trackpad, VoiceOver, software/hardware keyboard interruptions and controlled two-device Sync checks are Unexecuted.** The maintainer directed **Publish** after this gap was reported. The [candidate-specific authorization](0.22.0-iphone.md) accepts that scope as unverified; no previous waiver is reused and no row becomes a device Pass.
 

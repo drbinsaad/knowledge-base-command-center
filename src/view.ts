@@ -11,7 +11,7 @@ import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge
 import { LibraryEditorModal, ManageLibrariesModal } from "./library-modal";
 import { resolveLibraryIconId } from "./library-icons";
 import { DEFAULT_LIBRARY_DISPLAY_PROFILE, type LibraryDisplayProfile } from "./library-display-profile";
-import { clearExternalLibraryCovers, libraryPropertyText, ownLibraryProperty, renderLibraryCover, resolveLibraryCover } from "./library-cover";
+import { libraryPropertyText, ownLibraryProperty, renderLibraryCover, resolveLibraryCover } from "./library-cover";
 import { TouchDragController, type TouchDragTarget } from "./touch-drag";
 import {
   MAX_KBCC_RETURN_BROWSE_LIMIT,
@@ -4615,10 +4615,6 @@ export class EntVaultCommandCenterView extends ItemView {
     }
   }
 
-  public clearExternalLibraryImages(): void {
-    clearExternalLibraryCovers(this.contentEl);
-  }
-
   private libraryLayout(libraryId: string): LayoutHeading[] {
     return this.plugin.data.portableIndex.libraryLayouts[libraryId] ?? [];
   }
@@ -4897,8 +4893,7 @@ export class EntVaultCommandCenterView extends ItemView {
       const file = record.isPlaceholder ? null : this.app.vault.getAbstractFileByPath(record.path);
       cardFrontmatter = file instanceof TFile ? this.app.metadataCache.getFileCache(file)?.frontmatter : undefined;
       renderLibraryCover(row, resolveLibraryCover(this.app,
-        ownLibraryProperty(cardFrontmatter, cardProfile.imageProperty), record.path,
-        this.plugin.getExternalLibraryImagesAllowed?.() === true), cardProfile, {
+        ownLibraryProperty(cardFrontmatter, cardProfile.imageProperty), record.path), cardProfile, {
         label: record.isPlaceholder ? `Create or link ${record.title}` : `Select ${record.title}`,
         onActivate: activateRecord, onKeyDown: handleRecordKeydown,
         keyShortcuts: RECORD_KEYBOARD_SHORTCUTS, current: selected,

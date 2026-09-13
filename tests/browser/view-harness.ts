@@ -178,7 +178,6 @@ const currentRecords = (): VaultRecord[] => touchDrag
 const completedImportActions = { undo: 0, placeholderQueue: 0, closed: [] as boolean[] };
 const files = records.filter((item) => touchDrag || libraryGallery ? !item.isPlaceholder : !item.portableId).map((item) => new TFile(item.path));
 const coverFile = new TFile("Covers/Example.png");
-let externalCoversAllowed = false;
 let coverResource = "";
 function syntheticCoverResource(): string {
   if (coverResource) return coverResource;
@@ -233,12 +232,6 @@ const plugin = {
       if (profile) data.settings.libraryDisplayProfiles[id] = normalizeLibraryDisplayProfile(profile);
       else delete data.settings.libraryDisplayProfiles[id];
     });
-  },
-  getExternalLibraryImagesAllowed: () => externalCoversAllowed,
-  setExternalLibraryImagesAllowed: async (allowed: boolean) => {
-    externalCoversAllowed = allowed;
-    if (!allowed) view.clearExternalLibraryImages();
-    await view.reload();
   },
   openLibrarySettings: (id: string) => {
     const library = plugin.getLibrary(id);

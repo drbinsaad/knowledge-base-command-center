@@ -6963,8 +6963,6 @@
   margin-block: 12px;
 }
 
-.ent-cc-image-consent button { min-width: 44px; min-height: 44px; }
-
 .ent-cc-library-settings-nav button,
 .ent-cc-library-settings-footer button,
 .ent-cc-library-settings .setting-item-control input,
@@ -6986,7 +6984,7 @@
 }
 
 .ent-cc-library-settings-panel { min-width: 0; }
-.ent-cc-library-image-permission {
+.ent-cc-library-cover-info {
   padding: 12px;
   border: 1px solid var(--background-modifier-border);
   border-radius: 8px;

@@ -316,7 +316,7 @@ export class ClearDeviceLocalDataModal extends Modal {
       text: "Synced knowledge-base organization, settings, Markdown notes, attachments, and recovery export files are not changed.",
     });
     this.contentEl.createEl("p", {
-      text: "This also clears external library-image permission and blocks new cover loads. It cannot undo requests already sent to image hosts or clear browser cookies and image cache.",
+      text: "This also removes any legacy library-image permission from a private build. Online cover loading is unavailable in this release. Browser cookies and image cache are not cleared.",
     });
     const actions = this.contentEl.createDiv({ cls: "ent-cc-sync-recovery-actions" });
     const cancel = actions.createEl("button", { cls: "ent-cc-button", type: "button", text: "Cancel" });
@@ -335,7 +335,7 @@ export class ClearDeviceLocalDataModal extends Modal {
         this.busy = false;
         cancel.disabled = false;
         clear.disabled = false;
-        new Notice("Device-local plugin data could not be cleared. External-image permission may still be saved on this device: check library settings after restarting, or block external images there now. Synced knowledge-base data and Markdown notes were not changed.", 10000);
+        new Notice("Device-local plugin data could not be cleared. Please retry. Synced knowledge-base data and Markdown notes were not changed.", 10000);
       });
     });
   }

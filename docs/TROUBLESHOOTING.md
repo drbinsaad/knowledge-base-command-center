@@ -49,7 +49,7 @@ Protected ENT records can move only to destinations compatible with their source
 
 ## I cannot rename or remove ENT or a Library
 
-In the unreleased Library-settings build, open **Library settings… → General**, or **Manage libraries → Settings…**. Rename also changes the singular label and icon. Archive hides the tab while retaining its organization. A custom Library can be deleted permanently only after archiving and choosing where its subjects should go. Built-in Procedures, Medications, and Syndromes retain protected source classifications, so they support rename and archive but not permanent deletion.
+In 0.23.0, open **Library settings… → General**, or **Manage libraries → Settings…**. Rename also changes the singular label and icon. Archive hides the tab while retaining its organization. A custom Library can be deleted permanently only after archiving and choosing where its subjects should go. Built-in Procedures, Medications, and Syndromes retain protected source classifications, so they support rename and archive but not permanent deletion.
 
 If ENT is the knowledge-base name, use **Manage knowledge bases… → Rename** instead. The clinical preset itself remains fixed. A stale settings form must be reopened after a base switch or Sync change; a read-only compatibility warning must be resolved before editing.
 
@@ -57,7 +57,7 @@ If ENT is the knowledge-base name, use **Manage knowledge bases… → Rename** 
 
 Open **Library settings… → Display**, select Cards, and choose the property containing the cover, usually `cover`. The local image must exist in this vault; a note property such as `cover: "[[Covers/My book.jpg]]"` works. SVGs and arbitrary file/HTML links are not supported as local covers. Increase **Card size**, choose Portrait proportions, and use **Show whole image** to avoid cropping. A **No note** placeholder has no frontmatter image until deliberately linked.
 
-An **External cover blocked** message is the default for HTTPS references. Enable them only through the separate **Allow external images…** confirmation if you accept image-host requests. A synced note or imported profile cannot grant that permission. If allowing images cannot be saved, they remain blocked. If blocking cannot be saved, they remain blocked for this session; recheck after restart. See [Library display and privacy](LIBRARY_DISPLAY_AND_PRIVACY.md).
+Online cover URLs are not supported in 0.23.0. They show an unavailable-cover placeholder without a request, and there is no permission switch to enable them. Save an image you may use into the vault and change the note property to its vault link. A previously allowed value from a private test build is inert; Sync, imports and recovery cannot enable online images. See [Library display and privacy](LIBRARY_DISPLAY_AND_PRIVACY.md).
 
 ## The Organizer shows a README or every note in a folder
 
@@ -157,7 +157,7 @@ The plugin detected unrecognized, damaged, or newer plugin data and intentionall
 5. Update every device to the same compatible plugin build; a matching version label alone does not identify an unreleased source build.
 6. Report the issue without attaching private plugin data publicly.
 
-An older device can describe the version-16 store with schema-16 knowledge-base data as a migration failure. That is expected downgrade protection. For this unreleased candidate, every synced device needs the same schema-16-compatible source build or a newer compatible build before editing resumes. Published 0.22.0 cannot edit schema-16 data, and there is no Community Plugins update for these unreleased changes yet. A writable downgrade requires a complete compatible pre-upgrade backup; do not lower schema fields or replace only the plugin assets over newer data.
+An older device can describe the version-16 store with schema-16 knowledge-base data as a migration failure. That is expected downgrade protection. Every synced device needs 0.23.0 or a newer compatible build before editing resumes. Public 0.22.0 cannot edit schema-16 data. A writable downgrade requires a complete compatible pre-upgrade backup; do not lower schema fields or replace only the plugin assets over newer data.
 
 ## Export/import center is in salvage mode
 
@@ -220,7 +220,7 @@ Removing the folder removes <code>data.json</code> and the synced settings and o
 
 Before uninstalling, export current private recovery for every available base, temporarily restore any archived base that needs recovery, and back up the complete vault including <code>.obsidian</code>.
 
-The fifth App-local value is external Library-image permission. The clear action removes current external image sources before attempting its storage reset. If that reset reports failure, keep images blocked and check permission again after restarting; previously sent image requests cannot be recalled. See [Local data](LOCAL_DATA.md).
+The fifth App-local key is an inert legacy external-image permission value from private test builds. The clear action attempts to remove it, but failure cannot enable online covers in 0.23.0, including after restart. Cleanup cannot recall requests previously sent by a private build. See [Local data](LOCAL_DATA.md).
 
 ## Ask for help
 
