@@ -2966,7 +2966,7 @@ test("oversized export preparation never mutates the live portable registry", ()
       records,
       { ...EMPTY_PORTABLE_SELECTION, index: true },
       "2026-08-08T00:00:00.000Z",
-      "vault-ent-main",
+      "vault-synthetic-source",
     ),
     /above the 10 MB/i,
   );
@@ -4508,7 +4508,7 @@ test("portability center rejects cross-vault recovery before mutate starts", asy
     [],
     { ...EMPTY_PORTABLE_SELECTION, recovery: true },
     "2026-08-08T00:00:00.000Z",
-    "vault-ent-main-vault",
+    "vault-synthetic-source",
     "base-ent",
     "ENT",
   );
@@ -4519,7 +4519,7 @@ test("portability center rejects cross-vault recovery before mutate starts", asy
   const plugin = {
     data,
     isDataReadOnly: () => false,
-    getVaultId: () => "vault-my-main-note-kb",
+    getVaultId: () => "vault-synthetic-target",
     getActiveKnowledgeBaseId: () => "base-main",
     async mutate(): Promise<void> { mutateCalls += 1; },
   };
@@ -4596,7 +4596,7 @@ test("direct organization recovery refuses to apply when safe Undo cannot be gua
     "base-ent",
     "ENT",
   );
-  let mutateOptions: { requireUndo?: boolean } | null = null;
+  let mutateOptions: { requireUndo?: boolean; includeSettings?: boolean } | null = null;
   const plugin = {
     data,
     getVaultId: () => "vault-shared",
@@ -4604,7 +4604,7 @@ test("direct organization recovery refuses to apply when safe Undo cannot be gua
     async mutate(
       _label: string,
       _action: () => void,
-      options: { requireUndo?: boolean },
+      options: { requireUndo?: boolean; includeSettings?: boolean },
     ): Promise<void> {
       mutateOptions = options;
       if (options.requireUndo) throw new Error("simulated Undo budget refusal");
@@ -4630,6 +4630,7 @@ test("direct organization recovery refuses to apply when safe Undo cannot be gua
     assert.equal(opened.length, 1, "an exact-base recovery proceeds directly to the final confirmation");
     await assert.rejects(Promise.resolve(opened[0]?.onConfirm()), /Undo budget refusal/i);
     assert.equal(mutateOptions?.requireUndo, true);
+    assert.equal(mutateOptions?.includeSettings, true, "recovery v12 must capture the prior Library display settings");
   } finally {
     if (hadOwnOpen && originalOpen) Object.defineProperty(ConfirmModal.prototype, "open", originalOpen);
     else Reflect.deleteProperty(ConfirmModal.prototype, "open");
@@ -5378,7 +5379,8 @@ test("mobile browse toolbar reuses only navigation and search while the workspac
         if (mobileBrowse) {
           assert.ok(toolbar && search, context);
           assert.equal(toolbar.parentElement, workspace, `${context}: sticky chrome shares the existing owner`);
-          assert.equal(tabs.parentElement, toolbar);
+          assert.equal(tabs.parentElement?.classList.contains("ent-cc-tabs-row"), true);
+          assert.equal(tabs.parentElement?.parentElement, toolbar);
           assert.equal(search.parentElement, toolbar);
           assert.equal(header.parentElement, workspace, `${context}: base/Add/Details can scroll away`);
           assert.equal(count.parentElement, workspace, `${context}: result metadata is not pinned`);
@@ -5389,7 +5391,8 @@ test("mobile browse toolbar reuses only navigation and search while the workspac
           assert.equal(toolbar, null, `${context}: desktop layouts retain the original structure`);
           assert.equal(search, null);
           assert.equal(header.parentElement, shell);
-          assert.equal(tabs.parentElement, shell);
+          assert.equal(tabs.parentElement?.classList.contains("ent-cc-tabs-row"), true);
+          assert.equal(tabs.parentElement?.parentElement, shell);
         }
         await view.onClose();
       }

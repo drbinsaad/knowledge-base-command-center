@@ -10,6 +10,8 @@ import { MAX_PORTABLE_PACKAGE_BYTES } from "./portability";
 import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge-base-modal";
 import { LibraryEditorModal, ManageLibrariesModal } from "./library-modal";
 import { resolveLibraryIconId } from "./library-icons";
+import { DEFAULT_LIBRARY_DISPLAY_PROFILE, type LibraryDisplayProfile } from "./library-display-profile";
+import { libraryPropertyText, ownLibraryProperty, renderLibraryCover, resolveLibraryCover } from "./library-cover";
 import { TouchDragController, type TouchDragTarget } from "./touch-drag";
 import {
   MAX_KBCC_RETURN_BROWSE_LIMIT,
@@ -3240,12 +3242,19 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private renderTabs(parent: HTMLElement): void {
     const tabs = tabDefinitions(this.plugin.data.settings, this.records, this.plugin.getLibraries());
-    const bar = parent.createDiv({ cls: "ent-cc-tabs", attr: { role: "tablist", "aria-label": "Command center sections" } });
+    const libraryId = libraryIdForTab(this.plugin.data.activeTab);
+    const tabRow = parent.createDiv({ cls: "ent-cc-tabs-row" });
+    const labelId = `ent-cc-tabs-label-${this.viewInstanceId}`;
+    tabRow.createSpan({ cls: "ent-cc-visually-hidden", text: "Command center sections", attr: { id: labelId } });
+    // Obsidian uses aria-label as hover-tooltip text. Label this scrolling
+    // region by reference so its accessible name does not cover the search bar.
+    const bar = tabRow.createDiv({ cls: "ent-cc-tabs", attr: { role: "tablist", "aria-labelledby": labelId } });
     let libraryGroup: HTMLElement | null = null;
     for (const tab of tabs) {
       if (libraryIdForTab(tab.id) && !libraryGroup) {
-        libraryGroup = bar.createDiv({ cls: "ent-cc-library-tabs", attr: { role: "group", "aria-label": "Libraries" } });
-        libraryGroup.createSpan({ cls: "ent-cc-library-tabs-label", text: "Libraries", attr: { "aria-hidden": "true" } });
+        const groupLabelId = `ent-cc-libraries-label-${this.viewInstanceId}`;
+        libraryGroup = bar.createDiv({ cls: "ent-cc-library-tabs", attr: { role: "group", "aria-labelledby": groupLabelId } });
+        libraryGroup.createSpan({ cls: "ent-cc-library-tabs-label", text: "Libraries", attr: { id: groupLabelId } });
       }
       const button = (libraryIdForTab(tab.id) ? libraryGroup ?? bar : bar).createEl("button", {
         cls: `ent-cc-tab ${this.plugin.data.activeTab === tab.id ? "is-active" : ""}`,
@@ -3264,16 +3273,52 @@ export class EntVaultCommandCenterView extends ItemView {
       button.addEventListener("click", () => this.run(() => this.changeTab(tab.id)));
       button.addEventListener("keydown", (event) => {
         const index = tabs.findIndex((candidate) => candidate.id === tab.id);
+        const rtl = button.ownerDocument.defaultView?.getComputedStyle(bar).direction === "rtl";
+        const forward = rtl ? "ArrowLeft" : "ArrowRight";
+        const backward = rtl ? "ArrowRight" : "ArrowLeft";
         const nextIndex = event.key === "Home" ? 0
           : event.key === "End" ? tabs.length - 1
-            : event.key === "ArrowRight" ? (index + 1) % tabs.length
-              : event.key === "ArrowLeft" ? (index - 1 + tabs.length) % tabs.length
+            : event.key === forward ? (index + 1) % tabs.length
+              : event.key === backward ? (index - 1 + tabs.length) % tabs.length
                 : -1;
         if (nextIndex < 0) return;
         event.preventDefault();
         const nextTab = tabs[nextIndex];
         if (nextTab) this.run(() => this.changeTab(nextTab.id, true));
       });
+    }
+    const menuLabelId = `ent-cc-sections-menu-label-${this.viewInstanceId}`;
+    const chooser = tabRow.createEl("button", {
+      cls: "ent-cc-icon-button ent-cc-tabs-menu-button",
+      attr: { type: "button", "aria-haspopup": "menu", "aria-expanded": "false", "aria-labelledby": menuLabelId,
+        "data-kbcc-focus": "all-sections" },
+    });
+    setIcon(chooser.createSpan({ attr: { "aria-hidden": "true" } }), "list");
+    chooser.createSpan({ cls: "ent-cc-visually-hidden", text: "All sections", attr: { id: menuLabelId } });
+    chooser.addEventListener("click", () => {
+      const baseId = this.plugin.getActiveKnowledgeBaseId();
+      const menu = new Menu();
+      for (const tab of tabDefinitions(this.plugin.data.settings, this.records, this.plugin.getLibraries())) {
+        menu.addItem((item) => item.setTitle(tab.label).setIcon(tab.icon)
+          .setChecked(tab.id === this.plugin.data.activeTab)
+          .onClick(() => {
+            if (this.viewClosed || !this.contentEl.contains(chooser) || baseId !== this.plugin.getActiveKnowledgeBaseId()) return;
+            const available = tabDefinitions(this.plugin.data.settings, this.records, this.plugin.getLibraries());
+            if (available.some((entry) => entry.id === tab.id)) this.run(() => this.changeTab(tab.id, true));
+          }));
+      }
+      menu.onHide(() => {
+        chooser.setAttribute("aria-expanded", "false");
+        if (this.contentEl.contains(chooser) && chooser.ownerDocument.activeElement === chooser.ownerDocument.body) chooser.focus({ preventScroll: true });
+      });
+      const bounds = chooser.getBoundingClientRect();
+      chooser.setAttribute("aria-expanded", "true");
+      menu.setParentElement(chooser).showAtPosition({ x: bounds.left, y: bounds.bottom }, chooser.ownerDocument);
+    });
+    if (libraryId) {
+      const settings = iconButton(tabRow, "settings-2", "Library settings", "ent-cc-library-settings-button");
+      settings.setAttribute("data-kbcc-focus", "library-settings");
+      settings.addEventListener("click", () => this.plugin.openLibrarySettings(libraryId));
     }
     this.revealActiveTab(bar);
   }
@@ -3283,16 +3328,17 @@ export class EntVaultCommandCenterView extends ItemView {
       if (this.viewClosed
         || (typeof this.contentEl?.contains === "function" && !this.contentEl.contains(tablist))) return;
       const active = tablist.querySelector<HTMLElement>('[aria-selected="true"]');
-      if (active && Platform.isMobile && this.isCompactInspectorLayout()) {
-        // The phone tab bar lives inside the vertical browse owner. Revealing
-        // an active tab must pan only its horizontal strip, never pull a
-        // refreshed or restored list back up to the header.
+      if (active) {
+        // Pan only the horizontal strip on every device. scrollIntoView can
+        // move the vertical browse owner or surrounding Obsidian workspace.
         const barRect = tablist.getBoundingClientRect();
         const activeRect = active.getBoundingClientRect();
-        tablist.scrollLeft += activeRect.left - barRect.left + (activeRect.width - barRect.width) / 2;
-        return;
+        const rtl = tablist.ownerDocument.defaultView?.getComputedStyle(tablist).direction === "rtl";
+        const offset = activeRect.width > barRect.width
+          ? rtl ? activeRect.right - barRect.right : activeRect.left - barRect.left
+          : activeRect.left - barRect.left + (activeRect.width - barRect.width) / 2;
+        tablist.scrollLeft += offset;
       }
-      active?.scrollIntoView({ block: "nearest", inline: "center" });
     }, 0);
   }
 
@@ -3311,7 +3357,7 @@ export class EntVaultCommandCenterView extends ItemView {
     await this.plugin.saveViewState();
     if (!this.guardLoadedBase()) return;
     this.render();
-    if (focusTab) this.contentEl.querySelector<HTMLElement>(`[data-tab="${tab}"]`)?.focus();
+    if (focusTab) this.contentEl.querySelector<HTMLElement>(`[data-tab="${tab}"]`)?.focus({ preventScroll: true });
   }
 
   async openLibrary(libraryId: string): Promise<void> {
@@ -4100,7 +4146,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private treeHeaderTitle(): string {
-    if (this.hasGlobalSearch()) return "Search results / Library / Record";
+    if (this.hasGlobalSearch()) return this.searchScope === "library" ? "This Library / Search results" : "Search results · List / Library / Record";
     const tab = this.plugin.data.activeTab;
     const settings = this.plugin.data.settings;
     if (tab === "curriculum") return this.curriculumArrangeMode
@@ -4454,10 +4500,11 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     if (mutable && this.editMode) applyNodeDrop(content);
     const level = Math.min(depth, MAX_LAYOUT_DEPTH);
-    for (const record of this.matchingLayoutRecords(context, node)) {
-      if (context.kind === "library") {
-        this.renderBrowseRecordRow(content, record, level, undefined, undefined, { libraryId: context.library.id, ...membership });
-      } else {
+    const records = this.matchingLayoutRecords(context, node);
+    if (context.kind === "library") {
+      this.renderLibraryRecords(content, records, level, context.library.id, membership);
+    } else {
+      for (const record of records) {
         this.renderBrowseRecordRow(content, record, level, mutable ? membership : undefined);
       }
     }
@@ -4513,7 +4560,8 @@ export class EntVaultCommandCenterView extends ItemView {
     if (this.editMode) {
       const hint = parent.createDiv({ cls: "ent-cc-arrange-hint", attr: { role: "note" } });
       setIcon(hint.createSpan(), "list-tree");
-      hint.createSpan({ text: "Drag a row’s grip to a heading or subheading, or above/below another record. Scroll outside the grip; the … menu is also available. Markdown files stay unchanged." });
+      const displayHint = this.libraryDisplayProfile(libraryId).layout === "cards" ? "Cards are temporarily shown as a list while arranging. Choose Done to restore Cards. " : "";
+      hint.createSpan({ text: `${displayHint}Drag a row’s grip to a heading or subheading, or above/below another record. Scroll outside the grip; the … menu is also available. Markdown files stay unchanged.` });
     }
 
     for (const heading of layout) {
@@ -4531,7 +4579,7 @@ export class EntVaultCommandCenterView extends ItemView {
       row.createSpan({ cls: "ent-cc-row-title", text: `Unplaced ${library.name}` });
       row.createSpan({ cls: "ent-cc-row-count", text: String(unplaced.length) });
       const content = section.createDiv({ cls: "ent-cc-heading-body" });
-      unplaced.sort((a, b) => a.title.localeCompare(b.title)).forEach((record) => this.renderBrowseRecordRow(content, record, 1));
+      this.renderLibraryRecords(content, unplaced.sort((a, b) => a.title.localeCompare(b.title)), 1, libraryId);
     }
 
     if (!this.query && input.length === 0) {
@@ -4549,6 +4597,22 @@ export class EntVaultCommandCenterView extends ItemView {
       }
     }
     return records.length;
+  }
+
+  private libraryDisplayProfile(libraryId: string): LibraryDisplayProfile {
+    return this.plugin.getLibraryDisplayProfile?.(libraryId) ?? DEFAULT_LIBRARY_DISPLAY_PROFILE;
+  }
+
+  /** Each heading's direct children have their own grid; deeper headings remain outside it. */
+  private renderLibraryRecords(parent: HTMLElement, records: VaultRecord[], level: number, libraryId: string, membership?: Membership): void {
+    if (records.length === 0) return;
+    const profile = this.libraryDisplayProfile(libraryId);
+    const cards = !this.editMode && profile.layout === "cards";
+    const container = cards ? parent.createDiv({ cls: `ent-cc-library-card-grid ent-cc-library-card-size-${profile.cardSize}` }) : parent;
+    for (const record of records) {
+      this.renderBrowseRecordRow(container, record, level, undefined, undefined,
+        membership ? { libraryId, ...membership } : undefined, cards ? profile : undefined);
+    }
   }
 
   private libraryLayout(libraryId: string): LayoutHeading[] {
@@ -4627,7 +4691,7 @@ export class EntVaultCommandCenterView extends ItemView {
       baseRow.createSpan({ cls: "ent-cc-row-title", text: source.baseName, attr: { dir: "auto" } });
       baseRow.createSpan({ cls: "ent-cc-row-count", text: String(baseGroup.total) });
       const baseContent = baseSection.createDiv({ cls: "ent-cc-heading-body" });
-      const libraryGroups: Array<{ label: string; icon: string; records: VaultRecord[]; showIndexProvenance?: boolean }> = [
+      const libraryGroups: Array<{ label: string; icon: string; records: VaultRecord[]; showIndexProvenance?: boolean; libraryId?: string }> = [
         {
           label: source.data.settings.indexLabel,
           icon: "library",
@@ -4643,6 +4707,7 @@ export class EntVaultCommandCenterView extends ItemView {
         ...[...source.data.portableIndex.libraries]
           .sort((left, right) => left.order - right.order || left.name.localeCompare(right.name))
           .map((library) => ({
+            libraryId: library.id,
             label: `${library.name}${library.archivedAt === null ? "" : " (archived)"}`,
             icon: libraryIcon(library),
             records: baseGroup.records.filter((record) => record.libraryId === library.id),
@@ -4667,10 +4732,18 @@ export class EntVaultCommandCenterView extends ItemView {
         row.createSpan({ cls: "ent-cc-row-title", text: libraryGroup.label });
         row.createSpan({ cls: "ent-cc-row-count", text: String(libraryGroup.records.length) });
         const content = section.createDiv({ cls: "ent-cc-subheading-body" });
-        libraryGroup.records.forEach((record) => this.renderRecordRow(content, record, 2, undefined, {
+        const profile = this.searchScope === "library" && libraryGroup.libraryId === libraryIdForTab(this.plugin.data.activeTab)
+          && source.baseId === this.plugin.getActiveKnowledgeBaseId() && libraryGroup.libraryId
+          ? this.libraryDisplayProfile(libraryGroup.libraryId) : undefined;
+        const cardProfile = !this.editMode && profile?.layout === "cards" ? profile : undefined;
+        if (this.editMode && profile?.layout === "cards") content.createDiv({
+          cls: "ent-cc-arrange-hint", text: "Cards are temporarily shown as a list while arranging. Choose Done to restore Cards.", attr: { role: "note" },
+        });
+        const recordContainer = cardProfile ? content.createDiv({ cls: `ent-cc-library-card-grid ent-cc-library-card-size-${cardProfile.cardSize}` }) : content;
+        libraryGroup.records.forEach((record) => this.renderRecordRow(recordContainer, record, 2, undefined, {
           source,
           showIndexProvenance: libraryGroup.showIndexProvenance,
-        }));
+        }, undefined, cardProfile));
       }
     }
     return results.total;
@@ -4755,13 +4828,14 @@ export class EntVaultCommandCenterView extends ItemView {
     membership?: Membership,
     searchContext?: SearchRecordContext,
     libraryMembership?: LibraryMembership,
+    cardProfile?: LibraryDisplayProfile,
   ): void {
     if (this.browseRowsRendered >= this.browseRowLimit) {
       this.browseRowsOmitted += 1;
       return;
     }
     this.browseRowsRendered += 1;
-    this.renderRecordRow(parent, record, level, membership, searchContext, libraryMembership);
+    this.renderRecordRow(parent, record, level, membership, searchContext, libraryMembership, cardProfile);
   }
 
   private renderRecordRow(
@@ -4771,6 +4845,7 @@ export class EntVaultCommandCenterView extends ItemView {
     membership?: Membership,
     searchContext?: SearchRecordContext,
     libraryMembership?: LibraryMembership,
+    cardProfile?: LibraryDisplayProfile,
   ): void {
     const source = searchContext?.source;
     const sourceData = source?.data ?? this.plugin.data;
@@ -4780,9 +4855,50 @@ export class EntVaultCommandCenterView extends ItemView {
       : null;
     const selected = sourceIsActive && this.plugin.data.selectedPath === record.path;
     const row = parent.createDiv({
-      cls: `ent-cc-row ent-cc-subject-row ent-cc-level-${level} ${record.isPlaceholder ? "ent-cc-placeholder-row" : ""} ${selected ? "is-selected" : ""}`,
+      cls: `ent-cc-row ent-cc-subject-row ent-cc-level-${level} ${cardProfile ? "ent-cc-library-card" : ""} ${record.isPlaceholder ? "ent-cc-placeholder-row" : ""} ${selected ? "is-selected" : ""}`,
       attr: { "data-record-path": record.path, "data-source-active": String(sourceIsActive) },
     });
+    const activateRecord = (): void => {
+      if (source && !sourceIsActive) this.run(() => this.activateSearchResult(source, record, record.isPlaceholder ? "placeholder" : "select"));
+      else if (record.isPlaceholder) this.openPlaceholderActions(record);
+      else this.selectRecord(record.path);
+    };
+    const handleRecordKeydown = (event: KeyboardEvent): void => {
+      if (!shouldHandleRowShortcut(true, event.key) && event.key !== " ") return;
+      if (event.key === "Enter") {
+        event.preventDefault();
+        this.run(() => source && !sourceIsActive
+          ? this.activateSearchResult(source, record, record.isPlaceholder ? "placeholder" : "open")
+          : this.openRecord(record.path));
+      }
+      if (event.key === " ") {
+        event.preventDefault();
+        if (source && !sourceIsActive) this.run(() => this.activateSearchResult(source, record, "select"));
+        else this.selectRecord(record.path);
+      }
+      if (event.key.toLowerCase() === "m" && !event.metaKey && !event.ctrlKey) {
+        event.preventDefault();
+        if (source && !sourceIsActive) this.run(() => this.activateSearchResult(source, record, "collection"));
+        else this.openCollectionPicker(record.path);
+      }
+      if (event.key.toLowerCase() === "p" && !event.metaKey && !event.ctrlKey) {
+        event.preventDefault();
+        this.run(() => source && !sourceIsActive
+          ? this.activateSearchResult(source, record, "pin")
+          : this.togglePin(record.path));
+      }
+    };
+    let cardFrontmatter: Record<string, unknown> | undefined;
+    if (cardProfile) {
+      const file = record.isPlaceholder ? null : this.app.vault.getAbstractFileByPath(record.path);
+      cardFrontmatter = file instanceof TFile ? this.app.metadataCache.getFileCache(file)?.frontmatter : undefined;
+      renderLibraryCover(row, resolveLibraryCover(this.app,
+        ownLibraryProperty(cardFrontmatter, cardProfile.imageProperty), record.path), cardProfile, {
+        label: record.isPlaceholder ? `Create or link ${record.title}` : `Select ${record.title}`,
+        onActivate: activateRecord, onKeyDown: handleRecordKeydown,
+        keyShortcuts: RECORD_KEYBOARD_SHORTCUTS, current: selected,
+      });
+    }
     const touchLibraryId = this.touchDrag && record.portableId ? libraryIdForTab(this.plugin.data.activeTab) : null;
     if (this.touchDrag && this.editMode && sourceIsActive && touchLibraryId) {
       this.renderTouchHandle(row, record, { kind: "library", path: record.path, libraryId: touchLibraryId, membership: libraryMembership ?? null });
@@ -4829,36 +4945,8 @@ export class EntVaultCommandCenterView extends ItemView {
       },
     });
     if (selected) title.setAttribute("aria-current", "true");
-    title.addEventListener("click", () => {
-      if (source && !sourceIsActive) this.run(() => this.activateSearchResult(source, record, record.isPlaceholder ? "placeholder" : "select"));
-      else if (record.isPlaceholder) this.openPlaceholderActions(record);
-      else this.selectRecord(record.path);
-    });
-    title.addEventListener("keydown", (event) => {
-      if (!shouldHandleRowShortcut(true, event.key) && event.key !== " ") return;
-      if (event.key === "Enter") {
-        event.preventDefault();
-        this.run(() => source && !sourceIsActive
-          ? this.activateSearchResult(source, record, record.isPlaceholder ? "placeholder" : "open")
-          : this.openRecord(record.path));
-      }
-      if (event.key === " ") {
-        event.preventDefault();
-        if (source && !sourceIsActive) this.run(() => this.activateSearchResult(source, record, "select"));
-        else this.selectRecord(record.path);
-      }
-      if (event.key.toLowerCase() === "m" && !event.metaKey && !event.ctrlKey) {
-        event.preventDefault();
-        if (source && !sourceIsActive) this.run(() => this.activateSearchResult(source, record, "collection"));
-        else this.openCollectionPicker(record.path);
-      }
-      if (event.key.toLowerCase() === "p" && !event.metaKey && !event.ctrlKey) {
-        event.preventDefault();
-        this.run(() => source && !sourceIsActive
-          ? this.activateSearchResult(source, record, "pin")
-          : this.togglePin(record.path));
-      }
-    });
+    title.addEventListener("click", activateRecord);
+    title.addEventListener("keydown", handleRecordKeydown);
     this.attachHoverPreview(title, record, sourceData.settings);
     this.renderIndexRowMetadata(
       row,
@@ -4879,6 +4967,16 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     if (record.aiLock) {
       statusIconBadge(badges, "ent-cc-lock-badge", "lock", "AI locked");
+    }
+    if (cardProfile) {
+      const properties = row.createEl("dl", { cls: "ent-cc-library-card-properties" });
+      for (const property of cardProfile.visibleProperties) {
+        const value = libraryPropertyText(ownLibraryProperty(cardFrontmatter, property));
+        if (!value) continue;
+        const field = properties.createDiv({ cls: "ent-cc-library-card-property" });
+        field.createEl("dt", { text: property, attr: { dir: "auto" } });
+        field.createEl("dd", { text: value, attr: { dir: "auto" } });
+      }
     }
     iconButton(row, "ellipsis", `Actions for ${record.title}`, "ent-cc-row-more").addEventListener("click", (event) => {
       if (source && !sourceIsActive) this.showCrossBaseRecordMenu(event, source, record);
@@ -5319,6 +5417,10 @@ export class EntVaultCommandCenterView extends ItemView {
       const active = ownerDocument.activeElement;
       if (active && active !== ownerDocument.body && !this.contentEl.contains(active)
         && ownerDocument.body.contains(active)) return;
+      // Entry focus is queued. A user or assistive control may already have
+      // chosen an action in this new inspector before the callback runs;
+      // preserve that choice instead of sending focus back to Back.
+      if (active && this.inspectorEl.contains(active)) return;
       this.inspectorEl.querySelector<HTMLElement>(".ent-cc-inspector-close")?.focus();
     }, 0);
   }
@@ -7016,6 +7118,7 @@ export class EntVaultCommandCenterView extends ItemView {
             await this.plugin.mutate("Import organization backup", () => {
               applyPersonalBackupToData(this.plugin.data, backup);
             }, {
+              includeSettings: true,
               includePortableIndex: true,
               includeLayoutSnapshots: true,
               requireUndo: true,

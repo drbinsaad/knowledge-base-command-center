@@ -13,6 +13,8 @@ import { UPDATE_ANNOUNCEMENT_0_22_0 } from "../../src/update-announcement";
 import { applyNoteOrganizerPlan, createNoteOrganizerPlan, type NoteOrganizerDirective, type NoteOrganizerFileFact, type NoteOrganizerPrimaryState } from "../../src/note-organizer";
 import { organizerIndexPlacement, organizerIndexTrail } from "../../src/note-organizer-index";
 import { applyLibraryVisualMove, type LibraryVisualMoveRequest } from "../../src/library-visual-move";
+import { LibrarySettingsModal } from "../../src/library-settings-modal";
+import { normalizeLibraryDisplayProfile, type LibraryDisplayProfile } from "../../src/library-display-profile";
 
 function record(index: number, overrides: Partial<VaultRecord> = {}): VaultRecord {
   return {
@@ -39,6 +41,7 @@ const parameters = new URLSearchParams(location.hash.slice(1));
 Platform.isMobile = parameters.get("mobile") === "true";
 const mobileSpace = parameters.get("scenario") === "mobile-space";
 const touchDrag = parameters.get("scenario") === "touch-drag";
+const libraryGallery = parameters.get("scenario") === "library-gallery";
 const count = mobileSpace ? 8 : Number(parameters.get("count") ?? 650);
 const data = migrateData(null);
 Object.assign(data.settings, {
@@ -107,6 +110,53 @@ if (touchDrag) {
     { id: "review", title: "Review", collapsed: false, subjects: [], subheadings: [{ id: "next", title: "Next", collapsed: false, subjects: ["Research/Gamma.md"], subheadings: [] }] },
   ];
 }
+if (libraryGallery) {
+  const stressTitles = parameters.get("galleryTitleStress") === "true";
+  const titles = ["Atlas of discovery", "The creative mind", "A practical handbook", "Research methods", "Field notes", "Clinical reference", "A very long book title for checking narrow tablet and phone cards without horizontal overflow", "Reading wish list"];
+  if (stressTitles) {
+    titles[4] = "A complete illustrated reference for organizing a large collection of synthetic research notes without hiding the final words of the title";
+    titles[5] = "دليل تجريبي شامل لتنظيم الكتب والملاحظات والمراجع العلمية مع عرض العنوان كاملاً دون إخفاء الكلمات الأخيرة";
+    titles[6] = "SyntheticUnbrokenBookTitle".repeat(5);
+    titles[7] = "A long reading wish list entry with no linked note and no cover that must still show every word in the title";
+  }
+  data.settings.workspaceName = "Book collection";
+  data.activeTab = "library:reading";
+  data.portableIndex.libraries[0].name = "Books";
+  data.settings.libraryDisplayProfiles.reading = normalizeLibraryDisplayProfile({ layout: "cards" });
+  records.splice(0, records.length, ...Array.from({ length: 8 }, (_, index) => record(index, {
+    path: index === 7 ? portablePlaceholderPath("book-7") : `Reading/Book ${index}.md`,
+    title: titles[index],
+    libraryId: "reading", portableId: `book-${index}`, isPlaceholder: index === 7, role: "library", domain: "Books",
+  })));
+  data.portableIndex.groups = [{ id: "books", title: "Books", order: 0 }];
+  data.portableIndex.subjects = records.map((item, order) => ({
+    id: item.portableId!, title: item.title, groupId: "books", parentId: null, order,
+    indexed: false, configuredId: "", recordKind: "note", libraryId: "reading",
+  }));
+  data.portableIndex.resolvedPathBySubjectId = Object.fromEntries(records.filter((item) => !item.isPlaceholder).map((item) => [item.portableId!, item.path]));
+  data.portableIndex.libraryLayouts.reading = [{ id: "favorites", title: "Favorites", collapsed: false,
+    subjects: ["book-0", "book-1", "book-2", "book-3"], subheadings: [
+      { id: "reference", title: "Reference", collapsed: false, subjects: ["book-4", "book-5"], subheadings: [] },
+    ] }];
+  data.directIndexPaths = [];
+  data.collections = [];
+}
+if (parameters.get("scenario") === "tab-navigation") {
+  // Synthetic long Library rail for navigation/overflow coverage only.
+  for (let index = 0; index < 10; index += 1) {
+    const id = `tabs-library-${index}`;
+    data.portableIndex.libraries.push({
+      id, name: index === 9 ? "مكتبة المراجع والكتب والأبحاث طويلة العنوان لاختبار التنقل والوصول إلى جميع الأقسام" : `Reference library ${index + 1}`,
+      singularName: "Reference", icon: "book-open", order: index + 1, sourceKind: null, archivedAt: null,
+    });
+    data.portableIndex.libraryLayouts[id] = [];
+  }
+  records.push(...Array.from({ length: 80 }, (_, index) => record(index + count + 2, {
+    path: `References/Reference ${index + 1}.md`, title: `Reference ${index + 1}`,
+    libraryId: "tabs-library-9", role: "library", domain: "References",
+  })));
+  data.activeTab = "library:tabs-library-9";
+}
 const store = createDefaultStore(data, 1, "browser-synthetic-vault");
 const otherData = migrateData(data);
 otherData.settings.workspaceName = "Project workspace";
@@ -126,11 +176,38 @@ const currentRecords = (): VaultRecord[] => touchDrag
   ? records.map((item) => ({ ...item, domain: data.indexGroupByPath[item.path] ?? item.domain }))
   : records;
 const completedImportActions = { undo: 0, placeholderQueue: 0, closed: [] as boolean[] };
-const files = records.filter((item) => touchDrag ? !item.isPlaceholder : !item.portableId).map((item) => new TFile(item.path));
+const files = records.filter((item) => touchDrag || libraryGallery ? !item.isPlaceholder : !item.portableId).map((item) => new TFile(item.path));
+const coverFile = new TFile("Covers/Example.png");
+let coverResource = "";
+function syntheticCoverResource(): string {
+  if (coverResource) return coverResource;
+  // Synthetic host resource, detached before drawing or yielding to a paint.
+  const canvas = document.body.createEl("canvas");
+  canvas.remove();
+  canvas.width = 400; canvas.height = 600;
+  const context = canvas.getContext("2d")!;
+  context.fillStyle = "#244753"; context.fillRect(0, 0, 400, 600);
+  context.strokeStyle = "#dac592"; context.lineWidth = 2; context.strokeRect(25, 25, 350, 550);
+  context.fillStyle = "#f8ecd4"; context.textAlign = "center";
+  context.font = "18px sans-serif"; context.fillText("SYNTHETIC TEST COVER", 200, 105);
+  context.font = "40px serif"; context.fillText("FIELD", 200, 270); context.fillText("NOTES", 200, 325);
+  context.font = "20px sans-serif"; context.fillText("A. RESEARCHER", 200, 500);
+  coverResource = canvas.toDataURL("image/png");
+  return coverResource;
+}
 const app = {
   workspace: { getActiveFile: () => null, trigger: () => undefined },
-  vault: { getAbstractFileByPath: (path: string) => files.find((file) => file.path === path) ?? null, getMarkdownFiles: () => files },
-  metadataCache: { getFileCache: () => ({ frontmatter: {} }) },
+  vault: { getAbstractFileByPath: (path: string) => files.find((file) => file.path === path) ?? null, getMarkdownFiles: () => files,
+    getResourcePath: () => syntheticCoverResource() },
+  metadataCache: {
+    getFirstLinkpathDest: (path: string) => path === coverFile.path ? coverFile : null,
+    getFileCache: (file: TFile) => {
+      if (!libraryGallery) return { frontmatter: {} };
+      const index = files.indexOf(file);
+      return { frontmatter: { author: "A. Researcher", reading_status: index % 2 === 0 ? "Reading" : "To read", year: 2026,
+        cover: index === 3 ? "https://covers.invalid/example.png" : index === 4 ? "[[Covers/Missing.png]]" : index === 5 ? "" : "[[Covers/Example.png]]" } };
+    },
+  },
 };
 const plugin = {
   app, data,
@@ -149,6 +226,18 @@ const plugin = {
   validateGenericNote: (value: { title: string }) => value.title.trim() ? null : "Enter a title.",
   getLibraries: () => data.portableIndex.libraries,
   getLibrary: (id: string) => data.portableIndex.libraries.find((library) => library.id === id) ?? null,
+  getLibraryDisplayProfile: (id: string) => normalizeLibraryDisplayProfile(data.settings.libraryDisplayProfiles[id]),
+  setLibraryDisplayProfile: async (id: string, profile: LibraryDisplayProfile | null) => {
+    await plugin.mutate("Update synthetic Library display", () => {
+      if (profile) data.settings.libraryDisplayProfiles[id] = normalizeLibraryDisplayProfile(profile);
+      else delete data.settings.libraryDisplayProfiles[id];
+    });
+  },
+  openLibrarySettings: (id: string) => {
+    const library = plugin.getLibrary(id);
+    if (library) new LibrarySettingsModal(plugin as unknown as EntVaultCommandCenterPlugin, library).open();
+  },
+  getEffectiveLibraryNoteProfile: () => ({ folder: "Reading", mode: "empty", templatePath: "" }),
   getKnowledgeBases: () => sources.map(({ source }) => ({ id: source.baseId, name: source.baseName, data: source.data, archivedAt: null })),
   getLegacyIndexReviewPlans: () => [],
   getPortableSubject: (id: string) => data.portableIndex.subjects.find((item) => item.id === id) ?? null,
@@ -175,8 +264,8 @@ const plugin = {
   // Production view drop callbacks own every organization edit. This synthetic
   // host supplies only snapshot/restore and refresh, not filesystem persistence.
   mutate: async (label: string, action: () => unknown) => {
-    if (!touchDrag) throw new Error("Mutation is available only in the isolated touch-drag fixture");
-    const before = snapshotPersonal(data, label, false, true);
+    if (!touchDrag && !libraryGallery) throw new Error("Mutation is available only in isolated organization fixtures");
+    const before = snapshotPersonal(data, label, libraryGallery, true);
     await action();
     data.undoStack.push(before);
     data.redoStack = [];
@@ -185,10 +274,10 @@ const plugin = {
     await view.reload();
   },
   undo: async () => {
-    if (!touchDrag) { completedImportActions.undo += 1; data.undoStack.pop(); return; }
+    if (!touchDrag && !libraryGallery) { completedImportActions.undo += 1; data.undoStack.pop(); return; }
     const previous = data.undoStack.pop();
     if (!previous) return;
-    data.redoStack.push(snapshotPersonal(data, previous.label, false, true));
+    data.redoStack.push(snapshotPersonal(data, previous.label, libraryGallery, true));
     restoreSnapshot(data, previous);
     touchDragActions.undo += 1;
     generation += 1;
@@ -196,8 +285,8 @@ const plugin = {
   },
   redo: async () => {
     const next = data.redoStack.pop();
-    if (!touchDrag || !next) return;
-    data.undoStack.push(snapshotPersonal(data, next.label, false, true));
+    if ((!touchDrag && !libraryGallery) || !next) return;
+    data.undoStack.push(snapshotPersonal(data, next.label, libraryGallery, true));
     restoreSnapshot(data, next);
     touchDragActions.redo += 1;
     generation += 1;

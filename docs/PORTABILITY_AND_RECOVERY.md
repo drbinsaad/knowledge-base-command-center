@@ -2,6 +2,8 @@
 
 Knowledge Base Command Center separates portable organization from private same-vault restoration. Read this guide before sharing an export, replacing organization, or restoring recovery data.
 
+This guide covers version 0.23.0 Library-display formats. The release supports local-vault covers only; online loading is excluded and its [earlier proposal](LIBRARY_DISPLAY_AND_PRIVACY.md#deferred-online-cover-proposal) remains deferred and unapproved.
+
 ## Choose the right artifact
 
 | Artifact | Intended use | Path exposure |
@@ -21,7 +23,7 @@ The single-base center operates on the active knowledge base. A portfolio can in
 
 | Component | Contents |
 | --- | --- |
-| **Workspace settings** | Labels, compatible configured folders, base and per-Library creation profiles, template locations, metadata mappings, behavior, and visual group order. The destination base name and preset do not change. |
+| **Workspace settings** | Labels, compatible configured folders, base and per-Library creation profiles, Library list/card display profiles, template locations, metadata mappings, behavior, and visual group order. The destination base name and preset do not change. |
 | **Index blueprint** | Stable subject identities, titles, groups, nested parent relationships, record kinds, collapse state, and visual order. It contains no source note paths. |
 | **Each selected Library** | Stable Library identity, configured labels/icon, subject names, editable headings and nested subheadings, unplaced state, visual order, and portable identities. Doses, note bodies, source paths, and attachments are excluded. |
 | **Collections** | Collection heading and nested subheading structure with membership stored by portable subject identity. |
@@ -32,6 +34,10 @@ The single-base center operates on the active knowledge base. A portfolio can in
 The default **Transfer structure** preset selects workspace settings, the Index blueprint, every active Library, Collections, study state, and saved views. **Custom selection** expands the included sections. Each Library can be deselected independently, including an empty Library whose identity and hierarchy must be preserved.
 
 Archived Libraries are not offered as portable sections. Confirmed private recovery preserves their definitions and state.
+
+Library display profiles contain only layout choices and property names: no cover URL, property value, image bytes, or permission to contact a server. To transfer them, select **Workspace settings**. Workspace format 3 includes dependency descriptors for every active Library with a display profile, even when that Library's catalog is unselected. Descriptors preserve stable identity without replacing an unselected destination Library's name, archive decision, or headings. Profiles for archived or missing Libraries are omitted from Workspace export. Importing a Library catalog alone leaves destination display settings unchanged. Older Workspace formats 1–2 preserve destination display preferences; format 3 applies the selected Workspace profiles.
+
+Version 0.23.0 does not support online-image loading. Display profiles, synced notes, imports, recovery and Undo cannot enable it. The obsolete permission key from private test builds is App-local, inert, and excluded from all transfer formats.
 
 Collections and study state carry only the portable identities they reference. They do not silently select or replace a complete Index or complete Library.
 
@@ -97,11 +103,11 @@ Creating or linking preserves the portable identity and its Index/Library placem
 
 ## Portable format compatibility
 
-The current release writes portable format version 5. It adds nested Collection and Library subheadings—up to five levels in one branch, counting the top heading as level 1—to version 4's arbitrary stable Library definitions and selective Library IDs.
+Version 0.23.0 writes portable format version 6 with Workspace format 3, adding Library display profiles and their stable-ID dependencies. Releases 0.13.0 through 0.22.0 wrote portable version 5. That format added nested Collection and Library subheadings—up to five levels in one branch, counting the top heading as level 1—to version 4’s stable Library definitions and selective Library IDs.
 
-The current release continues to read versions 1–4, so older flat packages still import. Legacy Procedures, Medications, and Syndromes catalogs migrate to reserved stable Library IDs. Non-topic identities in version 1 files are treated conservatively as Collection or study dependencies rather than authoritative complete Libraries. Imported content nested deeper than five levels keeps its records by merging them into the nearest allowed level.
+Version 0.23.0 reads portable versions 1–6 and Workspace versions 1–3, so older flat packages still import. Legacy Procedures, Medications, and Syndromes catalogs migrate to reserved stable Library IDs. Non-topic identities in version 1 files are treated conservatively as Collection or study dependencies rather than authoritative complete Libraries. Imported content nested deeper than five levels keeps its records by merging them into the nearest allowed level.
 
-Older plugin builds reject version 5 rather than guessing destructively, and an older build that encounters a synced version-15 store with version-15 knowledge-base data preserves it read-only instead of rewriting it. Update every importing and syncing device before applying a new export.
+Older plugin builds reject unsupported portable version 6 or Workspace version 3 rather than discarding display settings. An older build that encounters a synced version-16 store with version-16 knowledge-base data preserves it read-only instead of rewriting it. Update every importing and syncing device before applying a new export. Existing version-15 direct-note and linked-folder provenance remains required and is preserved during migration to version 16; the display feature does not reenroll storage folders.
 
 ## Review an import
 
@@ -138,12 +144,13 @@ Single-base import and export enforce a 10 MB ceiling plus per-list and aggregat
 
 Same-vault recovery starts unselected when an import file is opened. It must be selected and confirmed separately, is restored by itself, and is never described or executed as a merge with portable sections.
 
-Current version-11 recovery files embed:
+Current version-12 recovery files introduced in 0.23.0 embed:
 
 - source vault identity;
 - source knowledge-base ID and name;
 - Generic/ENT preset identity;
 - dynamic Library definitions and layouts, including nested subheadings;
+- Library display profiles, including archived Libraries and profiles in retained settings snapshots;
 - direct Index memberships and linked-folder source provenance, including nested organization snapshots;
 - exact local note bindings and paths; and
 - the base's plugin-owned organization.
@@ -152,13 +159,16 @@ Before an Undo snapshot or mutation starts, the plugin verifies that the source 
 
 ### Recovery versions
 
-- **Version 11:** current format with explicit direct Index membership, linked-folder source provenance, nested Collection and Library subheading layouts, dynamic Library definitions, and source vault/base/preset locks.
+- **Version 12:** current format, introduced in 0.23.0, adding bounded Library display profiles to version 11’s organization and identity protections. Online-image permission is not included or supported.
+- **Version 11:** explicit direct Index membership, linked-folder source provenance, nested Collection and Library subheading layouts, dynamic Library definitions, and source vault/base/preset locks. Restoring it preserves destination display profiles for Library IDs that survive restoration.
 - **Version 10:** nested Collection and Library subheading layouts, dynamic Library definitions, and source vault/base/preset locks, but no trusted linked-folder provenance. When restored, the destination's linked sources are preserved and legacy membership is migrated conservatively.
 - **Version 9:** dynamic Library definitions and layouts plus the same identity locks, but its subheadings stay a single level deep.
 - **Version 8:** same identity locks and fixed clinical Library layouts, but predates arbitrary Library definitions.
 - **Version 7:** predates nested Library-layout recovery but carries current-style vault/base/preset identity.
 - **Versions 1–6:** do not carry a trusted knowledge-base identity or preset and require a separate **base/preset unverified** override.
 - **Versions 1–5:** also lack a trusted vault identity and undergo a conservative unique-path preflight.
+
+All recovery formats before version 12 preserve destination display preferences where the restored Library identity still exists. Version 12 restores its own profiles, including an explicitly empty profile map. No display reset or recovery restore can enable online covers or transfer the inert legacy image-permission key.
 
 A current recovery from a different vault or preset is hard-rejected. Restoring into a different base in the same vault is blocked by default. A distinct override must name both source and destination, followed by the normal destructive-restore confirmation, and it is available only when both bases have the same Generic or ENT preset.
 

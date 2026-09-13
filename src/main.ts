@@ -206,6 +206,8 @@ import {
 } from "./kbcc-return-navigation";
 import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge-base-modal";
 import { ManageLibrariesModal } from "./library-modal";
+import { LibrarySettingsModal } from "./library-settings-modal";
+import { normalizeLibraryDisplayProfile, validateLibraryDisplayProfile, type LibraryDisplayProfile } from "./library-display-profile";
 import { mergeKnowledgeBaseStores, type StoreMergeResult } from "./store-merge";
 import {
   applyTaxonomyRepairToData,
@@ -303,6 +305,8 @@ export const DEVICE_LOCAL_STATE_KEY = "ent-vault-command-center.device-state.v1"
 export const SYNC_RECOVERY_LOCAL_STATE_KEY = "ent-vault-command-center.sync-recovery-state.v1";
 export const VAULT_RENAME_JOURNAL_KEY = "ent-vault-command-center.vault-rename-journal.v1";
 export const KBCC_RETURN_NAVIGATION_STATE_KEY = "ent-vault-command-center.return-navigation.v1";
+/** Inert key from an unreleased experiment; only explicit local-data cleanup may touch it. */
+export const LEGACY_LIBRARY_IMAGE_PERMISSION_KEY = "ent-vault-command-center.library-images.v1";
 const FOLLOW_UP_UNDO_WINDOW_MS = 5 * 60 * 1000;
 
 /**
@@ -2387,6 +2391,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       SYNC_RECOVERY_LOCAL_STATE_KEY,
       VAULT_RENAME_JOURNAL_KEY,
       KBCC_RETURN_NAVIGATION_STATE_KEY,
+      LEGACY_LIBRARY_IMAGE_PERMISSION_KEY,
     ]) {
       try {
         this.app.saveLocalStorage(key, null);
@@ -6212,6 +6217,43 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return profile ? { ...profile } : null;
   }
 
+  getLibraryDisplayProfile(libraryId: string): LibraryDisplayProfile {
+    const profiles = this.data.settings.libraryDisplayProfiles;
+    return normalizeLibraryDisplayProfile(Object.prototype.hasOwnProperty.call(profiles, libraryId) ? profiles[libraryId] : null);
+  }
+
+  async setLibraryDisplayProfile(libraryId: string, profile: LibraryDisplayProfile | null): Promise<void> {
+    const library = this.requireLibrary(libraryId);
+    if (profile !== null) {
+      const error = validateLibraryDisplayProfile(profile);
+      if (error) throw new Error(error);
+    }
+    const cleaned = profile === null ? null : normalizeLibraryDisplayProfile(profile);
+    const originalData = this.data;
+    const originalBaseId = this.getActiveKnowledgeBaseId();
+    const originalLibrary = JSON.stringify(library);
+    const originalProfile = JSON.stringify(this.data.settings.libraryDisplayProfiles[libraryId] ?? null);
+    if (originalProfile === JSON.stringify(cleaned)) return;
+    await this.mutate(`${cleaned ? "Update" : "Reset"} display for “${library.name}”`, () => {
+      if (this.data !== originalData || this.getActiveKnowledgeBaseId() !== originalBaseId
+        || JSON.stringify(this.requireLibrary(libraryId)) !== originalLibrary
+        || JSON.stringify(this.data.settings.libraryDisplayProfiles[libraryId] ?? null) !== originalProfile) {
+        throw new Error("The Library changed. Reopen Library settings before saving your display choices.");
+      }
+      if (cleaned) this.data.settings.libraryDisplayProfiles[libraryId] = normalizeLibraryDisplayProfile(cleaned);
+      else delete this.data.settings.libraryDisplayProfiles[libraryId];
+    }, { includeSettings: true, requireUndo: true });
+  }
+
+  openLibrarySettings(libraryId: string): void {
+    const library = this.getLibrary(libraryId);
+    if (!library) {
+      new Notice("That library is no longer available.");
+      return;
+    }
+    new LibrarySettingsModal(this, library).open();
+  }
+
   getEffectiveLibraryNoteProfile(libraryId: string): EffectiveLibraryNoteProfile {
     this.requireLibrary(libraryId);
     return resolveLibraryNoteProfile(this.data.settings, libraryId);
@@ -6830,6 +6872,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       ));
       delete this.data.portableIndex.libraryLayouts[libraryId];
       delete this.data.settings.libraryNoteProfiles[libraryId];
+      delete this.data.settings.libraryDisplayProfiles[libraryId];
       this.data.portableIndex.libraries = this.libraryDefinitions()
         .filter((candidate) => candidate.id !== libraryId);
       this.normalizeLibraryOrder();

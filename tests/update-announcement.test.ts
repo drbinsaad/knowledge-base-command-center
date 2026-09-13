@@ -19,6 +19,7 @@ import {
   UPDATE_ANNOUNCEMENT_0_20_1,
   UPDATE_ANNOUNCEMENT_0_21_0,
   UPDATE_ANNOUNCEMENT_0_22_0,
+  UPDATE_ANNOUNCEMENT_0_23_0,
   type UpdateAnnouncement,
 } from "../src/update-announcement.ts";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
@@ -293,6 +294,27 @@ test("0.22.0 is one-time upgrade news, not a fresh-install, downgrade or local-b
   assert.equal(downgrade.shouldPersist, false);
   assert.equal(planUpdateAnnouncement("0.22.0-rc.1", "0.21.0", true).announcement, null);
   assert.equal(planUpdateAnnouncement("0.22.0+local", "0.21.0", true).announcement, null);
+});
+
+test("0.23.0 announces local-only Cards and exact compatibility limits once per upgrade", () => {
+  const upgrade = planUpdateAnnouncement("0.23.0", "0.22.0", true);
+  assert.equal(upgrade.announcement, UPDATE_ANNOUNCEMENT_0_23_0);
+  assert.equal(upgrade.nextHighestObservedVersion, "0.23.0");
+  assert.equal(upgrade.shouldPersist, true);
+  assert.equal(UPDATE_ANNOUNCEMENT_0_23_0.highlights.length, 5);
+  assert.match(UPDATE_ANNOUNCEMENT_0_23_0.intro, /Physical iPhone\/iPad testing remains unverified/u);
+  const highlights = UPDATE_ANNOUNCEMENT_0_23_0.highlights.join("\n");
+  for (const claim of [/List or Cards/u, /All sections/u, /Online image URLs are not loaded/u,
+    /no external-image opt-in/u, /permission left by a private test build is inert/u,
+    /format-16 organization/u, /update every syncing device before editing/u]) assert.match(highlights, claim);
+  assert.equal(UPDATE_ANNOUNCEMENT_0_23_0.releaseUrl, "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.23.0");
+  const repeat = planUpdateAnnouncement("0.23.0", upgrade.nextHighestObservedVersion, true);
+  assert.equal(repeat.announcement, null);
+  assert.equal(repeat.shouldPersist, false);
+  assert.equal(planUpdateAnnouncement("0.23.0", null, false).announcement, null);
+  assert.equal(planUpdateAnnouncement("0.22.0", "0.23.0", true).announcement, null);
+  assert.equal(planUpdateAnnouncement("0.23.0-rc.1", "0.22.0", true).announcement, null);
+  assert.equal(planUpdateAnnouncement("0.23.0+local", "0.22.0", true).announcement, null);
 });
 
 test("malformed local version state is bounded and recoverable without trusting partial values", () => {

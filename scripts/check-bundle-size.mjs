@@ -2,10 +2,11 @@ import { readFile, stat } from "node:fs/promises";
 import { gzipSync } from "node:zlib";
 
 const budgets = [
-  // Handle-only pointer gestures and guarded mobile organization add about
-  // 16.4 kB raw / 4.8 kB gzip JS and 1.7 kB raw / 0.3 kB gzip CSS over 0.21.0.
-  { file: "main.js", raw: 1_175_000, gzip: 309_000 },
-  { file: "styles.css", raw: 153_000, gzip: 21_100 },
+  // Per-Library display profiles, guarded settings, cover rendering and versioned
+  // portability add about 27.4 kB raw / 6.2 kB gzip JS and 5.0 kB raw / 0.9 kB
+  // gzip CSS over 0.22.0. No runtime dependencies or bundled image assets added.
+  { file: "main.js", raw: 1_205_000, gzip: 316_000 },
+  { file: "styles.css", raw: 158_000, gzip: 22_000 },
 ];
 
 for (const budget of budgets) {

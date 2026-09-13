@@ -372,6 +372,8 @@ test("mobile browse keyboard viewport keeps focused search reachable while later
     window.visualViewport.dispatchEvent(new Event("resize"));
   });
   await expect(page.locator(".ent-cc-shell")).toHaveClass(/is-virtual-keyboard-open/u);
+  await expect(page.locator(".ent-cc-tabs-row")).toBeHidden();
+  await expect(page.getByRole("button", { name: "Library settings", exact: true })).toBeHidden();
   await page.locator(".ent-cc-workspace").evaluate((owner) => { owner.scrollTop = owner.scrollHeight; });
   const geometry = await page.evaluate(() => {
     const selectors = ['.ent-cc-search-box input[type="search"]', ".ent-cc-search-clear", ".ent-cc-workspace", ".ent-cc-tree-panel"];

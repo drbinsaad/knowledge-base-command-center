@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.23.0
+
+### Library Cards and local covers
+
+- Configure each Library independently with List or Cards, a cover property, Small/Medium/Large cards, Portrait/Square/Landscape proportions, whole-image fitting or cropping, and up to six visible note properties.
+- Preserve headings, nested subheadings, ordering and note actions in Cards. Missing covers use compact placeholders, long English/Arabic titles remain readable, and Arrange keeps its list presentation.
+- Open Library settings directly from the toolbar or Manage libraries. Rename, customize, archive and restore Libraries; permanent deletion of archived custom Libraries uses guarded record reassignment. Built-in Library source classification remains protected.
+- Load covers only from existing raster images in the vault. **Online covers are excluded from this release**, with no opt-in or remote-image loading path. Any image permission retained from a private test build is inert and can be removed by Clear device-local data. The earlier online-cover proposal remains deferred and unapproved; this release does not claim its privacy review is complete.
+
+### Navigation and compatibility
+
+- Replace the thick horizontal tab scrollbar with a clean scrollable strip and an always-reachable All sections picker. Preserve vertical reading position when revealing a tab, support right-to-left keyboard navigation, and keep Library settings reachable on narrow layouts.
+- Preserve compact phone/tablet browsing, readable Cards and focus when opening record details. Ordinary Library and organization actions never move or rewrite Markdown notes.
+- Store Library display profiles by stable identity with guarded Save/Reset, Undo and transfer. Organization uses store/base format 16, portable package 6, Workspace 3 and recovery 12. Update every syncing/importing device; older public builds protect newer data read-only rather than dropping display settings. A writable downgrade requires a complete compatible pre-upgrade snapshot.
+
+### Verification and release boundary
+
+- The maintainer explicitly accepted publishing this local-cover-only candidate with physical iPhone/iPad and controlled two-device Sync testing unverified. This is a fresh decision for 0.23.0 only, not a physical-device Pass and not a reused waiver.
+- Exact final versioned validation belongs in the [0.23.0 evidence record](https://github.com/drbinsaad/knowledge-base-command-center/blob/0.23.0/docs/release-evidence/0.23.0-iphone.md). Browser automation and Mac Obsidian checks do not establish physical touch, VoiceOver, software-keyboard, safe-area, image-memory or Sync behavior.
+
 ## 0.22.0
 
 ### Touch arrangement

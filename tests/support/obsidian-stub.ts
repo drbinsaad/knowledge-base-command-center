@@ -76,7 +76,11 @@ export class MarkdownView {
 }
 export class Modal {
   app: unknown;
-  modalEl = {};
+  private readonly modalClasses = new Set<string>();
+  modalEl = {
+    addClass: (...names: string[]): void => { names.forEach((name) => this.modalClasses.add(name)); },
+    classList: { contains: (name: string): boolean => this.modalClasses.has(name) },
+  };
   contentEl = {};
   titleEl = {};
   constructor(app: unknown) { this.app = app; }

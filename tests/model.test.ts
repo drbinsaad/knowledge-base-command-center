@@ -2496,12 +2496,12 @@ test("organization backup round-trips without clinical content", () => {
     subjects: ["reading-subject"],
     subheadings: [],
   }];
-  const backup = createPersonalBackup(data, "2026-08-07T00:00:00.000Z", "vault-ent-main", "base-ent", "ENT");
+  const backup = createPersonalBackup(data, "2026-08-07T00:00:00.000Z", "vault-synthetic-source", "base-ent", "ENT");
   const parsed = parsePersonalBackup(JSON.parse(JSON.stringify(backup)) as unknown);
-  assert.equal(backup.version, 11);
-  assert.equal(parsed.version, 11);
+  assert.equal(backup.version, 12);
+  assert.equal(parsed.version, 12);
   assert.equal(parsed.indexFolderSourcesIncluded, true);
-  assert.equal(parsed.sourceVaultId, "vault-ent-main");
+  assert.equal(parsed.sourceVaultId, "vault-synthetic-source");
   assert.equal(parsed.sourceBaseId, "base-ent");
   assert.equal(parsed.sourceBaseName, "ENT");
   assert.equal(parsed.sourceWorkspaceMode, "generic");
@@ -2525,7 +2525,7 @@ test("organization backup round-trips without clinical content", () => {
   delete versionEight.directIndexPaths;
   delete versionEight.indexFolderSources;
   const migratedVersionEight = parsePersonalBackup(versionEight);
-  assert.equal(migratedVersionEight.version, 11);
+  assert.equal(migratedVersionEight.version, 12);
   assert.equal(migratedVersionEight.indexFolderSourcesIncluded, false);
   assert.equal(migratedVersionEight.portableIndex.libraries.some((library) => library.id === "library-reading"), true);
   assert.deepEqual(migratedVersionEight.portableIndex.libraryLayouts["library-reading"], data.portableIndex.libraryLayouts["library-reading"]);
@@ -2725,7 +2725,7 @@ test("version 1 organization backups remain readable but carry no trusted vault 
     curriculumVisual: { parentByPath: {}, orderByContainer: {} },
     layoutSnapshots: [],
   });
-  assert.equal(parsed.version, 11);
+  assert.equal(parsed.version, 12);
   assert.equal(parsed.indexFolderSourcesIncluded, false);
   assert.equal(parsed.sourceVaultId, "");
   assert.equal(parsed.sourceBaseId, "");
@@ -2770,7 +2770,7 @@ test("portable workspace configuration round-trips settings and group order with
   data.indexGroupOrder = ["Projects", "Reading"];
   data.manualIndexPaths = ["Private/Note.md"];
   const config = createWorkspaceConfig(data, "2026-08-07T00:00:00.000Z");
-  assert.equal(config.version, 2, "new settings exports use a compatibility boundary older builds reject");
+  assert.equal(config.version, 3, "new settings exports use a compatibility boundary older builds reject");
   const parsed = parseWorkspaceConfig(JSON.parse(JSON.stringify(config)) as unknown);
   assert.equal(parsed.settings.workspaceName, "Research Command Center");
   assert.equal(parsed.settings.allowClinicalVisualGroupMoves, true);
@@ -2788,7 +2788,7 @@ test("portable workspace configuration round-trips settings and group order with
   const legacy = structuredClone(config);
   legacy.version = 1;
   assert.equal(parseWorkspaceConfig(legacy).version, 1, "legacy version-1 workspace settings remain importable");
-  assert.throws(() => parseWorkspaceConfig({ ...config, version: 3 }), /unsupported/i);
+  assert.throws(() => parseWorkspaceConfig({ ...config, version: 4 }), /unsupported/i);
 });
 
 test("workspace parsing rejects Quick Append settings without an active category", () => {
@@ -3927,12 +3927,12 @@ test("portable parser bounds per-list and aggregate subject references below the
 
 test("same-vault recovery bounds lists, aggregate references, saved views, and snapshots", () => {
   const source = migrateData(null);
-  const oversizedList = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-ent-main", "base-ent", "ENT");
+  const oversizedList = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-synthetic-source", "base-ent", "ENT");
   oversizedList.pinnedPaths = Array(MAX_TRANSFER_LIST_ITEMS + 1).fill("Note.md") as string[];
   assert.ok(new TextEncoder().encode(JSON.stringify(oversizedList)).byteLength < 10 * 1024 * 1024);
   assert.throws(() => parsePersonalBackup(oversizedList), /too many references/i);
 
-  const oversizedLibraryLayout = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-ent-main", "base-ent", "ENT");
+  const oversizedLibraryLayout = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-synthetic-source", "base-ent", "ENT");
   oversizedLibraryLayout.portableIndex.libraryLayouts.medication = [{
     id: "medication-heading",
     title: "Medication",
@@ -3942,7 +3942,7 @@ test("same-vault recovery bounds lists, aggregate references, saved views, and s
   }];
   assert.throws(() => parsePersonalBackup(oversizedLibraryLayout), /medication layout.*too many references/i);
 
-  const aggregate = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-ent-main", "base-ent", "ENT");
+  const aggregate = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-synthetic-source", "base-ent", "ENT");
   const referencesPerList = MAX_TRANSFER_LIST_ITEMS;
   const listCount = Math.floor(MAX_TRANSFER_TOTAL_REFERENCES / referencesPerList) + 1;
   aggregate.collections = [{
@@ -3960,7 +3960,7 @@ test("same-vault recovery bounds lists, aggregate references, saved views, and s
   assert.ok(new TextEncoder().encode(JSON.stringify(aggregate)).byteLength < 10 * 1024 * 1024);
   assert.throws(() => parsePersonalBackup(aggregate), /recovery backup contains more than/i);
 
-  const savedViews = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-ent-main", "base-ent", "ENT");
+  const savedViews = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-synthetic-source", "base-ent", "ENT");
   savedViews.savedViews = Array.from({ length: 10_001 }, (_, index) => ({
     id: `view-${index}`,
     name: `View ${index}`,
@@ -3969,7 +3969,7 @@ test("same-vault recovery bounds lists, aggregate references, saved views, and s
   }));
   assert.throws(() => parsePersonalBackup(savedViews), /saved views has too many entries/i);
 
-  const snapshots = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-ent-main", "base-ent", "ENT");
+  const snapshots = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-synthetic-source", "base-ent", "ENT");
   snapshots.layoutSnapshots = Array.from({ length: MAX_TRANSFER_SNAPSHOTS + 1 }, (_, index) => snapshotPersonal(source, `Snapshot ${index}`));
   assert.throws(() => parsePersonalBackup(snapshots), /named snapshots has too many entries/i);
 });
@@ -4189,7 +4189,7 @@ test("same-vault recovery is an explicit standalone replace operation", () => {
     version: 1,
     exportedAt: "2026-08-08T00:00:00.000Z",
     sourceWorkspace: "",
-    components: { recovery: createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-ent-main", "base-ent", "ENT") },
+    components: { recovery: createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-synthetic-source", "base-ent", "ENT") },
   };
   const target = migrateData(null);
   assert.throws(() => applyPortableExport(target, value, portableSelection({ recovery: true }), "merge"), /not a merge/i);
@@ -4200,24 +4200,24 @@ test("same-vault recovery is an explicit standalone replace operation", () => {
   );
 });
 
-test("same-vault recovery rejects ent-Main-vault data in MY MAIN NOTE KB before mutation", () => {
+test("same-vault recovery rejects Synthetic Source Vault data in Synthetic Target Vault before mutation", () => {
   const source = migrateData(null);
   source.collections = [{ id: "ent", title: "ENT", collapsed: false, subjects: ["03 Clinical Topics/Larynx.md"], subheadings: [] }];
   const value: PortableExportV1 = {
     kind: PORTABLE_EXPORT_KIND,
     version: 1,
     exportedAt: "2026-08-08T00:00:00.000Z",
-    sourceWorkspace: "ENT main vault",
+    sourceWorkspace: "Synthetic Source Vault",
     components: {
-      recovery: createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-ent-main-vault", "base-ent", "ENT"),
+      recovery: createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-synthetic-source", "base-ent", "ENT"),
     },
   };
   const target = migrateData(null);
-  target.collections = [{ id: "local", title: "MY MAIN NOTE KB", collapsed: false, subjects: ["Knowledge Base/Local.md"], subheadings: [] }];
+  target.collections = [{ id: "local", title: "Synthetic Target Vault", collapsed: false, subjects: ["Knowledge Base/Local.md"], subheadings: [] }];
   const before = structuredClone(target);
 
   assert.throws(
-    () => applyPortableExport(target, value, portableSelection({ recovery: true }), "replace", "vault-my-main-note-kb"),
+    () => applyPortableExport(target, value, portableSelection({ recovery: true }), "replace", "vault-synthetic-target"),
     /different Obsidian vault/i,
   );
   assert.deepEqual(target, before);
@@ -4413,7 +4413,7 @@ test("recovery exported from a losing provisional ID is rejected after first-upg
 test("legacy recovery with 0 of 722 referenced paths is rejected before mutation", () => {
   const source = migrateData(null);
   source.directIndexPaths = Array.from({ length: 722 }, (_, index) => `03 Clinical Topics/Legacy ${index}.md`);
-  const modern = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-ent-main-vault", "base-ent", "ENT");
+  const modern = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-synthetic-source", "base-ent", "ENT");
   const legacy = { ...modern, version: 5 } as Record<string, unknown>;
   delete legacy.sourceVaultId;
   legacy.manualIndexPaths = modern.directIndexPaths;
@@ -4438,7 +4438,7 @@ test("legacy recovery with 0 of 722 referenced paths is rejected before mutation
       value,
       portableSelection({ recovery: true }),
       "replace",
-      "vault-my-main-note-kb",
+      "vault-synthetic-target",
       () => false,
     ),
     /matches 0 of 722 unique referenced paths.*at least 361 \(50%\)/i,
@@ -4449,7 +4449,7 @@ test("legacy recovery with 0 of 722 referenced paths is rejected before mutation
 test("legacy recovery with only 1 of 722 matching paths is rejected before mutation", () => {
   const source = migrateData(null);
   source.directIndexPaths = Array.from({ length: 722 }, (_, index) => `03 Clinical Topics/Legacy ${index}.md`);
-  const modern = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-ent-main-vault", "base-ent", "ENT");
+  const modern = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-synthetic-source", "base-ent", "ENT");
   const legacy = { ...modern, version: 5 } as Record<string, unknown>;
   delete legacy.sourceVaultId;
   legacy.manualIndexPaths = modern.directIndexPaths;
@@ -4473,7 +4473,7 @@ test("legacy recovery with only 1 of 722 matching paths is rejected before mutat
       value,
       portableSelection({ recovery: true }),
       "replace",
-      "vault-my-main-note-kb",
+      "vault-synthetic-target",
       (path) => path === "03 Clinical Topics/Legacy 0.md",
     ),
     /matches 1 of 722 unique referenced paths.*at least 361 \(50%\)/i,
@@ -4484,7 +4484,7 @@ test("legacy recovery with only 1 of 722 matching paths is rejected before mutat
 test("legacy recovery with exactly 361 of 722 matching paths reaches the threshold", () => {
   const source = migrateData(null);
   source.directIndexPaths = Array.from({ length: 722 }, (_, index) => `03 Clinical Topics/Legacy ${index}.md`);
-  const modern = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-ent-main-vault", "base-ent", "ENT");
+  const modern = createPersonalBackup(source, "2026-08-08T00:00:00.000Z", "vault-synthetic-source", "base-ent", "ENT");
   const legacy = { ...modern, version: 5 } as Record<string, unknown>;
   delete legacy.sourceVaultId;
   legacy.manualIndexPaths = modern.directIndexPaths;
@@ -4505,7 +4505,7 @@ test("legacy recovery with exactly 361 of 722 matching paths reaches the thresho
     value,
     portableSelection({ recovery: true }),
     "replace",
-    "vault-my-main-note-kb",
+    "vault-synthetic-target",
     (path) => {
       const match = /Legacy (\d+)\.md$/.exec(path);
       return match ? Number(match[1]) < 361 : false;
@@ -4665,7 +4665,7 @@ test("portable dispatcher accepts legacy workspace configurations and personal b
   assert.equal(workspace.components.index, undefined);
 
   const recovery = parseAnyCommandCenterExport(
-    JSON.parse(JSON.stringify(createPersonalBackup(data, exportedAt, "vault-ent-main", "base-ent", "ENT"))) as unknown,
+    JSON.parse(JSON.stringify(createPersonalBackup(data, exportedAt, "vault-synthetic-source", "base-ent", "ENT"))) as unknown,
   );
   assert.equal(recovery.kind, PORTABLE_EXPORT_KIND);
   assert.equal(recovery.components.recovery?.collections[0]?.title, "Legacy collection");
@@ -5967,8 +5967,8 @@ test("portable v5 declares every selected library while legacy v1 packages remai
     "2026-08-08T00:00:00.000Z",
   );
 
-  assert.equal(current.version, 5);
-  assert.equal(current.components.index?.version, 5);
+  assert.equal(current.version, 6);
+  assert.equal(current.components.index?.version, 6);
   assert.deepEqual(current.components.index?.includedSections, {
     index: false,
     libraryIds: ["medication"],
@@ -7861,9 +7861,9 @@ test("a realistic previous-build store migrates to the nested schema with conser
   }];
   const modern = createDefaultStore(data, 100, "vault-prev-build");
   const raw = structuredClone(modern) as unknown as { version: number; bases: Array<Record<string, unknown>> };
-  raw.version = STORE_VERSION - 1;
+  raw.version = 14;
   const rawBase = raw.bases[0];
-  (rawBase.data as { version: number }).version = DATA_VERSION - 1;
+  (rawBase.data as { version: number }).version = 14;
   rawBase.semanticRevision = 3;
   rawBase.semanticHash = semanticEntryFingerprint({
     createdAt: 100,
@@ -7902,7 +7902,7 @@ test("a realistic previous-build store migrates to the nested schema with conser
 });
 
 test("transfer budgets count nested subheadings at every depth", () => {
-  const backup = createPersonalBackup(migrateData(null), "2026-08-08T00:00:00.000Z", "vault-ent-main", "base-ent", "ENT");
+  const backup = createPersonalBackup(migrateData(null), "2026-08-08T00:00:00.000Z", "vault-synthetic-source", "base-ent", "ENT");
   const width = 100;
   const childrenPerNode = Math.ceil(MAX_TRANSFER_COLLECTIONS / width) + 1;
   (backup as { collections: unknown }).collections = [{
@@ -7933,10 +7933,10 @@ test("personal backups carry membership at v11 while flat v9 backups import unch
     indexFolderSources: [],
     collections: [nestedLayoutChain(6, (level) => ({ subjects: [`Knowledge/Level ${level}.md`] }))],
   });
-  const backup = createPersonalBackup(data, "2026-08-08T00:00:00.000Z", "vault-ent-main", "base-ent", "ENT");
-  assert.equal(backup.version, 11);
+  const backup = createPersonalBackup(data, "2026-08-08T00:00:00.000Z", "vault-synthetic-source", "base-ent", "ENT");
+  assert.equal(backup.version, 12);
   const parsed = parsePersonalBackup(JSON.parse(JSON.stringify(backup)) as unknown);
-  assert.equal(parsed.version, 11);
+  assert.equal(parsed.version, 12);
   assert.deepEqual(parsed.collections, data.collections, "nested organization survives an exact round-trip");
   assert.deepEqual(
     subheadingAt(parsed.collections[0], MAX_LAYOUT_DEPTH).subjects,
@@ -7951,13 +7951,13 @@ test("personal backups carry membership at v11 while flat v9 backups import unch
     subjects: ["Knowledge/Airway.md"],
     subheadings: [{ id: "sub", title: "Sub", collapsed: false, subjects: [] }],
   }];
-  const legacy = structuredClone(createPersonalBackup(flatData, "2026-08-08T00:00:00.000Z", "vault-ent-main", "base-ent", "ENT")) as unknown as Record<string, unknown>;
+  const legacy = structuredClone(createPersonalBackup(flatData, "2026-08-08T00:00:00.000Z", "vault-synthetic-source", "base-ent", "ENT")) as unknown as Record<string, unknown>;
   legacy.version = 9;
   delete legacy.indexFolderSourcesIncluded;
   delete legacy.directIndexPaths;
   delete legacy.indexFolderSources;
   const legacyParsed = parsePersonalBackup(legacy);
-  assert.equal(legacyParsed.version, 11, "flat v9 backups upgrade in place");
+  assert.equal(legacyParsed.version, 12, "flat v9 backups upgrade in place");
   assert.equal(legacyParsed.indexFolderSourcesIncluded, false);
   assert.equal(legacyParsed.collections[0]?.subheadings[0]?.id, "sub");
 });
@@ -8083,7 +8083,7 @@ test("portable v5 collections round-trip five nested levels byte-stably in repla
     portableSelection({ collections: true }),
     "2026-08-12T00:00:00.000Z",
   );
-  assert.equal(exported.version, 5);
+  assert.equal(exported.version, 6);
   const collection = exported.components.collections?.collections[0];
   assert.ok(collection);
   assert.equal(collection.id, "chain-1");
@@ -8452,7 +8452,7 @@ test("portable v4 flat packages import unchanged while unknown versions refuse c
     portableSelection({ collections: true }),
     "2026-08-12T00:00:00.000Z",
   );
-  assert.equal(v5.version, 5);
+  assert.equal(v5.version, 6);
 
   const downgraded = structuredClone(v5) as unknown as {
     version: number;
@@ -8469,7 +8469,7 @@ test("portable v4 flat packages import unchanged while unknown versions refuse c
   // The same envelope gate makes builds that predate a version refuse it with
   // one clear message instead of silently flattening unknown organization.
   const future = structuredClone(v5) as unknown as { version: number };
-  future.version = 6;
+  future.version = 7;
   assert.throws(() => parsePortableExport(future), /Unsupported Command Center portable export\./);
 });
 

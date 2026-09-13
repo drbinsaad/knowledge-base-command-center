@@ -941,6 +941,7 @@ test("mobile renders and reveals an active custom-library tab without exposing a
   const view = createView(dom.window) as unknown as MobileViewHarness & {
     records: VaultRecord[];
     plugin: { data: PluginData };
+    revealActiveTab(tablist: HTMLElement): void;
   };
   const library = installCustomLibrary(view.plugin.data);
   view.plugin.data.portableIndex.libraries.push({
@@ -961,7 +962,19 @@ test("mobile renders and reveals an active custom-library tab without exposing a
   assert.equal(active.getAttribute("aria-selected"), "true");
   assert.match(active.textContent, /Reference Sets1/);
   assert.equal(active.querySelector(".ent-cc-tab-label")?.textContent, "Reference Sets");
-  assert.equal((active as unknown as { scrollIntoViewCalls: number }).scrollIntoViewCalls, 1);
+  const bar = parent.querySelector(".ent-cc-tabs");
+  assert.ok(bar);
+  bar.setBoundingClientRect({ left: 0, right: 200, width: 200 });
+  bar.scrollLeft = 0;
+  active.setBoundingClientRect({ left: 400, right: 500, width: 100 });
+  parent.scrollTop = 123;
+  view.revealActiveTab(asHtmlElement(bar));
+  assert.equal(bar.scrollLeft, 350);
+  assert.equal(parent.scrollTop, 123);
+  assert.equal((active as unknown as { scrollIntoViewCalls: number }).scrollIntoViewCalls, 0);
+  assert.equal(bar.getAttribute("aria-label"), null);
+  assert.ok(bar.getAttribute("aria-labelledby"));
+  assert.ok(parent.querySelector(".ent-cc-tabs-menu-button"));
   assert.doesNotMatch(parent.textContent, /Archived Library/);
 });
 
@@ -1700,3 +1713,61 @@ test("compact record route re-renders restore scroll without stealing focus from
     "route entry still moves focus to the Back button while no other surface holds focus",
   );
 });
+
+for (const focusTarget of ["inspector-action", "outside-surface", "no-new-focus"] as const) {
+  test(`queued compact record entry focus respects ${focusTarget} before its callback runs`, async () => {
+    const dom = createFakeDom();
+    const selected = record("Knowledge Base/Airway.md", "Airway");
+    const source = searchSource("base-pending-route-focus", "Pending focus base", [selected]);
+    source.data.settings.setupComplete = true;
+    const view = createView(dom.window, [source]);
+    const content = dom.document.body.createDiv({ cls: "view-content" });
+    const harness = view as unknown as {
+      contentEl: HTMLElement;
+      paneLayout: string;
+      mobileInspectorScrollTop: number;
+      mobileInspectorNeedsFocus: boolean;
+      selectRecord(path: string): void;
+    };
+    harness.contentEl = asHtmlElement(content);
+    harness.paneLayout = "narrow";
+    await view.reload();
+
+    // Unlike FakeWindow's usual immediate timers, hold entry callbacks so a
+    // real user/assistive control can gain focus before the next event turn.
+    const pending: Array<() => void> = [];
+    const originalTimeout = dom.window.setTimeout.bind(dom.window);
+    dom.window.setTimeout = (callback, delay) => {
+      if (delay === 0 && typeof callback === "function") {
+        pending.push(() => callback());
+        return pending.length;
+      }
+      return originalTimeout(callback, delay);
+    };
+    harness.selectRecord(selected.path);
+    assert.equal(pending.length, 1, "the route has exactly one pending initial focus callback");
+    assert.equal(harness.mobileInspectorNeedsFocus, false, "scheduling consumes entry focus only once");
+    harness.mobileInspectorScrollTop = 64;
+    const action = content.querySelector(".ent-cc-inspector-actions button");
+    const routeBody = content.querySelector(".ent-cc-inspector-body");
+    const back = content.querySelector(".ent-cc-inspector-close");
+    assert.ok(action && routeBody && back);
+    const outside = dom.document.body.createEl("input", { type: "text" });
+    if (focusTarget === "inspector-action") action.focus();
+    else if (focusTarget === "outside-surface") outside.focus();
+
+    for (const callback of pending.splice(0)) callback();
+    assert.equal(routeBody.scrollTop, 64, "scroll restoration still runs even when focus is already owned");
+    const expected = focusTarget === "inspector-action" ? action : focusTarget === "outside-surface" ? outside : back;
+    assert.equal(dom.document.activeElement === expected, true,
+      "entry focus must not override a control chosen while the timer was queued");
+
+    await view.reload();
+    for (const callback of pending.splice(0)) callback();
+    const afterRefresh = focusTarget === "outside-surface" ? outside
+      : content.querySelector(focusTarget === "inspector-action" ? ".ent-cc-inspector-actions button" : ".ent-cc-inspector-close");
+    assert.equal(dom.document.activeElement === afterRefresh, true,
+    "a subsequent refresh preserves the live replacement control or untouched outside surface");
+    await view.onClose();
+  });
+}

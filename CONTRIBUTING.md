@@ -36,6 +36,8 @@ The check task runs strict typechecking, zero-warning lint and JSON validation, 
 
 The browser suite also bundles the production Command Center and dialog renderers with a narrow synthetic Obsidian host. Chromium and WebKit exercise keyboard navigation, search, refresh, expanded lists, and form/recovery controls in native browser DOM. This complements the existing Chromium CSS fixtures; it is not an Obsidian or physical-device integration pass. CI retains its reports, failure screenshots, and traces for 14 days. To capture desktop/mobile light/dark renderer screenshots locally, set `KBCC_BROWSER_SCREENSHOT_DIR` to an absolute directory outside this repository when running `npm run test:layout`.
 
+The cover-privacy suite checks that remote cover values cannot issue requests, with intercepted synthetic URLs and a positive local-vault image control. It does not contact external fixture hosts. Browser checks do not establish native Obsidian or physical-device behavior.
+
 ## Repository map
 
 - <code>src/main.ts</code>: plugin lifecycle, commands, storage, Sync, and guarded mutations.
@@ -44,6 +46,7 @@ The browser suite also bundles the production Command Center and dialog renderer
 - <code>src/index-manager.ts</code>: bulk membership, group, and diagnostic workflows.
 - <code>src/knowledge-base-modal.ts</code>: knowledge-base creation and lifecycle.
 - <code>src/library-modal.ts</code>: Library creation and lifecycle.
+- <code>src/library-settings-modal.ts</code>, <code>src/library-display-profile.ts</code>, and <code>src/library-cover.ts</code>: Library settings, bounded display profiles, and local-vault-only cover rendering.
 - <code>src/portability-modal.ts</code> and <code>src/portability.ts</code>: export, import, validation, and recovery.
 - <code>src/model.ts</code> and <code>src/store-merge.ts</code>: schemas, migration, normalization, and Sync reconciliation.
 - <code>tests/</code>: model, lifecycle, rendered UI, real-browser layout, mobile DOM, release, performance, and store-merge coverage.
@@ -58,6 +61,8 @@ The browser suite also bundles the production Command Center and dialog renderer
 5. Do not add analytics, telemetry, advertising, accounts, or network requests without an explicit public design and privacy review.
 6. Unrecognized or newer plugin data must fail read-only rather than being downgraded or overwritten.
 7. Never include a real vault, note content, <code>data.json</code>, recovery export, local absolute path, patient information, credentials, or copyrighted source text in a fixture, screenshot, issue, or commit.
+
+Version 0.23.0 supports local-vault Library covers only. The earlier [online-cover proposal](docs/LIBRARY_DISPLAY_AND_PRIVACY.md#deferred-online-cover-proposal) is deferred, not approved or included in this release. Any future network-capable implementation still requires independent privacy review and publication of that review under boundary 5. Review browser image requests as well as explicit networking APIs; a static `fetch` ban alone cannot establish that an image is offline.
 
 ## Make the change
 

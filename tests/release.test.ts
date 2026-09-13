@@ -95,7 +95,7 @@ test("public repository metadata is present", async () => {
     assert.match(localDataGuide, /up to 24 opened-note paths/iu);
     assert.match(localDataGuide, /literal search text/iu);
     assert.match(localDataGuide, /search text can itself be sensitive/iu);
-    assert.match(localDataGuide, /all four plugin-owned App-local values/iu);
+    assert.match(localDataGuide, /all five plugin-owned App-local values/iu);
   }
   assert.match(security, /bounded vault-scoped rename-recovery journal/iu);
   assert.match(security, /vault identity plus the old and new vault-relative paths/iu);
@@ -103,7 +103,7 @@ test("public repository metadata is present", async () => {
   assert.match(security, /up to 24 opened-note paths/iu);
   assert.match(security, /literal search text/iu);
   assert.match(security, /search text can itself be sensitive/iu);
-  assert.match(security, /all four plugin-owned App-local values/iu);
+  assert.match(security, /all five plugin-owned App-local values/iu);
   assert.match(readme, new RegExp(`Portable packages created by version .* use format version ${portableVersion}`, "iu"));
   assert.match(readme, new RegExp(`Current v${backupVersion} (?:snapshots|files)`, "iu"));
   assert.match(recoveryGuide, new RegExp(`Current version-${backupVersion} recovery files`, "iu"));

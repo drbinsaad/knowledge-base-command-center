@@ -24,6 +24,7 @@ const sources = await Promise.all(sourcePaths.map(async (absolute) => [
 ]));
 const runtime = sources.map(([, content]) => content).join("\n");
 const main = sources.find(([name]) => name === "main.ts")?.[1] ?? "";
+const covers = sources.find(([name]) => name === "library-cover.ts")?.[1] ?? "";
 const bundle = await readFile(path.join(root, "main.js"), "utf8");
 const readme = await readFile(path.join(root, "README.md"), "utf8");
 const manifest = JSON.parse(await readFile(path.join(root, "manifest.json"), "utf8"));
@@ -52,6 +53,17 @@ for (const imported of obsidianImports) {
   assert.doesNotMatch(imported, /(?:^|,)\s*(?:request|requestUrl)(?:\s+as\s+[\w$]+)?\s*(?:,|$)/, "runtime must not import Obsidian network APIs");
 }
 assert.doesNotMatch(runtime, /import\s+\*\s+as\s+[\w$]+\s+from\s*["']obsidian["']/, "runtime must use auditable named Obsidian imports");
+// Vault covers are the sole image-source sink. Behavioral tests prove that
+// user-supplied URLs are rejected; static checks additionally flag new image
+// paths and any reintroduction of the private build's external-image switch.
+assert.deepEqual(sources.filter(([, content]) => /createEl\(["']img["']/.test(content)).map(([name]) => name), ["library-cover.ts"]);
+assert.equal((runtime.match(/setAttribute\(["']src["']/g) ?? []).length, 1);
+assert.doesNotMatch(runtime, /\.src\s*=/);
+assert.match(covers, /source: app\.vault\.getResourcePath\(image\)/);
+assert.equal((covers.match(/state: "ready", source:/g) ?? []).length, 1);
+assert.doesNotMatch(runtime, /allowExternal|getExternalLibraryImagesAllowed|setExternalLibraryImagesAllowed/);
+assert.match(covers, /referrerpolicy: "no-referrer"/);
+assert.doesNotMatch(covers, /new URL\(/);
 assert.doesNotMatch(bundle, /\b(?:process\.|Buffer\b|__dirname\b|__filename\b)/, "built main.js must not use Node globals");
 assert.doesNotMatch(bundle, /(?:\.request(?:Url)?\b|\[\s*["']request(?:Url)?["']\s*\])/, "built main.js must not reference Obsidian network APIs");
 const bundledRequires = [...bundle.matchAll(/\brequire\s*\(\s*([^)]*?)\s*\)/g)].map((match) => match[1]);
@@ -83,4 +95,4 @@ assert.match(runtime, /deliverJsonExport\(this\.plugin, "backup"/);
 
 const enumerationCalls = runtime.match(/\.get(?:MarkdownFiles|Files|AllLoadedFiles)\s*\(/g) ?? [];
 const bulkReads = runtime.match(/\.(?:read|cachedRead)\s*\(/g) ?? [];
-process.stdout.write(`Community-oriented static verification passed: ${sourcePaths.length} runtime files plus built main.js (${bundle.length} bytes), ${enumerationCalls.length} enumeration call sites, ${bulkReads.length} targeted read call sites, no detected network APIs, one clipboard writer, and no clipboard-read API.\n`);
+process.stdout.write(`Community-oriented static verification passed: ${sourcePaths.length} runtime files plus built main.js (${bundle.length} bytes), ${enumerationCalls.length} enumeration call sites, ${bulkReads.length} targeted read call sites, no detected programmatic network APIs, one vault-resolved cover-image sink, one clipboard writer, and no clipboard-read API.\n`);
