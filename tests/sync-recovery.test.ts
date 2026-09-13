@@ -380,6 +380,38 @@ test("device-local clear disclosure includes path-bearing rename and return hist
   assert.match(disclosure, /does not copy note bodies[^.]*search text can itself be sensitive/iu);
   assert.match(disclosure, /Neither local value syncs/iu);
   assert.match(disclosure, /Synced knowledge-base organization[^.]*not changed/iu);
+  assert.match(disclosure, /clears external Library-image permission and blocks new cover loads/iu);
+  assert.match(disclosure, /cannot undo requests already sent[^.]*browser cookies and image cache/iu);
+});
+
+test("failed device-local clear warns about retained image permission and restart without exposing failure details", async () => {
+  for (const failure of ["Synthetic storage failure", "Synthetic busy-operation refusal"]) {
+    Notice.messages.length = 0;
+    const dom = createFakeDom();
+    let cleared = 0;
+    const modal = new ClearDeviceLocalDataModal({
+      app: {},
+      clearDeviceLocalData: async () => { throw new Error(failure); },
+    } as never, () => { cleared += 1; });
+    const content = dom.document.body.createDiv();
+    modal.contentEl = asHtmlElement(content);
+    modal.titleEl = asHtmlElement(dom.document.body.createEl("h2"));
+    modal.onOpen();
+    const clear = content.querySelectorAll("button").find((button) => button.textContent === "Clear device-local data");
+    const cancel = content.querySelectorAll("button").find((button) => button.textContent === "Cancel");
+    assert.ok(clear && cancel);
+    clear.click();
+    assert.equal(clear.disabled, true);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(cleared, 0);
+    assert.equal(clear.disabled, false);
+    assert.equal(cancel.disabled, false);
+    assert.equal(Notice.messages.length, 1);
+    assert.match(Notice.messages[0], /External-image permission may still be saved/iu);
+    assert.match(Notice.messages[0], /check Library settings after restarting[^.]*block external images there now/iu);
+    assert.doesNotMatch(Notice.messages[0], /are blocked for this session/iu, "a pre-operation refusal must not falsely claim successful revocation");
+    assert.equal(Notice.messages[0].includes(failure), false);
+  }
 });
 
 test("diagnostic failure logs omit thrown identifiers and paths", async () => {

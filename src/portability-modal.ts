@@ -1442,7 +1442,7 @@ export class ExportImportCenterModal extends Modal {
         this.plugin.invalidateRecordCache();
       },
       {
-        includeSettings: selection.workspace,
+        includeSettings: selection.workspace || selection.recovery,
         includePortableIndex: selectionUsesSubjectCatalog(selection)
           || selection.workspace
           || selection.savedViews

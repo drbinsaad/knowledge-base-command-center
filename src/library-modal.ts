@@ -8,6 +8,7 @@ import {
 import { resolveLibraryIconId } from "./library-icons";
 import { errorMessage, type LibraryDefinition } from "./model";
 import { ConfirmModal, modalOwnerWindow } from "./modals";
+import { LibrarySettingsModal } from "./library-settings-modal";
 
 function reportLibraryError(error: unknown): void {
   console.error("Knowledge Base Command Center library action failed", error);
@@ -502,9 +503,18 @@ export class ManageLibrariesModal extends Modal {
       text: `${count} ${count === 1 ? library.singularName : library.name} · ${library.singularName} / ${library.name}`,
       attr: { dir: "auto" },
     });
+    copy.createDiv({
+      cls: "ent-cc-picker-meta",
+      text: library.sourceKind !== null
+        ? "Built-in library: rename, customize, or archive. Permanent deletion is unavailable because its source classification is retained."
+        : archived
+          ? "Archived: restore, rename, customize, or permanently delete."
+          : "Rename and choose a layout in Library settings. Archive first to make permanent deletion available.",
+    });
     const actions = row.createDiv({ cls: "ent-cc-library-manager-actions" });
 
     if (archived) {
+      this.settingsButton(actions, library);
       this.actionButton(actions, "archive-restore", "Restore", () => void this.run(async () => {
         await this.plugin.restoreLibrary(library.id);
       }), false, false, libraryActionFocusKey(library.id, "restore"), libraryActionFocusKey(library.id, "edit"));
@@ -537,18 +547,7 @@ export class ManageLibrariesModal extends Modal {
       await this.plugin.reorderLibrary(library.id, nextAllIndex);
     }), activeIndex < 0 || activeIndex >= activeLibraries.length - 1 || currentAllIndex < 0 || nextAllIndex < 0, false,
     libraryActionFocusKey(library.id, "move-down"), libraryActionFocusKey(library.id, "edit"));
-    this.actionButton(actions, "pencil", "Edit", () => {
-      if (!this.isCurrent()) return;
-      const current = this.plugin.getLibrary(library.id);
-      if (!current) {
-        new Notice("That library is no longer available. Reopen manage libraries.", 8000);
-        return;
-      }
-      new LibraryEditorModal(this.plugin, current, () => this.afterNestedMutation(
-        libraryActionFocusKey(library.id, "edit"),
-        NEW_LIBRARY_FOCUS_KEY,
-      )).open();
-    }, false, false, libraryActionFocusKey(library.id, "edit"), NEW_LIBRARY_FOCUS_KEY);
+    this.settingsButton(actions, library);
     this.actionButton(actions, "archive", "Archive", () => {
       if (!this.isCurrent()) return;
       new ConfirmModal(
@@ -566,6 +565,21 @@ export class ManageLibrariesModal extends Modal {
         },
       ).open();
     }, false, false, libraryActionFocusKey(library.id, "archive"), libraryActionFocusKey(library.id, "restore"));
+  }
+
+  private settingsButton(parent: HTMLElement, library: LibraryDefinition): void {
+    this.actionButton(parent, "settings", "Library settings…", () => {
+      if (!this.isCurrent()) return;
+      const current = this.plugin.getLibrary(library.id);
+      if (!current) {
+        new Notice("That library is no longer available. Reopen manage libraries.", 8000);
+        return;
+      }
+      new LibrarySettingsModal(this.plugin, current, () => this.afterNestedMutation(
+        libraryActionFocusKey(library.id, "edit"),
+        NEW_LIBRARY_FOCUS_KEY,
+      )).open();
+    }, false, false, libraryActionFocusKey(library.id, "edit"), NEW_LIBRARY_FOCUS_KEY);
   }
 
   private actionButton(

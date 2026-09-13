@@ -4,6 +4,12 @@ import {
   MAX_FOLLOW_UP_CATEGORIES,
   type FollowUpCategoryDefinition,
 } from "./follow-up";
+import {
+  MAX_LIBRARY_DISPLAY_PROPERTY_LENGTH,
+  MAX_LIBRARY_VISIBLE_PROPERTIES,
+  normalizeLibraryDisplayProfile,
+  type LibraryDisplayProfiles,
+} from "./library-display-profile";
 
 export const TOPIC_ROOT = "03 Clinical Topics/";
 export const PROCEDURE_ROOT = "04 Procedures/";
@@ -11,8 +17,8 @@ export const MEDICATION_ROOT = "06 Clinical Tools/Medications/";
 export const SYNDROME_ROOT = "06 Clinical Tools/Syndromes/";
 export const DEFAULT_PROPOSAL_FOLDER = "01 Inbox/ENT Topic Proposals";
 export const DEFAULT_EXPORTS_FOLDER = "Knowledge Base Command Center Exports";
-export const DATA_VERSION = 15;
-export const STORE_VERSION = 15;
+export const DATA_VERSION = 16;
+export const STORE_VERSION = 16;
 export const MIN_RECOGNIZED_STORE_VERSION = 11;
 export const STORE_KIND = "knowledge-base-command-center-store";
 export const MAX_KNOWLEDGE_BASES = 50;
@@ -444,6 +450,8 @@ export interface PluginSettings {
   defaultTemplatePath: string;
   /** Stable Library IDs map to optional overrides; absent fields inherit base defaults. */
   libraryNoteProfiles: LibraryNoteProfiles;
+  /** Stable Library IDs map to display-only list and cover-gallery settings. */
+  libraryDisplayProfiles: LibraryDisplayProfiles;
   attachmentStorageMode: AttachmentStorageMode;
   attachmentFolder: string;
   /** Vault folder receiving JSON backups, mobile exports, and conflict rescues. */
@@ -647,6 +655,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   defaultNewNoteMode: "empty",
   defaultTemplatePath: "",
   libraryNoteProfiles: {},
+  libraryDisplayProfiles: {},
   attachmentStorageMode: "obsidian",
   attachmentFolder: "Attachments",
   exportsFolder: DEFAULT_EXPORTS_FOLDER,
@@ -685,6 +694,7 @@ export const ENT_CLINICAL_SETTINGS: PluginSettings = {
   defaultNewNoteMode: "empty",
   defaultTemplatePath: "",
   libraryNoteProfiles: {},
+  libraryDisplayProfiles: {},
   proposalFolder: DEFAULT_PROPOSAL_FOLDER,
 };
 
@@ -718,6 +728,7 @@ export const DEFAULT_DATA: PluginData = {
     ...DEFAULT_SETTINGS,
     followUpCategories: DEFAULT_FOLLOW_UP_CATEGORIES.map((category) => ({ ...category })),
     libraryNoteProfiles: {},
+    libraryDisplayProfiles: {},
   },
   layoutSnapshots: [],
   undoStack: [],
@@ -3017,6 +3028,21 @@ export function cleanLibraryNoteProfiles(
   return output;
 }
 
+/** Null resets a profile. Removed Libraries lose their settings; archived ones retain them. */
+export function cleanLibraryDisplayProfiles(
+  input: unknown,
+  allowedLibraryIds?: ReadonlySet<string>,
+): LibraryDisplayProfiles {
+  const output: LibraryDisplayProfiles = {};
+  if (!input || typeof input !== "object" || Array.isArray(input)) return output;
+  for (const [libraryId, raw] of Object.entries(input as Record<string, unknown>).slice(0, MAX_LIBRARIES)) {
+    if (!isValidLibraryId(libraryId) || (allowedLibraryIds && !allowedLibraryIds.has(libraryId))
+      || !raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    output[libraryId] = normalizeLibraryDisplayProfile(raw);
+  }
+  return output;
+}
+
 export function resolveLibraryNoteProfile(
   settings: Pick<PluginSettings, "defaultNoteFolder" | "defaultNewNoteMode" | "defaultTemplatePath" | "libraryNoteProfiles">,
   libraryId: string,
@@ -3542,6 +3568,7 @@ function cleanSettings(input: unknown, legacyEnt = false): PluginSettings {
     defaultNewNoteMode: isNewNoteMode(settings.defaultNewNoteMode) ? settings.defaultNewNoteMode : base.defaultNewNoteMode,
     defaultTemplatePath: asText(settings.defaultTemplatePath, base.defaultTemplatePath).replace(/^\/+/, ""),
     libraryNoteProfiles: cleanLibraryNoteProfiles(settings.libraryNoteProfiles),
+    libraryDisplayProfiles: cleanLibraryDisplayProfiles(settings.libraryDisplayProfiles),
     attachmentStorageMode: isAttachmentStorageMode(settings.attachmentStorageMode)
       ? settings.attachmentStorageMode
       : base.attachmentStorageMode,
@@ -3589,6 +3616,7 @@ export function enforceStoredTextBounds(data: PluginData): void {
     if (profile.folder !== undefined) profile.folder = clampStoredText(profile.folder);
     if (profile.templatePath !== undefined) profile.templatePath = clampStoredText(profile.templatePath);
   }
+  settings.libraryDisplayProfiles = cleanLibraryDisplayProfiles(settings.libraryDisplayProfiles);
   for (const category of settings.followUpCategories) {
     category.label = clampStoredText(category.label);
   }
@@ -3899,6 +3927,10 @@ export function normalizeKnowledgeBaseLibrariesAndNavigation(data: PluginData): 
     data.settings.libraryNoteProfiles,
     new Set(data.portableIndex.libraries.map((definition) => definition.id)),
   );
+  data.settings.libraryDisplayProfiles = cleanLibraryDisplayProfiles(
+    data.settings.libraryDisplayProfiles,
+    new Set(data.portableIndex.libraries.map((definition) => definition.id)),
+  );
   const availableLibraryIds = new Set(data.portableIndex.libraries
     .filter((definition) => definition.archivedAt === null)
     .map((definition) => definition.id));
@@ -3939,7 +3971,7 @@ function migrateDataWithBudget(
     || (loadedVersion === 0 && isRecognizedPluginData(loaded) && Object.keys(loaded).length > 0)) {
     validatePluginDataLoadShape(loaded, validationBudget);
   }
-  if (loadedVersion === DATA_VERSION) {
+  if (loadedVersion >= 15 && loadedVersion <= DATA_VERSION) {
     validateCanonicalIndexMembershipProvenance(loaded, "Plugin data");
   }
   // Versions newer than this plugin are read through the latest compatible
@@ -3966,12 +3998,12 @@ function migrateDataWithBudget(
       selectedPath: asText(loaded.selectedPath),
       activeTab: migrateMainTab(loaded.activeTab, settings.defaultTab),
       settings,
-      layoutSnapshots: cleanSnapshots(loaded.layoutSnapshots, true, MAX_TRANSFER_SNAPSHOTS, undefined, loadedVersion === DATA_VERSION),
+      layoutSnapshots: cleanSnapshots(loaded.layoutSnapshots, true, MAX_TRANSFER_SNAPSHOTS, undefined, loadedVersion >= 15),
       // v11-v13 kept device history inside data.json. Preserve its validated
       // newest 20 entries here long enough for main.ts to move the aggregate
       // into the vault-bound 4 MiB local payload before semantic writeback.
-      undoStack: cleanSnapshots(loaded.undoStack, true, 20, preserveLegacyDeviceHistory ? MAX_PORTABLE_UNDO_BYTES : undefined, loadedVersion === DATA_VERSION),
-      redoStack: cleanSnapshots(loaded.redoStack, true, 20, preserveLegacyDeviceHistory ? MAX_PORTABLE_UNDO_BYTES : undefined, loadedVersion === DATA_VERSION),
+      undoStack: cleanSnapshots(loaded.undoStack, true, 20, preserveLegacyDeviceHistory ? MAX_PORTABLE_UNDO_BYTES : undefined, loadedVersion >= 15),
+      redoStack: cleanSnapshots(loaded.redoStack, true, 20, preserveLegacyDeviceHistory ? MAX_PORTABLE_UNDO_BYTES : undefined, loadedVersion >= 15),
       collapsed: cleanCollapseState(loaded.collapsed),
       migrationBackup: cleanMigrationBackup(loaded.migrationBackup),
       v2MigrationBackup: cleanV2MigrationBackup(loaded.v2MigrationBackup),
@@ -5033,7 +5065,7 @@ export function buildIndexDiagnostics(data: PluginData, records: VaultRecord[], 
 
 export interface WorkspaceConfig {
   kind: "knowledge-base-command-center-workspace";
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   exportedAt: string;
   settings: PluginSettings;
   indexGroupOrder: string[];
@@ -5041,6 +5073,10 @@ export interface WorkspaceConfig {
 
 export function createWorkspaceConfig(data: PluginData, exportedAt: string): WorkspaceConfig {
   const settings = cloneJsonValue(data.settings);
+  settings.libraryDisplayProfiles = cleanLibraryDisplayProfiles(
+    settings.libraryDisplayProfiles,
+    new Set(data.portableIndex.libraries.filter((definition) => definition.archivedAt === null).map((definition) => definition.id)),
+  );
   settings.libraryNoteProfiles = cleanLibraryNoteProfiles(
     settings.libraryNoteProfiles,
     new Set(data.portableIndex.libraries
@@ -5049,7 +5085,7 @@ export function createWorkspaceConfig(data: PluginData, exportedAt: string): Wor
   );
   return {
     kind: "knowledge-base-command-center-workspace",
-    version: 2,
+    version: 3,
     exportedAt,
     settings,
     indexGroupOrder: [...data.indexGroupOrder],
@@ -5095,11 +5131,12 @@ export function parseWorkspaceConfig(input: unknown): WorkspaceConfig {
   if (!input || typeof input !== "object") throw new Error("The selected file is not a Command Center workspace configuration.");
   const value = input as Record<string, unknown>;
   if (value.kind !== "knowledge-base-command-center-workspace"
-    || (value.version !== 1 && value.version !== 2)) {
+    || (value.version !== 1 && value.version !== 2 && value.version !== 3)) {
     throw new Error("Unsupported Command Center workspace configuration.");
   }
   transferArrayLength(value.indexGroupOrder, "Workspace group order", MAX_TRANSFER_COLLECTIONS);
   const rawSettings = asUnknownRecord(value.settings);
+  validateLoadedLibraryDisplayProfiles(rawSettings.libraryDisplayProfiles, "Workspace libraryDisplayProfiles", createLoadTextValidationBudget());
   const settings = { ...cleanSettings(rawSettings), setupComplete: true };
   if (!settings.followUpCategories.some((category) => !category.archived)) {
     throw new Error("Workspace Quick Append settings must contain at least one active category.");
@@ -5116,8 +5153,8 @@ export function parseWorkspaceConfig(input: unknown): WorkspaceConfig {
 
 export interface PersonalBackup extends PersonalOrganizationState {
   kind: "ent-vault-command-center-personal-backup";
-  /** v11 adds canonical direct-note and explicit linked-folder membership. */
-  version: 11;
+  /** v12 adds Library display profiles; v11 added linked-folder membership. */
+  version: 12;
   /** False only when an older backup could not encode linked-folder provenance. */
   indexFolderSourcesIncluded: boolean;
   exportedAt: string;
@@ -5130,6 +5167,8 @@ export interface PersonalBackup extends PersonalOrganizationState {
   sourceWorkspaceMode: WorkspaceMode | "";
   layoutSnapshots: PersonalSnapshot[];
   portableIndex: PortableIndexLocalState;
+  /** Absent only in older recovery files, which preserve destination display settings. */
+  libraryDisplayProfiles?: LibraryDisplayProfiles;
 }
 
 function cleanRecoveryVaultId(value: unknown): string {
@@ -5162,7 +5201,7 @@ export function createPersonalBackup(
   if (!cleanSourceBaseName) throw new Error("A knowledge-base name is required to create same-base recovery data.");
   return {
     kind: "ent-vault-command-center-personal-backup",
-    version: 11,
+    version: 12,
     indexFolderSourcesIncluded: true,
     exportedAt,
     sourceVaultId: cleanSourceVaultId,
@@ -5172,6 +5211,10 @@ export function createPersonalBackup(
     ...clonePersonalOrganization(data),
     layoutSnapshots: cleanSnapshots(data.layoutSnapshots, true, MAX_TRANSFER_SNAPSHOTS),
     portableIndex: clonePortableIndex(data.portableIndex),
+    libraryDisplayProfiles: cleanLibraryDisplayProfiles(
+      data.settings.libraryDisplayProfiles,
+      new Set(data.portableIndex.libraries.map((library) => library.id)),
+    ),
   };
 }
 
@@ -5602,8 +5645,35 @@ function validateLoadedVisualText(input: unknown, label: string, budget: LoadTex
   }
 }
 
+function validateLoadedLibraryDisplayProfiles(input: unknown, label: string, budget: LoadTextValidationBudget): void {
+  const profiles = optionalPlainRecord(input, label);
+  if (Object.keys(profiles).length > MAX_LIBRARIES) throw new Error(`${label} has too many entries.`);
+  for (const [libraryId, rawProfile] of Object.entries(profiles)) {
+    validateLoadedText(libraryId, `${label} key`, budget);
+    if (rawProfile === null) continue;
+    const profile = requiredPlainRecord(rawProfile, `${label} ${libraryId}`);
+    for (const key of ["layout", "imageProperty", "cardSize", "imageRatio", "imageFit"] as const) {
+      validateLoadedText(profile[key], `${label} ${libraryId} ${key}`, budget);
+      if (typeof profile[key] === "string" && profile[key].length > MAX_LIBRARY_DISPLAY_PROPERTY_LENGTH) {
+        throw new Error(`${label} ${libraryId} ${key} is too long.`);
+      }
+    }
+    if (profile.visibleProperties === undefined) continue;
+    if (!Array.isArray(profile.visibleProperties) || profile.visibleProperties.length > MAX_LIBRARY_VISIBLE_PROPERTIES) {
+      throw new Error(`${label} ${libraryId} visibleProperties must contain at most ${MAX_LIBRARY_VISIBLE_PROPERTIES} entries.`);
+    }
+    for (const property of profile.visibleProperties) {
+      validateLoadedText(property, `${label} ${libraryId} visible property`, budget);
+      if (typeof property === "string" && property.length > MAX_LIBRARY_DISPLAY_PROPERTY_LENGTH) {
+        throw new Error(`${label} ${libraryId} visible property is too long.`);
+      }
+    }
+  }
+}
+
 function validateLoadedSettingsText(input: unknown, label: string, budget: LoadTextValidationBudget): void {
   const settings = optionalPlainRecord(input, label);
+  validateLoadedLibraryDisplayProfiles(settings.libraryDisplayProfiles, `${label} libraryDisplayProfiles`, budget);
   for (const key of [
     "workspaceMode",
     "workspaceName",
@@ -5819,7 +5889,7 @@ export function parsePersonalBackup(input: unknown): PersonalBackup {
   const sourceVersion = Number(value.version);
   // Older backups (v1-v9 flat layouts) import fine; newer formats than this
   // build refuse cleanly so nested organization is never silently flattened.
-  if (value.kind !== "ent-vault-command-center-personal-backup" || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].includes(sourceVersion)) {
+  if (value.kind !== "ent-vault-command-center-personal-backup" || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].includes(sourceVersion)) {
     throw new Error("Unsupported Command Center backup format.");
   }
   if (sourceVersion >= 11 && value.indexFolderSourcesIncluded !== true) {
@@ -5838,9 +5908,13 @@ export function parsePersonalBackup(input: unknown): PersonalBackup {
     throw new Error("This recovery backup is missing its required source knowledge-base identity or preset.");
   }
   validatePersonalBackupTransferShape(value, sourceVersion >= 11);
+  if (sourceVersion >= 12) {
+    if (value.libraryDisplayProfiles === undefined) throw new Error("This recovery backup is missing its Library display settings.");
+    validateLoadedLibraryDisplayProfiles(value.libraryDisplayProfiles, "Recovery libraryDisplayProfiles", createLoadTextValidationBudget());
+  }
   return {
     kind: "ent-vault-command-center-personal-backup",
-    version: 11,
+    version: 12,
     indexFolderSourcesIncluded: sourceVersion >= 11,
     exportedAt: asText(value.exportedAt),
     sourceVaultId,
@@ -5862,6 +5936,7 @@ export function parsePersonalBackup(input: unknown): PersonalBackup {
     indexGroupOrder: [...new Set(asStringList(value.indexGroupOrder))],
     layoutSnapshots: cleanSnapshots(value.layoutSnapshots, true, MAX_TRANSFER_SNAPSHOTS),
     portableIndex: cleanPortableIndex(value.portableIndex),
+    ...(sourceVersion >= 12 ? { libraryDisplayProfiles: cleanLibraryDisplayProfiles(value.libraryDisplayProfiles) } : {}),
   };
 }
 
@@ -5906,6 +5981,10 @@ export function applyPersonalBackupToData(data: PluginData, backup: PersonalBack
     10,
   );
   data.portableIndex = clonePortableIndex(backup.portableIndex);
+  data.settings.libraryDisplayProfiles = cleanLibraryDisplayProfiles(
+    backup.libraryDisplayProfiles ?? data.settings.libraryDisplayProfiles,
+    new Set(data.portableIndex.libraries.map((library) => library.id)),
+  );
   if (!backup.indexFolderSourcesIncluded) {
     backfillLegacyPortableDirectMembership(data, data.settings.workspaceMode);
     repairLegacyBackupSnapshotFolderSources(

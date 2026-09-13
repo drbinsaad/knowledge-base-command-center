@@ -9,6 +9,7 @@ import {
   childSubheadings,
   cleanLibraryLayouts,
   cleanLibraryNoteProfiles,
+  cleanLibraryDisplayProfiles,
   cleanSearchViewFilters,
   cloneCollections,
   cloneJsonValue,
@@ -59,13 +60,15 @@ import { hasUnpairedSurrogate } from "./follow-up";
 
 export const PORTABLE_EXPORT_KIND = "knowledge-base-command-center-portable-export" as const;
 /**
+ * Version 6 adds per-Library list and gallery display settings in Workspace.
  * Version 5 carries nested subheading hierarchies (up to MAX_LAYOUT_DEPTH
  * levels) in collections and library layouts. Older builds reject it rather
  * than silently flattening or discarding nested organization. Version 4 added
  * stable, user-defined library identities. The importer continues to accept
- * versions 1 through 4.
+ * versions 1 through 5.
  */
-export const PORTABLE_EXPORT_VERSION = 5 as const;
+export const PORTABLE_EXPORT_VERSION = 6 as const;
+const NESTED_LAYOUT_PORTABLE_EXPORT_VERSION = 5 as const;
 const LIBRARY_IDENTITY_PORTABLE_EXPORT_VERSION = 4 as const;
 const LIBRARY_LAYOUT_PORTABLE_EXPORT_VERSION = 3 as const;
 const CATALOG_PORTABLE_EXPORT_VERSION = 2 as const;
@@ -74,6 +77,7 @@ type PortableExportVersion = typeof LEGACY_PORTABLE_EXPORT_VERSION
   | typeof CATALOG_PORTABLE_EXPORT_VERSION
   | typeof LIBRARY_LAYOUT_PORTABLE_EXPORT_VERSION
   | typeof LIBRARY_IDENTITY_PORTABLE_EXPORT_VERSION
+  | typeof NESTED_LAYOUT_PORTABLE_EXPORT_VERSION
   | typeof PORTABLE_EXPORT_VERSION;
 export const MAX_PORTABLE_PACKAGE_BYTES = 10 * 1024 * 1024;
 const MAX_PORTABLE_GROUPS = 10_000;
@@ -994,6 +998,9 @@ export function createPortableExport(
     Object.keys(workspaceConfig?.settings.libraryNoteProfiles ?? {}).forEach((profileLibraryId) => {
       if (libraryById.get(profileLibraryId)?.archivedAt === null) dependencyLibraryIds.add(profileLibraryId);
     });
+    Object.keys(workspaceConfig?.settings.libraryDisplayProfiles ?? {}).forEach((profileLibraryId) => {
+      if (libraryById.get(profileLibraryId)?.archivedAt === null) dependencyLibraryIds.add(profileLibraryId);
+    });
   }
   if (selection.savedViews) {
     for (const view of data.savedViews) {
@@ -1615,6 +1622,7 @@ export function parsePortableExport(input: unknown): PortableExportV1 {
       && value.version !== CATALOG_PORTABLE_EXPORT_VERSION
       && value.version !== LIBRARY_LAYOUT_PORTABLE_EXPORT_VERSION
       && value.version !== LIBRARY_IDENTITY_PORTABLE_EXPORT_VERSION
+      && value.version !== NESTED_LAYOUT_PORTABLE_EXPORT_VERSION
       && value.version !== PORTABLE_EXPORT_VERSION)) {
     throw new Error("Unsupported Command Center portable export.");
   }
@@ -1666,6 +1674,9 @@ export function parsePortableExport(input: unknown): PortableExportV1 {
     const defaultLibraryId = components.workspace ? libraryIdFromTab(components.workspace.settings.defaultTab) : null;
     if (defaultLibraryId) referencedLibraryIds.add(defaultLibraryId);
     Object.keys(components.workspace?.settings.libraryNoteProfiles ?? {}).forEach((libraryId) => {
+      referencedLibraryIds.add(libraryId);
+    });
+    Object.keys(components.workspace?.settings.libraryDisplayProfiles ?? {}).forEach((libraryId) => {
       referencedLibraryIds.add(libraryId);
     });
     for (const view of components.savedViews?.views ?? []) {
@@ -2110,6 +2121,9 @@ function navigationLibraryIdsForSelection(
     Object.keys(value.components.workspace.settings.libraryNoteProfiles).forEach((profileLibraryId) => {
       libraryIds.add(profileLibraryId);
     });
+    Object.keys(value.components.workspace.settings.libraryDisplayProfiles).forEach((profileLibraryId) => {
+      libraryIds.add(profileLibraryId);
+    });
   }
   if (selection.savedViews) {
     for (const view of value.components.savedViews?.views ?? []) {
@@ -2143,7 +2157,7 @@ function portableIndexForSelection(
 
   const subjectById = new Map(index.subjects.map((subject) => [subject.id, subject]));
   const legacyIndexSubject = (subject: PortableSubjectDefinition): boolean => (
-    index.version < PORTABLE_EXPORT_VERSION && subject.recordKind === "topic" && !subjectLibraryId(subject)
+    index.version < NESTED_LAYOUT_PORTABLE_EXPORT_VERSION && subject.recordKind === "topic" && !subjectLibraryId(subject)
   );
   const includedIds = new Set(index.subjects
     .filter((subject) => (selection.index && (subject.indexed || legacyIndexSubject(subject)))
@@ -2308,7 +2322,7 @@ export function applyPortableExport(
   // Versions 1–3 predate portable library descriptors. Their only stable
   // navigation targets were the three built-in IDs, which can be recreated
   // without guessing a user-defined library's identity or semantics.
-  const legacyNavigationLibraries = value.version < PORTABLE_EXPORT_VERSION
+  const legacyNavigationLibraries = value.version < NESTED_LAYOUT_PORTABLE_EXPORT_VERSION
     ? BUILTIN_LIBRARY_DEFINITIONS.filter((library) => navigationLibraryIds.has(library.id))
     : [];
   const missingLibraryIds = new Set([
@@ -2372,6 +2386,10 @@ export function applyPortableExport(
       incomingSettings.libraryNoteProfiles,
       new Set(state.libraries.map((library) => library.id)),
     );
+    incomingSettings.libraryDisplayProfiles = cleanLibraryDisplayProfiles(
+      incomingWorkspace.version >= 3 ? incomingSettings.libraryDisplayProfiles : data.settings.libraryDisplayProfiles,
+      new Set(state.libraries.map((library) => library.id)),
+    );
     if (!navigationTabIsAvailable(incomingSettings.defaultTab)) incomingSettings.defaultTab = "curriculum";
     data.settings = {
       ...incomingSettings,
@@ -2389,7 +2407,7 @@ export function applyPortableExport(
     const oldSubjects = state.subjects.map((subject) => ({ ...subject }));
     const subjectSectionIsSelected = (subject: PortableSubjectDefinition): boolean => (
       (selection.index && (subject.indexed
-        || (incomingIndex.version < PORTABLE_EXPORT_VERSION
+        || (incomingIndex.version < NESTED_LAYOUT_PORTABLE_EXPORT_VERSION
           && subject.recordKind === "topic"
           && !subjectLibraryId(subject))))
       || libraryIdIsSelected(subjectLibraryId(subject), selection)

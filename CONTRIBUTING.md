@@ -13,6 +13,7 @@ Small, focused fixes can go directly to a pull request when their scope is clear
 ## Development requirements
 
 - Node.js 22
+- OpenSSL on the test host for ephemeral loopback HTTPS privacy fixtures (not a plugin runtime dependency)
 - npm using the committed <code>package-lock.json</code>
 - Obsidian 1.13.0 or newer for manual integration testing
 - A disposable synthetic vault for UI, import/export, and mobile checks
@@ -36,6 +37,8 @@ The check task runs strict typechecking, zero-warning lint and JSON validation, 
 
 The browser suite also bundles the production Command Center and dialog renderers with a narrow synthetic Obsidian host. Chromium and WebKit exercise keyboard navigation, search, refresh, expanded lists, and form/recovery controls in native browser DOM. This complements the existing Chromium CSS fixtures; it is not an Obsidian or physical-device integration pass. CI retains its reports, failure screenshots, and traces for 14 days. To capture desktop/mobile light/dark renderer screenshots locally, set `KBCC_BROWSER_SCREENSHOT_DIR` to an absolute directory outside this repository when running `npm run test:layout`.
 
+The cover-privacy suite uses only ephemeral loopback HTTPS servers and synthetic URLs. It generates temporary certificate material and cleans it up after the suite; it never commits keys or contacts external fixture hosts. It checks real request headers, redirects and revocation with harness-supplied permission. Native Obsidian consent persistence and physical-device cookie/Sync behavior require separate evidence; browser cookie policy is observed, not overridden or promised to suppress cookies.
+
 ## Repository map
 
 - <code>src/main.ts</code>: plugin lifecycle, commands, storage, Sync, and guarded mutations.
@@ -44,6 +47,7 @@ The browser suite also bundles the production Command Center and dialog renderer
 - <code>src/index-manager.ts</code>: bulk membership, group, and diagnostic workflows.
 - <code>src/knowledge-base-modal.ts</code>: knowledge-base creation and lifecycle.
 - <code>src/library-modal.ts</code>: Library creation and lifecycle.
+- <code>src/library-settings-modal.ts</code>, <code>src/library-display-profile.ts</code>, and <code>src/library-cover.ts</code>: Library settings, bounded display profiles, and consent-gated cover rendering.
 - <code>src/portability-modal.ts</code> and <code>src/portability.ts</code>: export, import, validation, and recovery.
 - <code>src/model.ts</code> and <code>src/store-merge.ts</code>: schemas, migration, normalization, and Sync reconciliation.
 - <code>tests/</code>: model, lifecycle, rendered UI, real-browser layout, mobile DOM, release, performance, and store-merge coverage.
@@ -58,6 +62,8 @@ The browser suite also bundles the production Command Center and dialog renderer
 5. Do not add analytics, telemetry, advertising, accounts, or network requests without an explicit public design and privacy review.
 6. Unrecognized or newer plugin data must fail read-only rather than being downgraded or overwritten.
 7. Never include a real vault, note content, <code>data.json</code>, recovery export, local absolute path, patient information, credentials, or copyrighted source text in a fixture, screenshot, issue, or commit.
+
+The unreleased external-Library-cover implementation has a [design and privacy proposal](docs/LIBRARY_DISPLAY_AND_PRIVACY.md). Local implementation does not constitute completed public review. Independent privacy review and publication of that review remain release prerequisites under boundary 5. Review the browser image request path as well as explicit networking APIs; a static `fetch` ban cannot establish that an image is offline.
 
 ## Make the change
 

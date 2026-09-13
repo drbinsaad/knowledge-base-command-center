@@ -3,6 +3,7 @@ import test from "node:test";
 import EntVaultCommandCenterPlugin, {
   DEVICE_LOCAL_STATE_KEY,
   KBCC_RETURN_NAVIGATION_STATE_KEY,
+  LIBRARY_IMAGE_PERMISSION_KEY,
   SYNC_RECOVERY_LOCAL_STATE_KEY,
   VAULT_RENAME_JOURNAL_KEY,
   type CatalogPlacementTarget,
@@ -74,6 +75,7 @@ import {
 import { EntVaultCommandCenterView, VIEW_TYPE } from "../src/view.ts";
 import { createOpenedBaseGuard, type OpenedBaseGuard } from "../src/opened-base-guard.ts";
 import { createVaultRenameJournal, type VaultRenameJournal } from "../src/vault-rename-journal.ts";
+import { normalizeLibraryDisplayProfile } from "../src/library-display-profile.ts";
 
 interface TestPluginBase {
   loadedData: unknown;
@@ -959,7 +961,7 @@ test("numeric-string v2 startup migration preserves legacy organization and writ
 
 test("an interim deterministic migrated vault ID rotates once and is persisted", async () => {
   const data = migrateData(null);
-  data.settings.workspaceName = "MY MAIN NOTE KB";
+  data.settings.workspaceName = "Synthetic Target Vault";
   const store = createDefaultStore(data, 100, "vault-migrated-0123456789abcdef");
   const plugin = pluginWith(store);
 
@@ -3237,11 +3239,12 @@ test("clearing device-local data resets in-memory view/history and all local key
 
   await plugin.clearDeviceLocalData();
 
-  assert.deepEqual(writes.slice(-4), [
+  assert.deepEqual(writes.slice(-5), [
     [DEVICE_LOCAL_STATE_KEY, null],
     [SYNC_RECOVERY_LOCAL_STATE_KEY, null],
     [VAULT_RENAME_JOURNAL_KEY, null],
     [KBCC_RETURN_NAVIGATION_STATE_KEY, null],
+    [LIBRARY_IMAGE_PERMISSION_KEY, null],
   ]);
   assert.equal(localValues.get(DEVICE_LOCAL_STATE_KEY), null);
   assert.equal(localValues.get(SYNC_RECOVERY_LOCAL_STATE_KEY), null);
@@ -7205,6 +7208,111 @@ test("a read-only portfolio export still succeeds without persisting subject IDs
   assert.deepEqual(plugin.data.portableIndex, registryBefore, "read-only mode keeps the clone-local allocation");
   assert.equal(plugin.savedData.length, 0, "read-only mode never writes data.json");
 });
+
+async function importDisplayRecoveryThroughUi(
+  plugin: EntVaultCommandCenterPlugin,
+  value: ReturnType<typeof createPortableExport>,
+  route: "modal" | "direct",
+): Promise<void> {
+  if (route === "modal") {
+    const center = Object.create(ExportImportCenterModal.prototype) as {
+      importSelected(): Promise<void>;
+    };
+    Object.assign(center, {
+      app: plugin.app,
+      plugin,
+      importValue: value,
+      importSelection: { ...EMPTY_PORTABLE_SELECTION, recovery: true },
+      importMode: "replace",
+      recoveryConfirmed: true,
+      crossBaseRecoveryConfirmed: false,
+      dataChanged: false,
+      openedBaseId: plugin.getActiveKnowledgeBaseId(),
+      openedDataEpoch: plugin.getDataEpoch(),
+      centerOpen: true,
+    });
+    await center.importSelected();
+    return;
+  }
+  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+    confirmOrganizationImport(input: Promise<unknown>, ownsBase: () => boolean): void;
+  };
+  Object.assign(view, { app: plugin.app, plugin });
+  const opened: Array<{ onConfirm(): void | Promise<void> }> = [];
+  const originalOpen = Object.getOwnPropertyDescriptor(ConfirmModal.prototype, "open");
+  ConfirmModal.prototype.open = function captureConfirm(): void { opened.push(this); };
+  try {
+    view.confirmOrganizationImport(Promise.resolve(value.components.recovery), () => true);
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(opened.length, 1, "exact-base recovery reaches its final confirmation");
+    await opened[0]?.onConfirm();
+  } finally {
+    if (originalOpen) Object.defineProperty(ConfirmModal.prototype, "open", originalOpen);
+    else Reflect.deleteProperty(ConfirmModal.prototype, "open");
+  }
+}
+
+for (const route of ["modal", "direct"] as const) {
+  test(`${route} recovery v12 restores Library display profiles with real Undo and Redo`, async () => {
+    const data = migrateData(null);
+    const libraryId = "library-recovery-books";
+    data.portableIndex.libraries = [{ id: libraryId, name: "Books", singularName: "Book", icon: "book-open", order: 0, sourceKind: null, archivedAt: null }];
+    data.portableIndex.libraryLayouts = { [libraryId]: [] };
+    data.settings.libraryDisplayProfiles = { [libraryId]: normalizeLibraryDisplayProfile({ layout: "list", cardSize: "small" }) };
+    const { plugin } = pluginWithKeyedLocalStorage(createDefaultStore(data, 100, `vault-${route}-display-recovery`));
+    await plugin.loadPluginData();
+    const before = structuredClone(plugin.data.settings.libraryDisplayProfiles);
+    const source = structuredClone(plugin.data);
+    source.settings.libraryDisplayProfiles[libraryId] = normalizeLibraryDisplayProfile({ layout: "cards", cardSize: "large", imageProperty: "book_cover" });
+    const value = parsePortableExport(createPortableExport(source, [], { ...EMPTY_PORTABLE_SELECTION, recovery: true }, "2026-09-13T00:00:00.000Z", plugin.getVaultId(), plugin.getActiveKnowledgeBaseId(), plugin.data.settings.workspaceName));
+    assert.equal(value.components.recovery?.version, 12);
+    let noteWrites = 0;
+    Object.assign(plugin.app.vault, {
+      create: async () => { noteWrites += 1; throw new Error("Recovery must not create a note"); },
+      modify: async () => { noteWrites += 1; throw new Error("Recovery must not edit a note"); },
+      rename: async () => { noteWrites += 1; throw new Error("Recovery must not rename a note"); },
+      delete: async () => { noteWrites += 1; throw new Error("Recovery must not delete a note"); },
+    });
+
+    await importDisplayRecoveryThroughUi(plugin, value, route);
+    assert.deepEqual(plugin.data.settings.libraryDisplayProfiles, source.settings.libraryDisplayProfiles);
+    assert.deepEqual(plugin.data.undoStack.at(-1)?.settings?.libraryDisplayProfiles, before);
+    await plugin.undo();
+    assert.deepEqual(plugin.data.settings.libraryDisplayProfiles, before);
+    await plugin.redo();
+    assert.deepEqual(plugin.data.settings.libraryDisplayProfiles, source.settings.libraryDisplayProfiles);
+    assert.equal(noteWrites, 0);
+  });
+
+  test(`${route} recovery v12 rolls display settings and history back after a rejected save`, async () => {
+    const data = migrateData(null);
+    const libraryId = "library-recovery-rollback";
+    data.portableIndex.libraries = [{ id: libraryId, name: "Books", singularName: "Book", icon: "book-open", order: 0, sourceKind: null, archivedAt: null }];
+    data.portableIndex.libraryLayouts = { [libraryId]: [] };
+    data.settings.libraryDisplayProfiles = { [libraryId]: normalizeLibraryDisplayProfile({ layout: "list" }) };
+    const { plugin } = pluginWithKeyedLocalStorage(createDefaultStore(data, 100, `vault-${route}-display-rollback`));
+    await plugin.loadPluginData();
+    plugin.savedData.length = 0;
+    const before = structuredClone(plugin.data);
+    const source = structuredClone(plugin.data);
+    source.settings.libraryDisplayProfiles[libraryId] = normalizeLibraryDisplayProfile({ layout: "cards", visibleProperties: ["author", "year"] });
+    const value = parsePortableExport(createPortableExport(source, [], { ...EMPTY_PORTABLE_SELECTION, recovery: true }, "2026-09-13T00:00:00.000Z", plugin.getVaultId(), plugin.getActiveKnowledgeBaseId(), plugin.data.settings.workspaceName));
+    let saveAttempts = 0;
+    plugin.saveData = async (saved: unknown) => {
+      saveAttempts += 1;
+      if (saveAttempts === 1) throw new Error("simulated recovery display save failure");
+      plugin.savedData.push(structuredClone(saved));
+    };
+
+    await assert.rejects(importDisplayRecoveryThroughUi(plugin, value, route), /simulated recovery display save failure/);
+    assert.deepEqual(plugin.data, before, "rollback includes display preferences and both history stacks");
+    assert.equal(saveAttempts, 2, "the failed candidate is followed by a compensating rollback");
+    const persisted = plugin.savedData.at(-1) as PluginStore;
+    assert.deepEqual(persisted.bases[0]?.data.settings.libraryDisplayProfiles, before.settings.libraryDisplayProfiles);
+    assert.equal(plugin.isDataReadOnly(), false);
+  });
+}
 
 test("workspace-only portability import includes dependency Library descriptors in Undo", async () => {
   const libraryId = "library-workspace-dependency";

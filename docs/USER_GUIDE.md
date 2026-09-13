@@ -13,6 +13,8 @@ The header contains:
 
 Switching knowledge bases changes every open Command Center view because the active base is plugin-wide. Archived bases do not appear in navigation or search until restored.
 
+The section tabs scroll horizontally without a bulky scrollbar on every device. Swipe or use a trackpad, or open **All sections** beside the strip to choose any section or Library directly. Keyboard users can focus the selected tab and use Left/Right, Home, and End; arrow direction follows right-to-left layouts. The selected tab is revealed horizontally without pulling the notes list back to the header. **Library settings** remains beside the strip when a Library is active.
+
 iPhone and iPad use the compact, single-column workspace at every width, including iPad landscape and Split View. The header shows the base switcher, **Add**, and **Details**. Open Details for the overview, statistics, Organize, and secondary actions. While browsing, section tabs and **Search/Filters** stay pinned and the overview and result statistics scroll away, leaving room for the notes. Filters opens a bounded panel below the toolbar; scroll inside it for additional controls or press Escape to close it with a keyboard. Focusing search hides secondary controls to leave more room for the software keyboard. The desktop layout is unchanged. This describes the implemented layout, not completed physical-device verification.
 
 ## Knowledge Index
@@ -177,6 +179,24 @@ A Library is a top-level primary category inside one knowledge base. Choose **Ma
 - permanently delete an archived custom Library after choosing where its subjects should go.
 
 Each knowledge base can retain at most 50 active and archived Libraries.
+
+### Library settings and book covers
+
+The unreleased source build adds **Library settings…** in the Library toolbar and **Manage libraries → Settings…**. Open **General** for Rename, singular label, icon, Archive, Restore, or deletion of an archived custom Library. Built-in Libraries explain why permanent deletion is unavailable. To rename the enclosing knowledge base, such as ENT, use **Manage knowledge bases… → Rename**; changing its display name does not change the fixed clinical preset.
+
+In **Display**, select **Cards**, choose an **Image property**, and set card size, image proportions, and fit. **Show whole image** keeps the full book cover visible. Enter up to six comma-separated **Visible properties**, such as `author, reading_status, year`; leaving this empty shows titles only. **Save display** applies only this Library's preferences and creates Undo. **Reset display** restores List, `cover`, medium size, portrait proportions, whole-image fit, and `author, reading_status`. Existing headings, subheadings, record order, search, and row actions remain available; arrangement uses the list presentation.
+
+For example, place an image in the vault and add these properties to a book note:
+
+~~~yaml
+cover: "[[Covers/My book.jpg]]"
+author: "Example Author"
+reading_status: "Reading"
+~~~
+
+Choose `cover` as the image property. KBCC reads the cached properties and displays the existing image; choosing Cards does not rewrite a note. Local raster covers work offline. Missing, blocked, or unavailable covers display a compact explanation instead of an empty image area. Card titles wrap to show the full title. Cover values and visible property values are not copied into display-profile exports.
+
+External covers are blocked by default. **Allow external images…** requests explicit permission for all Libraries in this vault on this device; only HTTPS references are accepted initially. It is separate from saving or resetting display and never follows Sync, imports, or recovery. **Block external images** and **Clear device-local data** revoke permission and remove existing external cover sources in the same scope; other vaults and devices keep their own permission. Requests already sent cannot be undone; browser cookies, cache, redirects, and host tracking may apply. The [design and privacy proposal](LIBRARY_DISPLAY_AND_PRIVACY.md) documents the remaining review and testing limits.
 
 ### Organize a Library
 
@@ -477,7 +497,9 @@ The artifact scan examines at most 2,000 direct children of the export folder an
 
 This is not a Sync-status surface. It makes no network request, calls no private Obsidian Sync API, and cannot tell whether a provider is online, queued, caught up, or safe for a device handoff. It never reads note bodies. Full paths, export filenames, custom configuration names, vault/base identifiers, and full semantic fingerprints are not shown.
 
-Choose **Clear device-local data…** in this center, or run the command of the same name, when preparing to uninstall or intentionally resetting this device. A confirmation explains that it clears this plugin's App-local route, disclosure, Undo/Redo, local diagnostic facts, update-announcement history, any bounded pending rename-recovery journal, and note-bound return destinations. The rename journal may temporarily contain the vault identity and old/new vault-relative paths after an interrupted organization repair. The separate bounded return-navigation history can contain the vault identity, up to 24 opened-note paths, their originating base and tab, a selected-record path, literal search text entered in KBCC, compact-detail state, and scroll positions. KBCC does not read or copy note bodies into return history, but user-entered search text can itself be sensitive; neither local value syncs. The clear action removes all four plugin-owned App-local values; it does not write synced <code>data.json</code> or change Markdown, attachments, or recovery exports. Tracking remains suppressed until Obsidian restarts, so disable or uninstall in the same session; restart only when you want local tracking to resume.
+Choose **Clear device-local data…** in this center, or run the command of the same name, when preparing to uninstall or intentionally resetting this device. A confirmation explains that it clears this plugin's App-local route, disclosure, Undo/Redo, local diagnostic facts, update-announcement history, any bounded pending rename-recovery journal, and note-bound return destinations. The rename journal may temporarily contain the vault identity and old/new vault-relative paths after an interrupted organization repair. The separate bounded return-navigation history can contain the vault identity, up to 24 opened-note paths, their originating base and tab, a selected-record path, literal search text entered in KBCC, compact-detail state, and scroll positions. KBCC does not read or copy note bodies into return history, but user-entered search text can itself be sensitive; neither local value syncs. The clear action removes all five plugin-owned App-local values; it does not write synced <code>data.json</code> or change Markdown, attachments, or recovery exports. Tracking remains suppressed until Obsidian restarts, so disable or uninstall in the same session; restart only when you want local tracking to resume.
+
+External Library-image permission is the fifth App-local value cleared by the local-data reset above. If its storage write fails, existing images are removed and new external loads stay blocked in this session, but check again after restarting. See [Local data](LOCAL_DATA.md).
 
 ## Settings
 

@@ -2,6 +2,8 @@
 
 Knowledge Base Command Center is an Obsidian plugin for building independent visual indexes over Markdown notes without making their storage folders authoritative. This guide covers installation, first-run setup, note creation, device updates, and safe migration from earlier plugin versions.
 
+This checkout includes unreleased Library settings and cover galleries. Published 0.22.0 assets do not contain these additions; the [external-image design proposal](LIBRARY_DISPLAY_AND_PRIVACY.md) remains pending independent and public release review.
+
 ## Requirements
 
 - Obsidian 1.13.0 or newer.
@@ -177,7 +179,7 @@ KBCC stores Markdown bindings as paths relative to the vault root. Different abs
 
 Identical pristine upgrades can converge through Sync. If exactly one same-origin copy was edited before convergence, that edited copy wins because the other has no unique work. Two independently edited copies are not guessed together; the plugin preserves data and enters a protected read-only state.
 
-An older device that encounters the version-15 store and schema-15 knowledge-base data preserves it read-only. It may describe the event as a migration failure because it cannot faithfully save the newer settings, membership provenance, and causal Sync metadata. That is downgrade protection, not proof of corruption. Update every synced device before editing; do not keep working with an older build.
+An older device that encounters the version-16 store and schema-16 knowledge-base data preserves it read-only. It may describe the event as a migration failure because it cannot faithfully save the newer settings, membership provenance, and causal Sync metadata. That is downgrade protection, not proof of corruption. Update every synced device before editing; do not keep working with an older build.
 
 Recovery exported before first-upgrade identity convergence may carry the losing provisional identity and is intentionally rejected afterward. Export it again once Sync has settled.
 
@@ -205,10 +207,13 @@ The sanitized [0.10.0 iPhone evidence](release-evidence/0.10.0-iphone.md) remain
 
 Export current organization and back up the vault first. Run **Knowledge Base Command Center: Clear device-local data…** from the Command Palette (also available in **Sync & recovery center**) and confirm. Then disable and remove the plugin through Community Plugins, or remove its manual plugin folder.
 
-Removing the plugin folder removes its <code>data.json</code>, including synced knowledge-base definitions, settings, Libraries, Collections, pins, visual hierarchy, and named snapshots. It does not by itself reliably remove device-only routes, collapsed sections, Undo/Redo history, local Sync/Recovery facts, or update-announcement history because Obsidian stores those App-local values outside the plugin folder. A third, bounded rename-recovery journal may temporarily contain the vault identity and old/new vault-relative paths until an interrupted organization repair is durably completed. A fourth, bounded return-navigation history can contain the vault identity, up to 24 opened-note paths, their originating base and tab, a selected-record path, literal search text entered in KBCC, compact-detail state, and scroll positions. KBCC does not read or copy note bodies into this history, but user-entered search text can itself be sensitive; the history is not synced. The clear command removes all four plugin-owned App-local values without changing <code>data.json</code>, Markdown notes, attachments, or recovery export files, and local tracking stays suppressed until Obsidian restarts. Disable or uninstall in that same session. If the plugin was already removed without clearing them, reinstall and enable the same or a newer release, run the command, then remove it again.
+Removing the plugin folder removes its <code>data.json</code>, including synced knowledge-base definitions, settings, Libraries, Collections, pins, visual hierarchy, and named snapshots. It does not by itself reliably remove device-only routes, collapsed sections, Undo/Redo history, local Sync/Recovery facts, or update-announcement history because Obsidian stores those App-local values outside the plugin folder. A third, bounded rename-recovery journal may temporarily contain the vault identity and old/new vault-relative paths until an interrupted organization repair is durably completed. A fourth, bounded return-navigation history can contain the vault identity, up to 24 opened-note paths, their originating base and tab, a selected-record path, literal search text entered in KBCC, compact-detail state, and scroll positions. KBCC does not read or copy note bodies into this history, but user-entered search text can itself be sensitive; the history is not synced. The clear command removes all five plugin-owned App-local values without changing <code>data.json</code>, Markdown notes, attachments, or recovery export files, and local tracking stays suppressed until Obsidian restarts. Disable or uninstall in that same session. If the plugin was already removed without clearing them, reinstall and enable the same or a newer release, run the command, then remove it again.
+
+The fifth App-local value is external Library-image permission. Clearing local data revokes it and removes current external covers. A failed permission-clear write blocks images for the current session only; check Library settings again after restarting. Details are in [Local data](LOCAL_DATA.md).
 
 ## Next
 
 - Learn the main workflows in the [User guide](USER_GUIDE.md).
+- Set up a Books gallery with [Library display and privacy](LIBRARY_DISPLAY_AND_PRIVACY.md).
 - Read [Portability and recovery](PORTABILITY_AND_RECOVERY.md) before exporting, importing, or restoring.
 - Use [Troubleshooting](TROUBLESHOOTING.md) for missing records, mobile behavior, Sync, or compatibility mode.

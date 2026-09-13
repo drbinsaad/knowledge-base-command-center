@@ -206,6 +206,8 @@ import {
 } from "./kbcc-return-navigation";
 import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge-base-modal";
 import { ManageLibrariesModal } from "./library-modal";
+import { LibrarySettingsModal } from "./library-settings-modal";
+import { normalizeLibraryDisplayProfile, validateLibraryDisplayProfile, type LibraryDisplayProfile } from "./library-display-profile";
 import { mergeKnowledgeBaseStores, type StoreMergeResult } from "./store-merge";
 import {
   applyTaxonomyRepairToData,
@@ -303,6 +305,7 @@ export const DEVICE_LOCAL_STATE_KEY = "ent-vault-command-center.device-state.v1"
 export const SYNC_RECOVERY_LOCAL_STATE_KEY = "ent-vault-command-center.sync-recovery-state.v1";
 export const VAULT_RENAME_JOURNAL_KEY = "ent-vault-command-center.vault-rename-journal.v1";
 export const KBCC_RETURN_NAVIGATION_STATE_KEY = "ent-vault-command-center.return-navigation.v1";
+export const LIBRARY_IMAGE_PERMISSION_KEY = "ent-vault-command-center.library-images.v1";
 const FOLLOW_UP_UNDO_WINDOW_MS = 5 * 60 * 1000;
 
 /**
@@ -704,6 +707,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private stagedRequiredUndoBatchOperationLabel: RequiredUndoBatchOperationLabel = "multi-base change";
   /** Sticky until restart after the explicit privacy reset. */
   private deviceLocalPersistenceSuppressed = false;
+  private externalLibraryImagesLoaded = false;
+  private externalLibraryImagesAllowed = false;
   private syncRecoveryLocalState: SyncRecoveryLocalState = createDefaultSyncRecoveryLocalState();
   private syncRecoveryLocalStateLoaded = false;
   /** Saves that may have reached data.json before their promise rejected. */
@@ -2378,8 +2383,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (this.baseOperationBusy || this.dataTransactionBusy || this.directSaveBusyCount > 0 || this.externalReloadBusy) {
       throw new Error("Finish the current knowledge-base operation before clearing device-local data.");
     }
+    this.blockExternalLibraryImages();
     if (typeof this.app.saveLocalStorage !== "function") {
-      throw new Error("Obsidian's device-local storage API is unavailable.");
+      throw new Error("Obsidian's device-local storage API is unavailable. External covers are blocked for this session; check Library settings after restarting.");
     }
     let clearFailed = false;
     for (const key of [
@@ -2387,6 +2393,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       SYNC_RECOVERY_LOCAL_STATE_KEY,
       VAULT_RENAME_JOURNAL_KEY,
       KBCC_RETURN_NAVIGATION_STATE_KEY,
+      LIBRARY_IMAGE_PERMISSION_KEY,
     ]) {
       try {
         this.app.saveLocalStorage(key, null);
@@ -2394,7 +2401,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         clearFailed = true;
       }
     }
-    if (clearFailed) throw new Error("One or more device-local values could not be cleared.");
+    if (clearFailed) throw new Error("One or more device-local values could not be cleared. External covers are blocked for this session; check Library settings after restarting.");
 
     // A privacy reset suppresses every future device-local Organizer write in
     // this session. Close an already-open review before changing that policy so
@@ -6212,6 +6219,98 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return profile ? { ...profile } : null;
   }
 
+  getLibraryDisplayProfile(libraryId: string): LibraryDisplayProfile {
+    const profiles = this.data.settings.libraryDisplayProfiles;
+    return normalizeLibraryDisplayProfile(Object.prototype.hasOwnProperty.call(profiles, libraryId) ? profiles[libraryId] : null);
+  }
+
+  async setLibraryDisplayProfile(libraryId: string, profile: LibraryDisplayProfile | null): Promise<void> {
+    const library = this.requireLibrary(libraryId);
+    if (profile !== null) {
+      const error = validateLibraryDisplayProfile(profile);
+      if (error) throw new Error(error);
+    }
+    const cleaned = profile === null ? null : normalizeLibraryDisplayProfile(profile);
+    const originalData = this.data;
+    const originalBaseId = this.getActiveKnowledgeBaseId();
+    const originalLibrary = JSON.stringify(library);
+    const originalProfile = JSON.stringify(this.data.settings.libraryDisplayProfiles[libraryId] ?? null);
+    if (originalProfile === JSON.stringify(cleaned)) return;
+    await this.mutate(`${cleaned ? "Update" : "Reset"} display for “${library.name}”`, () => {
+      if (this.data !== originalData || this.getActiveKnowledgeBaseId() !== originalBaseId
+        || JSON.stringify(this.requireLibrary(libraryId)) !== originalLibrary
+        || JSON.stringify(this.data.settings.libraryDisplayProfiles[libraryId] ?? null) !== originalProfile) {
+        throw new Error("The Library changed. Reopen Library settings before saving your display choices.");
+      }
+      if (cleaned) this.data.settings.libraryDisplayProfiles[libraryId] = normalizeLibraryDisplayProfile(cleaned);
+      else delete this.data.settings.libraryDisplayProfiles[libraryId];
+    }, { includeSettings: true, requireUndo: true });
+  }
+
+  openLibrarySettings(libraryId: string): void {
+    const library = this.getLibrary(libraryId);
+    if (!library) {
+      new Notice("That library is no longer available.");
+      return;
+    }
+    new LibrarySettingsModal(this, library).open();
+  }
+
+  /** Consent is App-local only: never accept it from a base, import, backup, or Sync. */
+  getExternalLibraryImagesAllowed(): boolean {
+    if (this.unloaded || this.deviceLocalPersistenceSuppressed) return false;
+    if (!this.externalLibraryImagesLoaded) {
+      this.externalLibraryImagesLoaded = true;
+      this.externalLibraryImagesAllowed = false;
+      try {
+        const value: unknown = this.app.loadLocalStorage?.(LIBRARY_IMAGE_PERMISSION_KEY);
+        if (value && typeof value === "object" && !Array.isArray(value)) {
+          const entry = value as Record<string, unknown>;
+          this.externalLibraryImagesAllowed = Object.keys(entry).length === 2
+            && Object.prototype.hasOwnProperty.call(entry, "version") && entry.version === 1
+            && Object.prototype.hasOwnProperty.call(entry, "externalImagesAllowed") && entry.externalImagesAllowed === true;
+        }
+      } catch {
+        // Fail closed when storage is missing, corrupt, or unavailable.
+      }
+    }
+    return this.externalLibraryImagesAllowed;
+  }
+
+  private blockExternalLibraryImages(): void {
+    this.externalLibraryImagesLoaded = true;
+    this.externalLibraryImagesAllowed = false;
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
+      if (leaf.view instanceof EntVaultCommandCenterView) leaf.view.clearExternalLibraryImages();
+    }
+  }
+
+  async setExternalLibraryImagesAllowed(allowed: boolean): Promise<void> {
+    if (typeof allowed !== "boolean") throw new Error("Choose whether to allow external Library covers.");
+    if (allowed && (this.unloaded || this.deviceLocalPersistenceSuppressed)) {
+      throw new Error("Restart the plugin before enabling external Library covers after a privacy reset.");
+    }
+    // Remove owned image sources synchronously before any persistence or refresh.
+    if (!allowed) this.blockExternalLibraryImages();
+    try {
+      if (typeof this.app.saveLocalStorage !== "function") throw new Error("Storage unavailable");
+      this.app.saveLocalStorage(LIBRARY_IMAGE_PERMISSION_KEY, allowed ? { version: 1, externalImagesAllowed: true } : null);
+    } catch {
+      if (allowed) {
+        this.blockExternalLibraryImages();
+        throw new Error("External covers remain blocked because device-local permission could not be saved.");
+      }
+      throw new Error("External covers are blocked for this session, but the permission could not be cleared. Check Library settings again after restarting.");
+    }
+    this.externalLibraryImagesLoaded = true;
+    this.externalLibraryImagesAllowed = allowed;
+    try {
+      await this.refreshViews(false);
+    } catch {
+      console.error("Knowledge Base Command Center saved the device-local image permission but could not refresh every open view.");
+    }
+  }
+
   getEffectiveLibraryNoteProfile(libraryId: string): EffectiveLibraryNoteProfile {
     this.requireLibrary(libraryId);
     return resolveLibraryNoteProfile(this.data.settings, libraryId);
@@ -6830,6 +6929,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       ));
       delete this.data.portableIndex.libraryLayouts[libraryId];
       delete this.data.settings.libraryNoteProfiles[libraryId];
+      delete this.data.settings.libraryDisplayProfiles[libraryId];
       this.data.portableIndex.libraries = this.libraryDefinitions()
         .filter((candidate) => candidate.id !== libraryId);
       this.normalizeLibraryOrder();

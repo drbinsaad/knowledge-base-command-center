@@ -165,6 +165,75 @@ export class FuzzySuggestModal extends Modal {
   setInstructions(): void {}
 }
 
+class BrowserMenuItem {
+  title = "";
+  icon = "";
+  checked: boolean | undefined;
+  disabled = false;
+  callback: () => unknown = () => undefined;
+  setTitle(value: string): this { this.title = value; return this; }
+  setIcon(value: string): this { this.icon = value; return this; }
+  setChecked(value: boolean): this { this.checked = value; return this; }
+  setDisabled(value: boolean): this { this.disabled = value; return this; }
+  onClick(callback: () => unknown): this { this.callback = callback; return this; }
+}
+
+/** Narrow browser Menu host: exercises production menu callbacks and semantics.
+ * Its positioning/keyboard implementation is synthetic, not native Obsidian or
+ * physical-device menu evidence; that integration still requires a native pass.
+ */
+export class Menu {
+  private items: Array<BrowserMenuItem | null> = [];
+  private parent: HTMLElement | null = null;
+  private element: HTMLElement | null = null;
+  private hidden: () => unknown = () => undefined;
+  addItem(callback: (item: BrowserMenuItem) => unknown): this {
+    const item = new BrowserMenuItem(); callback(item); this.items.push(item); return this;
+  }
+  addSeparator(): this { this.items.push(null); return this; }
+  setParentElement(element: HTMLElement): this { this.parent = element; return this; }
+  onHide(callback: () => unknown): this { this.hidden = callback; return this; }
+  showAtPosition(position: { x: number; y: number }, owner = document): void {
+    const menu = owner.createElement("div");
+    menu.className = "kbcc-browser-menu";
+    menu.setAttribute("role", "menu");
+    Object.assign(menu.style, {
+      position: "fixed", zIndex: "2000", maxHeight: "70vh", overflowY: "auto",
+      width: "min(360px, calc(100vw - 16px))", padding: "8px",
+      background: "var(--background-primary)", border: "1px solid var(--background-modifier-border)",
+    });
+    for (const item of this.items) {
+      if (!item) { menu.createDiv({ attr: { role: "separator" } }); continue; }
+      const button = menu.createEl("button", { text: item.title, type: "button", attr: {
+        role: item.checked === undefined ? "menuitem" : "menuitemcheckbox", tabindex: "-1",
+        ...(item.checked === undefined ? {} : { "aria-checked": String(item.checked) }),
+      } });
+      button.disabled = item.disabled;
+      Object.assign(button.style, { display: "block", width: "100%", minHeight: "44px", textAlign: "start" });
+      button.addEventListener("click", () => { this.hide(); void item.callback(); });
+    }
+    menu.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") { event.preventDefault(); this.hide(); return; }
+      const buttons = Array.from(menu.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"));
+      const index = buttons.indexOf(owner.activeElement as HTMLButtonElement);
+      const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
+        : event.key === "ArrowDown" ? (index + 1) % buttons.length
+          : event.key === "ArrowUp" ? (index - 1 + buttons.length) % buttons.length : -1;
+      if (next < 0) return;
+      event.preventDefault(); buttons[next]?.focus();
+    });
+    owner.body.append(menu); this.element = menu;
+    const bounds = menu.getBoundingClientRect();
+    menu.style.left = `${Math.max(8, Math.min(position.x, owner.documentElement.clientWidth - bounds.width - 8))}px`;
+    menu.style.top = `${Math.max(8, Math.min(position.y, owner.documentElement.clientHeight - bounds.height - 8))}px`;
+    menu.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus({ preventScroll: true });
+  }
+  hide(): void {
+    this.element?.remove(); this.element = null;
+    this.parent?.focus({ preventScroll: true }); this.hidden();
+  }
+}
+
 export function setIcon(element: HTMLElement, icon: string): void {
   element.dataset.icon = icon;
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -177,6 +246,8 @@ export function setIcon(element: HTMLElement, icon: string): void {
   svg.setAttribute("aria-hidden", "true");
   const paths: Record<string, string> = {
     "search": "m21 21-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0",
+    "list": "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01",
+    "settings-2": "M3 6h5m4 0h9M3 18h9m4 0h5M8 3v6m4 6v6",
     "plus": "M12 5v14M5 12h14",
     "chevron-down": "m6 9 6 6 6-6",
     "chevron-right": "m9 6 6 6-6 6",

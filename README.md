@@ -11,7 +11,9 @@
 
 _Abstract AI-generated concept artwork, not a product screenshot. A current renderer preview and historical real-app captures appear below; see [asset provenance](docs/assets/README.md)._
 
-Build each Index from notes you explicitly add and, when you want dynamic folder membership, folders you explicitly link. A default new-note folder controls storage only: putting a note there never enrolls it in the Index by itself. From there you arrange, group, nest, pin, and classify records into Libraries and Collections — and all of that organization lives in the plugin's own data, not in your Markdown. Your files stay exactly where you put them, with the frontmatter you wrote. One installation can hold several independent knowledge bases, so research, study, and project work never bleed into each other. Everything is local: the plugin makes no network request, has no account, and sends no telemetry.
+Build each Index from notes you explicitly add and, when you want dynamic folder membership, folders you explicitly link. A default new-note folder controls storage only: putting a note there never enrolls it in the Index by itself. From there you arrange, group, nest, pin, and classify records into Libraries and Collections — and all of that organization lives in the plugin's own data, not in your Markdown. Your files stay exactly where you put them, with the frontmatter you wrote. One installation can hold several independent knowledge bases, so research, study, and project work never bleed into each other. The default experience is local, with no account or telemetry. Optional external Library covers contact image hosts only after explicit permission on this device.
+
+**Unreleased source changes:** the Library settings and cover-gallery features described here are implemented in this checkout, not published as an update to 0.22.0. The external-image [design and privacy proposal](docs/LIBRARY_DISPLAY_AND_PRIVACY.md) still needs independent review and public release review.
 
 **Quick links:** [Getting started](docs/GETTING_STARTED.md) · [User guide](docs/USER_GUIDE.md) · [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Apple Shortcuts](docs/APPLE_SHORTCUT.md) · [Templates](templates/README.md) · [Support](SUPPORT.md)
 
@@ -78,7 +80,9 @@ First-device Sync precautions and the exact per-route update steps are in [Getti
 
 Export your current organization first. Then run **Knowledge Base Command Center: Clear device-local data…** and confirm, before disabling and removing the plugin through Community Plugins (or deleting its manual plugin folder).
 
-The plugin folder contains `data.json` with synced knowledge bases, settings, Libraries, Collections, pins, hierarchy, and named snapshots. Device-only routes, collapsed sections, Undo/Redo history, local Sync/Recovery facts, and the highest plugin version observed for one-time update announcements are stored through Obsidian's App-local storage outside that folder, so deleting only the folder does not reliably remove them. A third, bounded rename-recovery journal may temporarily contain the vault identity and old/new vault-relative paths until an interrupted organization repair is durably completed. A fourth, bounded return-navigation history can contain the vault identity, up to 24 opened-note paths, their originating base and tab, a selected-record path, literal search text entered in KBCC, compact-detail state, and scroll positions so a note can return to the same KBCC page after restart. KBCC does not read or copy note bodies into this history, but user-entered search text can itself be sensitive; the history is not synced. The clear command removes all four plugin-owned App-local values without changing `data.json`, Markdown notes, attachments, or recovery export files, and local tracking stays suppressed until Obsidian restarts — disable or uninstall in that same session. If you already removed the plugin without clearing them, reinstall and enable the same or a newer release, run the clear command, then remove it again.
+The plugin folder contains `data.json` with synced knowledge bases, settings, Libraries, Collections, pins, hierarchy, and named snapshots. Device-only routes, collapsed sections, Undo/Redo history, local Sync/Recovery facts, and the highest plugin version observed for one-time update announcements are stored through Obsidian's App-local storage outside that folder, so deleting only the folder does not reliably remove them. A third, bounded rename-recovery journal may temporarily contain the vault identity and old/new vault-relative paths until an interrupted organization repair is durably completed. A fourth, bounded return-navigation history can contain the vault identity, up to 24 opened-note paths, their originating base and tab, a selected-record path, literal search text entered in KBCC, compact-detail state, and scroll positions so a note can return to the same KBCC page after restart. KBCC does not read or copy note bodies into this history, but user-entered search text can itself be sensitive; the history is not synced. The clear command removes all five plugin-owned App-local values without changing `data.json`, Markdown notes, attachments, or recovery export files, and local tracking stays suppressed until Obsidian restarts — disable or uninstall in that same session. If you already removed the plugin without clearing them, reinstall and enable the same or a newer release, run the clear command, then remove it again.
+
+The fifth App-local value is external Library-image permission. **Clear device-local data** revokes it and removes existing external cover sources. If persistence fails, the current session stays blocked, but you must check permission again after restarting. See [Local data](docs/LOCAL_DATA.md).
 
 ## Quick start
 
@@ -147,6 +151,12 @@ Collections are reusable personal lists spanning the Index and Libraries. A reco
 
 Create, name, icon, reorder, archive, and restore custom Libraries. Inside a Library, add headings and nested subheadings, place existing records, and use the explicit Unplaced section when structure changes.
 
+Open **Library settings…** from the Library toolbar or **Manage libraries → Settings…**. **General** offers Rename, icon changes, Archive, Restore, and permanent deletion of an archived custom Library. Built-in Libraries can be renamed, customized, and archived; their source classification prevents permanent deletion. To rename the knowledge base itself, such as **ENT**, use **Manage knowledge bases… → Rename**; its Generic/ENT preset remains fixed.
+
+In **Display**, choose **List** or **Cards**, an image property, Small/Medium/Large card size, Portrait/Square/Landscape proportions, and **Show whole image** or **Crop to fill**. Up to six comma-separated property names appear beneath each card's title. Defaults use `cover`, medium portrait cards, whole-image fitting, and `author, reading_status`; new Libraries start in List. **Save display** applies the choices to this Library, with Undo. **Reset display** restores defaults. Renaming or archiving keeps its settings.
+
+For a Books Library, add `cover: "[[Covers/My book.jpg]]"` to a book note's properties, then select Cards. The image must already exist in the vault. Missing covers and unresolved **No note** subjects keep an explanatory placeholder. This is a KBCC Library view, not an Obsidian `.base` file. Local covers work offline; HTTPS cover URLs need the separate **Allow external images…** confirmation. See [Library display and privacy](docs/LIBRARY_DISPLAY_AND_PRIVACY.md) for supported links and permission limits.
+
 The **…** menu for any custom-Library heading or nested subheading includes **Create note here…**. It opens the normal creation form with the full heading path fixed and visible, applies that Library's creation profile, and expands every ancestor after successful placement. The exact base, Library, and destination are checked again immediately before Markdown creation. If placement still fails after the file is created, KBCC moves only that operation's provably unchanged file to Obsidian's recoverable trash; if it cannot prove the file is unchanged, it preserves the exact path and tells you how to place it manually. Protected built-in sections do not expose this action.
 
 Under **Settings → Libraries → Library creation profiles**, each Library can inherit the knowledge base's note folder, empty/template mode, and template — or override any of those fields. It is deliberately a two-level model: knowledge-base defaults, then one optional Library override. The Create note form still exposes the resolved values for a one-note exception. Profiles are keyed by the stable Library ID, so renaming keeps the profile; archiving retains it, and permanent deletion removes it.
@@ -203,7 +213,7 @@ If **Workspace settings** are selected with Index, Libraries, Collections, or St
 
 **Multi-base portfolio transfer** bundles up to 50 independent portable packages behind one bounded manifest. Map each source to a new or existing compatible base, choose Merge or Replace per destination, select components per source, and inspect an exact immutable change plan before applying it. Replace requires a displayed typed phrase and writes a same-vault recovery for every affected destination before the atomic mutation. The preview reports base, heading, subject, Library, conflict, folder/template fallback, and explicit will-not-change categories.
 
-Portable packages created by version 0.12.1 and earlier use format version 4. Packages created by version 0.13.0 and later use format version 5, which adds the nested subheading layout. Older packages still import — the current build reads versions 1 through 5 — while an older plugin build refuses a newer package rather than guessing destructively, so update every syncing device before applying a new export.
+Portable packages created by version 0.13.0 through 0.22.0 use format version 5, which adds nested subheading layouts to version 4's stable Library identities. The 0.12.1 release used format version 4; earlier formats remain supported. Portable packages created by version candidates with the unreleased Library-display changes use format version 6, with display profiles in Workspace format 3. This source build reads portable versions 1 through 6. Older plugin builds refuse newer packages, so update every syncing device before applying a new export.
 
 Read [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md) before importing, replacing, or restoring.
 
@@ -254,7 +264,7 @@ A VoiceOver-with-Arabic pass across Quick entry, Quick append, taxonomy repair, 
 
 ### Local-first by construction
 
-No network requests, no analytics, no telemetry, no accounts, no advertising, no payments. A static verification step in CI asserts that neither the source nor the built bundle references `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `sendBeacon`, or Obsidian's `requestUrl` — and that the bundle contains exactly one clipboard writer and no clipboard reader. The same pipeline runs the full test suite, the production build, and a release-metadata check on every push, and every published release carries GitHub build provenance attestation for its `main.js`, `manifest.json`, and `styles.css`.
+No analytics, telemetry, accounts, advertising, or payments. External Library covers are blocked by default and require separate device-local consent. A static verification step in CI checks that source and bundle do not reference `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `sendBeacon`, or Obsidian's `requestUrl`, and checks clipboard access. Those checks do not mean an allowed browser image cannot make a network request. The same pipeline runs tests, the production build, and release-metadata checks, and published releases carry GitHub build provenance attestation for `main.js`, `manifest.json`, and `styles.css`.
 
 ## Generic and ENT profiles
 
@@ -308,7 +318,7 @@ Step-by-step Shortcuts instructions, placement options, and troubleshooting are 
 
 ## Privacy and permissions
 
-The plugin is local-first by design and makes no network request of any kind.
+The plugin makes no network request by default. An explicit opt-in for this vault on this device allows HTTPS Library cover images to contact their hosts; it never enables telemetry or uploads note bodies. Other vaults and devices keep their own permission. The [proposed Library image privacy review](docs/LIBRARY_DISPLAY_AND_PRIVACY.md) documents browser request behavior and the remaining release review.
 
 **What it reads**
 
@@ -316,6 +326,7 @@ The plugin is local-first by design and makes no network request of any kind.
 - It enumerates all loaded vault entries before retaining folder paths for settings pickers, and enumerates all vault file paths before retaining JSON packages for the in-vault picker. Path enumeration alone does not read note bodies.
 - Content reads are targeted: an explicitly chosen template or JSON import, the note explicitly selected for Quick append inside Obsidian's atomic process operation, an explicit attachment destination note, and the disclosed ENT proposal-promotion and canonical-placement workflows. An attachment action also reads the one external file you select in the operating-system picker and copies its bytes into the vault.
 - Copy buttons write only the plugin-generated command, wikilink, or path you selected; the plugin never reads clipboard contents.
+- Cards read only the selected cover and visible properties from cached frontmatter. Local covers resolve to existing raster images in the vault; the browser reads the image to display it.
 
 **What it writes**
 
@@ -329,6 +340,7 @@ The plugin is local-first by design and makes no network request of any kind.
 - Quick entry, Quick append, and Attach file Obsidian protocols accept only their fixed intrinsic actions. Any query parameter is rejected before a hub, picker, or form opens; titles, paths, content, and files cannot be supplied by URL. Current-note actions use only the locally active eligible note.
 - The Organizer's optional drop target accepts only bounded `text/plain` or `text/uri-list` path strings and rejects operating-system file payloads, absolute paths, and unsafe URLs. Every parsed candidate must resolve to a current eligible Markdown file inside the vault; if one does not, the drop opens nothing. It never reads a dropped note body; the File Explorer context menu and Organizer vault browser remain the dependable alternatives.
 - The plugin never writes outside the vault and never enumerates external files. The explicit Attach file command reads only the one external file you select in the operating-system picker. Desktop JSON export and import also use operating-system download and file-picker surfaces, so those files go where you choose.
+- If you allow external Library images, the image host receives your IP address and requested URL, including its path and query. Referrers are suppressed; browser cookies, caching, redirects, and host tracking may still apply. Blocking images removes current image sources and prevents new requests in this vault on this device; it does not change another vault's or device's permission and cannot recall requests already sent.
 
 **Automatic protection**
 
@@ -347,7 +359,7 @@ See [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md) for the exact e
 
 Same-vault recovery protects plugin-owned organization for one knowledge base; it is not a backup of Markdown notes or attachments. Back up the complete vault, including `.obsidian`, and export one current private recovery per available base. Archived bases must be restored temporarily before export.
 
-Recovery is a standalone replacement, never a merge with portable sections. Current v11 files carry the nested Collection and Library subheading layout, dynamic Library definitions, explicit Index membership and linked-folder provenance, and locks to their source vault, base, and preset, all of which are verified before mutation. Older identity-less formats require additional overrides and conservative path checks.
+Recovery is a standalone replacement, never a merge with portable sections. Current v12 files from this unreleased source build add Library display profiles to the nested Collection and Library layout, dynamic Library definitions, explicit Index membership, linked-folder provenance, and source vault/base/preset locks. External-image permission is never included. Older identity-less formats require additional overrides and conservative path checks.
 
 Follow the complete [backup and restore procedure](docs/PORTABILITY_AND_RECOVERY.md#backup-and-restore) before restoring anything.
 
@@ -359,7 +371,7 @@ Follow the complete [backup and restore procedure](docs/PORTABILITY_AND_RECOVERY
 | Desktop | Uses Obsidian-compatible APIs; no Electron- or Node-only runtime dependency |
 | iPhone and iPad | Dedicated record grips, touch menus and mobile layouts are implemented; the [0.22.0 physical-device record](docs/release-evidence/0.22.0-iphone.md) is explicitly waived and unverified, so do not assume the release checklist passed |
 | Android | The manifest is mobile-compatible, but this repository does not currently document a complete physical-Android test pass |
-| Network | No plugin network requests, analytics, telemetry, accounts, advertising, or payments |
+| Network | No requests by default; device-local opt-in for HTTPS Library covers. No analytics, telemetry, accounts, advertising, or payments |
 
 ## Known limitations
 
@@ -393,6 +405,8 @@ Every other symptom, including import refusals and Sync protection reasons, is c
 - [Getting started](docs/GETTING_STARTED.md) — install, first-run setup, upgrades, uninstall
 - [User guide](docs/USER_GUIDE.md) — every surface, setting, and command
 - [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md) — export boundary, formats, backup and restore
+- [Library display and privacy](docs/LIBRARY_DISPLAY_AND_PRIVACY.md) — cover setup and the pending external-image design review
+- [Local data](docs/LOCAL_DATA.md) — synced organization, device-only history, and image permission
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Apple Shortcuts guide](docs/APPLE_SHORTCUT.md)
 - [Starter templates](templates/README.md)

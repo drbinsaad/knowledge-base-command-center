@@ -517,7 +517,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
         },
         renderSetting(
           "Manage libraries",
-          `${activeLibraries.length} active · ${archivedLibraryCount} archived · ${libraryRecordCount} classified ${libraryRecordCount === 1 ? settings.itemSingular : settings.itemPlural}. Library actions never move, rewrite, or delete Markdown notes.`,
+          `${activeLibraries.length} active · ${archivedLibraryCount} archived · ${libraryRecordCount} classified ${libraryRecordCount === 1 ? settings.itemSingular : settings.itemPlural}. Open Library settings to rename, choose List or Cards, configure covers, or archive a Library. These actions never move, rewrite, or delete Markdown notes.`,
           (row) => {
             row.addButton((button) => button
               .setButtonText("Manage…")
@@ -527,7 +527,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
                 new ManageLibrariesModal(this.host as EntVaultCommandCenterPlugin, () => this.update()).open();
               }));
           },
-          ["create", "rename", "icon", "reorder", "archive", "restore", "delete", "library"],
+          ["create", "rename", "icon", "reorder", "archive", "restore", "delete", "library", "cards", "cover", "gallery", "display"],
         ),
         renderSetting(
           "Library creation profiles",
