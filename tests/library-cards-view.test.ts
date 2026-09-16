@@ -26,6 +26,9 @@ function harness(records: VaultRecord[], layout: LayoutHeading[] = []) {
   data.portableIndex.libraryLayouts.books = layout;
   let profile = normalizeLibraryDisplayProfile({ layout: "cards" });
   let metadataReads = 0;
+  let noteAvailable = true;
+  let metadataAvailable = true;
+  let frontmatter: Record<string, unknown> = { cover: "[[Covers/Book.png]]", author: "Ali", reading_status: "Reading", unselected: "Do not show" };
   const events: string[] = [];
   const plugin = {
     data, getLibrary: (id: string) => data.portableIndex.libraries.find((library) => library.id === id),
@@ -41,10 +44,10 @@ function harness(records: VaultRecord[], layout: LayoutHeading[] = []) {
   Object.assign(view, {
     plugin, records, recordByPath: new Map(records.map((record) => [record.path, record])),
     app: {
-      vault: { getAbstractFileByPath: (path: string) => new TFile(path), getResourcePath: (file: TFile) => `app://vault/${file.path}` },
+      vault: { getAbstractFileByPath: (path: string) => noteAvailable ? new TFile(path) : null, getResourcePath: (file: TFile) => `app://vault/${file.path}` },
       metadataCache: {
         getFirstLinkpathDest: () => new TFile("Covers/Book.png"),
-        getFileCache: () => { metadataReads += 1; return { frontmatter: { cover: "[[Covers/Book.png]]", author: "Ali", reading_status: "Reading", unselected: "Do not show" } }; },
+        getFileCache: () => { metadataReads += 1; return metadataAvailable ? { frontmatter } : undefined; },
       },
     },
     contentEl: asHtmlElement(dom.document.body), query: "", parsedQuery: parseQuery(""), editMode: false,
@@ -62,6 +65,8 @@ function harness(records: VaultRecord[], layout: LayoutHeading[] = []) {
     view.browseStructuresRendered = 0; view.browseStructuresOmitted = 0;
   };
   return { view, data, dom, events, reset, metadataReads: () => metadataReads,
+    setFrontmatter: (value: Record<string, unknown>) => { frontmatter = value; },
+    setAvailability: (note: boolean, metadata: boolean) => { noteAvailable = note; metadataAvailable = metadata; },
     setProfile: (value: Partial<LibraryDisplayProfile>) => { profile = normalizeLibraryDisplayProfile(value); } };
 }
 
@@ -125,7 +130,58 @@ test("card titles preserve selection, open, pin, collection, menu, and placehold
   h.dom.document.body.querySelector(".ent-cc-placeholder-row .ent-cc-subject-title")?.dispatch("click");
   assert.deepEqual(h.events, ["select:Books/Alpha.md", "open:Books/Alpha.md", "pin:Books/Alpha.md", "collect:Books/Alpha.md", "menu:Books/Alpha.md", "resolve:kbcc-placeholder:Placeholder"]);
   assert.equal(h.metadataReads(), 1, "placeholders do not read vault files or frontmatter");
-  assert.match(h.dom.document.body.querySelector(".ent-cc-placeholder-row")?.textContent ?? "", /No cover/);
+  assert.match(h.dom.document.body.querySelector(".ent-cc-placeholder-row")?.textContent ?? "", /Link a note/);
+});
+
+test("Cards resolve the selected cover property across capitalization without changing metadata fields", () => {
+  const records = [book("Alpha")];
+  const h = harness(records);
+  h.setFrontmatter({ Cover: "[[Covers/Book.png]]", Author: "Not an exact metadata field" });
+  h.view.renderLibrary(asHtmlElement(h.dom.document.body), records);
+  assert.equal(h.dom.document.body.querySelectorAll("img").length, 1);
+  assert.doesNotMatch(h.dom.document.body.textContent, /Not an exact metadata field/);
+  h.reset();
+  h.setProfile({ layout: "cards", imageProperty: "Cover" });
+  h.setFrontmatter({ cover: "[[Covers/Book.png]]" });
+  h.view.renderLibrary(asHtmlElement(h.dom.document.body), records);
+  assert.equal(h.dom.document.body.querySelectorAll("img").length, 1);
+});
+
+test("Cards distinguish unavailable properties and refresh from the latest cached metadata", () => {
+  const records = [book("Alpha")];
+  const h = harness(records);
+  h.setFrontmatter({ unrelated: "Do not display this value" });
+  h.view.renderLibrary(asHtmlElement(h.dom.document.body), records);
+  assert.equal(h.dom.document.body.querySelectorAll("img").length, 0);
+  assert.match(h.dom.document.body.textContent, /Add a cover property/);
+  assert.doesNotMatch(h.dom.document.body.textContent, /Do not display this value/);
+  h.reset();
+  h.setFrontmatter({ Cover: ["[[Covers/Book.png]]"] });
+  h.view.renderLibrary(asHtmlElement(h.dom.document.body), records);
+  assert.equal(h.dom.document.body.querySelectorAll("img").length, 1);
+  h.reset();
+  h.setFrontmatter({ cover: "", Cover: "[[Covers/Book.png]]" });
+  h.view.renderLibrary(asHtmlElement(h.dom.document.body), records);
+  assert.equal(h.dom.document.body.querySelectorAll("img").length, 0, "an exact empty field is not replaced by a different-cased field");
+  assert.match(h.dom.document.body.textContent, /Cover property is empty/);
+});
+
+test("Cards distinguish a missing note and pending metadata from a missing cover property", () => {
+  const records = [book("Alpha")];
+  const h = harness(records);
+  h.setAvailability(false, false);
+  h.view.renderLibrary(asHtmlElement(h.dom.document.body), records);
+  assert.match(h.dom.document.body.textContent, /Note not on this device/);
+  assert.equal(h.metadataReads(), 0);
+  h.reset();
+  h.setAvailability(true, false);
+  h.view.renderLibrary(asHtmlElement(h.dom.document.body), records);
+  assert.match(h.dom.document.body.textContent, /Waiting for note properties/);
+  assert.doesNotMatch(h.dom.document.body.textContent, /Add a cover property/);
+  h.reset();
+  h.setAvailability(true, true);
+  h.view.renderLibrary(asHtmlElement(h.dom.document.body), records);
+  assert.equal(h.dom.document.body.querySelectorAll("img").length, 1);
 });
 
 test("cover taps and keyboard actions match the title and preserve separate card menus and placeholder actions", () => {

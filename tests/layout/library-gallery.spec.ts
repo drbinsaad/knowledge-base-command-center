@@ -28,7 +28,7 @@ async function open(page: Page, { mobile = true, width = 1180, height = 820, dar
   errorsByPage.set(page, errors);
   networkByPage.set(page, network);
   page.on("pageerror", (error) => errors.push(error.message));
-  page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
+  page.on("console", (message) => { if (["error", "warning"].includes(message.type())) errors.push(message.text()); });
   // All fixture assets are inline or generated local image data. Any attempted
   // network request is a regression, regardless of which hostname it targets.
   await page.route("**/*", async (route) => { network.push(route.request().url()); await route.abort(); });
@@ -55,6 +55,37 @@ async function capture(page: Page, name: string): Promise<void> {
   if (!path.isAbsolute(directory) || directory.startsWith(`${root}${path.sep}`)) throw new Error("Evidence must stay outside the repository");
   await mkdir(directory, { recursive: true });
   await page.screenshot({ path: path.join(directory, `${test.info().project.name}-gallery-${name}.png`) });
+}
+
+async function expectPinnedSave(dialog: Locator): Promise<void> {
+  // Check the actual first-viewport hit target; locator.click() would conceal
+  // the original below-the-fold bug by automatically scrolling the button.
+  const geometry = await dialog.getByRole("button", { name: "Save display", exact: true }).evaluate((element) => {
+    const r = element.getBoundingClientRect();
+    const viewport = window.visualViewport;
+    const top = viewport?.offsetTop ?? 0;
+    const bottom = top + (viewport?.height ?? window.innerHeight);
+    const footer = element.closest<HTMLElement>(".ent-cc-library-settings-footer")!;
+    const body = element.closest(".modal")!.querySelector<HTMLElement>(".ent-cc-library-settings-scroll")!;
+    return { visible: r.top >= top && r.bottom <= bottom && r.left >= 0 && r.right <= window.innerWidth,
+      hit: element.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)),
+      width: r.width, height: r.height, bodyHeight: body.clientHeight,
+      separate: body.getBoundingClientRect().bottom <= footer.getBoundingClientRect().top + 1,
+      noOverflow: footer.scrollWidth <= footer.clientWidth + 1 };
+  });
+  expect(geometry.visible, "Save stays within the visible viewport without scrolling").toBe(true);
+  expect(geometry.hit, "Save is not hidden behind another element").toBe(true);
+  expect(geometry.width).toBeGreaterThanOrEqual(44);
+  expect(geometry.height).toBeGreaterThanOrEqual(44);
+  expect(geometry.bodyHeight).toBeGreaterThan(40);
+  expect(geometry.separate).toBe(true);
+  expect(geometry.noOverflow).toBe(true);
+}
+
+async function savedImageProperty(page: Page): Promise<string> {
+  return page.evaluate(() => (window as unknown as {
+    kbccBrowserHarness: { libraryDisplaySnapshot(): { imageProperty: string } };
+  }).kbccBrowserHarness.libraryDisplaySnapshot().imageProperty);
 }
 
 async function expectCompactPlaceholder(cover: Locator): Promise<void> {
@@ -117,6 +148,40 @@ for (const device of [
 ]) {
   test.describe(device.name, () => {
     test.use({ hasTouch: device.mobile });
+    test("Save is always reachable and cover property drafts persist only after saving", async ({ page }) => {
+      await open(page, device);
+      // The first synthetic note uses capitalized Cover; default cover resolves
+      // it without any note mutation. The second uses a local Markdown link.
+      await expect(page.locator('.ent-cc-library-card[data-record-path="Reading/Book 0.md"] img')).toHaveJSProperty("naturalWidth", 400);
+      await expect(page.locator('.ent-cc-library-card[data-record-path="Reading/Book 1.md"] img')).toHaveJSProperty("naturalWidth", 400);
+      const settings = page.getByRole("button", { name: "Library settings", exact: true });
+      await settings.click();
+      const dialog = page.getByRole("dialog", { name: "Library settings — Books" });
+      await dialog.getByRole("button", { name: "Display", exact: true }).click();
+      await expectPinnedSave(dialog);
+      await capture(page, `${device.name}-save-first-viewport`);
+      await dialog.getByRole("textbox", { name: "Image property", exact: true }).fill("Cover");
+      await expect(dialog.locator(".ent-cc-library-settings-status")).toContainText("Unsaved changes");
+      expect(await savedImageProperty(page)).toBe("cover");
+      const scroll = dialog.locator(".ent-cc-library-settings-scroll");
+      for (const position of [0, 0.5, 1]) {
+        await scroll.evaluate((element, fraction) => { element.scrollTop = (element.scrollHeight - element.clientHeight) * fraction; }, position);
+        await expectPinnedSave(dialog);
+      }
+      await capture(page, `${device.name}-save-unsaved`);
+      const save = dialog.getByRole("button", { name: "Save display", exact: true });
+      const bounds = (await save.boundingBox())!;
+      if (device.mobile) await page.touchscreen.tap(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+      else await page.mouse.click(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+      await expect(dialog.locator(".ent-cc-library-settings-status")).toHaveText("Display saved");
+      expect(await savedImageProperty(page)).toBe("Cover");
+      await expectPinnedSave(dialog);
+      await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
+      await settings.click();
+      await dialog.getByRole("button", { name: "Display", exact: true }).click();
+      await expect(dialog.getByRole("textbox", { name: "Image property", exact: true })).toHaveValue("Cover");
+      await expectPinnedSave(dialog);
+    });
     test("missing covers are compact and long titles remain fully visible under fixed-height host buttons", async ({ page }) => {
       await open(page, { ...device, galleryTitleStress: true });
       const covers = page.locator(".ent-cc-library-cover.is-placeholder");
@@ -193,6 +258,41 @@ for (const device of [
   });
 }
 
+for (const device of [
+  { name: "phone", mobile: true, width: 390, height: 844 },
+  { name: "tablet", mobile: true, width: 820, height: 1180 },
+  { name: "desktop", mobile: false, width: 1024, height: 420 },
+]) {
+  test(`Library settings ${device.name} keeps Save and focused fields usable in a short visual viewport`, async ({ page }) => {
+    await open(page, device);
+    await page.getByRole("button", { name: "Library settings", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Library settings — Books" });
+    await dialog.getByRole("button", { name: "Display", exact: true }).click();
+    // Synthetic geometry only: not a physical keyboard/VoiceOver/safe-area pass.
+    await page.evaluate(() => {
+      if (!window.visualViewport) throw new Error("Visual viewport unavailable");
+      Object.defineProperty(window.visualViewport, "height", { configurable: true, value: 320 });
+      Object.defineProperty(window.visualViewport, "offsetTop", { configurable: true, value: 20 });
+      window.visualViewport.dispatchEvent(new Event("resize"));
+    });
+    const field = dialog.getByRole("textbox", { name: "Image property", exact: true });
+    await field.fill("Cover");
+    await expect(field).toBeFocused();
+    await expectPinnedSave(dialog);
+    await expect.poll(() => field.evaluate((element) => {
+      const field = element.getBoundingClientRect();
+      const scroll = element.closest(".ent-cc-library-settings-scroll")!.getBoundingClientRect();
+      return field.top >= scroll.top - 1 && field.bottom <= scroll.bottom + 1;
+    })).toBe(true);
+    await capture(page, `${device.name}-short-visual-viewport`);
+    const save = dialog.getByRole("button", { name: "Save display", exact: true });
+    const box = (await save.boundingBox())!;
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await expect(dialog.locator(".ent-cc-library-settings-status")).toHaveText("Display saved");
+    expect(await savedImageProperty(page)).toBe("Cover");
+  });
+}
+
 test.describe("small Cards on a narrow phone", () => {
   test.use({ hasTouch: true });
 
@@ -211,9 +311,9 @@ test.describe("small Cards on a narrow phone", () => {
       for (const index of [4, 5, 6, 7]) await expectFullCardTitle(page.locator(".ent-cc-library-card").nth(index));
       for (const cover of await page.locator(".ent-cc-library-cover.is-placeholder").all()) await expectCompactPlaceholder(cover);
       const blocked = page.locator('.ent-cc-library-card[data-record-path="Reading/Book 3.md"] .ent-cc-library-cover');
-      await expect(blocked).toHaveText("Cover unavailable");
-      await expect(page.locator('.ent-cc-library-card[data-record-path="Reading/Book 4.md"] .ent-cc-library-cover')).toHaveText("Cover unavailable");
-      await expect(page.locator('.ent-cc-library-card[data-record-path="Reading/Book 5.md"] .ent-cc-library-cover')).toHaveText("No cover");
+      await expect(blocked).toHaveText("Online covers unsupported");
+      await expect(page.locator('.ent-cc-library-card[data-record-path="Reading/Book 4.md"] .ent-cc-library-cover')).toHaveText("Image not found in vault");
+      await expect(page.locator('.ent-cc-library-card[data-record-path="Reading/Book 5.md"] .ent-cc-library-cover')).toHaveText("Cover property is empty");
       await expect(page.locator('.ent-cc-library-card[data-record-path="Reading/Book 5.md"] .ent-cc-subject-title')).toHaveCSS("direction", "rtl");
       expect(await page.locator(".ent-cc-shell").evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
       await blocked.scrollIntoViewIfNeeded();
@@ -229,7 +329,7 @@ test("Library settings explain vault-only covers and offer no remote permission 
   await open(page, { mobile: false, width: 1440, height: 960 });
   const externalCover = page.locator('.ent-cc-library-card[data-record-path="Reading/Book 3.md"] .ent-cc-library-cover');
   await expectCompactPlaceholder(externalCover);
-  await expect(externalCover).toHaveText("Cover unavailable");
+  await expect(externalCover).toHaveText("Online covers unsupported");
   await expect(externalCover.locator("img")).toHaveCount(0);
   await expect(page.locator(".ent-cc-library-cover img").first()).toHaveJSProperty("naturalWidth", 400);
   await page.getByRole("button", { name: "Library settings", exact: true }).click();
@@ -252,7 +352,7 @@ test("an image error replaces its portrait frame with a compact readable fallbac
   await expect(cover.locator("img")).toHaveJSProperty("naturalWidth", 400);
   await cover.locator("img").dispatchEvent("error");
   await expect(cover.locator("img")).toHaveCount(0);
-  await expect(cover).toContainText("Cover unavailable");
+  await expect(cover).toContainText("Image could not load");
   await expectCompactPlaceholder(cover);
 });
 

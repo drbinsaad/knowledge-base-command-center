@@ -25,8 +25,10 @@ export class LibrarySettingsModal extends Modal {
   private busy = false;
   private stale = false;
   private error = "";
+  private displaySaved = false;
   private previewEl: HTMLElement | null = null;
   private errorEl: HTMLElement | null = null;
+  private statusEl: HTMLElement | null = null;
   private viewportWindow: Window | null = null;
   private focusTimer: number | null = null;
 
@@ -128,31 +130,39 @@ export class LibrarySettingsModal extends Modal {
   private render(focusLabel?: string): void {
     this.contentEl.empty();
     this.previewEl = null;
+    this.statusEl = null;
     this.contentEl.setAttribute("aria-busy", String(this.busy));
     this.titleEl.setText(`Library settings — ${this.library.name}`);
-    this.contentEl.createEl("p", {
+    // Only this body scrolls; the explicit save action stays in the viewport.
+    const body = this.contentEl.createDiv({ cls: "ent-cc-library-settings-scroll" });
+    body.createEl("p", {
       cls: "ent-cc-modal-lead",
       text: "Customize this library in the current knowledge base. Display changes apply to its existing notes without editing note content.",
     });
     if (this.plugin.isDataReadOnly()) {
-      this.contentEl.createDiv({ cls: "ent-cc-catalog-context", text: "Library settings are read-only because knowledge-base data is protected.", attr: { role: "status" } });
+      body.createDiv({ cls: "ent-cc-catalog-context", text: "Library settings are read-only because knowledge-base data is protected.", attr: { role: "status" } });
     }
-    const nav = this.contentEl.createDiv({ cls: "ent-cc-library-settings-nav", attr: { role: "group", "aria-label": "Library settings sections" } });
+    const nav = body.createDiv({ cls: "ent-cc-library-settings-nav", attr: { role: "group", "aria-label": "Library settings sections" } });
     for (const [section, label] of [["general", "General"], ["display", "Display"], ["creation", "Note creation"]] as const) {
       const button = this.button(nav, label, () => { this.section = section; this.render(label); }, false);
       button.setAttribute("aria-pressed", String(this.section === section));
       button.toggleClass("is-selected", this.section === section);
     }
-    const panel = this.contentEl.createDiv({ cls: "ent-cc-library-settings-panel" });
+    const panel = body.createDiv({ cls: "ent-cc-library-settings-panel" });
     if (this.section === "general") this.renderGeneral(panel);
     else if (this.section === "display") this.renderDisplay(panel);
     else this.renderCreation(panel);
-    this.errorEl = this.contentEl.createDiv({ cls: "ent-cc-form-error", text: this.error, attr: { role: "alert", "aria-live": "assertive" } });
     const footer = this.contentEl.createDiv({ cls: "ent-cc-library-settings-footer" });
-    this.button(footer, "Close", () => this.close(), false);
+    this.errorEl = footer.createDiv({ cls: "ent-cc-form-error", text: this.error, attr: { role: "alert", "aria-live": "assertive" } });
+    this.statusEl = footer.createDiv({ cls: "ent-cc-library-settings-status", attr: { role: "status", "aria-live": "polite", "aria-atomic": "true" } });
+    this.updateDisplayStatus();
+    const actions = footer.createDiv({ cls: "ent-cc-library-settings-actions" });
+    this.button(actions, "Close", () => this.close(), false);
     if (this.section === "display") {
-      this.button(footer, "Reset display", () => void this.saveDisplay(true));
-      this.button(footer, this.busy ? "Saving…" : "Save display", () => void this.saveDisplay(false)).addClass("mod-cta");
+      this.button(actions, "Reset display", () => void this.saveDisplay(true));
+    }
+    if (this.section === "display" || this.hasDisplayChanges()) {
+      this.button(actions, this.busy ? "Saving…" : "Save display", () => void this.saveDisplay(false)).addClass("mod-cta");
     }
     if (focusLabel) {
       const buttons = Array.from(this.contentEl.querySelectorAll<HTMLButtonElement>("button"));
@@ -278,6 +288,25 @@ export class LibrarySettingsModal extends Modal {
     this.previewEl?.setText(this.draft.layout === "list"
       ? "List layout. Your card and image choices are saved for when you switch to Cards."
       : `${this.draft.cardSize} cards · ${this.draft.imageRatio} images · ${this.draft.imageFit === "contain" ? "whole image" : "cropped to fill"} · image property: ${this.draft.imageProperty.trim() || "none"} · title${properties.length ? `, ${properties.join(", ")}` : " only"}`);
+    this.updateDisplayStatus();
+  }
+
+  private hasDisplayChanges(): boolean {
+    return JSON.stringify({
+      ...this.draft,
+      imageProperty: this.draft.imageProperty.trim(),
+      visibleProperties: this.propertyNames(),
+    }) !== this.originalDisplayFingerprint;
+  }
+
+  private updateDisplayStatus(): void {
+    if (!this.statusEl) return;
+    const dirty = this.hasDisplayChanges();
+    this.statusEl.hidden = this.section !== "display" && !dirty;
+    this.statusEl.toggleClass("is-unsaved", dirty);
+    this.statusEl.setText(this.busy ? "Saving display…" : dirty
+      ? "Unsaved changes — save display to apply"
+      : this.displaySaved ? "Display saved" : "No unsaved display changes");
   }
 
   private propertyNames(): string[] {
@@ -300,6 +329,7 @@ export class LibrarySettingsModal extends Modal {
       await this.plugin.setLibraryDisplayProfile(this.library.id, reset ? null : { ...this.draft, imageProperty: this.draft.imageProperty.trim(), visibleProperties: properties });
       this.draft = this.plugin.getLibraryDisplayProfile(this.library.id);
       this.visiblePropertiesText = this.draft.visibleProperties.join(", ");
+      this.displaySaved = true;
       new Notice(reset ? "Library display reset to defaults." : `Saved display settings for ${this.library.name}.`);
     });
   }

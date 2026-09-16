@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.23.1
+
+### Cover setup and mobile Library settings
+
+- Keep Save display visible outside the scrolling settings form, including short viewports, with explicit unsaved/saving/saved feedback. Drafts remain available across settings sections and after a failed save; notes are never changed automatically.
+- Resolve a uniquely matching capitalized cover property (such as `Cover` when the setting is `cover`). An exact name always takes priority; ambiguous case variants require an exact selection.
+- Accept a single-item image-link list and simple local Markdown image links, alongside vault paths and wikilinks. Remote URLs remain blocked, including URLs encoded inside Markdown links.
+- Replace ambiguous missing-cover labels with specific guidance for missing/empty properties, unavailable notes or images, unsupported values, and loading errors. Diagnostics never expose the property value or private path.
+- No data-schema, dependency, online-image permission, or note-content changes.
+- The responsive settings footer adds 1,930 raw / 256 gzip CSS bytes over 0.23.0; bounded CSS limits are now 160,500 raw / 22,500 gzip bytes. JavaScript limits remain unchanged.
+
+### Verification and release boundary
+
+- After the physical-device limitation was disclosed, the maintainer explicitly approved publishing this tested update. Physical iPhone/iPad, native keyboard, safe-area, VoiceOver and controlled two-device Sync remain unverified; this is authorization for 0.23.1 only, not a physical-device Pass.
+- The [0.23.1 evidence record](https://github.com/drbinsaad/knowledge-base-command-center/blob/0.23.1/docs/release-evidence/0.23.1-iphone.md) separates automated synthetic-host validation from unexecuted device checks. Online-cover support remains excluded.
+
 ## 0.23.0
 
 ### Library Cards and local covers
