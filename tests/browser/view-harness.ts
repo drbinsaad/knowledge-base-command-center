@@ -205,7 +205,11 @@ const app = {
       if (!libraryGallery) return { frontmatter: {} };
       const index = files.indexOf(file);
       return { frontmatter: { author: "A. Researcher", reading_status: index % 2 === 0 ? "Reading" : "To read", year: 2026,
-        cover: index === 3 ? "https://covers.invalid/example.png" : index === 4 ? "[[Covers/Missing.png]]" : index === 5 ? "" : "[[Covers/Example.png]]" } };
+        // Exercise the phone-reported capitalization difference in the real
+        // renderer, with synthetic image content only.
+        [index === 0 ? "Cover" : "cover"]: index === 3 ? "https://covers.invalid/example.png"
+          : index === 4 ? "[[Covers/Missing.png]]" : index === 5 ? ""
+            : index === 1 ? "[Example](Covers/Example.png)" : "[[Covers/Example.png]]" } };
     },
   },
 };
@@ -506,6 +510,7 @@ function renderSettingDefinitions(parent: HTMLElement, definitions: SettingDefin
 
 const harness = {
   ready: false,
+  libraryDisplaySnapshot() { return plugin.getLibraryDisplayProfile("reading"); },
   async refresh(replaceData = false) {
     generation += 1;
     if (replaceData) epoch += 1;

@@ -19,6 +19,8 @@ function harness(libraryOverrides: Partial<LibraryDefinition> = {}) {
     } as LibraryDefinition | null,
     profile: normalizeLibraryDisplayProfile(null),
     displayWrites: [] as Array<LibraryDisplayProfile | null>,
+    saveFailure: "",
+    saveGate: null as Promise<void> | null,
   };
   const plugin = {
     app: {
@@ -37,6 +39,8 @@ function harness(libraryOverrides: Partial<LibraryDefinition> = {}) {
     getLibraryDisplayProfile: () => normalizeLibraryDisplayProfile(state.profile),
     getEffectiveLibraryNoteProfile: () => ({ folder: "Books", mode: "empty", templatePath: "" }),
     setLibraryDisplayProfile: async (_id: string, profile: LibraryDisplayProfile | null) => {
+      if (state.saveGate) await state.saveGate;
+      if (state.saveFailure) throw new Error(state.saveFailure);
       state.displayWrites.push(profile && structuredClone(profile));
       state.profile = normalizeLibraryDisplayProfile(profile);
       state.epoch += 1;
@@ -74,6 +78,110 @@ function change(content: FakeElement, name: string, value: string): void {
   element.value = value;
   element.dispatch(element.tagName.toLowerCase() === "select" ? "change" : "input");
 }
+
+function displayStatus(content: FakeElement): FakeElement {
+  const status = content.querySelector(".ent-cc-library-settings-status");
+  assert.ok(status);
+  return status;
+}
+
+test("Library settings keep explicit save actions outside the scrolling content", () => {
+  const { content } = harness();
+  for (const section of ["General", "Display", "Note creation", "Display"]) {
+    button(content, section).click();
+    const body = content.querySelector(".ent-cc-library-settings-scroll");
+    const footer = content.querySelector(".ent-cc-library-settings-footer");
+    assert.ok(body && footer);
+    assert.equal(body.parentElement, content);
+    assert.equal(footer.parentElement, content);
+    assert.equal(body.contains(footer), false);
+    assert.equal(content.querySelectorAll(".ent-cc-library-settings-footer").length, 1);
+    assert.equal(footer.contains(button(content, "Close")), true);
+    if (section === "Display") {
+      assert.equal(footer.contains(button(content, "Save display")), true);
+      assert.equal(footer.contains(button(content, "Reset display")), true);
+      assert.equal(body.contains(input(content, "Visible properties")), true);
+    }
+  }
+});
+
+test("display draft status changes in place and changes reverted to saved values are clean", () => {
+  const { content, dom, state } = harness();
+  button(content, "Display").click();
+  const status = displayStatus(content);
+  assert.equal(status.getAttribute("role"), "status");
+  assert.equal(status.getAttribute("aria-live"), "polite");
+  assert.equal(status.textContent, "No unsaved display changes");
+  const property = input(content, "Image property");
+  property.focus();
+  change(content, "Image property", "book_cover");
+  assert.equal(displayStatus(content), status, "typing does not replace the status or focused field");
+  assert.equal(dom.document.activeElement, property);
+  assert.equal(status.textContent, "Unsaved changes — save display to apply");
+  assert.equal(status.hasClass("is-unsaved"), true);
+  change(content, "Image property", "cover");
+  change(content, "Visible properties", "author, reading_status, author");
+  assert.equal(status.textContent, "No unsaved display changes", "formatting and duplicate names do not create a different profile");
+  assert.equal(status.hasClass("is-unsaved"), false);
+  assert.deepEqual(state.displayWrites, [], "editing and reverting never autosaves");
+});
+
+test("unsaved display choices survive section changes and remain explicitly saveable", async () => {
+  const { actions, content, state } = harness();
+  button(content, "Display").click();
+  change(content, "Image property", "book_cover");
+  change(content, "Layout", "cards");
+  for (const section of ["General", "Note creation"]) {
+    button(content, section).click();
+    assert.equal(displayStatus(content).hidden, false);
+    assert.match(displayStatus(content).textContent, /Unsaved changes/);
+    assert.equal(button(content, "Save display").disabled, false);
+  }
+  assert.deepEqual(state.displayWrites, []);
+  await actions.saveDisplay(false);
+  assert.equal(state.displayWrites.length, 1);
+  button(content, "Display").click();
+  assert.equal(input(content, "Image property").value, "book_cover");
+  assert.equal(input(content, "Layout").value, "cards");
+  assert.equal(displayStatus(content).textContent, "Display saved");
+  assert.equal(displayStatus(content).hasClass("is-unsaved"), false);
+  assert.equal(actions.isCurrent(), true);
+});
+
+test("failed display persistence keeps the dirty draft and successful retry rebaselines it", async () => {
+  const { actions, content, state } = harness();
+  button(content, "Display").click();
+  change(content, "Image property", "book_cover");
+  state.saveFailure = "Synthetic display save failure";
+  await actions.saveDisplay(false);
+  assert.deepEqual(state.displayWrites, []);
+  assert.equal(input(content, "Image property").value, "book_cover");
+  assert.match(content.textContent, /Synthetic display save failure/);
+  assert.match(displayStatus(content).textContent, /Unsaved changes/);
+  assert.equal(button(content, "Save display").disabled, false);
+  state.saveFailure = "";
+  await actions.saveDisplay(false);
+  assert.equal(state.displayWrites.length, 1);
+  assert.equal(displayStatus(content).textContent, "Display saved");
+});
+
+test("a pending save disables mutations and exposes saving status without a second write", async () => {
+  const { actions, content, state } = harness();
+  button(content, "Display").click();
+  change(content, "Image property", "book_cover");
+  let finishSave!: () => void;
+  state.saveGate = new Promise<void>((resolve) => { finishSave = resolve; });
+  const save = actions.saveDisplay(false);
+  assert.equal(button(content, "Saving…").disabled, true);
+  assert.equal(input(content, "Image property").disabled, true);
+  assert.equal(displayStatus(content).textContent, "Saving display…");
+  await actions.saveDisplay(false);
+  assert.deepEqual(state.displayWrites, []);
+  finishSave();
+  await save;
+  assert.equal(state.displayWrites.length, 1);
+  assert.equal(displayStatus(content).textContent, "Display saved");
+});
 
 test("Library settings has discoverable identity and creation controls, with protected built-in deletion explained", () => {
   const active = harness();
@@ -126,11 +234,13 @@ test("visible property count is validated and reset restores defaults without re
   await actions.saveDisplay(false);
   assert.deepEqual(state.displayWrites, []);
   assert.match(content.textContent, /Choose at most 6 visible properties/);
+  assert.match(displayStatus(content).textContent, /Unsaved changes/);
   await actions.saveDisplay(true);
   assert.deepEqual(state.displayWrites, [null]);
   assert.equal(state.legacyPermissionReads, 0);
   assert.equal(input(content, "Layout").value, "list");
   assert.equal(input(content, "Visible properties").value, "author, reading_status");
+  assert.equal(displayStatus(content).textContent, "Display saved");
 });
 
 for (const [name, drift] of [

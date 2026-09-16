@@ -6955,12 +6955,84 @@
   -webkit-line-clamp: 2;
 }
 
-.ent-cc-library-settings-nav,
-.ent-cc-library-settings-footer {
+.ent-cc-library-settings-modal {
+  display: flex;
+  flex-direction: column;
+  height: min(800px, calc(var(--ent-cc-modal-visual-height, 100dvh) - 16px));
+  max-height: calc(var(--ent-cc-modal-visual-height, 100dvh) - 16px);
+  padding: 16px;
+  overflow: hidden;
+  translate: 0 var(--ent-cc-modal-visual-shift, 0);
+}
+
+.ent-cc-library-settings-modal > .modal-content.ent-cc-library-settings {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  max-height: none;
+  padding-bottom: 0;
+  overflow: hidden;
+}
+
+.ent-cc-library-settings-modal > .modal-title {
+  padding-inline-end: 36px;
+  overflow-wrap: anywhere;
+}
+
+.ent-cc-library-settings-modal > .modal-close-button {
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+}
+
+.ent-cc-library-settings-scroll {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  padding: 0 2px 12px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-padding-block: 12px;
+  -webkit-overflow-scrolling: touch;
+}
+
+.ent-cc-library-settings-nav {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   margin-block: 12px;
+}
+
+.ent-cc-library-settings-footer {
+  flex: 0 0 auto;
+  min-width: 0;
+  padding-top: 8px;
+  padding-bottom: max(4px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--background-modifier-border);
+  background: var(--modal-background, var(--background-primary));
+}
+
+.ent-cc-library-settings-footer .ent-cc-form-error:empty { display: none; }
+
+.ent-cc-library-settings-status {
+  margin-bottom: 8px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.ent-cc-library-settings-status.is-unsaved { color: var(--text-accent); }
+
+.ent-cc-library-settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .ent-cc-library-settings-nav button,
@@ -6995,6 +7067,15 @@
 @media (max-width: 600px) {
   .ent-cc-library-card-grid { gap: 10px; padding: 8px 12px 16px; }
   .ent-cc-library-card-size-medium { --ent-cc-card-width: 156px; }
+  .ent-cc-library-settings-modal { padding: 12px; }
+  .ent-cc-library-settings-actions button {
+    flex: 1 1 0;
+    min-width: 0;
+    height: auto;
+    padding: 8px;
+    white-space: normal;
+    line-height: 1.25;
+  }
   .ent-cc-library-settings .setting-item { align-items: stretch; }
   .ent-cc-library-settings .setting-item-control { flex-wrap: wrap; min-width: 0; }
   .ent-cc-library-settings .setting-item-control input,

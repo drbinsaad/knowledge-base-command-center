@@ -20,6 +20,7 @@ import {
   UPDATE_ANNOUNCEMENT_0_21_0,
   UPDATE_ANNOUNCEMENT_0_22_0,
   UPDATE_ANNOUNCEMENT_0_23_0,
+  UPDATE_ANNOUNCEMENT_0_23_1,
   type UpdateAnnouncement,
 } from "../src/update-announcement.ts";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
@@ -315,6 +316,24 @@ test("0.23.0 announces local-only Cards and exact compatibility limits once per 
   assert.equal(planUpdateAnnouncement("0.22.0", "0.23.0", true).announcement, null);
   assert.equal(planUpdateAnnouncement("0.23.0-rc.1", "0.22.0", true).announcement, null);
   assert.equal(planUpdateAnnouncement("0.23.0+local", "0.22.0", true).announcement, null);
+});
+
+test("0.23.1 announces cover setup and explicit saving once without claiming physical-device validation", () => {
+  const upgrade = planUpdateAnnouncement("0.23.1", "0.23.0", true);
+  assert.equal(upgrade.announcement, UPDATE_ANNOUNCEMENT_0_23_1);
+  assert.equal(upgrade.nextHighestObservedVersion, "0.23.1");
+  assert.equal(upgrade.shouldPersist, true);
+  assert.match(UPDATE_ANNOUNCEMENT_0_23_1.intro, /Physical iPhone\/iPad testing remains unverified/u);
+  const highlights = UPDATE_ANNOUNCEMENT_0_23_1.highlights.join("\n");
+  for (const claim of [/Save display/u, /closing without saving discards/u, /Exact names take priority/u,
+    /without exposing private property values/u, /Online URLs are not loaded/u,
+    /No data formats, dependencies or note contents change/u]) assert.match(highlights, claim);
+  assert.equal(UPDATE_ANNOUNCEMENT_0_23_1.releaseUrl, "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.23.1");
+  assert.equal(planUpdateAnnouncement("0.23.1", upgrade.nextHighestObservedVersion, true).announcement, null);
+  assert.equal(planUpdateAnnouncement("0.23.1", null, false).announcement, null);
+  assert.equal(planUpdateAnnouncement("0.23.0", "0.23.1", true).announcement, null);
+  assert.equal(planUpdateAnnouncement("0.23.1-rc.1", "0.23.0", true).announcement, null);
+  assert.equal(planUpdateAnnouncement("0.23.1+local", "0.23.0", true).announcement, null);
 });
 
 test("malformed local version state is bounded and recoverable without trusting partial values", () => {

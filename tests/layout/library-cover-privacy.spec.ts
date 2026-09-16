@@ -78,13 +78,16 @@ const urlInputs = [
   "data:image/png;base64,iVBORw0KGgo=", "blob:https://covers.invalid/synthetic", "app://vault/cover.png",
   "file:///synthetic/cover.png", "obsidian://open?file=cover.png", "about:blank", "custom-scheme:cover.png",
   "[[https://covers.invalid/wikilink.png]]", "![[https://covers.invalid/embed.png|Synthetic]]",
+  "[cover](https://covers.invalid/cover.png)", "![cover](<https://covers.invalid/cover.png>)",
+  "[cover](https%3A%2F%2Fcovers.invalid%2Fcover.png)", "[cover](%2F%2Fcovers.invalid%2Fcover.png)",
 ];
 
 test("all supplied URL schemes stay blocked and never reach a vault resolver or image src", async ({ page, privacy }) => {
   for (const value of urlInputs) {
     expect(await privacy.render(value), value).toBe("blocked");
     await expect(page.locator("img")).toHaveCount(0);
-    await expect(page.locator("main")).toHaveText("Cover unavailable");
+    await expect(page.locator("main")).toHaveText(/^(?:Online covers unsupported|Use a vault image link)$/u);
+    await expect(page.locator("main")).not.toContainText("covers.invalid");
   }
   await page.waitForTimeout(150);
   expect(privacy.requests).toEqual([]);
@@ -108,16 +111,16 @@ test("inert legacy enabled App-local fixture cannot restore remote loading", asy
 
 test("vault paths and wikilinks load a trusted local resource while the browser is offline", async ({ page, context, privacy }) => {
   await context.setOffline(true);
-  for (const value of ["Covers/Example.png", "[[Covers/Example.png]]", "![[Covers/Example.png|Synthetic cover]]", "[[Covers/Example.png#cover]]", "../Covers/Example.png"]) {
+  for (const value of ["Covers/Example.png", "[[Covers/Example.png]]", "![[Covers/Example.png|Synthetic cover]]", "[[Covers/Example.png#cover]]", "../Covers/Example.png", "[Example](Covers/Example.png)", "![Example](<Covers/Example.png>)"]) {
     expect(await privacy.render(value), value).toBe("ready");
     await expect(page.locator("img")).toHaveJSProperty("naturalWidth", 1);
     await expect(page.locator("img")).toHaveAttribute("src", /^data:image\/png;base64,/u);
     await expect(page.locator("img")).toHaveAttribute("loading", "lazy");
   }
   const stats = await privacy.snapshot();
-  expect(stats.localLookups).toHaveLength(5);
+  expect(stats.localLookups).toHaveLength(7);
   expect(stats.localLookups.every((call) => call.sourcePath === "Books/Synthetic private note.md")).toBe(true);
-  expect(stats.resourceLookups).toEqual(Array(5).fill("Covers/Example.png"));
+  expect(stats.resourceLookups).toEqual(Array(7).fill("Covers/Example.png"));
   expect(stats.legacyReads).toBe(0);
   expect(privacy.requests).toEqual([]);
   await capture(page, "local-cover-offline");
@@ -129,12 +132,12 @@ test("changing a local cover to a URL removes the image; missing and invalid loc
   await expect(page.locator("img")).toHaveJSProperty("naturalWidth", 1);
   expect(await privacy.render("https://covers.invalid/changed.png?token=synthetic-only")).toBe("blocked");
   await expect(page.locator("img")).toHaveCount(0);
-  await expect(page.locator("main")).toHaveText("Cover unavailable");
+  await expect(page.locator("main")).toHaveText("Online covers unsupported");
   for (const [value, state, label] of [
-    ["[[Covers/Missing.png]]", "missing", "Cover unavailable"],
-    ["[[Covers/Unsafe.svg]]", "blocked", "Cover unavailable"],
-    ["/synthetic/cover.png", "blocked", "Cover unavailable"],
-    ["", "empty", "No cover"],
+    ["[[Covers/Missing.png]]", "missing", "Image not found in vault"],
+    ["[[Covers/Unsafe.svg]]", "blocked", "Unsupported image type"],
+    ["/synthetic/cover.png", "blocked", "Use a vault image link"],
+    ["", "empty", "Cover property is empty"],
   ]) {
     expect(await privacy.render(value), value).toBe(state);
     await expect(page.locator("img")).toHaveCount(0);

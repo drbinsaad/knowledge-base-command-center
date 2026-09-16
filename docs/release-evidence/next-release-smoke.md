@@ -1,6 +1,30 @@
-# 0.23.0 device and Sync smoke record
+# 0.23.1 device and Sync smoke record
 
-Candidate: 0.23.0, including Library List/Cards, local-vault covers, Library management and section-navigation improvements. This is the active smoke record. Online cover loading is excluded; its original proposal remains deferred and has not completed independent published privacy review.
+Candidate: 0.23.1, including exact-first capitalization-aware cover lookup, local Markdown links and one-item text lists, clearer cover diagnostics, and a persistent Save display footer with explicit draft status. This is the active smoke record. Online cover loading remains excluded; the original proposal remains deferred and has not completed independent published privacy review. Data and transfer formats are unchanged from 0.23.0.
+
+Status: **Physical iPhone/iPad, VoiceOver, software/hardware keyboards, native safe areas/scrolling and controlled two-device Sync checks are Unexecuted.** After the tested cover update and its physical-device limitation were disclosed, the maintainer explicitly approved publishing this update. The [fresh candidate-specific authorization](0.23.1-iphone.md) applies only to 0.23.1; it is not a device Pass and does not reuse the 0.23.0 waiver.
+
+Use a disposable synthetic vault and the [0.23.1 manual checklist](../manual-iphone-release-checklist.md). For any executed row record exact candidate asset hashes, date, device/OS/Obsidian versions, input method, Sync provider where relevant, and sanitized observations. Desktop Chromium/WebKit and simulated software-keyboard viewports execute none of these physical rows. Final versioned gate and publication results are recorded separately in the candidate evidence; they are not assumed here.
+
+| Flow | Pass criteria | Result |
+| --- | --- | --- |
+| Cover-property capitalization | Exact property wins, even when empty. A unique capitalization variant works only if exact is absent; ambiguous names require an exact choice. Other visible properties remain exact-match and no property is rewritten. | Unexecuted |
+| Local link representations | Existing local raster images load from plain paths, wikilinks, local Markdown link/image wrappers with encoded spaces and one-item text lists. Multiple values and invalid inputs produce a clear explanation. | Unexecuted |
+| Diagnostic states | Missing/empty/ambiguous property, invalid value, missing note/metadata/image, unsupported file/link and load failure show distinct useful states without private values, paths, URLs or raw errors. | Unexecuted |
+| Remote-cover denial | Raw/wrapped/encoded online links, protocol-relative URLs, supplied resource URLs and other schemes never issue a request. Legacy permissions, imports, restart and Sync cannot enable them; local-image positive control works. | Unexecuted |
+| Save footer and scrolling | Save display is visible on entry and at all body scroll positions in phone/tablet portrait, landscape and Split View. Final fields, Close and Reset stay reachable; separate controls remain at least 44 points with no overflow. | Unexecuted |
+| Drafts, save failures and protection | Edits do not autosave; section switches preserve drafts and Save. Success persists after reopen, failure/validation retains the draft, close discards an unsaved draft, and stale/read-only states prevent writes. Note hashes remain unchanged. | Unexecuted |
+| Software/hardware keyboards | Early/late inputs and forward/reverse focus remain visible with actual keyboard opening/closing, rotation, safe areas, backgrounding and split resizing. The footer remains reachable. | Unexecuted |
+| Dynamic Type, RTL and VoiceOver | Large text and Arabic/mixed-direction controls, cover states and unsaved/saving/saved announcements remain readable, correctly ordered and operable without clipping. | Unexecuted |
+| Controlled two-device Sync | Both devices run 0.23.1; profiles survive bidirectional handoff, delayed metadata/images, restart and concurrent changes. Stale drafts cannot overwrite changed profiles; Markdown remains unchanged. | Unexecuted |
+| Existing Library and navigation behavior | List/Cards hierarchy, local-image sizing, Library lifecycle, section rail, focused detail and explicit Undo remain functional without note changes. | Unexecuted |
+| Update announcement | Upgrade to 0.23.1 shows the update once with clear local-only/device limits; actions are reachable and the exact immutable release URL resolves after publication. | Unexecuted |
+
+Skipped or waived rows remain **Unexecuted**. The [0.23.1 candidate evidence](0.23.1-iphone.md) separates automated facts, publication status and unverified device scope. Do not include private test materials or real-vault content in public evidence.
+
+## Historical 0.23.0 device and Sync smoke record
+
+Historical candidate: 0.23.0, including Library List/Cards, local-vault covers, Library management and section-navigation improvements. This is not the active smoke record. Online cover loading was excluded; its original proposal remains deferred and has not completed independent published privacy review.
 
 Status: **Physical iPhone/iPad, VoiceOver, software/hardware keyboards, Pencil/trackpad, native scrolling and controlled two-device Sync checks are Unexecuted.** After requesting publication, the maintainer accepted this local-cover-only release with physical iPhone/iPad testing explicitly unverified. The [fresh candidate-specific authorization](0.23.0-iphone.md) is not a physical-device Pass and reuses no prior waiver.
 

@@ -182,7 +182,7 @@ Each knowledge base can retain at most 50 active and archived Libraries.
 
 ### Library settings and book covers
 
-Version 0.23.0 adds **Library settings…** in the Library toolbar and **Manage libraries → Settings…**. Open **General** for Rename, singular label, icon, Archive, Restore, or deletion of an archived custom Library. Built-in Libraries explain why permanent deletion is unavailable. To rename the enclosing knowledge base, such as ENT, use **Manage knowledge bases… → Rename**; changing its display name does not change the fixed clinical preset.
+Introduced in version 0.23.0, **Library settings…** is available in the Library toolbar and **Manage libraries → Settings…**. Open **General** for Rename, singular label, icon, Archive, Restore, or deletion of an archived custom Library. Built-in Libraries explain why permanent deletion is unavailable. To rename the enclosing knowledge base, such as ENT, use **Manage knowledge bases… → Rename**; changing its display name does not change the fixed clinical preset.
 
 In **Display**, select **Cards**, choose an **Image property**, and set card size, image proportions, and fit. **Show whole image** keeps the full book cover visible. Enter up to six comma-separated **Visible properties**, such as `author, reading_status, year`; leaving this empty shows titles only. **Save display** applies only this Library's preferences and creates Undo. **Reset display** restores List, `cover`, medium size, portrait proportions, whole-image fit, and `author, reading_status`. Existing headings, subheadings, record order, search, and row actions remain available; arrangement uses the list presentation.
 
@@ -196,7 +196,13 @@ reading_status: "Reading"
 
 Choose `cover` as the image property. KBCC reads the cached properties and displays the existing image; choosing Cards does not rewrite a note. Local raster covers work offline. Missing, blocked, or unavailable covers display a compact explanation instead of an empty image area. Card titles wrap to show the full title. Cover values and visible property values are not copied into display-profile exports.
 
-Online covers are not supported in 0.23.0: HTTP/HTTPS and other note-supplied URL schemes are not loaded, and there is no Allow external images action. Put the image in your vault and set the cover property to its local link. Display settings, Sync, imports, recovery, Undo and legacy private-test permission values cannot enable remote loading. The [Library display and privacy guide](LIBRARY_DISPLAY_AND_PRIVACY.md) explains local cover setup and the deferred online proposal.
+Version 0.23.1 keeps **Save display** in a fixed footer while the form scrolls. Editing a field does not save automatically: **Unsaved changes** becomes **Display saved** only after a successful save. The saved property name should still be present when you reopen the dialog. Drafts survive switching settings sections and failed saves, but closing the dialog without saving discards them.
+
+Cover lookup first checks the exact property name. If it is absent, one unique capitalization variant such as `Cover` also works. If both `Cover` and `COVER` exist and the setting is `cover`, choose the exact desired name; KBCC will not guess. Empty exact properties are not replaced by another case variant. The image value can be text or a list containing exactly one text link. Simple local Markdown links such as `[Cover](Covers/My%20book.jpg)` also work; links to websites remain blocked.
+
+The card now distinguishes a missing property, an empty property, a note or image not available on this device, an unsupported image/link, and an image that could not load. Open the linked image directly in Obsidian when checking availability; never post private note contents or recovery codes in diagnostic screenshots.
+
+Online covers are not supported in 0.23.1: HTTP/HTTPS and other note-supplied URL schemes are not loaded, and there is no Allow external images action. Put the image in your vault and set the cover property to its local link. Display settings, Sync, imports, recovery, Undo and legacy private-test permission values cannot enable remote loading. The [Library display and privacy guide](LIBRARY_DISPLAY_AND_PRIVACY.md) explains local cover setup and the deferred online proposal. The [0.23.1 device record](release-evidence/0.23.1-iphone.md) explicitly leaves physical-device and controlled two-device Sync checks unverified.
 
 ### Organize a Library
 
@@ -499,7 +505,7 @@ This is not a Sync-status surface. It makes no network request, calls no private
 
 Choose **Clear device-local data…** in this center, or run the command of the same name, when preparing to uninstall or intentionally resetting this device. A confirmation explains that it clears this plugin's App-local route, disclosure, Undo/Redo, local diagnostic facts, update-announcement history, any bounded pending rename-recovery journal, and note-bound return destinations. The rename journal may temporarily contain the vault identity and old/new vault-relative paths after an interrupted organization repair. The separate bounded return-navigation history can contain the vault identity, up to 24 opened-note paths, their originating base and tab, a selected-record path, literal search text entered in KBCC, compact-detail state, and scroll positions. KBCC does not read or copy note bodies into return history, but user-entered search text can itself be sensitive; neither local value syncs. The clear action removes all five plugin-owned App-local values; it does not write synced <code>data.json</code> or change Markdown, attachments, or recovery exports. Tracking remains suppressed until Obsidian restarts, so disable or uninstall in the same session; restart only when you want local tracking to resume.
 
-A legacy external Library-image permission key is the fifth App-local value covered by the local-data reset above. It may remain from a private test build but is inert in 0.23.0, even if cleanup fails or Obsidian restarts. There is no online-image enable control in this release. See [Local data](LOCAL_DATA.md).
+A legacy external Library-image permission key is the fifth App-local value covered by the local-data reset above. It may remain from a private test build but remains inert in 0.23.1, even if cleanup fails or Obsidian restarts. There is no online-image enable control in this release. See [Local data](LOCAL_DATA.md).
 
 ## Settings
 

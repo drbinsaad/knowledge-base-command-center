@@ -1,6 +1,6 @@
 # Library display and privacy
 
-Version **0.23.0 supports local-vault covers only**. Online cover loading and its opt-in controls are not included. The earlier network-capable proposal remains deferred and unapproved; removing it from this release is not a completed privacy review.
+Version **0.23.1 supports local-vault covers only**, retaining the boundary introduced in 0.23.0. Online cover loading and its opt-in controls are not included. The earlier network-capable proposal remains deferred and unapproved; removing it from this release is not a completed privacy review.
 
 ## Library settings
 
@@ -19,6 +19,8 @@ Display configures each Library independently:
 
 Property names are limited to 128 characters and exclude unsafe prototype keys and control characters. Values render as bounded plain text. Settings follow the stable Library ID, so renaming and archiving retain them; permanent deletion removes its display profile. Save and reset use guarded transactions and Undo. Reset display restores these defaults.
 
+Version 0.23.1 pins the explicit Save display action outside the scrolling form and labels unsaved, saving, and saved states. Changes do not autosave or alter note properties. Failed saves retain the draft; closing without saving discards it.
+
 Cards preserve headings, nested subheadings, ordering, Unplaced records, and note actions. Arrange uses the list presentation. This is a KBCC Library display, not an Obsidian <code>.base</code> query or a change to note storage.
 
 ## Local book covers
@@ -33,15 +35,19 @@ reading_status: "Reading"
 
 Choose Cards and image property <code>cover</code>. Existing vault paths, wikilinks, and embedded wikilinks resolve relative to the note through Obsidian. Supported local extensions are AVIF, BMP, GIF, JPEG/JPG, PNG, and WebP. The target must resolve to a current vault file; the browser receives an Obsidian-generated resource URL. Cover references are limited to 2,048 characters.
 
+In 0.23.1, the exact property name takes priority. Only if it is absent may a unique case-insensitive name match; multiple matches require an exact selection. Only cover lookup gets this fallback—other visible metadata fields keep exact matching. One-item text lists and simple local Markdown image/link wrappers are accepted. Markdown destinations are decoded before the local-only checks; URL schemes, absolute paths, unsafe markup, and unsupported file types remain blocked.
+
 HTTP/HTTPS URLs, protocol-relative URLs, local SVG, arbitrary HTML, operating-system absolute paths, and supplied <code>file:</code>, <code>data:</code>, <code>javascript:</code>, or app resource URLs are rejected. An existing online URL can remain in the note property, but KBCC will not load it. Save an image into the vault yourself and change the property to its vault link if you want a cover.
 
 There is no cover discovery service, remote search, automatic download, or note-body scan. KBCC reads the configured properties from cached frontmatter and displays the selected existing image. Missing, invalid, blocked, or failed covers show compact placeholders; a **No note** subject has no note properties to read. Local covers work offline. Changing display preferences does not write note properties, move files, or create image files.
+
+Cover diagnostics explain missing/empty or ambiguous properties, wrong value types, unavailable notes/metadata/images, unsupported files, remote links, and load failures. The messages and accessibility descriptions do not include the property value, image URL, private path, or a caught error message.
 
 Card dimensions, lazy loading, and image fitting do not cap decoded-image memory. Large or animated local images can still affect performance; use reasonably sized cover files and verify on your devices.
 
 ## Legacy private-test state
 
-A private pre-release build offered external images and could leave <code>ent-vault-command-center.library-images.v1</code> in vault-specific App-local storage. Version 0.23.0 does not use that value to authorize image loads, does not offer an enable action, and does not copy it into plugin data, Sync state, exports, recovery or Undo. A previously allowed value cannot enable remote covers.
+A private pre-release build offered external images and could leave <code>ent-vault-command-center.library-images.v1</code> in vault-specific App-local storage. Like 0.23.0, version 0.23.1 does not use that value to authorize image loads, does not offer an enable action, and does not copy it into plugin data, Sync state, exports, recovery or Undo. A previously allowed value cannot enable remote covers.
 
 **Clear device-local data** includes cleanup of this inert legacy key along with the other plugin-owned App-local values. Removing it does not clear browser cookies/cache or undo requests previously sent by a private test build. See [Local data](LOCAL_DATA.md).
 
@@ -61,10 +67,10 @@ Other export privacy boundaries still apply: Workspace can contain configured va
 
 ## Deferred online-cover proposal
 
-The earlier proposal allowed browser-loaded HTTPS covers after a separate opt-in scoped to one vault on one device. It described request IP/URL exposure, cookies/cache/redirects, referrer suppression without anonymity, persistence failures and revocation limits. It was explored in a private build and draft review, but **independent public privacy review was not completed**. That feature is excluded from 0.23.0.
+The earlier proposal allowed browser-loaded HTTPS covers after a separate opt-in scoped to one vault on one device. It described request IP/URL exposure, cookies/cache/redirects, referrer suppression without anonymity, persistence failures and revocation limits. It was explored in a private build and draft review, but **independent public privacy review was not completed**. That feature is excluded from both 0.23.0 and 0.23.1.
 
 Any future proposal must obtain independent review of the final image-loading implementation and publish the review before release, as required by [Contributing](../CONTRIBUTING.md#non-negotiable-boundaries). Default-denial tests or acceptance of unverified physical-device scope cannot waive that requirement.
 
 ## Device evidence
 
-Physical iPhone/iPad keyboard, safe-area, image-loading, VoiceOver, image-memory and controlled two-device Sync/import checks remain separately recorded in the [0.23.0 evidence record](release-evidence/0.23.0-iphone.md). The maintainer accepted publication with that physical scope unverified; it is not a device Pass. Use synthetic notes and owned images for future checks, and never publish private vault content or recovery files.
+Physical iPhone/iPad keyboard, safe-area, image-loading, VoiceOver, image-memory and controlled two-device Sync/import checks remain separately recorded in the [0.23.1 evidence record](release-evidence/0.23.1-iphone.md). After the remaining gap was disclosed, the maintainer explicitly approved publication of this tested update with that physical scope unverified. This is fresh authorization for 0.23.1, not a device Pass or reuse of the historical [0.23.0 record](release-evidence/0.23.0-iphone.md). Use synthetic notes and owned images for future checks, and never publish private vault content or recovery files.

@@ -2,11 +2,32 @@
 
 Complete this checklist on a physical iPhone before tagging a release that changes search, navigation, modals, import/export, Sync handling, or mobile styles. Simulator and automated DOM results may accompany this record but do not replace it.
 
-## 0.23.0 Library Cards, local covers and navigation
+## 0.23.1 cover setup, diagnostics and persistent Save
+
+Status: **Maintainer-authorized waiver — Unverified — not executed on a physical iPhone or iPad.** After the tested cover update and its remaining physical-device gap were disclosed, the maintainer explicitly approved publishing this update. The [fresh 0.23.1 record](release-evidence/0.23.1-iphone.md) applies only to this candidate. It does not reuse the 0.23.0 waiver or mark any device check as Pass. Online covers remain excluded; no online-cover review or approval is added.
+
+Use a disposable synthetic vault and the active [0.23.1 device and Sync smoke record](release-evidence/next-release-smoke.md). Before executing a row, record exact candidate asset hashes, date, device/OS/Obsidian versions, input method and Sync provider where relevant. All rows below remain **Unexecuted**; simulated viewport and desktop Chromium/WebKit results are not physical-device results. Final versioned gate results belong in the separate evidence record, not an assumed checklist pass.
+
+| Flow | Physical-device check | Result |
+| --- | --- | --- |
+| Cover-property capitalization | Verify exact `cover` takes priority over `Cover`, including an empty exact value. A unique case variant works only when exact is absent; multiple variants require an exact choice. Unrelated visible metadata keeps exact matching. No note property is rewritten. | Unexecuted |
+| Local links and one-item lists | Render existing local raster images from vault paths, wikilinks, simple local Markdown links/images with encoded spaces, and a list containing exactly one text link. Multi-item lists and invalid values show an explanation without guessing. | Unexecuted |
+| Cover diagnostics | Distinguish missing, empty and ambiguous properties, wrong value types, missing note/metadata/image, unsupported format/link and load failure. Confirm labels and accessibility descriptions expose no property value, private path, image URL or raw error. | Unexecuted |
+| Remote-cover denial | Raw, Markdown-wrapped and encoded HTTP/HTTPS, protocol-relative, supplied resource and other scheme URLs remain blocked with no request or enable control. Legacy permission values, restart, import and Sync cannot enable them. Confirm a local-image positive control still loads. | Unexecuted |
+| Persistent Save footer | In iPhone/iPad portrait, landscape and Split View, Save display is visible before scrolling and at the form's top/middle/end. Body content and final fields scroll clear of the footer; Close, Reset and Save retain separate 44-point targets and no horizontal overflow. | Unexecuted |
+| Draft and failure state | Editing shows Unsaved changes without saving; section switches preserve the draft and save action. Save success shows Display saved and survives reopen. Invalid/failed saves retain the draft; closing without saving discards it. Stale or read-only drafts cannot write. Compare synthetic Markdown hashes before and after. | Unexecuted |
+| Keyboard, focus and safe areas | With software and physical hardware keyboards, focus early/late fields and traverse forward/backward. Repeat after rotation, keyboard changes, background/foreground and Split View resizing; focused fields and footer actions must stay reachable within the native safe area. | Unexecuted |
+| Large text, RTL and VoiceOver | Repeat with largest supported Dynamic Type and Arabic/mixed-direction names. Read cover diagnostics and draft/saving/saved announcements; ensure natural traversal, separate actions, complete labels and no clipping. | Unexecuted |
+| Controlled two-device Sync and restart | Run 0.23.1 on both synthetic installations. Verify display choices after handoff, delayed metadata/image arrival, restart and concurrent edits; stale save attempts must fail safely without rewriting notes. Schema and transfer formats remain those introduced in 0.23.0. | Unexecuted |
+| Update announcement | Upgrade a disposable installation to 0.23.1. Verify one-time display, readable local-only scope/device limits, reachable actions and exactly `https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.23.1` after publication. | Unexecuted |
+
+Skipped or waived rows stay **Unexecuted**, not Pass. Keep any future observations distinct from the unverified status at publication authorization. No physical-device tester has signed this candidate.
+
+## Historical 0.23.0 Library Cards, local covers and navigation
 
 Status: **Maintainer-authorized waiver — Unverified — not executed on a physical iPhone or iPad.** After requesting publication, the maintainer accepted releasing the UI, Cards and local-vault images with online loading excluded and real iPhone/iPad testing explicitly unverified. The [fresh 0.23.0 record](release-evidence/0.23.0-iphone.md) applies for this candidate only; it is not a physical-device Pass and no earlier waiver is reused. The deferred online-cover proposal has not completed independent published privacy review and is not included in this release.
 
-Use the active [device and Sync smoke record](release-evidence/next-release-smoke.md), a disposable synthetic vault and the exact candidate hashes. Record device, operating-system and Obsidian versions before executing any row. In addition to the retained checklist below:
+This section and its authorization are historical, not 0.23.1 sign-off. Use the historical 0.23.0 section of the [device and Sync smoke record](release-evidence/next-release-smoke.md), a disposable synthetic vault and the exact candidate hashes. Record device, operating-system and Obsidian versions before executing any row. In addition to the retained checklist below:
 
 1. On iPhone and iPad in portrait, landscape and Split View, switch a Library between List and Cards. Verify full titles, compact missing-cover cards, configured card/image sizes and local-vault PNG/JPEG/WebP/GIF/AVIF/BMP covers. Scroll deeply; native chrome, sticky controls and modal footers must not hide the intended content or focus.
 2. Use a synthetic note with an HTTP/HTTPS image property and, separately, a fixture containing the old private-build image allow value. Confirm no image request, online-enable action or remote cover appears, including after restart, Sync delivery and import. Verify a local-vault image still renders and private notes are not changed.
