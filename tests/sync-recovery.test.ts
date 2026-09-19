@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { Notice, TFile, TFolder } from "obsidian";
 import EntVaultCommandCenterPlugin from "../src/main.ts";
-import { createDefaultStore, migrateData, type PluginStore } from "../src/model.ts";
+import { createDefaultStore, createKnowledgeBaseEntry, migrateData, type PluginStore } from "../src/model.ts";
 import { ClearDeviceLocalDataModal, SyncRecoveryCenterModal } from "../src/sync-recovery-modal.ts";
 import {
   MAX_SYNC_RECOVERY_ARTIFACT_ENTRIES,
@@ -123,6 +123,76 @@ test("artifact inventory is bounded and marks its count as a lower bound", () =>
   assert.equal(result.conflictRescueCount, MAX_SYNC_RECOVERY_ARTIFACT_ENTRIES);
   assert.equal(result.scanTruncated, true);
   assert.equal(summarizeRecoveryArtifacts(files, Number.MAX_SAFE_INTEGER).scannedEntries, MAX_SYNC_RECOVERY_ARTIFACT_ENTRIES);
+});
+
+test("artifact inventory matches configured direct children once, without including unrelated or nested files", () => {
+  const path = "Custom/Exports/knowledge-base-command-center-conflict-2026-08-11T10-20-30-000Z.json";
+  const result = summarizeRecoveryArtifacts([
+    artifact(path, 30), artifact(path, 30),
+    artifact(`Custom/Exports/nested/${path.split("/").at(-1)}`, 80),
+    artifact(`Elsewhere/${path.split("/").at(-1)}`, 90),
+  ], 2000, ["Custom/Exports"]);
+  assert.equal(result.conflictRescueCount, 1);
+  assert.equal(result.newestConflictRescueAt, 30);
+});
+
+test("snapshot discovers current, archived and legacy export folders without note or JSON reads", async () => {
+  const data = migrateData(null);
+  data.settings.exportsFolder = "Custom/Exports";
+  const store = createDefaultStore(data, 100, "vault-custom-recovery");
+  const archived = createKnowledgeBaseEntry(migrateData(null), "archived-research", 1);
+  archived.archivedAt = 5;
+  archived.data.settings.exportsFolder = "Old exports";
+  store.bases.push(archived);
+  const { plugin, noteBodyReads } = pluginHarness(store);
+  await plugin.loadPluginData();
+  const folderPaths = ["Custom/Exports", "Old exports", "Knowledge Base Command Center Exports"];
+  const folders = new Map(folderPaths.map((path, index) => {
+    const file = new TFile(`${path}/knowledge-base-command-center-conflict-2026-08-11T10-20-30-000Z.json`);
+    file.stat.mtime = 10 + index;
+    const backup = new TFile(`${path}/knowledge-base-command-center-backup-2026-08-11T10-20-30-000Z.json`);
+    backup.stat.mtime = 20 + index;
+    return [path, new TFolder(path, [file, backup])];
+  }));
+  plugin.app.vault.getAbstractFileByPath = (path) => folders.get(path) ?? null;
+  const result = plugin.getSyncRecoveryCenterSnapshot();
+  assert.equal(result.artifactInspectionAvailable, true);
+  assert.equal(result.conflictRescueCount, 3);
+  assert.equal(result.newestConflictRescueAt, 12);
+  assert.equal(result.newestRecoveryExportAt, 22);
+  assert.equal(noteBodyReads(), 0);
+  assert.doesNotMatch(JSON.stringify(result), /Custom\/Exports|Old exports/u);
+  folders.delete("Knowledge Base Command Center Exports");
+  const withoutHistoricalDefault = plugin.getSyncRecoveryCenterSnapshot();
+  assert.equal(withoutHistoricalDefault.artifactInspectionAvailable, true, "an unused legacy folder need not exist");
+  assert.equal(withoutHistoricalDefault.conflictRescueCount, 2);
+});
+
+test("missing configured export folders are unavailable rather than a confirmed zero", async () => {
+  const data = migrateData(null);
+  data.settings.exportsFolder = "Not synced yet";
+  const { plugin, noteBodyReads } = pluginHarness(createDefaultStore(data, 100, "vault-missing-recovery"));
+  await plugin.loadPluginData();
+  assert.equal(plugin.getSyncRecoveryCenterSnapshot().artifactInspectionAvailable, false);
+  plugin.app.vault.getAbstractFileByPath = () => { throw new Error("metadata unavailable"); };
+  assert.equal(plugin.getSyncRecoveryCenterSnapshot().artifactInspectionAvailable, false);
+  assert.equal(noteBodyReads(), 0);
+});
+
+test("multiple export folders share one 2000-entry metadata scan budget", async () => {
+  const data = migrateData(null);
+  data.settings.exportsFolder = "Custom";
+  const { plugin } = pluginHarness(createDefaultStore(data, 100, "vault-bounded-recovery"));
+  await plugin.loadPluginData();
+  const children = Array.from({ length: 1100 }, (_, index) => new TFile(validConflict(index).path));
+  const folders = new Map([
+    ["Custom", new TFolder("Custom", children.map((file) => new TFile(file.path.replace("Knowledge Base Command Center Exports", "Custom"))))],
+    ["Knowledge Base Command Center Exports", new TFolder("Knowledge Base Command Center Exports", children)],
+  ]);
+  plugin.app.vault.getAbstractFileByPath = (path) => folders.get(path) ?? null;
+  const result = plugin.getSyncRecoveryCenterSnapshot();
+  assert.equal(result.conflictRescueCount, 2000);
+  assert.equal(result.conflictRescueCountIsLowerBound, true);
 });
 
 test("device-local state is validated, bounded, and never treats a timestamp-less outcome as observed", () => {

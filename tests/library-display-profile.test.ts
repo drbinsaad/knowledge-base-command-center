@@ -84,14 +84,14 @@ test("v15 migration preserves organization and introduces bounded semantic displ
   old.version = 15;
   delete (old.settings as Record<string, unknown>).libraryDisplayProfiles;
   const data = migrateData(old);
-  assert.equal(data.version, 16);
+  assert.equal(data.version, DATA_VERSION);
   assert.deepEqual(data.settings.libraryDisplayProfiles, {});
   assert.equal(data.portableIndex.libraries[0]?.name, "Books");
   const changed = structuredClone(data);
   changed.settings.libraryDisplayProfiles["library-books"] = gallery;
   assert.equal(pluginDataSemanticallyEqual(data, changed), false);
-  assert.equal(STORE_VERSION, 16);
-  assert.equal(DATA_VERSION, 16);
+  assert.equal(STORE_VERSION, 17);
+  assert.equal(DATA_VERSION, 17);
   const store = createDefaultStore(changed, 100);
   assert.deepEqual(migrateStore(store).bases[0]?.data.settings.libraryDisplayProfiles, changed.settings.libraryDisplayProfiles);
   delete old.indexFolderSources;
@@ -124,7 +124,7 @@ test("Workspace and portable exports carry display Library dependencies without 
   assert.deepEqual(Object.keys(workspace.settings.libraryDisplayProfiles), ["library-books"]);
   assert.deepEqual(parseWorkspaceConfig(workspace).settings.libraryDisplayProfiles["library-books"], gallery);
   const value = parsePortableExport(createPortableExport(source, [], workspaceSelection, exportedAt));
-  assert.equal(value.version, 6);
+  assert.equal(value.version, 7);
   assert.deepEqual(value.components.index?.libraries?.map((library) => library.id), ["library-books"]);
   assert.deepEqual(value.components.index?.subjects, []);
   assert.deepEqual(selectionAvailableForExport(value).libraryIds, []);
@@ -137,7 +137,7 @@ test("Workspace and portable exports carry display Library dependencies without 
   assert.throws(() => parsePortableExport(missing), /without a definition/i);
   assert.equal("allowRemoteImages" in target.settings, false);
   assert.throws(() => parseWorkspaceConfig({ ...workspace, version: 4 }), /Unsupported/i);
-  assert.throws(() => parsePortableExport({ ...value, version: 7 }), /Unsupported/i);
+  assert.throws(() => parsePortableExport({ ...value, version: 8 }), /Unsupported/i);
 });
 
 test("workspace profile imports keep destination IDs, archive decisions and unrelated Library layouts", () => {
@@ -196,7 +196,7 @@ test("current recovery restores display settings while v11 recovery preserves de
   const source = libraryData();
   source.layoutSnapshots = [snapshotPersonal(source, "Shelf", true, true)];
   const backup = createPersonalBackup(source, exportedAt, "vault-test", "base-default", "Test");
-  assert.equal(backup.version, 12);
+  assert.equal(backup.version, 13);
   const parsed = parsePersonalBackup(backup);
   assert.deepEqual(parsed.libraryDisplayProfiles, source.settings.libraryDisplayProfiles);
   assert.deepEqual(parsed.layoutSnapshots[0]?.settings?.libraryDisplayProfiles, source.settings.libraryDisplayProfiles);
@@ -212,7 +212,7 @@ test("current recovery restores display settings while v11 recovery preserves de
   const malformed = { ...backup } as Record<string, unknown>;
   delete malformed.libraryDisplayProfiles;
   assert.throws(() => parsePersonalBackup(malformed), /missing its Library display settings/i);
-  assert.throws(() => parsePersonalBackup({ ...backup, version: 13 }), /Unsupported/i);
+  assert.throws(() => parsePersonalBackup({ ...backup, version: 14 }), /Unsupported/i);
 });
 
 test("raw display profiles cannot evade load, transfer or pre-save bounds", () => {

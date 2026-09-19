@@ -57,7 +57,7 @@ If ENT is the knowledge-base name, use **Manage knowledge bases… → Rename** 
 
 Open **Library settings… → Display**, select Cards, and choose the property containing the cover, usually `cover`. The local image must exist in this vault; a note property such as `cover: "[[Covers/My book.jpg]]"` works. SVGs and arbitrary file/HTML links are not supported as local covers. Increase **Card size**, choose Portrait proportions, and use **Show whole image** to avoid cropping. A **No note** placeholder has no frontmatter image until deliberately linked.
 
-Online cover URLs are not supported in 0.23.0. They show an unavailable-cover placeholder without a request, and there is no permission switch to enable them. Save an image you may use into the vault and change the note property to its vault link. A previously allowed value from a private test build is inert; Sync, imports and recovery cannot enable online images. See [Library display and privacy](LIBRARY_DISPLAY_AND_PRIVACY.md).
+Online cover URLs are not supported in 0.24.0. They show an unavailable-cover placeholder without a request, and there is no permission switch to enable them. Save an image you may use into the vault and change the note property to its vault link. A previously allowed value from a private test build is inert; Sync, imports and recovery cannot enable online images. See [Library display and privacy](LIBRARY_DISPLAY_AND_PRIVACY.md).
 
 ## The Organizer shows a README or every note in a folder
 
@@ -157,7 +157,7 @@ The plugin detected unrecognized, damaged, or newer plugin data and intentionall
 5. Update every device to the same compatible plugin build; a matching version label alone does not identify an unreleased source build.
 6. Report the issue without attaching private plugin data publicly.
 
-An older device can describe the version-16 store with schema-16 knowledge-base data as a migration failure. That is expected downgrade protection. Every synced device needs 0.23.0 or a newer compatible build before editing resumes. Public 0.22.0 cannot edit schema-16 data. A writable downgrade requires a complete compatible pre-upgrade backup; do not lower schema fields or replace only the plugin assets over newer data.
+An older device can describe the version-17 store with schema-17 knowledge-base data as a migration failure. That is expected downgrade protection. Every synced device needs 0.24.0 or a newer compatible build before editing resumes. Public 0.23.1 cannot edit schema-17 data. A writable downgrade requires matching pre-upgrade organization backups and a complete compatible vault backup; do not lower schema fields or replace only plugin assets over newer data. Stop edits and coordinate Sync across devices before any restore, retain the current state separately, and expect later organization to be lost if rolled back. Do not overwrite a live synced store to dismiss the warning.
 
 ## Export/import center is in salvage mode
 
@@ -220,7 +220,7 @@ Removing the folder removes <code>data.json</code> and the synced settings and o
 
 Before uninstalling, export current private recovery for every available base, temporarily restore any archived base that needs recovery, and back up the complete vault including <code>.obsidian</code>.
 
-The fifth App-local key is an inert legacy external-image permission value from private test builds. The clear action attempts to remove it, but failure cannot enable online covers in 0.23.0, including after restart. Cleanup cannot recall requests previously sent by a private build. See [Local data](LOCAL_DATA.md).
+The fifth App-local key is an inert legacy external-image permission value from private test builds. The clear action attempts to remove it, but failure cannot enable online covers in 0.24.0, including after restart. Cleanup cannot recall requests previously sent by a private build. See [Local data](LOCAL_DATA.md).
 
 ## Ask for help
 

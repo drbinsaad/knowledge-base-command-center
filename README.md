@@ -13,7 +13,9 @@ _Abstract AI-generated concept artwork, not a product screenshot. A current rend
 
 Build each Index from notes you explicitly add and, when you want dynamic folder membership, folders you explicitly link. A default new-note folder controls storage only: putting a note there never enrolls it in the Index by itself. From there you arrange, group, nest, pin, and classify records into Libraries and Collections — and all of that organization lives in the plugin's own data, not in your Markdown. Your files stay exactly where you put them, with the frontmatter you wrote. One installation can hold several independent knowledge bases, so research, study, and project work never bleed into each other. The plugin is local-first, with no account or telemetry. Library covers load only from existing images in your vault; online cover URLs are not loaded.
 
-**New in 0.23.1:** Easier local-cover setup, clearer cover diagnostics, and a persistent **Save display** footer with explicit draft status. Library settings, Cards and improved navigation introduced in 0.23.0 still use **local-vault images only**. Online cover loading is excluded; the [earlier online-cover proposal](docs/LIBRARY_DISPLAY_AND_PRIVACY.md#deferred-online-cover-proposal) remains deferred and unapproved.
+**New in 0.24.0:** Visible **New collection** and **Add notes** actions, searchable Collection checkboxes and inline creation in the note Organizer, atomic Review → Save with Undo, Collection-scoped searches, and safer note-creation and recovery workflows. Library Cards still use **local-vault images only**. Online cover loading is excluded; the [earlier online-cover proposal](docs/LIBRARY_DISPLAY_AND_PRIVACY.md#deferred-online-cover-proposal) remains deferred and unapproved.
+
+**Upgrade all syncing devices to 0.24.0.** Organization format 17 preserves Collection search filters; older builds protect this newer organization read-only. Back up the complete vault and plugin data before upgrading. A writable downgrade requires matching older plugin assets and the complete compatible pre-upgrade organization snapshot, not just replacing the plugin files.
 
 **Quick links:** [Getting started](docs/GETTING_STARTED.md) · [User guide](docs/USER_GUIDE.md) · [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Apple Shortcuts](docs/APPLE_SHORTCUT.md) · [Templates](templates/README.md) · [Support](SUPPORT.md)
 
@@ -82,7 +84,7 @@ Export your current organization first. Then run **Knowledge Base Command Center
 
 The plugin folder contains `data.json` with synced knowledge bases, settings, Libraries, Collections, pins, hierarchy, and named snapshots. Device-only routes, collapsed sections, Undo/Redo history, local Sync/Recovery facts, and the highest plugin version observed for one-time update announcements are stored through Obsidian's App-local storage outside that folder, so deleting only the folder does not reliably remove them. A third, bounded rename-recovery journal may temporarily contain the vault identity and old/new vault-relative paths until an interrupted organization repair is durably completed. A fourth, bounded return-navigation history can contain the vault identity, up to 24 opened-note paths, their originating base and tab, a selected-record path, literal search text entered in KBCC, compact-detail state, and scroll positions so a note can return to the same KBCC page after restart. KBCC does not read or copy note bodies into this history, but user-entered search text can itself be sensitive; the history is not synced. The clear command removes all five plugin-owned App-local values without changing `data.json`, Markdown notes, attachments, or recovery export files, and local tracking stays suppressed until Obsidian restarts — disable or uninstall in that same session. If you already removed the plugin without clearing them, reinstall and enable the same or a newer release, run the clear command, then remove it again.
 
-The fifth App-local key is a legacy external-image permission value that may remain from a private test build. It remains inert in 0.23.1 and cannot enable online covers, including after restart. **Clear device-local data** includes its cleanup. See [Local data](docs/LOCAL_DATA.md).
+The fifth App-local key is a legacy external-image permission value that may remain from a private test build. It remains inert in 0.24.0 and cannot enable online covers, including after restart. **Clear device-local data** includes its cleanup. See [Local data](docs/LOCAL_DATA.md).
 
 ## Quick start
 
@@ -120,7 +122,7 @@ Choose **Arrange** to build a separate visual hierarchy — group, nest, reorder
 
 Choose **Organize** in the Command Center, or run **Organize vault notes across knowledge bases…**, to organize existing Markdown notes without changing their files. In this workflow, **knowledge base** or **Base** always means an independent KBCC knowledge base—not an Obsidian `.base` file.
 
-For one open note, activate its editor **KBCC organization indicator** or run **Organize current note across knowledge bases…**. The shorter **Choose location → Review** flow prefills its existing Index or Library placement. Choose the knowledge base, **Index heading**, and **Under heading or note** destination; nested choices show full breadcrumbs and may name an unresolved placeholder. Large parent lists offer **Find a heading or note**. **More options: Collections and other bases** exposes additional destinations. Choose **Review placement**, then **Save organization**; an unchanged review offers **Done — no changes needed**.
+For one open note, activate its editor **KBCC organization indicator** or run **Organize current note across knowledge bases…**. The shorter **Choose location → Review** flow prefills its existing Index or Library placement. Choose the knowledge base, **Index heading**, and **Under heading or note** destination; nested choices show full breadcrumbs and may name an unresolved placeholder. Large parent lists offer **Find a heading or note**. Collections are visible as searchable checkboxes, including current memberships; create a collection or nested subheading inline without leaving the flow. More options exposes additional bases. Choose **Review placement**, then **Save organization**; an unchanged review offers **Done — no changes needed**. Collection-only edits preserve the primary Index/Library placement, and Cancel creates no draft collections.
 
 The full three-step Notes → Destinations → Review flow can:
 
@@ -144,6 +146,8 @@ The Organizer changes **existing** Markdown notes' organization; it does not bul
 ### Collections with nested subheadings
 
 Collections are reusable personal lists spanning the Index and Libraries. A record can appear in several Collection headings without being duplicated, moved, or reclassified.
+
+Open **My Collections → New collection** or **Add notes**. Every collection and nested subheading menu offers **Add notes here** and **Create note here**, including collapsed or populated destinations. The destination picker can create another collection even when others already exist. Inline Organizer creation stays a draft until Review → Save; structure and memberships commit together and one protected Undo restores the previous state. Collection searches include nested members and retain their scope when returning from a note.
 
 > **New in 0.13.0.** Subheadings can now contain further subheadings, in both the Collections and Libraries tabs, up to **five levels deep counting the top heading as level 1**. **Add subheading** appears on any node below that cap. Removing a nested node promotes its records and child subheadings to its parent rather than discarding them. Move, rename, drag-and-drop, collapse/expand, and Quick entry all work at any depth, and pickers label each node with its full path such as *Heading / Sub / Sub-sub*. On touch devices, **Move under…** and **Outdent one level** in the subheading menus rearrange the headings themselves; record grips move subjects between them. Portable exports carry the nested layout; older plugin builds that receive it show read-only protection instead of silently flattening it.
 
@@ -215,7 +219,7 @@ If **Workspace settings** are selected with Index, Libraries, Collections, or St
 
 **Multi-base portfolio transfer** bundles up to 50 independent portable packages behind one bounded manifest. Map each source to a new or existing compatible base, choose Merge or Replace per destination, select components per source, and inspect an exact immutable change plan before applying it. Replace requires a displayed typed phrase and writes a same-vault recovery for every affected destination before the atomic mutation. The preview reports base, heading, subject, Library, conflict, folder/template fallback, and explicit will-not-change categories.
 
-Portable packages created by version 0.13.0 through 0.22.0 use format version 5, which adds nested subheading layouts to version 4’s stable Library identities. The 0.12.1 release used format version 4; earlier formats remain supported. Portable packages created by version 0.23.0 through 0.23.1 use format version 6, with display profiles in Workspace format 3. The plugin reads portable versions 1 through 6. Older builds refuse newer packages, so update every syncing device before applying a new export.
+Portable packages created by version 0.13.0 through 0.22.0 use format version 5, which adds nested subheading layouts to version 4’s stable Library identities. The 0.12.1 release used format version 4; earlier formats remain supported. Portable packages created by version 0.23.0 through 0.23.1 use format version 6, with display profiles in Workspace format 3. Portable packages created by version 0.24.0 use format version 7, with Collection-scoped saved searches in saved views component 2; Workspace remains format 3. The plugin reads portable versions 1 through 7. Older builds refuse newer packages, so update every syncing device before applying a new export.
 
 Read [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md) before importing, replacing, or restoring.
 
@@ -251,7 +255,7 @@ On iPhone and iPad, a smaller header keeps the base switcher, **Add**, and **Det
 
 The bundle is built to a 2018 JavaScript baseline so it can run on older mobile web views, and that baseline is enforced rather than assumed: the compiler is pinned to exactly that language level, so using a newer built-in method fails the build instead of shipping unpolyfilled. Version 0.13.1 fixed four such methods that had been reaching devices — the most serious ran while classifying note paths and needed iOS Safari 15.4 or newer.
 
-Physical-device claims are kept separate from automated coverage: see the [0.23.1 device and Sync waiver record](docs/release-evidence/0.23.1-iphone.md), the historical completed-but-partial [0.10.0 iPhone evidence note](docs/release-evidence/0.10.0-iphone.md), and the [manual iPhone release checklist](docs/manual-iphone-release-checklist.md) rather than assuming any release checklist passed. The historical [0.19.1 record](docs/release-evidence/0.19.1-iphone.md) separately identifies its supplemental Mac Obsidian startup-cache recovery coverage and its limits. Physical iPad/iPhone, VoiceOver, and controlled two-device Sync remain unverified for 0.23.1; its authorization is fresh and does not reuse the 0.23.0 waiver.
+Physical-device claims are kept separate from automated coverage: see the [0.24.0 device and Sync waiver record](docs/release-evidence/0.24.0-iphone.md), the historical completed-but-partial [0.10.0 iPhone evidence note](docs/release-evidence/0.10.0-iphone.md), and the [manual iPhone release checklist](docs/manual-iphone-release-checklist.md) rather than assuming any release checklist passed. The historical [0.19.1 record](docs/release-evidence/0.19.1-iphone.md) separately identifies its supplemental Mac Obsidian startup-cache recovery coverage and its limits. Physical iPad/iPhone, VoiceOver, and controlled two-device Sync remain unverified for 0.24.0; its authorization is fresh and does not reuse an earlier waiver.
 
 ### Right-to-left and bidirectional text
 
@@ -320,7 +324,7 @@ Step-by-step Shortcuts instructions, placement options, and troubleshooting are 
 
 ## Privacy and permissions
 
-Version 0.23.1 does not load online covers or perform automatic remote metadata requests. Only existing local-vault cover images are supported. There is no external-image opt-in, and any allowed value from a private test build is inert. The [Library display and privacy guide](docs/LIBRARY_DISPLAY_AND_PRIVACY.md) separates this release from the deferred, unapproved online-cover proposal.
+Version 0.24.0 does not load online covers or perform automatic remote metadata requests. Only existing local-vault cover images are supported. There is no external-image opt-in, and any allowed value from a private test build is inert. The [Library display and privacy guide](docs/LIBRARY_DISPLAY_AND_PRIVACY.md) separates this release from the deferred, unapproved online-cover proposal.
 
 **What it reads**
 
@@ -361,7 +365,7 @@ See [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md) for the exact e
 
 Same-vault recovery protects plugin-owned organization for one knowledge base; it is not a backup of Markdown notes or attachments. Back up the complete vault, including `.obsidian`, and export one current private recovery per available base. Archived bases must be restored temporarily before export.
 
-Recovery is a standalone replacement, never a merge with portable sections. Current v12 files introduced in 0.23.0 add Library display profiles to the nested Collection and Library layout, dynamic Library definitions, explicit Index membership, linked-folder provenance, and source vault/base/preset locks. Online-image permission is not included or supported. Older identity-less formats require additional overrides and conservative path checks.
+Recovery is a standalone replacement, never a merge with portable sections. Current v13 files introduced in 0.24.0 preserve Collection-scoped saved searches alongside Library display profiles, nested Collection and Library layout, dynamic Library definitions, explicit Index membership, linked-folder provenance, and source vault/base/preset locks. Online-image permission is not included or supported. Older identity-less formats require additional overrides and conservative path checks.
 
 Follow the complete [backup and restore procedure](docs/PORTABILITY_AND_RECOVERY.md#backup-and-restore) before restoring anything.
 
@@ -371,7 +375,7 @@ Follow the complete [backup and restore procedure](docs/PORTABILITY_AND_RECOVERY
 | --- | --- |
 | Obsidian | 1.13.0 or newer |
 | Desktop | Uses Obsidian-compatible APIs; no Electron- or Node-only runtime dependency |
-| iPhone and iPad | Dedicated record grips, touch menus and mobile layouts are implemented; the [0.23.1 physical-device record](docs/release-evidence/0.23.1-iphone.md) is explicitly waived and unverified, so do not assume the release checklist passed |
+| iPhone and iPad | Dedicated record grips, touch menus and mobile layouts are implemented; the [0.24.0 physical-device record](docs/release-evidence/0.24.0-iphone.md) is explicitly waived and unverified, so do not assume the release checklist passed |
 | Android | The manifest is mobile-compatible, but this repository does not currently document a complete physical-Android test pass |
 | Network | Local-vault covers only; no online-cover support or automatic remote metadata requests. No analytics, telemetry, accounts, advertising, or payments |
 
@@ -391,7 +395,7 @@ Follow the complete [backup and restore procedure](docs/PORTABILITY_AND_RECOVERY
 - The Organizer rejects any vault-qualified `obsidian://open` drop URI, including one naming the current vault. Use an unqualified vault-relative path or one of the supported menu/tree entry points.
 - The bundle targets a 2018 JavaScript baseline for older mobile web views. Newer built-in methods are rejected at build time rather than polyfilled, so a feature needing one has to be written differently or the baseline has to be raised deliberately.
 - Same-vault recovery is intentionally not portable between vaults.
-- Real-iPad/iPhone keyboard, safe-area, Dynamic Type, landscape, import/export, Sync-startup, and destructive recovery behavior needs explicit physical-device evidence. Automated DOM checks and Mac Obsidian testing are not substitutes. The 0.23.1 physical-iPad/iPhone, VoiceOver, and controlled two-device Sync scope was explicitly waived by the maintainer rather than executed; it is unverified, not a Pass.
+- Real-iPad/iPhone keyboard, safe-area, Dynamic Type, landscape, import/export, Sync-startup, and destructive recovery behavior needs explicit physical-device evidence. Automated DOM checks and Mac Obsidian testing are not substitutes. The 0.24.0 physical-iPad/iPhone, VoiceOver, and controlled two-device Sync scope was explicitly waived by the maintainer rather than executed; it is unverified, not a Pass.
 
 ## Troubleshooting
 
@@ -412,7 +416,7 @@ Every other symptom, including import refusals and Sync protection reasons, is c
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Apple Shortcuts guide](docs/APPLE_SHORTCUT.md)
 - [Starter templates](templates/README.md)
-- [0.23.1 device and Sync waiver record](docs/release-evidence/0.23.1-iphone.md) · [Historical 0.23.0 record](docs/release-evidence/0.23.0-iphone.md)
+- [0.24.0 device and Sync waiver record](docs/release-evidence/0.24.0-iphone.md) · [Historical 0.23.1 record](docs/release-evidence/0.23.1-iphone.md) · [Historical 0.23.0 record](docs/release-evidence/0.23.0-iphone.md)
 - [0.10.0 iPhone evidence](docs/release-evidence/0.10.0-iphone.md) · [0.12.0 iPhone evidence](docs/release-evidence/0.12.0-iphone.md) · [0.17.0 iPhone waiver record](docs/release-evidence/0.17.0-iphone.md) · [0.18.0 iPhone waiver and Mac-emulation record](docs/release-evidence/0.18.0-iphone.md) · [0.19.0 iPhone waiver and Mac-emulation record](docs/release-evidence/0.19.0-iphone.md) · [0.19.1 iPhone waiver and Mac-startup record](docs/release-evidence/0.19.1-iphone.md)
 - [Manual real-iPhone release checklist](docs/manual-iphone-release-checklist.md)
 - [Changelog](CHANGELOG.md)

@@ -2,7 +2,7 @@
 
 Knowledge Base Command Center separates portable organization from private same-vault restoration. Read this guide before sharing an export, replacing organization, or restoring recovery data.
 
-This guide covers version 0.23.0 Library-display formats. The release supports local-vault covers only; online loading is excluded and its [earlier proposal](LIBRARY_DISPLAY_AND_PRIVACY.md#deferred-online-cover-proposal) remains deferred and unapproved.
+This guide covers version 0.24.0 Collections and Library-display formats. The release supports local-vault covers only; online loading is excluded and its [earlier proposal](LIBRARY_DISPLAY_AND_PRIVACY.md#deferred-online-cover-proposal) remains deferred and unapproved.
 
 ## Choose the right artifact
 
@@ -28,7 +28,7 @@ The single-base center operates on the active knowledge base. A portfolio can in
 | **Each selected Library** | Stable Library identity, configured labels/icon, subject names, editable headings and nested subheadings, unplaced state, visual order, and portable identities. Doses, note bodies, source paths, and attachments are excluded. |
 | **Collections** | Collection heading and nested subheading structure with membership stored by portable subject identity. |
 | **Study state** | Pins and the personal Next list stored by portable subject identity. |
-| **Saved views** | Named sections and literal search queries. A query can contain a path if it was typed. |
+| **Saved views** | Named sections, literal search queries, filters, and optional collection scope. A query can contain a path if it was typed. |
 | **Same-vault recovery** | Private restoration data for the active base, including exact direct-note memberships, linked-folder rules, exclusions, and other vault-relative paths. |
 
 The default **Transfer structure** preset selects workspace settings, the Index blueprint, every active Library, Collections, study state, and saved views. **Custom selection** expands the included sections. Each Library can be deselected independently, including an empty Library whose identity and hierarchy must be preserved.
@@ -37,7 +37,7 @@ Archived Libraries are not offered as portable sections. Confirmed private recov
 
 Library display profiles contain only layout choices and property names: no cover URL, property value, image bytes, or permission to contact a server. To transfer them, select **Workspace settings**. Workspace format 3 includes dependency descriptors for every active Library with a display profile, even when that Library's catalog is unselected. Descriptors preserve stable identity without replacing an unselected destination Library's name, archive decision, or headings. Profiles for archived or missing Libraries are omitted from Workspace export. Importing a Library catalog alone leaves destination display settings unchanged. Older Workspace formats 1–2 preserve destination display preferences; format 3 applies the selected Workspace profiles.
 
-Version 0.23.0 does not support online-image loading. Display profiles, synced notes, imports, recovery and Undo cannot enable it. The obsolete permission key from private test builds is App-local, inert, and excluded from all transfer formats.
+Version 0.24.0 does not support online-image loading. Display profiles, synced notes, imports, recovery and Undo cannot enable it. The obsolete permission key from private test builds is App-local, inert, and excluded from all transfer formats.
 
 Collections and study state carry only the portable identities they reference. They do not silently select or replace a complete Index or complete Library.
 
@@ -73,7 +73,7 @@ Import maps each selected source to either a new compatible knowledge base or on
 
 Large categories initially show 50 entries and expand in bounded 50-entry pages. A stale destination base, active-base selection, complete store snapshot, or externally synced generation invalidates the plan before mutation. The selected portfolio remains unchanged.
 
-Every Replace destination requires the displayed typed phrase. Before any plugin-data mutation, the plugin writes a separate strict same-vault recovery package for every destination that will be replaced. If one recovery write fails, no plan operation is applied. The final multi-base store change uses the existing atomic persistence and rollback path. Every destination's required in-plugin Undo snapshot is staged together in one version-4 causal batch before the primary write. If the exact protected batch cannot fit within the shared 4 MiB device-local limit, the entire plan is rejected before any primary store mutation. After a restart, each destination is promoted only when its committed semantic revision, head, and payload fingerprint match; a mismatched or newer synced base retains its pre-import local history instead.
+Every Replace destination requires the displayed typed phrase. Before any plugin-data mutation, the plugin writes a separate strict same-vault recovery package for every destination that will be replaced. If one recovery write fails, no plan operation is applied. The final multi-base store change uses the existing atomic persistence and rollback path. Every destination's required in-plugin Undo snapshot is staged together in one version-5 causal batch before the primary write. If the exact protected batch cannot fit within the shared 4 MiB device-local limit, the entire plan is rejected before any primary store mutation. After a restart, each destination is promoted only when its committed semantic revision, head, and payload fingerprint match; a mismatched or newer synced base retains its pre-import local history instead.
 
 Cross-vault Merge and new-base initialization retain the normal portable behavior. Cross-vault Replace has an additional acknowledgement because it can remove selected destination organization even though it never changes Markdown files.
 
@@ -103,11 +103,15 @@ Creating or linking preserves the portable identity and its Index/Library placem
 
 ## Portable format compatibility
 
-Version 0.23.0 writes portable format version 6 with Workspace format 3, adding Library display profiles and their stable-ID dependencies. Releases 0.13.0 through 0.22.0 wrote portable version 5. That format added nested Collection and Library subheadings—up to five levels in one branch, counting the top heading as level 1—to version 4’s stable Library definitions and selective Library IDs.
+Version 0.24.0 writes portable format version 7 with saved-view component format 2, preserving collection scopes. Workspace format 3 is unchanged. Releases 0.23.0 and 0.23.1 wrote portable format version 6 with Workspace format 3, adding Library display profiles and their stable-ID dependencies. Releases 0.13.0 through 0.22.0 wrote portable version 5. That format added nested Collection and Library subheadings—up to five levels in one branch, counting the top heading as level 1—to version 4’s stable Library definitions and selective Library IDs.
 
-Version 0.23.0 reads portable versions 1–6 and Workspace versions 1–3, so older flat packages still import. Legacy Procedures, Medications, and Syndromes catalogs migrate to reserved stable Library IDs. Non-topic identities in version 1 files are treated conservatively as Collection or study dependencies rather than authoritative complete Libraries. Imported content nested deeper than five levels keeps its records by merging them into the nearest allowed level.
+Version 0.24.0 reads portable versions 1–7, saved-view component versions 1–2, and Workspace versions 1–3, so older flat packages still import. Legacy Procedures, Medications, and Syndromes catalogs migrate to reserved stable Library IDs. Non-topic identities in version 1 files are treated conservatively as Collection or study dependencies rather than authoritative complete Libraries. Imported content nested deeper than five levels keeps its records by merging them into the nearest allowed level.
 
-Older plugin builds reject unsupported portable version 6 or Workspace version 3 rather than discarding display settings. An older build that encounters a synced version-16 store with version-16 knowledge-base data preserves it read-only instead of rewriting it. Update every importing and syncing device before applying a new export. Existing version-15 direct-note and linked-folder provenance remains required and is preserved during migration to version 16; the display feature does not reenroll storage folders.
+Older plugin builds reject unsupported portable version 7, saved-view component version 2, or recovery version 13 rather than silently dropping a collection scope. An older build that encounters a synced version-17 store with version-17 knowledge-base data preserves it read-only instead of rewriting it. Update every importing and syncing device to 0.24.0 or a newer compatible release before applying a new export or editing organization. Published 0.23.1 cannot edit the newer store. Existing version-15 direct-note and linked-folder provenance remains required and is preserved through version 16 and version 17; these upgrades do not reenroll storage folders.
+
+A collection-scoped saved view imports only when Collections is selected and the destination retains the same collection identity and compatible title. A missing or remapped dependency omits that incoming view instead of widening it. A missing collection scope in current data returns no matches.
+
+A writable downgrade needs matching pre-upgrade organization backups for every affected base and a complete vault backup. Do not lower schema fields, overwrite a live synced store, or install older assets over newer data. Stop edits and coordinate Sync across devices before restoring a compatible pre-upgrade state; rollback can discard organization created after that backup. Keep the current state separately recoverable, and seek help if a coordinated restore is uncertain.
 
 ## Review an import
 
@@ -144,7 +148,7 @@ Single-base import and export enforce a 10 MB ceiling plus per-list and aggregat
 
 Same-vault recovery starts unselected when an import file is opened. It must be selected and confirmed separately, is restored by itself, and is never described or executed as a merge with portable sections.
 
-Current version-12 recovery files introduced in 0.23.0 embed:
+Current version-13 recovery files introduced in 0.24.0 embed:
 
 - source vault identity;
 - source knowledge-base ID and name;
@@ -159,7 +163,8 @@ Before an Undo snapshot or mutation starts, the plugin verifies that the source 
 
 ### Recovery versions
 
-- **Version 12:** current format, introduced in 0.23.0, adding bounded Library display profiles to version 11’s organization and identity protections. Online-image permission is not included or supported.
+- **Version 13:** current format, introduced in 0.24.0, preserving collection-scoped saved views behind a compatibility barrier while retaining version 12's display profiles and identity protections.
+- **Version 12:** introduced in 0.23.0, adding bounded Library display profiles to version 11’s organization and identity protections. Online-image permission is not included or supported.
 - **Version 11:** explicit direct Index membership, linked-folder source provenance, nested Collection and Library subheading layouts, dynamic Library definitions, and source vault/base/preset locks. Restoring it preserves destination display profiles for Library IDs that survive restoration.
 - **Version 10:** nested Collection and Library subheading layouts, dynamic Library definitions, and source vault/base/preset locks, but no trusted linked-folder provenance. When restored, the destination's linked sources are preserved and legacy membership is migrated conservatively.
 - **Version 9:** dynamic Library definitions and layouts plus the same identity locks, but its subheadings stay a single level deep.
@@ -168,7 +173,7 @@ Before an Undo snapshot or mutation starts, the plugin verifies that the source 
 - **Versions 1–6:** do not carry a trusted knowledge-base identity or preset and require a separate **base/preset unverified** override.
 - **Versions 1–5:** also lack a trusted vault identity and undergo a conservative unique-path preflight.
 
-All recovery formats before version 12 preserve destination display preferences where the restored Library identity still exists. Version 12 restores its own profiles, including an explicitly empty profile map. No display reset or recovery restore can enable online covers or transfer the inert legacy image-permission key.
+All recovery formats before version 12 preserve destination display preferences where the restored Library identity still exists. Versions 12–13 restore their own profiles, including an explicitly empty profile map. No display reset or recovery restore can enable online covers or transfer the inert legacy image-permission key.
 
 A current recovery from a different vault or preset is hard-rejected. Restoring into a different base in the same vault is blocked by default. A distinct override must name both source and destination, followed by the normal destructive-restore confirmation, and it is available only when both bases have the same Generic or ENT preset.
 
@@ -210,7 +215,9 @@ Do not use a different-base or legacy-identity override unless the displayed unc
 
 Different knowledge bases can merge independently through Obsidian Sync. Current stores carry a per-base semantic revision, head, payload fingerprint, and bounded causal lineage. When two different semantic payloads have no proven ancestor relationship, the plugin treats them as concurrent edits, writes every possible losing complete envelope to private conflict rescue, and only then selects a deterministic whole-base winner. It still does not field-merge simultaneous edits.
 
-An operation that requires Undo stages its exact causal snapshot in the bounded version-4 device-local pending-Undo journal before the primary semantic commit. Multi-base portfolio import stages all destination snapshots in one bounded pending-Undo batch. Global Note Organizer Apply is the other author of that multi-base form and stages all affected-base snapshots through the same mechanism; each operation proves every base independently. A user-invoked Undo or Redo stages its exact pre-transition stacks and inverse snapshot in a separate pending Undo/Redo transition journal. On startup, a matching committed semantic revision, head, and payload fingerprint promotes the required snapshot or reconstructs the exact completed history transition; a nonmatching authority discards the staged required Undo or retains the exact pre-transition Undo/Redo stacks. This closes both restart windows between primary commit and normal local-history finalization. If the complete protected journal or aggregate batch cannot be retained within the shared 4 MiB device-local limit, the operation fails closed before primary mutation.
+An operation that requires Undo stages its exact causal snapshot in the bounded version-5 device-local pending-Undo journal before the primary semantic commit. Existing version-4 journals remain readable. Multi-base portfolio import stages all destination snapshots in one bounded pending-Undo batch. Global Note Organizer Apply is the other author of that multi-base form and stages all affected-base snapshots through the same mechanism; each operation proves every base independently. A user-invoked Undo or Redo stages its exact pre-transition stacks and inverse snapshot in a separate pending Undo/Redo transition journal. On startup, a matching committed semantic revision, head, and payload fingerprint promotes the required snapshot or reconstructs the exact completed history transition; a nonmatching authority discards the staged required Undo or retains the exact pre-transition Undo/Redo stacks. This closes both restart windows between primary commit and normal local-history finalization. If the complete protected journal or aggregate batch cannot be retained within the shared 4 MiB device-local limit, the operation fails closed before primary mutation.
+
+Device-only return navigation separately uses format 2 and reads legacy format 1. Older builds reject the newer route history instead of dropping a collection filter. This convenience history is not synced and is not an organization backup.
 
 Run **Open sync & recovery center** for local evidence about the active base, last successful local save, last external plugin-data reload, conflict rescues, recovery age, and any recorded active-base conflict. The center does not inspect Obsidian Sync, a provider queue, the network, or another device. An absent warning is not proof that it is safe to switch devices. Avoid editing the same base on two devices at once, let your provider settle using its supported surface, and keep current recovery exports.
 

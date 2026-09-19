@@ -12,6 +12,7 @@ import EntVaultCommandCenterPlugin, {
 import { ExportImportCenterModal } from "../src/portability-modal.ts";
 import {
   boundedSemanticLineage,
+  canonicalJsonString,
   canonicalInterimEnvelopeString,
   BUILTIN_LIBRARY_DEFINITIONS,
   buildCurriculumTree,
@@ -35,6 +36,7 @@ import {
   migrateStore,
   setCloneJsonValueObserver,
   nextSemanticHead,
+  fingerprintText,
   isFreshVaultId,
   INDEX_FOLDER_VAULT_ROOT,
   parseQuery,
@@ -45,6 +47,7 @@ import {
   resetPluginViewState,
   restoreSnapshot,
   semanticEntryFingerprint,
+  semanticPluginDataProjection,
   snapshotPersonal,
   STORE_KIND,
   STORE_VERSION,
@@ -266,6 +269,20 @@ function pluginWithKeyedLocalStorage(
   plugin.loadedData = data;
   plugin.deviceLocalWrites = localWrites.map(([, value]) => value);
   return { plugin, localValues, localWrites };
+}
+
+/** Reproduce the published0.23.1 schema and hash algorithm, not a current-version fixture. */
+function legacyPendingJournalRestart(store: PluginStore, local: ReturnType<typeof createDeviceLocalPluginState>) {
+  const source = structuredClone(store);
+  (source as { version: number }).version = 16;
+  for (const entry of source.bases) {
+    (entry.data as { version: number }).version = 16;
+    const publishedHash = fingerprintText(canonicalJsonString([
+      entry.createdAt, entry.archivedAt, semanticPluginDataProjection(entry.data),
+    ]));
+    assert.equal(entry.semanticHash, publishedHash, "the old committed authority is reproduced exactly");
+  }
+  return pluginWithKeyedLocalStorage(source, new Map([[DEVICE_LOCAL_STATE_KEY, { ...structuredClone(local), version: 4 }]]));
 }
 
 function portfolioJournalFixture(vaultId: string): {
@@ -6643,6 +6660,19 @@ test("portfolio batch Undo resolves pre-primary, exact, and mixed newer-head cra
       assert.deepEqual(entry?.data.redoStack, []);
     }
 
+    assert.ok(pending);
+    for (const committed of [false, true]) {
+      const upgrade = legacyPendingJournalRestart(committed ? candidatePrimary : fixture.store, pending);
+      await upgrade.plugin.loadPluginData(false);
+      assert.equal(upgrade.plugin.isDataReadOnly(), false);
+      assert.equal(upgrade.plugin.getKnowledgeBases(true).length, committed ? 3 : 2);
+      for (const entry of upgrade.plugin.getKnowledgeBases(true)) {
+        assert.match(entry.data.undoStack.at(-1)?.label ?? "", committed ? /portfolio source/i : /prior Undo/);
+        if (committed) assert.deepEqual(entry.data.redoStack, []);
+        else assert.match(entry.data.redoStack.at(-1)?.label ?? "", /prior Redo/);
+      }
+    }
+
     const mixed = structuredClone(candidatePrimary);
     const mismatchedOperation = plan.operations.find((candidate) => candidate.destinationKind === "existing");
     assert.ok(mismatchedOperation);
@@ -7266,7 +7296,7 @@ for (const route of ["modal", "direct"] as const) {
     const source = structuredClone(plugin.data);
     source.settings.libraryDisplayProfiles[libraryId] = normalizeLibraryDisplayProfile({ layout: "cards", cardSize: "large", imageProperty: "book_cover" });
     const value = parsePortableExport(createPortableExport(source, [], { ...EMPTY_PORTABLE_SELECTION, recovery: true }, "2026-09-13T00:00:00.000Z", plugin.getVaultId(), plugin.getActiveKnowledgeBaseId(), plugin.data.settings.workspaceName));
-    assert.equal(value.components.recovery?.version, 12);
+    assert.equal(value.components.recovery?.version, 13);
     let noteWrites = 0;
     Object.assign(plugin.app.vault, {
       create: async () => { noteWrites += 1; throw new Error("Recovery must not create a note"); },
@@ -8876,6 +8906,16 @@ test("required Undo journal resolves both hard-crash windows against exact commi
   const promoted = afterPrimary.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
   assert.equal(promoted?.pendingRequiredUndoCommit, undefined);
 
+  for (const committed of [false, true]) {
+    const upgrade = legacyPendingJournalRestart(committed ? candidatePrimary : baseline, pendingState);
+    await upgrade.plugin.loadPluginData(false);
+    assert.equal(upgrade.plugin.isDataReadOnly(), false);
+    assert.deepEqual(upgrade.plugin.data.undoStack.map((snapshot) => snapshot.label),
+      committed ? ["Earlier undo", "Crash-guarded change"] : ["Earlier undo"]);
+    assert.deepEqual(upgrade.plugin.data.redoStack.map((snapshot) => snapshot.label), committed ? [] : ["Earlier redo"]);
+    assert.deepEqual(upgrade.plugin.data.pinnedPaths, committed ? ["Knowledge Base/Committed only with authority.md"] : []);
+  }
+
   releasePrimary.resolve();
   await mutation;
 });
@@ -9073,6 +9113,18 @@ test("Undo and Redo journals resolve pre-primary, committed, and newer-head cras
           .pendingHistoryTransitionCommit,
         undefined,
       );
+
+      assert.ok(pending);
+      for (const committed of [false, true]) {
+        const upgrade = legacyPendingJournalRestart(committed ? candidatePrimary : baseline, pending);
+        await upgrade.plugin.loadPluginData(false);
+        assert.equal(upgrade.plugin.isDataReadOnly(), false);
+        assert.deepEqual(upgrade.plugin.data.pinnedPaths, committed ? destination.pinnedPaths : current.pinnedPaths);
+        assert.deepEqual(upgrade.plugin.data.undoStack.map((snapshot) => snapshot.label),
+          (committed ? direction === "redo" : direction === "undo") ? [label] : []);
+        assert.deepEqual(upgrade.plugin.data.redoStack.map((snapshot) => snapshot.label),
+          (committed ? direction === "undo" : direction === "redo") ? [label] : []);
+      }
 
       const newer = structuredClone(candidatePrimary);
       const newerEntry = newer.bases[0];

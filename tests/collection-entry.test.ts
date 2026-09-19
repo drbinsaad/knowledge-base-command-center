@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Notice, TFile } from "obsidian";
-import { KnowledgeNoteModal, VaultFilePickerModal, type KnowledgeNoteModalOptions } from "../src/modals.ts";
+import { AddActionModal, CollectionPickerModal, KnowledgeNoteModal, TextPromptModal, VaultFilePickerModal, type KnowledgeNoteModalOptions } from "../src/modals.ts";
+import { CreatedNoteRecoveryModal } from "../src/created-note-recovery-modal.ts";
 import { migrateData, type VaultRecord } from "../src/model.ts";
 import { EntVaultCommandCenterView } from "../src/view.ts";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
@@ -50,6 +51,80 @@ function harness() {
   Object.assign(view, { plugin, app: { vault: { getAbstractFileByPath: (path: string) => liveFile?.path === path ? liveFile : null } }, loadedBaseId: "base-a", loadedDataEpoch: 0, query: "", records: [] });
   return { view, data, file, created: () => created, setLiveFile: (file: TFile | undefined) => { liveFile = file; }, beforeMutation: (callback: () => void) => { beforeMutation = callback; } };
 }
+
+test("Add always offers collection creation, and a populated picker can create and move atomically", async () => {
+  const { view, data, file } = harness();
+  const internals = view as unknown as {
+    openAddActions(): void;
+    openCollectionPicker(path: string, source?: { headingId: string }, move?: boolean): void;
+  };
+  const captured: { actions?: AddActionModal; picker?: CollectionPickerModal; prompt?: TextPromptModal } = {};
+  const originals = [AddActionModal, CollectionPickerModal, TextPromptModal].map((ctor) => Object.getOwnPropertyDescriptor(ctor.prototype, "open"));
+  AddActionModal.prototype.open = function () { captured.actions = this; };
+  CollectionPickerModal.prototype.open = function () { captured.picker = this; };
+  TextPromptModal.prototype.open = function () { captured.prompt = this; };
+  try {
+    internals.openAddActions();
+    const createAction = captured.actions?.getItems().find((action) => action.id === "new-collection");
+    assert.ok(createAction);
+    captured.actions!.onChooseItem(createAction);
+    assert.ok(captured.prompt);
+    data.collections[0].subjects = [file.path];
+    internals.openCollectionPicker(file.path, { headingId: "first" }, true);
+    assert.ok(captured.picker);
+    (captured.picker as unknown as { onCreate(): void }).onCreate();
+    await (captured.prompt as unknown as { options: { onSubmit(title: string): Promise<void> } }).options.onSubmit("Reading");
+    assert.deepEqual(data.collections[0].subjects, []);
+    assert.deepEqual(data.collections.at(-1)?.subjects, [file.path]);
+    assert.equal(data.collections.at(-1)?.title, "Reading");
+  } finally {
+    [AddActionModal, CollectionPickerModal, TextPromptModal].forEach((ctor, index) => {
+      const original = originals[index];
+      if (original) Object.defineProperty(ctor.prototype, "open", original);
+      else Reflect.deleteProperty(ctor.prototype, "open");
+    });
+  }
+});
+
+test("failed first-note filing and failed rescue still expose the saved file without recreating it", async () => {
+  const { view, file, created, setLiveFile } = harness();
+  let organized = 0;
+  Object.assign(view.plugin, {
+    mutate: async () => { throw new Error("Storage is unavailable"); },
+    getRecord: () => null,
+    openNoteOrganizer: () => { organized += 1; },
+  });
+  let options: KnowledgeNoteModalOptions | undefined;
+  const captured: { recovery?: CreatedNoteRecoveryModal } = {};
+  const noteOpen = Object.getOwnPropertyDescriptor(KnowledgeNoteModal.prototype, "open");
+  const recoveryOpen = Object.getOwnPropertyDescriptor(CreatedNoteRecoveryModal.prototype, "open");
+  KnowledgeNoteModal.prototype.open = function () { options = (this as unknown as { options: KnowledgeNoteModalOptions }).options; };
+  CreatedNoteRecoveryModal.prototype.open = function () { captured.recovery = this; };
+  try {
+    Notice.messages.length = 0;
+    (view as unknown as { startCreateKnowledgeNote(): void }).startCreateKnowledgeNote();
+    assert.ok(options);
+    await options.onSubmit(options.initial);
+    assert.equal(created(), 1);
+    assert.ok(captured.recovery, "recovery is available even when both filing and the Index fallback fail");
+    assert.match(Notice.messages.at(-1) ?? "", /Notes\/Example.md.*Storage is unavailable/);
+    const saved = captured.recovery as unknown as { path: string; openNote(): Promise<void>; organize(): void };
+    assert.equal(saved.path, file.path);
+    await saved.openNote();
+    saved.organize();
+    assert.equal(organized, 1);
+    setLiveFile(new TFile(file.path));
+    await assert.rejects(saved.openNote(), /moved or replaced/);
+    assert.throws(() => saved.organize(), /moved or replaced/);
+    assert.equal(organized, 1, "a replacement file never receives the recovery operation");
+    assert.equal(created(), 1, "recovery opens the original file, not another creation request");
+  } finally {
+    if (noteOpen) Object.defineProperty(KnowledgeNoteModal.prototype, "open", noteOpen);
+    else Reflect.deleteProperty(KnowledgeNoteModal.prototype, "open");
+    if (recoveryOpen) Object.defineProperty(CreatedNoteRecoveryModal.prototype, "open", recoveryOpen);
+    else Reflect.deleteProperty(CreatedNoteRecoveryModal.prototype, "open");
+  }
+});
 
 test("empty Collection existing-note action targets the exact nested destination without a second picker", async () => {
   const { view, data, file, beforeMutation } = harness();

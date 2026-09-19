@@ -1,6 +1,25 @@
-# 0.23.1 device and Sync smoke record
+# 0.24.0 device and Sync smoke record
 
-Candidate: 0.23.1, including exact-first capitalization-aware cover lookup, local Markdown links and one-item text lists, clearer cover diagnostics, and a persistent Save display footer with explicit draft status. This is the active smoke record. Online cover loading remains excluded; the original proposal remains deferred and has not completed independent published privacy review. Data and transfer formats are unchanged from 0.23.0.
+Active candidate: 0.24.0 Collections and workflow reliability. Physical iPhone/iPad and controlled two-device Sync remain **Unverified — Unexecuted**, under the [fresh maintainer-authorized waiver](0.24.0-iphone.md). This is not a physical-device Pass and does not reuse any earlier authorization. Local-vault covers only; online covers remain excluded.
+
+Use synthetic notes and the [manual checklist](../manual-iphone-release-checklist.md). Record exact asset checksums, device/OS/Obsidian versions, input method and Sync provider before each executed row.
+
+| Flow | Pass criteria | Result |
+| --- | --- | --- |
+| Collection entry points | Visible New collection/Add notes and row actions work for empty, populated, collapsed and nested destinations. | Unexecuted |
+| Active-note organization | Existing checkboxes prefill; search and inline creation are usable. Cancel changes nothing; Save commits structure/membership together; collection-only edits preserve primary placement. | Unexecuted |
+| Undo, stale review and restart | Exact Undo/Redo survives restart; renamed notes or changed destinations refuse stale saves without partial mutation. | Unexecuted |
+| Scoped search and return | Nested collection members are included; filters survive note return, saved searches and transfer without broadening. | Unexecuted |
+| Migration and controlled Sync | Both devices run 0.24.0; format-17 data, portable7/savedViews2 and recovery13 retain scope. Older builds are read-only; delayed/concurrent delivery fails safely. | Unexecuted |
+| Creation and recovery | Failed filing offers the existing saved note, never duplicate creation; write failures preserve drafts; recovery discovery handles configured/missing folders. | Unexecuted |
+| Native input and geometry | Phone/tablet, portrait/landscape/Split View, keyboards, safe areas, large text, Arabic/RTL and VoiceOver retain reachable controls and usable reading space. | Unexecuted |
+| Regression and news | List/Cards, local covers and touch arrangement remain usable; 0.24.0 news is shown once and links to its exact immutable release. | Unexecuted |
+
+Waived/skipped rows stay Unexecuted. Desktop Chromium/WebKit and Mac Obsidian mobile emulation do not execute these physical rows. Historical records follow.
+
+## Historical 0.23.1 device and Sync smoke record
+
+Historical candidate: 0.23.1, including exact-first capitalization-aware cover lookup, local Markdown links and one-item text lists, clearer cover diagnostics, and a persistent Save display footer with explicit draft status. This is not the active smoke record. Online cover loading remains excluded; the original proposal remains deferred and has not completed independent published privacy review. Data and transfer formats are unchanged from 0.23.0.
 
 Status: **Physical iPhone/iPad, VoiceOver, software/hardware keyboards, native safe areas/scrolling and controlled two-device Sync checks are Unexecuted.** After the tested cover update and its physical-device limitation were disclosed, the maintainer explicitly approved publishing this update. The [fresh candidate-specific authorization](0.23.1-iphone.md) applies only to 0.23.1; it is not a device Pass and does not reuse the 0.23.0 waiver.
 

@@ -5793,6 +5793,7 @@
 
 .ent-cc-note-organizer-pagination {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: center;
   margin-top: 10px;
@@ -5800,7 +5801,9 @@
 }
 
 .ent-cc-note-organizer-page-status {
-  min-width: 280px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  flex: 1 1 220px;
   color: var(--text-muted);
   font-size: 0.76rem;
   text-align: center;
@@ -6121,7 +6124,8 @@
   }
 }
 
-@media (pointer: coarse) and (orientation: landscape) and (max-height: 500px) {
+@media (pointer: coarse) and (orientation: landscape) and (max-height: 500px),
+  (pointer: coarse) and (min-width: 760px) {
   .ent-cc-note-organizer-footer {
     align-items: center;
     flex-direction: row;
@@ -7056,6 +7060,48 @@
 }
 
 .ent-cc-library-settings-panel { min-width: 0; }
+.ent-cc-collection-actions,
+.ent-cc-collection-picker-actions,
+.ent-cc-queue-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px;
+}
+.ent-cc-collection-actions button,
+.ent-cc-collection-picker-actions button,
+.ent-cc-queue-empty-toggle { min-height: 44px; white-space: normal; }
+.ent-cc-created-note-path { overflow-wrap: anywhere; font-weight: 600; }
+.ent-cc-note-organizer-collection-list {
+  max-height: 240px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+}
+.ent-cc-note-organizer-fieldset > .ent-cc-note-organizer-page-status { margin-block: 8px; }
+.ent-cc-note-organizer-collection-choice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 8px;
+  cursor: pointer;
+}
+.ent-cc-note-organizer-collection-choice + .ent-cc-note-organizer-collection-choice {
+  border-top: 1px solid var(--background-modifier-border);
+}
+.ent-cc-note-organizer-collection-choice input { flex: 0 0 auto; }
+.ent-cc-note-organizer-collection-choice span { min-width: 0; overflow-wrap: anywhere; }
+.ent-cc-note-organizer-collection-choice .ent-cc-note-organizer-help { margin-inline-start: auto; }
+.ent-cc-note-organizer-collection-create {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  margin-block-start: 12px;
+}
+.ent-cc-note-organizer-collection-create > input { width: 100%; min-width: 0; min-height: 44px; }
+.ent-cc-note-organizer-collection-create button { min-height: 44px; white-space: normal; }
 .ent-cc-library-cover-info {
   padding: 12px;
   border: 1px solid var(--background-modifier-border);

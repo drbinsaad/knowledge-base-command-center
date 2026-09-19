@@ -17,8 +17,10 @@ export const MEDICATION_ROOT = "06 Clinical Tools/Medications/";
 export const SYNDROME_ROOT = "06 Clinical Tools/Syndromes/";
 export const DEFAULT_PROPOSAL_FOLDER = "01 Inbox/ENT Topic Proposals";
 export const DEFAULT_EXPORTS_FOLDER = "Knowledge Base Command Center Exports";
-export const DATA_VERSION = 16;
-export const STORE_VERSION = 16;
+// v17 preserves Collection-scoped saved searches. Older builds must not turn
+// those constrained searches into all-base searches during normalization.
+export const DATA_VERSION = 17;
+export const STORE_VERSION = 17;
 export const MIN_RECOGNIZED_STORE_VERSION = 11;
 export const STORE_KIND = "knowledge-base-command-center-store";
 export const MAX_KNOWLEDGE_BASES = 50;
@@ -27,9 +29,11 @@ export const MAX_LIBRARIES = 50;
 export const MAX_SEMANTIC_LINEAGE = 64;
 /** Device-local routes, disclosure state, and bounded history must fit comfortably in localStorage. */
 export const MAX_DEVICE_LOCAL_STATE_BYTES = 4 * 1024 * 1024;
-export const DEVICE_LOCAL_STATE_VERSION = 4;
+export const DEVICE_LOCAL_STATE_VERSION = 5;
 /** v3 first required canonical linked-folder provenance in local Undo/Redo. */
 const DEVICE_HISTORY_PROVENANCE_VERSION = 3;
+/** v4 first supported pending Undo journals; v5 adds Collection-scoped views. */
+const DEVICE_PENDING_HISTORY_VERSION = 4;
 /** Permanent base-deletion tombstones are small, but remain bounded and are never silently evicted. */
 export const MAX_DELETED_KNOWLEDGE_BASE_IDS = 10_000;
 export const DEFAULT_KNOWLEDGE_BASE_ID = "base-default";
@@ -345,15 +349,19 @@ export function emptyCurriculumTree(): CurriculumTreeResult {
 }
 
 export interface SearchViewFilters {
-  scope?: "all" | "current" | "library";
+  scope?: "all" | "current" | "library" | "collection";
+  collectionId?: string;
   availability?: "all" | "linked" | "placeholders";
   linkedFirst?: boolean;
 }
 
 /** Omit defaults so existing saved views and return routes retain their shape. */
 export function cleanSearchViewFilters(value: Record<string, unknown>): SearchViewFilters {
+  const collectionId = typeof value.collectionId === "string" ? value.collectionId.trim() : "";
   return {
-    ...(value.scope === "current" || value.scope === "library" ? { scope: value.scope } : {}),
+    ...(value.scope === "current" || value.scope === "library" || value.scope === "collection" ? { scope: value.scope } : {}),
+    ...(value.scope === "collection" && collectionId && collectionId.length <= 4096
+      && !/[\p{Cc}\p{Cf}]/u.test(collectionId) && isSafeObjectKey(collectionId) ? { collectionId } : {}),
     ...(value.availability === "linked" || value.availability === "placeholders" ? { availability: value.availability } : {}),
     ...(value.linkedFirst === true ? { linkedFirst: true } : {}),
   };
@@ -996,10 +1004,18 @@ export function pluginDataSemanticallyEqual(left: PluginData, right: PluginData)
 export function semanticEntryFingerprint(
   entry: Pick<KnowledgeBaseEntry, "createdAt" | "archivedAt" | "data">,
 ): string {
+  const data = semanticPluginDataProjection(entry.data);
+  // Format 17 adds an interpretation barrier, not a change to existing
+  // organization. Keep the established v16 fingerprint namespace so an
+  // interrupted v4 Undo journal still recognizes its exact committed head
+  // after an upgrade (including when that head arrives later through Sync).
+  // All actual organization fields remain hashed; only envelope metadata is
+  // stabilized. A future format needs its own reviewed migration decision.
+  const semanticData = { ...data, version: Number(data.version) === 17 ? 16 : data.version };
   return fingerprintText(JSON.stringify(canonicalJsonValue([
     entry.createdAt,
     entry.archivedAt,
-    semanticPluginDataProjection(entry.data),
+    semanticData,
   ])));
 }
 
@@ -5153,8 +5169,8 @@ export function parseWorkspaceConfig(input: unknown): WorkspaceConfig {
 
 export interface PersonalBackup extends PersonalOrganizationState {
   kind: "ent-vault-command-center-personal-backup";
-  /** v12 adds Library display profiles; v11 added linked-folder membership. */
-  version: 12;
+  /** v13 adds Collection-scoped saved views; v12 added Library display profiles. */
+  version: 13;
   /** False only when an older backup could not encode linked-folder provenance. */
   indexFolderSourcesIncluded: boolean;
   exportedAt: string;
@@ -5201,7 +5217,7 @@ export function createPersonalBackup(
   if (!cleanSourceBaseName) throw new Error("A knowledge-base name is required to create same-base recovery data.");
   return {
     kind: "ent-vault-command-center-personal-backup",
-    version: 12,
+    version: 13,
     indexFolderSourcesIncluded: true,
     exportedAt,
     sourceVaultId: cleanSourceVaultId,
@@ -5889,7 +5905,7 @@ export function parsePersonalBackup(input: unknown): PersonalBackup {
   const sourceVersion = Number(value.version);
   // Older backups (v1-v9 flat layouts) import fine; newer formats than this
   // build refuse cleanly so nested organization is never silently flattened.
-  if (value.kind !== "ent-vault-command-center-personal-backup" || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].includes(sourceVersion)) {
+  if (value.kind !== "ent-vault-command-center-personal-backup" || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].includes(sourceVersion)) {
     throw new Error("Unsupported Command Center backup format.");
   }
   if (sourceVersion >= 11 && value.indexFolderSourcesIncluded !== true) {
@@ -5914,7 +5930,7 @@ export function parsePersonalBackup(input: unknown): PersonalBackup {
   }
   return {
     kind: "ent-vault-command-center-personal-backup",
-    version: 12,
+    version: 13,
     indexFolderSourcesIncluded: sourceVersion >= 11,
     exportedAt: asText(value.exportedAt),
     sourceVaultId,
@@ -6337,7 +6353,7 @@ export function parseDeviceLocalPluginState(input: unknown): DeviceLocalPluginSt
   if (serializedUtf8Bytes(input) > MAX_DEVICE_LOCAL_STATE_BYTES) throw new Error("Device-local state is too large.");
   const value = input as Record<string, unknown>;
   const sourceVersion = Number(value.version);
-  if (![2, DEVICE_HISTORY_PROVENANCE_VERSION, DEVICE_LOCAL_STATE_VERSION].includes(sourceVersion)
+  if (![2, DEVICE_HISTORY_PROVENANCE_VERSION, DEVICE_PENDING_HISTORY_VERSION, DEVICE_LOCAL_STATE_VERSION].includes(sourceVersion)
     || !Array.isArray(value.bases)
     || value.bases.length > MAX_KNOWLEDGE_BASES) {
     throw new Error("Device-local state has an unsupported or malformed shape.");
@@ -6345,13 +6361,13 @@ export function parseDeviceLocalPluginState(input: unknown): DeviceLocalPluginSt
   if (sourceVersion >= DEVICE_HISTORY_PROVENANCE_VERSION && value.historyIndexFolderSourcesIncluded !== true) {
     throw new Error("Device-local state is missing its linked-folder history marker.");
   }
-  if (sourceVersion < DEVICE_LOCAL_STATE_VERSION && value.pendingRequiredUndoCommit !== undefined) {
+  if (sourceVersion < DEVICE_PENDING_HISTORY_VERSION && value.pendingRequiredUndoCommit !== undefined) {
     throw new Error("Legacy device-local state cannot contain a pending required Undo commit.");
   }
-  if (sourceVersion < DEVICE_LOCAL_STATE_VERSION && value.pendingRequiredUndoBatchCommit !== undefined) {
+  if (sourceVersion < DEVICE_PENDING_HISTORY_VERSION && value.pendingRequiredUndoBatchCommit !== undefined) {
     throw new Error("Legacy device-local state cannot contain a pending required Undo batch.");
   }
-  if (sourceVersion < DEVICE_LOCAL_STATE_VERSION && value.pendingHistoryTransitionCommit !== undefined) {
+  if (sourceVersion < DEVICE_PENDING_HISTORY_VERSION && value.pendingHistoryTransitionCommit !== undefined) {
     throw new Error("Legacy device-local state cannot contain a pending history transition.");
   }
   const pendingCommitCount = [

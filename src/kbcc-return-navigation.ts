@@ -1,6 +1,9 @@
 import { cleanSearchViewFilters, isValidLibraryId, libraryIdFromTab, type MainTab, type SearchViewFilters } from "./model";
 
-export const KBCC_RETURN_NAVIGATION_VERSION = 1;
+// Version 2 makes collection-scoped routes unreadable to older builds that
+// would silently drop the collection filter and restore a broader search.
+// Keep the same App-local key and migrate existing version-1 routes on read.
+export const KBCC_RETURN_NAVIGATION_VERSION = 2;
 export const MAX_KBCC_RETURN_ROUTES = 24;
 export const MAX_KBCC_RETURN_BROWSE_LIMIT = 10_000;
 export const MAX_KBCC_RETURN_STATE_BYTES = 256 * 1024;
@@ -134,7 +137,7 @@ export function parseKbccReturnNavigationState(input: unknown): KbccReturnNaviga
     throw new Error("KBCC return navigation is too large.");
   }
   const value = input as Record<string, unknown>;
-  if (value.version !== KBCC_RETURN_NAVIGATION_VERSION
+  if ((value.version !== 1 && value.version !== KBCC_RETURN_NAVIGATION_VERSION)
     || !Array.isArray(value.routes)
     || value.routes.length > MAX_KBCC_RETURN_ROUTES) {
     throw new Error("KBCC return navigation has an unsupported or malformed shape.");

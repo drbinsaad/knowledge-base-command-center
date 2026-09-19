@@ -72,7 +72,7 @@ Activate the editor's **KBCC organization indicator**, or run **Organize current
 
 1. Choose **Knowledge base** and **Place in**.
 2. For the Index, choose **Index heading**, then **Under heading or note**. Choose **Directly under this index heading** for the root, or a full breadcrumb for an existing indexed note or unresolved placeholder parent. A parent placeholder is a destination, not a Markdown file being created or selected for organization. Larger lists offer **Find a heading or note**; filtering keeps your selected destination even when it does not match the query, and shows at most 300 matching choices at once.
-3. Optionally open **More options: Collections and other bases** to add Collection targets or additional knowledge-base destinations.
+3. **Collections** is always visible. Search the full heading/subheading breadcrumbs and check the destinations you want. Existing memberships start checked; unchecking removes that membership only. To create a destination here, enter its name, choose **Create under**, and use **Create and select**. These are drafts: Cancel creates nothing, and Review/Save creates the structure and membership together. Open **More options: other knowledge bases** only for additional bases.
 4. Choose **Review placement**, inspect the exact before/after locations, then **Save organization**. If nothing would change, **Done — no changes needed** closes without applying a transaction.
 
 An explicit Index parent change moves only the selected leaf, not its dependent subtree. Notes with dependent children must be organized separately; self-parenting, cycles, incompatible groups, and stale destinations are rejected. Protected ENT Index eligibility and source-group constraints still apply. Choosing durable placement for a note supplied only by a linked folder is disclosed in the review; its folder rule is not changed.
@@ -202,7 +202,7 @@ Cover lookup first checks the exact property name. If it is absent, one unique c
 
 The card now distinguishes a missing property, an empty property, a note or image not available on this device, an unsupported image/link, and an image that could not load. Open the linked image directly in Obsidian when checking availability; never post private note contents or recovery codes in diagnostic screenshots.
 
-Online covers are not supported in 0.23.1: HTTP/HTTPS and other note-supplied URL schemes are not loaded, and there is no Allow external images action. Put the image in your vault and set the cover property to its local link. Display settings, Sync, imports, recovery, Undo and legacy private-test permission values cannot enable remote loading. The [Library display and privacy guide](LIBRARY_DISPLAY_AND_PRIVACY.md) explains local cover setup and the deferred online proposal. The [0.23.1 device record](release-evidence/0.23.1-iphone.md) explicitly leaves physical-device and controlled two-device Sync checks unverified.
+Online covers are not supported in 0.24.0: HTTP/HTTPS and other note-supplied URL schemes are not loaded, and there is no Allow external images action. Put the image in your vault and set the cover property to its local link. Display settings, Sync, imports, recovery, Undo and legacy private-test permission values cannot enable remote loading. The [Library display and privacy guide](LIBRARY_DISPLAY_AND_PRIVACY.md) explains local cover setup and the deferred online proposal. The [0.24.0 device record](release-evidence/0.24.0-iphone.md) explicitly leaves physical-device and controlled two-device Sync checks unverified.
 
 ### Organize a Library
 
@@ -254,7 +254,11 @@ In the ENT preset, custom Libraries use these creation profiles. Protected sourc
 
 Collections are personal reusable lists across the Index and Libraries. A record can belong to several Collection headings or subheadings without duplication or file movement.
 
-Use a record's menu or inspector to add it to a Collection. In Arrange mode, Collection headings and subheadings can be created, renamed, reordered, or removed, and any heading or subheading below the five-level cap offers **Add subheading**. Removing a nested subheading moves its memberships and child subheadings up under its parent. Removing Collection membership does not change the record's primary Index/Library classification.
+The **My Collections** tab shows **New collection** and **Add notes** above the list on desktop, tablet, and phone. **Add → New collection** is also available from other tabs. Destination pickers offer **New collection** even when collections already exist. A collection or subheading's **…** menu offers **Add notes here** and **Create note here**, including when collapsed or already populated. A top-level collection also offers **Search this collection**, including all its nested members; normal search filters still apply.
+
+Use a record's menu, inspector, or the note organizer to add it to a Collection. Collection headings and subheadings can be created, renamed, reordered, or removed, and any heading or subheading below the five-level cap offers **Add subheading**. Removing a nested subheading moves its memberships and child subheadings up under its parent. Removing Collection membership does not change the record's primary Index/Library classification. Destructive organization actions require a restorable Undo snapshot; if a change is too large, it is refused rather than applied without Undo.
+
+If a Markdown note is created but its organization cannot be saved, KBCC reports the saved path and offers **Open saved note** and **Organize saved note**. The file is kept; do not submit the creation form again.
 
 ### Touch arrangement
 
@@ -267,6 +271,8 @@ Use **Details → Undo** to restore the previous position; **Redo** reapplies it
 Physical iPhone/iPad gesture verification for this implementation remains pending; desktop-browser and Obsidian mobile-emulation tests do not replace device testing.
 
 ## Smart queues
+
+Empty queues are hidden by default. Use **Show empty queues** to see them; this display choice does not change notes or queue rules.
 
 Depending on the profile and current organization, smart queues can surface:
 
@@ -474,7 +480,7 @@ A wide desktop Obsidian leaf keeps the Index and inspector side by side. Compact
 
 A saved view retains the current section and literal search query. Queries can contain a path if one was typed, so review saved views before including them in a portable export.
 
-Undo/Redo covers personal organization and guarded import changes. Required Undo operations first stage an exact causal snapshot in the bounded version-4 device-local pending-Undo journal. A multi-base portfolio import stages the newest required Undo for every affected destination as one bounded causal batch. A Global Note Organizer Apply is the other multi-base author and stages every affected base through that same mechanism. Pressing Undo or Redo separately stages the exact pre-transition history stacks and the inverse snapshot in a pending Undo/Redo transition journal. After a restart, a journal advances history only when the committed semantic revision, head, and payload fingerprint match; a multi-base batch resolves that proof independently for each affected base. Otherwise required Undo is discarded or the user-invoked transition retains its exact pre-transition stacks. If the complete protected operation cannot fit within the shared 4 MiB device-local limit, it is refused before its primary mutation. Named organization snapshots are base-local and restore plugin state, not Markdown note bodies.
+Undo/Redo covers personal organization and guarded import changes. Required Undo operations first stage an exact causal snapshot in the bounded version-5 device-local pending-Undo journal. Existing version-4 journals remain readable during upgrade. A multi-base portfolio import stages the newest required Undo for every affected destination as one bounded causal batch. A Global Note Organizer Apply is the other multi-base author and stages every affected base through that same mechanism. Pressing Undo or Redo separately stages the exact pre-transition history stacks and the inverse snapshot in a pending Undo/Redo transition journal. After a restart, a journal advances history only when the committed semantic revision, head, and payload fingerprint match; a multi-base batch resolves that proof independently for each affected base. Otherwise required Undo is discarded or the user-invoked transition retains its exact pre-transition stacks. If the complete protected operation cannot fit within the shared 4 MiB device-local limit, it is refused before its primary mutation. Named organization snapshots are base-local and restore plugin state, not Markdown note bodies.
 
 For durable recovery, use a same-vault recovery export in addition to a complete vault backup. See [Portability and recovery](PORTABILITY_AND_RECOVERY.md).
 
@@ -505,7 +511,7 @@ This is not a Sync-status surface. It makes no network request, calls no private
 
 Choose **Clear device-local data…** in this center, or run the command of the same name, when preparing to uninstall or intentionally resetting this device. A confirmation explains that it clears this plugin's App-local route, disclosure, Undo/Redo, local diagnostic facts, update-announcement history, any bounded pending rename-recovery journal, and note-bound return destinations. The rename journal may temporarily contain the vault identity and old/new vault-relative paths after an interrupted organization repair. The separate bounded return-navigation history can contain the vault identity, up to 24 opened-note paths, their originating base and tab, a selected-record path, literal search text entered in KBCC, compact-detail state, and scroll positions. KBCC does not read or copy note bodies into return history, but user-entered search text can itself be sensitive; neither local value syncs. The clear action removes all five plugin-owned App-local values; it does not write synced <code>data.json</code> or change Markdown, attachments, or recovery exports. Tracking remains suppressed until Obsidian restarts, so disable or uninstall in the same session; restart only when you want local tracking to resume.
 
-A legacy external Library-image permission key is the fifth App-local value covered by the local-data reset above. It may remain from a private test build but remains inert in 0.23.1, even if cleanup fails or Obsidian restarts. There is no online-image enable control in this release. See [Local data](LOCAL_DATA.md).
+A legacy external Library-image permission key is the fifth App-local value covered by the local-data reset above. It may remain from a private test build but remains inert in 0.24.0, even if cleanup fails or Obsidian restarts. There is no online-image enable control in this release. See [Local data](LOCAL_DATA.md).
 
 ## Settings
 

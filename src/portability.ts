@@ -60,14 +60,17 @@ import { hasUnpairedSurrogate } from "./follow-up";
 
 export const PORTABLE_EXPORT_KIND = "knowledge-base-command-center-portable-export" as const;
 /**
- * Version 6 adds per-Library list and gallery display settings in Workspace.
+ * Version 7 adds Collection-scoped saved searches; older builds must reject
+ * them instead of silently widening their scope. Version 6 adds per-Library
+ * list and gallery display settings in Workspace.
  * Version 5 carries nested subheading hierarchies (up to MAX_LAYOUT_DEPTH
  * levels) in collections and library layouts. Older builds reject it rather
  * than silently flattening or discarding nested organization. Version 4 added
  * stable, user-defined library identities. The importer continues to accept
- * versions 1 through 5.
+ * versions 1 through 6.
  */
-export const PORTABLE_EXPORT_VERSION = 6 as const;
+export const PORTABLE_EXPORT_VERSION = 7 as const;
+const LIBRARY_DISPLAY_PORTABLE_EXPORT_VERSION = 6 as const;
 const NESTED_LAYOUT_PORTABLE_EXPORT_VERSION = 5 as const;
 const LIBRARY_IDENTITY_PORTABLE_EXPORT_VERSION = 4 as const;
 const LIBRARY_LAYOUT_PORTABLE_EXPORT_VERSION = 3 as const;
@@ -78,6 +81,7 @@ type PortableExportVersion = typeof LEGACY_PORTABLE_EXPORT_VERSION
   | typeof LIBRARY_LAYOUT_PORTABLE_EXPORT_VERSION
   | typeof LIBRARY_IDENTITY_PORTABLE_EXPORT_VERSION
   | typeof NESTED_LAYOUT_PORTABLE_EXPORT_VERSION
+  | typeof LIBRARY_DISPLAY_PORTABLE_EXPORT_VERSION
   | typeof PORTABLE_EXPORT_VERSION;
 export const MAX_PORTABLE_PACKAGE_BYTES = 10 * 1024 * 1024;
 const MAX_PORTABLE_GROUPS = 10_000;
@@ -211,7 +215,7 @@ export interface PortableStudyV1 {
 }
 
 export interface PortableSavedViewsV1 {
-  version: 1;
+  version: 1 | 2;
   views: SavedView[];
 }
 
@@ -1063,7 +1067,7 @@ export function createPortableExport(
       nextSubjectIds: unique(data.nextStudyPaths.map((path) => pathToId.get(path) || "").filter((id) => includedIds.has(id))),
     };
   }
-  if (selection.savedViews) components.savedViews = { version: 1, views: data.savedViews.map((view) => ({ ...view })) };
+  if (selection.savedViews) components.savedViews = { version: 2, views: data.savedViews.map((view) => ({ ...view })) };
   if (selection.recovery) {
     components.recovery = createPersonalBackup(data, exportedAt, sourceVaultId, sourceBaseId, sourceBaseName);
   }
@@ -1592,7 +1596,9 @@ function parsePortableCollections(input: unknown, known: Set<string>, budget: Po
 
 function parseSavedViews(input: unknown, packageVersion: PortableExportVersion): PortableSavedViewsV1 {
   const value = asUnknownRecord(input);
-  if (value.version !== 1 || !Array.isArray(value.views) || value.views.length > MAX_PORTABLE_COLLECTIONS) throw new Error("Unsupported saved views component.");
+  if ((value.version !== 1 && value.version !== 2)
+    || (value.version === 2 && packageVersion < PORTABLE_EXPORT_VERSION)
+    || !Array.isArray(value.views) || value.views.length > MAX_PORTABLE_COLLECTIONS) throw new Error("Unsupported saved views component.");
   const ids = new Set<string>();
   const views: SavedView[] = value.views.map((raw, index) => {
     const view = asUnknownRecord(raw);
@@ -1609,9 +1615,12 @@ function parseSavedViews(input: unknown, packageVersion: PortableExportVersion):
     if (!isMainTab(tab)) throw new Error(`Saved view ${id} has an unsupported tab.`);
     const query = typeof view.query === "string" ? view.query : "";
     if (query.length > MAX_SAVED_VIEW_QUERY_LENGTH) throw new Error(`Saved view ${id} query is too long.`);
+    if (view.scope === "collection" && (value.version !== 2 || packageVersion < PORTABLE_EXPORT_VERSION)) {
+      throw new Error(`Saved view ${id} requires the Collection-scoped saved views format.`);
+    }
     return { id, name: safeTitle(view.name, `Saved view ${index + 1} name`), tab, query, ...cleanSearchViewFilters(view) };
   });
-  return { version: 1, views };
+  return { version: value.version, views };
 }
 
 export function parsePortableExport(input: unknown): PortableExportV1 {
@@ -1623,6 +1632,7 @@ export function parsePortableExport(input: unknown): PortableExportV1 {
       && value.version !== LIBRARY_LAYOUT_PORTABLE_EXPORT_VERSION
       && value.version !== LIBRARY_IDENTITY_PORTABLE_EXPORT_VERSION
       && value.version !== NESTED_LAYOUT_PORTABLE_EXPORT_VERSION
+      && value.version !== LIBRARY_DISPLAY_PORTABLE_EXPORT_VERSION
       && value.version !== PORTABLE_EXPORT_VERSION)) {
     throw new Error("Unsupported Command Center portable export.");
   }
@@ -2807,18 +2817,30 @@ export function applyPortableExport(
     // label while silently changing its meaning. Omit only incoming views whose
     // dependency is missing or locally archived.
     const incomingViews = value.components.savedViews.views
-      .filter((view) => navigationTabIsAvailable(view.tab));
+      .filter((view) => navigationTabIsAvailable(view.tab))
+      .filter((view) => {
+        if (view.scope !== "collection") return true;
+        // Collection IDs can be reminted during a merge. Do not let a named
+        // search silently address an unrelated pre-existing collection, or
+        // widen it when its dependency was not included in this import.
+        if (!selection.collections) return false;
+        const incoming = value.components.collections?.collections.find((collection) => collection.id === view.collectionId);
+        const destination = data.collections.find((collection) => collection.id === view.collectionId);
+        return Boolean(incoming && destination && normalizedNameKey(incoming.title) === normalizedNameKey(destination.title));
+      });
     result.importedViews = incomingViews.length;
     if (mode === "replace") data.savedViews = incomingViews.map((view) => ({ ...view }));
     else {
-      const viewById = new Map(data.savedViews.map((view) => [view.id, view]));
+      const viewIndexById = new Map(data.savedViews.map((view, index) => [view.id, index]));
       for (const incoming of incomingViews) {
-        const existing = viewById.get(incoming.id);
-        if (existing) Object.assign(existing, incoming);
+        const existingIndex = viewIndexById.get(incoming.id);
+        // Missing optional filters mean defaults, not "retain the old filter".
+        // Replace the named view as a whole while preserving its list position.
+        if (existingIndex !== undefined) data.savedViews[existingIndex] = { ...incoming };
         else {
           const added = { ...incoming };
+          viewIndexById.set(added.id, data.savedViews.length);
           data.savedViews.push(added);
-          viewById.set(added.id, added);
         }
       }
     }

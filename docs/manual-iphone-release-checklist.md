@@ -2,7 +2,24 @@
 
 Complete this checklist on a physical iPhone before tagging a release that changes search, navigation, modals, import/export, Sync handling, or mobile styles. Simulator and automated DOM results may accompany this record but do not replace it.
 
-## 0.23.1 cover setup, diagnostics and persistent Save
+## 0.24.0 Collections and workflow reliability
+
+Status: **Maintainer-authorized waiver — Unverified — not executed on a physical iPhone or iPad.** The maintainer directed **publish** after the remaining device and controlled two-device Sync gap was disclosed. The [fresh 0.24.0 evidence](release-evidence/0.24.0-iphone.md) is candidate-specific and does not mark any physical check as Pass.
+
+Use a disposable synthetic vault and the [active smoke record](release-evidence/next-release-smoke.md). Record exact asset checksums, device/OS/Obsidian versions, input method and Sync provider before running these checks:
+
+1. Create a collection from the visible My Collections action, global Add menu and existing destination picker. Add notes to populated/collapsed collections and nested subheadings; verify full destination breadcrumbs and unchanged Markdown.
+2. Organize an open note using searchable membership checkboxes and inline new collections/subheadings. Cancel creates nothing; Review → Save commits the structure and membership atomically. Collection-only edits preserve existing Index/Library placement. Unchanged reviews close with Done.
+3. Undo/Redo the whole change, restart and confirm persisted organization. Change a destination or rename a selected note before Save; the stale review must be refused without partial changes.
+4. Search a collection with nested members, add filters, open a note and Return to KBCC. Save/import the search and confirm it never silently broadens. Update both devices to 0.24.0 before editing format-17 data; confirm old builds protect it read-only. Test rollback only with matching older assets and complete pre-upgrade organization data.
+5. Exercise note creation, saved-but-unfiled recovery, Quick Append, templates and attachments in synthetic fixtures. A filing retry must not create a second note; failed writes preserve the draft.
+6. Repeat phone/tablet portrait, landscape and Split View with software and hardware keyboards, native safe areas, VoiceOver, large text and Arabic/RTL. Verify reachable sticky controls, 44-point actions, footer scrolling, List/Cards/local covers and touch arrangement.
+7. In a controlled device pair, test delayed delivery, restart, concurrent organization changes and stale-save protection. The recovery center reports local observations, not remote Sync completion.
+8. Verify one-time update news and the exact release URL after publication: `https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.24.0`.
+
+All these physical-device and controlled Sync checks remain **Unexecuted**. Automated browser geometry and Mac Obsidian emulation do not execute them. Earlier sections below are historical, not current sign-off.
+
+## Historical 0.23.1 cover setup, diagnostics and persistent Save
 
 Status: **Maintainer-authorized waiver — Unverified — not executed on a physical iPhone or iPad.** After the tested cover update and its remaining physical-device gap were disclosed, the maintainer explicitly approved publishing this update. The [fresh 0.23.1 record](release-evidence/0.23.1-iphone.md) applies only to this candidate. It does not reuse the 0.23.0 waiver or mark any device check as Pass. Online covers remain excluded; no online-cover review or approval is added.
 

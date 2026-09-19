@@ -182,6 +182,41 @@ function indexPlacement(parentPath: string | null, overrides: Partial<NoteOrgani
   };
 }
 
+test("staged Collection creation rejects unused drafts atomically and applies exact new membership with original Undo", () => {
+  const base = entry("base-a", "Alpha");
+  base.data.collections = [];
+  const store = storeWith([base]);
+  const before = structuredClone(store);
+  const facts = [fact(base.id, "Notes/A.md")];
+  const collectionCreations = [{ baseId: base.id, id: "new-reading", title: "Reading", headingId: null, parentSubheadingId: null }];
+  assert.throws(() => createNoteOrganizerPlan(store, facts, [{ baseId: base.id, path: facts[0].path }], { collectionCreations }), /Every new Collection/u);
+  assert.deepEqual(store, before);
+  const directives: NoteOrganizerDirective[] = [{ baseId: base.id, path: facts[0].path, collections: { mode: "add", targets: [{ headingId: "new-reading" }] } }];
+  const plan = createNoteOrganizerPlan(store, facts, directives, { collectionCreations, now: 910, expectedExternalGeneration: 4 });
+  assert.deepEqual(store, before);
+  collectionCreations[0].title = "Edited after review";
+  const applied = applyNoteOrganizerPlan(store, plan, facts, 4);
+  assert.equal(applied.bases[0].data.collections[0].title, "Reading");
+  assert.deepEqual(applied.bases[0].data.collections[0].subjects, [facts[0].path]);
+  assert.deepEqual(applied.bases[0].data.undoStack.at(-1)?.collections, []);
+  assert.deepEqual(applied.bases[0].data.directIndexPaths, before.bases[0].data.directIndexPaths);
+  assert.throws(() => applyNoteOrganizerPlan(store, plan, facts, 5), /changed|generation|stale/iu);
+});
+
+test("staged Collection children can target an existing long non-Latin layout identity", () => {
+  const base = entry("base-a", "Alpha");
+  const headingId = `مجموعة_${"x".repeat(4089)}`;
+  base.data.collections = [{ id: headingId, title: "Reading", collapsed: false, subjects: [], subheadings: [] }];
+  const store = storeWith([base]);
+  const facts = [fact(base.id, "Notes/A.md")];
+  const plan = createNoteOrganizerPlan(store, facts, [{ baseId: base.id, path: facts[0].path, collections: { mode: "add", targets: [{ headingId, subheadingId: "new-child" }] } }], {
+    collectionCreations: [{ baseId: base.id, id: "new-child", title: "New child", headingId, parentSubheadingId: null }],
+  });
+  const applied = applyNoteOrganizerPlan(store, plan, facts, 0);
+  assert.equal(applied.bases[0].data.collections[0].id, headingId);
+  assert.deepEqual(applied.bases[0].data.collections[0].subheadings[0].subjects, [facts[0].path]);
+});
+
 test("explicit Index parent places only the selected leaf with breadcrumb review and exact durable Undo", () => {
   const base = entry("base-a", "Alpha");
   const path = "Vault/Leaf.md";

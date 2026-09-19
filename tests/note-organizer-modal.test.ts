@@ -207,6 +207,12 @@ function changeSelect(content: FakeElement, label: string, value: string): void 
   select.dispatch("change");
 }
 
+function inputByLabel(content: FakeElement, label: string): FakeElement & { checked: boolean } {
+  const input = content.querySelectorAll("input").find((candidate) => candidate.getAttribute("aria-label") === label);
+  assert.ok(input, `missing input: ${label}`);
+  return input as FakeElement & { checked: boolean };
+}
+
 async function openSingleNote(host: NoteOrganizerHost, path: string): Promise<ModalHarness> {
   return openModal(host, [path], undefined, undefined, true);
 }
@@ -245,6 +251,79 @@ test("single-note mode requires exactly one preselection and never replaces the 
     assert.equal(surface.content.querySelectorAll(".ent-cc-note-organizer-progress-step").length, 3);
     assert.ok(surface.content.querySelector('[role="tree"]'));
   }
+});
+
+test("single-note checked Collection memberships support explicit removal without incidental Index placement", async () => {
+  const harness = hostHarness(notes(1), [{ ...BASE, initialCollections: [{ headingId: "board-review", subheadingId: null }] }]);
+  const surface = await openSingleNote(harness.host, notes(1)[0].path);
+  const member = inputByLabel(surface.content, "Board review");
+  assert.equal(member.checked, true);
+  assert.match(surface.content.textContent, /Currently added/u);
+  member.checked = false;
+  member.dispatch("change");
+  button(surface.content, "Review placement").click();
+  await settle();
+  assert.deepEqual(harness.drafts[0].destinations[0].collections, { mode: "replace", targets: [], clearAllConfirmed: true });
+  assert.equal(harness.drafts[0].destinations[0].primary.mode, "keep");
+});
+
+test("zero-collection organizer stages a new Collection and subheading without host writes until Save", async () => {
+  const harness = hostHarness(notes(1), [{ ...BASE, collections: [] }]);
+  const surface = await openSingleNote(harness.host, notes(1)[0].path);
+  const name = inputByLabel(surface.content, "New collection or subheading name");
+  assert.ok(name);
+  name.value = "Reading";
+  button(surface.content, "Create and select").click();
+  assert.deepEqual(harness.drafts, []);
+  assert.deepEqual(harness.appliedTokens, []);
+  const parentSelect = selectByLabel(surface.content, "Create under");
+  const parent = parentSelect.querySelectorAll("option").find((option) => option.textContent === "Reading");
+  assert.ok(parent);
+  changeSelect(surface.content, "Create under", parent.getAttribute("value") ?? "");
+  const childName = inputByLabel(surface.content, "New collection or subheading name");
+  assert.ok(childName);
+  childName.value = "This week";
+  button(surface.content, "Create and select").click();
+  const parentMember = inputByLabel(surface.content, "Reading");
+  parentMember.checked = false;
+  parentMember.dispatch("change");
+  button(surface.content, "Review placement").click();
+  await settle();
+  const draft = harness.drafts[0];
+  assert.equal(draft.collectionCreations?.length, 2);
+  assert.equal(draft.collectionCreations[1].headingId, draft.collectionCreations[0].id);
+  assert.equal(draft.destinations[0].collections.targets.length, 1);
+  assert.equal(draft.destinations[0].primary.mode, "keep");
+  assert.deepEqual(harness.appliedTokens, [], "review stages only a token, not live collections");
+  button(surface.content, "Cancel").click();
+  assert.deepEqual(harness.appliedTokens, [], "cancel never calls Apply");
+});
+
+test("Collection checkbox search keeps exact selections without duplicates and omits unchecked draft structures", async () => {
+  const harness = hostHarness(notes(1));
+  const surface = await openSingleNote(harness.host, notes(1)[0].path);
+  let member = inputByLabel(surface.content, "Board review");
+  member.checked = true;
+  member.dispatch("change");
+  member = inputByLabel(surface.content, "Board review");
+  member.checked = true;
+  member.dispatch("change");
+  const name = inputByLabel(surface.content, "New collection or subheading name");
+  assert.ok(name);
+  name.value = "Unused draft";
+  button(surface.content, "Create and select").click();
+  const draftMember = inputByLabel(surface.content, "Unused draft");
+  draftMember.checked = false;
+  draftMember.dispatch("change");
+  const search = inputByLabel(surface.content, "Find a collection or subheading");
+  assert.ok(search);
+  search.value = "no match";
+  search.dispatch("input");
+  assert.equal(surface.content.querySelectorAll(".ent-cc-note-organizer-collection-choice").length, 0);
+  button(surface.content, "Review placement").click();
+  await settle();
+  assert.deepEqual(harness.drafts[0].destinations[0].collections.targets, [{ headingId: "board-review", subheadingId: null }]);
+  assert.deepEqual(harness.drafts[0].collectionCreations, []);
 });
 
 test("single-note existing Index and Library placements prefill exact identities without preparing or applying", async () => {
@@ -312,19 +391,19 @@ test("single-note heading and parent choice reach the exact review and Save retu
   assert.equal(surface.closed(), 1);
 });
 
-test("single-note advanced options expose Collections and other bases without per-note overrides or losing location", async () => {
+test("single-note Collections are visible while other bases remain advanced without losing location", async () => {
   const harness = hostHarness(notes(1), [BASE, SECOND_BASE]);
   const surface = await openSingleNote(harness.host, notes(1)[0].path);
   changeSelect(surface.content, "Under heading or note", "airway");
   assert.equal(button(surface.content, "Add knowledge base").hidden, true);
-  assert.equal(surface.content.querySelectorAll("legend").some((item) => item.textContent === "Collections"), false);
-  button(surface.content, "More options: Collections and other bases").click();
+  assert.equal(surface.content.querySelectorAll("legend").some((item) => item.textContent === "Collections"), true);
+  button(surface.content, "More options: other knowledge bases").click();
   assert.equal(button(surface.content, "Hide advanced options").getAttribute("aria-expanded"), "true");
   assert.equal(surface.content.ownerDocument.activeElement?.getAttribute("data-organizer-focus"), "advanced-options");
   assert.equal(button(surface.content, "Add knowledge base").hidden, false);
-  changeSelect(surface.content, "Action", "add");
-  button(surface.content, "Add target").click();
-  changeSelect(surface.content, "Subheading", "congenital");
+  const target = surface.content.querySelector('input[aria-label="Congenital"]') as FakeElement & { checked: boolean };
+  target.checked = true;
+  target.dispatch("change");
   button(surface.content, "Add knowledge base").click();
   await settle();
   assert.equal(surface.content.querySelectorAll(".ent-cc-note-organizer-destination-card").length, 2);
@@ -1021,7 +1100,7 @@ test("removed Collection destinations remain unavailable instead of being silent
   bases = [{ ...structuredClone(BASE), collections: [{ id: "different", name: "Different", subheadings: [] }] }];
   await surface.modal.refreshAfterExternalChange();
   assert.deepEqual(state.destinations[0].collections.targets, [{ headingId: "board-review", subheadingId: "congenital" }]);
-  assert.match(surface.content.textContent, /Unavailable — choose another destination/u);
+  assert.match(surface.content.textContent, /Unavailable — remove this Collection destination/u);
   button(surface.content, "Prepare review").click();
   await settle();
   assert.equal(harness.drafts.length, 0, "invalid destinations never reach authoritative preparation");
@@ -1157,6 +1236,22 @@ test("host-prepared blocking errors render actionable review feedback and cannot
   await settle();
   assert.deepEqual(harness.appliedTokens, []);
   assert.equal(surface.closed(), 0);
+});
+
+test("bulk unchanged review closes with Done without calling the transaction host", async () => {
+  const harness = hostHarness(notes(2));
+  const plan = prepared(2);
+  plan.summary.changeCount = 0;
+  plan.summary.unchangedCount = 2;
+  harness.setPrepared(plan);
+  const surface = await openModal(harness.host, notes(2).map((note) => note.path));
+  button(surface.content, "Choose destinations").click();
+  button(surface.content, "Prepare review").click();
+  await settle();
+  assert.equal(button(surface.content, "Done — no changes needed").disabled, false);
+  button(surface.content, "Done — no changes needed").click();
+  assert.equal(surface.closed(), 1);
+  assert.deepEqual(harness.appliedTokens, []);
 });
 
 test("prepare exceptions stay on Destinations with an actionable error and no Apply surface", async () => {

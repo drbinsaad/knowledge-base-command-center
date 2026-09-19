@@ -37,6 +37,7 @@ import {
   type RecordKind,
   type RecordRole,
 } from "./model";
+import { organizerCollectionStructureId, stageOrganizerCollectionCreations, validateOrganizerCollectionCreations, type OrganizerCollectionCreation } from "./note-organizer-collections";
 
 /** Hard UI/domain limits keep one synchronous organizer transaction bounded. */
 export const MAX_NOTE_ORGANIZER_NOTES = 5_000;
@@ -123,6 +124,7 @@ export interface NoteOrganizerPlanOptions {
   now?: number;
   expectedExternalGeneration?: number;
   label?: string;
+  collectionCreations?: readonly OrganizerCollectionCreation[];
 }
 
 export interface NoteOrganizerBaseGuard {
@@ -513,10 +515,10 @@ function normalizeCollectionTargets(
   for (const [index, rawInput] of inputs.entries()) {
     if (!rawInput || typeof rawInput !== "object") fail(`${label} Collection target ${index + 1} is invalid.`);
     const input = rawInput as Record<string, unknown>;
-    const headingId = safeStableId(input.headingId, `${label} Collection heading ${index + 1}`);
+    const headingId = organizerCollectionStructureId(input.headingId);
     const subheadingId = input.subheadingId === undefined
       ? undefined
-      : safeStableId(input.subheadingId, `${label} Collection subheading ${index + 1}`);
+      : organizerCollectionStructureId(input.subheadingId);
     const target = { headingId, ...(subheadingId ? { subheadingId } : {}) };
     const key = targetKey(target);
     if (used.has(key)) continue;
@@ -1779,6 +1781,17 @@ export function createNoteOrganizerPlan(
 ): Readonly<NoteOrganizerPlan> {
   const facts = normalizeFacts(fileFactInputs);
   const directives = normalizeDirectives(directiveInputs);
+  const collectionCreations = validateOrganizerCollectionCreations(options.collectionCreations);
+  const referencedCreations = new Set<string>();
+  for (const directive of directives) if (directive.collections.mode !== "keep") for (const target of directive.collections.targets) {
+    referencedCreations.add(`${directive.baseId}\0${target.headingId}`);
+    if (target.subheadingId) referencedCreations.add(`${directive.baseId}\0${target.subheadingId}`);
+  }
+  for (const creation of [...collectionCreations].reverse()) {
+    if (!referencedCreations.has(`${creation.baseId}\0${creation.id}`)) fail("Every new Collection or subheading must contain a selected note or a selected child destination.");
+    if (creation.parentSubheadingId) referencedCreations.add(`${creation.baseId}\0${creation.parentSubheadingId}`);
+    if (creation.headingId) referencedCreations.add(`${creation.baseId}\0${creation.headingId}`);
+  }
   verifyFactsMatchDirectives(facts, directives);
   const directiveByPair = new Map(directives.map((directive) => [pairKey(directive.baseId, directive.path), directive]));
   for (const fact of facts) {
@@ -1808,7 +1821,7 @@ export function createNoteOrganizerPlan(
   );
   const expectedStoreGuard = noteOrganizerStoreGuard(store);
   const expectedFileFactsGuard = fingerprint(facts);
-  const seed = fingerprint({ expectedStoreGuard, expectedFileFactsGuard, baseGuards: guards, directives, now, label });
+  const seed = fingerprint({ expectedStoreGuard, expectedFileFactsGuard, baseGuards: guards, directives, collectionCreations, now, label });
   const operations: NoteOrganizerPlanOperation[] = [];
   const reviews: NoteOrganizerReview[] = [];
   const diffs: NoteOrganizerDiff[] = [];
@@ -1831,6 +1844,7 @@ export function createNoteOrganizerPlan(
     const baseFacts = factsByBaseId.get(guard.baseId) ?? [];
     const baseDirectives = directivesByBaseId.get(guard.baseId) ?? [];
     const working = cloneJsonValue(sourceEntry);
+    stageOrganizerCollectionCreations(working.data, collectionCreations.filter((creation) => creation.baseId === guard.baseId));
     const context = createBaseContext(working, baseFacts, seed);
     for (const directive of baseDirectives) {
       const fact = context.factByPath.get(directive.path);

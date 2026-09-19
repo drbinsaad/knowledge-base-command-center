@@ -2498,8 +2498,8 @@ test("organization backup round-trips without clinical content", () => {
   }];
   const backup = createPersonalBackup(data, "2026-08-07T00:00:00.000Z", "vault-synthetic-source", "base-ent", "ENT");
   const parsed = parsePersonalBackup(JSON.parse(JSON.stringify(backup)) as unknown);
-  assert.equal(backup.version, 12);
-  assert.equal(parsed.version, 12);
+  assert.equal(backup.version, 13);
+  assert.equal(parsed.version, 13);
   assert.equal(parsed.indexFolderSourcesIncluded, true);
   assert.equal(parsed.sourceVaultId, "vault-synthetic-source");
   assert.equal(parsed.sourceBaseId, "base-ent");
@@ -2525,7 +2525,7 @@ test("organization backup round-trips without clinical content", () => {
   delete versionEight.directIndexPaths;
   delete versionEight.indexFolderSources;
   const migratedVersionEight = parsePersonalBackup(versionEight);
-  assert.equal(migratedVersionEight.version, 12);
+  assert.equal(migratedVersionEight.version, 13);
   assert.equal(migratedVersionEight.indexFolderSourcesIncluded, false);
   assert.equal(migratedVersionEight.portableIndex.libraries.some((library) => library.id === "library-reading"), true);
   assert.deepEqual(migratedVersionEight.portableIndex.libraryLayouts["library-reading"], data.portableIndex.libraryLayouts["library-reading"]);
@@ -2725,7 +2725,7 @@ test("version 1 organization backups remain readable but carry no trusted vault 
     curriculumVisual: { parentByPath: {}, orderByContainer: {} },
     layoutSnapshots: [],
   });
-  assert.equal(parsed.version, 12);
+  assert.equal(parsed.version, 13);
   assert.equal(parsed.indexFolderSourcesIncluded, false);
   assert.equal(parsed.sourceVaultId, "");
   assert.equal(parsed.sourceBaseId, "");
@@ -5967,8 +5967,8 @@ test("portable v5 declares every selected library while legacy v1 packages remai
     "2026-08-08T00:00:00.000Z",
   );
 
-  assert.equal(current.version, 6);
-  assert.equal(current.components.index?.version, 6);
+  assert.equal(current.version, 7);
+  assert.equal(current.components.index?.version, 7);
   assert.deepEqual(current.components.index?.includedSections, {
     index: false,
     libraryIds: ["medication"],
@@ -7325,6 +7325,8 @@ test("v4 pending required Undo journals are exact, strict, and bounded with thei
   const built = createDeviceLocalPluginStateWithReport(store, pending);
   const parsed = parseDeviceLocalPluginState(built.state);
   assert.deepEqual(parsed.pendingRequiredUndoCommit, pending);
+  assert.deepEqual(parseDeviceLocalPluginState({ ...built.state, version: 4 }).pendingRequiredUndoCommit, pending,
+    "v4 pending journals remain recoverable when upgrading the local saved-view format");
   assert.equal(
     parsed.bases[0]?.view.undoStack[parsed.bases[0].view.undoStack.length - 1]?.label,
     required.label,
@@ -7404,6 +7406,8 @@ test("v4 multi-base required Undo batches are sorted, strict, and preserve new-b
   const built = createDeviceLocalPluginStateWithReport(store, undefined, undefined, pending);
   const parsed = parseDeviceLocalPluginState(built.state);
   assert.deepEqual(parsed.pendingRequiredUndoBatchCommit, pending);
+  assert.deepEqual(parseDeviceLocalPluginState({ ...built.state, version: 4 }).pendingRequiredUndoBatchCommit, pending,
+    "v4 pending multi-base journals remain recoverable");
   assert.ok(new TextEncoder().encode(JSON.stringify(built.state)).byteLength <= MAX_DEVICE_LOCAL_STATE_BYTES);
 
   const legacy = structuredClone(built.state) as unknown as { version: number };
@@ -7487,6 +7491,8 @@ test("v4 pending history transitions strictly derive their exact post-Undo stack
     canonicalJsonString(parsed.pendingHistoryTransitionCommit),
     canonicalJsonString(pending),
   );
+  assert.equal(canonicalJsonString(parseDeviceLocalPluginState({ ...built.state, version: 4 }).pendingHistoryTransitionCommit),
+    canonicalJsonString(pending), "v4 pending Undo/Redo transitions remain recoverable");
   assert.equal(
     canonicalJsonString(projectPendingHistoryTransition(
       parsed.bases[0]?.view.undoStack ?? [],
@@ -7934,9 +7940,9 @@ test("personal backups carry membership at v11 while flat v9 backups import unch
     collections: [nestedLayoutChain(6, (level) => ({ subjects: [`Knowledge/Level ${level}.md`] }))],
   });
   const backup = createPersonalBackup(data, "2026-08-08T00:00:00.000Z", "vault-synthetic-source", "base-ent", "ENT");
-  assert.equal(backup.version, 12);
+  assert.equal(backup.version, 13);
   const parsed = parsePersonalBackup(JSON.parse(JSON.stringify(backup)) as unknown);
-  assert.equal(parsed.version, 12);
+  assert.equal(parsed.version, 13);
   assert.deepEqual(parsed.collections, data.collections, "nested organization survives an exact round-trip");
   assert.deepEqual(
     subheadingAt(parsed.collections[0], MAX_LAYOUT_DEPTH).subjects,
@@ -7957,7 +7963,7 @@ test("personal backups carry membership at v11 while flat v9 backups import unch
   delete legacy.directIndexPaths;
   delete legacy.indexFolderSources;
   const legacyParsed = parsePersonalBackup(legacy);
-  assert.equal(legacyParsed.version, 12, "flat v9 backups upgrade in place");
+  assert.equal(legacyParsed.version, 13, "flat v9 backups upgrade in place");
   assert.equal(legacyParsed.indexFolderSourcesIncluded, false);
   assert.equal(legacyParsed.collections[0]?.subheadings[0]?.id, "sub");
 });
@@ -8083,7 +8089,7 @@ test("portable v5 collections round-trip five nested levels byte-stably in repla
     portableSelection({ collections: true }),
     "2026-08-12T00:00:00.000Z",
   );
-  assert.equal(exported.version, 6);
+  assert.equal(exported.version, 7);
   const collection = exported.components.collections?.collections[0];
   assert.ok(collection);
   assert.equal(collection.id, "chain-1");
@@ -8452,7 +8458,7 @@ test("portable v4 flat packages import unchanged while unknown versions refuse c
     portableSelection({ collections: true }),
     "2026-08-12T00:00:00.000Z",
   );
-  assert.equal(v5.version, 6);
+  assert.equal(v5.version, 7);
 
   const downgraded = structuredClone(v5) as unknown as {
     version: number;
@@ -8469,7 +8475,7 @@ test("portable v4 flat packages import unchanged while unknown versions refuse c
   // The same envelope gate makes builds that predate a version refuse it with
   // one clear message instead of silently flattening unknown organization.
   const future = structuredClone(v5) as unknown as { version: number };
-  future.version = 7;
+  future.version = 8;
   assert.throws(() => parsePortableExport(future), /Unsupported Command Center portable export\./);
 });
 
