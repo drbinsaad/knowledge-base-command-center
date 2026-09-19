@@ -1,5 +1,6 @@
 import { Modal, Notice, setIcon, type App } from "obsidian";
 import { MAX_NOTE_ORGANIZER_NOTES } from "./note-organizer";
+import { hasOrganizerControlCharacters, MAX_ORGANIZER_COLLECTION_CREATIONS, type OrganizerCollectionCreation } from "./note-organizer-collections";
 
 export type NoteOrganizerSource = "command" | "file-menu" | "files-menu" | "drop";
 export type OrganizerStage = "notes" | "destinations" | "review";
@@ -52,6 +53,7 @@ export interface OrganizerBaseOption {
   collections: readonly OrganizerHeadingOption[];
   /** Current placement of the one preselected note; never applied without review. */
   initialPrimary?: OrganizerPrimaryDraft;
+  initialCollections?: readonly OrganizerCollectionTargetDraft[];
   indexRestriction?: string;
 }
 
@@ -93,6 +95,7 @@ export interface NoteOrganizerDraft {
   selectedPaths: readonly string[];
   destinations: readonly OrganizerDestinationDraft[];
   overrides: readonly OrganizerNoteOverrideDraft[];
+  collectionCreations?: readonly OrganizerCollectionCreation[];
 }
 
 export interface OrganizerReviewState {
@@ -159,6 +162,7 @@ interface OrganizerDestinationState {
   key: number;
   baseId: string;
   primary: OrganizerPrimaryDraft;
+  primaryEdited?: boolean;
   collections: {
     mode: OrganizerCollectionMode;
     targets: OrganizerCollectionTargetDraft[];
@@ -323,6 +327,7 @@ function cloneDestination(value: OrganizerDestinationState): OrganizerDestinatio
     key: value.key,
     baseId: value.baseId,
     primary: clonePrimary(value.primary),
+    primaryEdited: value.primaryEdited,
     collections: {
       mode: value.collections.mode,
       targets: value.collections.targets.map((target) => ({ ...target })),
@@ -497,6 +502,9 @@ export class NoteOrganizerModal extends Modal {
   private queryInput = "";
   private query = "";
   private readonly parentQueries = new Map<number, string>();
+  private readonly collectionQueries = new Map<number, string>();
+  private readonly collectionCreations: OrganizerCollectionCreation[] = [];
+  private nextCollectionKey = 1;
   private searchTimer: number | null = null;
   private searchTimerWindow: Window | null = null;
   private treePage = 0;
@@ -626,8 +634,10 @@ export class NoteOrganizerModal extends Modal {
       this.selectionStatsCache = null;
       this.bases = bases;
       if (resetDestination && resetDestination.baseId === resetBaseId && this.singleNote) {
-        const initial = bases.find((base) => base.id === resetBaseId)?.initialPrimary;
+        const resetBase = bases.find((base) => base.id === resetBaseId);
+        const initial = resetBase?.initialPrimary;
         if (initial) resetDestination.primary = { ...initial };
+        resetDestination.collections.targets = (resetBase?.initialCollections ?? []).map((target) => ({ ...target }));
       }
       if (!this.snapshotInitialized) {
         this.selectPreseededPaths();
@@ -658,12 +668,13 @@ export class NoteOrganizerModal extends Modal {
   }
 
   private createDestination(baseId: string): OrganizerDestinationState {
-    const initial = this.singleNote ? this.bases.find((base) => base.id === baseId)?.initialPrimary : undefined;
+    const base = this.singleNote ? this.bases.find((base) => base.id === baseId) : undefined;
+    const initial = base?.initialPrimary;
     return {
       key: this.nextDestinationKey++,
       baseId,
       primary: initial ? { ...initial } : { mode: this.singleNote ? "index" : "keep", libraryId: null, headingId: null, subheadingId: null },
-      collections: { mode: "keep", targets: [], clearAllConfirmed: false },
+      collections: { mode: "keep", targets: (base?.initialCollections ?? []).map((target) => ({ ...target })), clearAllConfirmed: false },
     };
   }
 
@@ -1301,7 +1312,7 @@ export class NoteOrganizerModal extends Modal {
     this.renderDestinationList(shared, this.destinations, "shared");
     if (this.singleNote) {
       const more = parent.createEl("button", {
-        cls: "ent-cc-note-organizer-secondary-button", text: this.advancedOpen ? "Hide advanced options" : "More options: Collections and other bases",
+        cls: "ent-cc-note-organizer-secondary-button", text: this.advancedOpen ? "Hide advanced options" : "More options: other knowledge bases",
         attr: { type: "button", "aria-expanded": String(this.advancedOpen), "data-organizer-focus": "advanced-options" },
       });
       more.addEventListener("click", () => {
@@ -1458,6 +1469,7 @@ export class NoteOrganizerModal extends Modal {
         (value) => {
           destination.baseId = value;
           destination.primary = { mode: "keep", libraryId: null, headingId: null, subheadingId: null };
+          destination.primaryEdited = false;
           destination.collections = { mode: "keep", targets: [], clearAllConfirmed: false };
           this.invalidatePrepared();
           this.loading = true;
@@ -1468,7 +1480,7 @@ export class NoteOrganizerModal extends Modal {
       baseSelect.setAttribute("data-organizer-field", "base");
       const base = this.bases.find((item) => item.id === destination.baseId) ?? null;
       this.renderPrimaryEditor(card, destination, base, ownerKey);
-      if (!this.singleNote || this.advancedOpen || destination.collections.mode !== "keep") this.renderCollectionsEditor(card, destination, base, ownerKey);
+      this.renderCollectionsEditor(card, destination, base, ownerKey);
     }
   }
 
@@ -1492,6 +1504,7 @@ export class NoteOrganizerModal extends Modal {
         { value: "none", label: "No primary placement" },
       ],
       (value) => {
+        destination.primaryEdited = true;
         destination.primary = {
           mode: value as OrganizerPrimaryMode,
           libraryId: null,
@@ -1517,6 +1530,7 @@ export class NoteOrganizerModal extends Modal {
         libraryId,
         base.libraries.map((library) => ({ value: library.id, label: library.name })),
         (value) => {
+          destination.primaryEdited = true;
           destination.primary.libraryId = value || null;
           destination.primary.headingId = null;
           destination.primary.subheadingId = null;
@@ -1544,6 +1558,7 @@ export class NoteOrganizerModal extends Modal {
         ...headings.map((heading) => ({ value: heading.id, label: heading.name })),
       ],
       (value) => {
+        destination.primaryEdited = true;
         destination.primary.headingId = value || null;
         destination.primary.subheadingId = null;
         this.invalidatePrepared();
@@ -1567,6 +1582,7 @@ export class NoteOrganizerModal extends Modal {
         ...(heading?.subheadings ?? []).map((item) => ({ value: item.id, label: item.name })),
       ],
       (value) => {
+        destination.primaryEdited = true;
         destination.primary.subheadingId = value || null;
         this.invalidatePrepared();
         this.render();
@@ -1589,6 +1605,7 @@ export class NoteOrganizerModal extends Modal {
     search.disabled = this.busy;
     const select = this.labeledSelect(section, "Under heading or note",
       `${ownerKey}-${destination.key}-primary-subheading`, destination.primary.subheadingId ?? "", [], (value) => {
+        destination.primaryEdited = true;
         destination.primary.subheadingId = value || null;
         this.invalidatePrepared();
         this.render();
@@ -1624,7 +1641,9 @@ export class NoteOrganizerModal extends Modal {
   ): void {
     const section = parent.createEl("fieldset", { cls: "ent-cc-note-organizer-fieldset" });
     section.createEl("legend", { text: "Collections" });
-    this.labeledSelect(
+    if (!base) return;
+    const available = this.withDraftCollections(base);
+    if (!this.singleNote) this.labeledSelect(
       section,
       "Action",
       `${ownerKey}-${destination.key}-collections-mode`,
@@ -1642,8 +1661,7 @@ export class NoteOrganizerModal extends Modal {
         this.render();
       },
     );
-    if (!base || destination.collections.mode === "keep") return;
-    if (destination.collections.mode === "replace") {
+    if (!this.singleNote && destination.collections.mode === "replace") {
       section.createDiv({
         cls: "ent-cc-note-organizer-help",
         text: "Replace with no targets removes all current Collection memberships in this knowledge base.",
@@ -1667,73 +1685,114 @@ export class NoteOrganizerModal extends Modal {
         confirmation.createSpan({ text: "I understand that applying Replace with no targets removes every Collection membership for these notes in this knowledge base." });
       }
     }
-    const add = section.createEl("button", {
-      cls: "ent-cc-note-organizer-secondary-button",
-      text: "Add target",
-      attr: { type: "button", "data-organizer-focus": `add-collection:${ownerKey}:${destination.key}` },
-    });
-    add.disabled = base.collections.length === 0;
+    section.createDiv({ cls: "ent-cc-note-organizer-help", text: this.singleNote
+      ? "Check to add this note; uncheck to remove it. Changes are saved only after Review."
+      : "Choose exact Collection destinations. New headings and membership are saved together after Review." });
+    section.createDiv({ cls: "ent-cc-note-organizer-page-status", text: `${destination.collections.targets.length.toLocaleString()} selected destinations`, attr: { role: "status" } });
+    const search = section.createEl("input", { type: "search", cls: "ent-cc-note-organizer-search", attr: { "aria-label": "Find a collection or subheading", placeholder: "Find a collection or subheading", "data-organizer-focus": `collection-search:${destination.key}` } });
+    search.value = this.collectionQueries.get(destination.key) ?? "";
+    search.disabled = this.busy;
+    const list = section.createDiv({ cls: "ent-cc-note-organizer-collection-list", attr: { "aria-label": "Collection destinations" } });
+    const allTargets: Array<OrganizerCollectionTargetDraft & { label: string; unavailable?: boolean }> = [];
+    for (const heading of available.collections) {
+      allTargets.push({ headingId: heading.id, subheadingId: null, label: heading.name });
+      for (const child of heading.subheadings) allTargets.push({ headingId: heading.id, subheadingId: child.id, label: child.name });
+    }
+    const same = (left: OrganizerCollectionTargetDraft, right: OrganizerCollectionTargetDraft): boolean => left.headingId === right.headingId && left.subheadingId === right.subheadingId;
+    for (const target of destination.collections.targets) if (!allTargets.some((item) => same(item, target))) {
+      allTargets.unshift({ ...target, label: "Unavailable — remove this Collection destination or restore it", unavailable: true });
+    }
+    const update = (): void => {
+      list.empty();
+      const query = normalizedSearchText(search.value);
+      const matches = allTargets.filter((target) => normalizedSearchText(target.label).includes(query));
+      for (const target of matches.slice(0, 300)) {
+        const row = list.createEl("label", { cls: "ent-cc-note-organizer-collection-choice" });
+        const input = row.createEl("input", { type: "checkbox", attr: { "aria-label": target.label, "data-organizer-focus": `collection-choice:${destination.key}:${target.headingId}:${target.subheadingId ?? ""}` } });
+        input.checked = destination.collections.targets.some((item) => same(item, target));
+        input.disabled = this.busy;
+        input.addEventListener("change", () => {
+          destination.collections.targets = destination.collections.targets.filter((item) => !same(item, target));
+          if (input.checked) destination.collections.targets.push({ headingId: target.headingId, subheadingId: target.subheadingId });
+          destination.collections.mode = this.singleNote ? "replace" : destination.collections.mode === "keep" ? "add" : destination.collections.mode;
+          if (!this.singleNote && destination.collections.mode === "add" && destination.collections.targets.length === 0) destination.collections.mode = "keep";
+          if (!destination.primaryEdited) destination.primary = { mode: "keep", libraryId: null, headingId: null, subheadingId: null };
+          // A single-note uncheck is an explicit removal; the exact before/after review remains mandatory.
+          destination.collections.clearAllConfirmed = this.singleNote && destination.collections.targets.length === 0;
+          this.invalidatePrepared();
+          this.pendingFocusKey = input.getAttribute("data-organizer-focus");
+          this.render();
+        });
+        row.createSpan({ text: target.label, attr: { dir: "auto" } });
+        if (base.initialCollections?.some((item) => same(item, target))) row.createSpan({ cls: "ent-cc-note-organizer-help", text: "Currently added" });
+      }
+      if (matches.length === 0) list.createDiv({ cls: "ent-cc-note-organizer-empty", text: allTargets.length ? "No matching collections. Your selections are kept." : "No collections yet. Create one below." });
+      if (matches.length > 300) list.createDiv({ cls: "ent-cc-note-organizer-page-status", text: "Showing the first 300 destinations. Narrow your search to find more." });
+    };
+    search.addEventListener("input", () => { this.collectionQueries.set(destination.key, search.value); update(); });
+    update();
+    const create = section.createDiv({ cls: "ent-cc-note-organizer-collection-create" });
+    const title = create.createEl("input", { type: "text", attr: { "aria-label": "New collection or subheading name", placeholder: "New collection or subheading name", maxlength: "100", "data-organizer-focus": `collection-name:${destination.key}` } });
+    title.disabled = this.busy;
+    let parentTarget = "";
+    const parentSelect = this.labeledSelect(create, "Create under", `${ownerKey}-${destination.key}-new-collection-parent`, "", [], (value) => { parentTarget = value; });
+    const updateParents = (): void => {
+      const options = allTargets.filter((target) => !target.unavailable && normalizedSearchText(target.label).includes(normalizedSearchText(search.value))).slice(0, 300);
+      const selected = allTargets.find((target) => `${target.headingId}\n${target.subheadingId ?? ""}` === parentTarget);
+      if (selected && !options.includes(selected)) options.unshift(selected);
+      parentSelect.empty();
+      parentSelect.createEl("option", { text: "New top-level collection", attr: { value: "" } });
+      for (const target of options) parentSelect.createEl("option", { text: target.label, attr: { value: `${target.headingId}\n${target.subheadingId ?? ""}`, dir: "auto" } });
+      parentSelect.value = parentTarget;
+    };
+    search.addEventListener("input", updateParents);
+    updateParents();
+    const add = create.createEl("button", { cls: "ent-cc-note-organizer-secondary-button", text: "Create and select", attr: { type: "button", "data-organizer-focus": `create-collection:${destination.key}` } });
+    add.disabled = this.busy || this.collectionCreations.length >= MAX_ORGANIZER_COLLECTION_CREATIONS;
     add.addEventListener("click", () => {
-      const collection = base.collections[0];
-      if (!collection) return;
-      destination.collections.targets.push({
-        headingId: collection.id,
-        subheadingId: null,
-      });
+      const clean = title.value.normalize("NFC").trim();
+      if (!clean || clean.length > 100 || hasOrganizerControlCharacters(clean)) { this.actionError = "Enter a collection or subheading name of 1–100 characters."; this.render(); return; }
+      const [headingId, parentSubheadingId] = parentTarget.split("\n");
+      const id = `organizer-${Date.now().toString(36)}-${this.instanceId}-${this.nextCollectionKey++}`;
+      this.collectionCreations.push({ baseId: base.id, id, title: clean, headingId: headingId || null, parentSubheadingId: parentSubheadingId || null });
+      destination.collections.targets.push({ headingId: headingId || id, subheadingId: headingId ? id : null });
+      destination.collections.mode = this.singleNote ? "replace" : destination.collections.mode === "keep" ? "add" : destination.collections.mode;
+      if (!destination.primaryEdited) destination.primary = { mode: "keep", libraryId: null, headingId: null, subheadingId: null };
       destination.collections.clearAllConfirmed = false;
+      this.collectionQueries.delete(destination.key);
       this.invalidatePrepared();
-      this.pendingFocusKey = `field:${ownerKey}-${destination.key}-collection-${destination.collections.targets.length - 1}`;
+      this.liveMessage = `“${clean}” is selected as a draft. Review and save to create it; Cancel creates nothing.`;
+      this.pendingFocusKey = `create-collection:${destination.key}`;
       this.render();
     });
-    if (base.collections.length === 0) {
-      section.createDiv({ cls: "ent-cc-note-organizer-empty", text: "This knowledge base has no Collections." });
-    }
-    for (const [index, target] of destination.collections.targets.entries()) {
-      const row = section.createDiv({ cls: "ent-cc-note-organizer-collection-target" });
-      const collection = base.collections.find((item) => item.id === target.headingId) ?? null;
-      this.labeledSelect(
-        row,
-        "Collection",
-        `${ownerKey}-${destination.key}-collection-${index}`,
-        target.headingId,
-        base.collections.map((item) => ({ value: item.id, label: item.name })),
-        (value) => {
-          target.headingId = value;
-          target.subheadingId = null;
-          this.invalidatePrepared();
-          this.render();
-        },
-      );
-      if (target.subheadingId || (collection && collection.subheadings.length > 0)) {
-        this.labeledSelect(
-          row,
-          "Subheading",
-          `${ownerKey}-${destination.key}-collection-subheading-${index}`,
-          target.subheadingId ?? "",
-          [
-            { value: "", label: "Heading root" },
-            ...(collection?.subheadings ?? []).map((item) => ({ value: item.id, label: item.name })),
-          ],
-          (value) => {
-            target.subheadingId = value || null;
-            this.invalidatePrepared();
-            this.render();
-          },
-        );
+  }
+
+  private withDraftCollections(base: OrganizerBaseOption): OrganizerBaseOption {
+    const collections = base.collections.map((heading) => ({ ...heading, subheadings: [...heading.subheadings] }));
+    for (const item of this.collectionCreations.filter((creation) => creation.baseId === base.id)) {
+      if (!item.headingId) collections.push({ id: item.id, name: item.title, subheadings: [] });
+      else {
+        const heading = collections.find((candidate) => candidate.id === item.headingId);
+        const parent = item.parentSubheadingId ? heading?.subheadings.find((candidate) => candidate.id === item.parentSubheadingId)?.name : heading?.name;
+        if (heading && parent) heading.subheadings.push({ id: item.id, name: `${parent} / ${item.title}` });
       }
-      const remove = row.createEl("button", {
-        cls: "ent-cc-note-organizer-remove",
-        attr: { type: "button", "aria-label": `Remove Collection target ${index + 1}` },
-      });
-      setIcon(remove, "x");
-      remove.addEventListener("click", () => {
-        destination.collections.targets.splice(index, 1);
-        if (destination.collections.targets.length === 0) destination.collections.clearAllConfirmed = false;
-        this.invalidatePrepared();
-        this.pendingFocusKey = `add-collection:${ownerKey}:${destination.key}`;
-        this.render();
-      });
     }
+    return { ...base, collections };
+  }
+
+  private selectedCollectionCreations(draft: NoteOrganizerDraft): OrganizerCollectionCreation[] {
+    const destinations = [...draft.destinations];
+    for (const override of draft.overrides) destinations.push(...override.destinations);
+    const needed = new Set<string>();
+    for (const destination of destinations) if (destination.collections.mode !== "keep") for (const target of destination.collections.targets) {
+      needed.add(`${destination.baseId}\0${target.headingId}`);
+      if (target.subheadingId) needed.add(`${destination.baseId}\0${target.subheadingId}`);
+    }
+    for (const item of [...this.collectionCreations].reverse()) if (needed.has(`${item.baseId}\0${item.id}`)) {
+      if (item.headingId) needed.add(`${item.baseId}\0${item.headingId}`);
+      if (item.parentSubheadingId) needed.add(`${item.baseId}\0${item.parentSubheadingId}`);
+    }
+    return this.collectionCreations.filter((item) => needed.has(`${item.baseId}\0${item.id}`)).map((item) => ({ ...item }));
   }
 
   private renderReview(parent: HTMLElement): void {
@@ -1885,7 +1944,7 @@ export class NoteOrganizerModal extends Modal {
         || this.host.isReadOnly?.() === true;
       review.addEventListener("click", () => { void this.prepareReview(); });
     } else {
-      const unchanged = this.singleNote && this.prepared?.summary.changeCount === 0;
+      const unchanged = this.prepared?.summary.changeCount === 0;
       const apply = navigation.createEl("button", {
         cls: "ent-cc-note-organizer-primary-button",
         text: this.busy ? "Applying…" : unchanged ? "Done — no changes needed" : this.singleNote ? "Save organization" : "Apply organization",
@@ -1912,7 +1971,8 @@ export class NoteOrganizerModal extends Modal {
     if (this.busy || this.loading || this.loadError || this.singleNoteUnavailable()) return;
     const snapshotGeneration = this.snapshotGeneration;
     const draft = snapshotNoteOrganizerDraft(this.source, this.selectedPaths, this.destinations, this.overrides);
-    const localErrors = validateNoteOrganizerDraft(draft, this.bases);
+    draft.collectionCreations = this.selectedCollectionCreations(draft);
+    const localErrors = validateNoteOrganizerDraft(draft, this.bases.map((base) => this.withDraftCollections(base)));
     if (localErrors.length > 0) {
       this.actionError = localErrors.join(" ");
       this.liveMessage = "The organizer needs more destination details before review.";

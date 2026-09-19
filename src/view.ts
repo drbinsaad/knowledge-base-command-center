@@ -23,6 +23,7 @@ import {
   type PlaceholderMatchNote,
 } from "./membership-explanation";
 import { MembershipExplanationModal } from "./membership-explanation-modal";
+import { CreatedNoteRecoveryModal } from "./created-note-recovery-modal";
 import { localeInvariantTaxonomyKey } from "./taxonomy-health";
 import {
   assertPersonalBackupMatchesVault,
@@ -81,6 +82,7 @@ import {
 } from "./model";
 import {
   DEFAULT_CROSS_BASE_SEARCH_LIMIT,
+  collectionSearchPaths,
   knowledgeBaseSearchRank,
   type KnowledgeBaseSearchGroup as BoundedKnowledgeBaseSearchGroup,
   type KnowledgeBaseSearchResultSet as BoundedKnowledgeBaseSearchResultSet,
@@ -703,7 +705,8 @@ export class EntVaultCommandCenterView extends ItemView {
   } | null = null;
   private curriculum: CurriculumTreeResult = emptyCurriculumTree();
   private query = "";
-  private searchScope: "all" | "current" | "library" = "all";
+  private searchScope: "all" | "current" | "library" | "collection" = "all";
+  private searchCollectionId = "";
   private searchAvailability: "all" | "linked" | "placeholders" = "all";
   private searchLinkedFirst = false;
   private viewDensity: "comfortable" | "compact" = "comfortable";
@@ -757,6 +760,7 @@ export class EntVaultCommandCenterView extends ItemView {
   private paneResizeWindow: Window | null = null;
   private paneResizeCleanup: (() => void) | null = null;
   private collapsedQueues = new Set<string>();
+  private showEmptyQueues = false;
   private collapsedCurriculumDomains = new Set<string>();
   private collapsedCurriculumNodes = new Set<string>();
   private visualPlacementPaths = new Set<string>();
@@ -982,6 +986,7 @@ export class EntVaultCommandCenterView extends ItemView {
         this.query = "";
         this.parsedQuery = parseQuery("");
         this.searchScope = "all";
+        this.searchCollectionId = "";
         this.searchAvailability = "all";
         this.searchLinkedFirst = false;
         this.inspectorSelectedByUser = false;
@@ -1080,6 +1085,7 @@ export class EntVaultCommandCenterView extends ItemView {
       this.currentSearchGeneration(),
       query,
       this.searchScope,
+      this.searchScope === "collection" ? this.searchCollectionId : "",
       this.searchAvailability,
       this.searchLinkedFirst,
       this.searchScope === "library" ? libraryIdForTab(this.plugin.data.activeTab) : "",
@@ -1092,6 +1098,7 @@ export class EntVaultCommandCenterView extends ItemView {
       this.currentDataEpoch(),
       this.currentSearchGeneration(),
       this.searchScope,
+      this.searchScope === "collection" ? this.searchCollectionId : "",
       this.searchAvailability,
       this.searchLinkedFirst,
       this.searchScope === "library" ? libraryIdForTab(this.plugin.data.activeTab) : "",
@@ -1099,11 +1106,12 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private currentSearchFilters(): SearchViewFilters {
-    return cleanSearchViewFilters({ scope: this.searchScope, availability: this.searchAvailability, linkedFirst: this.searchLinkedFirst });
+    return cleanSearchViewFilters({ scope: this.searchScope, collectionId: this.searchCollectionId, availability: this.searchAvailability, linkedFirst: this.searchLinkedFirst });
   }
 
   private restoreSearchFilters(filters: SearchViewFilters, tab: MainTab): void {
     this.searchScope = filters.scope === "library" && !libraryIdForTab(tab) ? "current" : filters.scope ?? "all";
+    this.searchCollectionId = filters.scope === "collection" ? filters.collectionId ?? "" : "";
     this.searchAvailability = filters.availability ?? "all";
     this.searchLinkedFirst = filters.linkedFirst ?? false;
   }
@@ -1130,6 +1138,7 @@ export class EntVaultCommandCenterView extends ItemView {
       isCancelled: cancelled,
       ...((this.searchScope ?? "all") !== "all" ? { baseIds: [this.plugin.getActiveKnowledgeBaseId()] } : {}),
       ...(this.searchScope === "library" ? { libraryId: libraryIdForTab(this.plugin.data.activeTab) ?? undefined } : {}),
+      ...(this.searchScope === "collection" ? { collectionId: this.searchCollectionId ?? "" } : {}),
       availability: this.searchAvailability,
       linkedFirst: this.searchLinkedFirst,
     }).then((result) => {
@@ -1590,9 +1599,10 @@ export class EntVaultCommandCenterView extends ItemView {
           new Notice(`The note was created at ${file.path}. The active knowledge base changed while it was being filed; verify its placement.`, 10000);
           return;
         }
-        if (notice) new Notice(notice);
+        if (!notice) return;
+        new Notice(notice);
         if (value.addToCollection && destination.kind !== "collection") this.openCollectionPicker(file.path);
-        await this.plugin.openFile(file, this);
+        await this.openCreatedNote(file);
       },
     }).open();
   }
@@ -1717,7 +1727,9 @@ export class EntVaultCommandCenterView extends ItemView {
             return `${itemLabel} created at ${file.path}, but the chosen collection destination no longer exists${rescued ? `, so it was added to ${settings.indexLabel}` : ""}. Use Add to a collection to place it.`;
           }
           await this.plugin.mutate("Add created note to collection", () => {
-            this.addMembership(file.path, { headingId: destination.headingId, subheadingId: destination.subheadingId });
+            if (!this.addMembership(file.path, { headingId: destination.headingId, subheadingId: destination.subheadingId })) {
+              throw new Error("That collection destination no longer exists. Organize the saved note into an available collection.");
+            }
           });
           return `${itemLabel} created and linked under ${destination.label} in My Collections. The note file was not changed.`;
         }
@@ -1732,8 +1744,8 @@ export class EntVaultCommandCenterView extends ItemView {
         }
       }
     } catch (error) {
-      await this.rescueUnfiledCreatedNote(file, ownsBase);
-      return `${itemLabel} created at ${file.path}, but it could not be filed: ${errorMessage(error)}`;
+      await this.showCreatedNoteRecovery(file, error, ownsBase);
+      return null;
     }
   }
 
@@ -1791,9 +1803,10 @@ export class EntVaultCommandCenterView extends ItemView {
         }).open();
       } else if (action.id === "collection") {
         const targets = collectionTargets(this.plugin.data.collections);
-        if (targets.length === 0) {
+        const createCollection = (): void => {
+          if (!ownsBase()) return;
           new TextPromptModal(this.app, {
-            title: "Create your first collection",
+            title: "New collection",
             placeholder: "Collection name",
             submitLabel: "Create heading",
             onSubmit: async (title) => {
@@ -1805,12 +1818,15 @@ export class EntVaultCommandCenterView extends ItemView {
               onChosen({ kind: "collection", headingId, label: heading.title });
             },
           }).open();
+        };
+        if (targets.length === 0) {
+          createCollection();
           return;
         }
         new CollectionPickerModal(this.app, targets, "Add", (target) => {
           if (!ownsBase()) return;
           onChosen({ kind: "collection", headingId: target.headingId, subheadingId: target.subheadingId, label: target.label });
-        }).open();
+        }, "collection", createCollection).open();
       } else {
         const libraryId = action.id.slice("library:".length);
         const library = this.plugin.getLibrary(libraryId);
@@ -1959,6 +1975,7 @@ export class EntVaultCommandCenterView extends ItemView {
       ...(!this.plugin.isClinicalMode() ? [{ id: "index-existing", title: `Add existing note to ${settings.indexLabel}`, description: `Index any eligible Markdown note without moving or editing its file.`, icon: "list-plus" }] : []),
       ...(this.plugin.isClinicalMode() ? [{ id: "vault-note", title: "Link an existing vault note", description: "Add a Markdown note to a collection without moving or modifying the note.", icon: "file-plus-2" }] : []),
       { id: "current-note", title: "Add current note", description: "Place the currently open note in a collection.", icon: "panel-top" },
+      { id: "new-collection", title: "New collection", description: "Create a personal collection without moving or editing notes.", icon: "folder-plus" },
       ...(!activeLibraryAcceptsManualAdd && addableLibraries.length > 0 ? [
         { id: "choose-library", title: "Add to library…", description: "Choose a library, then create, select, or use the current note without changing Markdown.", icon: "library" },
       ] : []),
@@ -1980,6 +1997,7 @@ export class EntVaultCommandCenterView extends ItemView {
       else if (action.id === "current-active-library" && activeLibrary) this.startAddCurrentToLibrary(activeLibrary.id);
       else if (action.id === "choose-library") this.openLibraryAddPicker();
       else if (action.id === "new-library") new LibraryEditorModal(this.plugin, null, () => this.render()).open();
+      else if (action.id === "new-collection") this.promptNewCollection();
       else if (action.id === "create-note") {
         if (this.plugin.isClinicalMode()) this.startCreateKnowledgeNote();
         else this.openQuickCreateNoteForm();
@@ -2482,47 +2500,39 @@ export class EntVaultCommandCenterView extends ItemView {
           new Notice(`The note was created at ${file.path}, but the active knowledge base changed before it could be filed. Use Add existing note to place it.`, 10000);
           return;
         }
-        if (onCreated) {
-          try {
+        try {
+          if (onCreated) {
             await onCreated(file);
-          } catch (error) {
-            await this.rescueUnfiledCreatedNote(file, ownsBase);
-            new Notice(`The note was created at ${file.path}, but it could not be filed: ${errorMessage(error)}`, 10000);
-            return;
-          }
-          if (!ownsBase()) {
-            new Notice(`The note was created at ${file.path}. The active knowledge base changed while it was being filed; verify its placement.`, 10000);
-            return;
-          }
-        } else if (indexAfterCreate && !clinicalMode) {
-          await this.plugin.mutate(`Add created ${settings.itemSingular} to ${settings.indexLabel}`, () => {
-            this.plugin.setDirectIndexMembershipState(file.path, true);
+          } else if (indexAfterCreate && !clinicalMode) {
+            await this.plugin.mutate(`Add created ${settings.itemSingular} to ${settings.indexLabel}`, () => {
+              this.plugin.setDirectIndexMembershipState(file.path, true);
+              this.plugin.data.selectedPath = file.path;
+            });
+          } else {
             this.plugin.data.selectedPath = file.path;
-          });
-          if (!ownsBase()) return;
-        } else {
-          this.plugin.data.selectedPath = file.path;
-          await this.plugin.saveViewState();
-          if (!ownsBase()) return;
-          await this.reload();
-          if (!ownsBase()) return;
-          // Belt over the validation braces: if the note still classified to
-          // no record (settings changed mid-form, case-folded folders), make
-          // it findable instead of letting it vanish from every tab.
-          if (!clinicalMode && !this.plugin.getRecord(file.path)) {
-            await this.rescueUnfiledCreatedNote(file, ownsBase);
-            if (!ownsBase()) return;
-            new Notice(`${settings.itemSingular[0]?.toUpperCase() ?? "N"}${settings.itemSingular.slice(1)} created at ${file.path}, which is outside every visible area, so it was added to ${settings.indexLabel} to stay findable.`, 10000);
-            if (value.addToCollection) this.openCollectionPicker(file.path);
-            await this.plugin.openFile(file, this);
-            return;
+            await this.plugin.saveViewState();
+            if (!ownsBase()) throw new Error("The active knowledge base changed; verify the saved note's placement.");
+            await this.reload();
+            if (!ownsBase()) throw new Error("The active knowledge base changed; verify the saved note's placement.");
+            if (!clinicalMode && !this.plugin.getRecord(file.path)) {
+              await this.rescueUnfiledCreatedNote(file, ownsBase);
+              if (!ownsBase()) throw new Error("The active knowledge base changed; verify the saved note's placement.");
+              new Notice(`${settings.itemSingular[0]?.toUpperCase() ?? "N"}${settings.itemSingular.slice(1)} created at ${file.path}, which is outside every visible area, so it was added to ${settings.indexLabel} to stay findable.`, 10000);
+              if (value.addToCollection) this.openCollectionPicker(file.path);
+              await this.openCreatedNote(file);
+              return;
+            }
           }
+          if (!ownsBase()) throw new Error("The active knowledge base changed; verify the saved note's placement.");
+        } catch (error) {
+          await this.showCreatedNoteRecovery(file, error, ownsBase);
+          return;
         }
         new Notice(completionMessage ?? (onCreated
           ? `${settings.itemSingular[0]?.toUpperCase() ?? "N"}${settings.itemSingular.slice(1)} created and linked to the imported subject.`
           : `${settings.itemSingular[0]?.toUpperCase() ?? "N"}${settings.itemSingular.slice(1)} created${indexAfterCreate && !clinicalMode ? ` and added to ${settings.indexLabel}` : ""}. Existing notes were not changed.`));
         if (value.addToCollection) this.openCollectionPicker(file.path);
-        await this.plugin.openFile(file, this);
+        await this.openCreatedNote(file);
       },
     }).open();
   }
@@ -2544,6 +2554,26 @@ export class EntVaultCommandCenterView extends ItemView {
       this.plugin.data.selectedPath = file.path;
     });
     return true;
+  }
+
+  private async showCreatedNoteRecovery(file: TFile, error: unknown, ownsBase: () => boolean): Promise<void> {
+    // A second failed persistence attempt must never conceal the saved file.
+    try { await this.rescueUnfiledCreatedNote(file, ownsBase); } catch { /* The recovery UI below does not depend on saving plugin data. */ }
+    const reason = `The note was created at ${file.path}, but it could not be filed: ${errorMessage(error)}`;
+    new Notice(reason, 10000);
+    const currentFile = (): TFile => {
+      const current = this.app.vault.getAbstractFileByPath(file.path);
+      if (!(current instanceof TFile) || current !== file) throw new Error("The saved note was moved or replaced. Locate it in the file explorer before continuing.");
+      return current;
+    };
+    new CreatedNoteRecoveryModal(this.app, file.path, reason,
+      async () => this.plugin.openFile(currentFile(), this),
+      () => this.plugin.openNoteOrganizer([currentFile().path], "command")).open();
+  }
+
+  private async openCreatedNote(file: TFile): Promise<void> {
+    try { await this.plugin.openFile(file, this); }
+    catch (error) { new Notice(`The note is saved at ${file.path}, but could not be opened: ${errorMessage(error)}`, 10000); }
   }
 
   public openSetupWizard(): void {
@@ -3074,11 +3104,6 @@ export class EntVaultCommandCenterView extends ItemView {
       });
     }
     if (this.plugin.data.activeTab === "collections") {
-      const add = actions.createEl("button", { cls: "ent-cc-button", type: "button" });
-      setIcon(add.createSpan(), "folder-plus");
-      add.createSpan({ text: "New collection" });
-      disableWhenReadOnly(add, readOnly, "Create a collection");
-      add.addEventListener("click", () => this.promptNewCollection());
       const edit = (this.editMode ? primaryActions : actions).createEl("button", {
         cls: `ent-cc-button ${this.editMode ? "is-active" : ""}`,
         type: "button",
@@ -3360,6 +3385,26 @@ export class EntVaultCommandCenterView extends ItemView {
     if (focusTab) this.contentEl.querySelector<HTMLElement>(`[data-tab="${tab}"]`)?.focus({ preventScroll: true });
   }
 
+  private startCollectionSearch(headingId: string): void {
+    if (!this.guardLoadedBase()) return;
+    if (!this.plugin.data.collections.some((heading) => heading.id === headingId)) {
+      new Notice("That collection is no longer available. Reopen the collections tab and choose again.");
+      return;
+    }
+    this.searchScope = "collection";
+    this.searchCollectionId = headingId;
+    this.query = "";
+    this.parsedQuery = parseQuery("");
+    this.cancelPendingGlobalSearch();
+    this.render();
+    this.contentEl?.querySelector<HTMLInputElement>('.ent-cc-search-box input[type="search"]')?.focus({ preventScroll: true });
+  }
+
+  private collectionSearchLabel(): string {
+    const collection = this.plugin.data.collections.find((heading) => heading.id === this.searchCollectionId);
+    return collection ? `Collection: ${collection.title}` : "Collection unavailable";
+  }
+
   async openLibrary(libraryId: string): Promise<void> {
     const library = this.plugin.getLibrary(libraryId);
     if (!library || library.archivedAt !== null) {
@@ -3494,11 +3539,12 @@ export class EntVaultCommandCenterView extends ItemView {
     const tab = this.plugin.data.activeTab;
     const query = this.query;
     const scope = this.searchScope;
+    const collectionId = this.searchCollectionId;
     const availability = this.searchAvailability;
     const linkedFirst = this.searchLinkedFirst;
     const apply = (): void => {
       if (this.viewClosed || this.plugin.getActiveKnowledgeBaseId() !== baseId || this.plugin.data.activeTab !== tab
-        || this.query !== query || this.searchScope !== scope
+        || this.query !== query || this.searchScope !== scope || this.searchCollectionId !== collectionId
         || this.searchAvailability !== availability || this.searchLinkedFirst !== linkedFirst) return;
       // A later navigation may replace the leaf before these frames run.
       // Never apply this route's position to its replacement scroll owner.
@@ -3751,6 +3797,7 @@ export class EntVaultCommandCenterView extends ItemView {
     for (const [value, label] of [["all", "All bases"], ["current", "This base"], ...(libraryIdForTab(this.plugin.data.activeTab) ? [["library", "This Library"]] : [])]) {
       scope.createEl("option", { value, text: label });
     }
+    if (this.searchScope === "collection") scope.createEl("option", { value: "collection", text: this.collectionSearchLabel() });
     scope.value = this.searchScope;
     const availabilityLabel = options.createEl("label", { cls: "ent-cc-search-option", text: "Availability" });
     const availability = availabilityLabel.createEl("select", { cls: "ent-cc-search-availability", attr: { "aria-label": "Note availability", "data-kbcc-focus": "search-availability" } });
@@ -3765,7 +3812,7 @@ export class EntVaultCommandCenterView extends ItemView {
       const activeCount = Number(this.searchScope !== "all") + Number(this.searchAvailability !== "all") + Number(this.searchLinkedFirst);
       filtersSummary.setText(activeCount ? `Filters (${activeCount})` : "Filters");
       const activeLabels = [
-        this.searchScope === "library" ? "This Library" : this.searchScope === "current" ? "This base" : "",
+        this.searchScope === "collection" ? this.collectionSearchLabel() : this.searchScope === "library" ? "This Library" : this.searchScope === "current" ? "This base" : "",
         this.searchAvailability === "linked" ? "Linked notes" : this.searchAvailability === "placeholders" ? "No note" : "",
         this.searchLinkedFirst ? "Linked notes first" : "",
       ].filter(Boolean);
@@ -3774,7 +3821,7 @@ export class EntVaultCommandCenterView extends ItemView {
     };
     updateFiltersSummary();
     const updateScope = (): void => {
-      this.searchScope = scope.value === "library" ? "library" : scope.value === "current" ? "current" : "all";
+      this.searchScope = scope.value === "collection" ? "collection" : scope.value === "library" ? "library" : scope.value === "current" ? "current" : "all";
       this.searchAvailability = availability.value === "linked" ? "linked" : availability.value === "placeholders" ? "placeholders" : "all";
       this.searchLinkedFirst = linkedFirst.checked;
       updateFiltersSummary();
@@ -3963,7 +4010,7 @@ export class EntVaultCommandCenterView extends ItemView {
     if (!this.countEl) return;
     this.countEl.empty();
     if (this.hasGlobalSearch()) {
-      const scopeLabel = this.searchScope === "library" ? "This Library" : this.searchScope === "current" ? "This base" : "All available bases";
+      const scopeLabel = this.searchScope === "collection" ? this.collectionSearchLabel() : this.searchScope === "library" ? "This Library" : this.searchScope === "current" ? "This base" : "All available bases";
       if (this.globalSearchErrorKey === this.globalSearchKey()) {
         this.countEl.createSpan({ text: "Search failed" });
         this.countEl.createSpan({ text: ` · ${scopeLabel}`, cls: "ent-cc-muted" });
@@ -4045,10 +4092,17 @@ export class EntVaultCommandCenterView extends ItemView {
     } else if (tab === "inbox") {
       visible = this.renderInbox(body);
     } else if (tab === "collections") {
+      const actions = body.createDiv({ cls: "ent-cc-collection-actions" });
+      const create = actions.createEl("button", { text: "New collection", type: "button" });
+      const add = actions.createEl("button", { text: "Add notes", type: "button" });
+      disableWhenReadOnly(create, this.plugin.isDataReadOnly(), "Create a collection");
+      disableWhenReadOnly(add, this.plugin.isDataReadOnly(), "Add notes to a collection");
+      create.addEventListener("click", () => this.promptNewCollection());
+      add.addEventListener("click", () => this.startLinkVaultNote());
       if (this.plugin.data.collections.length === 0) this.renderCollectionsEmpty(body);
       for (const heading of this.plugin.data.collections) visible += this.renderHeading(body, heading, true);
     } else if (tab === "queues") {
-      for (const queue of this.smartQueues()) visible += this.renderQueue(body, queue);
+      visible = this.renderQueues(body);
     } else {
       visible = this.renderLibrary(body, this.recordsForActiveTab());
     }
@@ -4066,7 +4120,11 @@ export class EntVaultCommandCenterView extends ItemView {
       // catalog-specific Add action and explain that Markdown stays intact.
       && !(!searching && libraryIdForTab(tab))) {
       if (!searching && tab === "curriculum" && !this.plugin.isClinicalMode()) this.renderKnowledgeIndexEmpty(body);
-      else body.createDiv({ cls: "ent-cc-empty", text: searching ? "No entries match these filters. Try All bases or All entries." : "No records in this section." });
+      else body.createDiv({ cls: "ent-cc-empty", text: searching
+        ? this.searchScope === "collection" && !this.plugin.data.collections.some((heading) => heading.id === this.searchCollectionId)
+          ? "This collection is no longer available. Choose All bases in Search in to start a different search."
+          : "No entries match these filters. Try All bases or All entries."
+        : "No records in this section." });
     }
     this.updateCount(visible);
     if (searching) resultCount.setText(globalSearchPending
@@ -4146,7 +4204,8 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private treeHeaderTitle(): string {
-    if (this.hasGlobalSearch()) return this.searchScope === "library" ? "This Library / Search results" : "Search results · List / Library / Record";
+    if (this.hasGlobalSearch()) return this.searchScope === "collection" ? `${this.collectionSearchLabel()} / Search results`
+      : this.searchScope === "library" ? "This Library / Search results" : "Search results · List / Library / Record";
     const tab = this.plugin.data.activeTab;
     const settings = this.plugin.data.settings;
     if (tab === "curriculum") return this.curriculumArrangeMode
@@ -4168,6 +4227,7 @@ export class EntVaultCommandCenterView extends ItemView {
     empty.createEl("strong", { text: "Build your own study map" });
     empty.createEl("p", { text: `A ${this.plugin.data.settings.itemSingular} can belong to multiple collections while remaining in its original vault location.` });
     const button = empty.createEl("button", { cls: "ent-cc-button", text: "Create first collection" });
+    disableWhenReadOnly(button, this.plugin.isDataReadOnly(), "Create a collection");
     button.addEventListener("click", () => this.promptNewCollection());
   }
 
@@ -4509,6 +4569,28 @@ export class EntVaultCommandCenterView extends ItemView {
       }
     }
     for (const child of this.renderableLayoutChildren(context, node)) this.renderLayoutNode(content, context, child, depth + 1);
+  }
+
+  private renderQueues(parent: HTMLElement): number {
+    const queues = this.smartQueues();
+    const emptyCount = queues.filter((queue) => queue.records.length === 0).length;
+    if (emptyCount > 0) {
+      const options = parent.createDiv({ cls: "ent-cc-queue-options" });
+      const toggle = options.createEl("button", {
+        cls: "ent-cc-button ent-cc-queue-empty-toggle",
+        text: `${this.showEmptyQueues ? "Hide" : "Show"} empty queues (${emptyCount})`,
+        attr: { type: "button", "aria-pressed": String(Boolean(this.showEmptyQueues)), "data-kbcc-focus": "empty-queues" },
+      });
+      toggle.addEventListener("click", () => {
+        this.showEmptyQueues = !this.showEmptyQueues;
+        this.renderTree();
+      });
+    }
+    let visible = 0;
+    for (const queue of queues) {
+      if (this.showEmptyQueues || queue.records.length > 0) visible += this.renderQueue(parent, queue);
+    }
+    return visible;
   }
 
   private renderQueue(parent: HTMLElement, queue: QueueDefinition): number {
@@ -4997,14 +5079,16 @@ export class EntVaultCommandCenterView extends ItemView {
     action: "select" | "open" | "placeholder" | "collection" | "pin",
   ): Promise<void> {
     const query = this.query;
+    const filters = this.currentSearchFilters();
     if (source.baseId !== this.plugin.getActiveKnowledgeBaseId()) {
       await this.plugin.switchKnowledgeBase(source.baseId);
       // switchKnowledgeBase reloads this view and intentionally clears stale
-      // base-local state. Restore only the global query so Back on mobile
-      // returns to the same all-base results.
+      // base-local state. Opening a global result is not a new search: restore
+      // the query and filters, including searches driven only by a filter.
       this.cancelPendingGlobalSearch();
       this.query = query;
       this.parsedQuery = parseQuery(query);
+      this.restoreSearchFilters(filters, this.plugin.data.activeTab);
       this.render();
     }
     const record = this.plugin.getRecord(searchedRecord.path);
@@ -5650,7 +5734,9 @@ export class EntVaultCommandCenterView extends ItemView {
   private matchingRecordsForCurrentView(): VaultRecord[] {
     // Toolbar actions can run while the visual search refresh is debounced.
     const libraryId = this.searchScope === "library" ? libraryIdForTab(this.plugin.data.activeTab) : null;
+    const collectionPaths = this.searchScope === "collection" ? collectionSearchPaths(this.plugin.data, this.searchCollectionId ?? "") : null;
     return matchingKnowledgeBaseRecords(this.records, this.query).filter((record) => (!libraryId || record.libraryId === libraryId)
+      && (!collectionPaths || collectionPaths.has(record.path))
       && (this.searchAvailability !== "linked" || !record.isPlaceholder)
       && (this.searchAvailability !== "placeholders" || record.isPlaceholder));
   }
@@ -5694,10 +5780,12 @@ export class EntVaultCommandCenterView extends ItemView {
       new Notice(placed === 0
         ? "That collection destination no longer exists. Reopen the picker and choose again."
         : `Added ${placed} matching records from ${baseName}. Source notes stayed in place.`);
-    }, `collection in ${baseName} (${records.length} current-base matches)`).open();
+    }, `collection in ${baseName} (${records.length} current-base matches)`, () => {
+      if (ownsBase()) this.promptNewCollection(paths);
+    }).open();
   }
 
-  private promptNewCollection(addPath?: string): void {
+  private promptNewCollection(addPath?: string | string[], source?: Membership): void {
     const ownsBase = this.createOpenedBaseGuard();
     new TextPromptModal(this.app, {
       title: "New collection",
@@ -5707,8 +5795,10 @@ export class EntVaultCommandCenterView extends ItemView {
         if (!ownsBase()) return;
         await this.plugin.mutate(`Create collection “${title}”`, () => {
           this.plugin.data.activeTab = "collections";
-          this.plugin.data.collections.push({ id: makeId("collection"), title, collapsed: false, subjects: addPath ? [addPath] : [], subheadings: [] });
-        });
+          const paths = typeof addPath === "string" ? [addPath] : addPath ?? [];
+          this.plugin.data.collections.push({ id: makeId("collection"), title, collapsed: false, subjects: [...new Set(paths)], subheadings: [] });
+          if (source) for (const path of paths) this.removeMembership(path, source);
+        }, { requireUndo: true });
       },
     }).open();
   }
@@ -6162,7 +6252,7 @@ export class EntVaultCommandCenterView extends ItemView {
       ensureChildList(destination).push(node);
       // The moved node stays reachable wherever it landed.
       for (const ancestor of subheadingChain(heading, subheadingId)?.chain ?? []) ancestor.collapsed = false;
-    }, libraryId ? { includePortableIndex: true, requireUndo: true } : undefined);
+    }, { includePortableIndex: Boolean(libraryId), requireUndo: true });
   }
 
   /**
@@ -6188,7 +6278,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const ownsBase = this.createOpenedBaseGuard();
     const targets = collectionTargets(this.plugin.data.collections);
     if (targets.length === 0) {
-      this.promptNewCollection(path);
+      this.promptNewCollection(path, move ? source : undefined);
       return;
     }
     new CollectionPickerModal(this.app, targets, move ? "Move" : "Add", async (target) => {
@@ -6201,13 +6291,15 @@ export class EntVaultCommandCenterView extends ItemView {
         if (!placed || !move || !source) return;
         const samePlace = source.headingId === target.headingId && source.subheadingId === target.subheadingId;
         if (!samePlace) this.removeMembership(path, source);
-      });
+      }, { requireUndo: true });
       if (!ownsBase()) return;
       if (!placed) {
         new Notice("That collection destination no longer exists. Reopen the picker and choose again.");
         return;
       }
       new Notice(`${move ? "Moved" : "Added"} in My Collections. The source note stayed in place.`);
+    }, "collection", () => {
+      if (ownsBase()) this.promptNewCollection(path, move ? source : undefined);
     }).open();
   }
 
@@ -6298,6 +6390,16 @@ export class EntVaultCommandCenterView extends ItemView {
     const ownsBase = this.createOpenedBaseGuard();
     const menu = new Menu();
     const index = this.plugin.data.collections.findIndex((item) => item.id === heading.id);
+    menu.addItem((item) => item.setTitle("Add notes here").setIcon("list-plus").onClick(() => {
+      if (ownsBase()) this.startCollectionNote({ headingId: heading.id }, false);
+    }));
+    menu.addItem((item) => item.setTitle("Create note here").setIcon("file-plus-2").onClick(() => {
+      if (ownsBase()) this.startCollectionNote({ headingId: heading.id }, true);
+    }));
+    menu.addItem((item) => item.setTitle("Search this collection").setIcon("search").onClick(() => {
+      if (ownsBase()) this.startCollectionSearch(heading.id);
+    }));
+    menu.addSeparator();
     menu.addItem((item) => item.setTitle("Move collection up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => {
       if (!ownsBase()) return;
       const currentIndex = this.plugin.data.collections.findIndex((item) => item.id === heading.id);
@@ -6332,7 +6434,7 @@ export class EntVaultCommandCenterView extends ItemView {
         if (!ownsBase()) return;
         await this.plugin.mutate(`Delete collection “${heading.title}”`, () => {
           this.plugin.data.collections = this.plugin.data.collections.filter((item) => item.id !== heading.id);
-        });
+        }, { requireUndo: true });
       }).open();
     }));
     menu.showAtMouseEvent(event);
@@ -6355,6 +6457,13 @@ export class EntVaultCommandCenterView extends ItemView {
     const parent = located.chain[located.chain.length - 2] ?? heading;
     const siblings = childSubheadings(parent);
     const index = siblings.findIndex((item) => item.id === subheading.id);
+    menu.addItem((item) => item.setTitle("Add notes here").setIcon("list-plus").onClick(() => {
+      if (ownsBase()) this.startCollectionNote({ headingId: heading.id, subheadingId: subheading.id }, false);
+    }));
+    menu.addItem((item) => item.setTitle("Create note here").setIcon("file-plus-2").onClick(() => {
+      if (ownsBase()) this.startCollectionNote({ headingId: heading.id, subheadingId: subheading.id }, true);
+    }));
+    menu.addSeparator();
     menu.addItem((item) => item.setTitle("Move subheading up").setIcon("arrow-up").setDisabled(index <= 0).onClick(() => {
       if (ownsBase()) this.run(() => this.moveSubheading(parent, index, index - 1));
     }));
@@ -6399,7 +6508,7 @@ export class EntVaultCommandCenterView extends ItemView {
           // The removed node's own children take its place, keeping order.
           children.splice(removeIndex < 0 ? children.length : removeIndex, removeIndex < 0 ? 0 : 1, ...childSubheadings(node));
           dropEmptyChildList(currentParent, currentParent.id === heading.id);
-        });
+        }, { requireUndo: true });
       }).open();
     }));
     menu.showAtMouseEvent(event);
@@ -6422,7 +6531,7 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     await this.plugin.mutate(label, () => {
       moveCurriculumVisual(this.plugin.data.curriculumVisual, record, parentPath, siblingPaths, index);
-    });
+    }, { requireUndo: true });
     new Notice(`Visual ${this.plugin.data.settings.indexLabel.toLowerCase()} arrangement updated. Note paths and metadata were not changed.`);
   }
 
@@ -6485,7 +6594,7 @@ export class EntVaultCommandCenterView extends ItemView {
     this.run(() => this.plugin.mutate(`Reset visual placement for “${record.title}”`, () => {
       resetCurriculumVisualPath(this.plugin.data.curriculumVisual, record.path);
       if (this.plugin.canVisuallyMoveAcrossGroups()) delete this.plugin.data.indexGroupByPath[record.path];
-    })
+    }, { requireUndo: true })
       .then(() => new Notice(`${this.plugin.isClinicalMode() ? "Canonical" : "Configured"} parent and sibling order restored. Source notes were not changed.`)));
   }
 
@@ -6534,7 +6643,7 @@ export class EntVaultCommandCenterView extends ItemView {
       if (!this.plugin.data.indexGroupOrder.includes(cleanGroup)) this.plugin.data.indexGroupOrder.push(cleanGroup);
       for (const path of [record.path, ...descendants]) this.plugin.data.indexGroupByPath[path] = cleanGroup;
       moveCurriculumVisual(this.plugin.data.curriculumVisual, { ...record, domain: cleanGroup, folderOrder: cleanGroup }, parentPath, siblingPaths, index);
-    });
+    }, { requireUndo: true });
     this.collapsedCurriculumDomains.delete(cleanGroup);
     this.collapsedCurriculumDomains.delete(destinationLabel);
     if (parentPath) this.collapsedCurriculumNodes.delete(parentPath);
@@ -6736,7 +6845,7 @@ export class EntVaultCommandCenterView extends ItemView {
       }));
       menu.addItem((item) => item.setTitle("Remove from this collection").setIcon("folder-minus").onClick(() => {
         if (!ownsBase()) return;
-        this.run(() => this.plugin.mutate(`Remove ${this.plugin.data.settings.itemSingular} membership`, () => this.removeMembership(record.path, membership)));
+        this.run(() => this.plugin.mutate(`Remove ${this.plugin.data.settings.itemSingular} membership`, () => this.removeMembership(record.path, membership), { requireUndo: true }));
       }));
     }
     if (libraryMembership && record.portableId) {
@@ -6931,7 +7040,7 @@ export class EntVaultCommandCenterView extends ItemView {
         if (!ownsBase()) return;
         new ConfirmModal(this.app, "Clear my collections?", "All personal headings, subheadings, and memberships will be removed. Undo remains available. Source notes are untouched.", "Clear collections", async () => {
           if (!ownsBase()) return;
-          await this.plugin.mutate("Clear my collections", () => { this.plugin.data.collections = []; });
+          await this.plugin.mutate("Clear my collections", () => { this.plugin.data.collections = []; }, { requireUndo: true });
         }).open();
       }));
     }
@@ -6948,7 +7057,7 @@ export class EntVaultCommandCenterView extends ItemView {
               this.plugin.data.indexGroupByPath = {};
               this.plugin.data.indexGroupOrder = [];
             }
-          });
+          }, { requireUndo: true });
         }).open();
       }));
     }
@@ -7621,7 +7730,7 @@ export class EntVaultCommandCenterView extends ItemView {
         const samePlace = payload.headingId === target.headingId && payload.subheadingId === target.subheadingId;
         if (!this.addMembership(payload.path, target)) return;
         if (!samePlace) this.removeMembership(payload.path, payload);
-      }));
+      }, { requireUndo: true }));
     });
   }
 
@@ -7646,13 +7755,16 @@ export class EntVaultCommandCenterView extends ItemView {
       const payload = this.readDrag(event);
       if (!payload || payload.path === targetPath) return;
       this.run(() => this.plugin.mutate("Place record in collection order", () => {
+        if (!this.membershipList(target).includes(targetPath)) {
+          throw new Error("That collection destination changed. Reopen the collection and try again.");
+        }
         this.removeMembership(payload.path, payload);
         const list = this.membershipList(target);
         const existing = list.indexOf(payload.path);
         if (existing >= 0) list.splice(existing, 1);
         const targetIndex = list.indexOf(targetPath);
         list.splice(Math.max(0, targetIndex + (after ? 1 : 0)), 0, payload.path);
-      }));
+      }, { requireUndo: true }));
     });
   }
 

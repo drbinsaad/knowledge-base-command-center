@@ -193,6 +193,11 @@ export class Menu {
   addSeparator(): this { this.items.push(null); return this; }
   setParentElement(element: HTMLElement): this { this.parent = element; return this; }
   onHide(callback: () => unknown): this { this.hidden = callback; return this; }
+  showAtMouseEvent(event: MouseEvent): this {
+    const owner = (event.target as Node | null)?.ownerDocument ?? document;
+    this.showAtPosition({ x: event.clientX, y: event.clientY }, owner);
+    return this;
+  }
   showAtPosition(position: { x: number; y: number }, owner = document): void {
     const menu = owner.createElement("div");
     menu.className = "kbcc-browser-menu";

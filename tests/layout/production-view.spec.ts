@@ -100,6 +100,7 @@ interface QuickOrganizerSnapshot {
   activeBase: string;
   parents: Record<string, string | null>;
   collections: string[];
+  collectionNames: string[];
   secondBase: string;
 }
 
@@ -231,12 +232,15 @@ for (const device of [
       expect(await quickOrganizerSnapshot(page)).toMatchObject({ prepared: 3, applied: 1, undoCount: 1 });
     });
 
-    test("advanced Collections and other bases remain reachable and exact", async ({ page }) => {
+    test("visible Collection membership and advanced other bases remain reachable and exact", async ({ page }) => {
       await openView(page, { ...device, count: 8 });
       await openModal(page, "quick-organizer");
       const dialog = page.getByRole("dialog", { name: "Organize this note", exact: true });
       const original = await quickOrganizerSnapshot(page);
-      const advanced = dialog.getByRole("button", { name: "More options: Collections and other bases", exact: true });
+      const membership = dialog.getByRole("checkbox", { name: "Reading this week", exact: true });
+      await expect(membership).toBeVisible();
+      await expect(membership).not.toBeChecked();
+      const advanced = dialog.getByRole("button", { name: "More options: other knowledge bases", exact: true });
       await expect(advanced).toHaveAttribute("aria-expanded", "false");
       await advanced.focus();
       await page.keyboard.press("Enter");
@@ -248,14 +252,13 @@ for (const device of [
       await dialog.getByRole("combobox", { name: "Knowledge base", exact: true }).nth(1).selectOption("quick-second-base");
       await dialog.getByRole("button", { name: "Remove this knowledge base destination", exact: true }).nth(1).click();
       await expect(dialog.getByRole("combobox", { name: "Knowledge base", exact: true })).toHaveCount(1);
-      await dialog.getByRole("combobox", { name: "Action", exact: true }).selectOption("add");
-      await dialog.getByRole("button", { name: "Add target", exact: true }).click();
-      await expect(dialog.getByRole("combobox", { name: "Collection", exact: true })).toHaveValue("quick-reading");
-      await expect(dialog.getByRole("combobox", { name: "Collection", exact: true })).toBeFocused();
+      await membership.check();
+      await expect(membership).toBeChecked();
+      await expect(membership).toBeFocused();
       await hideAdvanced.click();
       // A non-default Collection draft must remain visible, never silently
       // disappear when the optional controls are collapsed.
-      await expect(dialog.getByRole("combobox", { name: "Collection", exact: true })).toBeVisible();
+      await expect(membership).toBeVisible();
       await expect(dialog.getByRole("button", { name: "Add knowledge base", exact: true })).toHaveCount(0);
       expect((await quickOrganizerSnapshot(page)).unchanged).toBe(true);
       const review = dialog.getByRole("button", { name: "Review placement", exact: true });
@@ -273,6 +276,95 @@ for (const device of [
       expect(saved.parents).toEqual(original.parents);
       expect(saved.secondBase).toBe(original.secondBase);
       expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
+    });
+
+    test("inline collection drafts survive Review and Back, but Cancel creates nothing", async ({ page }) => {
+      await openView(page, { ...device, count: 8 });
+      await page.evaluate(() => (window as unknown as { kbccBrowserHarness: { clearQuickCollections(): void } }).kbccBrowserHarness.clearQuickCollections());
+      await openModal(page, "quick-organizer");
+      const dialog = page.getByRole("dialog", { name: "Organize this note", exact: true });
+      await expect(dialog.getByText("No collections yet. Create one below.", { exact: true })).toBeVisible();
+      await dialog.getByRole("textbox", { name: "New collection or subheading name", exact: true }).fill("Canceled shelf");
+      await dialog.getByRole("button", { name: "Create and select", exact: true }).click();
+      await expect(dialog.getByRole("checkbox", { name: "Canceled shelf", exact: true })).toBeChecked();
+      expect(await quickOrganizerSnapshot(page)).toMatchObject({ unchanged: true, collectionNames: [], applied: 0 });
+      await dialog.getByRole("button", { name: "Review placement", exact: true }).click();
+      await expect(dialog.getByText("Collections: Canceled shelf", { exact: true })).toBeVisible();
+      expect((await quickOrganizerSnapshot(page)).collectionNames).toEqual([]);
+      await dialog.getByRole("button", { name: "Back to destinations", exact: true }).click();
+      await expect(dialog.getByRole("checkbox", { name: "Canceled shelf", exact: true })).toBeChecked();
+      await captureEvidence(page, `collection-draft-cancel-${device.name}`);
+      await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+      await expect(dialog.getByRole("button", { name: "Discard and close", exact: true })).toBeVisible();
+      expect((await quickOrganizerSnapshot(page)).collectionNames).toEqual([]);
+      await dialog.getByRole("button", { name: "Discard and close", exact: true }).click();
+      await expect(dialog).toHaveCount(0);
+      expect(await quickOrganizerSnapshot(page)).toMatchObject({ unchanged: true, collectionNames: [], applied: 0, undoCount: 0 });
+      await openModal(page, "quick-organizer");
+      await expect(dialog.getByRole("checkbox", { name: "Canceled shelf", exact: true })).toHaveCount(0);
+      await expect(dialog.getByText("No collections yet. Create one below.", { exact: true })).toBeVisible();
+    });
+
+    test("inline collection and subheading save together, reopen checked, and remove membership explicitly", async ({ page }) => {
+      await openView(page, { ...device, count: 8 });
+      await page.evaluate(() => (window as unknown as { kbccBrowserHarness: { clearQuickCollections(): void } }).kbccBrowserHarness.clearQuickCollections());
+      await openModal(page, "quick-organizer");
+      const dialog = page.getByRole("dialog", { name: "Organize this note", exact: true });
+      const original = await quickOrganizerSnapshot(page);
+      const name = dialog.getByRole("textbox", { name: "New collection or subheading name", exact: true });
+      const create = dialog.getByRole("button", { name: "Create and select", exact: true });
+      const createUnder = dialog.getByRole("combobox", { name: "Create under", exact: true });
+      await name.fill("Evidence shelf");
+      await create.click();
+      await createUnder.selectOption({ label: "Evidence shelf" });
+      await name.fill("Read next");
+      await create.click();
+      const rootMembership = dialog.getByRole("checkbox", { name: "Evidence shelf", exact: true });
+      const nestedMembership = dialog.getByRole("checkbox", { name: "Evidence shelf / Read next", exact: true });
+      await expect(nestedMembership).toBeChecked();
+      await rootMembership.uncheck();
+      const search = dialog.getByRole("searchbox", { name: "Find a collection or subheading", exact: true });
+      await search.fill("Read next");
+      await expect(nestedMembership).toBeChecked();
+      await expect(rootMembership).toHaveCount(0);
+      await search.fill("");
+      await expect(rootMembership).not.toBeChecked();
+      await expect(dialog.getByRole("combobox", { name: "Place in", exact: true })).toHaveValue("keep");
+      for (const control of [name, createUnder, create, search, nestedMembership.locator("..")]) {
+        const rect = await control.boundingBox();
+        expect(rect?.height, "Collection controls preserve 44px touch targets").toBeGreaterThanOrEqual(44);
+        expect(rect?.width).toBeGreaterThanOrEqual(44);
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
+      await nestedMembership.scrollIntoViewIfNeeded();
+      await captureEvidence(page, `collection-inline-${device.name}`);
+      await dialog.getByRole("button", { name: "Review placement", exact: true }).click();
+      const afterMembership = dialog.getByText("Collections: Evidence shelf / Read next", { exact: true });
+      await expect(afterMembership).toBeVisible();
+      await afterMembership.scrollIntoViewIfNeeded();
+      expect(await afterMembership.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        const panel = element.closest(".ent-cc-note-organizer-panel")!.getBoundingClientRect();
+        return rect.top >= panel.top - 1 && rect.bottom <= panel.bottom + 1;
+      }), "Exact Collection destination is readable above the pinned Save footer").toBe(true);
+      expect(await quickOrganizerSnapshot(page)).toMatchObject({ unchanged: true, collectionNames: [], applied: 0 });
+      await captureEvidence(page, `collection-review-${device.name}`);
+      await dialog.getByRole("button", { name: "Save organization", exact: true }).click();
+      await expect(dialog).toHaveCount(0);
+      const saved = await quickOrganizerSnapshot(page);
+      expect(saved).toMatchObject({ applied: 1, undoCount: 1, collections: ["Evidence shelf / Read next"], collectionNames: ["Evidence shelf", "Evidence shelf / Read next"], parent: original.parent, group: original.group });
+      expect(saved.parents).toEqual(original.parents);
+      expect(saved.secondBase).toEqual(original.secondBase);
+      await openModal(page, "quick-organizer");
+      await expect(nestedMembership).toBeChecked();
+      await expect(rootMembership).not.toBeChecked();
+      await expect(nestedMembership.locator("..")).toContainText("Currently added");
+      await nestedMembership.uncheck();
+      await dialog.getByRole("button", { name: "Review placement", exact: true }).click();
+      await expect(dialog.getByText("Collections: None", { exact: true })).toBeVisible();
+      await dialog.getByRole("button", { name: "Save organization", exact: true }).click();
+      await expect(dialog).toHaveCount(0);
+      expect(await quickOrganizerSnapshot(page)).toMatchObject({ applied: 2, undoCount: 2, collections: [], collectionNames: saved.collectionNames, parent: original.parent, group: original.group });
     });
   });
 }
@@ -1279,6 +1371,12 @@ for (const mobile of [false, true]) {
     await openView(page, { mobile, count: 8 });
     await page.evaluate(() => (window as unknown as { kbccBrowserHarness: { showEmptyCollection(): Promise<void> } }).kbccBrowserHarness.showEmptyCollection());
     const empty = page.locator(".ent-cc-empty-collection");
+    const collectionActions = page.locator(".ent-cc-collection-actions");
+    await expect(collectionActions.getByRole("button", { name: "New collection", exact: true })).toBeVisible();
+    await expect(collectionActions.getByRole("button", { name: "Add notes", exact: true })).toBeVisible();
+    await collectionActions.getByRole("button", { name: "New collection", exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "New collection", exact: true })).toBeVisible();
+    await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(page.locator(".ent-cc-topic-count")).toContainText("1 collection · 0 entries · 0 linked notes · 0 placeholders");
     await expect(empty.getByRole("button", { name: "Add existing note", exact: true })).toBeVisible();
     await expect(empty.getByRole("button", { name: "Create note", exact: true })).toBeVisible();
@@ -1296,6 +1394,13 @@ for (const mobile of [false, true]) {
     await expect(dialog.getByRole("checkbox", { name: "Add to a collection after creation", exact: true })).toHaveCount(0);
     await dialog.getByRole("button", { name: mobile ? "Close" : "Cancel", exact: true }).click();
     await expect(page.getByRole("dialog")).toHaveCount(0);
+    await page.getByRole("button", { name: "Collapse Reading this week", exact: true }).click();
+    await expect(empty).toHaveCount(0);
+    await page.getByRole("button", { name: "Actions for Reading this week", exact: true }).click();
+    await expect(page.getByRole("menuitem", { name: "Add notes here", exact: true })).toBeVisible();
+    await expect(page.getByRole("menuitem", { name: "Search this collection", exact: true })).toBeVisible();
+    await page.getByRole("menuitem", { name: "Create note here", exact: true }).click();
+    await expect(page.getByRole("dialog").getByText("This note will be added to Reading this week. The collection destination is fixed for this action.", { exact: true })).toBeVisible();
   });
 
   test(`production note and setup dialogs ${device}: common fields precede optional details`, async ({ page }) => {

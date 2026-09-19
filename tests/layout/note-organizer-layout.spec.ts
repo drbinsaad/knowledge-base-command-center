@@ -24,6 +24,8 @@ const variants: LayoutVariant[] = [
   { name: "phone LTR", viewport: { width: 390, height: 844 }, direction: "ltr", fontSize: 16, phone: true },
   { name: "phone RTL", viewport: { width: 390, height: 844 }, direction: "rtl", fontSize: 16, phone: true },
   { name: "phone LTR at 125% text", viewport: { width: 430, height: 932 }, direction: "ltr", fontSize: 20, phone: true },
+  { name: "tablet portrait LTR", viewport: { width: 768, height: 1024 }, direction: "ltr", fontSize: 16, phone: false },
+  { name: "tablet landscape RTL", viewport: { width: 1180, height: 820 }, direction: "rtl", fontSize: 16, phone: false },
 ];
 
 const landscapePhoneVariants: LayoutVariant[] = [

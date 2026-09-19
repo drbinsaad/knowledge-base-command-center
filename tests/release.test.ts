@@ -166,7 +166,7 @@ test("public repository metadata is present", async () => {
   assert.notEqual(released018Start, -1, "the published 0.18.0 release record must remain in the changelog");
   const released018End = changelog.indexOf("\n## ", released018Start + 1);
   const released018Changelog = changelog.slice(released018Start, released018End < 0 ? undefined : released018End);
-  assert.match(released018Changelog, new RegExp(`version-${deviceLocalVersion} device-local journals`, "iu"));
+  assert.match(released018Changelog, /version-4 device-local journals/iu);
   assert.match(released018Changelog, /user-invoked Undo\/Redo restart-durable/iu);
   assert.match(released018Changelog, /multi-base portfolio import stages every destination's required Undo[^.]*one causally verified batch/iu);
   const released017Start = changelog.indexOf("## 0.17.0");

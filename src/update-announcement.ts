@@ -311,6 +311,21 @@ export const UPDATE_ANNOUNCEMENT_0_23_1: UpdateAnnouncement = {
   releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.23.1",
 };
 
+export const UPDATE_ANNOUNCEMENT_0_24_0: UpdateAnnouncement = {
+  version: "0.24.0",
+  title: "What’s new in Knowledge Base Command Center 0.24.0",
+  intro: "Easier Collections and safer organization. Physical iPhone/iPad and two-device Sync testing remain unverified.",
+  highlights: [
+    "My Collections now shows New collection and Add notes directly. Collection and subheading menus offer Add notes here and Create note here, even when collapsed or populated.",
+    "Organize this note shows your current Collection memberships as searchable checkboxes. Create a collection or nested subheading inline, then Review → Save organization. Cancel creates nothing; Undo restores structure and membership together.",
+    "Collection-only edits preserve primary placement. Unchanged reviews close with Done — no changes needed. Search this collection includes nested members and retains filters when returning from a note.",
+    "If a new note is saved but filing fails, open or organize that saved note without creating it again. Stronger write guards and recovery discovery protect interrupted workflows.",
+    "Ordinary organization never moves or rewrites Markdown. Local-vault covers only; no new network permissions or dependencies.",
+    "Update every syncing device to 0.24.0. Organization format 17 protects Collection search filters; older builds keep the newer data read-only. Keep a complete pre-upgrade backup for rollback.",
+  ],
+  releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.24.0",
+};
+
 const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_12_0.version, UPDATE_ANNOUNCEMENT_0_12_0],
   [UPDATE_ANNOUNCEMENT_0_12_1.version, UPDATE_ANNOUNCEMENT_0_12_1],
@@ -334,6 +349,7 @@ const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_22_0.version, UPDATE_ANNOUNCEMENT_0_22_0],
   [UPDATE_ANNOUNCEMENT_0_23_0.version, UPDATE_ANNOUNCEMENT_0_23_0],
   [UPDATE_ANNOUNCEMENT_0_23_1.version, UPDATE_ANNOUNCEMENT_0_23_1],
+  [UPDATE_ANNOUNCEMENT_0_24_0.version, UPDATE_ANNOUNCEMENT_0_24_0],
 ]);
 
 function parseSemanticVersion(value: string): ParsedSemanticVersion | null {

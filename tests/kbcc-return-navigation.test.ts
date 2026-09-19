@@ -42,6 +42,47 @@ test("return navigation round-trips exact per-note route state", () => {
   assert.equal(kbccReturnRouteForNote(parsed, "vault-main", "Notes/Unrelated.md"), null, "routes are bound to the opened note");
 });
 
+test("version-1 return history migrates without losing existing search filters or route identity", () => {
+  const legacyRoute = route("Notes/Legacy.md", 100, "linked notes");
+  Object.assign(legacyRoute.view, { scope: "library", availability: "linked", linkedFirst: true });
+  const legacy = { version: 1, vaultId: "vault-main", routes: [legacyRoute] };
+  const original = structuredClone(legacy);
+  const migrated = parseKbccReturnNavigationState(legacy);
+
+  assert.equal(migrated.version, 2);
+  assert.deepEqual(migrated.routes, original.routes);
+  assert.deepEqual(legacy, original, "reading convenience history never mutates the stored input");
+  assert.equal(rememberKbccReturnRoute(migrated, "vault-main", route("Notes/New.md", 200)).version, 2);
+  assert.equal(rebuildBoundedKbccReturnNavigationState("vault-main", migrated.routes).version, 2);
+});
+
+test("collection-scoped return history uses a version barrier instead of widening on downgrade", () => {
+  const collectionRoute = route("Notes/Collection.md", 100, "selected notes");
+  Object.assign(collectionRoute.view, {
+    activeTab: "collections", scope: "collection", collectionId: "reading", availability: "linked", linkedFirst: true,
+  });
+  const state = rememberKbccReturnRoute(null, "vault-main", collectionRoute);
+
+  assert.equal(state.version, 2, "published version-1 readers reject this shape before normalizing its filters");
+  assert.deepEqual(parseKbccReturnNavigationState(structuredClone(state)).routes, [collectionRoute]);
+  const legacyAcceptsVersion = (input: { version: number }): boolean => input.version === 1;
+  assert.equal(legacyAcceptsVersion(state), false);
+  const missingCollection = structuredClone(state);
+  delete missingCollection.routes[0].view.collectionId;
+  assert.equal(parseKbccReturnNavigationState(missingCollection).routes[0].view.scope, "collection",
+    "a malformed collection identity remains a constrained empty search, never the all-base default");
+});
+
+test("return history rejects unsupported formats without modifying their routes", () => {
+  const state = rememberKbccReturnRoute(null, "vault-main", route("Notes/Versioned.md", 100));
+  for (const version of [0, 3, "2", null]) {
+    const unknown = { ...structuredClone(state), version };
+    const original = structuredClone(unknown);
+    assert.throws(() => parseKbccReturnNavigationState(unknown), /unsupported/iu);
+    assert.deepEqual(unknown, original);
+  }
+});
+
 test("remembering routes replaces one note and keeps only the newest bounded history", () => {
   let state = null;
   for (let index = 0; index < MAX_KBCC_RETURN_ROUTES + 5; index += 1) {

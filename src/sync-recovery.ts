@@ -132,26 +132,30 @@ export function parseSyncRecoveryLocalState(input: unknown): SyncRecoveryLocalSt
   };
 }
 
-function directExportName(path: string): string | null {
-  const prefix = `${SYNC_RECOVERY_EXPORT_FOLDER}/`;
-  if (!path.startsWith(prefix)) return null;
-  const name = path.slice(prefix.length);
-  return !name || name.includes("/") ? null : name;
+function directExportName(path: string, folders: readonly string[]): string | null {
+  for (const folder of folders) {
+    const prefix = `${folder}/`;
+    if (!path.startsWith(prefix)) continue;
+    const name = path.slice(prefix.length);
+    if (name && !name.includes("/")) return name;
+  }
+  return null;
 }
 
-export function isDocumentedConflictRescuePath(path: string): boolean {
-  const name = directExportName(path);
+export function isDocumentedConflictRescuePath(path: string, folders: readonly string[] = [SYNC_RECOVERY_EXPORT_FOLDER]): boolean {
+  const name = directExportName(path, folders);
   return Boolean(name && CONFLICT_RESCUE_NAME.test(name));
 }
 
-export function isDocumentedNamedRecoveryPath(path: string): boolean {
-  const name = directExportName(path);
+export function isDocumentedNamedRecoveryPath(path: string, folders: readonly string[] = [SYNC_RECOVERY_EXPORT_FOLDER]): boolean {
+  const name = directExportName(path, folders);
   return Boolean(name && LEGACY_RECOVERY_NAME.test(name));
 }
 
 export function summarizeRecoveryArtifacts(
   artifacts: readonly LocalRecoveryArtifact[],
   maxEntries = MAX_SYNC_RECOVERY_ARTIFACT_ENTRIES,
+  folders: readonly string[] = [SYNC_RECOVERY_EXPORT_FOLDER],
 ): RecoveryArtifactSummary {
   const safeLimit = Number.isSafeInteger(maxEntries) && maxEntries >= 0
     ? Math.min(maxEntries, MAX_SYNC_RECOVERY_ARTIFACT_ENTRIES)
@@ -160,14 +164,16 @@ export function summarizeRecoveryArtifacts(
   let newestConflictRescueAt: number | null = null;
   let newestNamedRecoveryAt: number | null = null;
   const scannedEntries = Math.min(artifacts.length, safeLimit);
+  const seen = new Set<string>();
   for (let index = 0; index < scannedEntries; index += 1) {
     const artifact = artifacts[index];
-    if (!artifact) continue;
+    if (!artifact || seen.has(artifact.path)) continue;
+    seen.add(artifact.path);
     const mtime = cleanTimestamp(artifact.mtime);
-    if (isDocumentedConflictRescuePath(artifact.path)) {
+    if (isDocumentedConflictRescuePath(artifact.path, folders)) {
       conflictRescueCount += 1;
       if (mtime !== null) newestConflictRescueAt = Math.max(newestConflictRescueAt ?? 0, mtime);
-    } else if (isDocumentedNamedRecoveryPath(artifact.path) && mtime !== null) {
+    } else if (isDocumentedNamedRecoveryPath(artifact.path, folders) && mtime !== null) {
       newestNamedRecoveryAt = Math.max(newestNamedRecoveryAt ?? 0, mtime);
     }
   }

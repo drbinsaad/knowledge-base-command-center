@@ -1,6 +1,6 @@
 # Library display and privacy
 
-Version **0.23.1 supports local-vault covers only**, retaining the boundary introduced in 0.23.0. Online cover loading and its opt-in controls are not included. The earlier network-capable proposal remains deferred and unapproved; removing it from this release is not a completed privacy review.
+Version **0.24.0 supports local-vault covers only**, retaining the boundary introduced in 0.23.0. Online cover loading and its opt-in controls are not included. The earlier network-capable proposal remains deferred and unapproved; removing it from this release is not a completed privacy review.
 
 ## Library settings
 
@@ -47,7 +47,7 @@ Card dimensions, lazy loading, and image fitting do not cap decoded-image memory
 
 ## Legacy private-test state
 
-A private pre-release build offered external images and could leave <code>ent-vault-command-center.library-images.v1</code> in vault-specific App-local storage. Like 0.23.0, version 0.23.1 does not use that value to authorize image loads, does not offer an enable action, and does not copy it into plugin data, Sync state, exports, recovery or Undo. A previously allowed value cannot enable remote covers.
+A private pre-release build offered external images and could leave <code>ent-vault-command-center.library-images.v1</code> in vault-specific App-local storage. Like 0.23.0 and 0.23.1, version 0.24.0 does not use that value to authorize image loads, does not offer an enable action, and does not copy it into plugin data, Sync state, exports, recovery or Undo. A previously allowed value cannot enable remote covers.
 
 **Clear device-local data** includes cleanup of this inert legacy key along with the other plugin-owned App-local values. Removing it does not clear browser cookies/cache or undo requests previously sent by a private test build. See [Local data](LOCAL_DATA.md).
 
@@ -55,22 +55,23 @@ A private pre-release build offered external images and could leave <code>ent-va
 
 | Artifact | Version | Display behavior |
 | --- | --- | --- |
-| Plugin store / base data | 16 / 16 | Profiles live in base settings and participate in semantic Sync; older builds protect newer data read-only |
+| Plugin store / base data | 17 / 17 | Profiles live in base settings and participate in semantic Sync; older builds protect newer data read-only |
 | Workspace configuration | 3 | Library display profiles and required stable Library descriptors in a portable package |
-| Portable package | 6 | Carries Workspace 3; versions 1–6 remain readable |
-| Same-vault recovery | 12 | Restores display profiles, including archived Libraries and retained settings snapshots |
-| Device history | 4 | Existing bounded Undo journal; the obsolete external-image key is separate and inert |
+| Portable package | 7 | Carries Workspace 3 and saved-view component 2; package versions 1–7 remain readable |
+| Same-vault recovery | 13 | Restores display profiles, including archived Libraries and retained settings snapshots |
+| Device history | 5 | Bounded Undo journal; version-4 journals remain readable; the obsolete external-image key is separate and inert |
+| Return-navigation history | 2 | Collection-scoped routes; version-1 histories migrate on read |
 
 Workspace profiles contain property names and display choices, not cover URLs, image bytes or property values. Workspace export omits archived/missing Library profiles. A Library-only import leaves destination display preferences unchanged. Older Workspace versions 1–2 and recovery versions 1–11 preserve destination display preferences for surviving Library IDs. Current recovery restores its own profile map. No format grants online-image permission.
 
-Other export privacy boundaries still apply: Workspace can contain configured vault-relative folders, literal saved queries can be sensitive, and private recovery contains exact note bindings. Update every importing or syncing device before using new formats. See [Portability and recovery](PORTABILITY_AND_RECOVERY.md).
+Other export privacy boundaries still apply: Workspace can contain configured vault-relative folders, literal saved queries can be sensitive, and private recovery contains exact note bindings. Update every importing or syncing device to 0.24.0 or a newer compatible release before using new formats. Published 0.23.1 protects the newer store read-only. A writable downgrade requires matching pre-upgrade organization backups, a complete vault backup, and coordinated Sync handling; replacing only plugin assets or lowering schema fields is unsafe. See [Portability and recovery](PORTABILITY_AND_RECOVERY.md).
 
 ## Deferred online-cover proposal
 
-The earlier proposal allowed browser-loaded HTTPS covers after a separate opt-in scoped to one vault on one device. It described request IP/URL exposure, cookies/cache/redirects, referrer suppression without anonymity, persistence failures and revocation limits. It was explored in a private build and draft review, but **independent public privacy review was not completed**. That feature is excluded from both 0.23.0 and 0.23.1.
+The earlier proposal allowed browser-loaded HTTPS covers after a separate opt-in scoped to one vault on one device. It described request IP/URL exposure, cookies/cache/redirects, referrer suppression without anonymity, persistence failures and revocation limits. It was explored in a private build and draft review, but **independent public privacy review was not completed**. That feature is excluded from 0.23.0, 0.23.1, and 0.24.0.
 
 Any future proposal must obtain independent review of the final image-loading implementation and publish the review before release, as required by [Contributing](../CONTRIBUTING.md#non-negotiable-boundaries). Default-denial tests or acceptance of unverified physical-device scope cannot waive that requirement.
 
 ## Device evidence
 
-Physical iPhone/iPad keyboard, safe-area, image-loading, VoiceOver, image-memory and controlled two-device Sync/import checks remain separately recorded in the [0.23.1 evidence record](release-evidence/0.23.1-iphone.md). After the remaining gap was disclosed, the maintainer explicitly approved publication of this tested update with that physical scope unverified. This is fresh authorization for 0.23.1, not a device Pass or reuse of the historical [0.23.0 record](release-evidence/0.23.0-iphone.md). Use synthetic notes and owned images for future checks, and never publish private vault content or recovery files.
+Physical iPhone/iPad keyboard, safe-area, image-loading, VoiceOver, image-memory and controlled two-device Sync/import checks remain separately recorded in the [0.24.0 evidence record](release-evidence/0.24.0-iphone.md). After the remaining gap was disclosed, the maintainer explicitly approved publication of this tested update with that physical scope unverified. This is fresh authorization for 0.24.0, not a device Pass or reuse of the historical [0.23.1 record](release-evidence/0.23.1-iphone.md). Use synthetic notes and owned images for future checks, and never publish private vault content or recovery files.

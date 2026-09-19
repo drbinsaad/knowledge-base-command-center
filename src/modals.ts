@@ -347,6 +347,7 @@ export class CollectionPickerModal extends NormalizedFuzzySuggestModal<Collectio
     private readonly action: "Add" | "Move",
     private readonly onChoose: (target: CollectionTarget) => void | Promise<void>,
     private readonly targetLabel = "collection",
+    private readonly onCreate?: () => void,
   ) {
     super(app);
     this.setPlaceholder(`${action} to ${targetLabel}…`);
@@ -360,6 +361,11 @@ export class CollectionPickerModal extends NormalizedFuzzySuggestModal<Collectio
     void super.onOpen();
     this.modalEl.addClass("ent-cc-modal");
     this.titleEl.setText(`${this.action} to ${this.targetLabel}`);
+    if (this.onCreate) {
+      const footer = this.modalEl.createDiv({ cls: "ent-cc-collection-picker-actions" });
+      const create = footer.createEl("button", { text: "New collection", type: "button" });
+      create.addEventListener("click", () => { this.close(); this.onCreate?.(); });
+    }
   }
 }
 

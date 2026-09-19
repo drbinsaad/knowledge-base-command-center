@@ -100,6 +100,9 @@ export class QuickAppendModal extends FollowUpResponsiveModal {
   private dateSettingEl: HTMLElement | null = null;
   private errorEl: HTMLElement | null = null;
   private busy = false;
+  private readonly disabledBeforeSubmit = new Map<
+    HTMLButtonElement | HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement, boolean
+  >();
 
   constructor(app: App, private readonly options: QuickAppendModalOptions) {
     super(app);
@@ -163,7 +166,33 @@ export class QuickAppendModal extends FollowUpResponsiveModal {
     this.bindResponsiveViewport();
   }
 
-  onClose(): void { this.releaseResponsiveViewport(); }
+  onClose(): void {
+    this.setBusy(false);
+    this.releaseResponsiveViewport();
+  }
+
+  /** Escape, the backdrop and Cancel must not hide an in-flight note write. */
+  close(): void {
+    if (this.busy) return;
+    super.close();
+  }
+
+  private setBusy(busy: boolean): void {
+    this.busy = busy;
+    if (busy) {
+      this.modalEl.setAttribute("aria-busy", "true");
+      this.contentEl.querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
+        "button, input, select, textarea",
+      ).forEach((control) => {
+        this.disabledBeforeSubmit.set(control, control.disabled);
+        control.disabled = true;
+      });
+    } else {
+      this.modalEl.removeAttribute("aria-busy");
+      for (const [control, disabled] of this.disabledBeforeSubmit) control.disabled = disabled;
+      this.disabledBeforeSubmit.clear();
+    }
+  }
 
   private updateDateVisibility(): void {
     const selected = this.options.categories.find((category) => category.id === this.value.categoryId);
@@ -176,13 +205,14 @@ export class QuickAppendModal extends FollowUpResponsiveModal {
       this.errorEl?.setText(this.value.categoryId ? "Enter a follow-up note." : "Choose a category.");
       return;
     }
-    this.busy = true;
+    this.setBusy(true);
     this.errorEl?.setText("");
     try {
       await this.options.onSubmit({ ...this.value });
+      this.setBusy(false);
       this.close();
     } catch (error) {
-      this.busy = false;
+      this.setBusy(false);
       const message = errorMessage(error);
       this.errorEl?.setText(message);
       new Notice(message, 8000);

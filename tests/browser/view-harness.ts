@@ -1,7 +1,7 @@
 import { Platform, Setting, TFile, type Modal, type SettingDefinitionItem } from "obsidian";
 import type EntVaultCommandCenterPlugin from "../../src/main";
 import { EntVaultCommandCenterView } from "../../src/view";
-import { buildCurriculumTree, canonicalJsonString, clonePersonalOrganization, createDefaultStore, createKnowledgeBaseEntry, migrateData, parseQuery, portablePlaceholderPath, restoreSnapshot, snapshotPersonal, type LayoutHeading, type VaultRecord } from "../../src/model";
+import { buildCurriculumTree, canonicalJsonString, childSubheadings, clonePersonalOrganization, createDefaultStore, createKnowledgeBaseEntry, migrateData, parseQuery, portablePlaceholderPath, restoreSnapshot, semanticEntryFingerprint, snapshotPersonal, type LayoutHeading, type LayoutSubheading, type VaultRecord } from "../../src/model";
 import { BoundedKnowledgeBaseSearchCollector } from "../../src/search";
 import { KnowledgeNoteModal, WorkspaceSetupModal } from "../../src/modals";
 import { ExportImportCenterModal } from "../../src/portability-modal";
@@ -398,7 +398,7 @@ let quickStore = createDefaultStore(quickData, 1, "browser-quick-organizer-synth
 const secondQuickData = migrateData(quickData);
 secondQuickData.settings.workspaceName = "Second synthetic base";
 quickStore.bases.push(createKnowledgeBaseEntry(secondQuickData, "quick-second-base", 1));
-const quickOriginal = canonicalJsonString(quickStore);
+let quickOriginal = canonicalJsonString(quickStore);
 const quickCounters = { prepared: 0, applied: 0 };
 type QuickPlan = ReturnType<typeof createNoteOrganizerPlan>;
 let quickToken: { plan: QuickPlan; directives: NoteOrganizerDirective[]; consumed: boolean } | null = null;
@@ -427,12 +427,24 @@ function quickPrimaryLabel(primary: NoteOrganizerPrimaryState): string {
   if (primary.kind === "library") return `Library — ${primary.libraryName}${primary.placement ? ` / ${primary.placement.label}` : " / Unplaced"}`;
   return `Index — ${primary.groupTitle} / ${primary.parentPath ? primary.parentLabel || primary.parentPath : "Heading root"}`;
 }
+function quickCollectionTargets(headings: readonly LayoutHeading[]) {
+  const targets: Array<{ headingId: string; subheadingId: string | null; label: string; subjects: string[] }> = [];
+  const visit = (node: LayoutHeading | LayoutSubheading, headingId: string, parent: string): void => {
+    const label = parent ? `${parent} / ${node.title}` : node.title;
+    targets.push({ headingId, subheadingId: node.id === headingId ? null : node.id, label, subjects: node.subjects });
+    for (const child of childSubheadings(node)) visit(child, headingId, label);
+  };
+  for (const heading of headings) visit(heading, heading.id, "");
+  return targets;
+}
 const quickOrganizerHost: NoteOrganizerHost = {
   app: app as never,
   getVaultSnapshot: async () => quickRecords.map((item) => ({ kind: "note", name: item.title, path: item.path })),
   getBases: async () => quickStore.bases.map((entry) => {
     const { base, tree } = quickTree(entry.id);
     const group = base.data.indexGroupByPath[quickNotePath] ?? "General";
+    const targets = quickCollectionTargets(base.data.collections);
+    const selectedSubject = base.data.portableIndex.subjects.find((item) => base.data.portableIndex.resolvedPathBySubjectId[item.id] === quickNotePath);
     return {
       id: base.id, name: base.data.settings.workspaceName, current: base.id === quickStore.activeBaseId,
       indexName: "Knowledge Index",
@@ -441,7 +453,12 @@ const quickOrganizerHost: NoteOrganizerHost = {
           .map((item) => ({ id: item.path, name: organizerIndexTrail(tree, item.path).label })),
       })),
       initialPrimary: { mode: "index", libraryId: null, headingId: group, subheadingId: tree.parentByPath.get(quickNotePath) ?? null },
-      libraries: [], collections: [{ id: "quick-reading", name: "Reading this week", subheadings: [] }],
+      initialCollections: targets.filter((target) => target.subjects.includes(quickNotePath)
+        || Boolean(selectedSubject && target.subjects.includes(selectedSubject.id))).map(({ headingId, subheadingId }) => ({ headingId, subheadingId })),
+      libraries: [], collections: base.data.collections.map((heading) => ({
+        id: heading.id, name: heading.title,
+        subheadings: targets.filter((target) => target.headingId === heading.id && target.subheadingId).map((target) => ({ id: target.subheadingId!, name: target.label })),
+      })),
     };
   }),
   prepare: async (draft) => {
@@ -458,7 +475,7 @@ const quickOrganizerHost: NoteOrganizerHost = {
         },
       };
     });
-    const plan = createNoteOrganizerPlan(quickStore, quickFacts(directives), directives, { now: 1000 + quickCounters.prepared });
+    const plan = createNoteOrganizerPlan(quickStore, quickFacts(directives), directives, { now: 1000 + quickCounters.prepared, collectionCreations: draft.collectionCreations });
     quickToken = { plan, directives, consumed: false };
     quickCounters.prepared += 1;
     return {
@@ -649,9 +666,17 @@ const harness = {
       parent: tree.parentByPath.get(quickNotePath) ?? null, group: base.data.indexGroupByPath[quickNotePath],
       undoCount: base.data.undoStack.length, activeBase: quickStore.activeBaseId,
       parents: Object.fromEntries([...tree.parentByPath].filter(([item]) => item !== quickNotePath)),
-      collections: base.data.collections.filter((item) => item.subjects.includes(quickNotePath) || Boolean(selectedSubject && item.subjects.includes(selectedSubject.id))).map((item) => item.title),
+      collections: quickCollectionTargets(base.data.collections).filter((item) => item.subjects.includes(quickNotePath) || Boolean(selectedSubject && item.subjects.includes(selectedSubject.id))).map((item) => item.label),
+      collectionNames: quickCollectionTargets(base.data.collections).map((item) => item.label),
       secondBase: canonicalJsonString(quickStore.bases.find((item) => item.id === "quick-second-base")),
     };
+  },
+  clearQuickCollections() {
+    quickStore.bases.forEach((base) => {
+      base.data.collections = [];
+      base.semanticHash = semanticEntryFingerprint(base);
+    });
+    quickOriginal = canonicalJsonString(quickStore);
   },
   snapshot() { return { activeTab: data.activeTab, recordCount: records.length, selectedPath: data.selectedPath, submittedTitles, completedImportActions }; },
 };

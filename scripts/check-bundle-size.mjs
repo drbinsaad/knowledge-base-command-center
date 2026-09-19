@@ -2,13 +2,12 @@ import { readFile, stat } from "node:fs/promises";
 import { gzipSync } from "node:zlib";
 
 const budgets = [
-  // Per-Library display profiles, guarded settings, cover rendering and versioned
-  // portability add about 27.4 kB raw / 6.2 kB gzip JS and 5.0 kB raw / 0.9 kB
-  // gzip CSS over 0.22.0. No runtime dependencies or bundled image assets added.
-  { file: "main.js", raw: 1_205_000, gzip: 316_000 },
-  // The fixed-visible Library settings footer adds 1,930 raw / 256 gzip bytes
-  // over 0.23.0 (Node 22), including narrow/keyboard viewport and touch targets.
-  { file: "styles.css", raw: 160_500, gzip: 22_500 },
+  // Collections workflow + staged creation/Undo, scoped search, write guards,
+  // and saved-note recovery add about 18 kB raw / 4.4 kB gzip over 0.23.1.
+  // No runtime dependencies, image assets, or network capabilities are added.
+  { file: "main.js", raw: 1_225_000, gzip: 322_000 },
+  // Touch-sized membership choices/actions and tablet wrapping add ~1.6 kB raw.
+  { file: "styles.css", raw: 163_000, gzip: 22_600 },
 ];
 
 for (const budget of budgets) {

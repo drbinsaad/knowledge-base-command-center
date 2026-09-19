@@ -1,4 +1,7 @@
 import {
+  childSubheadings,
+  type LayoutHeading,
+  type LayoutSubheading,
   matchesParsedQuery,
   normalizeSearchText,
   type ParsedQuery,
@@ -7,6 +10,18 @@ import {
 } from "./model";
 
 export const DEFAULT_CROSS_BASE_SEARCH_LIMIT = 300;
+
+/** Missing destinations deliberately produce no matches, never an unscoped search. */
+export function collectionSearchPaths(data: Pick<PluginData, "collections">, collectionId: string): Set<string> {
+  const heading = data.collections.find((item) => item.id === collectionId);
+  const paths = new Set<string>();
+  const visit = (node: LayoutHeading | LayoutSubheading): void => {
+    for (const path of node.subjects) paths.add(path);
+    for (const child of childSubheadings(node)) visit(child);
+  };
+  if (heading) visit(heading);
+  return paths;
+}
 
 export interface KnowledgeBaseSearchSource {
   baseId: string;

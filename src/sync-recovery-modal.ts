@@ -173,7 +173,7 @@ export class SyncRecoveryCenterModal extends Modal {
       section.createDiv({
         cls: "ent-cc-sync-recovery-callout is-warning",
         attr: { role: "status" },
-        text: "The public Vault API could not inspect the local export folder, so artifact counts are unavailable.",
+        text: "One or more export folders are missing on this device or could not be inspected, so complete artifact counts are unavailable. Let Sync finish, then refresh.",
       });
     } else {
       const facts = section.createEl("dl", { cls: "ent-cc-sync-recovery-facts" });
@@ -200,7 +200,7 @@ export class SyncRecoveryCenterModal extends Modal {
     }
     section.createEl("p", {
       cls: "ent-cc-sync-recovery-note",
-      text: "Counts use only the documented conflict-rescue filename pattern and file modification times. The scan is capped at 2,000 direct export-folder entries; when capped, counts are lower bounds. File names, full paths, JSON contents, and note bodies are not displayed or read.",
+      text: "Counts inspect the configured export folders for all knowledge bases and the legacy default folder, using only documented filenames and modification times. The combined scan is capped at 2,000 direct entries; capped counts are lower bounds. Full paths, JSON contents, and note bodies are not displayed or read.",
     });
   }
 

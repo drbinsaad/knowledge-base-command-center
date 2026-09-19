@@ -175,6 +175,53 @@ async function indexParentOrganizerFixture() {
   return { plugin, harness, app, files, selected, parent, unrelated, headingAPath, targetPath, childPath, commits, personalState, draftFor, vaultMutationCalls: () => vaultMutationCalls };
 }
 
+test("Organizer stages Collection and nested heading creation with membership in one Undo-protected commit", async () => {
+  const fixture = await indexParentOrganizerFixture();
+  const { plugin, harness, selected, commits, personalState } = fixture;
+  const baseId = plugin.getActiveKnowledgeBaseId();
+  const before = personalState();
+  const draft: NoteOrganizerDraft = {
+    version: 1, source: "command", selectedPaths: [selected.path], overrides: [],
+    destinations: [{ baseId, primary: { mode: "keep", libraryId: null, headingId: null, subheadingId: null }, collections: { mode: "add", targets: [{ headingId: "new-collection", subheadingId: "new-child" }] } }],
+    collectionCreations: [
+      { baseId, id: "new-collection", title: "Reading", headingId: null, parentSubheadingId: null },
+      { baseId, id: "new-parent", title: "Books", headingId: "new-collection", parentSubheadingId: null },
+      { baseId, id: "new-child", title: "This week", headingId: "new-collection", parentSubheadingId: "new-parent" },
+    ],
+  };
+  const abandoned = await harness.prepareNoteOrganizer(draft);
+  assert.deepEqual(personalState(), before, "preparing and abandoning a draft writes no collection or membership");
+  assert.equal(commits.length, 0);
+  assert.deepEqual(abandoned.reviewRows[0].after.collections, ["Reading / Books / This week"]);
+  const prepared = await harness.prepareNoteOrganizer(draft);
+  await harness.applyPreparedNoteOrganizer(prepared.preparedToken);
+  assert.equal(commits.length, 1);
+  assert.equal(commits[0].requireUndo, true);
+  assert.deepEqual(commits[0].bases, [baseId]);
+  assert.equal(plugin.data.directIndexPaths.includes(selected.path), false, "collection-only creation does not enroll the note in Index");
+  const current = harness.noteOrganizerBaseOptions(selected.path)[0];
+  assert.deepEqual(current.initialCollections, [{ headingId: "new-collection", subheadingId: "new-child" }]);
+  assert.equal(current.initialPrimary?.mode, "keep");
+  assert.equal(harness.canUndoNoteOrganizerBatch(), true);
+  await harness.applyNoteOrganizerBatchHistory("undo");
+  assert.deepEqual(personalState(), before, "Undo restores the original layout as well as membership");
+  assert.equal(fixture.vaultMutationCalls(), 0);
+  await assert.rejects(() => harness.applyPreparedNoteOrganizer(abandoned.preparedToken), /changed|stale/iu, "the abandoned review cannot reapply after a subsequent transaction");
+  plugin.onunload();
+});
+
+test("Organizer reports an unchanged single-note review as a valid Done state", async () => {
+  const { plugin, harness, selected } = await indexParentOrganizerFixture();
+  const draft: NoteOrganizerDraft = { version: 1, source: "command", selectedPaths: [selected.path], overrides: [], destinations: [{
+    baseId: plugin.getActiveKnowledgeBaseId(), primary: { mode: "keep", libraryId: null, headingId: null, subheadingId: null }, collections: { mode: "keep", targets: [] },
+  }] };
+  const prepared = await harness.prepareNoteOrganizer(draft);
+  assert.equal(prepared.summary.changeCount, 0);
+  assert.equal(prepared.summary.unchangedCount, 1);
+  assert.deepEqual(prepared.errors, [], "a no-op is not an error that disables the modal Done action");
+  plugin.onunload();
+});
+
 test("Organizer Index options expose the effective note tree including placeholder-parent breadcrumbs", async () => {
   const { plugin, harness, parent, targetPath, headingAPath } = await indexParentOrganizerFixture();
   const option = harness.noteOrganizerBaseOptions().find((base) => base.current);

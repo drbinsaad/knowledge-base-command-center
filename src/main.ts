@@ -188,6 +188,7 @@ import {
 } from "./quick-entry";
 import {
   BoundedKnowledgeBaseSearchCollector,
+  collectionSearchPaths,
   DEFAULT_CROSS_BASE_SEARCH_LIMIT,
   type KnowledgeBaseSearchResultSet,
   type KnowledgeBaseSearchSource,
@@ -249,6 +250,7 @@ import {
   type NoteOrganizerPrimaryDirective,
 } from "./note-organizer";
 import { organizerIndexPlacement, organizerIndexTrail } from "./note-organizer-index";
+import { stageOrganizerCollectionCreations, validateOrganizerCollectionCreations, type OrganizerCollectionCreation } from "./note-organizer-collections";
 import {
   createNoteOrganizerBatchHistoryToken,
   projectNoteOrganizerBatchTransition,
@@ -563,6 +565,7 @@ export interface KnowledgeBaseSearchOptions {
   yieldEvery?: number;
   baseIds?: readonly string[];
   libraryId?: string;
+  collectionId?: string;
   availability?: "all" | "linked" | "placeholders";
   linkedFirst?: boolean;
 }
@@ -2311,20 +2314,32 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         : "pending";
 
     let artifactInspectionAvailable = true;
-    let artifacts: Array<{ path: string; mtime: number }> = [];
-    try {
-      const folder = this.app.vault.getAbstractFileByPath(SYNC_RECOVERY_EXPORT_FOLDER);
-      if (folder instanceof TFolder) {
-        artifacts = folder.children
-          .slice(0, MAX_SYNC_RECOVERY_ARTIFACT_ENTRIES + 1)
-          .map((entry) => entry instanceof TFile
-            ? { path: entry.path, mtime: entry.stat.mtime }
-            : { path: "", mtime: 0 });
+    const artifacts: Array<{ path: string; mtime: number }> = [];
+    // Settings are bounded by the store's base limit. Include archived bases
+    // and the historical default, without walking the vault or reading JSON.
+    const configuredExportFolders = new Set(this.store.bases.map((base) =>
+      normalizePath(base.data.settings.exportsFolder || SYNC_RECOVERY_EXPORT_FOLDER)));
+    const exportFolders = [...new Set([...configuredExportFolders, SYNC_RECOVERY_EXPORT_FOLDER])];
+    for (const path of exportFolders) {
+      try {
+        const folder = this.app.vault.getAbstractFileByPath(path);
+        if (!(folder instanceof TFolder)) {
+          // A missing folder may simply not have synced to this device yet.
+          // The optional historical default need never have existed. Missing
+          // configured folders, however, cannot establish a complete count.
+          if (configuredExportFolders.has(path) || folder) artifactInspectionAvailable = false;
+          continue;
+        }
+        const remaining = MAX_SYNC_RECOVERY_ARTIFACT_ENTRIES + 1 - artifacts.length;
+        for (const entry of folder.children.slice(0, remaining)) {
+          artifacts.push(entry instanceof TFile ? { path: entry.path, mtime: entry.stat.mtime } : { path: "", mtime: 0 });
+        }
+        if (artifacts.length > MAX_SYNC_RECOVERY_ARTIFACT_ENTRIES) break;
+      } catch {
+        artifactInspectionAvailable = false;
       }
-    } catch {
-      artifactInspectionAvailable = false;
     }
-    const artifactSummary = summarizeRecoveryArtifacts(artifacts);
+    const artifactSummary = summarizeRecoveryArtifacts(artifacts, MAX_SYNC_RECOVERY_ARTIFACT_ENTRIES, exportFolders);
     const localConflict = this.syncRecoveryLocalState.semanticConflicts.find((entry) => entry.baseId === active.id);
     const localStateApiAvailable = typeof this.app.loadLocalStorage === "function"
       && typeof this.app.saveLocalStorage === "function";
@@ -4485,11 +4500,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return { id: heading.id, name: heading.title, subheadings };
   }
 
-  private noteOrganizerBaseOptions(notePath?: string, detailedBaseIds?: readonly string[]): OrganizerBaseOption[] {
+  private noteOrganizerBaseOptions(notePath?: string, detailedBaseIds?: readonly string[], collectionCreations: readonly OrganizerCollectionCreation[] = []): OrganizerBaseOption[] {
     const activeBaseId = this.getActiveKnowledgeBaseId();
     const detailed = new Set(detailedBaseIds ?? [activeBaseId]);
     return this.getKnowledgeBases().map((entry) => {
-      const data = entry.data;
+      const staged = collectionCreations.filter((creation) => creation.baseId === entry.id);
+      const data = staged.length ? cloneJsonValue(entry.data) : entry.data;
+      stageOrganizerCollectionCreations(data, staged);
       const records = detailed.has(entry.id) ? this.getRecordsForEntry(entry) : this.recordsCacheByBase.get(entry.id) ?? [];
       const tree = buildCurriculumTree(records, data.curriculumVisual, data.settings.workspaceMode === "ent-clinical");
       const groups: string[] = [];
@@ -4548,7 +4565,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           ? indexHeadings.find((candidate) => !candidate.sourceDerived && normalizedNameKey(candidate.name) === normalizedNameKey(record.domain)) : null;
         initialPrimary = record?.libraryId || (fact && !fact.indexEligible && data.settings.workspaceMode === "ent-clinical")
           ? { mode: "keep", libraryId: null, headingId: null, subheadingId: null }
-          : { mode: "index", libraryId: null, headingId: heading?.id ?? indexHeadings[0]?.id ?? null, subheadingId: heading ? tree.parentByPath.get(notePath) ?? null : null };
+          : heading
+            ? { mode: "index", libraryId: null, headingId: heading.id, subheadingId: tree.parentByPath.get(notePath) ?? null }
+            : { mode: "keep", libraryId: null, headingId: null, subheadingId: null };
         const ownerIds = factContext?.ownerIdsByPath.get(notePath) ?? [];
         const owner = ownerIds.length === 1 ? factContext?.subjectById.get(ownerIds[0]) : null;
         const libraryId = owner ? subjectLibraryId(owner) : null;
@@ -4569,6 +4588,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         indexName: data.settings.indexLabel,
         indexHeadings,
         ...(initialPrimary ? { initialPrimary } : {}),
+        ...(notePath ? { initialCollections: data.collections.reduce<Array<{ headingId: string; subheadingId: string | null }>>((targets, heading) => {
+          forEachLayoutNode([heading], (node) => {
+            if (node.subjects.includes(notePath)) targets.push({ headingId: heading.id, subheadingId: node === heading ? null : node.id });
+          });
+          return targets;
+        }, []) } : {}),
         ...(fact && data.settings.workspaceMode === "ent-clinical" ? { indexRestriction: !fact.indexEligible
           ? `This note is classified as ${fact.sourceKind}; the protected Index accepts topic notes. Choose a compatible Library instead.`
           : protectedGroup ? `The ENT preset keeps this note in ${fact.suggestedIndexGroup}. Choose a parent within that heading; its source classification will not change.` : "" } : {}),
@@ -4859,7 +4884,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const pathSet = new Set(paths);
     const requestedOptions = [...draft.destinations];
     for (const override of draft.overrides) requestedOptions.push(...override.destinations);
-    const options = this.noteOrganizerBaseOptions(undefined, [...new Set(requestedOptions.filter((destination) => destination.primary.mode === "index" && destination.primary.subheadingId).map((destination) => destination.baseId))]);
+    const collectionCreations = validateOrganizerCollectionCreations(draft.collectionCreations);
+    const options = this.noteOrganizerBaseOptions(undefined, [...new Set(requestedOptions.filter((destination) => destination.primary.mode === "index" && destination.primary.subheadingId).map((destination) => destination.baseId))], collectionCreations);
     const optionsByBaseId = new Map(options.map((base) => [base.id, base]));
     if (new Set(draft.overrides.map((override) => override.path)).size !== draft.overrides.length
       || draft.overrides.some((override) => !pathSet.has(override.path))) {
@@ -4966,6 +4992,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     });
     const plan = createNoteOrganizerPlan(this.store, facts, directives, {
       expectedExternalGeneration: this.organizerReviewGeneration,
+      collectionCreations,
     });
     const token: PreparedNoteOrganizerCommit = {
       kind: "knowledge-base-command-center-prepared-note-organizer",
@@ -5039,10 +5066,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return {
       preparedToken: token,
       reviewRows: rows,
-      warnings: plan.summary.noOpDirectiveCount > 0
-        ? [`${plan.summary.noOpDirectiveCount.toLocaleString()} note/base destination${plan.summary.noOpDirectiveCount === 1 ? " is" : "s are"} already in the requested state.`]
-        : [],
-      errors: plan.operations.length === 0 ? ["The prepared review contains no organization changes."] : [],
+      warnings: [
+        ...(collectionCreations.length ? [`Creates ${collectionCreations.length} new Collection heading${collectionCreations.length === 1 ? "" : "s"} together with the selected membership: ${collectionCreations.slice(0, 20).map((item) => item.title).join(", ")}${collectionCreations.length > 20 ? ", …" : ""}. Cancel creates nothing.`] : []),
+        ...(plan.summary.noOpDirectiveCount > 0
+          ? [`${plan.summary.noOpDirectiveCount.toLocaleString()} note/base destination${plan.summary.noOpDirectiveCount === 1 ? " is" : "s are"} already in the requested state.`]
+          : []),
+      ],
+      errors: [],
       summary: {
         noteCount: paths.length,
         baseCount: requestedBaseIds.length,
@@ -5817,7 +5847,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   async appendFollowUpToFile(file: TFile, categoryId: string, text: string, date = this.today()): Promise<void> {
-    this.assertDataWritable();
+    const guard = this.captureNoteWriteGuard(() => JSON.stringify(
+      this.data.settings.followUpCategories.find((item) => item.id === categoryId),
+    ));
+    const expectedPath = file.path;
     if (file.extension.toLocaleLowerCase() !== "md") throw new Error("Quick Append can change only Markdown notes.");
     if (isImmutableSourcePath(file.path)) throw new Error("Immutable source-book files cannot be changed by Quick Append.");
     const currentFile = this.app.vault.getAbstractFileByPath(file.path);
@@ -5828,7 +5861,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (!category) throw new Error("The selected Quick Append category is no longer active.");
     let undo: FollowUpUndoMetadata | null = null;
     await this.app.vault.process(currentFile, (content) => {
-      if (this.app.vault.getAbstractFileByPath(currentFile.path) !== currentFile) {
+      guard();
+      if (currentFile.path !== expectedPath || this.app.vault.getAbstractFileByPath(expectedPath) !== currentFile) {
         throw new Error("The selected note is no longer the same Markdown file. Reopen Quick Append and choose it again.");
       }
       assertFollowUpNoteWritable(content);
@@ -5857,15 +5891,17 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private async undoLastFollowUpAppend(): Promise<void> {
-    this.assertDataWritable();
+    const guard = this.captureNoteWriteGuard();
     const pending = this.lastFollowUpUndo;
     if (!pending || !this.canUndoLastFollowUpAppend()) throw new Error("There is no recent Quick Append change to undo.");
     const currentFile = this.app.vault.getAbstractFileByPath(pending.file.path);
     if (!(currentFile instanceof TFile) || currentFile !== pending.file) {
       throw new Error("The note changed or was replaced and the transient Quick Append undo is unavailable.");
     }
+    const expectedPath = currentFile.path;
     await this.app.vault.process(currentFile, (content) => {
-      if (this.app.vault.getAbstractFileByPath(pending.file.path) !== pending.file) {
+      guard();
+      if (pending.file.path !== expectedPath || this.app.vault.getAbstractFileByPath(expectedPath) !== pending.file) {
         throw new Error("The note changed or was replaced and the transient Quick Append undo is unavailable.");
       }
       assertFollowUpNoteWritable(content);
@@ -7326,6 +7362,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (cancelled()) return null;
       const entry = entries[baseIndex];
       if (!entry) continue;
+      const collectionPaths = options.collectionId !== undefined ? collectionSearchPaths(entry.data, options.collectionId) : null;
       const cached = this.recordsCacheByBase.get(entry.id) ?? this.getInactiveSearchRecords(entry.id);
       const retentionCapacity = Math.max(0, MAX_INACTIVE_SEARCH_CACHED_RECORDS - this.inactiveSearchCachedRecordCount);
       // Active projections are never retained by search; a cache miss beyond
@@ -7347,6 +7384,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           else scannedRecords = null;
         }
         if (record && (!options.libraryId || record.libraryId === options.libraryId)
+          && (!collectionPaths || collectionPaths.has(record.path))
           && (options.availability !== "linked" || !record.isPlaceholder)
           && (options.availability !== "placeholders" || record.isPlaceholder)) collector.consider(baseIndex, record);
         const ready = checkpoint();
@@ -9412,6 +9450,39 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return null;
   }
 
+  /** Capture once, then call synchronously at the final Vault write boundary. */
+  private captureNoteWriteGuard(policy: () => string | undefined = () => ""): () => void {
+    this.assertDataWritable();
+    const data = this.data;
+    const baseId = this.getActiveKnowledgeBaseId();
+    const epoch = this.dataEpoch;
+    const generation = this.externalChangeGeneration;
+    const configDir = this.app.vault.configDir;
+    const fingerprint = policy();
+    return () => {
+      this.assertDataWritable();
+      if (data !== this.data || baseId !== this.getActiveKnowledgeBaseId()
+        || epoch !== this.dataEpoch || generation !== this.externalChangeGeneration
+        || configDir !== this.app.vault.configDir || fingerprint !== policy()) {
+        throw new Error("The knowledge base, synced data, or note settings changed. Reopen this action before continuing.");
+      }
+    };
+  }
+
+  private captureCreationTemplateGuard(value: GenericNoteFormValue): () => void {
+    if (value.mode !== "template") return () => {};
+    const path = normalizePath(value.templatePath);
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) throw new Error("The selected template could not be found.");
+    const { mtime, size } = file.stat;
+    return () => {
+      if (file.path !== path || this.app.vault.getAbstractFileByPath(path) !== file
+        || file.stat.mtime !== mtime || file.stat.size !== size) {
+        throw new Error("The selected template changed while the note was being prepared. Reopen the action and try again.");
+      }
+    };
+  }
+
   /**
    * Re-resolve a fixed Library destination against live organization state.
    * IDs, not captured objects or labels, define the target. The returned token
@@ -9502,9 +9573,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     target: CatalogPlacementTarget,
     policy: LibraryKnowledgeNoteCreationPolicy,
   ): Promise<TFile> {
+    value = { ...value };
     this.resolveLibraryKnowledgeNoteCreationTarget(libraryId, target, policy);
     const initialValidation = this.validateGenericNote(value);
     if (initialValidation) throw new Error(initialValidation);
+    const guard = this.captureNoteWriteGuard(() => this.data.settings.templatesFolder);
+    const templateGuard = this.captureCreationTemplateGuard(value);
     const path = normalizePath(genericNotePath(value.folder, value.title));
     const folder = path.includes("/") ? path.substring(0, path.lastIndexOf("/")) : "";
     let templateMarkdown = "";
@@ -9517,6 +9591,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     let createdFile: TFile | null = null;
     try {
       await this.ensureFolder(folder, createdFolders);
+      guard();
+      templateGuard();
       const liveTarget = this.resolveLibraryKnowledgeNoteCreationTarget(libraryId, target, policy);
       const finalValidation = this.validateGenericNote(value);
       if (finalValidation) throw new Error(finalValidation);
@@ -9553,9 +9629,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   async createKnowledgeNote(value: GenericNoteFormValue, tokenContext: TemplateTokenContext = {}): Promise<TFile> {
-    this.assertDataWritable();
+    value = { ...value };
+    tokenContext = { ...tokenContext };
+    const guard = this.captureNoteWriteGuard(() => this.data.settings.templatesFolder);
     const validation = this.validateGenericNote(value);
     if (validation) throw new Error(validation);
+    const templateGuard = this.captureCreationTemplateGuard(value);
     const path = normalizePath(genericNotePath(value.folder, value.title));
     const folder = path.includes("/") ? path.substring(0, path.lastIndexOf("/")) : "";
     let content = "";
@@ -9574,6 +9653,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const createdFolders: TFolder[] = [];
     try {
       await this.ensureFolder(folder, createdFolders);
+      guard();
+      templateGuard();
+      const finalValidation = this.validateGenericNote(value);
+      if (finalValidation) throw new Error(finalValidation);
       const file = await this.app.vault.create(path, content);
       this.invalidateRecordCache();
       return file;
@@ -9640,6 +9723,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private assertAttachmentOperationCurrent(note: TFile, policy: AttachmentOperationPolicy): void {
+    this.assertDataWritable();
     if (policy.expectedBaseId !== this.getActiveKnowledgeBaseId() || policy.expectedDataEpoch !== this.getDataEpoch()) {
       throw new Error("The active knowledge base or its synced data changed. Reopen Attach file before continuing.");
     }
@@ -9863,7 +9947,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   async createProposal(value: TopicFormValue): Promise<TFile> {
-    this.assertDataWritable();
+    value = { ...value };
+    const guard = this.captureNoteWriteGuard(() => JSON.stringify([
+      this.data.settings.proposalFolder, this.data.settings.workspaceMode,
+    ]));
+    const parent = value.parentPath ? this.app.vault.getAbstractFileByPath(value.parentPath) : null;
     const validation = this.validateProposal(value);
     if (validation) throw new Error(validation);
     const path = normalizePath(proposalPath(this.data.settings.proposalFolder, value.title));
@@ -9880,6 +9968,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     let file: TFile;
     try {
       await this.ensureFolder(path.substring(0, path.lastIndexOf("/")), createdFolders);
+      guard();
+      const finalValidation = this.validateProposal(value);
+      if (finalValidation) throw new Error(finalValidation);
+      if (value.parentPath && this.app.vault.getAbstractFileByPath(value.parentPath) !== parent) {
+        throw new Error("The parent note changed. Reopen this action before continuing.");
+      }
       file = await this.app.vault.create(path, content);
     } catch (error) {
       await this.removeCreatedEmptyFolders(createdFolders);
@@ -9896,7 +9990,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   async createCanonical(value: TopicFormValue): Promise<TFile> {
-    this.assertDataWritable();
+    value = { ...value };
+    const guard = this.captureNoteWriteGuard(() => JSON.stringify([
+      this.data.settings.primaryFolder, this.data.settings.workspaceMode,
+    ]));
+    const parent = value.parentPath ? this.app.vault.getAbstractFileByPath(value.parentPath) : null;
     const validation = this.validateCanonical(value);
     if (validation) throw new Error(validation);
     const path = normalizePath(canonicalPath(value, this.data.settings.primaryFolder));
@@ -9913,6 +10011,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     let file: TFile;
     try {
       await this.ensureFolder(path.substring(0, path.lastIndexOf("/")), createdFolders);
+      guard();
+      const finalValidation = this.validateCanonical(value);
+      if (finalValidation) throw new Error(finalValidation);
+      if (value.parentPath && this.app.vault.getAbstractFileByPath(value.parentPath) !== parent) {
+        throw new Error("The parent note changed. Reopen this action before continuing.");
+      }
       file = await this.app.vault.create(path, content);
     } catch (error) {
       await this.removeCreatedEmptyFolders(createdFolders);

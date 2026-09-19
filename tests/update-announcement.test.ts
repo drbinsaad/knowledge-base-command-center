@@ -21,9 +21,31 @@ import {
   UPDATE_ANNOUNCEMENT_0_22_0,
   UPDATE_ANNOUNCEMENT_0_23_0,
   UPDATE_ANNOUNCEMENT_0_23_1,
+  UPDATE_ANNOUNCEMENT_0_24_0,
   type UpdateAnnouncement,
 } from "../src/update-announcement.ts";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
+
+test("0.24.0 announces Collections with exact release identity and honest device limits", () => {
+  const result = planUpdateAnnouncement("0.24.0", "0.23.1", true);
+  assert.equal(result.announcement, UPDATE_ANNOUNCEMENT_0_24_0);
+  assert.equal(result.nextHighestObservedVersion, "0.24.0");
+  assert.equal(result.shouldPersist, true);
+  assert.equal(UPDATE_ANNOUNCEMENT_0_24_0.releaseUrl, "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.24.0");
+  assert.match(UPDATE_ANNOUNCEMENT_0_24_0.intro, /Physical iPhone\/iPad and two-device Sync testing remain unverified/u);
+  const highlights = UPDATE_ANNOUNCEMENT_0_24_0.highlights.join("\n");
+  for (const claim of [/New collection and Add notes/u, /searchable checkboxes/u, /Cancel creates nothing/u, /Undo restores structure and membership together/u, /preserve primary placement/u, /Done — no changes needed/u, /without creating it again/u, /Local-vault covers only/u]) assert.match(highlights, claim);
+});
+
+test("0.24.0 announcement is one-time and does not replay for a fresh install or downgrade", () => {
+  const repeat = planUpdateAnnouncement("0.24.0", "0.24.0", true);
+  assert.equal(repeat.announcement, null);
+  assert.equal(repeat.shouldPersist, false);
+  assert.equal(planUpdateAnnouncement("0.24.0", null, false).announcement, null);
+  assert.equal(planUpdateAnnouncement("0.23.1", "0.24.0", true).announcement, null);
+  assert.equal(planUpdateAnnouncement("0.24.0-rc.1", "0.23.1", true).announcement, null);
+  assert.equal(planUpdateAnnouncement("0.24.0+local", "0.23.1", true).announcement, null);
+});
 
 test("semantic version comparison handles large identifiers, prereleases, builds, and invalid values", () => {
   assert.equal(compareSemanticVersions("0.12.0", "0.11.99"), 1);

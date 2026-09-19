@@ -2815,6 +2815,7 @@ test("selecting an inactive-base search result switches bases and restores the g
     query: string;
     parsedQuery: ReturnType<typeof parseQuery>;
     plugin: {
+      data: typeof inactiveData;
       getActiveKnowledgeBaseId(): string;
       switchKnowledgeBase(id: string): Promise<void>;
       getRecord(path: string): VaultRecord | null;
@@ -2830,6 +2831,7 @@ test("selecting an inactive-base search result switches bases and restores the g
   view.query = "laryn";
   view.parsedQuery = parseQuery(view.query);
   view.plugin = {
+    data: inactiveData,
     getActiveKnowledgeBaseId: () => activeBaseId,
     switchKnowledgeBase: async (id) => {
       switchedTo = id;

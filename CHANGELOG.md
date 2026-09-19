@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.24.0
+
+### Collections made easier
+
+- Show **New collection** and **Add notes** directly in My Collections. The global Add menu and destination picker can create another collection even when collections already exist.
+- Offer **Add notes here** and **Create note here** from collection and subheading menus, including collapsed and populated destinations, with exact destination breadcrumbs.
+- Show current Collection memberships as searchable checkboxes in **Organize this note**. Create collections and nested subheadings inline; Review → Save commits their structure and memberships together. Cancel creates nothing, and one protected Undo restores the previous state.
+- Preserve primary Index/Library placement for collection-only edits. Close unchanged reviews with enabled **Done — no changes needed**; reject stale or unavailable destinations safely.
+
+### Workflow reliability
+
+- Search a collection and its nested members, retaining search filters on return from opened notes and cross-base navigation. Unresolvable imported collection-scoped saved searches are omitted rather than broadened.
+- Require recoverable Undo for destructive organization changes and refuse stale desktop drag destinations before removing a membership.
+- If note creation succeeds but filing fails, offer **Open saved note** and **Organize saved note** without recreating the file. Recheck write eligibility at note/template/append/attachment boundaries and preserve Quick Append drafts on failure.
+- Find recovery exports across configured export folders plus the legacy location using a bounded metadata-only scan. Distinguish unavailable folders from empty results.
+- Hide empty smart queues with an option to show them. Retain touch-sized Collection controls, wrap tablet pagination and use a single-row tablet organizer footer when space permits.
+
+### Safety and verification
+
+- Ordinary organization does not move or rewrite Markdown. No dependency, analytics, online-cover support or network-permission change is introduced.
+- Protect Collection-scoped saved searches with store/base format 17, portable package 7 (saved views component 2), recovery 13, device-local history 5 and return-navigation history 2. Workspace remains version 3. Older supported formats remain readable, including version-4 pending Undo journals. Older builds reject newer packages and protect newer organization read-only instead of silently broadening a search. Update every syncing device to 0.24.0; a writable downgrade requires matching older plugin assets and a complete pre-upgrade organization backup.
+- Importing a saved search now replaces its optional filters exactly, so an existing Collection scope or availability filter cannot leak into a different imported search.
+- Explicit feature budgets are 1,225,000 raw / 322,000 gzip JavaScript bytes and 163,000 raw / 22,600 gzip CSS bytes. Existing automated coverage is supplemented by a disposable-vault native Obsidian smoke pass; exact final versioned checks are recorded separately.
+- After physical iPhone/iPad and controlled two-device Sync limitations were disclosed, the maintainer explicitly directed **publish** for this candidate. These device checks remain **unverified**, not passed. This fresh 0.24.0 authorization does not reuse earlier waivers.
+- See the [0.24.0 release evidence](https://github.com/drbinsaad/knowledge-base-command-center/blob/0.24.0/docs/release-evidence/0.24.0-iphone.md) for versioned validation and limits. Local-vault images remain the only supported covers.
+
 ## 0.23.1
 
 ### Cover setup and mobile Library settings
