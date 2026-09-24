@@ -122,9 +122,11 @@ function fenceState(lines: readonly DocumentLine[], bodyStart: number): { outsid
     }
     if (!fence) {
       // CommonMark allows at most three spaces of indentation before a fence;
-      // deeper indentation is indented-code content, exactly as follow-up.ts
-      // parses the same construct.
-      const opening = /^ {0,3}(`{3,}|~{3,})/u.exec(line.text);
+      // deeper indentation is indented-code content, and a backtick fence's
+      // info string cannot contain a backtick, exactly as follow-up.ts parses
+      // the same construct.
+      const match = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line.text);
+      const opening = match && !(match[1]?.startsWith("`") && (match[2] ?? "").includes("`")) ? match : null;
       outside.push(opening === null);
       if (!opening) continue;
       const sequence = opening[1] ?? "";

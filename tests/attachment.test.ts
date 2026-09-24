@@ -171,6 +171,17 @@ test("attachment UI stays scoped, touch-sized, and physically gated", () => {
   assert.match(checklist, /Attach file to current note[\s\S]*Follow Obsidian[\s\S]*fixed folder[\s\S]*note-local folder[\s\S]*Ask each time/u);
 });
 
+test("a backtick run with a backtick in its info string is text, not an unclosed fence", () => {
+  const source = "# Topic\n\n```js`inline code`\n\n## Attachments\n![[one.png]]\n";
+  const output = insertAttachmentReference(source, "![[two.png]]", "heading", "", "Attachments");
+  assert.equal(output, "# Topic\n\n```js`inline code`\n\n## Attachments\n![[one.png]]\n![[two.png]]\n");
+  assert.throws(
+    () => insertAttachmentReference("# Topic\n\n~~~js`\n## Attachments\n", "![[x.png]]", "heading", "", "Attachments"),
+    /unclosed fenced code block/i,
+    "a tilde fence may carry a backtick in its info string and still opens a fence",
+  );
+});
+
 test("any file type is accepted and previewable types embed automatically", () => {
   for (const name of ["scan.PNG", "photo.jpeg", "paper.pdf", "lecture.mp4", "voice.m4a", "clip.webm", "diagram.svg"]) {
     assert.equal(attachmentCanPreview(name), true, name);
