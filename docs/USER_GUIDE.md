@@ -393,6 +393,22 @@ The first item creates one managed **Follow-up notes** block at the end of the n
 
 Quick append refuses locked notes, ambiguous managed markers, malformed frontmatter, oversized notes, and stale undo. Its five-minute undo stores only positions and integrity fingerprints in memory; it never stores the note body in plugin data. Ordinary attachments remain controlled by Obsidian.
 
+## Attach files
+
+Open the Markdown note that should hold the files, then run **Attach file to current note…** (or use `obsidian://kbcc-attach-current`). You can choose up to 20 files at once, each up to 100 MB, of **any type**: PDF, Word, PowerPoint, Excel, images, audio, video, ZIP, and so on. Each file is copied into the vault; your original is never changed, and an existing vault file is never overwritten.
+
+**Show in note** controls how each link appears:
+
+| Choice | Result |
+| --- | --- |
+| **Preview images, PDF, audio, and video; link the rest** (default) | Files Obsidian can display inside a note are embedded (`![[paper.pdf]]`). Other types, such as `.pptx`, `.docx`, `.xlsx`, or `.zip`, become ordinary links (`[[slides.pptx]]`) that open in their own app. |
+| **Embed every file** | Every file uses the embed form. Obsidian shows a placeholder for types it cannot display. |
+| **Link only** | Every file becomes an ordinary link, including images and PDFs. |
+
+**Insert link** places all the links together, in the order you chose the files: at the editor cursor, under the configured marker or heading, or at the end of the note. **Storage** follows the knowledge base's attachment setting (Obsidian's own setting, a fixed folder, a folder beside the note, or a folder you choose each time).
+
+If one file cannot be copied, the files before it are still copied and linked, and a notice tells you which file failed. Files after it are not copied. To see Word, PowerPoint, and other non-Obsidian files in the File explorer, turn on **Settings → Files and links → Detect all file extensions** in Obsidian.
+
 ## Portable placeholders
 
 A portable Index or Library blueprint can describe a subject without exposing its original Markdown path. If no local note is linked after import, the subject appears as **No note**.

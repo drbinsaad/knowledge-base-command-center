@@ -1,11 +1,25 @@
 import { Modal, Notice, Setting, type App } from "obsidian";
 import { errorMessage, type AttachmentInsertionMode, type AttachmentStorageMode } from "./model";
 import { StringPickerModal } from "./modals";
+import {
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENT_FILES,
+  attachmentCanPreview,
+  formatAttachmentSize,
+  type AttachmentDisplayMode,
+} from "./attachment";
 
 export interface AttachmentImportValue {
   file: File;
   requestedFolder: string;
   insertionMode: AttachmentInsertionMode;
+  /** How each link is shown. Omitted: Obsidian's generated link is inserted unchanged. */
+  display?: AttachmentDisplayMode;
+}
+
+/** One Attach file submission: the same folder, placement, and display for every file. */
+export interface AttachmentBatchValue extends Omit<AttachmentImportValue, "file"> {
+  files: readonly File[];
 }
 
 export interface AttachmentOperationPolicy {
@@ -25,6 +39,17 @@ export function attachmentSubmitReady(
   return fileSelected && (storageMode !== "ask" || destinationSelected);
 }
 
+/** Explain why a chosen set of files cannot be attached, or return null when it can. */
+export function attachmentSelectionProblem(files: readonly Pick<File, "name" | "size">[]): string | null {
+  if (files.length > MAX_ATTACHMENT_FILES) {
+    return `Choose at most ${MAX_ATTACHMENT_FILES} files at a time. You chose ${files.length}.`;
+  }
+  const tooLarge = files.filter((file) => file.size > MAX_ATTACHMENT_BYTES);
+  if (tooLarge.length === 1) return `${tooLarge[0]?.name ?? "One file"} is larger than 100 MB. Remove it or choose a smaller file.`;
+  if (tooLarge.length > 1) return `${tooLarge.length} files are larger than 100 MB. Choose smaller files.`;
+  return null;
+}
+
 function storageLabel(mode: AttachmentStorageMode): string {
   if (mode === "fixed-folder") return "Configured vault folder";
   if (mode === "note-subfolder") return "Folder beside this note";
@@ -33,11 +58,13 @@ function storageLabel(mode: AttachmentStorageMode): string {
 }
 
 export class AttachmentImportModal extends Modal {
-  private selectedFile: File | null = null;
+  private selectedFiles: File[] = [];
   private requestedFolder: string;
   private destinationSelected: boolean;
   private insertionMode: AttachmentInsertionMode;
+  private display: AttachmentDisplayMode = "auto";
   private submitButton: HTMLButtonElement | null = null;
+  private selectionEl: HTMLElement | null = null;
 
   constructor(
     app: App,
@@ -45,7 +72,7 @@ export class AttachmentImportModal extends Modal {
     private readonly policy: AttachmentOperationPolicy,
     private readonly availableFolders: string[],
     insertionMode: AttachmentInsertionMode,
-    private readonly onSubmit: (value: AttachmentImportValue) => Promise<void>,
+    private readonly onSubmit: (value: AttachmentBatchValue) => Promise<void>,
   ) {
     super(app);
     this.requestedFolder = policy.storageMode === "ask" ? "" : policy.configuredFolder;
@@ -55,19 +82,23 @@ export class AttachmentImportModal extends Modal {
 
   onOpen(): void {
     this.modalEl.addClass("ent-cc-attachment-modal");
-    this.setTitle("Attach file to note");
+    this.setTitle("Attach files to note");
     this.contentEl.createEl("p", {
       cls: "setting-item-description",
-      text: `Choose one local file. It will be copied into this vault and linked only from ${this.notePath}. Ordinary paste and drag-and-drop remain controlled by Obsidian.`,
+      text: `Choose one or more files of any type: PDF, Word, PowerPoint, Excel, images, audio, video, ZIP, and more. Each file is copied into this vault and linked from ${this.notePath}. Your original files are not changed.`,
     });
 
     const fileSetting = new Setting(this.contentEl)
-      .setName("File")
-      .setDesc("Maximum 100 megabytes. The original external file is not modified.");
+      .setName("Files")
+      .setDesc(`Up to ${MAX_ATTACHMENT_FILES} files at a time, each up to 100 MB.`);
     const input = fileSetting.controlEl.createEl("input", { type: "file" });
-    input.setAttribute("aria-label", "Choose attachment file");
+    input.multiple = true;
+    input.setAttribute("aria-label", "Choose files to attach");
+    this.selectionEl = this.contentEl.createDiv({ cls: "ent-cc-attachment-selection" });
+    this.selectionEl.setAttribute("aria-live", "polite");
     input.addEventListener("change", () => {
-      this.selectedFile = input.files?.item(0) ?? null;
+      this.selectedFiles = Array.from(input.files ?? []);
+      this.renderSelection();
       this.updateSubmit();
     });
 
@@ -96,8 +127,23 @@ export class AttachmentImportModal extends Modal {
     }
 
     new Setting(this.contentEl)
+      .setName("Show in note")
+      .setDesc("Previews appear inside the note. Other files appear as links that open in their own app.")
+      .addDropdown((dropdown) => dropdown
+        .addOptions({
+          auto: "Preview images, PDF, audio, and video; link the rest",
+          embed: "Embed every file",
+          link: "Link only",
+        })
+        .setValue(this.display)
+        .onChange((value) => {
+          this.display = value as AttachmentDisplayMode;
+          this.renderSelection();
+        }));
+
+    new Setting(this.contentEl)
       .setName("Insert link")
-      .setDesc("This affects only the generated Markdown link for this upload.")
+      .setDesc("This affects only the links for this upload.")
       .addDropdown((dropdown) => dropdown
         .addOptions({
           cursor: "At the current cursor",
@@ -111,36 +157,57 @@ export class AttachmentImportModal extends Modal {
     const footer = this.contentEl.createDiv({ cls: "ent-cc-modal-footer ent-cc-attachment-footer" });
     const cancel = footer.createEl("button", { text: "Cancel" });
     cancel.addEventListener("click", () => this.close());
-    this.submitButton = footer.createEl("button", { cls: "mod-cta", text: "Attach file" });
+    this.submitButton = footer.createEl("button", { cls: "mod-cta", text: "Attach" });
     this.submitButton.addEventListener("click", () => void this.submit());
     this.updateSubmit();
   }
 
   onClose(): void {
     this.contentEl.empty();
-    this.selectedFile = null;
+    this.selectedFiles = [];
     this.submitButton = null;
+    this.selectionEl = null;
+  }
+
+  private renderSelection(): void {
+    const container = this.selectionEl;
+    if (!container) return;
+    container.empty();
+    if (this.selectedFiles.length === 0) return;
+    const list = container.createEl("ul");
+    for (const file of this.selectedFiles) {
+      const preview = this.display === "embed" || (this.display === "auto" && attachmentCanPreview(file.name));
+      const status = file.size > MAX_ATTACHMENT_BYTES ? "too large" : preview ? "preview" : "link";
+      const item = list.createEl("li", { text: `${file.name} · ${formatAttachmentSize(file.size)} · ${status}` });
+      item.setAttribute("dir", "auto");
+    }
+    const problem = attachmentSelectionProblem(this.selectedFiles);
+    if (problem) container.createEl("p", { cls: "mod-warning", text: problem });
   }
 
   private updateSubmit(): void {
-    if (this.submitButton) {
-      this.submitButton.disabled = !attachmentSubmitReady(
-        this.selectedFile !== null,
-        this.policy.storageMode,
-        this.destinationSelected,
-      );
-    }
+    const count = this.selectedFiles.length;
+    if (!this.submitButton) return;
+    this.submitButton.setText(count > 1 ? `Attach ${count} files` : "Attach file");
+    this.submitButton.disabled = !attachmentSubmitReady(
+      count > 0 && attachmentSelectionProblem(this.selectedFiles) === null,
+      this.policy.storageMode,
+      this.destinationSelected,
+    );
   }
 
   private async submit(): Promise<void> {
-    const file = this.selectedFile;
-    if (!file || !attachmentSubmitReady(true, this.policy.storageMode, this.destinationSelected)) return;
+    const files = [...this.selectedFiles];
+    if (files.length === 0
+      || attachmentSelectionProblem(files) !== null
+      || !attachmentSubmitReady(true, this.policy.storageMode, this.destinationSelected)) return;
     this.submitButton?.setAttribute("disabled", "true");
     try {
       await this.onSubmit({
-        file,
+        files,
         requestedFolder: this.requestedFolder,
         insertionMode: this.insertionMode,
+        display: this.display,
       });
       this.close();
     } catch (error) {

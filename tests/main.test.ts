@@ -11549,6 +11549,107 @@ test("attachment storage modes remain collision-safe and cursor insertion uses t
   assert.equal(cursorInsert, "[[Core/core.pdf]]");
 });
 
+test("attaching several files of any type links them in order, previews what Obsidian can show, and reports a partial copy", async () => {
+  const note = new TFile("Knowledge/Topic.md");
+  const files = new Map<string, TAbstractFile>([[note.path, note]]);
+  let markdown = "# Topic\n\n## Notes\nKeep\n";
+  let cursorInsert = "";
+  let failOn = "";
+  let processCalls = 0;
+  const editor = {
+    getValue: () => markdown,
+    getCursor: () => ({ line: 0, ch: 0 }),
+    replaceRange: (value: string) => { cursorInsert = value; },
+  };
+  let activeView: { file: TFile; editor: typeof editor } | null = null;
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getAbstractFileByPath: (path: string) => files.get(path) ?? null,
+      getMarkdownFiles: () => [note],
+      cachedRead: async () => markdown,
+      process: async (_file: TFile, update: (value: string) => string) => {
+        processCalls += 1;
+        markdown = update(markdown);
+      },
+      createFolder: async (path: string) => { files.set(path, new TFolder(path)); },
+      createBinary: async (path: string) => {
+        if (failOn && path.endsWith(failOn)) throw new Error("simulated disk failure");
+        const file = new TFile(path);
+        files.set(path, file);
+        return file;
+      },
+    },
+    workspace: {
+      getLeavesOfType: () => [],
+      getActiveViewOfType: () => activeView,
+      getActiveFile: () => note,
+    },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+    fileManager: {
+      generateMarkdownLink: (file: TFile) => `[[${file.path}]]`,
+      getAvailablePathForAttachment: async () => "unused",
+    },
+  };
+  const data = migrateData(null);
+  data.settings.attachmentStorageMode = "fixed-folder";
+  data.settings.attachmentFolder = "Files";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-attachment-batch-test");
+  await plugin.loadPluginData();
+
+  Notice.messages.length = 0;
+  const created = await plugin.attachFilesToNote(note, {
+    files: [new File(["a"], "Paper.pdf"), new File(["b"], "Slides.pptx"), new File(["c"], "Scan.png")],
+    requestedFolder: "",
+    insertionMode: "heading",
+    display: "auto",
+  });
+  assert.deepEqual(created.map((file) => file.path), ["Files/Paper.pdf", "Files/Slides.pptx", "Files/Scan.png"]);
+  assert.equal(processCalls, 1, "all links are written in one atomic note update");
+  assert.equal(
+    markdown,
+    "# Topic\n\n## Notes\nKeep\n\n## Attachments\n\n![[Files/Paper.pdf]]\n[[Files/Slides.pptx]]\n![[Files/Scan.png]]\n",
+  );
+  assert.equal(Notice.messages.at(-1), "Attached 3 files inside the vault.");
+
+  activeView = { file: note, editor };
+  await plugin.attachFilesToNote(note, {
+    files: [new File(["d"], "Sheet.xlsx"), new File(["e"], "Audio.mp3")],
+    requestedFolder: "",
+    insertionMode: "cursor",
+    display: "link",
+  });
+  assert.equal(cursorInsert, "[[Files/Sheet.xlsx]]\n[[Files/Audio.mp3]]");
+
+  activeView = null;
+  failOn = "Second.docx";
+  const beforePartial = markdown;
+  const partial = await plugin.attachFilesToNote(note, {
+    files: [new File(["f"], "First.zip"), new File(["g"], "Second.docx"), new File(["h"], "Third.pdf")],
+    requestedFolder: "",
+    insertionMode: "end",
+    display: "embed",
+  });
+  assert.deepEqual(partial.map((file) => file.path), ["Files/First.zip"]);
+  assert.equal(markdown, `${beforePartial}\n![[Files/First.zip]]\n`);
+  assert.match(Notice.messages.at(-1) ?? "", /Attached 1 of 3 files\. The attachment could not be copied to Files\/Second\.docx\. The remaining files were not copied\./u);
+  assert.equal(files.has("Files/Third.pdf"), false);
+
+  failOn = "";
+  await assert.rejects(plugin.attachFilesToNote(note, {
+    files: [new File(["x"], "a.pdf"), { name: "huge.mov", size: 101 * 1024 * 1024 } as File],
+    requestedFolder: "",
+    insertionMode: "end",
+  }), /huge\.mov is larger than the 100 MB attachment limit/u);
+  assert.equal(files.has("Files/a.pdf"), false, "size limits are checked before any file is copied");
+  await assert.rejects(plugin.attachFilesToNote(note, {
+    files: [],
+    requestedFolder: "",
+    insertionMode: "end",
+  }), /at least one file/u);
+});
+
 test("portable JSON serialization fails before creating an export folder", async () => {
   const tree = trackedVaultTree([]);
   const app = {

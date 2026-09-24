@@ -2,13 +2,16 @@ import { MarkdownView, normalizePath, Notice, parseYaml, Platform, Plugin, setIc
 import {
   attachmentFileName,
   attachmentPathCandidate,
+  attachmentReference,
   canonicalAttachmentFolder,
-  insertAttachmentReference,
+  insertAttachmentReferences,
   MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENT_FILES,
   noteAttachmentFolder,
 } from "./attachment";
 import {
   AttachmentImportModal,
+  type AttachmentBatchValue,
   type AttachmentImportValue,
   type AttachmentOperationPolicy,
 } from "./attachment-modal";
@@ -9690,7 +9693,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.data.settings.attachmentInsertionMode,
       async (value) => {
         this.assertAttachmentOperationCurrent(note, policy);
-        await this.attachFileToNote(note, value, policy);
+        await this.attachFilesToNote(note, value, policy);
       },
     ).open();
   }
@@ -9739,10 +9742,32 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     value: AttachmentImportValue,
     policy = this.captureAttachmentPolicy(),
   ): Promise<TFile> {
+    const { file, ...options } = value;
+    const [created] = await this.attachFilesToNote(note, { ...options, files: [file] }, policy);
+    if (!created) throw new Error("The attachment could not be added.");
+    return created;
+  }
+
+  /**
+   * Copy every selected file, in order, then insert all of their links in one
+   * editor or atomic note write. If a later file cannot be copied, the files
+   * already copied are still linked and the failure is reported.
+   */
+  async attachFilesToNote(
+    note: TFile,
+    value: AttachmentBatchValue,
+    policy = this.captureAttachmentPolicy(),
+  ): Promise<TFile[]> {
     this.assertDataWritable();
     this.assertAttachmentOperationCurrent(note, policy);
-    if (value.file.size > MAX_ATTACHMENT_BYTES) throw new Error("The selected file is larger than the 100 MB attachment limit.");
-    if (value.file.size < 0) throw new Error("The selected file has an invalid size.");
+    const files = [...value.files];
+    if (files.length === 0) throw new Error("Choose at least one file to attach.");
+    if (files.length > MAX_ATTACHMENT_FILES) throw new Error(`Choose at most ${MAX_ATTACHMENT_FILES} files at a time.`);
+    for (const file of files) {
+      const subject = files.length === 1 ? "The selected file" : attachmentFileName(file.name);
+      if (file.size > MAX_ATTACHMENT_BYTES) throw new Error(`${subject} is larger than the 100 MB attachment limit.`);
+      if (file.size < 0) throw new Error(`${subject} has an invalid size.`);
+    }
     const editorView = this.app.workspace.getActiveViewOfType(MarkdownView);
     const editorOwnsNote = editorView?.file === note;
     if (value.insertionMode === "cursor" && !editorOwnsNote) {
@@ -9751,36 +9776,48 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const currentMarkdown = editorOwnsNote ? editorView.editor.getValue() : await this.app.vault.cachedRead(note);
     assertMarkdownAiLockWritable(currentMarkdown);
 
-    const createdFolders: TFolder[] = [];
-    let destination: string;
-    let bytes: ArrayBuffer;
-    try {
-      destination = await this.availableAttachmentDestination(note, value.file.name, value.requestedFolder, policy, createdFolders);
-      this.assertAttachmentOperationCurrent(note, policy);
-      bytes = await value.file.arrayBuffer();
-      this.assertAttachmentOperationCurrent(note, policy);
-    } catch (error) {
-      await this.removeCreatedEmptyFolders(createdFolders);
-      throw error;
+    const created: { file: TFile; name: string }[] = [];
+    let copyFailure: unknown = null;
+    for (const file of files) {
+      const createdFolders: TFolder[] = [];
+      let destination: string;
+      let bytes: ArrayBuffer;
+      try {
+        destination = await this.availableAttachmentDestination(note, file.name, value.requestedFolder, policy, createdFolders);
+        this.assertAttachmentOperationCurrent(note, policy);
+        bytes = await file.arrayBuffer();
+        this.assertAttachmentOperationCurrent(note, policy);
+      } catch (error) {
+        await this.removeCreatedEmptyFolders(createdFolders);
+        if (created.length === 0) throw error;
+        copyFailure = error;
+        break;
+      }
+      try {
+        created.push({ file: await this.app.vault.createBinary(destination, bytes), name: file.name });
+      } catch (error) {
+        await this.removeCreatedEmptyFolders(createdFolders);
+        console.error("Knowledge Base Command Center could not copy the selected attachment", error);
+        const failure = new Error(`The attachment could not be copied to ${destination}.`);
+        if (created.length === 0) throw failure;
+        copyFailure = failure;
+        break;
+      }
     }
-    let created: TFile;
-    try {
-      created = await this.app.vault.createBinary(destination, bytes);
-    } catch (error) {
-      await this.removeCreatedEmptyFolders(createdFolders);
-      console.error("Knowledge Base Command Center could not copy the selected attachment", error);
-      throw new Error(`The attachment could not be copied to ${destination}.`);
-    }
     try {
       this.assertAttachmentOperationCurrent(note, policy);
-      const reference = this.app.fileManager.generateMarkdownLink(created, note.path);
-      if (!reference.trim()) throw new Error("Obsidian generated an empty attachment link.");
+      const references = created.map(({ file, name }) => attachmentReference(
+        this.app.fileManager.generateMarkdownLink(file, note.path),
+        name,
+        value.display,
+      ));
+      if (references.some((reference) => !reference)) throw new Error("Obsidian generated an empty attachment link.");
       if (value.insertionMode === "cursor") {
         const view = this.app.workspace.getActiveViewOfType(MarkdownView);
         if (view?.file !== note) throw new Error("The active editor changed before the link was inserted.");
         this.assertAttachmentOperationCurrent(note, policy);
         assertMarkdownAiLockWritable(view.editor.getValue());
-        view.editor.replaceRange(reference, view.editor.getCursor());
+        view.editor.replaceRange(references.join("\n"), view.editor.getCursor());
       } else {
         const insertionTarget = value.insertionMode === "marker" ? "marker"
           : value.insertionMode === "heading" ? "heading" : "end";
@@ -9788,9 +9825,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         await this.app.vault.process(note, (markdown) => {
           this.assertAttachmentOperationCurrent(note, policy);
           assertMarkdownAiLockWritable(markdown);
-          return insertAttachmentReference(
+          return insertAttachmentReferences(
             markdown,
-            reference,
+            references,
             insertionTarget,
             policy.marker,
             policy.heading,
@@ -9799,10 +9836,22 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       }
     } catch (error) {
       console.error("Knowledge Base Command Center copied an attachment but could not insert its link", error);
-      throw new Error(`The file was copied to ${created.path}, but its Markdown link could not be inserted. Add the link manually.`);
+      const paths = created.map(({ file }) => file.path);
+      throw new Error(paths.length === 1
+        ? `The file was copied to ${paths[0] ?? ""}, but its Markdown link could not be inserted. Add the link manually.`
+        : `The files were copied to ${paths.join(", ")}, but their Markdown links could not be inserted. Add the links manually.`);
     }
-    new Notice(`Attached ${attachmentFileName(value.file.name)} inside the vault.`, 5000);
-    return created;
+    if (copyFailure !== null) {
+      new Notice(
+        `Attached ${created.length} of ${files.length} files. ${errorMessage(copyFailure, "The next file could not be copied.")} The remaining files were not copied.`,
+        12000,
+      );
+    } else {
+      new Notice(created.length === 1
+        ? `Attached ${attachmentFileName(created[0]?.name ?? "")} inside the vault.`
+        : `Attached ${created.length} files inside the vault.`, 5000);
+    }
+    return created.map(({ file }) => file);
   }
 
   private async availableAttachmentDestination(

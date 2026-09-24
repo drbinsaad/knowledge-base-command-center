@@ -2280,6 +2280,12 @@
   white-space: normal;
 }
 
+.ent-cc-attachment-selection ul {
+  margin: 0 0 8px;
+  padding-inline-start: 20px;
+  overflow-wrap: anywhere;
+}
+
 .ent-cc-attachment-footer {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

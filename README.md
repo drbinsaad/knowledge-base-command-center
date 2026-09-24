@@ -205,9 +205,11 @@ Five ready-made templates ship in [`templates/`](templates/README.md). Tokens re
 
 ### Explicit attachments
 
-Use **Attach file to current note…** after opening the destination Markdown note. Each knowledge base can follow Obsidian's own attachment setting, use a fixed vault folder, create a folder beside the note, or ask for a vault-relative folder every time. The generated link goes at the editor cursor, under a configured marker or heading, or at the end of the note.
+Use **Attach file to current note…** after opening the destination Markdown note. Each knowledge base can follow Obsidian's own attachment setting, use a fixed vault folder, create a folder beside the note, or ask for a vault-relative folder every time. The generated links go at the editor cursor, under a configured marker or heading, or at the end of the note.
 
-The command copies one explicitly selected file, up to 100 MB, into the vault. It never moves the external original, never relocates existing vault attachments, and never intercepts ordinary paste or drag-and-drop. It refuses immutable source notes, replaced note identities, malformed YAML, and `ai_lock: true`. If the copy succeeds but link insertion fails, the new vault file is kept and its path is reported so you can link it by hand.
+Choose up to 20 files of **any type** at once, such as PDF, Word, PowerPoint, Excel, images, audio, video, or ZIP. By default, images, PDFs, audio, and video are embedded so they display inside the note; other types become ordinary links that open in their own app. You can instead embed every file or link every file. See [Attach files](docs/USER_GUIDE.md#attach-files).
+
+The command copies only the explicitly selected files, each up to 100 MB, into the vault. It never moves the external original, never relocates existing vault attachments, and never intercepts ordinary paste or drag-and-drop. It refuses immutable source notes, replaced note identities, malformed YAML, and `ai_lock: true`. If the copy succeeds but link insertion fails, the new vault file is kept and its path is reported so you can link it by hand.
 
 ### Portable export, import, and multi-base portfolios
 
@@ -330,7 +332,7 @@ Version 0.24.0 does not load online covers or perform automatic remote metadata 
 
 - The plugin enumerates whole-vault Markdown file paths and cached Markdown metadata to build and reconcile indexes, offer note and template choices, and diagnose stale references.
 - It enumerates all loaded vault entries before retaining folder paths for settings pickers, and enumerates all vault file paths before retaining JSON packages for the in-vault picker. Path enumeration alone does not read note bodies.
-- Content reads are targeted: an explicitly chosen template or JSON import, the note explicitly selected for Quick append inside Obsidian's atomic process operation, an explicit attachment destination note, and the disclosed ENT proposal-promotion and canonical-placement workflows. An attachment action also reads the one external file you select in the operating-system picker and copies its bytes into the vault.
+- Content reads are targeted: an explicitly chosen template or JSON import, the note explicitly selected for Quick append inside Obsidian's atomic process operation, an explicit attachment destination note, and the disclosed ENT proposal-promotion and canonical-placement workflows. An attachment action also reads only the external files you select in the operating-system picker and copies their bytes into the vault.
 - Copy buttons write only the plugin-generated command, wikilink, or path you selected; the plugin never reads clipboard contents.
 - Cards read only the selected cover and visible properties from cached frontmatter. Local covers resolve to existing raster images in the vault; the browser reads the image to display it.
 
@@ -345,7 +347,7 @@ Version 0.24.0 does not load online covers or perform automatic remote metadata 
 
 - Quick entry, Quick append, and Attach file Obsidian protocols accept only their fixed intrinsic actions. Any query parameter is rejected before a hub, picker, or form opens; titles, paths, content, and files cannot be supplied by URL. Current-note actions use only the locally active eligible note.
 - The Organizer's optional drop target accepts only bounded `text/plain` or `text/uri-list` path strings and rejects operating-system file payloads, absolute paths, and unsafe URLs. Every parsed candidate must resolve to a current eligible Markdown file inside the vault; if one does not, the drop opens nothing. It never reads a dropped note body; the File Explorer context menu and Organizer vault browser remain the dependable alternatives.
-- The plugin never writes outside the vault and never enumerates external files. The explicit Attach file command reads only the one external file you select in the operating-system picker. Desktop JSON export and import also use operating-system download and file-picker surfaces, so those files go where you choose.
+- The plugin never writes outside the vault and never enumerates external files. The explicit Attach file command reads only the external files you select in the operating-system picker. Desktop JSON export and import also use operating-system download and file-picker surfaces, so those files go where you choose.
 - Cards never assign a note-supplied remote URL to an image source. Online URLs in properties remain unchanged but are not loaded; use an existing vault image link for a cover. Ordinary user-activated links, such as complete release notes, still open externally through Obsidian.
 
 **Automatic protection**

@@ -3,8 +3,55 @@ import { sanitizeFileName } from "./model";
 import { markdownBodyStartLine } from "./follow-up";
 
 export const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
+/** Files accepted by one Attach file submission; each file still has its own size limit. */
+export const MAX_ATTACHMENT_FILES = 20;
 
 export type AttachmentInsertTarget = "marker" | "heading" | "end";
+
+/**
+ * How a generated link is shown in the note. "auto" previews every type that
+ * Obsidian can render inside a note and links everything else.
+ */
+export type AttachmentDisplayMode = "auto" | "embed" | "link";
+
+/** Extensions Obsidian renders inline when embedded with `![[…]]`. */
+const PREVIEWABLE_ATTACHMENT_EXTENSIONS = new Set([
+  // Images
+  "avif", "bmp", "gif", "jpeg", "jpg", "png", "svg", "webp",
+  // Audio
+  "3gp", "flac", "m4a", "mp3", "ogg", "wav",
+  // Video (webm may be audio or video; Obsidian embeds both)
+  "mkv", "mov", "mp4", "ogv", "webm",
+  // Documents
+  "pdf",
+]);
+
+export function attachmentExtension(fileName: string): string {
+  const dot = fileName.lastIndexOf(".");
+  return dot > 0 && dot < fileName.length - 1 ? fileName.slice(dot + 1).toLocaleLowerCase() : "";
+}
+
+export function attachmentCanPreview(fileName: string): boolean {
+  return PREVIEWABLE_ATTACHMENT_EXTENSIONS.has(attachmentExtension(fileName));
+}
+
+/**
+ * Turn Obsidian's generated link into the requested display form. Without a
+ * display choice the generated link is returned unchanged.
+ */
+export function attachmentReference(link: string, fileName: string, display?: AttachmentDisplayMode): string {
+  const clean = link.trim();
+  if (!clean || display === undefined) return clean;
+  const embed = display === "embed" || (display === "auto" && attachmentCanPreview(fileName));
+  const bare = clean.startsWith("!") ? clean.slice(1) : clean;
+  return embed ? `!${bare}` : bare;
+}
+
+export function formatAttachmentSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+}
 
 function documentEol(markdown: string): "\r\n" | "\n" {
   return markdown.includes("\r\n") ? "\r\n" : "\n";
@@ -151,6 +198,22 @@ export function insertAttachmentReference(
   }
   while (insertionIndex > headingIndex + 1 && !(lines[insertionIndex - 1]?.text ?? "").trim()) insertionIndex -= 1;
   return spliceLine(markdown, lines, insertionIndex, cleanReference);
+}
+
+/**
+ * Insert several references in order at one durable location. End-of-note
+ * references stay together as one block instead of one block per file.
+ */
+export function insertAttachmentReferences(
+  markdown: string,
+  references: readonly string[],
+  target: AttachmentInsertTarget,
+  marker: string,
+  heading: string,
+): string {
+  const clean = references.map((reference) => reference.trim()).filter(Boolean);
+  if (target === "end") return insertAttachmentReference(markdown, clean.join(documentEol(markdown)), target, marker, heading);
+  return clean.reduce((current, reference) => insertAttachmentReference(current, reference, target, marker, heading), markdown);
 }
 
 export function attachmentFileName(input: string): string {
