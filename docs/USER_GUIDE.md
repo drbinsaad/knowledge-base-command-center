@@ -407,7 +407,7 @@ Open the Markdown note that should hold the files, then run **Attach file to cur
 
 **Insert link** places all the links together, in the order you chose the files: at the editor cursor, under the configured marker or heading, or at the end of the note. **Storage** follows the knowledge base's attachment setting (Obsidian's own setting, a fixed folder, a folder beside the note, or a folder you choose each time).
 
-If one file cannot be copied, the files before it are still copied and linked, and a notice tells you which file failed. Files after it are not copied. To see Word, PowerPoint, and other non-Obsidian files in the File explorer, turn on **Settings → Files and links → Detect all file extensions** in Obsidian.
+When you open Attach file from the Command Center instead of the note's editor, a cursor default starts at **At the end of the note**, because there is no cursor to use. If the note cannot take the links (for example, it has an unclosed code block), nothing is copied and the notice says why. If one file cannot be copied, the files before it are still copied and linked, and a notice tells you which file failed. Files after it are not copied. To see Word, PowerPoint, and other non-Obsidian files in the File explorer, turn on **Settings → Files and links → Detect all file extensions** in Obsidian.
 
 ## Portable placeholders
 

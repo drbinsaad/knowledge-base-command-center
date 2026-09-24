@@ -171,6 +171,22 @@ test("attachment UI stays scoped, touch-sized, and physically gated", () => {
   assert.match(checklist, /Attach file to current note[\s\S]*Follow Obsidian[\s\S]*fixed folder[\s\S]*note-local folder[\s\S]*Ask each time/u);
 });
 
+test("attachment headings keep a hash that is part of the name and accept indented headings", () => {
+  const sharp = insertAttachmentReference("# Topic\n\n## C#\n![[one.png]]\n\n## Notes\n", "![[two.png]]", "heading", "", "C#");
+  assert.equal(sharp, "# Topic\n\n## C#\n![[one.png]]\n![[two.png]]\n\n## Notes\n", "no duplicate C# section is appended");
+  const indented = insertAttachmentReference("# Topic\n\n  ## Attachments\n![[one.png]]\n\n   ## Notes\nKeep\n", "![[two.png]]", "heading", "", "Attachments");
+  assert.equal(indented, "# Topic\n\n  ## Attachments\n![[one.png]]\n![[two.png]]\n\n   ## Notes\nKeep\n");
+  assert.equal(
+    insertAttachmentReference("# Topic\n\n## Attachments ##\n![[one.png]]\n", "![[two.png]]", "heading", "", "Attachments"),
+    "# Topic\n\n## Attachments ##\n![[one.png]]\n![[two.png]]\n",
+    "closing hashes after whitespace are still ignored",
+  );
+  const marker = insertAttachmentReference("<!-- m -->\n![[one.png]]\n #hashtag\n ## Next\n", "![[two.png]]", "marker", "<!-- m -->", "");
+  assert.equal(marker, "<!-- m -->\n![[one.png]]\n #hashtag\n![[two.png]]\n ## Next\n", "an indented heading ends the marker section; a hashtag does not");
+  assert.equal(canonicalAttachmentFolder(""), "");
+  assert.equal(canonicalAttachmentFolder("/"), "");
+});
+
 test("a backtick run with a backtick in its info string is text, not an unclosed fence", () => {
   const source = "# Topic\n\n```js`inline code`\n\n## Attachments\n![[one.png]]\n";
   const output = insertAttachmentReference(source, "![[two.png]]", "heading", "", "Attachments");

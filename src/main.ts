@@ -1,6 +1,7 @@
 import { MarkdownView, normalizePath, Notice, parseYaml, Platform, Plugin, setIcon, TFile, TFolder, type Menu, type TAbstractFile } from "obsidian";
 import {
   attachmentFileName,
+  AttachmentLinkInsertionError,
   attachmentPathCandidate,
   attachmentReference,
   canonicalAttachmentFolder,
@@ -9679,6 +9680,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       return;
     }
     const policy = this.captureAttachmentPolicy();
+    // Opened from the Command Center, the note has no active editor cursor, so
+    // a cursor default would always be refused; start at the end of the note.
+    const configuredMode = this.data.settings.attachmentInsertionMode;
+    const insertionMode = configuredMode === "cursor"
+      && this.app.workspace.getActiveViewOfType(MarkdownView)?.file !== note ? "end" : configuredMode;
     new AttachmentImportModal(
       this.app,
       note.path,
@@ -9690,7 +9696,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           .filter(Boolean)
           .sort((left, right) => left.localeCompare(right))
         : [],
-      this.data.settings.attachmentInsertionMode,
+      insertionMode,
       async (value) => {
         this.assertAttachmentOperationCurrent(note, policy);
         await this.attachFilesToNote(note, value, policy);
@@ -9775,6 +9781,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
     const currentMarkdown = editorOwnsNote ? editorView.editor.getValue() : await this.app.vault.cachedRead(note);
     assertMarkdownAiLockWritable(currentMarkdown);
+    const insertionTarget = value.insertionMode === "marker" ? "marker"
+      : value.insertionMode === "heading" ? "heading" : "end";
+    // A note whose structure refuses the links (such as an unclosed code
+    // fence) is refused before any copy, so no unlinked file is left behind.
+    if (value.insertionMode !== "cursor") {
+      insertAttachmentReferences(currentMarkdown, ["[[attachment]]"], insertionTarget, policy.marker, policy.heading);
+    }
 
     const created: { file: TFile; name: string }[] = [];
     let copyFailure: unknown = null;
@@ -9819,8 +9832,6 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         assertMarkdownAiLockWritable(view.editor.getValue());
         view.editor.replaceRange(references.join("\n"), view.editor.getCursor());
       } else {
-        const insertionTarget = value.insertionMode === "marker" ? "marker"
-          : value.insertionMode === "heading" ? "heading" : "end";
         this.assertAttachmentOperationCurrent(note, policy);
         await this.app.vault.process(note, (markdown) => {
           this.assertAttachmentOperationCurrent(note, policy);
@@ -9837,9 +9848,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     } catch (error) {
       console.error("Knowledge Base Command Center copied an attachment but could not insert its link", error);
       const paths = created.map(({ file }) => file.path);
-      throw new Error(paths.length === 1
-        ? `The file was copied to ${paths[0] ?? ""}, but its Markdown link could not be inserted. Add the link manually.`
-        : `The files were copied to ${paths.join(", ")}, but their Markdown links could not be inserted. Add the links manually.`);
+      const reason = errorMessage(error, "").trim().replace(/\.$/u, "");
+      const because = reason ? ` (${reason})` : "";
+      throw new AttachmentLinkInsertionError(paths.length === 1
+        ? `The file was copied to ${paths[0] ?? ""}, but its Markdown link could not be inserted${because}. Add the link manually.`
+        : `The files were copied to ${paths.join(", ")}, but their Markdown links could not be inserted${because}. Add the links manually.`);
     }
     if (copyFailure !== null) {
       new Notice(
@@ -10328,7 +10341,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private async ensureFolder(path: string, createdFolders: TFolder[] = []): Promise<void> {
-    const normalized = normalizePath(path);
+    // Obsidian normalizes an empty path to "/"; the vault root always exists.
+    const normalized = normalizePath(path).replace(/^\/+|\/+$/gu, "");
     if (!normalized) return;
     let built = "";
     for (const segment of normalized.split("/")) {

@@ -2,6 +2,7 @@ import { Modal, Notice, Setting, type App } from "obsidian";
 import { errorMessage, type AttachmentInsertionMode, type AttachmentStorageMode } from "./model";
 import { StringPickerModal } from "./modals";
 import {
+  AttachmentLinkInsertionError,
   MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENT_FILES,
   attachmentCanPreview,
@@ -212,7 +213,9 @@ export class AttachmentImportModal extends Modal {
       this.close();
     } catch (error) {
       new Notice(errorMessage(error, "The attachment could not be added."), 9000);
-      this.submitButton?.removeAttribute("disabled");
+      // Copied files stay in the vault; a retry from this form would copy them again.
+      if (error instanceof AttachmentLinkInsertionError) this.close();
+      else this.submitButton?.removeAttribute("disabled");
     }
   }
 }

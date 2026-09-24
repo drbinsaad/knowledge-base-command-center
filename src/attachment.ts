@@ -6,6 +6,9 @@ export const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
 /** Files accepted by one Attach file submission; each file still has its own size limit. */
 export const MAX_ATTACHMENT_FILES = 20;
 
+/** The files were copied but their links were not inserted; retrying would copy them again. */
+export class AttachmentLinkInsertionError extends Error {}
+
 export type AttachmentInsertTarget = "marker" | "heading" | "end";
 
 /**
@@ -61,6 +64,11 @@ function appendLine(markdown: string, reference: string, eol: string): string {
   const clean = markdown.replace(/[\r\n]+$/u, "");
   return `${clean}${clean ? `${eol}${eol}` : ""}${reference}${eol}`;
 }
+
+/** ATX heading line: up to three spaces of indentation, then 1-6 hashes and a space or end of line. */
+const ATX_HEADING = /^ {0,3}(#{1,6})(?:[ \t]|$)/u;
+/** Heading text; closing hashes count only when separated by whitespace, so "C#" keeps its hash. */
+const ATX_HEADING_TEXT = /^ {0,3}(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/u;
 
 function normalizedHeading(value: string): string {
   return value
@@ -172,7 +180,7 @@ export function insertAttachmentReference(
     }
     let insertionIndex = markerIndex + 1;
     while (insertionIndex < lines.length
-      && !(outsideFence[insertionIndex] === true && /^#{1,6}\s+/u.test(lines[insertionIndex]?.text ?? ""))) insertionIndex += 1;
+      && !(outsideFence[insertionIndex] === true && ATX_HEADING.test(lines[insertionIndex]?.text ?? ""))) insertionIndex += 1;
     while (insertionIndex > markerIndex + 1 && !(lines[insertionIndex - 1]?.text ?? "").trim()) insertionIndex -= 1;
     return spliceLine(markdown, lines, insertionIndex, cleanReference);
   }
@@ -181,7 +189,7 @@ export function insertAttachmentReference(
   if (!wanted) return appendLine(markdown, cleanReference, eol);
   const headingIndex = lines.findIndex((line, index) => {
     if (outsideFence[index] !== true) return false;
-    const match = /^(#{1,6})\s+(.+?)\s*#*\s*$/u.exec(line.text);
+    const match = ATX_HEADING_TEXT.exec(line.text);
     return match ? normalizedHeading(match[2] ?? "") === wanted : false;
   });
   if (headingIndex < 0) {
@@ -189,11 +197,11 @@ export function insertAttachmentReference(
     const block = `## ${cleanHeading}${eol}${eol}${cleanReference}`;
     return appendLine(markdown, block, eol);
   }
-  const currentLevel = /^(#{1,6})\s+/u.exec(lines[headingIndex]?.text ?? "")?.[1]?.length ?? 2;
+  const currentLevel = ATX_HEADING.exec(lines[headingIndex]?.text ?? "")?.[1]?.length ?? 2;
   let insertionIndex = headingIndex + 1;
   while (insertionIndex < lines.length) {
     const nextLevel = outsideFence[insertionIndex] === true
-      ? /^(#{1,6})\s+/u.exec(lines[insertionIndex]?.text ?? "")?.[1]?.length
+      ? ATX_HEADING.exec(lines[insertionIndex]?.text ?? "")?.[1]?.length
       : undefined;
     if (nextLevel !== undefined && nextLevel <= currentLevel) break;
     insertionIndex += 1;
@@ -223,8 +231,9 @@ export function attachmentFileName(input: string): string {
   return clean || "attachment";
 }
 
+/** Vault-relative folder, or "" for the vault root (Obsidian normalizes "" to "/"). */
 export function canonicalAttachmentFolder(input: string): string {
-  return normalizePath(input.trim().replace(/^\/+|\/+$/gu, ""));
+  return normalizePath(input.trim().replace(/^\/+|\/+$/gu, "")).replace(/^\/+|\/+$/gu, "");
 }
 
 export function noteAttachmentFolder(notePath: string): string {

@@ -68,6 +68,7 @@ import { ConfirmModal, IndexGroupModal, StringPickerModal, TextPromptModal, Vaul
 import { EntCommandCenterSettingsTab } from "../src/settings.ts";
 import { QuickAppendModal } from "../src/follow-up-modal.ts";
 import { AttachmentImportModal } from "../src/attachment-modal.ts";
+import { AttachmentLinkInsertionError } from "../src/attachment.ts";
 import { Notice, Plugin, TFile, TFolder, type TAbstractFile } from "obsidian";
 import { mergeKnowledgeBaseStores } from "../src/store-merge.ts";
 import {
@@ -11221,7 +11222,7 @@ test("attachment import accepts a case-variant Markdown extension consistently",
       getMarkdownFiles: () => [note],
       getAllLoadedFiles: () => [note],
     },
-    workspace: { getActiveFile: () => note, getLeavesOfType: () => [] },
+    workspace: { getActiveFile: () => note, getLeavesOfType: () => [], getActiveViewOfType: () => null },
     metadataCache: { getFileCache: () => null, resolvedLinks: {} },
     fileManager: {},
   };
@@ -11232,12 +11233,20 @@ test("attachment import accepts a case-variant Markdown extension consistently",
 
   const originalOpen = Object.getOwnPropertyDescriptor(AttachmentImportModal.prototype, "open");
   let opens = 0;
-  AttachmentImportModal.prototype.open = function open(): void { opens += 1; };
+  const openedModes: string[] = [];
+  AttachmentImportModal.prototype.open = function open(): void {
+    opens += 1;
+    openedModes.push((this as unknown as { insertionMode: string }).insertionMode);
+  };
   Notice.messages.length = 0;
   try {
     plugin.openAttachmentImport(note);
     assert.equal(opens, 1);
     assert.deepEqual(Notice.messages, []);
+    assert.deepEqual(openedModes, ["end"], "without an active editor for the note, a cursor default starts at the end of the note");
+    plugin.data.settings.attachmentInsertionMode = "heading";
+    plugin.openAttachmentImport(note);
+    assert.deepEqual(openedModes, ["end", "heading"], "non-cursor defaults are kept");
   } finally {
     if (originalOpen) Object.defineProperty(AttachmentImportModal.prototype, "open", originalOpen);
     else Reflect.deleteProperty(AttachmentImportModal.prototype, "open");
@@ -11375,7 +11384,8 @@ test("attachment partial failures retain and report the copied path without touc
   await plugin.loadPluginData();
   const value = { file: new File(["x"], "report.pdf"), requestedFolder: "", insertionMode: "end" as const };
 
-  await assert.rejects(plugin.attachFileToNote(note, value), /copied to Attachments\/report\.pdf[\s\S]*manually/i);
+  await assert.rejects(plugin.attachFileToNote(note, value), /copied to Attachments\/report\.pdf[\s\S]*simulated link generator failure[\s\S]*manually/i);
+  await assert.rejects(plugin.attachFileToNote(note, value), AttachmentLinkInsertionError);
   assert.equal(processCalls, 0);
 
   failLinkGeneration = false;
@@ -11547,6 +11557,59 @@ test("attachment storage modes remain collision-safe and cursor insertion uses t
   });
   assert.equal(core.path, "Core/core.pdf");
   assert.equal(cursorInsert, "[[Core/core.pdf]]");
+});
+
+test("attachments can be stored at the vault root and structural refusals happen before any copy", async () => {
+  const note = new TFile("Topic.md");
+  const files = new Map<string, TAbstractFile>([[note.path, note]]);
+  let markdown = "# Topic\n";
+  const createdFolderPaths: string[] = [];
+  let binaryCreates = 0;
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      // Real Obsidian keeps the root at "/", so "" resolves to nothing and
+      // createFolder("") is normalized to "/" and refused.
+      getAbstractFileByPath: (path: string) => files.get(path) ?? null,
+      getMarkdownFiles: () => [note],
+      cachedRead: async () => markdown,
+      process: async (_file: TFile, update: (value: string) => string) => { markdown = update(markdown); },
+      createFolder: async (path: string) => {
+        createdFolderPaths.push(path);
+        throw new Error("Folder already exists.");
+      },
+      createBinary: async (path: string) => {
+        binaryCreates += 1;
+        const file = new TFile(path);
+        files.set(path, file);
+        return file;
+      },
+    },
+    workspace: { getLeavesOfType: () => [], getActiveViewOfType: () => null, getActiveFile: () => note },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+    fileManager: { generateMarkdownLink: (file: TFile) => `[[${file.path}]]`, getAvailablePathForAttachment: async () => "unused" },
+  };
+  const data = migrateData(null);
+  data.settings.attachmentStorageMode = "ask";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-attachment-root-test");
+  await plugin.loadPluginData();
+
+  for (const requestedFolder of ["", "/"]) {
+    const created = await plugin.attachFilesToNote(note, {
+      files: [new File(["a"], "scan.png")], requestedFolder, insertionMode: "end", display: "auto",
+    });
+    assert.equal(created[0]?.path, requestedFolder ? "scan 1.png" : "scan.png");
+  }
+  assert.deepEqual(createdFolderPaths, [], "the vault root is never created");
+  assert.equal(markdown, "# Topic\n\n![[scan.png]]\n\n![[scan 1.png]]\n");
+
+  const copiesBefore = binaryCreates;
+  markdown = "# Topic\n\n```js\nunclosed\n";
+  await assert.rejects(plugin.attachFilesToNote(note, {
+    files: [new File(["b"], "late.pdf")], requestedFolder: "", insertionMode: "heading",
+  }), /unclosed fenced code block/iu);
+  assert.equal(binaryCreates, copiesBefore, "a note that cannot take the links is refused before copying");
 });
 
 test("attaching several files of any type links them in order, previews what Obsidian can show, and reports a partial copy", async () => {
