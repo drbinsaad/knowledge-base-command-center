@@ -114,7 +114,7 @@ export function createQuickEntryCommands(handlers: QuickEntryCommandHandlers): C
     { id: "quick-create-note", name: "Quick entry: Create note…", icon: "file-plus-2", callback: handlers.createNote },
     { id: "quick-add-current-note", name: "Quick entry: Add current note…", icon: "panel-top", callback: handlers.addCurrentNote },
     { id: "quick-add-existing-note", name: "Quick entry: Add existing note…", icon: "list-plus", callback: handlers.addExistingNote },
-    { id: "quick-append-current-note", name: "Quick Append: Add to current note…", icon: "list-end", callback: handlers.appendCurrentNote },
-    { id: "quick-append-existing-note", name: "Quick Append: Choose a note…", icon: "file-input", callback: handlers.appendExistingNote },
+    { id: "quick-append-current-note", name: "Quick append: Add to current note…", icon: "list-end", callback: handlers.appendCurrentNote },
+    { id: "quick-append-existing-note", name: "Quick append: Choose a note…", icon: "file-input", callback: handlers.appendExistingNote },
   ];
 }

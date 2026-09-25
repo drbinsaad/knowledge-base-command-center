@@ -687,14 +687,14 @@ export class NoteOrganizerModal extends Modal {
     renderRoot.createDiv({
       cls: "ent-cc-note-organizer-boundary",
       text: this.singleNote
-        ? "Choose where this note appears in KBCC. Its file, folder, and Markdown stay unchanged."
-        : "Organization is stored only in KBCC plugin data. Folder selection is a one-time snapshot; it never links a folder. Markdown files stay where they are and are never rewritten.",
+        ? "Choose where this note appears in the command center. Its file, folder, and Markdown stay unchanged."
+        : "Organization is stored only in the plugin's own data. Folder selection is a one-time snapshot; it never links a folder. Markdown files stay where they are and are never rewritten.",
       attr: { id: `${this.instanceId}-boundary`, role: "note" },
     });
     if (this.host.isReadOnly?.() === true) {
       renderRoot.createDiv({
         cls: "ent-cc-note-organizer-read-only",
-        text: "KBCC organization is read-only. You can inspect the organizer, but review and Apply stay unavailable until the current data or Sync protection is resolved.",
+        text: "Editing is paused to protect your data. You can inspect the organizer, but review and Apply stay unavailable until the current data or Sync protection is resolved.",
         attr: { role: "status" },
       });
     }
@@ -706,7 +706,7 @@ export class NoteOrganizerModal extends Modal {
       return;
     }
     if (this.loading) {
-      renderRoot.createDiv({ cls: "ent-cc-note-organizer-loading", text: "Loading Markdown notes and KBCC destinations…" });
+      renderRoot.createDiv({ cls: "ent-cc-note-organizer-loading", text: "Loading your notes and destinations…" });
       this.renderLiveRegion();
       this.restorePendingFocus();
       return;
@@ -1284,7 +1284,7 @@ export class NoteOrganizerModal extends Modal {
       return;
     }
     if (this.bases.length === 0) {
-      parent.createDiv({ cls: "ent-cc-note-organizer-error", text: "Create a KBCC knowledge base before organizing notes.", attr: { role: "alert" } });
+      parent.createDiv({ cls: "ent-cc-note-organizer-error", text: "Create a knowledge base before organizing notes.", attr: { role: "alert" } });
       return;
     }
     const shared = parent.createDiv({ cls: "ent-cc-note-organizer-destination-section" });
@@ -1819,7 +1819,7 @@ export class NoteOrganizerModal extends Modal {
     for (const warning of prepared.warnings) parent.createDiv({ cls: "ent-cc-note-organizer-warning", text: warning, attr: { role: "note" } });
     if (!this.preparedUsable && prepared.errors.length === 0) {
       const stale = parent.createDiv({ cls: "ent-cc-note-organizer-warning", attr: { role: "alert" } });
-      stale.createSpan({ text: "This prepared review can no longer be applied. Refresh it against current KBCC state." });
+      stale.createSpan({ text: "This prepared review can no longer be applied. Refresh it to use the latest organization." });
       const refresh = stale.createEl("button", {
         cls: "ent-cc-note-organizer-secondary-button",
         text: "Refresh review",
@@ -1964,7 +1964,7 @@ export class NoteOrganizerModal extends Modal {
         } else void this.applyPrepared();
       });
     }
-    if (this.busy) navigation.createDiv({ cls: "ent-cc-note-organizer-working", text: "Creating or applying a restart-safe KBCC transaction…", attr: { role: "status" } });
+    if (this.busy) navigation.createDiv({ cls: "ent-cc-note-organizer-working", text: "Saving your changes…", attr: { role: "status" } });
   }
 
   private async prepareReview(): Promise<void> {
@@ -2018,7 +2018,7 @@ export class NoteOrganizerModal extends Modal {
     const prepared = this.prepared;
     if (this.busy || this.loading || this.loadError || this.singleNoteUnavailable() || !prepared || !this.preparedUsable || prepared.errors.length > 0) return;
     if (this.host.isReadOnly?.() === true) {
-      this.actionError = "KBCC is read-only. Resolve the current data or Sync condition before applying this review.";
+      this.actionError = "Editing is paused to protect your data. Run the sync and backup status command, then try again.";
       this.pendingFocusKey = "action-error";
       this.render();
       return;

@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.25.0
+
+### Attach files of any type
+
+- **Attach file to current note…** accepts up to 20 files per action, each up to 100 MB, of any type: PDF, Word, PowerPoint, Excel, images, audio, video, ZIP and more. The form lists each file with its size and whether it will preview, and refuses oversized selections before copying.
+- New **Show in note** choice: by default, images, PDFs, audio and video are embedded so they display inside the note, and other types become ordinary links. You can also embed every file or link every file. All links from one action are inserted together, in selection order.
+- A note that cannot take the links (for example, an unclosed code block) is refused before any file is copied. If links fail after copying, the message gives the reason and the form closes so a retry cannot duplicate files. Opened from the Command Center, a cursor default starts at the end of the note.
+
+### Easier to use
+
+- Saving a setting no longer skips the setup wizard. **Run setup again…** (command, and **Settings → Setup wizard**) reopens it for Generic knowledge bases; ENT bases and paused editing are refused with a notice. The wizard asks for your own name and names the next step when it finishes.
+- Plain-language command names, such as **Organize notes…**, **Where is this note organized?**, **Check sync and backup status**, **Back up, export, or import…** and **Create note…**. Command IDs are unchanged, so hotkeys and mobile toolbar entries keep working.
+- About fifteen technical notices are rewritten in plain words with the same safety guidance. Organizer labels use "command center" instead of "KBCC". Header counts use the singular for one item and hide zero counts.
+- On desktop, **Arrange** (**Edit** in Collections) and **Undo** sit in the header beside Add and Organize; the remaining controls are under **More**. Phone and tablet layouts are unchanged.
+
+### Fixes and review safeguards
+
+- Creating a note or attachment at the vault root no longer fails with "Folder already exists".
+- Attachment headings such as `C#`, and headings indented by up to three spaces, are found instead of duplicated. Attachments and Quick append now agree on backtick code blocks.
+- An attachment submission stays locked while copying, preventing repeated Attach actions from duplicating files even if the selection or destination changes.
+- Setup rechecks the original knowledge base after opening and before saving; it never changes an ENT base to Generic. A pending Sync check keeps the draft open, and a settled unchanged reload saves into the current settings rather than an obsolete copy.
+- Desktop Undo remains visible in narrow and compact panes as well as wide windows.
+- Edits outside a knowledge base still refresh the open Command Center, because external backlinks and in-flight searches depend on them. The proposed redraw-skipping optimization was withdrawn after independent regression review.
+
+### Compatibility and verification
+
+- No data-format, dependency, network or online-cover change. Store/base 17, portable package 7 and recovery 13 are unchanged from 0.24.0.
+- JavaScript budget raised by the measured size of these changes to 1,231,000 raw / 324,000 gzip bytes.
+- The maintainer explicitly directed **publish** without physical iPhone/iPad or two-device Sync checks. These remain **unverified**, not passed. See the [0.25.0 release evidence](https://github.com/drbinsaad/knowledge-base-command-center/blob/0.25.0/docs/release-evidence/0.25.0-iphone.md).
+
 ## 0.24.0
 
 ### Collections made easier

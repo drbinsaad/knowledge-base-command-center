@@ -2,13 +2,19 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENT_FILES,
+  attachmentCanPreview,
   attachmentFileName,
   attachmentPathCandidate,
+  attachmentReference,
   canonicalAttachmentFolder,
+  formatAttachmentSize,
   insertAttachmentReference,
+  insertAttachmentReferences,
   noteAttachmentFolder,
 } from "../src/attachment";
-import { attachmentSubmitReady } from "../src/attachment-modal";
+import { attachmentSelectionProblem, attachmentSubmitReady } from "../src/attachment-modal";
 
 test("Ask each time requires an explicit destination after file selection", () => {
   assert.equal(attachmentSubmitReady(false, "ask", false), false);
@@ -163,4 +169,93 @@ test("attachment UI stays scoped, touch-sized, and physically gated", () => {
   assert.match(styles, /\.ent-cc-attachment-modal \.setting-item-control,[\s\S]*?width:\s*100%/u);
   assert.match(styles, /\.ent-cc-attachment-modal \.setting-item-control > button,[\s\S]*?min-height:\s*44px/u);
   assert.match(checklist, /Attach file to current note[\s\S]*Follow Obsidian[\s\S]*fixed folder[\s\S]*note-local folder[\s\S]*Ask each time/u);
+});
+
+test("attachment headings keep a hash that is part of the name and accept indented headings", () => {
+  const sharp = insertAttachmentReference("# Topic\n\n## C#\n![[one.png]]\n\n## Notes\n", "![[two.png]]", "heading", "", "C#");
+  assert.equal(sharp, "# Topic\n\n## C#\n![[one.png]]\n![[two.png]]\n\n## Notes\n", "no duplicate C# section is appended");
+  const indented = insertAttachmentReference("# Topic\n\n  ## Attachments\n![[one.png]]\n\n   ## Notes\nKeep\n", "![[two.png]]", "heading", "", "Attachments");
+  assert.equal(indented, "# Topic\n\n  ## Attachments\n![[one.png]]\n![[two.png]]\n\n   ## Notes\nKeep\n");
+  assert.equal(
+    insertAttachmentReference("# Topic\n\n## Attachments ##\n![[one.png]]\n", "![[two.png]]", "heading", "", "Attachments"),
+    "# Topic\n\n## Attachments ##\n![[one.png]]\n![[two.png]]\n",
+    "closing hashes after whitespace are still ignored",
+  );
+  const marker = insertAttachmentReference("<!-- m -->\n![[one.png]]\n #hashtag\n ## Next\n", "![[two.png]]", "marker", "<!-- m -->", "");
+  assert.equal(marker, "<!-- m -->\n![[one.png]]\n #hashtag\n![[two.png]]\n ## Next\n", "an indented heading ends the marker section; a hashtag does not");
+  assert.equal(canonicalAttachmentFolder(""), "");
+  assert.equal(canonicalAttachmentFolder("/"), "");
+});
+
+test("a backtick run with a backtick in its info string is text, not an unclosed fence", () => {
+  const source = "# Topic\n\n```js`inline code`\n\n## Attachments\n![[one.png]]\n";
+  const output = insertAttachmentReference(source, "![[two.png]]", "heading", "", "Attachments");
+  assert.equal(output, "# Topic\n\n```js`inline code`\n\n## Attachments\n![[one.png]]\n![[two.png]]\n");
+  assert.throws(
+    () => insertAttachmentReference("# Topic\n\n~~~js`\n## Attachments\n", "![[x.png]]", "heading", "", "Attachments"),
+    /unclosed fenced code block/i,
+    "a tilde fence may carry a backtick in its info string and still opens a fence",
+  );
+});
+
+test("any file type is accepted and previewable types embed automatically", () => {
+  for (const name of ["scan.PNG", "photo.jpeg", "paper.pdf", "lecture.mp4", "voice.m4a", "clip.webm", "diagram.svg"]) {
+    assert.equal(attachmentCanPreview(name), true, name);
+  }
+  for (const name of ["slides.pptx", "slides.ppt", "report.docx", "sheet.xlsx", "archive.zip", "notes.txt", "README", ".pdf"]) {
+    assert.equal(attachmentCanPreview(name), false, name);
+  }
+
+  assert.equal(attachmentReference("[[Assets/paper.pdf]]", "paper.pdf", "auto"), "![[Assets/paper.pdf]]");
+  assert.equal(attachmentReference("[[Assets/slides.pptx]]", "slides.pptx", "auto"), "[[Assets/slides.pptx]]");
+  assert.equal(attachmentReference("[[Assets/slides.pptx]]", "slides.pptx", "embed"), "![[Assets/slides.pptx]]");
+  assert.equal(attachmentReference("[[Assets/scan.png]]", "scan.png", "link"), "[[Assets/scan.png]]");
+  assert.equal(attachmentReference("![[Assets/scan.png]]", "scan.png", "link"), "[[Assets/scan.png]]");
+  assert.equal(attachmentReference("![[Assets/scan.png]]", "scan.png", "embed"), "![[Assets/scan.png]]", "never doubles the embed marker");
+  assert.equal(attachmentReference("[scan](Assets/scan%20one.png)", "scan one.png", "auto"), "![scan](Assets/scan%20one.png)");
+  assert.equal(attachmentReference(" [[Assets/x.pdf]] ", "x.pdf", undefined), "[[Assets/x.pdf]]", "no display choice keeps Obsidian's link");
+  assert.equal(attachmentReference("  ", "x.pdf", "embed"), "");
+});
+
+test("several references keep their order at every durable insertion target", () => {
+  const references = ["![[one.pdf]]", "[[two.pptx]]", "![[three.png]]"];
+  assert.equal(
+    insertAttachmentReferences("# Topic\n", references, "end", "", ""),
+    "# Topic\n\n![[one.pdf]]\n[[two.pptx]]\n![[three.png]]\n",
+  );
+  assert.equal(
+    insertAttachmentReferences("# Topic\r\n", references, "end", "", ""),
+    "# Topic\r\n\r\n![[one.pdf]]\r\n[[two.pptx]]\r\n![[three.png]]\r\n",
+  );
+  assert.equal(
+    insertAttachmentReferences("# Topic\n", references, "marker", "<!-- kbcc:attachments -->", ""),
+    "# Topic\n\n<!-- kbcc:attachments -->\n![[one.pdf]]\n[[two.pptx]]\n![[three.png]]\n",
+  );
+  assert.equal(
+    insertAttachmentReferences("# Topic\n\n## Notes\nKeep\n", references, "heading", "", "Attachments"),
+    "# Topic\n\n## Notes\nKeep\n\n## Attachments\n\n![[one.pdf]]\n[[two.pptx]]\n![[three.png]]\n",
+  );
+  assert.equal(insertAttachmentReferences("# Topic\n", [" ", ""], "heading", "", "Attachments"), "# Topic\n");
+});
+
+test("the file selection explains limits before anything is copied", () => {
+  assert.equal(attachmentSelectionProblem([]), null);
+  assert.equal(attachmentSelectionProblem([{ name: "deck.pptx", size: MAX_ATTACHMENT_BYTES }]), null);
+  assert.match(
+    attachmentSelectionProblem([{ name: "video.mov", size: MAX_ATTACHMENT_BYTES + 1 }]) ?? "",
+    /video\.mov is larger than 100 MB/u,
+  );
+  assert.match(
+    attachmentSelectionProblem([
+      { name: "a.mov", size: MAX_ATTACHMENT_BYTES + 1 },
+      { name: "b.mov", size: MAX_ATTACHMENT_BYTES + 1 },
+    ]) ?? "",
+    /2 files are larger than 100 MB/u,
+  );
+  const many = Array.from({ length: MAX_ATTACHMENT_FILES + 1 }, (_, index) => ({ name: `f${index}.pdf`, size: 1 }));
+  assert.match(attachmentSelectionProblem(many) ?? "", /at most 20 files/u);
+  assert.equal(formatAttachmentSize(512), "512 B");
+  assert.equal(formatAttachmentSize(1536), "1.5 KB");
+  assert.equal(formatAttachmentSize(5 * 1024 * 1024), "5.0 MB");
+  assert.equal(formatAttachmentSize(50 * 1024 * 1024), "50 MB");
 });

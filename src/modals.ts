@@ -5,6 +5,7 @@ import {
   canonicalPath,
   childSubheadings,
   DEFAULT_EXPORTS_FOLDER,
+  DEFAULT_SETTINGS,
   DOMAIN_DEFINITIONS,
   errorMessage,
   expectedParentCurriculumId,
@@ -1023,7 +1024,8 @@ export class WorkspaceSetupModal extends Modal {
   constructor(app: App, initial: PluginSettings, private readonly onSubmit: (value: WorkspaceSetupValue) => void | Promise<void>) {
     super(app);
     this.value = {
-      workspaceName: initial.workspaceName,
+      // The product name is only a placeholder default; ask for the user's own name.
+      workspaceName: initial.workspaceName === DEFAULT_SETTINGS.workspaceName ? "" : initial.workspaceName,
       workspaceSubtitle: initial.workspaceSubtitle,
       indexLabel: initial.indexLabel,
       itemSingular: initial.itemSingular,
@@ -1048,7 +1050,7 @@ export class WorkspaceSetupModal extends Modal {
     this.modalEl.addClass("ent-cc-topic-editor-modal");
     this.contentEl.addClass("ent-cc-modal", "ent-cc-topic-editor");
     this.titleEl.setText("Set up your knowledge base");
-    this.contentEl.createEl("p", { cls: "ent-cc-modal-lead", text: "This configures only the plugin view. Existing notes stay exactly where they are, and the index starts empty until you add a note or explicitly link a folder." });
+    this.contentEl.createEl("p", { cls: "ent-cc-modal-lead", text: "Nothing in your vault is moved or changed. Your index starts empty; after setup you choose which notes to add." });
     this.contentEl.createEl("p", { text: "Start with a name. After setup, add existing notes and choose their destination. You can customize these options later." });
     let fieldParent = this.contentEl;
     const textField = (name: string, description: string, key: Exclude<keyof WorkspaceSetupValue, "defaultNewNoteMode">, placeholder: string): void => {
@@ -1057,7 +1059,7 @@ export class WorkspaceSetupModal extends Modal {
         .setValue(this.value[key])
         .onChange((value) => { this.value[key] = value; }));
     };
-    textField("Command center name", "You can change it later in Settings.", "workspaceName", "My Knowledge Base");
+    textField("Name this knowledge base", "For example: Research, Study, or ENT. You can change it later in Settings.", "workspaceName", "My knowledge base");
     const advanced = this.contentEl.createEl("details", { cls: "ent-cc-setup-advanced" });
     advanced.createEl("summary", { text: "Customize labels, folders, and templates" });
     advanced.open = this.advancedOpen;
@@ -1156,6 +1158,11 @@ export class WorkspaceSetupModal extends Modal {
       if (this.advancedEl) this.advancedEl.open = true;
       this.errorEl?.setText(message);
     };
+    this.value.workspaceName = this.value.workspaceName.trim();
+    if (!this.value.workspaceName) {
+      this.errorEl?.setText("Enter a name for this knowledge base.");
+      return;
+    }
     for (const key of ["workspaceName", "indexLabel", "itemSingular", "itemPlural", "groupLabel", "inboxLabel"] as const) {
       this.value[key] = this.value[key].trim();
       if (!this.value[key]) { showError("Name and item labels cannot be empty."); return; }

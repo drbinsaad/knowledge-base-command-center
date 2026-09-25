@@ -64,10 +64,11 @@ import {
   synchronizePortableRegistry,
 } from "../src/portability.ts";
 import { IndexManagerModal } from "../src/index-manager.ts";
-import { ConfirmModal, IndexGroupModal, StringPickerModal, TextPromptModal, VaultFilePickerModal } from "../src/modals.ts";
+import { ConfirmModal, IndexGroupModal, StringPickerModal, TextPromptModal, VaultFilePickerModal, WorkspaceSetupModal } from "../src/modals.ts";
 import { EntCommandCenterSettingsTab } from "../src/settings.ts";
 import { QuickAppendModal } from "../src/follow-up-modal.ts";
 import { AttachmentImportModal } from "../src/attachment-modal.ts";
+import { AttachmentLinkInsertionError } from "../src/attachment.ts";
 import { Notice, Plugin, TFile, TFolder, type TAbstractFile } from "obsidian";
 import { mergeKnowledgeBaseStores } from "../src/store-merge.ts";
 import {
@@ -79,6 +80,7 @@ import { EntVaultCommandCenterView, VIEW_TYPE } from "../src/view.ts";
 import { createOpenedBaseGuard, type OpenedBaseGuard } from "../src/opened-base-guard.ts";
 import { createVaultRenameJournal, type VaultRenameJournal } from "../src/vault-rename-journal.ts";
 import { normalizeLibraryDisplayProfile } from "../src/library-display-profile.ts";
+import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
 
 interface TestPluginBase {
   loadedData: unknown;
@@ -3182,7 +3184,7 @@ test("oversized v13 history arriving through Sync keeps newest entries and repor
   assert.ok(local);
   assert.ok(new TextEncoder().encode(JSON.stringify(local)).byteLength <= 4 * 1024 * 1024);
   assert.ok(local.bases[0]?.view.undoStack.at(-1)?.label.startsWith("19-"), "the newest active-base snapshot survives");
-  assert.ok(Notice.messages.some((message) => /exceeded the safe local limit.*Newest entries were retained/iu.test(message)));
+  assert.ok(Notice.messages.some((message) => /too large and was trimmed.*newest entries were kept/iu.test(message)));
   const written = plugin.savedData.at(-1) as PluginStore | undefined;
   assert.equal(written?.version, STORE_VERSION);
   assert.ok(written?.bases.every((entry) => entry.data.undoStack.length === 0));
@@ -3615,7 +3617,7 @@ test("same-revision semantic conflicts rescue the losing complete envelope befor
   const rescue = JSON.parse(rescueContent) as { kind: string; store: PluginStore };
   assert.equal(rescue.kind, "knowledge-base-command-center-conflict-rescue");
   assert.equal(rescue.store.bases[0]?.data.settings.workspaceName, losing.bases[0]?.data.settings.workspaceName);
-  const conflictNotice = Notice.messages.find((message) => message.includes("concurrent knowledge-base edit"));
+  const conflictNotice = Notice.messages.find((message) => message.includes("from another device overlapped"));
   assert.ok(conflictNotice);
   assert.equal(conflictNotice.includes("Knowledge Base Command Center Exports"), false, "the conflict notice is path-free");
   assert.equal(plugin.dataCompatibilityWarning, "");
@@ -6861,7 +6863,7 @@ test("portfolio finalization conforms view-pressure reductions before ordinary v
       "the live projection adopts the finalized bounded view state",
     );
   }
-  assert.ok(Notice.messages.some((message) => /inactive route and layout state was reduced/i.test(message)));
+  assert.ok(Notice.messages.some((message) => /older history and inactive view settings on this device were removed/i.test(message)));
 
   live.plugin.data.selectedPath = "Knowledge Base/Immediate post-portfolio view.md";
   await live.plugin.saveViewState();
@@ -6925,7 +6927,7 @@ test("failed portfolio primary reports any device-local reduction already made b
       .pendingRequiredUndoBatchCommit,
     undefined,
   );
-  assert.ok(Notice.messages.some((message) => /inactive route and layout state was reduced/i.test(message)));
+  assert.ok(Notice.messages.some((message) => /older history and inactive view settings on this device were removed/i.test(message)));
 });
 
 test("portfolio batch journal quota rejection restores every destination before primary", async () => {
@@ -8307,6 +8309,112 @@ test("layout and metadata readiness repair linked Library records cached before 
   assert.deepEqual(scheduledRefreshes, [false, false], "the initial metadata fence reconciles only once");
 });
 
+async function unrelatedMetadataRefreshHarness() {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const indexed = new TFile("Knowledge/Indexed.md");
+  const unrelated = new TFile("Journal/Today.md");
+  data.directIndexPaths = [indexed.path];
+  const { plugin } = pluginWithFiles(data, [indexed, unrelated], {});
+  let metadataChanged: ((file: TFile) => void) | null = null;
+  let metadataResolved: (() => void) | null = null;
+  let layoutReady: (() => void) | null = null;
+  const scheduledRefreshes: boolean[] = [];
+  const app = plugin.app as unknown as {
+    vault: { on: (name: string, callback: (...args: unknown[]) => void) => unknown };
+    workspace: { onLayoutReady: (callback: () => void) => void; getLeavesOfType: (type: string) => unknown[] };
+    metadataCache: {
+      on: (name: string, callback: (...args: unknown[]) => void) => unknown;
+      resolvedLinks: Record<string, Record<string, number>>;
+    };
+  };
+  app.vault.on = () => ({ unsubscribe: () => {} });
+  app.metadataCache.on = (name, callback) => {
+    if (name === "changed") metadataChanged = callback;
+    if (name === "resolved") metadataResolved = callback;
+    return { unsubscribe: () => {} };
+  };
+  app.workspace.onLayoutReady = (callback) => { layoutReady = callback; };
+  app.workspace.getLeavesOfType = (type) => type === VIEW_TYPE ? [{}] : [];
+  (plugin as unknown as { manifest: { id: string; name: string; version: string } }).manifest = {
+    id: "ent-vault-command-center", name: "Knowledge Base Command Center", version: "0.24.0",
+  };
+  (plugin as unknown as { registerObsidianProtocolHandler: () => void }).registerObsidianProtocolHandler = () => {};
+  (plugin as unknown as { scheduleRefresh: (invalidateRecords?: boolean) => void }).scheduleRefresh = (invalidateRecords = true) => {
+    scheduledRefreshes.push(invalidateRecords);
+  };
+  await plugin.onload();
+  assert.ok(layoutReady);
+  layoutReady();
+  assert.ok(metadataChanged);
+  assert.ok(metadataResolved);
+  metadataResolved();
+  scheduledRefreshes.length = 0;
+  return { plugin, app, indexed, unrelated, metadataChanged, metadataResolved, scheduledRefreshes };
+}
+
+test("outside-note metadata changes refresh rendered external backlinks without placeholders", async () => {
+  const { plugin, app, indexed, unrelated, metadataChanged, metadataResolved, scheduledRefreshes } = await unrelatedMetadataRefreshHarness();
+  const records = plugin.getRecords();
+  assert.deepEqual(records.map((record) => record.path), [indexed.path]);
+  assert.equal(records.some((record) => record.isPlaceholder), false);
+  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView;
+  Object.assign(view, { plugin, app, records, recordByPath: new Map(records.map((record) => [record.path, record])) });
+  const internals = view as unknown as { renderRelatedKnowledge(parent: HTMLElement, record: VaultRecord): void };
+  const { document } = createFakeDom();
+  const parent = document.body;
+  internals.renderRelatedKnowledge(asHtmlElement(parent), records[0]);
+  assert.match(parent.textContent, /No resolved relationships yet/u);
+
+  app.metadataCache.resolvedLinks[unrelated.path] = { [indexed.path]: 1 };
+  metadataChanged(unrelated);
+  metadataResolved();
+  assert.deepEqual(plugin.getBacklinkPaths(indexed.path), [unrelated.path]);
+  parent.empty();
+  internals.renderRelatedKnowledge(asHtmlElement(parent), records[0]);
+  assert.match(parent.textContent, /Other backlinksToday/u);
+  assert.deepEqual(scheduledRefreshes, [false], "external backlinks need a redraw after the startup resolution fence");
+
+  app.metadataCache.resolvedLinks[unrelated.path] = {};
+  metadataChanged(unrelated);
+  assert.deepEqual(plugin.getBacklinkPaths(indexed.path), []);
+  assert.deepEqual(scheduledRefreshes, [false, false], "removing the final external backlink also refreshes");
+});
+
+test("outside-note metadata changes schedule a retry for cancelled in-flight search", async () => {
+  const { plugin, app, unrelated, metadataChanged, scheduledRefreshes } = await unrelatedMetadataRefreshHarness();
+  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView;
+  const { document } = createFakeDom();
+  const parent = document.body;
+  const internals = view as unknown as {
+    renderTree(): void;
+    renderGlobalSearchResults(parent: HTMLElement): number;
+    globalSearchResult: { total: number } | null;
+    globalSearchPendingKey: string;
+  };
+  Object.assign(view, {
+    plugin, app, query: "no matching knowledge", searchScope: "all", viewClosed: false,
+    globalSearchRequestGeneration: 0, globalSearchResult: null,
+    renderTree: () => {
+      parent.empty();
+      internals.renderGlobalSearchResults(asHtmlElement(parent));
+    },
+    resetSearchScrollPosition: () => {},
+  });
+  internals.renderTree();
+  assert.match(parent.textContent, /Searching all available knowledge bases/u);
+  metadataChanged(unrelated);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(internals.globalSearchResult, null, "the invalidated search cannot publish stale results");
+  assert.equal(internals.globalSearchPendingKey, "");
+  assert.deepEqual(scheduledRefreshes, [false], "a cancelled search must receive a refresh that starts its replacement");
+  // The scheduled view refresh renders the same query with the current generation.
+  internals.renderTree();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(internals.globalSearchResult?.total, 0);
+  assert.doesNotMatch(parent.textContent, /Searching/u);
+});
+
 test("custom libraries support stable CRUD, locale-invariant names, ordering, archive, and restore", async () => {
   const data = migrateData(null);
   data.settings.workspaceMode = "generic";
@@ -9416,7 +9524,7 @@ test("required Undo retains the newest snapshot and reports older local-history 
   const labels = local?.bases[0]?.view.undoStack.map((snapshot) => snapshot.label) ?? [];
   assert.ok(labels.includes("Restart-safe newest"), "the required newest snapshot survives the 4 MiB reduction");
   assert.ok(labels.length < 20, "older device-local history is actually reduced");
-  assert.ok(Notice.messages.some((message) => /Older undo or redo entries were removed.*restart-safe.*four-megabyte/i.test(message)));
+  assert.ok(Notice.messages.some((message) => /after a restart, older undo or redo steps.*were removed.*4-megabyte/i.test(message)));
 });
 
 test("custom-library definitions are isolated per knowledge base", async () => {
@@ -11212,6 +11320,222 @@ test("explicit attachment upload uses the configured folder and appends under on
   assert.equal(markdown, "---\ntitle: Topic\n---\n\n## Attachments\n\n![[old.png]]\n![[Assets/Uploads/scan.png]]\n\n## Notes\n- Keep\n");
 });
 
+test("Run setup again opens the wizard only for writable Generic knowledge bases", async () => {
+  const app = {
+    vault: { configDir: ".obsidian", getAbstractFileByPath: () => null, getMarkdownFiles: () => [] },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+  };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-run-setup-test");
+  await plugin.loadPluginData();
+  let wizardOpens = 0;
+  (plugin as unknown as { withView(action: (view: { openSetupWizard(): void }) => void): Promise<void> }).withView = async (action) => {
+    action({ openSetupWizard: () => { wizardOpens += 1; } });
+  };
+  Notice.messages.length = 0;
+  plugin.runSetupAgain();
+  await Promise.resolve();
+  assert.equal(wizardOpens, 1);
+
+  plugin.dataCompatibilityWarning = "Protected read-only.";
+  plugin.runSetupAgain();
+  await Promise.resolve();
+  assert.equal(wizardOpens, 1);
+  assert.match(Notice.messages.at(-1) ?? "", /Editing is paused/u);
+
+  plugin.dataCompatibilityWarning = "";
+  plugin.data.settings.workspaceMode = "ent-clinical";
+  plugin.runSetupAgain();
+  await Promise.resolve();
+  assert.equal(wizardOpens, 1, "setup never converts an ENT knowledge base to Generic");
+  assert.match(Notice.messages.at(-1) ?? "", /only for generic knowledge bases/u);
+});
+
+test("Run setup again stays bound to its original base across asynchronous view activation", async (context) => {
+  for (const mode of ["generic", "ent-clinical"] as const) {
+    await context.test(`switch to ${mode}`, async () => {
+      const generic = migrateData(null);
+      generic.settings.workspaceName = "Original";
+      generic.settings.setupComplete = true;
+      const target = migrateData(null);
+      target.settings.workspaceName = "Other base";
+      target.settings.workspaceMode = mode;
+      target.settings.setupComplete = true;
+      const store = createDefaultStore(generic, 1, "vault-setup-race");
+      store.bases.push(createKnowledgeBaseEntry(target, "other-base", 2));
+      const { plugin } = pluginWithFiles(store, [], {});
+      await plugin.loadPluginData();
+      plugin.savedData.length = 0;
+      const activation = deferred();
+      plugin.activateView = async () => {
+        await activation.promise;
+        const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView;
+        Object.assign(view, {
+          plugin, app: plugin.app,
+          loadedBaseId: plugin.getActiveKnowledgeBaseId(), loadedDataEpoch: plugin.getDataEpoch(),
+        });
+        return view;
+      };
+      const originalOpen = Object.getOwnPropertyDescriptor(WorkspaceSetupModal.prototype, "open");
+      const opened: WorkspaceSetupModal[] = [];
+      WorkspaceSetupModal.prototype.open = function (): void { opened.push(this); };
+      try {
+        plugin.runSetupAgain();
+        await plugin.switchKnowledgeBase("other-base");
+        activation.resolve();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        // Exercise the real submit/save path if the stale command opened a form.
+        for (const modal of opened) {
+          await (modal as unknown as { submit(): Promise<void> }).submit();
+        }
+        assert.equal(plugin.data.settings.workspaceMode, mode, "setup must never convert the target ENT base to Generic");
+        assert.equal(opened.length, 0, "a command issued for another base must not open this base's setup");
+        assert.equal(plugin.savedData.length, 0, "the stale setup command must not persist the other base");
+      } finally {
+        if (originalOpen) Object.defineProperty(WorkspaceSetupModal.prototype, "open", originalOpen);
+        else Reflect.deleteProperty(WorkspaceSetupModal.prototype, "open");
+      }
+    });
+  }
+});
+
+test("setup wizard rejects clinical, stale, and newly read-only surfaces", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceName = "Research";
+  const { plugin } = pluginWithFiles(createDefaultStore(data, 1, "vault-setup-guards"), [], {});
+  await plugin.loadPluginData();
+  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView;
+  Object.assign(view, {
+    plugin, app: plugin.app,
+    loadedBaseId: plugin.getActiveKnowledgeBaseId(), loadedDataEpoch: plugin.getDataEpoch(),
+  });
+  const originalOpen = Object.getOwnPropertyDescriptor(WorkspaceSetupModal.prototype, "open");
+  const opened: WorkspaceSetupModal[] = [];
+  WorkspaceSetupModal.prototype.open = function (): void { opened.push(this); };
+  try {
+    plugin.data.settings.workspaceMode = "ent-clinical";
+    view.openSetupWizard();
+    assert.equal(opened.length, 0, "direct wizard entry cannot open an ENT base");
+    plugin.data.settings.workspaceMode = "generic";
+    plugin.dataCompatibilityWarning = "Protected read-only.";
+    view.openSetupWizard();
+    assert.equal(opened.length, 0, "read-only data cannot open the wizard after activation");
+    plugin.dataCompatibilityWarning = "";
+    Object.assign(view, { loadedBaseId: "previous-base" });
+    view.openSetupWizard();
+    assert.equal(opened.length, 0, "a stale rendered view cannot configure the current base");
+    Object.assign(view, { loadedBaseId: plugin.getActiveKnowledgeBaseId() });
+    view.openSetupWizard();
+    assert.equal(opened.length, 1);
+    plugin.dataCompatibilityWarning = "Protected read-only.";
+    await (opened[0] as unknown as { submit(): Promise<void> }).submit();
+    assert.equal(plugin.data.settings.setupComplete, false, "a wizard opened before read-only protection cannot save afterward");
+    assert.equal(plugin.savedData.length, 0);
+    plugin.dataCompatibilityWarning = "";
+    await (opened[0] as unknown as { submit(): Promise<void> }).submit();
+    assert.equal(plugin.data.settings.setupComplete, true, "a writable Generic base can still finish setup");
+    assert.equal(plugin.data.settings.workspaceMode, "generic");
+    assert.equal(plugin.savedData.length, 1);
+  } finally {
+    if (originalOpen) Object.defineProperty(WorkspaceSetupModal.prototype, "open", originalOpen);
+    else Reflect.deleteProperty(WorkspaceSetupModal.prototype, "open");
+  }
+});
+
+async function openedSetupWizardHarness() {
+  const data = migrateData(null);
+  data.settings.workspaceName = "Before setup";
+  const { plugin, sourceMutationCount } = pluginWithFiles(createDefaultStore(data, 100, "vault-setup-sync"), [], {});
+  const localValues = new Map<string, unknown>();
+  Object.assign(plugin.app, {
+    loadLocalStorage: (key: string) => structuredClone(localValues.get(key) ?? null),
+    saveLocalStorage: (key: string, value: unknown) => { localValues.set(key, structuredClone(value)); },
+  });
+  await plugin.loadPluginData(false);
+  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView;
+  Object.assign(view, {
+    plugin, app: plugin.app,
+    loadedBaseId: plugin.getActiveKnowledgeBaseId(), loadedDataEpoch: plugin.getDataEpoch(),
+  });
+  const originalOpen = Object.getOwnPropertyDescriptor(WorkspaceSetupModal.prototype, "open");
+  const opened: WorkspaceSetupModal[] = [];
+  WorkspaceSetupModal.prototype.open = function (): void { opened.push(this); };
+  try {
+    view.openSetupWizard();
+  } finally {
+    if (originalOpen) Object.defineProperty(WorkspaceSetupModal.prototype, "open", originalOpen);
+    else Reflect.deleteProperty(WorkspaceSetupModal.prototype, "open");
+  }
+  assert.equal(opened.length, 1);
+  const modal = opened[0] as unknown as {
+    value: { workspaceName: string; defaultNoteFolder: string };
+    errorEl: { setText(text: string): void } | null;
+    close(): void;
+    submit(): Promise<void>;
+  };
+  modal.value.workspaceName = "After setup";
+  modal.value.defaultNoteFolder = "Research/Captures";
+  const incoming = structuredClone((plugin as unknown as { store: PluginStore }).store);
+  return { plugin, modal, incoming, sourceMutationCount };
+}
+
+test("setup wizard persists its draft into live settings after a settled no-op Sync reload", async () => {
+  const { plugin, modal, incoming, sourceMutationCount } = await openedSetupWizardHarness();
+  const previousSettings = plugin.data.settings;
+  const surfaceVersion = plugin.getBaseSurfaceVersion();
+  plugin.loadedData = incoming;
+  await plugin.onExternalSettingsChange();
+  assert.equal(plugin.getBaseSurfaceVersion(), surfaceVersion, "a no-op reload retains the setup draft's semantic ownership");
+  assert.notEqual(plugin.data.settings, previousSettings, "the reload replaces the settings object");
+  plugin.savedData.length = 0;
+  await modal.submit();
+  assert.equal(plugin.data.settings.workspaceName, "After setup");
+  assert.equal(plugin.data.settings.defaultNoteFolder, "Research/Captures");
+  assert.equal(plugin.data.settings.setupComplete, true);
+  assert.equal(plugin.data.settings.workspaceMode, "generic");
+  assert.equal(previousSettings.workspaceName, "Before setup", "the obsolete settings object is not mutated");
+  assert.equal(plugin.savedData.length, 1, "finishing setup must persist the draft instead of reporting a false success");
+  const saved = plugin.savedData[0] as PluginStore;
+  assert.equal(saved.bases[0].data.settings.workspaceName, "After setup");
+  assert.equal(saved.bases[0].data.settings.setupComplete, true);
+  assert.equal(sourceMutationCount(), 0);
+});
+
+test("setup wizard keeps its draft open when Finish overlaps a pending Sync reload", async () => {
+  const { plugin, modal, incoming, sourceMutationCount } = await openedSetupWizardHarness();
+  const read = deferred();
+  plugin.loadData = async () => {
+    await read.promise;
+    return incoming;
+  };
+  let closes = 0;
+  let errorText = "";
+  modal.close = () => { closes += 1; };
+  modal.errorEl = { setText: (text) => { errorText = text; } };
+  const reload = plugin.onExternalSettingsChange();
+  try {
+    await modal.submit();
+    assert.equal(plugin.isExternalReloadInProgress(), true);
+    assert.equal(closes, 0, "the pending ownership check must not close and discard the draft");
+    assert.equal(modal.value.workspaceName, "After setup");
+    assert.match(errorText, /not saved.*sync/iu);
+    assert.equal(plugin.data.settings.setupComplete, false);
+  } finally {
+    read.resolve();
+    await reload;
+  }
+  plugin.savedData.length = 0;
+  await modal.submit();
+  assert.equal(closes, 1, "the same draft finishes after the no-op reload settles");
+  assert.equal(plugin.data.settings.workspaceName, "After setup");
+  assert.equal(plugin.data.settings.setupComplete, true);
+  assert.equal(plugin.savedData.length, 1);
+  assert.equal(sourceMutationCount(), 0);
+});
+
 test("attachment import accepts a case-variant Markdown extension consistently", async () => {
   const note = new TFile("Knowledge/Topic.MD");
   const app = {
@@ -11221,7 +11545,7 @@ test("attachment import accepts a case-variant Markdown extension consistently",
       getMarkdownFiles: () => [note],
       getAllLoadedFiles: () => [note],
     },
-    workspace: { getActiveFile: () => note, getLeavesOfType: () => [] },
+    workspace: { getActiveFile: () => note, getLeavesOfType: () => [], getActiveViewOfType: () => null },
     metadataCache: { getFileCache: () => null, resolvedLinks: {} },
     fileManager: {},
   };
@@ -11232,12 +11556,20 @@ test("attachment import accepts a case-variant Markdown extension consistently",
 
   const originalOpen = Object.getOwnPropertyDescriptor(AttachmentImportModal.prototype, "open");
   let opens = 0;
-  AttachmentImportModal.prototype.open = function open(): void { opens += 1; };
+  const openedModes: string[] = [];
+  AttachmentImportModal.prototype.open = function open(): void {
+    opens += 1;
+    openedModes.push((this as unknown as { insertionMode: string }).insertionMode);
+  };
   Notice.messages.length = 0;
   try {
     plugin.openAttachmentImport(note);
     assert.equal(opens, 1);
     assert.deepEqual(Notice.messages, []);
+    assert.deepEqual(openedModes, ["end"], "without an active editor for the note, a cursor default starts at the end of the note");
+    plugin.data.settings.attachmentInsertionMode = "heading";
+    plugin.openAttachmentImport(note);
+    assert.deepEqual(openedModes, ["end", "heading"], "non-cursor defaults are kept");
   } finally {
     if (originalOpen) Object.defineProperty(AttachmentImportModal.prototype, "open", originalOpen);
     else Reflect.deleteProperty(AttachmentImportModal.prototype, "open");
@@ -11375,7 +11707,8 @@ test("attachment partial failures retain and report the copied path without touc
   await plugin.loadPluginData();
   const value = { file: new File(["x"], "report.pdf"), requestedFolder: "", insertionMode: "end" as const };
 
-  await assert.rejects(plugin.attachFileToNote(note, value), /copied to Attachments\/report\.pdf[\s\S]*manually/i);
+  await assert.rejects(plugin.attachFileToNote(note, value), /copied to Attachments\/report\.pdf[\s\S]*simulated link generator failure[\s\S]*manually/i);
+  await assert.rejects(plugin.attachFileToNote(note, value), AttachmentLinkInsertionError);
   assert.equal(processCalls, 0);
 
   failLinkGeneration = false;
@@ -11547,6 +11880,160 @@ test("attachment storage modes remain collision-safe and cursor insertion uses t
   });
   assert.equal(core.path, "Core/core.pdf");
   assert.equal(cursorInsert, "[[Core/core.pdf]]");
+});
+
+test("attachments can be stored at the vault root and structural refusals happen before any copy", async () => {
+  const note = new TFile("Topic.md");
+  const files = new Map<string, TAbstractFile>([[note.path, note]]);
+  let markdown = "# Topic\n";
+  const createdFolderPaths: string[] = [];
+  let binaryCreates = 0;
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      // Real Obsidian keeps the root at "/", so "" resolves to nothing and
+      // createFolder("") is normalized to "/" and refused.
+      getAbstractFileByPath: (path: string) => files.get(path) ?? null,
+      getMarkdownFiles: () => [note],
+      cachedRead: async () => markdown,
+      process: async (_file: TFile, update: (value: string) => string) => { markdown = update(markdown); },
+      createFolder: async (path: string) => {
+        createdFolderPaths.push(path);
+        throw new Error("Folder already exists.");
+      },
+      createBinary: async (path: string) => {
+        binaryCreates += 1;
+        const file = new TFile(path);
+        files.set(path, file);
+        return file;
+      },
+    },
+    workspace: { getLeavesOfType: () => [], getActiveViewOfType: () => null, getActiveFile: () => note },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+    fileManager: { generateMarkdownLink: (file: TFile) => `[[${file.path}]]`, getAvailablePathForAttachment: async () => "unused" },
+  };
+  const data = migrateData(null);
+  data.settings.attachmentStorageMode = "ask";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-attachment-root-test");
+  await plugin.loadPluginData();
+
+  for (const requestedFolder of ["", "/"]) {
+    const created = await plugin.attachFilesToNote(note, {
+      files: [new File(["a"], "scan.png")], requestedFolder, insertionMode: "end", display: "auto",
+    });
+    assert.equal(created[0]?.path, requestedFolder ? "scan 1.png" : "scan.png");
+  }
+  assert.deepEqual(createdFolderPaths, [], "the vault root is never created");
+  assert.equal(markdown, "# Topic\n\n![[scan.png]]\n\n![[scan 1.png]]\n");
+
+  const copiesBefore = binaryCreates;
+  markdown = "# Topic\n\n```js\nunclosed\n";
+  await assert.rejects(plugin.attachFilesToNote(note, {
+    files: [new File(["b"], "late.pdf")], requestedFolder: "", insertionMode: "heading",
+  }), /unclosed fenced code block/iu);
+  assert.equal(binaryCreates, copiesBefore, "a note that cannot take the links is refused before copying");
+});
+
+test("attaching several files of any type links them in order, previews what Obsidian can show, and reports a partial copy", async () => {
+  const note = new TFile("Knowledge/Topic.md");
+  const files = new Map<string, TAbstractFile>([[note.path, note]]);
+  let markdown = "# Topic\n\n## Notes\nKeep\n";
+  let cursorInsert = "";
+  let failOn = "";
+  let processCalls = 0;
+  const editor = {
+    getValue: () => markdown,
+    getCursor: () => ({ line: 0, ch: 0 }),
+    replaceRange: (value: string) => { cursorInsert = value; },
+  };
+  let activeView: { file: TFile; editor: typeof editor } | null = null;
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getAbstractFileByPath: (path: string) => files.get(path) ?? null,
+      getMarkdownFiles: () => [note],
+      cachedRead: async () => markdown,
+      process: async (_file: TFile, update: (value: string) => string) => {
+        processCalls += 1;
+        markdown = update(markdown);
+      },
+      createFolder: async (path: string) => { files.set(path, new TFolder(path)); },
+      createBinary: async (path: string) => {
+        if (failOn && path.endsWith(failOn)) throw new Error("simulated disk failure");
+        const file = new TFile(path);
+        files.set(path, file);
+        return file;
+      },
+    },
+    workspace: {
+      getLeavesOfType: () => [],
+      getActiveViewOfType: () => activeView,
+      getActiveFile: () => note,
+    },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+    fileManager: {
+      generateMarkdownLink: (file: TFile) => `[[${file.path}]]`,
+      getAvailablePathForAttachment: async () => "unused",
+    },
+  };
+  const data = migrateData(null);
+  data.settings.attachmentStorageMode = "fixed-folder";
+  data.settings.attachmentFolder = "Files";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-attachment-batch-test");
+  await plugin.loadPluginData();
+
+  Notice.messages.length = 0;
+  const created = await plugin.attachFilesToNote(note, {
+    files: [new File(["a"], "Paper.pdf"), new File(["b"], "Slides.pptx"), new File(["c"], "Scan.png")],
+    requestedFolder: "",
+    insertionMode: "heading",
+    display: "auto",
+  });
+  assert.deepEqual(created.map((file) => file.path), ["Files/Paper.pdf", "Files/Slides.pptx", "Files/Scan.png"]);
+  assert.equal(processCalls, 1, "all links are written in one atomic note update");
+  assert.equal(
+    markdown,
+    "# Topic\n\n## Notes\nKeep\n\n## Attachments\n\n![[Files/Paper.pdf]]\n[[Files/Slides.pptx]]\n![[Files/Scan.png]]\n",
+  );
+  assert.equal(Notice.messages.at(-1), "Attached 3 files inside the vault.");
+
+  activeView = { file: note, editor };
+  await plugin.attachFilesToNote(note, {
+    files: [new File(["d"], "Sheet.xlsx"), new File(["e"], "Audio.mp3")],
+    requestedFolder: "",
+    insertionMode: "cursor",
+    display: "link",
+  });
+  assert.equal(cursorInsert, "[[Files/Sheet.xlsx]]\n[[Files/Audio.mp3]]");
+
+  activeView = null;
+  failOn = "Second.docx";
+  const beforePartial = markdown;
+  const partial = await plugin.attachFilesToNote(note, {
+    files: [new File(["f"], "First.zip"), new File(["g"], "Second.docx"), new File(["h"], "Third.pdf")],
+    requestedFolder: "",
+    insertionMode: "end",
+    display: "embed",
+  });
+  assert.deepEqual(partial.map((file) => file.path), ["Files/First.zip"]);
+  assert.equal(markdown, `${beforePartial}\n![[Files/First.zip]]\n`);
+  assert.match(Notice.messages.at(-1) ?? "", /Attached 1 of 3 files\. The attachment could not be copied to Files\/Second\.docx\. The remaining files were not copied\./u);
+  assert.equal(files.has("Files/Third.pdf"), false);
+
+  failOn = "";
+  await assert.rejects(plugin.attachFilesToNote(note, {
+    files: [new File(["x"], "a.pdf"), { name: "huge.mov", size: 101 * 1024 * 1024 } as File],
+    requestedFolder: "",
+    insertionMode: "end",
+  }), /huge\.mov is larger than the 100 MB attachment limit/u);
+  assert.equal(files.has("Files/a.pdf"), false, "size limits are checked before any file is copied");
+  await assert.rejects(plugin.attachFilesToNote(note, {
+    files: [],
+    requestedFolder: "",
+    insertionMode: "end",
+  }), /at least one file/u);
 });
 
 test("portable JSON serialization fails before creating an export folder", async () => {
@@ -12822,7 +13309,7 @@ test("a rename-journal append failure keeps the live overlay queued and warns ab
   assert.equal(internal.projectPendingRenamePath(oldPath), newPath);
   assert.equal(live.localValues.has(VAULT_RENAME_JOURNAL_KEY), false);
   assert.equal(
-    Notice.messages.slice(noticeStart).some((message) => /restart-safe local repair journal could not be saved/iu.test(message)),
+    Notice.messages.slice(noticeStart).some((message) => /could not save its repair notes/iu.test(message)),
     true,
   );
 });

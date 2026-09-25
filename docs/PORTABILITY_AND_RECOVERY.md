@@ -37,7 +37,7 @@ Archived Libraries are not offered as portable sections. Confirmed private recov
 
 Library display profiles contain only layout choices and property names: no cover URL, property value, image bytes, or permission to contact a server. To transfer them, select **Workspace settings**. Workspace format 3 includes dependency descriptors for every active Library with a display profile, even when that Library's catalog is unselected. Descriptors preserve stable identity without replacing an unselected destination Library's name, archive decision, or headings. Profiles for archived or missing Libraries are omitted from Workspace export. Importing a Library catalog alone leaves destination display settings unchanged. Older Workspace formats 1–2 preserve destination display preferences; format 3 applies the selected Workspace profiles.
 
-Version 0.24.0 does not support online-image loading. Display profiles, synced notes, imports, recovery and Undo cannot enable it. The obsolete permission key from private test builds is App-local, inert, and excluded from all transfer formats.
+Version 0.25.0 does not support online-image loading. Display profiles, synced notes, imports, recovery and Undo cannot enable it. The obsolete permission key from private test builds is App-local, inert, and excluded from all transfer formats.
 
 Collections and study state carry only the portable identities they reference. They do not silently select or replace a complete Index or complete Library.
 
@@ -219,7 +219,7 @@ An operation that requires Undo stages its exact causal snapshot in the bounded 
 
 Device-only return navigation separately uses format 2 and reads legacy format 1. Older builds reject the newer route history instead of dropping a collection filter. This convenience history is not synced and is not an organization backup.
 
-Run **Open sync & recovery center** for local evidence about the active base, last successful local save, last external plugin-data reload, conflict rescues, recovery age, and any recorded active-base conflict. The center does not inspect Obsidian Sync, a provider queue, the network, or another device. An absent warning is not proof that it is safe to switch devices. Avoid editing the same base on two devices at once, let your provider settle using its supported surface, and keep current recovery exports.
+Run **Check sync and backup status** for local evidence about the active base, last successful local save, last external plugin-data reload, conflict rescues, recovery age, and any recorded active-base conflict. The center does not inspect Obsidian Sync, a provider queue, the network, or another device. An absent warning is not proof that it is safe to switch devices. Avoid editing the same base on two devices at once, let your provider settle using its supported surface, and keep current recovery exports.
 
 Conflict-rescue counts use only direct export-folder file metadata and the documented <code>knowledge-base-command-center-conflict-*.json</code> name pattern. The bounded scan never opens the JSON. Recovery age comes from a confirmed recovery export on this device or the standalone backup name pattern; the center does not open an arbitrary portable package to infer its selected components.
 

@@ -34,7 +34,7 @@ function summary(): NoteOrganizerMembershipSummary {
     ],
     indicator: {
       id: "kbcc-note-membership", state: "organized-current", icon: "circle-check", color: "success",
-      label: "KBCC: Organized in ENT", tooltip: "Organized in two knowledge bases.",
+      label: "Command center: Organized in ENT", tooltip: "Organized in two knowledge bases.",
       ariaLabel: "Organized in two knowledge bases. Activate to review or change memberships.",
       classNames: ["ent-cc-note-membership-indicator", "ent-cc-note-membership-organized-current"],
       preferredSurfaces: ["editor-header", "status-bar"], interactive: true,
@@ -94,7 +94,7 @@ test("membership detail disables Organizer for protected notes and explains why"
   const title = root.createEl("h2");
   const content = root.createDiv();
   let organizerOpened = false;
-  const reason = "This note is in a protected source or Obsidian configuration area and cannot be organized by KBCC.";
+  const reason = "This note is in a protected source or Obsidian configuration area and cannot be organized by the command center.";
   const modal = new NoteMembershipModal({
     app: {} as never,
     getNoteOrganizerMembershipSummary: () => ({ ...summary(), path: ".obsidian/Private.md" }),

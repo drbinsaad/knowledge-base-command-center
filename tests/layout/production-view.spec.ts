@@ -616,15 +616,23 @@ test.describe("mobile touch pointer", () => {
   });
 });
 
-test("narrow nonmobile panes retain desktop controls and scroll hierarchy", async ({ page }) => {
-  await openView(page, { width: 390, height: 844, count: 8 });
-  await expect(page.locator(".ent-cc-shell")).not.toHaveClass(/is-mobile-browse/u);
-  await expect(page.locator(".ent-cc-workspace-options > summary")).toHaveText("Workspace options");
-  await expect(page.getByRole("combobox", { name: "Search scope" })).toBeVisible();
-  await expect(page.locator(".ent-cc-mobile-filters")).toHaveCount(0);
-  await expect(page.locator(".ent-cc-workspace .ent-cc-header")).toHaveCount(0);
-  await captureEvidence(page, "browse-narrow-desktop-unchanged");
-});
+for (const width of [390, 900]) {
+  test(`nonmobile ${width}px panes retain desktop controls and scroll hierarchy`, async ({ page }) => {
+    await openView(page, { width, height: 844, count: 8 });
+    await expect(page.locator(".ent-cc-shell")).not.toHaveClass(/is-mobile-browse/u);
+    const more = page.locator(".ent-cc-workspace-options > summary");
+    await expect(more).toHaveText("More");
+    const undo = page.getByRole("button", { name: "Undo last organization change", exact: true });
+    await expect(undo).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Search scope" })).toBeVisible();
+    await expect(page.locator(".ent-cc-mobile-filters")).toHaveCount(0);
+    await expect(page.locator(".ent-cc-workspace .ent-cc-header")).toHaveCount(0);
+    await more.click();
+    await expect(undo).toBeVisible();
+    await expect(page.getByRole("button", { name: "Redo last organization change", exact: true })).toBeVisible();
+    await captureEvidence(page, `browse-desktop-${width}-undo`);
+  });
+}
 
 const phoneBrowseScenarios = [
   { width: 390, height: 844, largeText: false },
@@ -1139,7 +1147,7 @@ test("iPad routing leaves the 1440px desktop header and side inspector unchanged
   await expect(page.locator("#kbcc-view")).toHaveAttribute("data-pane-layout", "wide");
   await expect(page.locator(".ent-cc-shell")).not.toHaveClass(/is-mobile-browse/u);
   await expect(page.locator(".ent-cc-mobile-toolbar")).toHaveCount(0);
-  await expect(page.locator(".ent-cc-workspace-options > summary")).toHaveText("Workspace options");
+  await expect(page.locator(".ent-cc-workspace-options > summary")).toHaveText("More");
   await expect(page.getByRole("heading", { name: "Research workspace", exact: true })).toBeVisible();
   await expect(page.getByRole("combobox", { name: "Search scope" })).toBeVisible();
   await page.getByRole("button", { name: /^Research note 000,/u }).click();
@@ -1419,7 +1427,7 @@ for (const mobile of [false, true]) {
     await dialog.getByRole("button", { name: mobile ? "Close" : "Cancel", exact: true }).click();
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await openModal(page, "setup");
-    await expect(dialog.getByRole("textbox", { name: "Command center name", exact: true })).toBeVisible();
+    await expect(dialog.getByRole("textbox", { name: "Name this knowledge base", exact: true })).toBeVisible();
     await expect(dialog.locator(".ent-cc-setup-advanced")).not.toHaveAttribute("open");
     await expect(dialog.getByRole("textbox", { name: "Header description", exact: true })).toBeHidden();
     await captureEvidence(page, `setup-${device}`);

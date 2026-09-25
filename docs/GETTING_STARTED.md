@@ -45,7 +45,7 @@ Do not mix assets from different releases.
 
 ## First-run setup
 
-Start by naming your knowledge base, then finish setup. Choose **Add** to select an existing note and its destination; your Index does not automatically adopt storage folders.
+Start by naming your knowledge base, then finish setup. Choose **Add** to select an existing note and its destination; your Index does not automatically adopt storage folders. Changing Settings first does not skip the wizard; reopen it any time with **Run setup again…** from the Command palette or **Settings → Setup wizard → Run setup**. It changes only plugin settings and is available for Generic knowledge bases.
 
 Expand **Customize labels, folders, and templates** only when you want to change the defaults. It contains:
 
@@ -89,7 +89,7 @@ When a note's presence is surprising, open its row or inspector and choose **Why
 
 ## Create or add notes
 
-Use **Add → Create note** or **Create note from template or empty note…**. For each note, choose:
+Use **Add → Create note** or **Create note…**. For each note, choose:
 
 - the title;
 - a vault-relative destination folder;
@@ -103,11 +103,11 @@ In a Generic base, **Add → Add existing note to Index** records durable direct
 
 Creating a note in the default new-note folder does not enroll it in the Index unless the creation flow explicitly targets the Index or another selected organization destination. Storage and membership are separate choices.
 
-An imported path-free subject can remain as **No note** until you create or link a note deliberately. Open Smart queues → **Imported placeholders needing notes**, run **Open imported placeholder queue**, or run **Resolve next imported placeholder…**. Exact normalized title and configured-ID candidates are review hints only; the plugin never chooses or links one automatically.
+An imported path-free subject can remain as **No note** until you create or link a note deliberately. Open Smart queues → **Imported placeholders needing notes**, run **Show imported topics without notes**, or run **Create or link the next imported topic…**. Exact normalized title and configured-ID candidates are review hints only; the plugin never chooses or links one automatically.
 
 ## Organize existing notes in bulk
 
-Choose **Organize** in the Command Center or run **Organize vault notes across knowledge bases…**. In this workflow, **Base** means a KBCC knowledge base, not an Obsidian `.base` file.
+Choose **Organize** in the Command Center or run **Organize notes…**. In this workflow, **Base** means a KBCC knowledge base, not an Obsidian `.base` file.
 
 1. In **Notes**, select one or many existing Markdown notes. Selecting a folder takes a one-time snapshot of its current eligible Markdown descendants. It does not link that folder, and notes created there later do not join automatically.
 2. In **Destinations**, choose one or more KBCC knowledge bases. Shared choices can keep, set, or clear the primary Index/Library placement and keep, add, or replace Collection memberships. Use **Skip this note** or **Custom destinations** for a per-note exception.
@@ -117,9 +117,9 @@ A note has at most one primary Index or Library placement inside each knowledge 
 
 You can start the same review from the editor or File Explorer context menu for a single note, an Obsidian multi-selection, or a folder snapshot. On compatible desktop drags, dropping safe existing-note path text on **Organize** preselects those notes. Drop support is optional; if a theme, platform, or drag source does not provide a safe text path, use the context menu or the Organizer's vault tree.
 
-The active Markdown editor also shows an accessible organization indicator. Activate it to open **Organize this note**, with its existing primary placement and Collection memberships prefilled in the **Choose location → Review** flow. For the separate read-only all-base summary of primary placement, Collections, provenance and issues, run **Show current note’s knowledge-base memberships**. The icon, accessible label, tooltip, and count carry the meaning; green means organized in the current base, the accent state means organized only elsewhere, muted means ordinarily unorganized, and red is reserved for broken persisted organization.
+The active Markdown editor also shows an accessible organization indicator. Activate it to open **Organize this note**, with its existing primary placement and Collection memberships prefilled in the **Choose location → Review** flow. For the separate read-only all-base summary of primary placement, Collections, provenance and issues, run **Where is this note organized?**. The icon, accessible label, tooltip, and count carry the meaning; green means organized in the current base, the accent state means organized only elsewhere, muted means ordinarily unorganized, and red is reserved for broken persisted organization.
 
-Apply rechecks the selected file identities, KBCC destinations, and Sync generation. If a note or destination changed after review, Apply aborts without a partial result; refresh the review and inspect it again. Every affected knowledge base gets its normal durable per-base Undo entry. During the same plugin session, run **Note organizer: Undo last multi-base change** or **Note organizer: Redo last multi-base change** to reverse the latest Organizer batch across all affected bases together.
+Apply rechecks the selected file identities, KBCC destinations, and Sync generation. If a note or destination changed after review, Apply aborts without a partial result; refresh the review and inspect it again. Every affected knowledge base gets its normal durable per-base Undo entry. During the same plugin session, run **Undo last organizer change** or **Redo last organizer change** to reverse the latest Organizer batch across all affected bases together.
 
 The Organizer bulk-organizes existing notes only. It does not bulk-create Markdown files. Use the Create note flow separately for each file you want to create. In the ENT clinical preset, destination eligibility, protected Library source kinds, and canonical Index grouping remain enforced; incompatible placements are rejected before Apply.
 
@@ -165,7 +165,7 @@ Permanent deletion is available only for an archived base and requires typed con
 
 Version 0.10 and later wrap earlier single-base organization into one knowledge base without intentionally resetting it. The first upgraded copy receives a random full vault identity plus a non-secret fingerprint of its legacy organization.
 
-When a Generic base stored in pre-v15 plugin data is upgraded, its former `primaryFolder` temporarily becomes one deterministic **legacy linked-folder source**. This prevents notes from disappearing during upgrade. A persistent warning and the **Review legacy index source…** command list the real notes currently available on this device and supplied only by that source. Before unlinking, let Obsidian Sync finish and confirm in the review that the folder's Markdown contents are complete; Apply is blocked when a non-root source folder is unavailable, and zero local notes is not treated as proof that other synced devices are empty. Keep selected notes as durable direct members and unlink the folder in one Undo-protected action, intentionally **Keep linked**, or choose **Not now**. Until you resolve the warning, current and future Markdown below that legacy source can still enter automatically. No review choice deletes, moves, renames, or rewrites Markdown.
+When a Generic base stored in pre-v15 plugin data is upgraded, its former `primaryFolder` temporarily becomes one deterministic **legacy linked-folder source**. This prevents notes from disappearing during upgrade. A persistent warning and the **Review folder that adds notes automatically…** command list the real notes currently available on this device and supplied only by that source. Before unlinking, let Obsidian Sync finish and confirm in the review that the folder's Markdown contents are complete; Apply is blocked when a non-root source folder is unavailable, and zero local notes is not treated as proof that other synced devices are empty. Keep selected notes as durable direct members and unlink the folder in one Undo-protected action, intentionally **Keep linked**, or choose **Not now**. Until you resolve the warning, current and future Markdown below that legacy source can still enter automatically. No review choice deletes, moves, renames, or rewrites Markdown.
 
 When upgrading a synced vault on several devices:
 
@@ -209,7 +209,7 @@ Export current organization and back up the vault first. Run **Knowledge Base Co
 
 Removing the plugin folder removes its <code>data.json</code>, including synced knowledge-base definitions, settings, Libraries, Collections, pins, visual hierarchy, and named snapshots. It does not by itself reliably remove device-only routes, collapsed sections, Undo/Redo history, local Sync/Recovery facts, or update-announcement history because Obsidian stores those App-local values outside the plugin folder. A third, bounded rename-recovery journal may temporarily contain the vault identity and old/new vault-relative paths until an interrupted organization repair is durably completed. A fourth, bounded return-navigation history can contain the vault identity, up to 24 opened-note paths, their originating base and tab, a selected-record path, literal search text entered in KBCC, compact-detail state, and scroll positions. KBCC does not read or copy note bodies into this history, but user-entered search text can itself be sensitive; the history is not synced. The clear command removes all five plugin-owned App-local values without changing <code>data.json</code>, Markdown notes, attachments, or recovery export files, and local tracking stays suppressed until Obsidian restarts. Disable or uninstall in that same session. If the plugin was already removed without clearing them, reinstall and enable the same or a newer release, run the command, then remove it again.
 
-The fifth App-local key is a legacy external-image permission value from private test builds. It is ignored for image loading in 0.24.0 and included only for cleanup by Clear device-local data. A failed cleanup cannot enable online covers, including after restart. Details are in [Local data](LOCAL_DATA.md).
+The fifth App-local key is a legacy external-image permission value from private test builds. It is ignored for image loading in 0.24.0 and later and included only for cleanup by Clear device-local data. A failed cleanup cannot enable online covers, including after restart. Details are in [Local data](LOCAL_DATA.md).
 
 ## Next
 

@@ -2577,11 +2577,23 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   public openSetupWizard(): void {
+    if (!this.guardLoadedBase()) return;
+    if (this.plugin.isClinicalMode()) {
+      new Notice("Setup is only for generic knowledge bases. Change this one from the plugin settings instead.", 7000);
+      return;
+    }
+    if (this.plugin.isDataReadOnly()) {
+      new Notice("Editing is paused to protect your data, so setup cannot run now. Run the sync and backup status command for details.", 8000);
+      return;
+    }
     const ownsBase = this.createOpenedBaseGuard();
-    const settings = this.plugin.data.settings;
-    new WorkspaceSetupModal(this.app, settings, async (value) => {
-      if (!ownsBase()) return;
+    new WorkspaceSetupModal(this.app, this.plugin.data.settings, async (value) => {
+      if (!ownsBase()) throw new Error("Setup was not saved. Wait for sync to finish; if the knowledge base changed, reopen setup.");
       this.plugin.assertDataWritable();
+      // A settled no-op Sync reload preserves this form's ownership while
+      // replacing PluginData. Apply its draft to the current settings object.
+      const settings = this.plugin.data.settings;
+      if (settings.workspaceMode !== "generic") throw new Error("Setup is only for generic knowledge bases.");
       for (const folder of [value.primaryFolder, value.defaultNoteFolder, value.templatesFolder, value.proposalFolder, value.exportsFolder]) {
         const error = validateWritableFolderPath(folder, this.app.vault.configDir);
         if (error) throw new Error(error);
@@ -2592,12 +2604,12 @@ export class EntVaultCommandCenterView extends ItemView {
         const template = this.app.vault.getAbstractFileByPath(value.defaultTemplatePath);
         if (!(template instanceof TFile)) throw new Error("The selected default template could not be found.");
       }
-      Object.assign(settings, value, { setupComplete: true, workspaceMode: "generic" });
+      Object.assign(settings, value, { setupComplete: true });
       await this.plugin.savePluginData();
       if (!ownsBase()) return;
       await this.plugin.refreshViews();
       if (!ownsBase()) return;
-      new Notice(`${settings.workspaceName} is ready. No existing note was modified.`);
+      new Notice(`${settings.workspaceName} is ready. Next, choose Add → Add existing note to Index to bring in your notes. No existing note was modified.`, 10000);
     }).open();
   }
 
@@ -3019,7 +3031,7 @@ export class EntVaultCommandCenterView extends ItemView {
       cls: "ent-cc-button ent-cc-note-organizer-launch",
       type: "button",
       attr: {
-        "aria-label": "Organize vault notes across knowledge bases. You can also drop existing Obsidian Markdown notes here.",
+        "aria-label": "Organize notes. You can also drop existing Obsidian Markdown notes here.",
         title: "Organize notes across knowledge bases",
       },
     });
@@ -3029,7 +3041,7 @@ export class EntVaultCommandCenterView extends ItemView {
       if (options.isConnected) this.workspaceOptionsOpen = options.open;
     });
     options.createEl("summary", {
-      cls: "ent-cc-button", text: mobileBrowse ? "Details" : "Workspace options",
+      cls: "ent-cc-button", text: mobileBrowse ? "Details" : "More",
       attr: { "data-kbcc-focus": "workspace-options" },
     });
     if (mobileBrowse) {
@@ -3089,7 +3101,7 @@ export class EntVaultCommandCenterView extends ItemView {
       setIcon(manage.createSpan(), "list-tree");
       manage.createSpan({ text: "Manage" });
       manage.addEventListener("click", () => this.openIndexManager());
-      const arrange = (this.curriculumArrangeMode ? primaryActions : actions).createEl("button", {
+      const arrange = (this.curriculumArrangeMode || !mobileBrowse ? primaryActions : actions).createEl("button", {
         cls: `ent-cc-button ${this.curriculumArrangeMode ? "is-active" : ""}`,
         type: "button",
         attr: { "aria-pressed": String(this.curriculumArrangeMode) },
@@ -3104,7 +3116,7 @@ export class EntVaultCommandCenterView extends ItemView {
       });
     }
     if (this.plugin.data.activeTab === "collections") {
-      const edit = (this.editMode ? primaryActions : actions).createEl("button", {
+      const edit = (this.editMode || !mobileBrowse ? primaryActions : actions).createEl("button", {
         cls: `ent-cc-button ${this.editMode ? "is-active" : ""}`,
         type: "button",
         attr: { "aria-pressed": String(this.editMode) },
@@ -3126,7 +3138,7 @@ export class EntVaultCommandCenterView extends ItemView {
       addHeading.createSpan({ text: "New heading" });
       disableWhenReadOnly(addHeading, readOnly, "Create a Library heading");
       addHeading.addEventListener("click", () => this.promptNewLibraryHeading(activeLibraryId));
-      const edit = (this.editMode ? primaryActions : actions).createEl("button", {
+      const edit = (this.editMode || !mobileBrowse ? primaryActions : actions).createEl("button", {
         cls: `ent-cc-button ${this.editMode ? "is-active" : ""}`,
         type: "button",
         attr: { "aria-pressed": String(this.editMode) },
@@ -3151,11 +3163,14 @@ export class EntVaultCommandCenterView extends ItemView {
         });
       });
     }
-    const undo = iconButton(actions, "undo-2", "Undo personal organization change", "ent-cc-history-action");
+    // Desktop keeps Arrange/Edit and Undo beside Add; the phone's first row is
+    // reserved for base selection, Add, and Details.
+    const undo = iconButton(mobileBrowse ? actions : primaryActions, "undo-2", "Undo last organization change", "ent-cc-history-action");
+    if (!mobileBrowse) primaryActions.append(options);
     undo.disabled = readOnly || this.plugin.data.undoStack.length === 0;
     disableWhenReadOnly(undo, readOnly, "Undo an organization change");
     undo.addEventListener("click", () => this.run(() => this.plugin.undo()));
-    const redo = iconButton(actions, "redo-2", "Redo personal organization change", "ent-cc-history-action");
+    const redo = iconButton(actions, "redo-2", "Redo last organization change", "ent-cc-history-action");
     redo.disabled = readOnly || this.plugin.data.redoStack.length === 0;
     disableWhenReadOnly(redo, readOnly, "Redo an organization change");
     redo.addEventListener("click", () => this.run(() => this.plugin.redo()));
@@ -3585,19 +3600,23 @@ export class EntVaultCommandCenterView extends ItemView {
     const indexRecords = this.plugin.getIndexRecords();
     const indexCount = indexRecords.length;
     const placeholders = indexRecords.filter((record) => record.isPlaceholder).length;
-    health.createSpan({ text: `${indexCount} index entries` });
-    health.createSpan({ text: `${indexCount - placeholders} linked notes` });
-    health.createSpan({ text: `${placeholders} without linked notes` });
+    // The entry total always shows; other counts appear only once they are non-zero.
+    const count = (value: number, singular: string, plural: string, always = false): void => {
+      if (always || value > 0) health.createSpan({ text: `${value} ${value === 1 ? singular : plural}` });
+    };
+    count(indexCount, "index entry", "index entries", true);
+    count(indexCount - placeholders, "linked note", "linked notes");
+    count(placeholders, "without a linked note", "without linked notes");
     const proposalCount = this.records.filter((record) => record.role === "proposal").length;
     if (this.plugin.isClinicalMode()) {
       const reviewedCount = this.records.filter((record) => record.reviewStatus === "reviewed").length;
-      health.createSpan({ text: `${reviewedCount} marked reviewed` });
-      health.createSpan({ text: `${proposalCount} inbox` });
+      count(reviewedCount, "marked reviewed", "marked reviewed");
+      count(proposalCount, "in inbox", "in inbox");
       return;
     }
-    health.createSpan({ text: `${proposalCount} inbox` });
-    health.createSpan({ text: `${this.plugin.data.collections.length} collections` });
-    health.createSpan({ text: `${this.plugin.data.pinnedPaths.length} pinned` });
+    count(proposalCount, "in inbox", "in inbox");
+    count(this.plugin.data.collections.length, "collection", "collections");
+    count(this.plugin.data.pinnedPaths.length, "pinned", "pinned");
   }
 
   /** Refresh count-only chrome without replacing the focused mobile search input. */
@@ -5684,7 +5703,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const placeholderQueue: QueueDefinition = {
       id: "imported-placeholders",
       title: "Imported placeholders needing notes",
-      description: `${placeholders.total} unresolved subject${placeholders.total === 1 ? "" : "s"}; ${placeholders.withCandidates} ${placeholders.withCandidates === 1 ? "has" : "have"} exact local title or ID candidates. Choose each subject to create or link deliberately—KBCC never links automatically.`,
+      description: `${placeholders.total} unresolved subject${placeholders.total === 1 ? "" : "s"}; ${placeholders.withCandidates} ${placeholders.withCandidates === 1 ? "has" : "have"} exact local title or ID candidates. Choose each subject to create or link deliberately; the plugin never links automatically.`,
       records: placeholders.ordered,
     };
     if (!this.plugin.isClinicalMode()) {
@@ -6931,7 +6950,7 @@ export class EntVaultCommandCenterView extends ItemView {
     menu.addItem((item) => item.setTitle("Quick entry…").setIcon("zap").setDisabled(this.plugin.isDataReadOnly?.() ?? false).onClick(() => {
       if (ownsBase()) this.openQuickEntry(this.app.workspace.getActiveFile()?.path);
     }));
-    menu.addItem((item) => item.setTitle("Organize vault notes across knowledge bases…").setIcon("network").onClick(() => {
+    menu.addItem((item) => item.setTitle("Organize notes…").setIcon("network").onClick(() => {
       this.plugin.openNoteOrganizer();
     }));
     menu.addItem((item) => item.setTitle(`Manage ${this.plugin.data.settings.indexLabel}`).setIcon("list-tree").onClick(() => {
@@ -6958,10 +6977,10 @@ export class EntVaultCommandCenterView extends ItemView {
       if (ownsBase()) this.startAddExistingToIndex();
     }));
     menu.addSeparator();
-    menu.addItem((item) => item.setTitle("Undo personal organization change").setIcon("undo-2").setDisabled(this.plugin.data.undoStack.length === 0).onClick(() => {
+    menu.addItem((item) => item.setTitle("Undo last organization change").setIcon("undo-2").setDisabled(this.plugin.data.undoStack.length === 0).onClick(() => {
       if (ownsBase()) this.run(() => this.plugin.undo());
     }));
-    menu.addItem((item) => item.setTitle("Redo personal organization change").setIcon("redo-2").setDisabled(this.plugin.data.redoStack.length === 0).onClick(() => {
+    menu.addItem((item) => item.setTitle("Redo last organization change").setIcon("redo-2").setDisabled(this.plugin.data.redoStack.length === 0).onClick(() => {
       if (ownsBase()) this.run(() => this.plugin.redo());
     }));
     menu.addItem((item) => item

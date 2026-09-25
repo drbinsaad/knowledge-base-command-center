@@ -56,7 +56,7 @@ Use **Add → Add existing note to Index** or the current-note action in a Gener
 
 Removing or hiding a record affects only the active knowledge base. For a note supplied by a linked folder, hiding records an Index exclusion instead of touching the file. Unlinking the folder removes only that source rule; a separately added direct member remains indexed. Generic membership, grouping, nesting, Library classification, Collections, pins, and queues never move, rename, delete, or rewrite Markdown.
 
-Generic bases migrated from pre-v15 data temporarily keep the old `primaryFolder` as a reviewable **legacy linked-folder source** so the pre-upgrade result set does not disappear. The Command Center and Settings keep a warning visible until you choose **Review…** or run **Review legacy index source…** from the Command palette. The review lists only real Markdown notes currently available on this device whose membership depends on that source alone. It initially selects all notes for preservation when they fit within the direct-membership limit; use the filter, **Clear all notes**, or individual checkboxes as needed. Before **Apply review & unlink** becomes available, confirm that Obsidian Sync has finished and the folder's Markdown contents are complete on this device. A missing non-root source blocks Apply, and zero local candidates is never treated as proof that every synced copy is empty. Apply makes selected notes direct members and removes the folder rule in one Undo-protected transaction. An unusually large source that cannot fit is left unselected and explains its capacity instead of truncating the choice. **Keep linked** records an intentional dynamic-folder choice and remains safe when a folder is temporarily unavailable. **Not now** changes nothing, and the warning remains. None of these actions edits, moves, renames, or deletes Markdown.
+Generic bases migrated from pre-v15 data temporarily keep the old `primaryFolder` as a reviewable **legacy linked-folder source** so the pre-upgrade result set does not disappear. The Command Center and Settings keep a warning visible until you choose **Review…** or run **Review folder that adds notes automatically…** from the Command palette. The review lists only real Markdown notes currently available on this device whose membership depends on that source alone. It initially selects all notes for preservation when they fit within the direct-membership limit; use the filter, **Clear all notes**, or individual checkboxes as needed. Before **Apply review & unlink** becomes available, confirm that Obsidian Sync has finished and the folder's Markdown contents are complete on this device. A missing non-root source blocks Apply, and zero local candidates is never treated as proof that every synced copy is empty. Apply makes selected notes direct members and removes the folder rule in one Undo-protected transaction. An unusually large source that cannot fit is left unselected and explains its capacity instead of truncating the choice. **Keep linked** records an intentional dynamic-folder choice and remains safe when a folder is temporarily unavailable. **Not now** changes nothing, and the warning remains. None of these actions edits, moves, renames, or deletes Markdown.
 
 Linked Index rows show **Direct**, **Linked folder**, or **Protected source** so membership authority is visible. An unresolved placeholder shows one **No note** status; its imported provenance remains available in the tooltip, accessible label, and inspector. Compact panes use shorter equivalents while keeping the full explanation available to assistive technology. Choose **Why this appears** from a record menu or inspector to see every authority that applies at once, including the exact linked sources, exclusion, primary Library, Collections, pin and Next state. Its Markdown path is labelled separately as storage location and never presented as a membership rule.
 
@@ -64,11 +64,11 @@ The ENT preset protects canonical source classification and folder scope. It sti
 
 ## Global Note Organizer
 
-The Global Note Organizer coordinates existing-note organization across the whole KBCC installation. Open it with **Organize** in the Command Center, **Organize vault notes across knowledge bases…** in the Command palette, or **Organize current note across knowledge bases…** for the active Markdown note. Here **knowledge base** and **Base** mean a KBCC knowledge base; the Organizer does not read or edit native Obsidian `.base` definitions.
+The Global Note Organizer coordinates existing-note organization across the whole KBCC installation. Open it with **Organize** in the Command Center, **Organize notes…** in the Command palette, or **Organize this note…** for the active Markdown note. Here **knowledge base** and **Base** mean a KBCC knowledge base; the Organizer does not read or edit native Obsidian `.base` definitions.
 
 ### Organize the current note
 
-Activate the editor's **KBCC organization indicator**, or run **Organize current note across knowledge bases…**, to start directly at **Choose location → Review**. The original note is fixed; there is no vault tree or per-note override step. Existing Index or Library placement prefills the controls, including its heading and parent where available. Choosing another knowledge base loads that base's current destinations before you continue.
+Activate the editor's **KBCC organization indicator**, or run **Organize this note…**, to start directly at **Choose location → Review**. The original note is fixed; there is no vault tree or per-note override step. Existing Index or Library placement prefills the controls, including its heading and parent where available. Choosing another knowledge base loads that base's current destinations before you continue.
 
 1. Choose **Knowledge base** and **Place in**.
 2. For the Index, choose **Index heading**, then **Under heading or note**. Choose **Directly under this index heading** for the root, or a full breadcrumb for an existing indexed note or unresolved placeholder parent. A parent placeholder is a destination, not a Markdown file being created or selected for organization. Larger lists offer **Find a heading or note**; filtering keeps your selected destination even when it does not match the query, and shows at most 300 matching choices at once.
@@ -88,7 +88,7 @@ The full Organizer's **Notes** step mirrors the vault's folder hierarchy and sel
 - removing or moving a selected file before Apply makes the prepared review stale; and
 - selecting a folder never authorizes moving, renaming, deleting, creating, or rewriting any descendant.
 
-The same snapshot behavior is used by Obsidian's public File Explorer context menus. Right-click one Markdown note for **Organize in KBCC…** and **Show KBCC memberships**; right-click a supported multi-selection or folder for the corresponding current-note-count action. The editor context menu offers the single-note actions for its Markdown file.
+The same snapshot behavior is used by Obsidian's public File Explorer context menus. Right-click one Markdown note for **Organize in command center…** and **Show where this note is organized**; right-click a supported multi-selection or folder for the corresponding current-note-count action. The editor context menu offers the single-note actions for its Markdown file.
 
 The **Organize** header button is also a progressive drop target for compatible Obsidian drag sources that expose bounded `text/plain` or `text/uri-list` vault paths. Every candidate must resolve to a current eligible Markdown note. Operating-system files, absolute paths, unsafe URLs, missing paths, restricted paths, and non-Markdown files do not enter the review. A vault-qualified `obsidian://open` URI is rejected even when it names the current vault because the drop surface cannot authenticate that vault name; use an unqualified vault-relative path instead. Because drag payloads differ by platform and theme, the File Explorer context menu and the Organizer's own vault tree are the supported fallback.
 
@@ -115,14 +115,14 @@ An unchanged external reload keeps the Organizer and its prepared review open. A
 
 Each affected knowledge base receives its ordinary restart-durable per-base Undo entry. Before the primary plugin-store mutation, a multi-base Organizer Apply stages the exact required-Undo snapshot for every affected base as one protected batch. If those aggregate snapshots cannot fit within the shared 4 MiB device-local history budget, the whole Apply is refused without a partial organization change. Split the affected bases across batches; because each Undo entry is an exact whole-base snapshot, selecting fewer notes while targeting the same bases may not reduce this journal size. The newest multi-base Organizer batch also has two session-only commands:
 
-- **Note organizer: Undo last multi-base change** reverses all affected bases together; and
-- **Note organizer: Redo last multi-base change** reapplies that same batch.
+- **Undo last organizer change** reverses all affected bases together; and
+- **Redo last organizer change** reapplies that same batch.
 
-Those coordinated commands remain available only in the plugin session that applied the batch and only while their exact newest-Undo guards still match. After restart—or after another incompatible organization change—use each base's durable **Undo personal organization change** action separately. Undo changes KBCC plugin data only and never reverses a Markdown file operation because the Organizer performs none.
+Those coordinated commands remain available only in the plugin session that applied the batch and only while their exact newest-Undo guards still match. After restart—or after another incompatible organization change—use each base's durable **Undo last organization change** action separately. Undo changes KBCC plugin data only and never reverses a Markdown file operation because the Organizer performs none.
 
 ### Active-note indicator
 
-Every open Markdown editor gets an interactive KBCC organization indicator. Activate it to open the current note's **Choose location → Review** flow directly. For a read-only all-base summary instead, run **Show current note’s knowledge-base memberships** or use **Show KBCC memberships** in the note's context menu; that summary still offers **Organize…** when a change is needed.
+Every open Markdown editor gets an interactive KBCC organization indicator. Activate it to open the current note's **Choose location → Review** flow directly. For a read-only all-base summary instead, run **Where is this note organized?** or use **Show where this note is organized** in the note's context menu; that summary still offers **Organize…** when a change is needed.
 
 The indicator conveys state through icon, accessible label, tooltip, class, and an optional multi-base count; color is supplementary:
 
@@ -137,7 +137,7 @@ A separate **Return to KBCC** action appears directly beside the organization in
 
 Return history is bounded to 24 vault-scoped note routes and 256 KiB in a separate device-local App value. It keeps one route per note path, so opening the same note from a second KBCC page replaces the older origin for every editor showing that path. It can contain vault identity, note and selected-record paths, base/tab, the literal search text entered in KBCC, compact-detail state, bounded browse limits, and scroll positions. Saved browse-row and structural-section limits are each capped at 10,000; if a page had been expanded beyond that cap, Return restores the bounded available position rather than recreating an unbounded DOM. KBCC does not read or copy note bodies into this history, but user-entered search text can itself be sensitive. The history is not synced and **Clear device-local data** removes it.
 
-The Organizer's bulk scope is existing Markdown notes. It does not create notes in bulk; use **Create note from template or empty note…** separately when a new file is required.
+The Organizer's bulk scope is existing Markdown notes. It does not create notes in bulk; use **Create note…** separately when a new file is required.
 
 ## Index Manager
 
@@ -202,7 +202,7 @@ Cover lookup first checks the exact property name. If it is absent, one unique c
 
 The card now distinguishes a missing property, an empty property, a note or image not available on this device, an unsupported image/link, and an image that could not load. Open the linked image directly in Obsidian when checking availability; never post private note contents or recovery codes in diagnostic screenshots.
 
-Online covers are not supported in 0.24.0: HTTP/HTTPS and other note-supplied URL schemes are not loaded, and there is no Allow external images action. Put the image in your vault and set the cover property to its local link. Display settings, Sync, imports, recovery, Undo and legacy private-test permission values cannot enable remote loading. The [Library display and privacy guide](LIBRARY_DISPLAY_AND_PRIVACY.md) explains local cover setup and the deferred online proposal. The [0.24.0 device record](release-evidence/0.24.0-iphone.md) explicitly leaves physical-device and controlled two-device Sync checks unverified.
+Online covers are not supported in 0.25.0: HTTP/HTTPS and other note-supplied URL schemes are not loaded, and there is no Allow external images action. Put the image in your vault and set the cover property to its local link. Display settings, Sync, imports, recovery, Undo and legacy private-test permission values cannot enable remote loading. The [Library display and privacy guide](LIBRARY_DISPLAY_AND_PRIVACY.md) explains local cover setup and the deferred online proposal. The [0.24.0 device record](release-evidence/0.24.0-iphone.md) explicitly leaves physical-device and controlled two-device Sync checks unverified.
 
 ### Organize a Library
 
@@ -283,11 +283,11 @@ Depending on the profile and current organization, smart queues can surface:
 - ungrouped records; and
 - recently changed records.
 
-Queues are views over existing records and plugin state. They do not create duplicate notes. The placeholder queue is always first: choose a subject to open its deliberate create/link choices, or run **Resolve next imported placeholder…** to begin with the next item. Exact candidates are hints, not automatic links, and any existing portable owners are disclosed before a deliberate merge.
+Queues are views over existing records and plugin state. They do not create duplicate notes. The placeholder queue is always first: choose a subject to open its deliberate create/link choices, or run **Create or link the next imported topic…** to begin with the next item. Exact candidates are hints, not automatic links, and any existing portable owners are disclosed before a deliberate merge.
 
 ## Create notes
 
-Use **Add → Create note** or **Create note from template or empty note…**. In the generic profile the form opens aimed at your **Inbox** by default — type a title, press Create, and the note lands in the configured Inbox folder without joining the Index. A **Destination** row at the top shows the current target, and **Change…** re-targets the same form at:
+Use **Add → Create note** or **Create note…**. In the generic profile the form opens aimed at your **Inbox** by default — type a title, press Create, and the note lands in the configured Inbox folder without joining the Index. A **Destination** row at the top shows the current target, and **Change…** re-targets the same form at:
 
 - the **Index**, after choosing a visual group;
 - a **Collection** heading or subheading, picked by its full path; or
@@ -322,7 +322,7 @@ Notes created through the primary action join only the destination explicitly ch
 
 ## Quick entry and shortcuts
 
-Open Quick entry from the lightning-bolt desktop ribbon action or the **Quick entry…** command. The Command Center header uses **Add** for capture and **Organize** for existing-note placement; layout and management controls are under **Workspace options**. On mobile, Obsidian places ribbon actions in its **Open** menu. The Quick entry hub shows the active knowledge base and offers:
+Open Quick entry from the lightning-bolt desktop ribbon action or the **Quick entry…** command. The Command Center header uses **Add** for capture and **Organize** for existing-note placement; **Arrange** (or **Edit** in Collections) and **Undo** sit beside them on desktop, and the remaining layout and management controls are under **More** (**Details** on iPhone and iPad). On mobile, Obsidian places ribbon actions in its **Open** menu. The Quick entry hub shows the active knowledge base and offers:
 
 - switch knowledge base;
 - create a portable **No note** subject;
@@ -393,6 +393,22 @@ The first item creates one managed **Follow-up notes** block at the end of the n
 
 Quick append refuses locked notes, ambiguous managed markers, malformed frontmatter, oversized notes, and stale undo. Its five-minute undo stores only positions and integrity fingerprints in memory; it never stores the note body in plugin data. Ordinary attachments remain controlled by Obsidian.
 
+## Attach files
+
+Open the Markdown note that should hold the files, then run **Attach file to current note…** (or use `obsidian://kbcc-attach-current`). You can choose up to 20 files at once, each up to 100 MB, of **any type**: PDF, Word, PowerPoint, Excel, images, audio, video, ZIP, and so on. Each file is copied into the vault; your original is never changed, and an existing vault file is never overwritten.
+
+**Show in note** controls how each link appears:
+
+| Choice | Result |
+| --- | --- |
+| **Preview images, PDF, audio, and video; link the rest** (default) | Files Obsidian can display inside a note are embedded (`![[paper.pdf]]`). Other types, such as `.pptx`, `.docx`, `.xlsx`, or `.zip`, become ordinary links (`[[slides.pptx]]`) that open in their own app. |
+| **Embed every file** | Every file uses the embed form. Obsidian shows a placeholder for types it cannot display. |
+| **Link only** | Every file becomes an ordinary link, including images and PDFs. |
+
+**Insert link** places all the links together, in the order you chose the files: at the editor cursor, under the configured marker or heading, or at the end of the note. **Storage** follows the knowledge base's attachment setting (Obsidian's own setting, a fixed folder, a folder beside the note, or a folder you choose each time).
+
+When you open Attach file from the Command Center instead of the note's editor, a cursor default starts at **At the end of the note**, because there is no cursor to use. If the note cannot take the links (for example, it has an unclosed code block), nothing is copied and the notice says why. If one file cannot be copied, the files before it are still copied and linked, and a notice tells you which file failed. Files after it are not copied. To see Word, PowerPoint, and other non-Obsidian files in the File explorer, turn on **Settings → Files and links → Detect all file extensions** in Obsidian.
+
 ## Portable placeholders
 
 A portable Index or Library blueprint can describe a subject without exposing its original Markdown path. If no local note is linked after import, the subject appears as **No note**.
@@ -406,7 +422,7 @@ In a Generic base, a placeholder can:
 
 While the linked Markdown note is present, **Change linked note** and **Unlink note** preserve the portable identity and organization. If that file later disappears locally, the subject becomes an unresolved placeholder but retains its prior path binding. It stays in the queue, a file that later arrives at the same path resolves it automatically, and you may deliberately link another eligible note instead. Choosing a note already owned by another portable subject requires explicit confirmation before identities are merged.
 
-Open Smart queues → **Imported placeholders needing notes** or run **Open imported placeholder queue** for the complete active-base list. It separates Index, Library, and unplaced blueprint subjects. Candidate discovery scans every eligible Markdown note in the vault, including unindexed notes and notes outside the active base's storage or linked-folder rules, for an exact normalized title or configured-ID match. The count is unresolved subjects with at least one match, not the number of matching notes, and nothing is selected automatically. **Resolve next imported placeholder…** opens the next unresolved subject's existing guarded create/link actions.
+Open Smart queues → **Imported placeholders needing notes** or run **Show imported topics without notes** for the complete active-base list. It separates Index, Library, and unplaced blueprint subjects. Candidate discovery scans every eligible Markdown note in the vault, including unindexed notes and notes outside the active base's storage or linked-folder rules, for an exact normalized title or configured-ID match. The count is unresolved subjects with at least one match, not the number of matching notes, and nothing is selected automatically. **Create or link the next imported topic…** opens the next unresolved subject's existing guarded create/link actions.
 
 Before a single-base portable import, **Predicted outcome** simulates the production import against an isolated copy. It shows incoming additions, existing identity matches, selected subjects still awaiting a note, the whole post-import placeholder count by placement, and how many unresolved placeholders have at least one exact eligible vault-wide candidate. Nothing is linked during preview. A predicted import that leaves 100 or more selected subjects unresolved requires an extra acknowledgement; after import, use **Open placeholder queue**, **Undo import**, or Close from the completion screen.
 
@@ -494,7 +510,7 @@ Replace requires the displayed typed phrase. Before changing plugin data, the pl
 
 ## Sync and recovery center
 
-Run **Open sync & recovery center** from the Command palette, or open **Manage index → Diagnostics → Sync & recovery center**. The modal remains available in compatibility or sticky read-only mode and reports a fixed, bounded set of local facts:
+Run **Check sync and backup status** from the Command palette, or open **Manage index → Diagnostics → Sync & recovery center**. The modal remains available in compatibility or sticky read-only mode and reports a fixed, bounded set of local facts:
 
 - the active knowledge-base name and Generic/ENT profile;
 - its semantic revision, a shortened semantic-head fingerprint, and whether it matches the last committed local snapshot;
@@ -537,28 +553,29 @@ The ENT preset also exposes safety-badge display and optional advanced canonical
 
 ## Commands
 
-- Open workspace
+- Open main page
+- Run setup again…
 - Open Library: *Library name* (one dynamically maintained global command for every active Library)
 - New knowledge base…
 - Switch knowledge base…
 - Manage knowledge bases…
 - Manage libraries…
-- Open sync & recovery center
+- Check sync and backup status
 - Open what’s new
-- Open export / import center
-- Open multi-base portfolio transfer
+- Back up, export, or import…
+- Export or import several knowledge bases…
 - Manage index…
-- Organize vault notes across knowledge bases…
-- Organize current note across knowledge bases…
-- Show current note’s knowledge-base memberships
-- Note organizer: Undo last multi-base change
-- Note organizer: Redo last multi-base change
-- Open imported placeholder queue
-- Resolve next imported placeholder…
-- Review legacy index source… (shown only while an upgraded Generic folder source still needs a choice)
-- Open taxonomy health center
+- Organize notes…
+- Organize this note…
+- Where is this note organized?
+- Undo last organizer change
+- Redo last organizer change
+- Show imported topics without notes
+- Create or link the next imported topic…
+- Review folder that adds notes automatically… (shown only while an upgraded Generic folder source still needs a choice)
+- Check names and structure for problems
 - Add or create…
-- Create note from template or empty note…
+- Create note…
 - Attach file to current note…
 - Add current note to a collection
 - Quick entry…

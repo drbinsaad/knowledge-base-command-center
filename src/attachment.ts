@@ -3,8 +3,58 @@ import { sanitizeFileName } from "./model";
 import { markdownBodyStartLine } from "./follow-up";
 
 export const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
+/** Files accepted by one Attach file submission; each file still has its own size limit. */
+export const MAX_ATTACHMENT_FILES = 20;
+
+/** The files were copied but their links were not inserted; retrying would copy them again. */
+export class AttachmentLinkInsertionError extends Error {}
 
 export type AttachmentInsertTarget = "marker" | "heading" | "end";
+
+/**
+ * How a generated link is shown in the note. "auto" previews every type that
+ * Obsidian can render inside a note and links everything else.
+ */
+export type AttachmentDisplayMode = "auto" | "embed" | "link";
+
+/** Extensions Obsidian renders inline when embedded with `![[…]]`. */
+const PREVIEWABLE_ATTACHMENT_EXTENSIONS = new Set([
+  // Images
+  "avif", "bmp", "gif", "jpeg", "jpg", "png", "svg", "webp",
+  // Audio
+  "3gp", "flac", "m4a", "mp3", "ogg", "wav",
+  // Video (webm may be audio or video; Obsidian embeds both)
+  "mkv", "mov", "mp4", "ogv", "webm",
+  // Documents
+  "pdf",
+]);
+
+export function attachmentExtension(fileName: string): string {
+  const dot = fileName.lastIndexOf(".");
+  return dot > 0 && dot < fileName.length - 1 ? fileName.slice(dot + 1).toLocaleLowerCase() : "";
+}
+
+export function attachmentCanPreview(fileName: string): boolean {
+  return PREVIEWABLE_ATTACHMENT_EXTENSIONS.has(attachmentExtension(fileName));
+}
+
+/**
+ * Turn Obsidian's generated link into the requested display form. Without a
+ * display choice the generated link is returned unchanged.
+ */
+export function attachmentReference(link: string, fileName: string, display?: AttachmentDisplayMode): string {
+  const clean = link.trim();
+  if (!clean || display === undefined) return clean;
+  const embed = display === "embed" || (display === "auto" && attachmentCanPreview(fileName));
+  const bare = clean.startsWith("!") ? clean.slice(1) : clean;
+  return embed ? `!${bare}` : bare;
+}
+
+export function formatAttachmentSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+}
 
 function documentEol(markdown: string): "\r\n" | "\n" {
   return markdown.includes("\r\n") ? "\r\n" : "\n";
@@ -14,6 +64,11 @@ function appendLine(markdown: string, reference: string, eol: string): string {
   const clean = markdown.replace(/[\r\n]+$/u, "");
   return `${clean}${clean ? `${eol}${eol}` : ""}${reference}${eol}`;
 }
+
+/** ATX heading line: up to three spaces of indentation, then 1-6 hashes and a space or end of line. */
+const ATX_HEADING = /^ {0,3}(#{1,6})(?:[ \t]|$)/u;
+/** Heading text; closing hashes count only when separated by whitespace, so "C#" keeps its hash. */
+const ATX_HEADING_TEXT = /^ {0,3}(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/u;
 
 function normalizedHeading(value: string): string {
   return value
@@ -75,9 +130,11 @@ function fenceState(lines: readonly DocumentLine[], bodyStart: number): { outsid
     }
     if (!fence) {
       // CommonMark allows at most three spaces of indentation before a fence;
-      // deeper indentation is indented-code content, exactly as follow-up.ts
-      // parses the same construct.
-      const opening = /^ {0,3}(`{3,}|~{3,})/u.exec(line.text);
+      // deeper indentation is indented-code content, and a backtick fence's
+      // info string cannot contain a backtick, exactly as follow-up.ts parses
+      // the same construct.
+      const match = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line.text);
+      const opening = match && !(match[1]?.startsWith("`") && (match[2] ?? "").includes("`")) ? match : null;
       outside.push(opening === null);
       if (!opening) continue;
       const sequence = opening[1] ?? "";
@@ -123,7 +180,7 @@ export function insertAttachmentReference(
     }
     let insertionIndex = markerIndex + 1;
     while (insertionIndex < lines.length
-      && !(outsideFence[insertionIndex] === true && /^#{1,6}\s+/u.test(lines[insertionIndex]?.text ?? ""))) insertionIndex += 1;
+      && !(outsideFence[insertionIndex] === true && ATX_HEADING.test(lines[insertionIndex]?.text ?? ""))) insertionIndex += 1;
     while (insertionIndex > markerIndex + 1 && !(lines[insertionIndex - 1]?.text ?? "").trim()) insertionIndex -= 1;
     return spliceLine(markdown, lines, insertionIndex, cleanReference);
   }
@@ -132,7 +189,7 @@ export function insertAttachmentReference(
   if (!wanted) return appendLine(markdown, cleanReference, eol);
   const headingIndex = lines.findIndex((line, index) => {
     if (outsideFence[index] !== true) return false;
-    const match = /^(#{1,6})\s+(.+?)\s*#*\s*$/u.exec(line.text);
+    const match = ATX_HEADING_TEXT.exec(line.text);
     return match ? normalizedHeading(match[2] ?? "") === wanted : false;
   });
   if (headingIndex < 0) {
@@ -140,11 +197,11 @@ export function insertAttachmentReference(
     const block = `## ${cleanHeading}${eol}${eol}${cleanReference}`;
     return appendLine(markdown, block, eol);
   }
-  const currentLevel = /^(#{1,6})\s+/u.exec(lines[headingIndex]?.text ?? "")?.[1]?.length ?? 2;
+  const currentLevel = ATX_HEADING.exec(lines[headingIndex]?.text ?? "")?.[1]?.length ?? 2;
   let insertionIndex = headingIndex + 1;
   while (insertionIndex < lines.length) {
     const nextLevel = outsideFence[insertionIndex] === true
-      ? /^(#{1,6})\s+/u.exec(lines[insertionIndex]?.text ?? "")?.[1]?.length
+      ? ATX_HEADING.exec(lines[insertionIndex]?.text ?? "")?.[1]?.length
       : undefined;
     if (nextLevel !== undefined && nextLevel <= currentLevel) break;
     insertionIndex += 1;
@@ -153,13 +210,30 @@ export function insertAttachmentReference(
   return spliceLine(markdown, lines, insertionIndex, cleanReference);
 }
 
+/**
+ * Insert several references in order at one durable location. End-of-note
+ * references stay together as one block instead of one block per file.
+ */
+export function insertAttachmentReferences(
+  markdown: string,
+  references: readonly string[],
+  target: AttachmentInsertTarget,
+  marker: string,
+  heading: string,
+): string {
+  const clean = references.map((reference) => reference.trim()).filter(Boolean);
+  if (target === "end") return insertAttachmentReference(markdown, clean.join(documentEol(markdown)), target, marker, heading);
+  return clean.reduce((current, reference) => insertAttachmentReference(current, reference, target, marker, heading), markdown);
+}
+
 export function attachmentFileName(input: string): string {
   const clean = sanitizeFileName(input).replace(/^\.+/u, "");
   return clean || "attachment";
 }
 
+/** Vault-relative folder, or "" for the vault root (Obsidian normalizes "" to "/"). */
 export function canonicalAttachmentFolder(input: string): string {
-  return normalizePath(input.trim().replace(/^\/+|\/+$/gu, ""));
+  return normalizePath(input.trim().replace(/^\/+|\/+$/gu, "")).replace(/^\/+|\/+$/gu, "");
 }
 
 export function noteAttachmentFolder(notePath: string): string {

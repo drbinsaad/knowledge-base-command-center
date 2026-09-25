@@ -354,7 +354,7 @@ test("context menu labels distinguish a note, multiple notes, and folder snapsho
   );
   const singleMenu = buildNoteOrganizerContextMenuDescriptor(single);
   assert.deepEqual(singleMenu.actions.map((action) => action.id), ["organize", "show-memberships"]);
-  assert.equal(singleMenu.actions[0]?.title, "Organize in KBCC…");
+  assert.equal(singleMenu.actions[0]?.title, "Organize in command center…");
   assert.match(singleMenu.actions[0]?.ariaLabel ?? "", /Markdown files will not move or change/u);
 
   const multiple = normalizeNoteOrganizerSelection(
@@ -362,14 +362,14 @@ test("context menu labels distinguish a note, multiple notes, and folder snapsho
     [{ path: "A.md" }, { path: "B.md" }],
     { isRestrictedPath: () => false },
   );
-  assert.equal(buildNoteOrganizerContextMenuDescriptor(multiple).actions[0]?.title, "Organize 2 notes in KBCC…");
+  assert.equal(buildNoteOrganizerContextMenuDescriptor(multiple).actions[0]?.title, "Organize 2 notes in command center…");
 
   const folder = normalizeNoteOrganizerSelection(
     [{ path: "Folder", kind: "folder" }],
     [{ path: "Folder/A.md" }, { path: "Folder/B.md" }],
     { isRestrictedPath: () => false },
   );
-  assert.equal(buildNoteOrganizerContextMenuDescriptor(folder).actions[0]?.title, "Organize 2 current Markdown notes in KBCC…");
+  assert.equal(buildNoteOrganizerContextMenuDescriptor(folder).actions[0]?.title, "Organize 2 current Markdown notes in the command center…");
 });
 
 test("indicator controller keeps editor/status host ownership outside the projection", () => {

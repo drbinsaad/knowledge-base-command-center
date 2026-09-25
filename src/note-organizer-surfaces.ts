@@ -268,32 +268,32 @@ export function buildNoteOrganizerIndicatorModel(
     state = "broken";
     icon = "triangle-alert";
     color = "danger";
-    label = `KBCC: ${countLabel(input.brokenBaseCount, "organization issue")}`;
+    label = `Command center: ${countLabel(input.brokenBaseCount, "organization issue")}`;
     tooltip = `${label}. Review the affected knowledge-base memberships before making another organization change.`;
   } else if (input.currentBaseCollectionOnly) {
     state = "collection-only-current";
     icon = "folder-check";
     color = "success";
-    label = `KBCC: In collections only in ${currentName}`;
+    label = `Command center: In collections only in ${currentName}`;
     tooltip = `${label}. ${countLabel(input.totalBaseCount, "knowledge base", "knowledge bases")} organize this note in total.`;
   } else if (input.currentBaseOrganized) {
     state = "organized-current";
     icon = "circle-check";
     color = "success";
-    label = `KBCC: Organized in ${currentName}`;
+    label = `Command center: Organized in ${currentName}`;
     tooltip = `${label}. ${countLabel(input.totalBaseCount, "knowledge base", "knowledge bases")} organize this note in total.`;
   } else if (input.otherBaseCount > 0) {
     state = "organized-other";
     icon = "layers-3";
     color = "accent";
-    label = `KBCC: Organized in ${countLabel(input.otherBaseCount, "other knowledge base", "other knowledge bases")}`;
+    label = `Command center: Organized in ${countLabel(input.otherBaseCount, "other knowledge base", "other knowledge bases")}`;
     tooltip = `${label}, but not in ${currentName}.`;
   } else {
     state = "not-organized";
     icon = "circle";
     color = "muted";
-    label = "KBCC: Not organized";
-    tooltip = "This note is not organized in any KBCC knowledge base. Its folder location alone does not add it.";
+    label = "Command center: Not organized";
+    tooltip = "This note is not organized in any knowledge base. Its folder location alone does not add it.";
   }
   return {
     id: "kbcc-note-membership",
@@ -639,11 +639,11 @@ export function buildNoteOrganizerContextMenuDescriptor(
   const folder = snapshot.folderSnapshot;
   const organizeTitle = folder
     ? noteCount === 1
-      ? "Organize current Markdown note in KBCC…"
-      : `Organize ${noteCount.toLocaleString()} current Markdown notes in KBCC…`
+      ? "Organize current Markdown note in the command center…"
+      : `Organize ${noteCount.toLocaleString()} current Markdown notes in the command center…`
     : noteCount === 1
-      ? "Organize in KBCC…"
-      : `Organize ${noteCount.toLocaleString()} notes in KBCC…`;
+      ? "Organize in command center…"
+      : `Organize ${noteCount.toLocaleString()} notes in command center…`;
   const enabled = snapshot.complete && noteCount > 0;
   const actions: NoteOrganizerContextMenuAction[] = [{
     id: "organize",
@@ -655,8 +655,8 @@ export function buildNoteOrganizerContextMenuDescriptor(
   }];
   if (snapshot.kind === "single-note" && noteCount === 1) actions.push({
     id: "show-memberships",
-    title: "Show KBCC memberships",
-    ariaLabel: "Show this note’s memberships across all KBCC knowledge bases.",
+    title: "Show where this note is organized",
+    ariaLabel: "Show this note’s memberships across all knowledge bases.",
     icon: "list-tree",
     enabled: true,
     opensReview: false,

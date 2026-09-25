@@ -466,7 +466,7 @@ test("single-note base change loads fresh details before prefill and fences an o
   const surface = await openSingleNote(harness.host, notes(1)[0].path);
   changeSelect(surface.content, "Knowledge base", SECOND_BASE.id);
   assert.deepEqual(requests[1], [SECOND_BASE.id]);
-  assert.match(surface.content.textContent, /Loading Markdown notes and KBCC destinations/u);
+  assert.match(surface.content.textContent, /Loading your notes and destinations/u);
   assert.equal(surface.content.querySelectorAll("button").some((item) => item.textContent === "Review placement"), false);
   pending.resolve([BASE, { ...SECOND_BASE, initialPrimary: { mode: "library", libraryId: "sources", headingId: "books", subheadingId: "textbooks" } }]);
   await settle();
@@ -1385,7 +1385,7 @@ test("read-only mode explains why review and Apply are unavailable", async () =>
   harness.host.isReadOnly = () => true;
   const path = "Knowledge Base/ENT/Topic 00000.md";
   const surface = await openModal(harness.host, [path]);
-  assert.match(surface.content.textContent, /read-only.*review and Apply stay unavailable/isu);
+  assert.match(surface.content.textContent, /paused to protect your data.*review and Apply stay unavailable/isu);
   button(surface.content, "Choose destinations").click();
   assert.equal((button(surface.content, "Prepare review") as unknown as { disabled: boolean }).disabled, true);
   assert.equal(harness.drafts.length, 0);
