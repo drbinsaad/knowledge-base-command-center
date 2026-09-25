@@ -202,7 +202,7 @@ Cover lookup first checks the exact property name. If it is absent, one unique c
 
 The card now distinguishes a missing property, an empty property, a note or image not available on this device, an unsupported image/link, and an image that could not load. Open the linked image directly in Obsidian when checking availability; never post private note contents or recovery codes in diagnostic screenshots.
 
-Online covers are not supported in 0.24.0: HTTP/HTTPS and other note-supplied URL schemes are not loaded, and there is no Allow external images action. Put the image in your vault and set the cover property to its local link. Display settings, Sync, imports, recovery, Undo and legacy private-test permission values cannot enable remote loading. The [Library display and privacy guide](LIBRARY_DISPLAY_AND_PRIVACY.md) explains local cover setup and the deferred online proposal. The [0.24.0 device record](release-evidence/0.24.0-iphone.md) explicitly leaves physical-device and controlled two-device Sync checks unverified.
+Online covers are not supported in 0.25.0: HTTP/HTTPS and other note-supplied URL schemes are not loaded, and there is no Allow external images action. Put the image in your vault and set the cover property to its local link. Display settings, Sync, imports, recovery, Undo and legacy private-test permission values cannot enable remote loading. The [Library display and privacy guide](LIBRARY_DISPLAY_AND_PRIVACY.md) explains local cover setup and the deferred online proposal. The [0.24.0 device record](release-evidence/0.24.0-iphone.md) explicitly leaves physical-device and controlled two-device Sync checks unverified.
 
 ### Organize a Library
 

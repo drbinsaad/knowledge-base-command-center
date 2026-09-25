@@ -2,6 +2,16 @@
 
 Complete this checklist on a physical iPhone before tagging a release that changes search, navigation, modals, import/export, Sync handling, or mobile styles. Simulator and automated DOM results may accompany this record but do not replace it.
 
+## 0.25.0 Attachments, setup and plain language
+
+Status: **Maintainer-authorized waiver — Unverified — not executed on a physical iPhone or iPad.** The maintainer directed **publish** without device testing. The [0.25.0 evidence](release-evidence/0.25.0-iphone.md) is candidate-specific and does not mark any physical check as Pass.
+
+When checks are run later, use a disposable synthetic vault and record exact asset checksums, device/OS/Obsidian versions and input method:
+
+1. Run Attach file to current note… and choose several files of mixed types (PDF, image, audio, Word, PowerPoint) from Files and Photos. Confirm the file list, Show in note choices, embedded previews of PDF/image/audio/video, links for other types, and that all links arrive together in order.
+2. Confirm the renamed commands in the Command palette and on an existing mobile toolbar entry, and that Run setup again… opens the wizard for a Generic knowledge base.
+3. Verify one-time update news and the exact release URL after publication: `https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.25.0`.
+
 ## 0.24.0 Collections and workflow reliability
 
 Status: **Maintainer-authorized waiver — Unverified — not executed on a physical iPhone or iPad.** The maintainer directed **publish** after the remaining device and controlled two-device Sync gap was disclosed. The [fresh 0.24.0 evidence](release-evidence/0.24.0-iphone.md) is candidate-specific and does not mark any physical check as Pass.

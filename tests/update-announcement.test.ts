@@ -22,9 +22,21 @@ import {
   UPDATE_ANNOUNCEMENT_0_23_0,
   UPDATE_ANNOUNCEMENT_0_23_1,
   UPDATE_ANNOUNCEMENT_0_24_0,
+  UPDATE_ANNOUNCEMENT_0_25_0,
   type UpdateAnnouncement,
 } from "../src/update-announcement.ts";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
+
+test("0.25.0 announces attachments and plain language with exact release identity and honest device limits", () => {
+  const result = planUpdateAnnouncement("0.25.0", "0.24.0", true);
+  assert.equal(result.announcement, UPDATE_ANNOUNCEMENT_0_25_0);
+  assert.equal(result.nextHighestObservedVersion, "0.25.0");
+  assert.equal(UPDATE_ANNOUNCEMENT_0_25_0.releaseUrl, "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.25.0");
+  assert.match(UPDATE_ANNOUNCEMENT_0_25_0.intro, /Physical iPhone\/iPad testing remains unverified/u);
+  const highlights = UPDATE_ANNOUNCEMENT_0_25_0.highlights.join("\n");
+  for (const claim of [/up to 20 files of any type/u, /Run setup again…/u, /hotkeys keep working/u, /Arrange and Undo/u, /Data formats are unchanged from 0\.24\.0/u]) assert.match(highlights, claim);
+  assert.equal(planUpdateAnnouncement("0.25.0", "0.25.0", true).announcement, null, "shown once");
+});
 
 test("0.24.0 announces Collections with exact release identity and honest device limits", () => {
   const result = planUpdateAnnouncement("0.24.0", "0.23.1", true);

@@ -13,9 +13,9 @@ _Abstract AI-generated concept artwork, not a product screenshot. A current rend
 
 Build each Index from notes you explicitly add and, when you want dynamic folder membership, folders you explicitly link. A default new-note folder controls storage only: putting a note there never enrolls it in the Index by itself. From there you arrange, group, nest, pin, and classify records into Libraries and Collections — and all of that organization lives in the plugin's own data, not in your Markdown. Your files stay exactly where you put them, with the frontmatter you wrote. One installation can hold several independent knowledge bases, so research, study, and project work never bleed into each other. The plugin is local-first, with no account or telemetry. Library covers load only from existing images in your vault; online cover URLs are not loaded.
 
-**New in 0.24.0:** Visible **New collection** and **Add notes** actions, searchable Collection checkboxes and inline creation in the note Organizer, atomic Review → Save with Undo, Collection-scoped searches, and safer note-creation and recovery workflows. Library Cards still use **local-vault images only**. Online cover loading is excluded; the [earlier online-cover proposal](docs/LIBRARY_DISPLAY_AND_PRIVACY.md#deferred-online-cover-proposal) remains deferred and unapproved.
+**New in 0.25.0:** **Attach file** takes up to 20 files of any type at once (PDF, Word, PowerPoint, Excel, images, audio, video, ZIP) and shows images, PDFs, audio and video inside the note. Setup can be reopened with **Run setup again…**, commands and messages use plain words, Arrange and Undo sit in the desktop header, and typing in notes outside your knowledge bases no longer redraws the view. Library Cards still use **local-vault images only**; online cover loading remains excluded.
 
-**Upgrade all syncing devices to 0.24.0.** Organization format 17 preserves Collection search filters; older builds protect this newer organization read-only. Back up the complete vault and plugin data before upgrading. A writable downgrade requires matching older plugin assets and the complete compatible pre-upgrade organization snapshot, not just replacing the plugin files.
+**Upgrade all syncing devices to 0.24.0 or later.** 0.25.0 keeps the 0.24.0 data formats. Organization format 17 preserves Collection search filters; older builds protect this newer organization read-only. Back up the complete vault and plugin data before upgrading. A writable downgrade below 0.24.0 requires matching older plugin assets and the complete compatible pre-upgrade organization snapshot, not just replacing the plugin files.
 
 **Quick links:** [Getting started](docs/GETTING_STARTED.md) · [User guide](docs/USER_GUIDE.md) · [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Apple Shortcuts](docs/APPLE_SHORTCUT.md) · [Templates](templates/README.md) · [Support](SUPPORT.md)
 
@@ -84,7 +84,7 @@ Export your current organization first. Then run **Knowledge Base Command Center
 
 The plugin folder contains `data.json` with synced knowledge bases, settings, Libraries, Collections, pins, hierarchy, and named snapshots. Device-only routes, collapsed sections, Undo/Redo history, local Sync/Recovery facts, and the highest plugin version observed for one-time update announcements are stored through Obsidian's App-local storage outside that folder, so deleting only the folder does not reliably remove them. A third, bounded rename-recovery journal may temporarily contain the vault identity and old/new vault-relative paths until an interrupted organization repair is durably completed. A fourth, bounded return-navigation history can contain the vault identity, up to 24 opened-note paths, their originating base and tab, a selected-record path, literal search text entered in KBCC, compact-detail state, and scroll positions so a note can return to the same KBCC page after restart. KBCC does not read or copy note bodies into this history, but user-entered search text can itself be sensitive; the history is not synced. The clear command removes all five plugin-owned App-local values without changing `data.json`, Markdown notes, attachments, or recovery export files, and local tracking stays suppressed until Obsidian restarts — disable or uninstall in that same session. If you already removed the plugin without clearing them, reinstall and enable the same or a newer release, run the clear command, then remove it again.
 
-The fifth App-local key is a legacy external-image permission value that may remain from a private test build. It remains inert in 0.24.0 and cannot enable online covers, including after restart. **Clear device-local data** includes its cleanup. See [Local data](docs/LOCAL_DATA.md).
+The fifth App-local key is a legacy external-image permission value that may remain from a private test build. It remains inert in 0.24.0 and later and cannot enable online covers, including after restart. **Clear device-local data** includes its cleanup. See [Local data](docs/LOCAL_DATA.md).
 
 ## Quick start
 
@@ -221,7 +221,7 @@ If **Workspace settings** are selected with Index, Libraries, Collections, or St
 
 **Multi-base portfolio transfer** bundles up to 50 independent portable packages behind one bounded manifest. Map each source to a new or existing compatible base, choose Merge or Replace per destination, select components per source, and inspect an exact immutable change plan before applying it. Replace requires a displayed typed phrase and writes a same-vault recovery for every affected destination before the atomic mutation. The preview reports base, heading, subject, Library, conflict, folder/template fallback, and explicit will-not-change categories.
 
-Portable packages created by version 0.13.0 through 0.22.0 use format version 5, which adds nested subheading layouts to version 4’s stable Library identities. The 0.12.1 release used format version 4; earlier formats remain supported. Portable packages created by version 0.23.0 through 0.23.1 use format version 6, with display profiles in Workspace format 3. Portable packages created by version 0.24.0 use format version 7, with Collection-scoped saved searches in saved views component 2; Workspace remains format 3. The plugin reads portable versions 1 through 7. Older builds refuse newer packages, so update every syncing device before applying a new export.
+Portable packages created by version 0.13.0 through 0.22.0 use format version 5, which adds nested subheading layouts to version 4’s stable Library identities. The 0.12.1 release used format version 4; earlier formats remain supported. Portable packages created by version 0.23.0 through 0.23.1 use format version 6, with display profiles in Workspace format 3. Portable packages created by version 0.24.0 and 0.25.0 use format version 7, with Collection-scoped saved searches in saved views component 2; Workspace remains format 3. The plugin reads portable versions 1 through 7. Older builds refuse newer packages, so update every syncing device before applying a new export.
 
 Read [Portability and recovery](docs/PORTABILITY_AND_RECOVERY.md) before importing, replacing, or restoring.
 
@@ -257,7 +257,7 @@ On iPhone and iPad, a smaller header keeps the base switcher, **Add**, and **Det
 
 The bundle is built to a 2018 JavaScript baseline so it can run on older mobile web views, and that baseline is enforced rather than assumed: the compiler is pinned to exactly that language level, so using a newer built-in method fails the build instead of shipping unpolyfilled. Version 0.13.1 fixed four such methods that had been reaching devices — the most serious ran while classifying note paths and needed iOS Safari 15.4 or newer.
 
-Physical-device claims are kept separate from automated coverage: see the [0.24.0 device and Sync waiver record](docs/release-evidence/0.24.0-iphone.md), the historical completed-but-partial [0.10.0 iPhone evidence note](docs/release-evidence/0.10.0-iphone.md), and the [manual iPhone release checklist](docs/manual-iphone-release-checklist.md) rather than assuming any release checklist passed. The historical [0.19.1 record](docs/release-evidence/0.19.1-iphone.md) separately identifies its supplemental Mac Obsidian startup-cache recovery coverage and its limits. Physical iPad/iPhone, VoiceOver, and controlled two-device Sync remain unverified for 0.24.0; its authorization is fresh and does not reuse an earlier waiver.
+Physical-device claims are kept separate from automated coverage: see the [0.25.0 device waiver record](docs/release-evidence/0.25.0-iphone.md), the [0.24.0 device and Sync waiver record](docs/release-evidence/0.24.0-iphone.md), the historical completed-but-partial [0.10.0 iPhone evidence note](docs/release-evidence/0.10.0-iphone.md), and the [manual iPhone release checklist](docs/manual-iphone-release-checklist.md) rather than assuming any release checklist passed. The historical [0.19.1 record](docs/release-evidence/0.19.1-iphone.md) separately identifies its supplemental Mac Obsidian startup-cache recovery coverage and its limits. Physical iPad/iPhone, VoiceOver, and controlled two-device Sync remain unverified for 0.24.0 and 0.25.0; each authorization is candidate-specific and does not reuse an earlier waiver.
 
 ### Right-to-left and bidirectional text
 
@@ -326,7 +326,7 @@ Step-by-step Shortcuts instructions, placement options, and troubleshooting are 
 
 ## Privacy and permissions
 
-Version 0.24.0 does not load online covers or perform automatic remote metadata requests. Only existing local-vault cover images are supported. There is no external-image opt-in, and any allowed value from a private test build is inert. The [Library display and privacy guide](docs/LIBRARY_DISPLAY_AND_PRIVACY.md) separates this release from the deferred, unapproved online-cover proposal.
+Version 0.25.0 does not load online covers or perform automatic remote metadata requests. Only existing local-vault cover images are supported. There is no external-image opt-in, and any allowed value from a private test build is inert. The [Library display and privacy guide](docs/LIBRARY_DISPLAY_AND_PRIVACY.md) separates this release from the deferred, unapproved online-cover proposal.
 
 **What it reads**
 
@@ -377,7 +377,7 @@ Follow the complete [backup and restore procedure](docs/PORTABILITY_AND_RECOVERY
 | --- | --- |
 | Obsidian | 1.13.0 or newer |
 | Desktop | Uses Obsidian-compatible APIs; no Electron- or Node-only runtime dependency |
-| iPhone and iPad | Dedicated record grips, touch menus and mobile layouts are implemented; the [0.24.0 physical-device record](docs/release-evidence/0.24.0-iphone.md) is explicitly waived and unverified, so do not assume the release checklist passed |
+| iPhone and iPad | Dedicated record grips, touch menus and mobile layouts are implemented; the [0.25.0 physical-device record](docs/release-evidence/0.25.0-iphone.md) is explicitly waived and unverified, so do not assume the release checklist passed |
 | Android | The manifest is mobile-compatible, but this repository does not currently document a complete physical-Android test pass |
 | Network | Local-vault covers only; no online-cover support or automatic remote metadata requests. No analytics, telemetry, accounts, advertising, or payments |
 
@@ -418,7 +418,7 @@ Every other symptom, including import refusals and Sync protection reasons, is c
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Apple Shortcuts guide](docs/APPLE_SHORTCUT.md)
 - [Starter templates](templates/README.md)
-- [0.24.0 device and Sync waiver record](docs/release-evidence/0.24.0-iphone.md) · [Historical 0.23.1 record](docs/release-evidence/0.23.1-iphone.md) · [Historical 0.23.0 record](docs/release-evidence/0.23.0-iphone.md)
+- [0.25.0 device waiver record](docs/release-evidence/0.25.0-iphone.md) · [0.24.0 device and Sync waiver record](docs/release-evidence/0.24.0-iphone.md) · [Historical 0.23.1 record](docs/release-evidence/0.23.1-iphone.md) · [Historical 0.23.0 record](docs/release-evidence/0.23.0-iphone.md)
 - [0.10.0 iPhone evidence](docs/release-evidence/0.10.0-iphone.md) · [0.12.0 iPhone evidence](docs/release-evidence/0.12.0-iphone.md) · [0.17.0 iPhone waiver record](docs/release-evidence/0.17.0-iphone.md) · [0.18.0 iPhone waiver and Mac-emulation record](docs/release-evidence/0.18.0-iphone.md) · [0.19.0 iPhone waiver and Mac-emulation record](docs/release-evidence/0.19.0-iphone.md) · [0.19.1 iPhone waiver and Mac-startup record](docs/release-evidence/0.19.1-iphone.md)
 - [Manual real-iPhone release checklist](docs/manual-iphone-release-checklist.md)
 - [Changelog](CHANGELOG.md)

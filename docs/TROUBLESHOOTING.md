@@ -57,7 +57,7 @@ If ENT is the knowledge-base name, use **Manage knowledge bases… → Rename** 
 
 Open **Library settings… → Display**, select Cards, and choose the property containing the cover, usually `cover`. The local image must exist in this vault; a note property such as `cover: "[[Covers/My book.jpg]]"` works. SVGs and arbitrary file/HTML links are not supported as local covers. Increase **Card size**, choose Portrait proportions, and use **Show whole image** to avoid cropping. A **No note** placeholder has no frontmatter image until deliberately linked.
 
-Online cover URLs are not supported in 0.24.0. They show an unavailable-cover placeholder without a request, and there is no permission switch to enable them. Save an image you may use into the vault and change the note property to its vault link. A previously allowed value from a private test build is inert; Sync, imports and recovery cannot enable online images. See [Library display and privacy](LIBRARY_DISPLAY_AND_PRIVACY.md).
+Online cover URLs are not supported in 0.25.0. They show an unavailable-cover placeholder without a request, and there is no permission switch to enable them. Save an image you may use into the vault and change the note property to its vault link. A previously allowed value from a private test build is inert; Sync, imports and recovery cannot enable online images. See [Library display and privacy](LIBRARY_DISPLAY_AND_PRIVACY.md).
 
 ## The Organizer shows a README or every note in a folder
 

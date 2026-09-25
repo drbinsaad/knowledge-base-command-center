@@ -8,8 +8,9 @@ const budgets = [
   // Multi-file attachments with any-type preview/link choice and pre-copy
   // checks add about 3.7 kB raw / 1.5 kB gzip over 0.24.0 (1,222,306 raw /
   // 321,154 gzip). Plain-language messages, command names, and the Run setup
-  // again command add about 1.6 kB raw / 0.5 kB gzip on top of that.
-  { file: "main.js", raw: 1_231_000, gzip: 323_600 },
+  // again command add about 1.6 kB raw / 0.5 kB gzip on top of that. The
+  // curated 0.25.0 What's new text adds about 1.2 kB raw / 0.45 kB gzip.
+  { file: "main.js", raw: 1_231_000, gzip: 324_000 },
   // Touch-sized membership choices/actions and tablet wrapping add ~1.6 kB raw.
   { file: "styles.css", raw: 163_000, gzip: 22_600 },
 ];
