@@ -5691,7 +5691,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const placeholderQueue: QueueDefinition = {
       id: "imported-placeholders",
       title: "Imported placeholders needing notes",
-      description: `${placeholders.total} unresolved subject${placeholders.total === 1 ? "" : "s"}; ${placeholders.withCandidates} ${placeholders.withCandidates === 1 ? "has" : "have"} exact local title or ID candidates. Choose each subject to create or link deliberately—KBCC never links automatically.`,
+      description: `${placeholders.total} unresolved subject${placeholders.total === 1 ? "" : "s"}; ${placeholders.withCandidates} ${placeholders.withCandidates === 1 ? "has" : "have"} exact local title or ID candidates. Choose each subject to create or link deliberately; the plugin never links automatically.`,
       records: placeholders.ordered,
     };
     if (!this.plugin.isClinicalMode()) {

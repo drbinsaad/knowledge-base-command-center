@@ -8308,6 +8308,63 @@ test("layout and metadata readiness repair linked Library records cached before 
   assert.deepEqual(scheduledRefreshes, [false, false], "the initial metadata fence reconciles only once");
 });
 
+test("editing a note outside every knowledge base does not redraw the open view unless placeholders need candidates", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const indexed = new TFile("Knowledge/Indexed.md");
+  const unrelated = new TFile("Journal/Today.md");
+  const { plugin } = pluginWithFiles(data, [indexed, unrelated], {});
+  let metadataChanged: ((file: TFile) => void) | null = null;
+  let layoutReady: (() => void) | null = null;
+  const scheduledRefreshes: boolean[] = [];
+  const app = plugin.app as unknown as {
+    vault: { on: (name: string, callback: (...args: unknown[]) => void) => unknown };
+    workspace: { onLayoutReady: (callback: () => void) => void; getLeavesOfType: (type: string) => unknown[] };
+    metadataCache: { on: (name: string, callback: (...args: unknown[]) => void) => unknown };
+  };
+  app.vault.on = () => ({ unsubscribe: () => {} });
+  app.metadataCache.on = (name, callback) => {
+    if (name === "changed") metadataChanged = callback;
+    return { unsubscribe: () => {} };
+  };
+  app.workspace.onLayoutReady = (callback) => { layoutReady = callback; };
+  app.workspace.getLeavesOfType = (type) => type === VIEW_TYPE ? [{}] : [];
+  (plugin as unknown as { manifest: { id: string; name: string; version: string } }).manifest = {
+    id: "ent-vault-command-center", name: "Knowledge Base Command Center", version: "0.24.0",
+  };
+  (plugin as unknown as { registerObsidianProtocolHandler: () => void }).registerObsidianProtocolHandler = () => {};
+  (plugin as unknown as { scheduleRefresh: (invalidateRecords?: boolean) => void }).scheduleRefresh = (invalidateRecords = true) => {
+    scheduledRefreshes.push(invalidateRecords);
+  };
+  const relevantPaths = new Set([indexed.path]);
+  (plugin as unknown as { invalidateRecordCachesForPath: (path: string) => boolean }).invalidateRecordCachesForPath = (path) => relevantPaths.has(path);
+
+  await plugin.onload();
+  assert.ok(layoutReady);
+  layoutReady();
+  assert.ok(metadataChanged);
+  scheduledRefreshes.length = 0;
+
+  metadataChanged(unrelated);
+  assert.deepEqual(scheduledRefreshes, [], "typing in an unrelated note never redraws the Command Center");
+  metadataChanged(indexed);
+  assert.deepEqual(scheduledRefreshes, [false], "an indexed note still refreshes the view");
+
+  plugin.data.portableIndex.subjects.push({
+    id: "subject-unresolved",
+    title: "Imported topic",
+    groupId: plugin.data.portableIndex.groups[0]?.id ?? "",
+    parentId: null,
+    order: 0,
+    indexed: true,
+    configuredId: "",
+    recordKind: "topic",
+  });
+  assert.equal(plugin.viewDependsOnUnrelatedNotes(), true);
+  metadataChanged(unrelated);
+  assert.deepEqual(scheduledRefreshes, [false, false], "an unresolved placeholder may gain a candidate from any note");
+});
+
 test("custom libraries support stable CRUD, locale-invariant names, ordering, archive, and restore", async () => {
   const data = migrateData(null);
   data.settings.workspaceMode = "generic";

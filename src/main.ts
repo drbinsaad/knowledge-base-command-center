@@ -1087,7 +1087,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         this.backlinkIndex = null;
         this.invalidateKnowledgeBaseSearchSnapshot();
         if (this.invalidateRecordCachesForPath(file.path, { file })) this.scheduleRefresh(false);
-        else if (this.app.workspace.getLeavesOfType(VIEW_TYPE).length > 0) this.scheduleRefresh(false);
+        else if (this.app.workspace.getLeavesOfType(VIEW_TYPE).length > 0 && this.viewDependsOnUnrelatedNotes()) {
+          this.scheduleRefresh(false);
+        }
       }));
       // Initial vault discovery does not have to emit a normal create/change
       // event for every file. `resolved` is the final metadata-inventory fence
@@ -9420,6 +9422,18 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (file && records.has(file.path)) return records.get(file.path) ?? null;
     const lowered = clean.toLowerCase();
     return this.recordLinkIndex.get(lowered) ?? null;
+  }
+
+  /**
+   * Whether an edit to a note outside every knowledge base can change what the
+   * open view shows. Records, backlinks, and related notes come only from
+   * indexed records; imported placeholders are the one exception, because any
+   * vault note's title or configured ID can become a match candidate.
+   */
+  viewDependsOnUnrelatedNotes(): boolean {
+    const portable = this.data.portableIndex;
+    return portable.subjects.some((subject) => !portable.resolvedPathBySubjectId[subject.id])
+      || this.getRecords().some((record) => record.isPlaceholder);
   }
 
   getBacklinkPaths(path: string): string[] {
