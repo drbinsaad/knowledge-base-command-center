@@ -619,7 +619,7 @@ test.describe("mobile touch pointer", () => {
 test("narrow nonmobile panes retain desktop controls and scroll hierarchy", async ({ page }) => {
   await openView(page, { width: 390, height: 844, count: 8 });
   await expect(page.locator(".ent-cc-shell")).not.toHaveClass(/is-mobile-browse/u);
-  await expect(page.locator(".ent-cc-workspace-options > summary")).toHaveText("Workspace options");
+  await expect(page.locator(".ent-cc-workspace-options > summary")).toHaveText("More");
   await expect(page.getByRole("combobox", { name: "Search scope" })).toBeVisible();
   await expect(page.locator(".ent-cc-mobile-filters")).toHaveCount(0);
   await expect(page.locator(".ent-cc-workspace .ent-cc-header")).toHaveCount(0);
@@ -1139,7 +1139,7 @@ test("iPad routing leaves the 1440px desktop header and side inspector unchanged
   await expect(page.locator("#kbcc-view")).toHaveAttribute("data-pane-layout", "wide");
   await expect(page.locator(".ent-cc-shell")).not.toHaveClass(/is-mobile-browse/u);
   await expect(page.locator(".ent-cc-mobile-toolbar")).toHaveCount(0);
-  await expect(page.locator(".ent-cc-workspace-options > summary")).toHaveText("Workspace options");
+  await expect(page.locator(".ent-cc-workspace-options > summary")).toHaveText("More");
   await expect(page.getByRole("heading", { name: "Research workspace", exact: true })).toBeVisible();
   await expect(page.getByRole("combobox", { name: "Search scope" })).toBeVisible();
   await page.getByRole("button", { name: /^Research note 000,/u }).click();

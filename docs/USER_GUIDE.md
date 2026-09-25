@@ -322,7 +322,7 @@ Notes created through the primary action join only the destination explicitly ch
 
 ## Quick entry and shortcuts
 
-Open Quick entry from the lightning-bolt desktop ribbon action or the **Quick entry…** command. The Command Center header uses **Add** for capture and **Organize** for existing-note placement; layout and management controls are under **Workspace options**. On mobile, Obsidian places ribbon actions in its **Open** menu. The Quick entry hub shows the active knowledge base and offers:
+Open Quick entry from the lightning-bolt desktop ribbon action or the **Quick entry…** command. The Command Center header uses **Add** for capture and **Organize** for existing-note placement; **Arrange** (or **Edit** in Collections) and **Undo** sit beside them on desktop, and the remaining layout and management controls are under **More** (**Details** on iPhone and iPad). On mobile, Obsidian places ribbon actions in its **Open** menu. The Quick entry hub shows the active knowledge base and offers:
 
 - switch knowledge base;
 - create a portable **No note** subject;

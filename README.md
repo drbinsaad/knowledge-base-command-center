@@ -181,7 +181,7 @@ Search is Unicode-aware and folds diacritics, straight and curly apostrophes, Ar
 
 ### Quick entry, hotkeys, and Apple Shortcut URLs
 
-Quick entry opens from the lightning-bolt desktop ribbon action, **Workspace options → Command center actions → Quick entry…**, a hotkey you assign, the mobile toolbar, or a fixed Obsidian URL. Its focused commands create a **No note** subject, a heading, a subheading, or a note; add the current or an existing note; and open Quick append. Library capture always asks for the exact heading or subheading first.
+Quick entry opens from the lightning-bolt desktop ribbon action, **More → Command center actions → Quick entry…**, a hotkey you assign, the mobile toolbar, or a fixed Obsidian URL. Its focused commands create a **No note** subject, a heading, a subheading, or a note; add the current or an existing note; and open Quick append. Library capture always asks for the exact heading or subheading first.
 
 Every active Library also gets its own **Open Library: …** global command, usable as a hotkey, a mobile toolbar button, or Obsidian's mobile Quick Action.
 

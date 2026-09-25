@@ -3029,7 +3029,7 @@ export class EntVaultCommandCenterView extends ItemView {
       if (options.isConnected) this.workspaceOptionsOpen = options.open;
     });
     options.createEl("summary", {
-      cls: "ent-cc-button", text: mobileBrowse ? "Details" : "Workspace options",
+      cls: "ent-cc-button", text: mobileBrowse ? "Details" : "More",
       attr: { "data-kbcc-focus": "workspace-options" },
     });
     if (mobileBrowse) {
@@ -3089,7 +3089,7 @@ export class EntVaultCommandCenterView extends ItemView {
       setIcon(manage.createSpan(), "list-tree");
       manage.createSpan({ text: "Manage" });
       manage.addEventListener("click", () => this.openIndexManager());
-      const arrange = (this.curriculumArrangeMode ? primaryActions : actions).createEl("button", {
+      const arrange = (this.curriculumArrangeMode || !mobileBrowse ? primaryActions : actions).createEl("button", {
         cls: `ent-cc-button ${this.curriculumArrangeMode ? "is-active" : ""}`,
         type: "button",
         attr: { "aria-pressed": String(this.curriculumArrangeMode) },
@@ -3104,7 +3104,7 @@ export class EntVaultCommandCenterView extends ItemView {
       });
     }
     if (this.plugin.data.activeTab === "collections") {
-      const edit = (this.editMode ? primaryActions : actions).createEl("button", {
+      const edit = (this.editMode || !mobileBrowse ? primaryActions : actions).createEl("button", {
         cls: `ent-cc-button ${this.editMode ? "is-active" : ""}`,
         type: "button",
         attr: { "aria-pressed": String(this.editMode) },
@@ -3126,7 +3126,7 @@ export class EntVaultCommandCenterView extends ItemView {
       addHeading.createSpan({ text: "New heading" });
       disableWhenReadOnly(addHeading, readOnly, "Create a Library heading");
       addHeading.addEventListener("click", () => this.promptNewLibraryHeading(activeLibraryId));
-      const edit = (this.editMode ? primaryActions : actions).createEl("button", {
+      const edit = (this.editMode || !mobileBrowse ? primaryActions : actions).createEl("button", {
         cls: `ent-cc-button ${this.editMode ? "is-active" : ""}`,
         type: "button",
         attr: { "aria-pressed": String(this.editMode) },
@@ -3151,7 +3151,10 @@ export class EntVaultCommandCenterView extends ItemView {
         });
       });
     }
-    const undo = iconButton(actions, "undo-2", "Undo last organization change", "ent-cc-history-action");
+    // Desktop keeps Arrange/Edit and Undo beside Add; the phone's first row is
+    // reserved for base selection, Add, and Details.
+    const undo = iconButton(mobileBrowse ? actions : primaryActions, "undo-2", "Undo last organization change", "ent-cc-history-action");
+    if (!mobileBrowse) primaryActions.append(options);
     undo.disabled = readOnly || this.plugin.data.undoStack.length === 0;
     disableWhenReadOnly(undo, readOnly, "Undo an organization change");
     undo.addEventListener("click", () => this.run(() => this.plugin.undo()));

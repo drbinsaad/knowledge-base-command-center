@@ -269,7 +269,7 @@ test("tablet portrait and landscape keep mobile browse routing above the desktop
         assert.equal(Boolean(content.querySelector(".ent-cc-shell.is-mobile-browse")), mobile, context);
         assert.equal(Boolean(content.querySelector(".ent-cc-mobile-toolbar")), mobile, context);
         assert.equal(Boolean(content.querySelector(".ent-cc-mobile-filter-panel")), mobile, context);
-        assert.equal(content.querySelector(".ent-cc-workspace-options summary")?.textContent, mobile ? "Details" : "Workspace options", context);
+        assert.equal(content.querySelector(".ent-cc-workspace-options summary")?.textContent, mobile ? "Details" : "More", context);
         assert.equal(content.querySelector(".ent-cc-inspector")?.getAttribute("role") ?? null, mobile ? null : "complementary", context);
         assert.ok(content.querySelector(".ent-cc-subject-title"), `${context}: the same Index record remains available`);
         await view.onClose();
@@ -625,7 +625,7 @@ test("read-only organization disables write-only controls before activation", as
   assert.equal(content.querySelector(".ent-cc-quick-entry-button"), null, "Add is the only primary creation entry point");
   const workspaceOptions = content.querySelector(".ent-cc-workspace-options");
   assert.equal(workspaceOptions?.tagName.toLowerCase(), "details", "management actions belong to a native disclosure");
-  assert.equal(workspaceOptions?.querySelector("summary")?.textContent, "Workspace options");
+  assert.equal(workspaceOptions?.querySelector("summary")?.textContent, "More");
   const organize = content.querySelector(".ent-cc-note-organizer-launch");
   const add = content.querySelector(".ent-cc-header-actions .ent-cc-add-button");
   const arrange = content.querySelector(".ent-cc-header-actions button[aria-pressed]");
@@ -638,6 +638,9 @@ test("read-only organization disables write-only controls before activation", as
     assert.match(control.getAttribute("title") ?? "", /read-only/u);
   }
   assert.equal(arrange?.getAttribute("aria-pressed"), "false");
+  assert.match(arrange?.parentElement?.className ?? "", /\bent-cc-header-actions\b/u, "desktop Arrange sits in the header, not inside More");
+  const undo = content.querySelectorAll(".ent-cc-history-action")[0];
+  assert.match(undo?.parentElement?.className ?? "", /\bent-cc-header-actions\b/u, "desktop Undo sits in the header, not inside More");
 
   organize?.dispatch("click");
   assert.equal(organizerOpenCount, 0, "read-only activation must not open a writable organizer");
