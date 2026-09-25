@@ -3602,6 +3602,36 @@ test("reverting while an older settings write is in flight queues the durable re
   assert.equal(tab.pendingSettingsSaves, 0);
 });
 
+test("saving a setting does not complete or skip the setup wizard", async () => {
+  const harness = bufferedSettingsHarness();
+  harness.data.settings.setupComplete = false;
+  harness.data.settings.openNoteBehavior = "same-tab";
+  assert.equal(await harness.tab.save(false), true);
+  assert.equal(harness.data.settings.setupComplete, false, "only finishing the wizard completes setup");
+});
+
+test("setup wizard asks for the user's own name instead of the product default", async () => {
+  const fresh = new WorkspaceSetupModal({} as never, migrateData(null).settings, () => {});
+  const internals = fresh as unknown as {
+    value: WorkspaceSetupValue;
+    errorEl: { setText(text: string): void } | null;
+    advancedEl: { open: boolean } | null;
+    submit(): Promise<void>;
+  };
+  assert.equal(internals.value.workspaceName, "", "the product name is never prefilled");
+  let errorText = "";
+  internals.errorEl = { setText: (text: string) => { errorText = text; } };
+  internals.advancedEl = { open: false };
+  await internals.submit();
+  assert.equal(errorText, "Enter a name for this knowledge base.");
+  assert.equal(internals.advancedEl.open, false, "a missing name does not open the advanced options");
+
+  const named = migrateData(null).settings;
+  named.workspaceName = "Research";
+  const existing = new WorkspaceSetupModal({} as never, named, () => {}) as unknown as { value: WorkspaceSetupValue };
+  assert.equal(existing.value.workspaceName, "Research", "running setup again keeps the current name");
+});
+
 test("an immediate save(false) absorbs a buffered edit without losing refresh intent", async () => {
   let saves = 0;
   let refreshes = 0;

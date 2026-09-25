@@ -2597,7 +2597,7 @@ export class EntVaultCommandCenterView extends ItemView {
       if (!ownsBase()) return;
       await this.plugin.refreshViews();
       if (!ownsBase()) return;
-      new Notice(`${settings.workspaceName} is ready. No existing note was modified.`);
+      new Notice(`${settings.workspaceName} is ready. Next, choose Add → Add existing note to Index to bring in your notes. No existing note was modified.`, 10000);
     }).open();
   }
 
@@ -3019,7 +3019,7 @@ export class EntVaultCommandCenterView extends ItemView {
       cls: "ent-cc-button ent-cc-note-organizer-launch",
       type: "button",
       attr: {
-        "aria-label": "Organize vault notes across knowledge bases. You can also drop existing Obsidian Markdown notes here.",
+        "aria-label": "Organize notes. You can also drop existing Obsidian Markdown notes here.",
         title: "Organize notes across knowledge bases",
       },
     });
@@ -3151,11 +3151,11 @@ export class EntVaultCommandCenterView extends ItemView {
         });
       });
     }
-    const undo = iconButton(actions, "undo-2", "Undo personal organization change", "ent-cc-history-action");
+    const undo = iconButton(actions, "undo-2", "Undo last organization change", "ent-cc-history-action");
     undo.disabled = readOnly || this.plugin.data.undoStack.length === 0;
     disableWhenReadOnly(undo, readOnly, "Undo an organization change");
     undo.addEventListener("click", () => this.run(() => this.plugin.undo()));
-    const redo = iconButton(actions, "redo-2", "Redo personal organization change", "ent-cc-history-action");
+    const redo = iconButton(actions, "redo-2", "Redo last organization change", "ent-cc-history-action");
     redo.disabled = readOnly || this.plugin.data.redoStack.length === 0;
     disableWhenReadOnly(redo, readOnly, "Redo an organization change");
     redo.addEventListener("click", () => this.run(() => this.plugin.redo()));
@@ -3585,19 +3585,23 @@ export class EntVaultCommandCenterView extends ItemView {
     const indexRecords = this.plugin.getIndexRecords();
     const indexCount = indexRecords.length;
     const placeholders = indexRecords.filter((record) => record.isPlaceholder).length;
-    health.createSpan({ text: `${indexCount} index entries` });
-    health.createSpan({ text: `${indexCount - placeholders} linked notes` });
-    health.createSpan({ text: `${placeholders} without linked notes` });
+    // The entry total always shows; other counts appear only once they are non-zero.
+    const count = (value: number, singular: string, plural: string, always = false): void => {
+      if (always || value > 0) health.createSpan({ text: `${value} ${value === 1 ? singular : plural}` });
+    };
+    count(indexCount, "index entry", "index entries", true);
+    count(indexCount - placeholders, "linked note", "linked notes");
+    count(placeholders, "without a linked note", "without linked notes");
     const proposalCount = this.records.filter((record) => record.role === "proposal").length;
     if (this.plugin.isClinicalMode()) {
       const reviewedCount = this.records.filter((record) => record.reviewStatus === "reviewed").length;
-      health.createSpan({ text: `${reviewedCount} marked reviewed` });
-      health.createSpan({ text: `${proposalCount} inbox` });
+      count(reviewedCount, "marked reviewed", "marked reviewed");
+      count(proposalCount, "in inbox", "in inbox");
       return;
     }
-    health.createSpan({ text: `${proposalCount} inbox` });
-    health.createSpan({ text: `${this.plugin.data.collections.length} collections` });
-    health.createSpan({ text: `${this.plugin.data.pinnedPaths.length} pinned` });
+    count(proposalCount, "in inbox", "in inbox");
+    count(this.plugin.data.collections.length, "collection", "collections");
+    count(this.plugin.data.pinnedPaths.length, "pinned", "pinned");
   }
 
   /** Refresh count-only chrome without replacing the focused mobile search input. */
@@ -6931,7 +6935,7 @@ export class EntVaultCommandCenterView extends ItemView {
     menu.addItem((item) => item.setTitle("Quick entry…").setIcon("zap").setDisabled(this.plugin.isDataReadOnly?.() ?? false).onClick(() => {
       if (ownsBase()) this.openQuickEntry(this.app.workspace.getActiveFile()?.path);
     }));
-    menu.addItem((item) => item.setTitle("Organize vault notes across knowledge bases…").setIcon("network").onClick(() => {
+    menu.addItem((item) => item.setTitle("Organize notes…").setIcon("network").onClick(() => {
       this.plugin.openNoteOrganizer();
     }));
     menu.addItem((item) => item.setTitle(`Manage ${this.plugin.data.settings.indexLabel}`).setIcon("list-tree").onClick(() => {
@@ -6958,10 +6962,10 @@ export class EntVaultCommandCenterView extends ItemView {
       if (ownsBase()) this.startAddExistingToIndex();
     }));
     menu.addSeparator();
-    menu.addItem((item) => item.setTitle("Undo personal organization change").setIcon("undo-2").setDisabled(this.plugin.data.undoStack.length === 0).onClick(() => {
+    menu.addItem((item) => item.setTitle("Undo last organization change").setIcon("undo-2").setDisabled(this.plugin.data.undoStack.length === 0).onClick(() => {
       if (ownsBase()) this.run(() => this.plugin.undo());
     }));
-    menu.addItem((item) => item.setTitle("Redo personal organization change").setIcon("redo-2").setDisabled(this.plugin.data.redoStack.length === 0).onClick(() => {
+    menu.addItem((item) => item.setTitle("Redo last organization change").setIcon("redo-2").setDisabled(this.plugin.data.redoStack.length === 0).onClick(() => {
       if (ownsBase()) this.run(() => this.plugin.redo());
     }));
     menu.addItem((item) => item

@@ -51,6 +51,7 @@ interface SettingsHost extends Plugin {
   getExternalChangeGeneration?(): number;
   switchKnowledgeBase(id: string): Promise<void>;
   renameKnowledgeBase(id: string, name: string): Promise<void>;
+  runSetupAgain(): void;
   getLibraries(includeArchived?: boolean): LibraryDefinition[];
   librarySubjectCount(id: string): number;
   getFollowUpCategories(): FollowUpCategoryDefinition[];
@@ -249,7 +250,6 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
     this.clearBufferedTextSaveTimer();
     this.bufferedTextSaveRefresh = false;
     this.bufferedTextSaveData = null;
-    this.host.data.settings.setupComplete = true;
     // Matching the last committed snapshot is not a no-op while an older write
     // is pending: that older write may contain the value the user just reverted.
     if (this.pendingSettingsSaves === 0 && !this.hasPersistedSettingsChange(directDataFields)) {
@@ -838,6 +838,15 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
               .setValue(settings.workspaceMode)
               .setDisabled(true));
           }, ["generic", "ENT", "clinical", "preset"]),
+          ...(settings.workspaceMode === "generic" ? [renderSetting("Setup wizard", "Walk through the name, labels, and folders again. Existing notes are not moved or changed.", (row) => {
+            row.addButton((button) => button
+              .setButtonText("Run setup")
+              .setDisabled(readOnly)
+              .onClick(() => {
+                if (!ownsConfiguredBase()) return;
+                this.host.runSetupAgain();
+              }));
+          }, ["setup", "wizard", "onboarding", "getting started"])] : []),
           renderSetting("Command center name", "Displayed in the view title, header, and settings. The ribbon and hover source retain the stable plugin name.", (row) => {
             row.addText((text) => {
               text.setValue(settings.workspaceName).setDisabled(true);
@@ -1113,7 +1122,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
           },
           {
             name: "Safe linking policy",
-            desc: "Exact title or configured-ID matches may be suggested for review, but KBCC never links a note automatically or uses fuzzy matching as identity. Create or link each placeholder deliberately from Smart Queues or its row action.",
+            desc: "Exact title or configured-ID matches may be suggested for review, but the plugin never links a note automatically or uses fuzzy matching as identity. Create or link each placeholder deliberately from Smart Queues or its row action.",
             aliases: ["candidate", "resolve", "exact match", "automatic link"],
           },
           {

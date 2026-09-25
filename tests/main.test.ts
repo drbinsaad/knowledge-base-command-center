@@ -3183,7 +3183,7 @@ test("oversized v13 history arriving through Sync keeps newest entries and repor
   assert.ok(local);
   assert.ok(new TextEncoder().encode(JSON.stringify(local)).byteLength <= 4 * 1024 * 1024);
   assert.ok(local.bases[0]?.view.undoStack.at(-1)?.label.startsWith("19-"), "the newest active-base snapshot survives");
-  assert.ok(Notice.messages.some((message) => /exceeded the safe local limit.*Newest entries were retained/iu.test(message)));
+  assert.ok(Notice.messages.some((message) => /too large and was trimmed.*newest entries were kept/iu.test(message)));
   const written = plugin.savedData.at(-1) as PluginStore | undefined;
   assert.equal(written?.version, STORE_VERSION);
   assert.ok(written?.bases.every((entry) => entry.data.undoStack.length === 0));
@@ -3616,7 +3616,7 @@ test("same-revision semantic conflicts rescue the losing complete envelope befor
   const rescue = JSON.parse(rescueContent) as { kind: string; store: PluginStore };
   assert.equal(rescue.kind, "knowledge-base-command-center-conflict-rescue");
   assert.equal(rescue.store.bases[0]?.data.settings.workspaceName, losing.bases[0]?.data.settings.workspaceName);
-  const conflictNotice = Notice.messages.find((message) => message.includes("concurrent knowledge-base edit"));
+  const conflictNotice = Notice.messages.find((message) => message.includes("from another device overlapped"));
   assert.ok(conflictNotice);
   assert.equal(conflictNotice.includes("Knowledge Base Command Center Exports"), false, "the conflict notice is path-free");
   assert.equal(plugin.dataCompatibilityWarning, "");
@@ -6862,7 +6862,7 @@ test("portfolio finalization conforms view-pressure reductions before ordinary v
       "the live projection adopts the finalized bounded view state",
     );
   }
-  assert.ok(Notice.messages.some((message) => /inactive route and layout state was reduced/i.test(message)));
+  assert.ok(Notice.messages.some((message) => /older history and inactive view settings on this device were removed/i.test(message)));
 
   live.plugin.data.selectedPath = "Knowledge Base/Immediate post-portfolio view.md";
   await live.plugin.saveViewState();
@@ -6926,7 +6926,7 @@ test("failed portfolio primary reports any device-local reduction already made b
       .pendingRequiredUndoBatchCommit,
     undefined,
   );
-  assert.ok(Notice.messages.some((message) => /inactive route and layout state was reduced/i.test(message)));
+  assert.ok(Notice.messages.some((message) => /older history and inactive view settings on this device were removed/i.test(message)));
 });
 
 test("portfolio batch journal quota rejection restores every destination before primary", async () => {
@@ -9417,7 +9417,7 @@ test("required Undo retains the newest snapshot and reports older local-history 
   const labels = local?.bases[0]?.view.undoStack.map((snapshot) => snapshot.label) ?? [];
   assert.ok(labels.includes("Restart-safe newest"), "the required newest snapshot survives the 4 MiB reduction");
   assert.ok(labels.length < 20, "older device-local history is actually reduced");
-  assert.ok(Notice.messages.some((message) => /Older undo or redo entries were removed.*restart-safe.*four-megabyte/i.test(message)));
+  assert.ok(Notice.messages.some((message) => /after a restart, older undo or redo steps.*were removed.*4-megabyte/i.test(message)));
 });
 
 test("custom-library definitions are isolated per knowledge base", async () => {
@@ -11213,6 +11213,40 @@ test("explicit attachment upload uses the configured folder and appends under on
   assert.equal(markdown, "---\ntitle: Topic\n---\n\n## Attachments\n\n![[old.png]]\n![[Assets/Uploads/scan.png]]\n\n## Notes\n- Keep\n");
 });
 
+test("Run setup again opens the wizard only for writable Generic knowledge bases", async () => {
+  const app = {
+    vault: { configDir: ".obsidian", getAbstractFileByPath: () => null, getMarkdownFiles: () => [] },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+  };
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = createDefaultStore(data, 1, "vault-run-setup-test");
+  await plugin.loadPluginData();
+  let wizardOpens = 0;
+  (plugin as unknown as { withView(action: (view: { openSetupWizard(): void }) => void): Promise<void> }).withView = async (action) => {
+    action({ openSetupWizard: () => { wizardOpens += 1; } });
+  };
+  Notice.messages.length = 0;
+  plugin.runSetupAgain();
+  await Promise.resolve();
+  assert.equal(wizardOpens, 1);
+
+  plugin.dataCompatibilityWarning = "Protected read-only.";
+  plugin.runSetupAgain();
+  await Promise.resolve();
+  assert.equal(wizardOpens, 1);
+  assert.match(Notice.messages.at(-1) ?? "", /Editing is paused/u);
+
+  plugin.dataCompatibilityWarning = "";
+  plugin.data.settings.workspaceMode = "ent-clinical";
+  plugin.runSetupAgain();
+  await Promise.resolve();
+  assert.equal(wizardOpens, 1, "setup never converts an ENT knowledge base to Generic");
+  assert.match(Notice.messages.at(-1) ?? "", /only for generic knowledge bases/u);
+});
+
 test("attachment import accepts a case-variant Markdown extension consistently", async () => {
   const note = new TFile("Knowledge/Topic.MD");
   const app = {
@@ -12986,7 +13020,7 @@ test("a rename-journal append failure keeps the live overlay queued and warns ab
   assert.equal(internal.projectPendingRenamePath(oldPath), newPath);
   assert.equal(live.localValues.has(VAULT_RENAME_JOURNAL_KEY), false);
   assert.equal(
-    Notice.messages.slice(noticeStart).some((message) => /restart-safe local repair journal could not be saved/iu.test(message)),
+    Notice.messages.slice(noticeStart).some((message) => /could not save its repair notes/iu.test(message)),
     true,
   );
 });

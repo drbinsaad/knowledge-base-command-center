@@ -813,18 +813,19 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       const currentPath = this.app.workspace.getActiveFile()?.path;
       void this.withView((view) => view.openQuickEntry(currentPath));
     });
-    this.addCommand({ id: "open-workspace", name: "Open workspace", callback: () => this.run(() => this.activateView()) });
+    this.addCommand({ id: "open-workspace", name: "Open main page", callback: () => this.run(() => this.activateView()) });
+    this.addCommand({ id: "run-setup-again", name: "Run setup again…", icon: "settings-2", callback: () => this.runSetupAgain() });
     this.addCommand({ id: "add-or-create", name: "Add or create…", callback: () => void this.withView((view) => view.openAddActions()) });
     this.addCommand({ id: "manage-knowledge-index", name: "Manage index…", callback: () => void this.withView((view) => view.openIndexManager()) });
     this.addCommand({
       id: "organize-vault-notes",
-      name: "Organize vault notes across knowledge bases…",
+      name: "Organize notes…",
       icon: "network",
       callback: () => this.openNoteOrganizer(),
     });
     this.addCommand({
       id: "organize-current-note",
-      name: "Organize current note across knowledge bases…",
+      name: "Organize this note…",
       icon: "network",
       checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile();
@@ -835,7 +836,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     });
     this.addCommand({
       id: "show-current-note-memberships",
-      name: "Show current note’s knowledge-base memberships",
+      name: "Where is this note organized?",
       icon: "list-tree",
       checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile();
@@ -846,7 +847,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     });
     this.addCommand({
       id: "undo-last-note-organizer-batch",
-      name: "Note organizer: Undo last multi-base change",
+      name: "Undo last organizer change",
       icon: "undo-2",
       checkCallback: (checking) => {
         if (!this.canUndoNoteOrganizerBatch()) return false;
@@ -856,7 +857,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     });
     this.addCommand({
       id: "redo-last-note-organizer-batch",
-      name: "Note organizer: Redo last multi-base change",
+      name: "Redo last organizer change",
       icon: "redo-2",
       checkCallback: (checking) => {
         if (!this.canRedoNoteOrganizerBatch()) return false;
@@ -865,11 +866,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       },
     });
     this.registerNoteOrganizerContextMenus();
-    this.addCommand({ id: "open-placeholder-resolution-queue", name: "Open imported placeholder queue", icon: "file-question", callback: () => this.openPlaceholderResolutionQueue() });
-    this.addCommand({ id: "resolve-next-imported-placeholder", name: "Resolve next imported placeholder…", icon: "list-start", callback: () => void this.withView((view) => view.startResolveNextPlaceholder()) });
+    this.addCommand({ id: "open-placeholder-resolution-queue", name: "Show imported topics without notes", icon: "file-question", callback: () => this.openPlaceholderResolutionQueue() });
+    this.addCommand({ id: "resolve-next-imported-placeholder", name: "Create or link the next imported topic…", icon: "list-start", callback: () => void this.withView((view) => view.startResolveNextPlaceholder()) });
     this.addCommand({
       id: "review-legacy-index-source",
-      name: "Review legacy index source…",
+      name: "Review folder that adds notes automatically…",
       icon: "folder-sync",
       checkCallback: (checking) => {
         if (!this.hasLegacyIndexSource()) return false;
@@ -877,8 +878,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         return true;
       },
     });
-    this.addCommand({ id: "open-taxonomy-health", name: "Open taxonomy health center", callback: () => new TaxonomyHealthModal(this).open() });
-    this.addCommand({ id: "open-sync-recovery-center", name: "Open sync & recovery center", icon: "shield-check", callback: () => new SyncRecoveryCenterModal(this).open() });
+    this.addCommand({ id: "open-taxonomy-health", name: "Check names and structure for problems", callback: () => new TaxonomyHealthModal(this).open() });
+    this.addCommand({ id: "open-sync-recovery-center", name: "Check sync and backup status", icon: "shield-check", callback: () => new SyncRecoveryCenterModal(this).open() });
     const currentUpdateAnnouncement = updateAnnouncementForVersion(this.manifest.version);
     if (currentUpdateAnnouncement) {
       this.addCommand({
@@ -898,9 +899,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.addCommand({ id: "switch-knowledge-base", name: "Switch knowledge base…", callback: () => new ManageKnowledgeBasesModal(this).open() });
     this.addCommand({ id: "manage-knowledge-bases", name: "Manage knowledge bases…", callback: () => new ManageKnowledgeBasesModal(this).open() });
     this.addCommand({ id: "manage-libraries", name: "Manage libraries…", callback: () => new ManageLibrariesModal(this, () => void this.refreshViews()).open() });
-    this.addCommand({ id: "export-import-center", name: "Open export / import center", callback: () => void this.withView((view) => view.openPortabilityCenter()) });
-    this.addCommand({ id: "portfolio-transfer-center", name: "Open multi-base portfolio transfer", callback: () => new PortfolioTransferModal(this).open() });
-    this.addCommand({ id: "create-knowledge-note", name: "Create note from template or empty note…", callback: () => void this.withView((view) => {
+    this.addCommand({ id: "export-import-center", name: "Back up, export, or import…", callback: () => void this.withView((view) => view.openPortabilityCenter()) });
+    this.addCommand({ id: "portfolio-transfer-center", name: "Export or import several knowledge bases…", callback: () => new PortfolioTransferModal(this).open() });
+    this.addCommand({ id: "create-knowledge-note", name: "Create note…", callback: () => void this.withView((view) => {
       if (this.isClinicalMode()) view.startCreateKnowledgeNote();
       else view.openQuickCreateNoteForm();
     }) });
@@ -1027,7 +1028,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     });
     this.addCommand({
       id: "undo-personal-organization",
-      name: "Undo personal organization change",
+      name: "Undo last organization change",
       checkCallback: (checking) => {
         if (this.data.undoStack.length === 0) return false;
         if (!checking) this.run(() => this.undo());
@@ -1036,7 +1037,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     });
     this.addCommand({
       id: "redo-personal-organization",
-      name: "Redo personal organization change",
+      name: "Redo last organization change",
       checkCallback: (checking) => {
         if (this.data.redoStack.length === 0) return false;
         if (!checking) this.run(() => this.redo());
@@ -1311,12 +1312,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (semanticHash === entry.semanticHash && rejected.length === 0) return null;
     if (!Number.isSafeInteger(entry.semanticRevision) || entry.semanticRevision < 0
       || entry.semanticRevision >= Number.MAX_SAFE_INTEGER) {
-      throw new Error("The knowledge base semantic revision cannot be advanced safely. Export the base before repairing plugin data.");
+      throw new Error("This change could not be saved safely. Back up this knowledge base (Back up, export, or import…) before repairing plugin data.");
     }
     const highestRejectedRevision = rejected.reduce((highest, attempt) => Math.max(highest, attempt.revision), -1);
     const nextRevision = Math.max(entry.semanticRevision, highestRejectedRevision) + 1;
     if (!Number.isSafeInteger(nextRevision)) {
-      throw new Error("The knowledge base semantic revision cannot be advanced safely. Export the base before repairing plugin data.");
+      throw new Error("This change could not be saved safely. Back up this knowledge base (Back up, export, or import…) before repairing plugin data.");
     }
     return {
       semanticHash,
@@ -1607,8 +1608,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (!historyTruncated && !viewStateTruncated) return;
     new Notice(
       viewStateTruncated
-        ? "Legacy device-local view state exceeded the safe local limit. The active base and newest available history were retained; preserve a pre-upgrade copy of plugin data if older device state may be needed."
-        : "Legacy device-local Undo or Redo history exceeded the safe local limit. Newest entries were retained; preserve a pre-upgrade copy of plugin data if older history may be needed.",
+        ? "Older view settings on this device were too large and were trimmed. The current knowledge base and the newest history were kept. Keep a pre-upgrade copy of the plugin data if you may need the older settings."
+        : "Older Undo or Redo history on this device was too large and was trimmed. The newest entries were kept. Keep a pre-upgrade copy of the plugin data if you may need the older history.",
       12000,
     );
   }
@@ -1718,7 +1719,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private noticeVaultRenameJournalWriteFailure(): void {
-    new Notice("The vault rename was detected, but its restart-safe local repair journal could not be saved. Keep Obsidian open until the organization repair finishes; if it remains read-only, preserve plugin data before restarting.", 15000);
+    new Notice("Your vault was renamed, but the plugin could not save its repair notes on this device. Keep Obsidian open until your organization finishes updating. If editing stays paused, back up the plugin data before restarting.", 15000);
   }
 
   private captureLiveDeviceLocalState(): void {
@@ -1981,7 +1982,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private finalizeRequiredUndoCommit(pending: PendingRequiredUndoCommit): void {
     if (!this.committedAuthorityMatchesPendingUndo(this.store, pending)) {
       console.error("Knowledge Base Command Center did not finalize required Undo because committed authority did not match its pending journal");
-      new Notice("The change was saved, but required undo is still pending causal verification. Obsidian will verify it on restart.", 10000);
+      new Notice("The change was saved. Its undo will be confirmed the next time Obsidian starts.", 10000);
       return;
     }
     const current = this.deviceLocalState;
@@ -1999,7 +2000,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.storeDeviceLocalState(built.state, true);
     } catch (error) {
       console.error("Knowledge Base Command Center could not promote its committed required Undo journal", error);
-      new Notice("The change was saved and its undo remains protected by a pending local journal, but finalization failed. Obsidian will retry on restart.", 12000);
+      new Notice("The change was saved and its undo is protected, but the last undo setup step did not finish (finalization failed). It will finish the next time Obsidian starts.", 12000);
     }
   }
 
@@ -2086,7 +2087,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     try {
       if (!pending.entries.every((entry) => this.committedAuthorityMatchesPendingUndo(this.store, entry))) {
         console.error(`Knowledge Base Command Center did not finalize ${operationLabel} Undo because committed authority did not match its pending batch`);
-        new Notice(`${operationSubject} was saved, but its undo history is still pending causal verification. Obsidian will verify it on restart.`, 10000);
+        new Notice(`${operationSubject} was saved. Its undo will be confirmed the next time Obsidian starts.`, 10000);
         return { finalized: false, historyTruncated: false, viewStateTruncated: false };
       }
       const current = this.deviceLocalState;
@@ -2126,8 +2127,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       console.error("Knowledge Base Command Center could not promote its committed required Undo batch", error);
       new Notice(
         markerFreeWasStored
-          ? `${operationSubject} was saved and its protected local history was finalized, but the live view could not adopt its bounded projection. Organization remains read-only until Obsidian is restarted.`
-          : `${operationSubject} was saved and its undo remains protected by a pending local journal, but finalization failed. Obsidian will retry on restart.`,
+          ? `${operationSubject} was saved and its undo is safe, but the view could not refresh. Editing is paused until you restart Obsidian.`
+          : `${operationSubject} was saved and its undo is protected, but the last undo setup step did not finish (finalization failed). It will finish the next time Obsidian starts.`,
         12000,
       );
       return { finalized: false, historyTruncated: false, viewStateTruncated: false };
@@ -2145,8 +2146,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       : `every base affected by ${requiredUndoBatchSubject(operationLabel).toLocaleLowerCase()}`;
     new Notice(
       viewStateTruncated
-        ? `Older device-local history or inactive route and layout state was reduced so ${affectedBases} keeps its required undo within the four-megabyte local limit.`
-        : `Older undo or redo entries were removed on this device so ${affectedBases} keeps its required undo within the four-megabyte local limit.`,
+        ? `To keep undo available for ${affectedBases}, older history and inactive view settings on this device were removed to stay within the 4-megabyte undo storage limit.`
+        : `To keep undo available for ${affectedBases}, older undo or redo steps on this device were removed to stay within the 4-megabyte undo storage limit.`,
       10000,
     );
   }
@@ -2211,7 +2212,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private finalizeHistoryTransitionCommit(pending: PendingHistoryTransitionCommit): void {
     if (!this.committedAuthorityMatchesPendingUndo(this.store, pending)) {
       console.error("Knowledge Base Command Center did not finalize history because committed authority did not match its pending transition");
-      new Notice(`The ${pending.direction} was saved, but its history transition is still pending causal verification. Obsidian will verify it on restart.`, 10000);
+      new Notice(`The ${pending.direction} was saved. Its history will be confirmed the next time Obsidian starts.`, 10000);
       return;
     }
     const current = this.deviceLocalState;
@@ -2227,7 +2228,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.storeDeviceLocalState(built.state, true);
     } catch (error) {
       console.error("Knowledge Base Command Center could not promote its committed history transition", error);
-      new Notice(`The ${pending.direction} was saved and its history remains protected by a pending local journal, but finalization failed. Obsidian will retry on restart.`, 12000);
+      new Notice(`The ${pending.direction} was saved and its history is protected, but the last setup step did not finish (finalization failed). It will finish the next time Obsidian starts.`, 12000);
     }
   }
 
@@ -3633,7 +3634,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (!path) throw new SemanticConflictRescueError("The losing incoming semantic edit could not be rescued before conflict resolution.");
     }
     new Notice(
-      `${merged.semanticConflicts.length} concurrent knowledge-base edit${merged.semanticConflicts.length === 1 ? " was" : "s were"} preserved in a private conflict rescue before deterministic merging.`,
+      `${merged.semanticConflicts.length === 1 ? "An edit" : `${merged.semanticConflicts.length} edits`} from another device overlapped with this one. One version was kept, and the other was saved first as a private conflict backup in your vault.`,
       12000,
     );
     return merged;
@@ -4109,7 +4110,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
     if (this.semanticConflictRescueFailed) {
       this.recordExternalReload("blocked");
-      new Notice("Knowledge-base sync remains read-only because a prior concurrent edit could not be preserved. Restart only after exporting every base or copying the plugin data.json.", 12000);
+      new Notice("Editing is paused to protect your data: an overlapping edit from another device could not be backed up. Before restarting, back up every knowledge base or copy the plugin data.json.", 12000);
       return;
     }
     // Preserve this device's current route/collapse/history before any synced
@@ -4336,7 +4337,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   noteOrganizerRestrictionReason(path: string): string | null {
     return this.noteOrganizerPathIsRestricted(path)
-      ? "This note is in a protected source or Obsidian configuration area and cannot be organized by KBCC."
+      ? "This note is in a protected source or Obsidian configuration area and cannot be organized by the command center."
       : null;
   }
 
@@ -5047,7 +5048,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           && review.after.primary.kind === "index"
           && !entriesById.get(directive.baseId)?.data.directIndexPaths.includes(path)
           && !entriesById.get(directive.baseId)?.data.manualIndexPaths.includes(path)
-          ? ["Adds durable direct Index membership and a portable KBCC identity. This note will stay indexed if its linked folder is later unlinked."]
+          ? ["Adds durable direct Index membership and a portable identity. This note will stay indexed if its linked folder is later unlinked."]
           : [];
         rows.push({
           path,
@@ -5523,7 +5524,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           membershipElement: null as unknown as HTMLElement,
           returnElement: null as unknown as HTMLElement,
         };
-        const membershipElement = view.addAction("circle", "KBCC note organization", () => {
+        const membershipElement = view.addAction("circle", "Command center note organization", () => {
           const current = view.file;
           if (current instanceof TFile && current.extension.toLowerCase() === "md") {
             this.openNoteOrganizer([current.path]);
@@ -9239,7 +9240,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         new Notice("The change was saved, but the view could not refresh. Reopen the command center to update it.", 8000);
       }
       if (olderLocalHistoryTruncated) {
-        new Notice("Older undo or redo entries were removed on this device so this change's required undo remains restart-safe within the four-megabyte local limit.", 10000);
+        new Notice("To keep undo available for this change after a restart, older undo or redo steps on this device were removed to stay within the 4-megabyte undo storage limit.", 10000);
       }
       });
     } finally {
@@ -9399,7 +9400,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         new Notice(`The ${direction} was saved, but the view could not refresh. Reopen the command center to update it.`, 8000);
       }
       if (olderLocalHistoryTruncated) {
-        new Notice(`Older undo or redo entries in other knowledge bases were removed so this ${direction} remains crash-safe within the four-megabyte local limit.`, 10000);
+        new Notice(`To keep this ${direction} safe, older undo or redo steps in other knowledge bases were removed to stay within the 4-megabyte undo storage limit.`, 10000);
       }
       new Notice(`${direction === "undo" ? "Undid" : "Redid"}: ${snapshot.label}`);
       });
@@ -9668,6 +9669,19 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       await this.removeCreatedEmptyFolders(createdFolders);
       throw error;
     }
+  }
+
+  /** Reopen the Generic setup wizard; the ENT preset is configured only in Settings. */
+  runSetupAgain(): void {
+    if (this.isClinicalMode()) {
+      new Notice("Setup is only for generic knowledge bases. Change this one from the plugin settings instead.", 7000);
+      return;
+    }
+    if (this.isDataReadOnly()) {
+      new Notice("Editing is paused to protect your data, so setup cannot run now. Run the sync and backup status command for details.", 8000);
+      return;
+    }
+    void this.withView((view) => view.openSetupWizard());
   }
 
   openAttachmentImport(note = this.app.workspace.getActiveFile()): void {

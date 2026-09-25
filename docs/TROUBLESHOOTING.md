@@ -37,7 +37,7 @@ If an ordinary note such as `README.md` appears in a Generic Index merely becaus
 
 Before changing it, open the note's **Why this appears** action or **Manage Index… → Why included**. If the explanation names the inherited linked folder, that rule—not the note's location by itself—is the active authority. A direct membership listed at the same time will survive unlinking; an exclusion can hide the note without touching the file.
 
-Choose **Review…** or run **Review legacy index source…**. First let Obsidian Sync finish and verify that the linked folder's Markdown contents are complete on this device, then check the confirmation in the review. Apply remains blocked if a non-root source folder is unavailable, and an empty local list does not prove another synced device has no notes. Select only the notes that should remain durable direct members, then choose **Apply review & unlink**. Unselected notes leave the plugin Index, future notes placed in that folder no longer join automatically, and every Markdown file remains where it is unchanged. The conversion and unlink are saved together as one Undo action. Choose **Keep linked** only when you intentionally want that folder's current and future Markdown descendants to join automatically; **Not now** leaves the source and warning unchanged.
+Choose **Review…** or run **Review folder that adds notes automatically…**. First let Obsidian Sync finish and verify that the linked folder's Markdown contents are complete on this device, then check the confirmation in the review. Apply remains blocked if a non-root source folder is unavailable, and an empty local list does not prove another synced device has no notes. Select only the notes that should remain durable direct members, then choose **Apply review & unlink**. Unselected notes leave the plugin Index, future notes placed in that folder no longer join automatically, and every Markdown file remains where it is unchanged. The conversion and unlink are saved together as one Undo action. Choose **Keep linked** only when you intentionally want that folder's current and future Markdown descendants to join automatically; **Not now** leaves the source and warning unchanged.
 
 ## A subject appears in the wrong Index or Library
 
@@ -61,7 +61,7 @@ Online cover URLs are not supported in 0.24.0. They show an unavailable-cover pl
 
 ## The Organizer shows a README or every note in a folder
 
-The **Notes** step is a vault browser, so it can show eligible existing Markdown files that are not organized anywhere. Merely appearing in this picker does not add a note to an Index, Library, or Collection. The active-note indicator says **KBCC: Not organized** for an ordinary unorganized note; this neutral state is not an error.
+The **Notes** step is a vault browser, so it can show eligible existing Markdown files that are not organized anywhere. Merely appearing in this picker does not add a note to an Index, Library, or Collection. The active-note indicator says **Command center: Not organized** for an ordinary unorganized note; this neutral state is not an error.
 
 Selecting a folder deliberately selects a one-time snapshot of all its current eligible Markdown descendants, which can include `README.md`. Before **Choose destinations**, clear the folder selection, remove the individual README from **Selected notes**, or use **Skip this note** under per-note behavior. The snapshot never creates a linked-folder rule, so a Markdown file created in that folder later will not be included automatically.
 
@@ -77,19 +77,19 @@ Let Sync finish, confirm the selected notes still exist, choose **Refresh review
 
 Organizer drop support is a progressive enhancement. It accepts only bounded text path payloads from compatible Obsidian drag sources; operating-system file objects, absolute paths, unsafe URLs, missing or restricted notes, and non-Markdown files are refused. Platforms, themes, and other plugins can expose a different drag payload.
 
-Use the dependable fallback: select or right-click the note, multi-selection, or folder in Obsidian's File Explorer and choose **Organize in KBCC…**, or choose **Organize** and select notes in the vault tree. Dropping never imports an external file and never moves a vault file.
+Use the dependable fallback: select or right-click the note, multi-selection, or folder in Obsidian's File Explorer and choose **Organize in command center…**, or choose **Organize** and select notes in the vault tree. Dropping never imports an external file and never moves a vault file.
 
 ## The active-note indicator is red
 
-Red is reserved for broken persisted organization, such as a duplicate or missing portable identity, unavailable Library, conflicting primary placements, or simultaneous direct-and-hidden Index state. It never means merely “not in the current Index.” Activate the indicator or run **Show current note’s knowledge-base memberships** and read the issue under each affected knowledge base before changing anything.
+Red is reserved for broken persisted organization, such as a duplicate or missing portable identity, unavailable Library, conflicting primary placements, or simultaneous direct-and-hidden Index state. It never means merely “not in the current Index.” Activate the indicator or run **Where is this note organized?** and read the issue under each affected knowledge base before changing anything.
 
 The indicator also uses an icon, accessible label, tooltip, and optional count, so color is not the only status signal. A normal unorganized note is neutral/muted; organization only in another base uses the accent state; current-base primary or Collections-only organization uses the success state.
 
 ## Multi-base Organizer Undo disappeared after restart
 
-**Note organizer: Undo last multi-base change** and **Note organizer: Redo last multi-base change** coordinate the newest exact Organizer batch only during the plugin session that applied it. They also fail closed after a conflicting newer organization change, because the affected bases no longer have the expected newest Undo state.
+**Undo last organizer change** and **Redo last organizer change** coordinate the newest exact Organizer batch only during the plugin session that applied it. They also fail closed after a conflicting newer organization change, because the affected bases no longer have the expected newest Undo state.
 
-Every affected knowledge base still received a durable per-base Undo entry. After restart, switch to each changed base and use **Undo personal organization change** separately. Undo changes plugin data only; no Markdown file operation needs to be reversed because the Organizer did not perform one.
+Every affected knowledge base still received a durable per-base Undo entry. After restart, switch to each changed base and use **Undo last organization change** separately. Undo changes plugin data only; no Markdown file operation needs to be reversed because the Organizer did not perform one.
 
 ## A portable subject says “No note”
 
@@ -104,7 +104,7 @@ If organization or Libraries did not arrive at all, check **Settings → Sync �
 - **Link existing note** resolves the portable identity to a chosen note.
 - **Keep placeholder** preserves imported organization without creating a file.
 
-For several unresolved subjects, open Smart queues → **Imported placeholders needing notes** or run **Open imported placeholder queue**. Candidate discovery checks every eligible Markdown note in the vault, including unindexed notes and notes outside the active base's folder rules, for an exact normalized title or configured-ID match. Its total is the number of unresolved subjects with at least one candidate, not the number of matching notes. Candidates are suggestions for review only: the plugin does not auto-link one; choose the subject, inspect any existing portable owner, and explicitly create or link. **Resolve next imported placeholder…** starts with the next item.
+For several unresolved subjects, open Smart queues → **Imported placeholders needing notes** or run **Show imported topics without notes**. Candidate discovery checks every eligible Markdown note in the vault, including unindexed notes and notes outside the active base's folder rules, for an exact normalized title or configured-ID match. Its total is the number of unresolved subjects with at least one candidate, not the number of matching notes. Candidates are suggestions for review only: the plugin does not auto-link one; choose the subject, inspect any existing portable owner, and explicitly create or link. **Create or link the next imported topic…** starts with the next item.
 
 ## Index row text, status, or actions overlap
 

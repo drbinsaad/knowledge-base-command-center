@@ -32,7 +32,7 @@ function detailLabel(base: NoteOrganizerBaseMembership): string {
     details.push(provenance.join(" · "));
   }
   if (base.hidden) details.push("Hidden from Index");
-  return details.join(" · ") || "No KBCC organization in this knowledge base";
+  return details.join(" · ") || "Not organized in this knowledge base";
 }
 
 /** Read-only all-base membership detail opened from the active-note indicator. */

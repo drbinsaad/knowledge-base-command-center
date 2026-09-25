@@ -1400,7 +1400,7 @@ test("same-base reloads preserve the focused search and its query across ordinar
   const originalActiveTabCount = content.querySelector(".ent-cc-tab.is-active .ent-cc-tab-count");
   const originalHealth = content.querySelector(".ent-cc-health-summary");
   assert.equal(originalActiveTabCount?.textContent, "1");
-  assert.match(originalHealth?.textContent ?? "", /1 index entries/);
+  assert.match(originalHealth?.textContent ?? "", /1 index entry/);
   original.value = view.query;
   original.focus({ preventScroll: true });
   source.records.push(record("KB/Laryngeal cleft.md", "Laryngeal cleft"));

@@ -1419,7 +1419,7 @@ for (const mobile of [false, true]) {
     await dialog.getByRole("button", { name: mobile ? "Close" : "Cancel", exact: true }).click();
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await openModal(page, "setup");
-    await expect(dialog.getByRole("textbox", { name: "Command center name", exact: true })).toBeVisible();
+    await expect(dialog.getByRole("textbox", { name: "Name this knowledge base", exact: true })).toBeVisible();
     await expect(dialog.locator(".ent-cc-setup-advanced")).not.toHaveAttribute("open");
     await expect(dialog.getByRole("textbox", { name: "Header description", exact: true })).toBeHidden();
     await captureEvidence(page, `setup-${device}`);

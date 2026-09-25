@@ -121,11 +121,11 @@ test("public repository metadata is present", async () => {
   assert.match(recoveryGuide, /Global Note Organizer Apply[^.]*other author[^.]*multi-base form[^.]*same mechanism/iu);
   assert.match(recoveryGuide, /exact protected batch cannot fit[^.]*4 MiB[^.]*rejected[^.]*before any primary store mutation/iu);
   for (const organizerCommand of [
-    "Organize vault notes across knowledge bases…",
-    "Organize current note across knowledge bases…",
-    "Show current note’s knowledge-base memberships",
-    "Note organizer: Undo last multi-base change",
-    "Note organizer: Redo last multi-base change",
+    "Organize notes…",
+    "Organize this note…",
+    "Where is this note organized?",
+    "Undo last organizer change",
+    "Redo last organizer change",
   ]) {
     assert.match(userGuide, new RegExp(`^- ${organizerCommand.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}$`, "mu"),
       `the commands appendix must include ${organizerCommand}`);
@@ -286,9 +286,9 @@ test("public repository metadata is present", async () => {
     "Quick append: Add to current note…",
     "Quick append: Choose a note…",
     "Quick append: Undo last append",
-    "Open imported placeholder queue",
-    "Resolve next imported placeholder…",
-    "Review legacy index source…",
+    "Show imported topics without notes",
+    "Create or link the next imported topic…",
+    "Review folder that adds notes automatically…",
   ]) assert.match(commandAppendix, new RegExp(command.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
   assert.match(userGuide, /Any focused Quick Entry or Quick Append command/);
   assert.match(userGuide, /Open Library: _Library name_/);

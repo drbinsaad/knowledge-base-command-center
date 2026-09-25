@@ -7,8 +7,9 @@ const budgets = [
   // No runtime dependencies, image assets, or network capabilities are added.
   // Multi-file attachments with any-type preview/link choice and pre-copy
   // checks add about 3.7 kB raw / 1.5 kB gzip over 0.24.0 (1,222,306 raw /
-  // 321,154 gzip).
-  { file: "main.js", raw: 1_229_000, gzip: 323_000 },
+  // 321,154 gzip). Plain-language messages, command names, and the Run setup
+  // again command add about 1.6 kB raw / 0.5 kB gzip on top of that.
+  { file: "main.js", raw: 1_231_000, gzip: 323_600 },
   // Touch-sized membership choices/actions and tablet wrapping add ~1.6 kB raw.
   { file: "styles.css", raw: 163_000, gzip: 22_600 },
 ];

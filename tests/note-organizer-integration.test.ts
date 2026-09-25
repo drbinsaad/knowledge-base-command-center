@@ -1520,7 +1520,7 @@ test("review discloses when a linked-folder Index note is strengthened into dura
   assert.equal(prepared.reviewRows[0]?.before.primary, prepared.reviewRows[0]?.after.primary);
   assert.match(
     prepared.reviewRows[0]?.warnings?.join(" ") ?? "",
-    /durable direct Index membership.*portable KBCC identity/iu,
+    /durable direct Index membership.*portable identity/iu,
   );
 
   const collection = option?.collections[0];
