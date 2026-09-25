@@ -179,7 +179,7 @@ import {
   type FollowUpUndoMetadata,
 } from "./follow-up";
 import { QuickAppendModal } from "./follow-up-modal";
-import { VaultFilePickerModal } from "./modals";
+import { createOpenedBaseGuard, VaultFilePickerModal } from "./modals";
 import {
   ATTACHMENT_PROTOCOL_ACTIONS,
   createQuickEntryCommands,
@@ -1087,7 +1087,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         this.backlinkIndex = null;
         this.invalidateKnowledgeBaseSearchSnapshot();
         if (this.invalidateRecordCachesForPath(file.path, { file })) this.scheduleRefresh(false);
-        else if (this.app.workspace.getLeavesOfType(VIEW_TYPE).length > 0 && this.viewDependsOnUnrelatedNotes()) {
+        // Outside notes can change the inspector's external backlinks and
+        // cancel an in-flight search through the generation invalidation above.
+        else if (this.app.workspace.getLeavesOfType(VIEW_TYPE).length > 0) {
           this.scheduleRefresh(false);
         }
       }));
@@ -9424,18 +9426,6 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return this.recordLinkIndex.get(lowered) ?? null;
   }
 
-  /**
-   * Whether an edit to a note outside every knowledge base can change what the
-   * open view shows. Records, backlinks, and related notes come only from
-   * indexed records; imported placeholders are the one exception, because any
-   * vault note's title or configured ID can become a match candidate.
-   */
-  viewDependsOnUnrelatedNotes(): boolean {
-    const portable = this.data.portableIndex;
-    return portable.subjects.some((subject) => !portable.resolvedPathBySubjectId[subject.id])
-      || this.getRecords().some((record) => record.isPlaceholder);
-  }
-
   getBacklinkPaths(path: string): string[] {
     if (!this.backlinkIndex) {
       this.backlinkIndex = new Map<string, string[]>();
@@ -9695,7 +9685,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       new Notice("Editing is paused to protect your data, so setup cannot run now. Run the sync and backup status command for details.", 8000);
       return;
     }
-    void this.withView((view) => view.openSetupWizard());
+    const ownsBase = createOpenedBaseGuard(this, {
+      message: "The active knowledge base changed. Run setup again for the current base.",
+    });
+    void this.withView((view) => {
+      if (ownsBase()) view.openSetupWizard();
+    });
   }
 
   openAttachmentImport(note = this.app.workspace.getActiveFile()): void {

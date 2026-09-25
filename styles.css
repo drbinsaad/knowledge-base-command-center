@@ -6507,6 +6507,10 @@
   display: inline-flex;
 }
 
+.ent-cc-view .ent-cc-shell:not(.is-mobile-browse) .ent-cc-header-actions > .ent-cc-history-action {
+  display: inline-grid;
+}
+
 @media (pointer: fine) {
   .ent-cc-view.is-pane-wide:not(.is-density-compact) .ent-cc-subject-row {
     min-height: 44px;

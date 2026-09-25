@@ -12,14 +12,17 @@
 
 - Saving a setting no longer skips the setup wizard. **Run setup again…** (command, and **Settings → Setup wizard**) reopens it for Generic knowledge bases; ENT bases and paused editing are refused with a notice. The wizard asks for your own name and names the next step when it finishes.
 - Plain-language command names, such as **Organize notes…**, **Where is this note organized?**, **Check sync and backup status**, **Back up, export, or import…** and **Create note…**. Command IDs are unchanged, so hotkeys and mobile toolbar entries keep working.
-- About fifteen technical notices are rewritten in plain words with the same safety guidance. "KBCC" no longer appears in on-screen text. Header counts use the singular for one item and hide zero counts.
+- About fifteen technical notices are rewritten in plain words with the same safety guidance. Organizer labels use "command center" instead of "KBCC". Header counts use the singular for one item and hide zero counts.
 - On desktop, **Arrange** (**Edit** in Collections) and **Undo** sit in the header beside Add and Organize; the remaining controls are under **More**. Phone and tablet layouts are unchanged.
 
-### Fixes and performance
+### Fixes and review safeguards
 
 - Creating a note or attachment at the vault root no longer fails with "Folder already exists".
 - Attachment headings such as `C#`, and headings indented by up to three spaces, are found instead of duplicated. Attachments and Quick append now agree on backtick code blocks.
-- Editing a note outside every knowledge base no longer redraws the whole Command Center while it is open. While unresolved imported placeholders exist, the previous behaviour is kept.
+- An attachment submission stays locked while copying, preventing repeated Attach actions from duplicating files even if the selection or destination changes.
+- Setup rechecks the original knowledge base after opening and before saving; it never changes an ENT base to Generic. A pending Sync check keeps the draft open, and a settled unchanged reload saves into the current settings rather than an obsolete copy.
+- Desktop Undo remains visible in narrow and compact panes as well as wide windows.
+- Edits outside a knowledge base still refresh the open Command Center, because external backlinks and in-flight searches depend on them. The proposed redraw-skipping optimization was withdrawn after independent regression review.
 
 ### Compatibility and verification
 

@@ -616,15 +616,23 @@ test.describe("mobile touch pointer", () => {
   });
 });
 
-test("narrow nonmobile panes retain desktop controls and scroll hierarchy", async ({ page }) => {
-  await openView(page, { width: 390, height: 844, count: 8 });
-  await expect(page.locator(".ent-cc-shell")).not.toHaveClass(/is-mobile-browse/u);
-  await expect(page.locator(".ent-cc-workspace-options > summary")).toHaveText("More");
-  await expect(page.getByRole("combobox", { name: "Search scope" })).toBeVisible();
-  await expect(page.locator(".ent-cc-mobile-filters")).toHaveCount(0);
-  await expect(page.locator(".ent-cc-workspace .ent-cc-header")).toHaveCount(0);
-  await captureEvidence(page, "browse-narrow-desktop-unchanged");
-});
+for (const width of [390, 900]) {
+  test(`nonmobile ${width}px panes retain desktop controls and scroll hierarchy`, async ({ page }) => {
+    await openView(page, { width, height: 844, count: 8 });
+    await expect(page.locator(".ent-cc-shell")).not.toHaveClass(/is-mobile-browse/u);
+    const more = page.locator(".ent-cc-workspace-options > summary");
+    await expect(more).toHaveText("More");
+    const undo = page.getByRole("button", { name: "Undo last organization change", exact: true });
+    await expect(undo).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Search scope" })).toBeVisible();
+    await expect(page.locator(".ent-cc-mobile-filters")).toHaveCount(0);
+    await expect(page.locator(".ent-cc-workspace .ent-cc-header")).toHaveCount(0);
+    await more.click();
+    await expect(undo).toBeVisible();
+    await expect(page.getByRole("button", { name: "Redo last organization change", exact: true })).toBeVisible();
+    await captureEvidence(page, `browse-desktop-${width}-undo`);
+  });
+}
 
 const phoneBrowseScenarios = [
   { width: 390, height: 844, largeText: false },

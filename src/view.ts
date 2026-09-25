@@ -2577,11 +2577,23 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   public openSetupWizard(): void {
+    if (!this.guardLoadedBase()) return;
+    if (this.plugin.isClinicalMode()) {
+      new Notice("Setup is only for generic knowledge bases. Change this one from the plugin settings instead.", 7000);
+      return;
+    }
+    if (this.plugin.isDataReadOnly()) {
+      new Notice("Editing is paused to protect your data, so setup cannot run now. Run the sync and backup status command for details.", 8000);
+      return;
+    }
     const ownsBase = this.createOpenedBaseGuard();
-    const settings = this.plugin.data.settings;
-    new WorkspaceSetupModal(this.app, settings, async (value) => {
-      if (!ownsBase()) return;
+    new WorkspaceSetupModal(this.app, this.plugin.data.settings, async (value) => {
+      if (!ownsBase()) throw new Error("Setup was not saved. Wait for sync to finish; if the knowledge base changed, reopen setup.");
       this.plugin.assertDataWritable();
+      // A settled no-op Sync reload preserves this form's ownership while
+      // replacing PluginData. Apply its draft to the current settings object.
+      const settings = this.plugin.data.settings;
+      if (settings.workspaceMode !== "generic") throw new Error("Setup is only for generic knowledge bases.");
       for (const folder of [value.primaryFolder, value.defaultNoteFolder, value.templatesFolder, value.proposalFolder, value.exportsFolder]) {
         const error = validateWritableFolderPath(folder, this.app.vault.configDir);
         if (error) throw new Error(error);
@@ -2592,7 +2604,7 @@ export class EntVaultCommandCenterView extends ItemView {
         const template = this.app.vault.getAbstractFileByPath(value.defaultTemplatePath);
         if (!(template instanceof TFile)) throw new Error("The selected default template could not be found.");
       }
-      Object.assign(settings, value, { setupComplete: true, workspaceMode: "generic" });
+      Object.assign(settings, value, { setupComplete: true });
       await this.plugin.savePluginData();
       if (!ownsBase()) return;
       await this.plugin.refreshViews();

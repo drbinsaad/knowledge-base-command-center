@@ -329,13 +329,13 @@ export const UPDATE_ANNOUNCEMENT_0_24_0: UpdateAnnouncement = {
 export const UPDATE_ANNOUNCEMENT_0_25_0: UpdateAnnouncement = {
   version: "0.25.0",
   title: "What’s new in Knowledge Base Command Center 0.25.0",
-  intro: "Easier to use: attach any file, clearer names and messages, and a faster view. Physical iPhone/iPad testing remains unverified.",
+  intro: "Easier to use: attach any file, clearer names and messages, and more accessible desktop controls. Physical iPhone/iPad testing remains unverified.",
   highlights: [
     "Attach file now takes up to 20 files of any type at once: PDF, Word, PowerPoint, Excel, images, audio, video, ZIP. Images, PDFs, audio and video show inside the note; other files become links. You can choose to embed or link every file instead.",
     "Setup is hard to miss. Changing Settings no longer skips it, and Run setup again… reopens it any time for Generic knowledge bases.",
     "Commands and messages use plain words, such as Organize notes…, Where is this note organized?, and Check sync and backup status. Your hotkeys keep working.",
     "On desktop, Arrange and Undo now sit in the header next to Add and Organize. The other controls are under More.",
-    "Typing in a note outside your knowledge bases no longer redraws the whole view.",
+    "Review safeguards prevent repeated attachment submissions, protect ENT bases when reopening setup, and keep external backlinks and searches up to date.",
     "Fixed: creating notes or attachments at the vault root, attachments copied but left unlinked, and attaching from the Command Center. Data formats are unchanged from 0.24.0.",
   ],
   releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.25.0",

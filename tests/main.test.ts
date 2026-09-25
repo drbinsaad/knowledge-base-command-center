@@ -64,7 +64,7 @@ import {
   synchronizePortableRegistry,
 } from "../src/portability.ts";
 import { IndexManagerModal } from "../src/index-manager.ts";
-import { ConfirmModal, IndexGroupModal, StringPickerModal, TextPromptModal, VaultFilePickerModal } from "../src/modals.ts";
+import { ConfirmModal, IndexGroupModal, StringPickerModal, TextPromptModal, VaultFilePickerModal, WorkspaceSetupModal } from "../src/modals.ts";
 import { EntCommandCenterSettingsTab } from "../src/settings.ts";
 import { QuickAppendModal } from "../src/follow-up-modal.ts";
 import { AttachmentImportModal } from "../src/attachment-modal.ts";
@@ -80,6 +80,7 @@ import { EntVaultCommandCenterView, VIEW_TYPE } from "../src/view.ts";
 import { createOpenedBaseGuard, type OpenedBaseGuard } from "../src/opened-base-guard.ts";
 import { createVaultRenameJournal, type VaultRenameJournal } from "../src/vault-rename-journal.ts";
 import { normalizeLibraryDisplayProfile } from "../src/library-display-profile.ts";
+import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
 
 interface TestPluginBase {
   loadedData: unknown;
@@ -8308,23 +8309,29 @@ test("layout and metadata readiness repair linked Library records cached before 
   assert.deepEqual(scheduledRefreshes, [false, false], "the initial metadata fence reconciles only once");
 });
 
-test("editing a note outside every knowledge base does not redraw the open view unless placeholders need candidates", async () => {
+async function unrelatedMetadataRefreshHarness() {
   const data = migrateData(null);
   data.settings.workspaceMode = "generic";
   const indexed = new TFile("Knowledge/Indexed.md");
   const unrelated = new TFile("Journal/Today.md");
+  data.directIndexPaths = [indexed.path];
   const { plugin } = pluginWithFiles(data, [indexed, unrelated], {});
   let metadataChanged: ((file: TFile) => void) | null = null;
+  let metadataResolved: (() => void) | null = null;
   let layoutReady: (() => void) | null = null;
   const scheduledRefreshes: boolean[] = [];
   const app = plugin.app as unknown as {
     vault: { on: (name: string, callback: (...args: unknown[]) => void) => unknown };
     workspace: { onLayoutReady: (callback: () => void) => void; getLeavesOfType: (type: string) => unknown[] };
-    metadataCache: { on: (name: string, callback: (...args: unknown[]) => void) => unknown };
+    metadataCache: {
+      on: (name: string, callback: (...args: unknown[]) => void) => unknown;
+      resolvedLinks: Record<string, Record<string, number>>;
+    };
   };
   app.vault.on = () => ({ unsubscribe: () => {} });
   app.metadataCache.on = (name, callback) => {
     if (name === "changed") metadataChanged = callback;
+    if (name === "resolved") metadataResolved = callback;
     return { unsubscribe: () => {} };
   };
   app.workspace.onLayoutReady = (callback) => { layoutReady = callback; };
@@ -8336,33 +8343,76 @@ test("editing a note outside every knowledge base does not redraw the open view 
   (plugin as unknown as { scheduleRefresh: (invalidateRecords?: boolean) => void }).scheduleRefresh = (invalidateRecords = true) => {
     scheduledRefreshes.push(invalidateRecords);
   };
-  const relevantPaths = new Set([indexed.path]);
-  (plugin as unknown as { invalidateRecordCachesForPath: (path: string) => boolean }).invalidateRecordCachesForPath = (path) => relevantPaths.has(path);
-
   await plugin.onload();
   assert.ok(layoutReady);
   layoutReady();
   assert.ok(metadataChanged);
+  assert.ok(metadataResolved);
+  metadataResolved();
   scheduledRefreshes.length = 0;
+  return { plugin, app, indexed, unrelated, metadataChanged, metadataResolved, scheduledRefreshes };
+}
 
+test("outside-note metadata changes refresh rendered external backlinks without placeholders", async () => {
+  const { plugin, app, indexed, unrelated, metadataChanged, metadataResolved, scheduledRefreshes } = await unrelatedMetadataRefreshHarness();
+  const records = plugin.getRecords();
+  assert.deepEqual(records.map((record) => record.path), [indexed.path]);
+  assert.equal(records.some((record) => record.isPlaceholder), false);
+  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView;
+  Object.assign(view, { plugin, app, records, recordByPath: new Map(records.map((record) => [record.path, record])) });
+  const internals = view as unknown as { renderRelatedKnowledge(parent: HTMLElement, record: VaultRecord): void };
+  const { document } = createFakeDom();
+  const parent = document.body;
+  internals.renderRelatedKnowledge(asHtmlElement(parent), records[0]);
+  assert.match(parent.textContent, /No resolved relationships yet/u);
+
+  app.metadataCache.resolvedLinks[unrelated.path] = { [indexed.path]: 1 };
   metadataChanged(unrelated);
-  assert.deepEqual(scheduledRefreshes, [], "typing in an unrelated note never redraws the Command Center");
-  metadataChanged(indexed);
-  assert.deepEqual(scheduledRefreshes, [false], "an indexed note still refreshes the view");
+  metadataResolved();
+  assert.deepEqual(plugin.getBacklinkPaths(indexed.path), [unrelated.path]);
+  parent.empty();
+  internals.renderRelatedKnowledge(asHtmlElement(parent), records[0]);
+  assert.match(parent.textContent, /Other backlinksToday/u);
+  assert.deepEqual(scheduledRefreshes, [false], "external backlinks need a redraw after the startup resolution fence");
 
-  plugin.data.portableIndex.subjects.push({
-    id: "subject-unresolved",
-    title: "Imported topic",
-    groupId: plugin.data.portableIndex.groups[0]?.id ?? "",
-    parentId: null,
-    order: 0,
-    indexed: true,
-    configuredId: "",
-    recordKind: "topic",
+  app.metadataCache.resolvedLinks[unrelated.path] = {};
+  metadataChanged(unrelated);
+  assert.deepEqual(plugin.getBacklinkPaths(indexed.path), []);
+  assert.deepEqual(scheduledRefreshes, [false, false], "removing the final external backlink also refreshes");
+});
+
+test("outside-note metadata changes schedule a retry for cancelled in-flight search", async () => {
+  const { plugin, app, unrelated, metadataChanged, scheduledRefreshes } = await unrelatedMetadataRefreshHarness();
+  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView;
+  const { document } = createFakeDom();
+  const parent = document.body;
+  const internals = view as unknown as {
+    renderTree(): void;
+    renderGlobalSearchResults(parent: HTMLElement): number;
+    globalSearchResult: { total: number } | null;
+    globalSearchPendingKey: string;
+  };
+  Object.assign(view, {
+    plugin, app, query: "no matching knowledge", searchScope: "all", viewClosed: false,
+    globalSearchRequestGeneration: 0, globalSearchResult: null,
+    renderTree: () => {
+      parent.empty();
+      internals.renderGlobalSearchResults(asHtmlElement(parent));
+    },
+    resetSearchScrollPosition: () => {},
   });
-  assert.equal(plugin.viewDependsOnUnrelatedNotes(), true);
+  internals.renderTree();
+  assert.match(parent.textContent, /Searching all available knowledge bases/u);
   metadataChanged(unrelated);
-  assert.deepEqual(scheduledRefreshes, [false, false], "an unresolved placeholder may gain a candidate from any note");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(internals.globalSearchResult, null, "the invalidated search cannot publish stale results");
+  assert.equal(internals.globalSearchPendingKey, "");
+  assert.deepEqual(scheduledRefreshes, [false], "a cancelled search must receive a refresh that starts its replacement");
+  // The scheduled view refresh renders the same query with the current generation.
+  internals.renderTree();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(internals.globalSearchResult?.total, 0);
+  assert.doesNotMatch(parent.textContent, /Searching/u);
 });
 
 test("custom libraries support stable CRUD, locale-invariant names, ordering, archive, and restore", async () => {
@@ -11302,6 +11352,188 @@ test("Run setup again opens the wizard only for writable Generic knowledge bases
   await Promise.resolve();
   assert.equal(wizardOpens, 1, "setup never converts an ENT knowledge base to Generic");
   assert.match(Notice.messages.at(-1) ?? "", /only for generic knowledge bases/u);
+});
+
+test("Run setup again stays bound to its original base across asynchronous view activation", async (context) => {
+  for (const mode of ["generic", "ent-clinical"] as const) {
+    await context.test(`switch to ${mode}`, async () => {
+      const generic = migrateData(null);
+      generic.settings.workspaceName = "Original";
+      generic.settings.setupComplete = true;
+      const target = migrateData(null);
+      target.settings.workspaceName = "Other base";
+      target.settings.workspaceMode = mode;
+      target.settings.setupComplete = true;
+      const store = createDefaultStore(generic, 1, "vault-setup-race");
+      store.bases.push(createKnowledgeBaseEntry(target, "other-base", 2));
+      const { plugin } = pluginWithFiles(store, [], {});
+      await plugin.loadPluginData();
+      plugin.savedData.length = 0;
+      const activation = deferred();
+      plugin.activateView = async () => {
+        await activation.promise;
+        const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView;
+        Object.assign(view, {
+          plugin, app: plugin.app,
+          loadedBaseId: plugin.getActiveKnowledgeBaseId(), loadedDataEpoch: plugin.getDataEpoch(),
+        });
+        return view;
+      };
+      const originalOpen = Object.getOwnPropertyDescriptor(WorkspaceSetupModal.prototype, "open");
+      const opened: WorkspaceSetupModal[] = [];
+      WorkspaceSetupModal.prototype.open = function (): void { opened.push(this); };
+      try {
+        plugin.runSetupAgain();
+        await plugin.switchKnowledgeBase("other-base");
+        activation.resolve();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        // Exercise the real submit/save path if the stale command opened a form.
+        for (const modal of opened) {
+          await (modal as unknown as { submit(): Promise<void> }).submit();
+        }
+        assert.equal(plugin.data.settings.workspaceMode, mode, "setup must never convert the target ENT base to Generic");
+        assert.equal(opened.length, 0, "a command issued for another base must not open this base's setup");
+        assert.equal(plugin.savedData.length, 0, "the stale setup command must not persist the other base");
+      } finally {
+        if (originalOpen) Object.defineProperty(WorkspaceSetupModal.prototype, "open", originalOpen);
+        else Reflect.deleteProperty(WorkspaceSetupModal.prototype, "open");
+      }
+    });
+  }
+});
+
+test("setup wizard rejects clinical, stale, and newly read-only surfaces", async () => {
+  const data = migrateData(null);
+  data.settings.workspaceName = "Research";
+  const { plugin } = pluginWithFiles(createDefaultStore(data, 1, "vault-setup-guards"), [], {});
+  await plugin.loadPluginData();
+  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView;
+  Object.assign(view, {
+    plugin, app: plugin.app,
+    loadedBaseId: plugin.getActiveKnowledgeBaseId(), loadedDataEpoch: plugin.getDataEpoch(),
+  });
+  const originalOpen = Object.getOwnPropertyDescriptor(WorkspaceSetupModal.prototype, "open");
+  const opened: WorkspaceSetupModal[] = [];
+  WorkspaceSetupModal.prototype.open = function (): void { opened.push(this); };
+  try {
+    plugin.data.settings.workspaceMode = "ent-clinical";
+    view.openSetupWizard();
+    assert.equal(opened.length, 0, "direct wizard entry cannot open an ENT base");
+    plugin.data.settings.workspaceMode = "generic";
+    plugin.dataCompatibilityWarning = "Protected read-only.";
+    view.openSetupWizard();
+    assert.equal(opened.length, 0, "read-only data cannot open the wizard after activation");
+    plugin.dataCompatibilityWarning = "";
+    Object.assign(view, { loadedBaseId: "previous-base" });
+    view.openSetupWizard();
+    assert.equal(opened.length, 0, "a stale rendered view cannot configure the current base");
+    Object.assign(view, { loadedBaseId: plugin.getActiveKnowledgeBaseId() });
+    view.openSetupWizard();
+    assert.equal(opened.length, 1);
+    plugin.dataCompatibilityWarning = "Protected read-only.";
+    await (opened[0] as unknown as { submit(): Promise<void> }).submit();
+    assert.equal(plugin.data.settings.setupComplete, false, "a wizard opened before read-only protection cannot save afterward");
+    assert.equal(plugin.savedData.length, 0);
+    plugin.dataCompatibilityWarning = "";
+    await (opened[0] as unknown as { submit(): Promise<void> }).submit();
+    assert.equal(plugin.data.settings.setupComplete, true, "a writable Generic base can still finish setup");
+    assert.equal(plugin.data.settings.workspaceMode, "generic");
+    assert.equal(plugin.savedData.length, 1);
+  } finally {
+    if (originalOpen) Object.defineProperty(WorkspaceSetupModal.prototype, "open", originalOpen);
+    else Reflect.deleteProperty(WorkspaceSetupModal.prototype, "open");
+  }
+});
+
+async function openedSetupWizardHarness() {
+  const data = migrateData(null);
+  data.settings.workspaceName = "Before setup";
+  const { plugin, sourceMutationCount } = pluginWithFiles(createDefaultStore(data, 100, "vault-setup-sync"), [], {});
+  const localValues = new Map<string, unknown>();
+  Object.assign(plugin.app, {
+    loadLocalStorage: (key: string) => structuredClone(localValues.get(key) ?? null),
+    saveLocalStorage: (key: string, value: unknown) => { localValues.set(key, structuredClone(value)); },
+  });
+  await plugin.loadPluginData(false);
+  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView;
+  Object.assign(view, {
+    plugin, app: plugin.app,
+    loadedBaseId: plugin.getActiveKnowledgeBaseId(), loadedDataEpoch: plugin.getDataEpoch(),
+  });
+  const originalOpen = Object.getOwnPropertyDescriptor(WorkspaceSetupModal.prototype, "open");
+  const opened: WorkspaceSetupModal[] = [];
+  WorkspaceSetupModal.prototype.open = function (): void { opened.push(this); };
+  try {
+    view.openSetupWizard();
+  } finally {
+    if (originalOpen) Object.defineProperty(WorkspaceSetupModal.prototype, "open", originalOpen);
+    else Reflect.deleteProperty(WorkspaceSetupModal.prototype, "open");
+  }
+  assert.equal(opened.length, 1);
+  const modal = opened[0] as unknown as {
+    value: { workspaceName: string; defaultNoteFolder: string };
+    errorEl: { setText(text: string): void } | null;
+    close(): void;
+    submit(): Promise<void>;
+  };
+  modal.value.workspaceName = "After setup";
+  modal.value.defaultNoteFolder = "Research/Captures";
+  const incoming = structuredClone((plugin as unknown as { store: PluginStore }).store);
+  return { plugin, modal, incoming, sourceMutationCount };
+}
+
+test("setup wizard persists its draft into live settings after a settled no-op Sync reload", async () => {
+  const { plugin, modal, incoming, sourceMutationCount } = await openedSetupWizardHarness();
+  const previousSettings = plugin.data.settings;
+  const surfaceVersion = plugin.getBaseSurfaceVersion();
+  plugin.loadedData = incoming;
+  await plugin.onExternalSettingsChange();
+  assert.equal(plugin.getBaseSurfaceVersion(), surfaceVersion, "a no-op reload retains the setup draft's semantic ownership");
+  assert.notEqual(plugin.data.settings, previousSettings, "the reload replaces the settings object");
+  plugin.savedData.length = 0;
+  await modal.submit();
+  assert.equal(plugin.data.settings.workspaceName, "After setup");
+  assert.equal(plugin.data.settings.defaultNoteFolder, "Research/Captures");
+  assert.equal(plugin.data.settings.setupComplete, true);
+  assert.equal(plugin.data.settings.workspaceMode, "generic");
+  assert.equal(previousSettings.workspaceName, "Before setup", "the obsolete settings object is not mutated");
+  assert.equal(plugin.savedData.length, 1, "finishing setup must persist the draft instead of reporting a false success");
+  const saved = plugin.savedData[0] as PluginStore;
+  assert.equal(saved.bases[0].data.settings.workspaceName, "After setup");
+  assert.equal(saved.bases[0].data.settings.setupComplete, true);
+  assert.equal(sourceMutationCount(), 0);
+});
+
+test("setup wizard keeps its draft open when Finish overlaps a pending Sync reload", async () => {
+  const { plugin, modal, incoming, sourceMutationCount } = await openedSetupWizardHarness();
+  const read = deferred();
+  plugin.loadData = async () => {
+    await read.promise;
+    return incoming;
+  };
+  let closes = 0;
+  let errorText = "";
+  modal.close = () => { closes += 1; };
+  modal.errorEl = { setText: (text) => { errorText = text; } };
+  const reload = plugin.onExternalSettingsChange();
+  try {
+    await modal.submit();
+    assert.equal(plugin.isExternalReloadInProgress(), true);
+    assert.equal(closes, 0, "the pending ownership check must not close and discard the draft");
+    assert.equal(modal.value.workspaceName, "After setup");
+    assert.match(errorText, /not saved.*sync/iu);
+    assert.equal(plugin.data.settings.setupComplete, false);
+  } finally {
+    read.resolve();
+    await reload;
+  }
+  plugin.savedData.length = 0;
+  await modal.submit();
+  assert.equal(closes, 1, "the same draft finishes after the no-op reload settles");
+  assert.equal(plugin.data.settings.workspaceName, "After setup");
+  assert.equal(plugin.data.settings.setupComplete, true);
+  assert.equal(plugin.savedData.length, 1);
+  assert.equal(sourceMutationCount(), 0);
 });
 
 test("attachment import accepts a case-variant Markdown extension consistently", async () => {

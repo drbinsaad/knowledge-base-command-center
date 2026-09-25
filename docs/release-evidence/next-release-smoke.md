@@ -1,6 +1,23 @@
-# 0.24.0 device and Sync smoke record
+# 0.25.0 device and Sync smoke record
 
-Active candidate: 0.24.0 Collections and workflow reliability. Physical iPhone/iPad and controlled two-device Sync remain **Unverified — Unexecuted**, under the [fresh maintainer-authorized waiver](0.24.0-iphone.md). This is not a physical-device Pass and does not reuse any earlier authorization. Local-vault covers only; online covers remain excluded.
+Active candidate: 0.25.0 Attachments, setup and plain language. Physical iPhone/iPad and controlled two-device Sync remain **Unverified — Unexecuted**, under the [candidate-specific maintainer-authorized waiver](0.25.0-iphone.md). This is not a physical-device Pass. Local-vault covers only; online covers remain excluded.
+
+Use synthetic notes and the [manual checklist](../manual-iphone-release-checklist.md). Record exact asset checksums, device/OS/Obsidian versions, input method and Sync provider before each executed row.
+
+| Flow | Pass criteria | Result |
+| --- | --- | --- |
+| Multiple attachments | Native file selection, mixed preview/link choices, all placement/storage modes, failures and repeated taps preserve file/link ordering without unintended copies. | Unexecuted |
+| Setup ownership | Run setup again opens only for the intended writable Generic base; changing bases or entering protected mode cannot alter an ENT base. | Unexecuted |
+| Native input and geometry | Phone/tablet, rotation, Split View, keyboards, safe areas, large text, Arabic/RTL and VoiceOver retain reachable controls and usable reading space. | Unexecuted |
+| Collections and organization | Creation, membership changes, scoped searches, return navigation and Undo remain usable without moving or rewriting notes. | Unexecuted |
+| Controlled two-device Sync | Both devices run 0.25.0; delayed/concurrent delivery preserves format-17 organization and refuses stale writes. | Unexecuted |
+| Regression and news | Local covers and touch arrangement remain usable; update news appears once and links to the exact 0.25.0 release. | Unexecuted |
+
+Waived/skipped rows stay Unexecuted. Desktop browser tests do not execute these physical rows. Historical records follow.
+
+## Historical 0.24.0 device and Sync smoke record
+
+Historical candidate: 0.24.0 Collections and workflow reliability. Physical iPhone/iPad and controlled two-device Sync remain **Unverified — Unexecuted**, under the [fresh maintainer-authorized waiver](0.24.0-iphone.md). This is not a physical-device Pass and does not reuse any earlier authorization. Local-vault covers only; online covers remain excluded.
 
 Use synthetic notes and the [manual checklist](../manual-iphone-release-checklist.md). Record exact asset checksums, device/OS/Obsidian versions, input method and Sync provider before each executed row.
 

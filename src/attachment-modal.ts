@@ -64,6 +64,7 @@ export class AttachmentImportModal extends Modal {
   private destinationSelected: boolean;
   private insertionMode: AttachmentInsertionMode;
   private display: AttachmentDisplayMode = "auto";
+  private submitting = false;
   private submitButton: HTMLButtonElement | null = null;
   private selectionEl: HTMLElement | null = null;
 
@@ -190,7 +191,7 @@ export class AttachmentImportModal extends Modal {
     const count = this.selectedFiles.length;
     if (!this.submitButton) return;
     this.submitButton.setText(count > 1 ? `Attach ${count} files` : "Attach file");
-    this.submitButton.disabled = !attachmentSubmitReady(
+    this.submitButton.disabled = this.submitting || !attachmentSubmitReady(
       count > 0 && attachmentSelectionProblem(this.selectedFiles) === null,
       this.policy.storageMode,
       this.destinationSelected,
@@ -199,10 +200,11 @@ export class AttachmentImportModal extends Modal {
 
   private async submit(): Promise<void> {
     const files = [...this.selectedFiles];
-    if (files.length === 0
+    if (this.submitting || files.length === 0
       || attachmentSelectionProblem(files) !== null
       || !attachmentSubmitReady(true, this.policy.storageMode, this.destinationSelected)) return;
-    this.submitButton?.setAttribute("disabled", "true");
+    this.submitting = true;
+    this.updateSubmit();
     try {
       await this.onSubmit({
         files,
@@ -215,7 +217,9 @@ export class AttachmentImportModal extends Modal {
       new Notice(errorMessage(error, "The attachment could not be added."), 9000);
       // Copied files stay in the vault; a retry from this form would copy them again.
       if (error instanceof AttachmentLinkInsertionError) this.close();
-      else this.submitButton?.removeAttribute("disabled");
+    } finally {
+      this.submitting = false;
+      this.updateSubmit();
     }
   }
 }
