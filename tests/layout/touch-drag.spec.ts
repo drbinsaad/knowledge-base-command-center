@@ -158,7 +158,7 @@ async function move(page: Page, source: string, target: Locator, fraction = 0.5,
 
 async function history(page: Page, action: "Undo" | "Redo"): Promise<void> {
   await options(page);
-  await page.getByRole("button", { name: `${action} personal organization change`, exact: true }).click();
+  await page.getByRole("button", { name: `${action} last organization change`, exact: true }).click();
 }
 
 for (const device of [{ name: "iPad", width: 1180, height: 820 }, { name: "iPhone", width: 390, height: 844 }]) {
