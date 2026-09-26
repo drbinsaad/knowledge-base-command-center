@@ -1,6 +1,7 @@
 import { ItemView, Menu, Notice, Platform, setIcon, TFile, WorkspaceLeaf, normalizePath } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
 import { captureViewFocus, restoreViewFocus, readableStatus, relativeUpdatedTime, recordAvailabilitySummary } from "./view-state";
+import { DEFAULT_INSPECTOR_WIDTH, loadWorkspaceLayoutPreference, saveWorkspaceLayoutPreference, WorkspaceResizeController, type WorkspaceLayoutPreference } from "./workspace-layout";
 import { cleanSearchViewFilters, type SearchViewFilters } from "./model";
 import type { CatalogPlacementTarget } from "./main";
 import { IndexManagerModal, type ManagerTab } from "./index-manager";
@@ -12,6 +13,7 @@ import { LibraryEditorModal, ManageLibrariesModal } from "./library-modal";
 import { resolveLibraryIconId } from "./library-icons";
 import { DEFAULT_LIBRARY_DISPLAY_PROFILE, type LibraryDisplayProfile } from "./library-display-profile";
 import { libraryPropertyText, ownLibraryProperty, renderLibraryCover, resolveLibraryCoverFromProperty } from "./library-cover";
+import { collectNoteAttachments, renderNoteAttachments } from "./note-attachments";
 import { TouchDragController, type TouchDragTarget } from "./touch-drag";
 import {
   MAX_KBCC_RETURN_BROWSE_LIMIT,
@@ -712,7 +714,13 @@ export class EntVaultCommandCenterView extends ItemView {
   private viewDensity: "comfortable" | "compact" = "comfortable";
   private workspaceOptionsOpen = false;
   private mobileFiltersOpen = false;
+  private noteDetailsOpen = false;
   private inspectorSelectedByUser = false;
+  private workspaceLayoutPreference: WorkspaceLayoutPreference = { inspectorWidth: DEFAULT_INSPECTOR_WIDTH, tabletSplit: false };
+  private workspaceResize: WorkspaceResizeController | null = null;
+  private inspectorExpanded = false;
+  private inspectorExpandedReturn: { path: string; listScrollTop: number; detailScrollTop: number } | null = null;
+  private layoutStorageWarningShown = false;
   private parsedQuery: ParsedQuery = parseQuery("");
   private searchDebounce: number | null = null;
   private setupTimer: number | null = null;
@@ -792,6 +800,7 @@ export class EntVaultCommandCenterView extends ItemView {
 
   async onOpen(): Promise<void> {
     this.viewClosed = false;
+    this.workspaceLayoutPreference = loadWorkspaceLayoutPreference(this.app);
     this.bindWindowMigration();
     this.measureAndApplyPaneLayout(false);
     await this.reload();
@@ -805,6 +814,7 @@ export class EntVaultCommandCenterView extends ItemView {
 
   async onClose(): Promise<void> {
     this.viewClosed = true;
+    this.disposeWorkspaceResize();
     this.destroyTouchDrag();
     this.clearSearchPointerInteraction();
     this.unbindMobileToolbarLayout();
@@ -873,6 +883,7 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private handleWindowMigration(migratedWindow: Window): void {
     if (this.viewClosed) return;
+    this.workspaceResize?.cancel();
     this.destroyTouchDrag();
     this.clearSearchPointerInteraction();
     this.unbindMobileToolbarLayout();
@@ -2939,6 +2950,7 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private render(preserveBrowseLimits = false): void {
+    this.disposeWorkspaceResize();
     this.destroyTouchDrag();
     this.clearSearchPointerInteraction();
     this.unbindMobileToolbarLayout();
@@ -2949,6 +2961,8 @@ export class EntVaultCommandCenterView extends ItemView {
     if (currentOptions) this.workspaceOptionsOpen = currentOptions.open;
     const currentFilters = this.contentEl.querySelector<HTMLDetailsElement>(".ent-cc-mobile-filters");
     if (currentFilters) this.mobileFiltersOpen = currentFilters.open;
+    const currentNoteDetails = this.inspectorEl?.querySelector<HTMLDetailsElement>(".ent-cc-note-details");
+    if (currentNoteDetails) this.noteDetailsOpen = currentNoteDetails.open;
     this.indexProvenanceCache = new WeakMap<object, IndexMembershipProvenanceData>();
     // A full route/tab render returns to the bounded initial page. Incremental
     // "Show more" actions use renderTree() and therefore preserve their limit.
@@ -2995,7 +3009,6 @@ export class EntVaultCommandCenterView extends ItemView {
     const header = shell.createDiv({ cls: "ent-cc-header" });
     const titleBlock = header.createDiv({ cls: "ent-cc-title-block" });
     const kickerRow = titleBlock.createDiv({ cls: "ent-cc-title-kicker-row" });
-    if (!mobileBrowse) kickerRow.createDiv({ cls: "ent-cc-kicker", text: "Knowledge operations" });
     const baseSwitcher = kickerRow.createEl("button", {
       cls: "ent-cc-base-switcher",
       type: "button",
@@ -3038,17 +3051,31 @@ export class EntVaultCommandCenterView extends ItemView {
     const options = primaryActions.createEl("details", { cls: "ent-cc-workspace-options" });
     options.open = this.workspaceOptionsOpen;
     options.addEventListener("toggle", () => {
-      if (options.isConnected) this.workspaceOptionsOpen = options.open;
+      if (!options.isConnected) return;
+      this.workspaceOptionsOpen = options.open;
+      if (options.open && !mobileBrowse) {
+        const filters = this.contentEl.querySelector<HTMLDetailsElement>(".ent-cc-mobile-filters");
+        if (filters) filters.open = false;
+        this.mobileFiltersOpen = false;
+      }
     });
-    options.createEl("summary", {
-      cls: "ent-cc-button", text: mobileBrowse ? "Details" : "More",
+    const optionsSummary = options.createEl("summary", {
+      cls: "ent-cc-button", text: "Details",
       attr: { "data-kbcc-focus": "workspace-options" },
     });
-    if (mobileBrowse) {
-      const detailsCopy = options.createDiv({ cls: "ent-cc-title-block ent-cc-mobile-details-copy" });
-      detailsCopy.append(workspaceTitle, workspaceSubtitle, health);
-    }
-    const actions = options.createDiv({ cls: "ent-cc-workspace-options-actions" });
+    options.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || !options.open) return;
+      event.preventDefault();
+      event.stopPropagation();
+      options.open = false;
+      this.workspaceOptionsOpen = false;
+      optionsSummary.focus({ preventScroll: true });
+    });
+    const detailsPanel = options.createDiv({ cls: "ent-cc-workspace-details-panel" });
+    const detailsCopy = detailsPanel.createDiv({ cls: "ent-cc-title-block ent-cc-mobile-details-copy" });
+    detailsCopy.append(workspaceTitle, workspaceSubtitle, health);
+    const actions = detailsPanel.createDiv({ cls: "ent-cc-workspace-options-actions" });
+    this.renderWorkspaceLayoutControl(actions);
     if (mobileBrowse) {
       // Keep one instance of each action and its native disclosure semantics.
       // The phone's first row is reserved for base selection, Add, and Details.
@@ -3216,9 +3243,16 @@ export class EntVaultCommandCenterView extends ItemView {
     });
     this.renderTree();
     if (!compact) {
+      workspace.addClass("is-adjustable-workspace");
+      const separator = workspace.createDiv({ cls: "ent-cc-workspace-separator", attr: { "data-kbcc-focus": "workspace-separator", "aria-controls": `ent-cc-inspector-${this.viewInstanceId}` } });
       this.createInspector(workspace);
       this.renderInspector();
       workspace.toggleClass("is-inspector-collapsed", !this.inspectorSelectedByUser);
+      workspace.toggleClass("is-inspector-expanded", this.inspectorExpanded && this.inspectorSelectedByUser);
+      this.workspaceResize = new WorkspaceResizeController(workspace, separator, this.getWorkspaceLayoutPreference().inspectorWidth, (width) => {
+        this.getWorkspaceLayoutPreference().inspectorWidth = width;
+        this.saveWorkspaceLayoutPreference();
+      });
     } else {
       this.inspectorEl = null;
       workspace.addClass("is-inspector-collapsed");
@@ -3275,7 +3309,7 @@ export class EntVaultCommandCenterView extends ItemView {
   private createInspector(parent: HTMLElement): void {
     this.inspectorEl = parent.createEl("aside", {
       cls: "ent-cc-inspector",
-      attr: { "aria-label": "Selected knowledge record" },
+      attr: { id: `ent-cc-inspector-${this.viewInstanceId}`, "aria-label": "Selected knowledge record" },
     });
     this.inspectorEl.addEventListener("keydown", (event) => this.handleMobileInspectorKeydown(event));
   }
@@ -3391,6 +3425,8 @@ export class EntVaultCommandCenterView extends ItemView {
     this.plugin.data.activeTab = tab;
     if (this.searchScope === "library" && !libraryIdForTab(tab)) this.searchScope = "current";
     this.inspectorSelectedByUser = false;
+    this.inspectorExpanded = false;
+    this.inspectorExpandedReturn = null;
     this.mobileInspectorOpen = false;
     this.editMode = false;
     this.curriculumArrangeMode = false;
@@ -3505,6 +3541,8 @@ export class EntVaultCommandCenterView extends ItemView {
     this.plugin.data.activeTab = homeTab;
     this.restoreSearchFilters({}, homeTab);
     this.inspectorSelectedByUser = false;
+    this.inspectorExpanded = false;
+    this.inspectorExpandedReturn = null;
     this.plugin.data.selectedPath = "";
     this.mobileInspectorOpen = false;
     this.mobileInspectorNeedsFocus = false;
@@ -3638,7 +3676,7 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private renderSearch(parent: HTMLElement, mobileToolbar?: HTMLElement): void {
     const mobileBrowse = Platform.isMobile && this.isCompactInspectorLayout();
-    const searchContainer = mobileBrowse ? (mobileToolbar ?? parent).createDiv({ cls: "ent-cc-mobile-search" }) : parent;
+    const searchContainer = (mobileToolbar ?? parent).createDiv({ cls: mobileBrowse ? "ent-cc-mobile-search" : "ent-cc-desktop-search" });
     const searchRow = searchContainer.createDiv({ cls: "ent-cc-search-row" });
     const box = searchRow.createDiv({ cls: "ent-cc-search-box" });
     const readOnly = this.plugin.isDataReadOnly();
@@ -3785,13 +3823,18 @@ export class EntVaultCommandCenterView extends ItemView {
     setIcon(saved.createSpan(), "book-marked");
     saved.createSpan({ text: "Saved" });
     saved.addEventListener("click", (event) => this.showSavedViews(event));
-    const filters = mobileBrowse ? searchContainer.createEl("details", { cls: "ent-cc-mobile-filters" }) : null;
+    const filters = (mobileBrowse ? searchContainer : searchRow).createEl("details", { cls: "ent-cc-mobile-filters" });
     let filtersSummary: HTMLElement | null = null;
     if (filters) {
       filters.open = this.mobileFiltersOpen;
       filters.addEventListener("toggle", () => {
         if (filters.isConnected) {
           this.mobileFiltersOpen = filters.open;
+          if (filters.open && !mobileBrowse) {
+            const details = this.contentEl.querySelector<HTMLDetailsElement>(".ent-cc-workspace-options");
+            if (details) details.open = false;
+            this.workspaceOptionsOpen = false;
+          }
           this.syncMobileToolbarLayout();
         }
       });
@@ -5171,6 +5214,7 @@ export class EntVaultCommandCenterView extends ItemView {
       this.contentEl.toggleClass(`is-pane-${layout}`, this.paneLayout === layout);
     }
     this.contentEl.setAttribute("data-pane-layout", this.paneLayout);
+    this.contentEl.toggleClass("is-mobile-split", Platform.isMobile && this.paneLayout === "wide");
   }
 
   private measureAndApplyPaneLayout(allowRender = true): void {
@@ -5186,11 +5230,13 @@ export class EntVaultCommandCenterView extends ItemView {
     const measuredLayout = classifyPaneWidth(width);
     // Tablets keep the mobile browse/detail route even when landscape or a
     // large screen crosses the desktop two-column breakpoint.
-    const next = Platform.isMobile && measuredLayout === "wide" ? "compact" : measuredLayout;
+    const next = Platform.isMobile && !this.getWorkspaceLayoutPreference().tabletSplit && measuredLayout === "wide" ? "compact" : measuredLayout;
     const modeChanged = next !== previous;
     this.paneWidth = width;
     this.paneLayout = next;
     this.applyPaneLayoutClasses();
+    this.workspaceResize?.cancel();
+    this.workspaceResize?.refresh();
     if (!allowRender || !modeChanged || this.viewClosed) return;
     if (!this.contentEl.querySelector(".ent-cc-shell")) return;
     this.renderPaneLayoutChange(previous, next);
@@ -5210,6 +5256,18 @@ export class EntVaultCommandCenterView extends ItemView {
     const detailScrollTop = previous === "wide"
       ? this.inspectorEl?.scrollTop ?? this.mobileInspectorScrollTop
       : inspectorBody?.scrollTop ?? this.mobileInspectorScrollTop;
+
+    // A selected side panel remains the same visible detail route when an
+    // iPad rotates or Obsidian narrows this leaf. The inverse transition must
+    // likewise retain the selected detail instead of silently closing it.
+    if (previous === "wide" && next !== "wide") {
+      this.mobileInspectorOpen = Boolean(this.inspectorSelectedByUser && this.recordByPath.has(this.plugin.data.selectedPath));
+      this.mobileInspectorNeedsFocus = this.mobileInspectorOpen;
+    } else if (previous !== "wide" && next === "wide") {
+      this.inspectorSelectedByUser = this.mobileInspectorOpen;
+      this.mobileInspectorOpen = false;
+      this.mobileInspectorNeedsFocus = false;
+    }
 
     this.mobileTreeScrollTop = listScrollTop;
     this.mobileInspectorScrollTop = detailScrollTop;
@@ -5281,6 +5339,8 @@ export class EntVaultCommandCenterView extends ItemView {
     if (compact) this.render(true);
     else {
       this.workspaceEl?.removeClass("is-inspector-collapsed");
+      this.workspaceEl?.toggleClass("is-inspector-expanded", this.inspectorExpanded);
+      this.workspaceResize?.refresh();
       this.syncSelectedRecordRows(path);
       this.renderInspector();
     }
@@ -5303,9 +5363,91 @@ export class EntVaultCommandCenterView extends ItemView {
     return this.paneLayout !== "wide";
   }
 
+  private disposeWorkspaceResize(): void {
+    this.workspaceResize?.dispose();
+    this.workspaceResize = null;
+  }
+
+  private getWorkspaceLayoutPreference(): WorkspaceLayoutPreference {
+    return this.workspaceLayoutPreference ??= { inspectorWidth: DEFAULT_INSPECTOR_WIDTH, tabletSplit: false };
+  }
+
+  private saveWorkspaceLayoutPreference(): void {
+    if (saveWorkspaceLayoutPreference(this.app, this.getWorkspaceLayoutPreference()) || this.layoutStorageWarningShown) return;
+    this.layoutStorageWarningShown = true;
+    new Notice("The layout changed for this session, but this device could not remember it.");
+  }
+
+  /** Hook in More/Details: tablets retain full-width browsing unless requested. */
+  private renderWorkspaceLayoutControl(parent: HTMLElement): void {
+    if (!Platform.isMobile) return;
+    const toggle = parent.createEl("button", {
+      cls: "ent-cc-button",
+      text: "Split view on wide screens",
+      attr: { type: "button", "aria-pressed": String(this.getWorkspaceLayoutPreference().tabletSplit), "data-kbcc-focus": "tablet-split", title: "Show the index and note details side by side when this pane is at least 1050 pixels wide. Narrow screens always use full-width details." },
+    });
+    toggle.addEventListener("click", () => {
+      const preference = this.getWorkspaceLayoutPreference();
+      preference.tabletSplit = !preference.tabletSplit;
+      this.saveWorkspaceLayoutPreference();
+      toggle.setAttribute("aria-pressed", String(preference.tabletSplit));
+      this.applyPaneWidth(this.paneWidth);
+    });
+  }
+
+  private setInspectorExpanded(expanded: boolean): void {
+    if (this.isCompactInspectorLayout()) return;
+    this.workspaceResize?.cancel();
+    const returnScroll = this.inspectorExpandedReturn;
+    if (expanded && !this.inspectorExpanded) {
+      this.inspectorExpandedReturn = { path: this.plugin.data.selectedPath, listScrollTop: this.treeEl?.scrollTop ?? 0, detailScrollTop: this.inspectorEl?.scrollTop ?? 0 };
+    }
+    this.inspectorExpanded = expanded;
+    this.workspaceEl?.toggleClass("is-inspector-expanded", expanded);
+    const button = this.inspectorEl?.querySelector<HTMLButtonElement>(".ent-cc-inspector-expand");
+    if (button) {
+      const label = expanded ? "Back to split view" : "Expand note details";
+      button.setAttribute("aria-label", label);
+      button.setAttribute("title", label);
+      button.setAttribute("aria-pressed", String(expanded));
+      setIcon(button, expanded ? "minimize-2" : "maximize-2");
+      button.focus({ preventScroll: true });
+    }
+    if (!expanded) {
+      this.workspaceResize?.refresh();
+      this.inspectorExpandedReturn = null;
+      if (returnScroll) this.restoreReturnScrollPosition(returnScroll.listScrollTop, returnScroll.path === this.plugin.data.selectedPath ? returnScroll.detailScrollTop : this.inspectorEl?.scrollTop ?? 0);
+    }
+  }
+
+  private hideDesktopInspector(): void {
+    this.workspaceResize?.cancel();
+    const returnScroll = this.inspectorExpandedReturn;
+    this.inspectorExpandedReturn = null;
+    this.inspectorExpanded = false;
+    this.inspectorSelectedByUser = false;
+    this.workspaceEl?.removeClass("is-inspector-expanded");
+    this.workspaceEl?.addClass("is-inspector-collapsed");
+    if (returnScroll && this.treeEl) this.treeEl.scrollTop = returnScroll.listScrollTop;
+    const selected = this.treeEl?.querySelector<HTMLElement>(".ent-cc-subject-row.is-selected .ent-cc-subject-title");
+    (selected ?? this.treeEl)?.focus({ preventScroll: true });
+  }
+
+  private showInspectorWidthMenu(event: MouseEvent): void {
+    const menu = new Menu();
+    menu.addItem((item) => item.setTitle("Wider note details").setIcon("maximize-2").onClick(() => this.workspaceResize?.adjust(48)));
+    menu.addItem((item) => item.setTitle("Narrower note details").setIcon("minimize-2").onClick(() => this.workspaceResize?.adjust(-48)));
+    menu.addSeparator();
+    menu.addItem((item) => item.setTitle("Reset panel width").setIcon("rotate-ccw").onClick(() => this.workspaceResize?.reset()));
+    menu.showAtMouseEvent(event);
+  }
+
   private closeMobileInspector(): void {
     this.mobileInspectorOpen = false;
     this.mobileInspectorNeedsFocus = false;
+    this.inspectorSelectedByUser = false;
+    this.inspectorExpanded = false;
+    this.inspectorExpandedReturn = null;
     this.render(true);
     const workspace = this.workspaceEl;
     this.timerWindow.setTimeout(() => {
@@ -5317,6 +5459,12 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private handleMobileInspectorKeydown(event: KeyboardEvent): void {
+    if (event.key === "Escape" && this.inspectorExpanded && !this.isCompactInspectorLayout()) {
+      event.preventDefault();
+      event.stopPropagation();
+      this.setInspectorExpanded(false);
+      return;
+    }
     if (!this.mobileInspectorOpen || !this.isCompactInspectorLayout() || !this.inspectorEl) return;
     if (event.key === "Escape") {
       event.preventDefault();
@@ -5325,7 +5473,7 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     if (event.key !== "Tab") return;
     const focusable = Array.from(this.inspectorEl.querySelectorAll<HTMLElement>(
-      'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      'button:not([disabled]), summary, a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
     )).filter((element) => element.offsetParent !== null);
     const first = focusable[0];
     const last = focusable[focusable.length - 1];
@@ -5342,6 +5490,8 @@ export class EntVaultCommandCenterView extends ItemView {
 
   private renderInspector(): void {
     if (!this.inspectorEl) return;
+    const currentDetails = this.inspectorEl.querySelector<HTMLDetailsElement>(".ent-cc-note-details");
+    if (currentDetails) this.noteDetailsOpen = currentDetails.open;
     this.inspectorEl.empty();
     const record = this.recordByPath.get(this.plugin.data.selectedPath);
     const compact = this.isCompactInspectorLayout();
@@ -5367,6 +5517,17 @@ export class EntVaultCommandCenterView extends ItemView {
     setIcon(close.createSpan(), "arrow-left");
     close.createSpan({ text: backLabel });
     close.addEventListener("click", () => this.closeMobileInspector());
+    if (!compact) {
+      const controls = header.createDiv({ cls: "ent-cc-inspector-layout-actions" });
+      const expandLabel = this.inspectorExpanded ? "Back to split view" : "Expand note details";
+      const expand = iconButton(controls, this.inspectorExpanded ? "minimize-2" : "maximize-2", expandLabel, "ent-cc-inspector-expand");
+      expand.setAttribute("aria-pressed", String(this.inspectorExpanded));
+      expand.addEventListener("click", () => this.setInspectorExpanded(!this.inspectorExpanded));
+      const widthMenu = iconButton(controls, "sliders-horizontal", "Panel width options");
+      widthMenu.setAttribute("aria-haspopup", "menu");
+      widthMenu.addEventListener("click", (event) => this.showInspectorWidthMenu(event));
+      iconButton(controls, "x", "Hide note details").addEventListener("click", () => this.hideDesktopInspector());
+    }
     if (!record) {
       this.inspectorEl.setAttribute("aria-labelledby", labelId);
       this.inspectorEl.createDiv({ cls: "ent-cc-empty", text: "Select a record to inspect it." });
@@ -5482,11 +5643,9 @@ export class EntVaultCommandCenterView extends ItemView {
       placement.addEventListener("click", () => this.startEditCanonicalPlacement(record));
     }
 
-    const settings = this.plugin.data.settings;
-    this.inspectorField(body, this.plugin.isClinicalMode() ? "Curriculum ID" : `ID (${settings.idProperty})`, record.curriculumId || (record.role === "proposal" ? "Not assigned" : "—"));
-    if (record.libraryId) this.inspectorField(body, "Library", this.plugin.getLibrary(record.libraryId)?.name || "Archived or missing library");
-    this.inspectorField(body, this.plugin.isClinicalMode() ? "Domain" : settings.groupLabel, record.domain || "—");
-    this.inspectorField(body, "Knowledge type", record.topicKind || record.kind);
+    this.renderInspectorAttachments(body, record);
+
+    // Safety and lock state must remain visible even when ordinary note details are collapsed.
     if (this.plugin.isClinicalMode()) {
       this.inspectorField(body, "Priority", record.priority || "—", record.priority === "P1" ? "is-urgent" : "");
       this.inspectorField(body, "Synthesis", readableStatus(record.synthesisStatus));
@@ -5494,13 +5653,37 @@ export class EntVaultCommandCenterView extends ItemView {
       if (record.kind === "medication") this.inspectorField(body, "Dose status", readableStatus(record.doseStatus), record.doseStatus !== "reviewed" ? "is-urgent" : "");
       if (record.kind === "syndrome") this.inspectorField(body, "Image status", readableStatus(record.imageStatus), record.imageStatus === "absent" ? "is-urgent" : "");
     }
-    this.inspectorField(body, "Path", record.path, "is-path");
     if (record.aiLock) this.inspectorField(body, "AI lock", "Locked — structural editing disabled", "is-urgent");
+
+    const details = body.createEl("details", { cls: "ent-cc-note-details" });
+    details.open = this.noteDetailsOpen;
+    details.createEl("summary", { text: "Note details" });
+    details.addEventListener("toggle", () => { if (details.isConnected) this.noteDetailsOpen = details.open; });
+    const settings = this.plugin.data.settings;
+    this.inspectorField(details, this.plugin.isClinicalMode() ? "Curriculum ID" : `ID (${settings.idProperty})`, record.curriculumId || (record.role === "proposal" ? "Not assigned" : "—"));
+    if (record.libraryId) this.inspectorField(details, "Library", this.plugin.getLibrary(record.libraryId)?.name || "Archived or missing library");
+    this.inspectorField(details, this.plugin.isClinicalMode() ? "Domain" : settings.groupLabel, record.domain || "—");
+    this.inspectorField(details, "Knowledge type", record.topicKind || record.kind);
+    this.inspectorField(details, "Path", record.path, "is-path");
 
     if (record.role !== "vault-note") this.renderStudyActions(body, record);
     this.renderRelatedKnowledge(body, record);
 
     if (mobileOpen) this.restoreMobileInspectorAfterRender(body);
+  }
+
+  private renderInspectorAttachments(parent: HTMLElement, record: VaultRecord): void {
+    const property = record.libraryId ? this.libraryDisplayProfile(record.libraryId).imageProperty : undefined;
+    const attachments = collectNoteAttachments(this.app, record.path, property);
+    renderNoteAttachments(parent, attachments, (path) => this.run(async () => {
+      // The row can outlive a sync/delete/rename. Never open an unresolved link or create a note.
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (!(file instanceof TFile)) {
+        new Notice("This attachment is not available on this device. Check that it has finished syncing.", 7000);
+        return;
+      }
+      await this.plugin.openFile(file, this);
+    }));
   }
 
   /**

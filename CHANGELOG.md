@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.26.0
+
+### More room to browse
+
+- Use a compact desktop header with the base switcher and primary actions. Workspace title, description and statistics live under **Details**, while advanced search and saved-search actions live under **Filters** with visible active-filter counts. Index and note details retain independent scrolling.
+- Resize the index/detail divider with a pointer or keyboard, expand or hide details, and reset the preferred width. Width preferences stay on this device, not in synced organization. Narrow screens keep full-width details; wide iPads may opt into split view.
+
+### Attachments within reach
+
+- Show files linked or embedded in a selected note directly beneath its main actions, including recognized property links and local cover references. File links wrap, duplicates are combined, and unavailable files are distinguished from an empty list.
+- Open existing attachments through Obsidian without rewriting notes, reading file contents for previews, downloading remote files, or creating missing notes. File opening support depends on Obsidian and the device.
+- Move ordinary metadata under **Note details**, keeping safety information visible and attachments easier to reach.
+
+### Compatibility and verification
+
+- Minimum Obsidian version stays 1.13.0. Synced organization, portable/recovery formats, command IDs, dependencies, network permissions and local-only cover policy are unchanged.
+- Bounded feature budgets cover the new attachment and adjustable-workspace code: JavaScript 1,250,000 raw / 329,500 gzip bytes, CSS 170,000 raw / 23,700 gzip bytes. Test and coverage thresholds are unchanged.
+- Physical iPhone/iPad and controlled two-device Sync remain **unverified**, under this candidate's maintainer-authorized publication instruction. Automated browser checks are supplemental, not physical-device passes. See [0.26.0 release evidence](https://github.com/drbinsaad/knowledge-base-command-center/blob/0.26.0/docs/release-evidence/0.26.0-iphone.md).
+
 ## 0.25.1
 
 - Wrap long linked-note titles, backlink filenames, and IDs in record details instead of letting them push the panel sideways. Rows grow with their text, and IDs move below titles when space is limited, including the narrow desktop inspector. The phone/tablet detail header stays fixed.

@@ -352,6 +352,19 @@ export const UPDATE_ANNOUNCEMENT_0_25_1: UpdateAnnouncement = {
   releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.25.1",
 };
 
+export const UPDATE_ANNOUNCEMENT_0_26_0: UpdateAnnouncement = {
+  version: "0.26.0",
+  title: "What’s new in Knowledge Base Command Center 0.26.0",
+  intro: "More space to browse, attachments within reach, and adjustable note details. Physical iPhone/iPad testing remains unverified.",
+  highlights: [
+    "The desktop header is compact. Workspace information is under Details, and advanced search controls are under Filters.",
+    "Attachments lists files linked or embedded in the selected note. Open a file without hunting through the note; missing files are identified safely.",
+    "Resize the divider, expand or hide note details, or reset the width. Sizes stay local to this device. Phones keep full-width details; wide tablets can opt into Split view.",
+    "Note metadata is under Note details. Your notes and synced organization stay unchanged.",
+  ],
+  releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.26.0",
+};
+
 const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_12_0.version, UPDATE_ANNOUNCEMENT_0_12_0],
   [UPDATE_ANNOUNCEMENT_0_12_1.version, UPDATE_ANNOUNCEMENT_0_12_1],
@@ -378,6 +391,7 @@ const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
   [UPDATE_ANNOUNCEMENT_0_24_0.version, UPDATE_ANNOUNCEMENT_0_24_0],
   [UPDATE_ANNOUNCEMENT_0_25_0.version, UPDATE_ANNOUNCEMENT_0_25_0],
   [UPDATE_ANNOUNCEMENT_0_25_1.version, UPDATE_ANNOUNCEMENT_0_25_1],
+  [UPDATE_ANNOUNCEMENT_0_26_0.version, UPDATE_ANNOUNCEMENT_0_26_0],
 ]);
 
 function parseSemanticVersion(value: string): ParsedSemanticVersion | null {

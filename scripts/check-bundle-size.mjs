@@ -10,9 +10,15 @@ const budgets = [
   // 321,154 gzip). Plain-language messages, command names, and the Run setup
   // again command add about 1.6 kB raw / 0.5 kB gzip on top of that. The
   // curated 0.25.0 What's new text adds about 1.2 kB raw / 0.45 kB gzip.
-  { file: "main.js", raw: 1_231_000, gzip: 324_000 },
+  // 0.26.0 adds the cache-only attachment projection, bounded/persisted divider,
+  // accessible panel actions and compact disclosures. The initial integrated
+  // candidate adds ~15.7 kB raw / 4.1 kB gzip over 0.25.1 (1,229,742 /
+  // 323,923). Keep bounded feature headroom, no new runtime dependencies.
+  { file: "main.js", raw: 1_250_000, gzip: 329_500 },
   // Touch-sized membership choices/actions and tablet wrapping add ~1.6 kB raw.
-  { file: "styles.css", raw: 163_000, gzip: 22_600 },
+  // Compact disclosures, attachment rows and resizing add ~6 kB raw / 1 kB
+  // gzip over 0.25.1 (162,088 / 22,375), including safe touch/focus states.
+  { file: "styles.css", raw: 170_000, gzip: 23_700 },
 ];
 
 for (const budget of budgets) {

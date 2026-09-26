@@ -26,11 +26,11 @@ test.beforeAll(async () => {
   hostStyles = host;
 });
 
-async function openView(page: Page, options: { mobile?: boolean; dark?: boolean; count?: number; phoneChrome?: boolean; width?: number; height?: number; largeText?: boolean; scenario?: "related-overflow" } = {}): Promise<void> {
+async function openView(page: Page, options: { mobile?: boolean; dark?: boolean; count?: number; phoneChrome?: boolean; width?: number; height?: number; largeText?: boolean; scenario?: "related-overflow" | "attachments" } = {}): Promise<void> {
   const errors: string[] = [];
   failures.set(page, errors);
   page.on("pageerror", (error) => errors.push(error.message));
-  page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
+  page.on("console", (message) => { if (message.type() === "error" || message.type() === "warning") errors.push(message.text()); });
   await page.setViewportSize({ width: options.width ?? (options.mobile ? 390 : 1440), height: options.height ?? (options.mobile ? 844 : 960) });
   const scenario = options.scenario ?? (options.phoneChrome ? "mobile-space" : "");
   await page.goto(`about:blank#mobile=${Boolean(options.mobile)}&count=${options.count ?? 650}&scenario=${scenario}`);
@@ -42,9 +42,9 @@ async function openView(page: Page, options: { mobile?: boolean; dark?: boolean;
   await page.addScriptTag({ content: rendererBundle });
   await expect.poll(() => page.evaluate(() => Boolean((window as unknown as { kbccBrowserHarness?: { ready: boolean } }).kbccBrowserHarness?.ready))).toBe(true);
   await expect(page).toHaveTitle("KBCC production renderer · synthetic vault");
-  if (!options.mobile && !options.phoneChrome) await expect(page.getByRole("heading", { name: "Research workspace", exact: true })).toBeVisible();
-  if (options.mobile) await expect(page.locator(".ent-cc-base-switcher-name")).toHaveText(options.phoneChrome ? "My knowledge base" : "Research workspace");
+  await expect(page.locator(".ent-cc-base-switcher-name")).toHaveText(options.phoneChrome ? "My knowledge base" : "Research workspace");
   await expect(page.locator(".ent-cc-shell")).toBeVisible();
+  await expect(page.locator("vite-error-overlay, #webpack-dev-server-client-overlay, nextjs-portal")).toHaveCount(0);
   await page.evaluate(() => new Promise<void>((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve()))));
 }
 
@@ -108,6 +108,335 @@ interface QuickOrganizerSnapshot {
 async function quickOrganizerSnapshot(page: Page): Promise<QuickOrganizerSnapshot> {
   return page.evaluate(() => (window as unknown as { kbccBrowserHarness: { quickOrganizerSnapshot(): QuickOrganizerSnapshot } }).kbccBrowserHarness.quickOrganizerSnapshot());
 }
+
+for (const size of [
+  { width: 1440, height: 900 }, { width: 1280, height: 650 },
+  { width: 900, height: 650 }, { width: 390, height: 740 },
+  { width: 1100, height: 600, largeText: true, dark: true },
+]) {
+  test(`compact desktop workspace ${size.width}x${size.height}: space, fixed controls and accessible disclosures`, async ({ page }) => {
+    await openView(page, { ...size, count: 80 });
+    const details = page.locator(".ent-cc-workspace-options");
+    const detailsSummary = details.locator(":scope > summary");
+    const filters = page.locator(".ent-cc-mobile-filters");
+    const filtersSummary = filters.locator(":scope > summary");
+    const workspace = page.locator(".ent-cc-workspace");
+    const list = size.width >= 1050 ? page.locator(".ent-cc-tree-panel") : workspace;
+    const search = page.getByRole("searchbox");
+    await expect(detailsSummary).toHaveText("Details");
+    await expect(details).not.toHaveAttribute("open");
+    await expect(filters).not.toHaveAttribute("open");
+    await expect(page.getByRole("heading", { name: "Research workspace", exact: true })).toBeHidden();
+    await expect(page.getByRole("combobox", { name: "Search scope" })).toBeHidden();
+    for (const target of [page.locator(".ent-cc-base-switcher"), page.locator(".ent-cc-main-add"), detailsSummary,
+      page.locator(".ent-cc-note-organizer-launch"), page.getByRole("button", { name: "Arrange", exact: true }),
+      page.getByRole("button", { name: "Undo last organization change", exact: true }), search, filtersSummary]) {
+      await expect(target).toBeInViewport();
+      const box = await target.boundingBox();
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(size.width + 1);
+    }
+    const workspaceBefore = await workspace.boundingBox();
+    expect(workspaceBefore!.height, "Compact chrome should leave most vertical space to notes").toBeGreaterThanOrEqual(size.height * 0.55);
+    const searchBefore = await search.boundingBox();
+    await list.evaluate((element) => { element.scrollTop = 300; });
+    expect(await list.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+    expect((await search.boundingBox())!.y).toBeCloseTo(searchBefore!.y, 0);
+    await detailsSummary.focus();
+    await page.keyboard.press("Enter");
+    await expect(details).toHaveAttribute("open", "");
+    await expect(page.getByRole("heading", { name: "Research workspace", exact: true })).toBeVisible();
+    expect((await workspace.boundingBox())!.height, "Expanded Details must not squeeze the list").toBeCloseTo(workspaceBefore!.height, 0);
+    await captureEvidence(page, `desktop-compact-${size.width}-details`);
+    await detailsSummary.click();
+    await filtersSummary.focus();
+    await page.keyboard.press("Space");
+    await expect(filters).toHaveAttribute("open", "");
+    await page.getByRole("combobox", { name: "Search scope" }).selectOption("current");
+    await page.getByRole("combobox", { name: "Note availability" }).selectOption("linked");
+    await page.getByRole("checkbox", { name: "Show linked notes first" }).check();
+    await expect(filtersSummary).toHaveText("Filters (3)");
+    await expect(filtersSummary).toHaveAccessibleName("Filters: This base, Linked notes, Linked notes first");
+    // Safari does not move keyboard focus on every pointer checkbox action.
+    // Exercise Escape from an explicitly keyboard-focused filter control.
+    await page.getByRole("checkbox", { name: "Show linked notes first" }).focus();
+    await page.keyboard.press("Escape");
+    await expect(filters).not.toHaveAttribute("open");
+    await expect(filtersSummary).toBeFocused();
+    await search.fill("Research note 003");
+    await expect(page.locator(".ent-cc-subject-title")).toHaveCount(1);
+    await expect(page.getByRole("button", { name: /^Research note 003,/u })).toBeVisible();
+    await expect(search).toBeFocused();
+    await refresh(page);
+    await expect(search).toHaveValue("Research note 003");
+    await expect(search).toBeFocused();
+    await expect(filtersSummary).toHaveText("Filters (3)");
+    await search.fill("No matching synthetic note");
+    await expect(page.locator(".ent-cc-subject-title")).toHaveCount(0);
+    const heights = await workspace.evaluate(async (element) => {
+      const values: number[] = [];
+      for (let index = 0; index < 6; index += 1) {
+        element.scrollTop = index % 2 ? 0 : 100;
+        await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+        values.push(element.getBoundingClientRect().height);
+      }
+      return values;
+    });
+    expect(Math.max(...heights) - Math.min(...heights), "Short results must not oscillate the header height").toBeLessThanOrEqual(1);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
+    await captureEvidence(page, `desktop-compact-${size.width}-search`);
+  });
+}
+
+for (const device of [
+  { name: "desktop1440", width: 1440, height: 960, mobile: false },
+  { name: "phone320", width: 320, height: 740, mobile: true },
+  { name: "ipad1180", width: 1180, height: 820, mobile: true },
+]) {
+  test.describe(`note attachment links ${device.name}`, () => {
+    test.use({ hasTouch: device.mobile });
+    test("local files are paged, readable and openable without fetching previews", async ({ page }) => {
+      const requests: string[] = [];
+      page.on("request", (request) => { if (/^https?:/u.test(request.url())) requests.push(request.url()); });
+      await openView(page, { ...device, scenario: "attachments" });
+      // Actual Obsidian buttons may center their contents and impose a fixed
+      // height/single line. Attachment links must retain readable list rows.
+      await page.addStyleTag({ content: "button { justify-content: center; white-space: nowrap; height: 32px; }" });
+      await page.getByRole("button", { name: /^Attachment overview,/u }).click();
+      const inspector = page.locator(".ent-cc-inspector");
+      const section = inspector.locator(".ent-cc-note-attachments");
+      const rows = section.locator(".ent-cc-attachment-row");
+      await expect(section.getByRole("heading", { name: "Attachments (28)", exact: true })).toBeVisible();
+      await expect(rows).toHaveCount(20);
+      await expect(inspector.locator(".ent-cc-note-details")).not.toHaveAttribute("open");
+      const pdf = section.getByRole("button", { name: "Open attachment: Review.pdf", exact: true });
+      await pdf.scrollIntoViewIfNeeded();
+      await clickRenderedCenter(page, pdf, device.mobile);
+      await expect.poll(() => page.evaluate(() => (window as unknown as { kbccBrowserHarness: { relatedSnapshot(): { openedPaths: string[] } } }).kbccBrowserHarness.relatedSnapshot().openedPaths)).toEqual(["Attachments/Review.pdf"]);
+      await pdf.focus();
+      await page.keyboard.press("Enter");
+      await expect.poll(() => page.evaluate(() => (window as unknown as { kbccBrowserHarness: { relatedSnapshot(): { openedPaths: string[] } } }).kbccBrowserHarness.relatedSnapshot().openedPaths)).toEqual(["Attachments/Review.pdf", "Attachments/Review.pdf"]);
+      const more = section.getByRole("button", { name: "Show more attachments (8 remaining)", exact: true });
+      await more.scrollIntoViewIfNeeded();
+      await clickRenderedCenter(page, more, device.mobile);
+      await expect(rows).toHaveCount(28);
+      await expect(more).toBeHidden();
+      for (const name of ["Diagram.png", "Minutes.docx", "Results.xlsx", "Slides.pptx", "Recording.mp3", "Walkthrough.mp4", "Archive.zip", "Bundle.custom", "README", "Cover.jpg"]) {
+        await expect(section.getByRole("button", { name: `Open attachment: ${name}`, exact: true })).toHaveCount(1);
+      }
+      const duplicates = section.getByRole("button", { name: "Open attachment: shared.pdf", exact: true });
+      await expect(duplicates).toHaveCount(2);
+      await expect(duplicates.first()).toContainText("Attachments/One/shared.pdf");
+      await expect(duplicates.last()).toContainText("Attachments/Two/shared.pdf");
+      await expect(section.locator(".is-missing")).toHaveText("Not-synced.pdfNot available on this device");
+      await expect(section.locator(".is-missing button")).toHaveCount(0);
+      await expect(section.locator("img, iframe, audio, video, object, embed")).toHaveCount(0);
+      await expect(section).not.toContainText("remote.pdf");
+      await expect(section).not.toContainText("Plain note");
+      const geometry = await rows.evaluateAll((elements) => elements.map((element) => {
+        const bounds = element.getBoundingClientRect();
+        const name = element.querySelector(".ent-cc-attachment-name")!;
+        const range = document.createRange();
+        range.selectNodeContents(name);
+        return { width: element.clientWidth, scrollWidth: element.scrollWidth, height: bounds.height,
+          justifyContent: getComputedStyle(element).justifyContent,
+          textContained: Array.from(range.getClientRects()).every((rect) => rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1 && rect.top >= bounds.top - 1 && rect.bottom <= bounds.bottom + 1) };
+      }));
+      for (const row of geometry) {
+        expect(row.scrollWidth, JSON.stringify(row)).toBeLessThanOrEqual(row.width + 1);
+        expect(row.textContained, JSON.stringify(row)).toBe(true);
+        expect(row.height).toBeGreaterThanOrEqual(44);
+        expect(row.justifyContent).toBe("flex-start");
+      }
+      await section.getByRole("button", { name: /^Open attachment: SyntheticUnbroken/u }).scrollIntoViewIfNeeded();
+      await captureEvidence(page, `attachment-links-${device.name}`);
+      expect(requests).toEqual([]);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
+    });
+  });
+}
+
+test("attachment metadata refresh distinguishes waiting, missing, empty and deleted files", async ({ page }) => {
+  await openView(page, { scenario: "attachments" });
+  const note = page.getByRole("button", { name: /^Attachment overview,/u });
+  await note.click();
+  const section = page.locator(".ent-cc-note-attachments");
+  await page.evaluate(() => (window as unknown as { kbccBrowserHarness: { setAttachmentCacheReady(value: boolean): void } }).kbccBrowserHarness.setAttachmentCacheReady(false));
+  await refresh(page);
+  await expect(section).toContainText("Waiting for Obsidian to read this note’s links.");
+  await page.evaluate(() => {
+    const host = (window as unknown as { kbccBrowserHarness: { setAttachmentCacheReady(value: boolean): void; syncMissingAttachment(): void } }).kbccBrowserHarness;
+    host.setAttachmentCacheReady(true); host.syncMissingAttachment();
+  });
+  await refresh(page);
+  await section.locator(".ent-cc-attachments-more").click();
+  await expect(section.getByRole("button", { name: "Open attachment: Not-synced.pdf", exact: true })).toHaveCount(1);
+  const pdf = section.getByRole("button", { name: "Open attachment: Review.pdf", exact: true });
+  await page.evaluate(() => (window as unknown as { kbccBrowserHarness: { removeAttachment(path: string): void } }).kbccBrowserHarness.removeAttachment("Attachments/Review.pdf"));
+  await pdf.click();
+  expect(await page.evaluate(() => (window as unknown as { kbccBrowserHarness: { relatedSnapshot(): { openedPaths: string[] } } }).kbccBrowserHarness.relatedSnapshot().openedPaths)).toEqual([]);
+  await refresh(page);
+  await expect(section.locator(".is-missing")).toContainText("Review.pdf");
+  await page.getByRole("button", { name: /^Plain note,/u }).click();
+  await expect(section).toContainText("No linked files in this note yet.");
+});
+
+async function workspaceLayoutSnapshot(page: Page): Promise<{ localValues: Record<string, { version: number; inspectorWidth: number; tabletSplit: boolean }>; organizationUnchanged: boolean }> {
+  return page.evaluate(() => (window as unknown as { kbccBrowserHarness: { workspaceLayoutSnapshot(): { localValues: Record<string, { version: number; inspectorWidth: number; tabletSplit: boolean }>; organizationUnchanged: boolean } } }).kbccBrowserHarness.workspaceLayoutSnapshot());
+}
+
+test("desktop pane resize supports pointer, keyboard, cancellation and device-local restart", async ({ page }) => {
+  await openView(page, { count: 80 });
+  await page.getByRole("button", { name: /^Research note 000,/u }).click();
+  const separator = page.getByRole("separator", { name: "Resize note details", exact: true });
+  const inspector = page.locator(".ent-cc-inspector");
+  const tree = page.locator(".ent-cc-tree-panel");
+  await expect(separator).toHaveAttribute("aria-orientation", "vertical");
+  await expect(separator).toHaveAttribute("aria-valuenow", "380");
+  await tree.evaluate((element) => { element.scrollTop = 200; });
+  const initialScroll = await tree.evaluate((element) => element.scrollTop);
+  await page.evaluate(() => { (window as unknown as { originalTree: Element | null }).originalTree = document.querySelector(".ent-cc-tree-panel"); });
+  await separator.focus();
+  await page.keyboard.press("ArrowLeft");
+  await expect(separator).toHaveAttribute("aria-valuenow", "396");
+  await expect(separator).toBeFocused();
+  expect((await inspector.boundingBox())!.width).toBeCloseTo(396, 0);
+  await page.keyboard.press("ArrowRight");
+  await expect(separator).toHaveAttribute("aria-valuenow", "380");
+  await page.keyboard.press("End");
+  expect((await tree.boundingBox())!.width).toBeGreaterThanOrEqual(520);
+  expect(Number(await separator.getAttribute("aria-valuenow"))).toBe(Number(await separator.getAttribute("aria-valuemax")));
+  await page.keyboard.press("Home");
+  await expect(separator).toHaveAttribute("aria-valuenow", "320");
+  await page.getByRole("button", { name: "Panel width options", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Reset panel width", exact: true }).click();
+  await expect(separator).toHaveAttribute("aria-valuenow", "380");
+  const beforeDrag = await workspaceLayoutSnapshot(page);
+  const rect = (await separator.boundingBox())!;
+  const x = rect.x + rect.width / 2;
+  const y = rect.y + Math.min(80, rect.height / 2);
+  await page.mouse.move(x, y); await page.mouse.down(); await page.mouse.move(x - 100, y, { steps: 5 });
+  await expect(separator).toHaveAttribute("aria-valuenow", "480");
+  expect((await workspaceLayoutSnapshot(page)).localValues, "Dragging must not repeatedly persist device preferences").toEqual(beforeDrag.localValues);
+  await page.mouse.up();
+  expect((await workspaceLayoutSnapshot(page)).localValues["ent-vault-command-center.workspace-layout.v1"].inspectorWidth).toBe(480);
+  expect(await tree.evaluate((element) => element.scrollTop)).toBeCloseTo(initialScroll, 0);
+  expect(await page.evaluate(() => (window as unknown as { originalTree: Element | null }).originalTree === document.querySelector(".ent-cc-tree-panel")), "Resizing must not rebuild the index").toBe(true);
+  const cancelRect = (await separator.boundingBox())!;
+  await page.mouse.move(cancelRect.x + cancelRect.width / 2, y); await page.mouse.down();
+  await page.mouse.move(cancelRect.x - 80, y);
+  await page.keyboard.press("Escape"); await page.mouse.up();
+  await expect(separator).toHaveAttribute("aria-valuenow", "480");
+  await expect(page.locator(".ent-cc-workspace")).not.toHaveClass(/is-resizing-inspector/u);
+  expect((await workspaceLayoutSnapshot(page)).organizationUnchanged).toBe(true);
+  await captureEvidence(page, "desktop-resized-details");
+  await page.evaluate(() => (window as unknown as { kbccBrowserHarness: { reopenView(): Promise<void> } }).kbccBrowserHarness.reopenView());
+  await page.getByRole("button", { name: /^Research note 000,/u }).click();
+  await expect(separator).toHaveAttribute("aria-valuenow", "480");
+  expect((await inspector.boundingBox())!.width).toBeCloseTo(480, 0);
+  await page.setViewportSize({ width: 1100, height: 960 });
+  expect((await tree.boundingBox())!.width).toBeGreaterThanOrEqual(520);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
+  await page.setViewportSize({ width: 1440, height: 960 });
+  await expect(separator).toHaveAttribute("aria-valuenow", "480");
+});
+
+test("desktop note details expand, restore and hide without losing index position", async ({ page }) => {
+  await openView(page, { count: 80 });
+  const selected = page.getByRole("button", { name: /^Research note 010,/u });
+  await selected.click();
+  const tree = page.locator(".ent-cc-tree-panel");
+  const inspector = page.locator(".ent-cc-inspector");
+  const workspace = page.locator(".ent-cc-workspace");
+  const separator = page.getByRole("separator", { name: "Resize note details", exact: true });
+  const before = await tree.evaluate((element) => element.scrollTop);
+  const oldWidth = (await inspector.boundingBox())!.width;
+  await page.getByRole("button", { name: "Expand note details", exact: true }).click();
+  await expect(tree).toBeHidden(); await expect(separator).toBeHidden();
+  await expect(inspector).toHaveAttribute("role", "complementary");
+  expect((await inspector.boundingBox())!.width).toBeCloseTo((await workspace.boundingBox())!.width, 0);
+  const restore = page.getByRole("button", { name: "Back to split view", exact: true });
+  await expect(restore).toBeFocused();
+  await captureEvidence(page, "desktop-expanded-details");
+  await page.keyboard.press("Escape");
+  await expect(tree).toBeVisible(); await expect(separator).toBeVisible();
+  expect((await inspector.boundingBox())!.width).toBeCloseTo(oldWidth, 0);
+  expect(await tree.evaluate((element) => element.scrollTop)).toBeCloseTo(before, 0);
+  await page.getByRole("button", { name: "Hide note details", exact: true }).click();
+  await expect(inspector).toBeHidden(); await expect(separator).toBeHidden();
+  await expect(selected).toBeFocused();
+  expect((await tree.boundingBox())!.width).toBeCloseTo((await workspace.boundingBox())!.width, 0);
+  // The established row shortcut is Space for details; Enter opens the note.
+  await page.keyboard.press("Space");
+  await expect(inspector).toBeVisible(); await expect(separator).toBeVisible();
+  expect((await inspector.boundingBox())!.width).toBeCloseTo(oldWidth, 0);
+  expect((await workspaceLayoutSnapshot(page)).organizationUnchanged).toBe(true);
+});
+
+test("RTL pane resizing and explicit width options respect their visual direction", async ({ page }) => {
+  await openView(page, { count: 8 });
+  await page.locator("#kbcc-view").evaluate((element) => element.setAttribute("dir", "rtl"));
+  await page.getByRole("button", { name: /^Research note 000,/u }).click();
+  const separator = page.getByRole("separator", { name: "Resize note details", exact: true });
+  const inspector = page.locator(".ent-cc-inspector");
+  const tree = page.locator(".ent-cc-tree-panel");
+  expect((await inspector.boundingBox())!.x).toBeLessThan((await tree.boundingBox())!.x);
+  await separator.focus(); await page.keyboard.press("ArrowRight");
+  await expect(separator).toHaveAttribute("aria-valuenow", "396");
+  await page.keyboard.press("ArrowLeft");
+  await expect(separator).toHaveAttribute("aria-valuenow", "380");
+  await page.getByRole("button", { name: "Panel width options", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Wider note details", exact: true }).click();
+  const wider = Number(await separator.getAttribute("aria-valuenow"));
+  expect(wider).toBeGreaterThan(380);
+  await page.getByRole("button", { name: "Panel width options", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Narrower note details", exact: true }).click();
+  expect(Number(await separator.getAttribute("aria-valuenow"))).toBeLessThan(wider);
+  const rect = (await separator.boundingBox())!;
+  await page.mouse.move(rect.x + rect.width / 2, rect.y + 60); await page.mouse.down();
+  await page.mouse.move(rect.x + rect.width / 2 + 80, rect.y + 60); await page.mouse.up();
+  await expect(separator).toHaveAttribute("aria-valuenow", "460");
+  expect((await inspector.boundingBox())!.width).toBeCloseTo(460, 0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
+  expect((await workspaceLayoutSnapshot(page)).organizationUnchanged).toBe(true);
+  await captureEvidence(page, "desktop-resize-rtl");
+});
+
+test.describe("tablet split opt-in", () => {
+  test.use({ hasTouch: true });
+  test("wide tablet defaults to full-width and restores an explicit split preference after rotation", async ({ page }) => {
+    await openView(page, { mobile: true, width: 1180, height: 820, count: 80 });
+    await expect(page.getByRole("separator", { name: "Resize note details", exact: true })).toHaveCount(0);
+    await page.locator(".ent-cc-workspace-options > summary").tap();
+    const toggle = page.getByRole("button", { name: "Split view on wide screens", exact: true });
+    await expect(toggle).toHaveAttribute("aria-pressed", "false");
+    await toggle.tap();
+    await expect(page.locator("#kbcc-view")).toHaveAttribute("data-pane-layout", "wide");
+    await page.locator(".ent-cc-workspace-options > summary").tap();
+    await page.getByRole("button", { name: /^Research note 000,/u }).tap();
+    const separator = page.getByRole("separator", { name: "Resize note details", exact: true });
+    await expect(separator).toBeVisible();
+    await expect(page.locator(".ent-cc-inspector")).toHaveAttribute("role", "complementary");
+    await separator.focus(); await page.keyboard.press("ArrowLeft");
+    await expect(separator).toHaveAttribute("aria-valuenow", "396");
+    await page.setViewportSize({ width: 820, height: 1180 });
+    await expect(separator).toHaveCount(0);
+    await expect(page.locator(".ent-cc-inspector")).toHaveAttribute("role", "dialog");
+    await expect(page.getByRole("button", { name: "Back to main page", exact: true })).toBeInViewport();
+    await page.setViewportSize({ width: 1180, height: 820 });
+    await expect(separator).toBeVisible();
+    await expect(separator).toHaveAttribute("aria-valuenow", "396");
+    const local = (await workspaceLayoutSnapshot(page)).localValues["ent-vault-command-center.workspace-layout.v1"];
+    expect(local.tabletSplit).toBe(true);
+    expect(local.inspectorWidth).toBe(396);
+    expect((await workspaceLayoutSnapshot(page)).organizationUnchanged).toBe(true);
+    await captureEvidence(page, "tablet-explicit-split");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(separator).toHaveCount(0);
+    await expect(page.locator(".ent-cc-inspector")).toHaveAttribute("role", "dialog");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
+  });
+});
 
 for (const device of [
     { name: "iPhone390", width: 390, height: 844, mobile: true },
@@ -553,6 +882,9 @@ for (const device of [
       const rows = inspector.locator(".ent-cc-related-record");
       await expect(inspector).toHaveAttribute("role", device.mobile ? "dialog" : "complementary");
       await expect(rows).toHaveCount(8);
+      // Entry restoration owns the initial scroll until its queued focus move
+      // finishes. Start user scrolling from the actual ready navigation state.
+      if (device.mobile) await expect(page.getByRole("button", { name: "Back to main page", exact: true })).toBeFocused();
       if (!device.mobile) expect((await inspector.boundingBox())!.width).toBeLessThan(500);
       const initialHeader = await header.boundingBox();
       const geometry = await inspector.evaluate((element) => {
@@ -733,15 +1065,15 @@ test.describe("mobile touch pointer", () => {
 });
 
 for (const width of [390, 900]) {
-  test(`nonmobile ${width}px panes retain desktop controls and scroll hierarchy`, async ({ page }) => {
+  test(`nonmobile ${width}px panes keep compact desktop controls and scroll hierarchy`, async ({ page }) => {
     await openView(page, { width, height: 844, count: 8 });
     await expect(page.locator(".ent-cc-shell")).not.toHaveClass(/is-mobile-browse/u);
     const more = page.locator(".ent-cc-workspace-options > summary");
-    await expect(more).toHaveText("More");
+    await expect(more).toHaveText("Details");
     const undo = page.getByRole("button", { name: "Undo last organization change", exact: true });
     await expect(undo).toBeVisible();
-    await expect(page.getByRole("combobox", { name: "Search scope" })).toBeVisible();
-    await expect(page.locator(".ent-cc-mobile-filters")).toHaveCount(0);
+    await expect(page.getByRole("combobox", { name: "Search scope" })).toBeHidden();
+    await expect(page.locator(".ent-cc-mobile-filters > summary")).toBeVisible();
     await expect(page.locator(".ent-cc-workspace .ent-cc-header")).toHaveCount(0);
     await more.click();
     await expect(undo).toBeVisible();
@@ -1258,24 +1590,27 @@ test.describe("iPad compact browsing", () => {
   });
 });
 
-test("iPad routing leaves the 1440px desktop header and side inspector unchanged", async ({ page }) => {
+test("1440px desktop keeps the side inspector with compact Details and Filters", async ({ page }) => {
   await openView(page, { width: 1440, height: 960, count: 80 });
   await expect(page.locator("#kbcc-view")).toHaveAttribute("data-pane-layout", "wide");
   await expect(page.locator(".ent-cc-shell")).not.toHaveClass(/is-mobile-browse/u);
   await expect(page.locator(".ent-cc-mobile-toolbar")).toHaveCount(0);
-  await expect(page.locator(".ent-cc-workspace-options > summary")).toHaveText("More");
-  await expect(page.getByRole("heading", { name: "Research workspace", exact: true })).toBeVisible();
-  await expect(page.getByRole("combobox", { name: "Search scope" })).toBeVisible();
+  await expect(page.locator(".ent-cc-workspace-options > summary")).toHaveText("Details");
+  await expect(page.getByRole("heading", { name: "Research workspace", exact: true })).toBeHidden();
+  await expect(page.getByRole("combobox", { name: "Search scope" })).toBeHidden();
   await page.getByRole("button", { name: /^Research note 000,/u }).click();
   await expect(page.locator(".ent-cc-inspector")).toHaveAttribute("role", "complementary");
   await expect(page.locator(".ent-cc-workspace")).toHaveCSS("display", "grid");
   expect((await page.locator(".ent-cc-inspector").boundingBox())!.width).toBeLessThan(500);
-  await captureEvidence(page, "ipad-desktop-unchanged");
+  await captureEvidence(page, "desktop-compact-header-side-inspector");
 });
 
 async function expectReadableMetadata(page: Page): Promise<void> {
   for (const selector of [".ent-cc-health-summary", ".ent-cc-subject-id"]) {
     const target = page.locator(selector).first();
+    const details = page.locator(".ent-cc-workspace-options");
+    const revealSummary = selector === ".ent-cc-health-summary" && !(await target.isVisible());
+    if (revealSummary) await details.locator(":scope > summary").click();
     await expect(target).toBeVisible();
     const contrast = await target.evaluate((element) => {
       // Resolve computed colors through the native canvas color parser. Composite
@@ -1309,6 +1644,7 @@ async function expectReadableMetadata(page: Page): Promise<void> {
       return (Math.max(light, dark) + 0.05) / (Math.min(light, dark) + 0.05);
     });
     expect(contrast, `${selector} contrast in the synthetic host theme`).toBeGreaterThanOrEqual(4.5);
+    if (revealSummary) await details.locator(":scope > summary").click();
   }
 }
 
@@ -1420,6 +1756,7 @@ test("scope and note-availability controls filter the real rendered search resul
   const input = page.locator('.ent-cc-search-box input[type="search"]');
   await input.fill("Search");
   await expect(page.getByRole("button", { name: /^Search project,/u })).toBeVisible();
+  await page.locator(".ent-cc-mobile-filters > summary").click();
   await page.getByRole("combobox", { name: "Search scope" }).selectOption("current");
   await expect(page.getByRole("button", { name: /^Search project,/u })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /^Search draft,/u })).toBeVisible();

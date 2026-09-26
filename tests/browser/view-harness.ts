@@ -43,6 +43,18 @@ const mobileSpace = parameters.get("scenario") === "mobile-space";
 const touchDrag = parameters.get("scenario") === "touch-drag";
 const libraryGallery = parameters.get("scenario") === "library-gallery";
 const relatedOverflow = parameters.get("scenario") === "related-overflow";
+const attachmentScenario = parameters.get("scenario") === "attachments";
+const attachmentNotePath = "Reading/Attachment overview.md";
+const attachmentPaths = [
+  "Attachments/Diagram.png", "Attachments/Review.pdf", "Attachments/Minutes.docx",
+  "Attachments/Results.xlsx", "Attachments/Slides.pptx", "Attachments/Recording.mp3",
+  "Attachments/Walkthrough.mp4", "Attachments/Archive.zip", "Attachments/Bundle.custom",
+  "Attachments/README", `Attachments/${"SyntheticUnbrokenAttachmentName".repeat(5)}.pdf`,
+  "Attachments/مرجع تجريبي طويل لتنظيم المرفقات مع إظهار جميع كلمات الاسم.pdf",
+  "Attachments/One/shared.pdf", "Attachments/Two/shared.pdf",
+  ...Array.from({ length: 12 }, (_, index) => `Attachments/Additional ${index + 1}.txt`),
+];
+let attachmentCacheReady = true;
 const relatedOverviewPath = "Research/Relationship overview.md";
 const externalBacklinkPaths = relatedOverflow ? [
   "External/Short backlink.md",
@@ -182,6 +194,15 @@ if (relatedOverflow) {
   data.directIndexPaths = records.map((item) => item.path);
   data.collections = [];
 }
+if (attachmentScenario) {
+  records.splice(0, records.length,
+    record(0, { path: attachmentNotePath, title: "Attachment overview", libraryId: "reading", role: "library" }),
+    record(1, { path: "Reading/Plain note.md", title: "Plain note", libraryId: "reading", role: "library" }),
+  );
+  data.activeTab = "library:reading";
+  data.directIndexPaths = [];
+  data.collections = [];
+}
 const store = createDefaultStore(data, 1, "browser-synthetic-vault");
 const otherData = migrateData(data);
 otherData.settings.workspaceName = "Project workspace";
@@ -203,8 +224,10 @@ const currentRecords = (): VaultRecord[] => touchDrag
 const completedImportActions = { undo: 0, placeholderQueue: 0, closed: [] as boolean[] };
 const files = records.filter((item) => touchDrag || libraryGallery ? !item.isPlaceholder : !item.portableId).map((item) => new TFile(item.path));
 files.push(...externalBacklinkPaths.map((path) => new TFile(path)));
+if (attachmentScenario) files.push(...[...attachmentPaths, "Attachments/Cover.jpg"].map((path) => new TFile(path)));
 const openedRelatedPaths: string[] = [];
 const coverFile = new TFile("Covers/Example.png");
+const deviceLocalValues = new Map<string, unknown>();
 let coverResource = "";
 function syntheticCoverResource(): string {
   if (coverResource) return coverResource;
@@ -223,12 +246,21 @@ function syntheticCoverResource(): string {
   return coverResource;
 }
 const app = {
+  loadLocalStorage: (key: string) => deviceLocalValues.get(key) ?? null,
+  saveLocalStorage: (key: string, value: unknown) => { deviceLocalValues.set(key, structuredClone(value)); },
   workspace: { getActiveFile: () => null, trigger: () => undefined },
   vault: { getAbstractFileByPath: (path: string) => files.find((file) => file.path === path) ?? null, getMarkdownFiles: () => files,
     getResourcePath: () => syntheticCoverResource() },
   metadataCache: {
-    getFirstLinkpathDest: (path: string) => path === coverFile.path ? coverFile : null,
+    getFirstLinkpathDest: (path: string) => path === coverFile.path ? coverFile
+      : attachmentScenario ? files.find((file) => file.path === path) ?? null : null,
     getFileCache: (file: TFile) => {
+      if (attachmentScenario && file.path === attachmentNotePath) return attachmentCacheReady ? {
+        frontmatter: { Cover: "[[Attachments/Cover.jpg]]" },
+        links: [...attachmentPaths, "Attachments/Not-synced.pdf", "Reading/Plain note.md", "https://example.invalid/remote.pdf"].map((link) => ({ link })),
+        embeds: [{ link: "Attachments/Diagram.png" }, { link: "Attachments/Review.pdf#page=2" }],
+        frontmatterLinks: [{ link: "Attachments/Archive.zip" }],
+      } : null;
       if (!libraryGallery) return { frontmatter: {} };
       const index = files.indexOf(file);
       return { frontmatter: { author: "A. Researcher", reading_status: index % 2 === 0 ? "Reading" : "To read", year: 2026,
@@ -375,7 +407,7 @@ if (touchDrag) {
     hostSwipeTouches.push({ ignored, handle, trusted: event.isTrusted });
   });
 }
-const view = new EntVaultCommandCenterView({ app, contentEl: content } as never, plugin as unknown as EntVaultCommandCenterPlugin);
+let view = new EntVaultCommandCenterView({ app, contentEl: content } as never, plugin as unknown as EntVaultCommandCenterPlugin);
 let openedModal: Modal | null = null;
 let organizer: NoteOrganizerModal | null = null;
 const submittedTitles: string[] = [];
@@ -556,7 +588,21 @@ function renderSettingDefinitions(parent: HTMLElement, definitions: SettingDefin
 
 const harness = {
   ready: false,
+  workspaceLayoutSnapshot() {
+    return { localValues: Object.fromEntries(deviceLocalValues), organizationUnchanged: organizationFingerprint() === initialOrganization };
+  },
+  async reopenView() {
+    await view.onClose();
+    view = new EntVaultCommandCenterView({ app, contentEl: content } as never, plugin as unknown as EntVaultCommandCenterPlugin);
+    await view.onOpen();
+  },
   relatedSnapshot() { return { openedPaths: [...openedRelatedPaths], selectedPath: data.selectedPath }; },
+  setAttachmentCacheReady(ready: boolean) { attachmentCacheReady = ready; },
+  removeAttachment(path: string) {
+    const index = files.findIndex((file) => file.path === path);
+    if (index >= 0) files.splice(index, 1);
+  },
+  syncMissingAttachment() { files.push(new TFile("Attachments/Not-synced.pdf")); },
   libraryDisplaySnapshot() { return plugin.getLibraryDisplayProfile("reading"); },
   async refresh(replaceData = false) {
     generation += 1;

@@ -1921,7 +1921,10 @@ test("Generic indexed non-topic records expose inspector and mobile arrange cont
     renderInspector(): void;
     showRecordMenu(event: MouseEvent, item: VaultRecord): void;
   };
-  view.app = {};
+  view.app = {
+    vault: { getAbstractFileByPath: (path: string) => path === indexedNote.path ? new TFile(path) : null },
+    metadataCache: { getFileCache: () => ({}) },
+  };
   view.plugin = plugin;
   view.contentEl = dom.document.body as unknown as HTMLElement;
   view.inspectorEl = dom.document.body.createEl("aside") as unknown as HTMLElement;
@@ -8191,4 +8194,50 @@ test("explicit return focus enters compact detail and gives Home a stable tab ta
   view.mobileInspectorOpen = false;
   view.focusReturnDestination("collections");
   assert.equal(dom.document.activeElement, tab, "Home and browse returns focus the active section tab without opening a keyboard");
+});
+
+test("desktop compact chrome keeps descriptions inside Details and restores disclosure focus without scroll changes", async () => {
+  const platform = Platform as unknown as { isMobile: boolean };
+  const previous = platform.isMobile;
+  platform.isMobile = false;
+  try {
+    const { dom, view } = mobileSearchPointerHarness();
+    view.render();
+    const root = dom.document.body;
+    const details = root.querySelector(".ent-cc-workspace-options") as FakeElement & { open: boolean };
+    const filters = root.querySelector(".ent-cc-mobile-filters") as FakeElement & { open: boolean };
+    const tree = root.querySelector(".ent-cc-tree-panel");
+    assert.ok(details && filters && tree);
+    for (const element of [details, filters]) Object.defineProperty(element, "isConnected", { get: () => root.contains(element) });
+    assert.equal(details.open, false);
+    assert.equal(filters.open, false);
+    assert.ok(details.contains(root.querySelector(".ent-cc-health-summary")!));
+    assert.ok(details.contains(root.querySelector("h1")!));
+    assert.ok(filters.contains(root.querySelector(".ent-cc-search-scope")!));
+    assert.ok(filters.contains(root.querySelector(".ent-cc-saved-button")!));
+    tree.scrollTop = 245;
+    details.open = true;
+    details.dispatch("toggle");
+    filters.open = true;
+    filters.dispatch("toggle");
+    assert.equal(details.open, false, "desktop disclosures cannot overlap");
+    const option = filters.querySelector(".ent-cc-search-scope")!;
+    option.focus();
+    option.dispatch("keydown", { key: "Escape" });
+    assert.equal(filters.open, false);
+    assert.equal(dom.document.activeElement, filters.querySelector("summary"));
+    details.open = true;
+    const density = details.querySelector(".ent-cc-density-toggle")!;
+    density.focus();
+    density.dispatch("keydown", { key: "Escape" });
+    assert.equal(details.open, false);
+    assert.equal(dom.document.activeElement, details.querySelector("summary"));
+    assert.equal(tree.scrollTop, 245);
+    view.render();
+    assert.equal((root.querySelector(".ent-cc-workspace-options") as FakeElement & { open: boolean }).open, false);
+    assert.equal(dom.document.activeElement, root.querySelector(".ent-cc-workspace-options summary"));
+    await view.onClose();
+  } finally {
+    platform.isMobile = previous;
+  }
 });
