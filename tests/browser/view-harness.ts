@@ -42,6 +42,14 @@ Platform.isMobile = parameters.get("mobile") === "true";
 const mobileSpace = parameters.get("scenario") === "mobile-space";
 const touchDrag = parameters.get("scenario") === "touch-drag";
 const libraryGallery = parameters.get("scenario") === "library-gallery";
+const relatedOverflow = parameters.get("scenario") === "related-overflow";
+const relatedOverviewPath = "Research/Relationship overview.md";
+const externalBacklinkPaths = relatedOverflow ? [
+  "External/Short backlink.md",
+  "External/A synthetic reference with a deliberately long title that must remain completely readable on a narrow screen.md",
+  `External/${"SyntheticUnbrokenReference".repeat(5)}.md`,
+  "External/مرجع تجريبي طويل لتنظيم الملاحظات والروابط مع إبقاء جميع الكلمات واضحة وقابلة للقراءة.md",
+] : [];
 const count = mobileSpace ? 8 : Number(parameters.get("count") ?? 650);
 const data = migrateData(null);
 Object.assign(data.settings, {
@@ -157,6 +165,23 @@ if (parameters.get("scenario") === "tab-navigation") {
   })));
   data.activeTab = "library:tabs-library-9";
 }
+if (relatedOverflow) {
+  // Synthetic relationships exercise the actual production inspector; none of
+  // these titles, IDs or paths are derived from a user's vault or screenshot.
+  const linked = [
+    record(1, { path: "Research/Short linked note.md", title: "Short linked note", curriculumId: "REL-001" }),
+    record(2, { path: "Research/Spaced linked note.md", title: "A synthetic linked note with a deliberately long title that must show every word on a narrow screen", curriculumId: "SYNTHETIC-LONG-REFERENCE-IDENTIFIER-1234567890" }),
+    record(3, { path: "Research/Unbroken linked note.md", title: "SyntheticUnbrokenLinkedTitle".repeat(15), curriculumId: "SYNTHETICUNBROKENIDENTIFIER".repeat(3) }),
+    record(4, { path: "Research/RTL linked note.md", title: "ملاحظة تجريبية طويلة لتنظيم المراجع والروابط مع عرض جميع الكلمات دون إخفاء العنوان", curriculumId: "REL-RTL-004" }),
+  ];
+  linked.forEach((item) => { item.relatedTopics = [relatedOverviewPath]; });
+  records.splice(0, records.length,
+    record(0, { path: relatedOverviewPath, title: "Relationship overview", relatedTopics: linked.map((item) => item.path) }),
+    ...linked,
+  );
+  data.directIndexPaths = records.map((item) => item.path);
+  data.collections = [];
+}
 const store = createDefaultStore(data, 1, "browser-synthetic-vault");
 const otherData = migrateData(data);
 otherData.settings.workspaceName = "Project workspace";
@@ -177,6 +202,8 @@ const currentRecords = (): VaultRecord[] => touchDrag
   : records;
 const completedImportActions = { undo: 0, placeholderQueue: 0, closed: [] as boolean[] };
 const files = records.filter((item) => touchDrag || libraryGallery ? !item.isPlaceholder : !item.portableId).map((item) => new TFile(item.path));
+files.push(...externalBacklinkPaths.map((path) => new TFile(path)));
+const openedRelatedPaths: string[] = [];
 const coverFile = new TFile("Covers/Example.png");
 let coverResource = "";
 function syntheticCoverResource(): string {
@@ -246,7 +273,9 @@ const plugin = {
   getLegacyIndexReviewPlans: () => [],
   getPortableSubject: (id: string) => data.portableIndex.subjects.find((item) => item.id === id) ?? null,
   getRecordUnassignedLibraryFallback: () => null,
-  getBacklinkPaths: () => [], resolveLink: () => null,
+  getBacklinkPaths: (path: string) => relatedOverflow && path === relatedOverviewPath ? externalBacklinkPaths : [],
+  resolveLink: (link: string) => relatedOverflow ? records.find((item) => item.path === link) ?? null : null,
+  openFile: async (file: TFile) => { openedRelatedPaths.push(file.path); },
   isDataReadOnly: () => false, isClinicalMode: () => false,
   canVisuallyMoveAcrossGroups: () => touchDrag, countMemberships: () => 0,
   initializeLibraryCatalog: async () => undefined,
@@ -527,6 +556,7 @@ function renderSettingDefinitions(parent: HTMLElement, definitions: SettingDefin
 
 const harness = {
   ready: false,
+  relatedSnapshot() { return { openedPaths: [...openedRelatedPaths], selectedPath: data.selectedPath }; },
   libraryDisplaySnapshot() { return plugin.getLibraryDisplayProfile("reading"); },
   async refresh(replaceData = false) {
     generation += 1;

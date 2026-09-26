@@ -5622,7 +5622,8 @@ export class EntVaultCommandCenterView extends ItemView {
       const group = section.createDiv({ cls: "ent-cc-related-group" });
       group.createDiv({ cls: "ent-cc-related-label", text: this.plugin.isClinicalMode() ? "Evidence & other backlinks" : "Other backlinks" });
       for (const path of external.slice(0, 8)) {
-        const button = group.createEl("button", { cls: "ent-cc-related-record", text: path.split("/").pop()?.replace(/\.md$/, "") ?? path });
+        const button = group.createEl("button", { cls: "ent-cc-related-record" });
+        button.createSpan({ cls: "ent-cc-related-title", text: path.split("/").pop()?.replace(/\.md$/, "") ?? path, attr: { dir: "auto" } });
         button.addEventListener("click", () => this.run(() => this.openRecord(path)));
       }
     }
@@ -5637,8 +5638,8 @@ export class EntVaultCommandCenterView extends ItemView {
     group.createDiv({ cls: "ent-cc-related-label", text: label });
     for (const record of records.slice(0, 12)) {
       const button = group.createEl("button", { cls: "ent-cc-related-record" });
-      button.createSpan({ text: record.title });
-      button.createSpan({ text: record.curriculumId || (this.plugin.isClinicalMode() ? record.kind : this.plugin.data.settings.itemSingular), cls: "ent-cc-related-meta" });
+      button.createSpan({ text: record.title, cls: "ent-cc-related-title", attr: { dir: "auto" } });
+      button.createSpan({ text: record.curriculumId || (this.plugin.isClinicalMode() ? record.kind : this.plugin.data.settings.itemSingular), cls: "ent-cc-related-meta", attr: { dir: "auto" } });
       button.addEventListener("click", () => this.selectRecord(record.path));
       this.attachHoverPreview(button, record);
     }
