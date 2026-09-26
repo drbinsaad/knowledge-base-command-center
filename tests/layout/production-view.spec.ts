@@ -26,13 +26,14 @@ test.beforeAll(async () => {
   hostStyles = host;
 });
 
-async function openView(page: Page, options: { mobile?: boolean; dark?: boolean; count?: number; phoneChrome?: boolean; width?: number; height?: number; largeText?: boolean } = {}): Promise<void> {
+async function openView(page: Page, options: { mobile?: boolean; dark?: boolean; count?: number; phoneChrome?: boolean; width?: number; height?: number; largeText?: boolean; scenario?: "related-overflow" } = {}): Promise<void> {
   const errors: string[] = [];
   failures.set(page, errors);
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
   await page.setViewportSize({ width: options.width ?? (options.mobile ? 390 : 1440), height: options.height ?? (options.mobile ? 844 : 960) });
-  await page.goto(`about:blank#mobile=${Boolean(options.mobile)}&count=${options.count ?? 650}${options.phoneChrome ? "&scenario=mobile-space" : ""}`);
+  const scenario = options.scenario ?? (options.phoneChrome ? "mobile-space" : "");
+  await page.goto(`about:blank#mobile=${Boolean(options.mobile)}&count=${options.count ?? 650}&scenario=${scenario}`);
   const content = '<main id="kbcc-view" class="view-content"></main>';
   const host = options.phoneChrome ? `<div class="kbcc-browser-phone-frame"><header class="kbcc-browser-app-chrome" aria-label="Synthetic top app chrome">Obsidian host space · synthetic fixture</header>${content}<footer class="kbcc-browser-app-chrome" aria-label="Synthetic bottom app toolbar">App toolbar · outside the plugin</footer></div>` : content;
   await page.setContent(`<!doctype html><html lang="en"><head><meta charset="utf-8"><title>KBCC production renderer · synthetic vault</title></head><body class="${options.dark ? "theme-dark" : "theme-light"}${options.mobile ? " is-mobile" : ""}${options.largeText ? " kbcc-browser-large-text" : ""}">${host}</body></html>`);
@@ -528,6 +529,121 @@ test("mobile browse inspector Back restores the scrolled list and selected row f
   expect((await mobileBrowseGeometry(page)).fullyVisibleRows.map((row) => row.title)).toContain("Reference 17");
   await captureEvidence(page, "browse-inspector-return-dark");
 });
+
+for (const device of [
+  { name: "phone320", width: 320, height: 740, mobile: true },
+  { name: "phone390-large-text", width: 390, height: 844, mobile: true, largeText: true, dark: true },
+  { name: "tablet-portrait820", width: 820, height: 1180, mobile: true },
+  { name: "tablet-landscape1180", width: 1180, height: 820, mobile: true },
+  { name: "tablet-split600", width: 600, height: 820, mobile: true },
+  { name: "desktop-side-panel1440", width: 1440, height: 960, mobile: false },
+]) {
+  test.describe(`related-note overflow ${device.name}`, () => {
+    test.use({ hasTouch: device.mobile });
+    test("long titles and IDs remain readable, vertically scrollable and actionable", async ({ page }) => {
+      await openView(page, { ...device, count: 8, scenario: "related-overflow" });
+      // Native host themes may impose single-line, fixed-height buttons. The
+      // production relationship rows must override these generic defaults.
+      await page.addStyleTag({ content: "button { white-space: nowrap; height: 32px; flex-shrink: 0; }" });
+      const selected = page.getByRole("button", { name: /^Relationship overview,/u });
+      await selected.click();
+      const inspector = page.locator(".ent-cc-inspector");
+      const body = inspector.locator(".ent-cc-inspector-body");
+      const header = inspector.locator(".ent-cc-inspector-header");
+      const rows = inspector.locator(".ent-cc-related-record");
+      await expect(inspector).toHaveAttribute("role", device.mobile ? "dialog" : "complementary");
+      await expect(rows).toHaveCount(8);
+      if (!device.mobile) expect((await inspector.boundingBox())!.width).toBeLessThan(500);
+      const initialHeader = await header.boundingBox();
+      const geometry = await inspector.evaluate((element) => {
+        const bodyElement = element.querySelector<HTMLElement>(".ent-cc-inspector-body")!;
+        const bodyRect = bodyElement.getBoundingClientRect();
+        const rowGeometry = Array.from(element.querySelectorAll<HTMLButtonElement>(".ent-cc-related-record"), (row) => {
+          const bounds = row.getBoundingClientRect();
+          const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+          const textRects: Array<{ left: number; right: number; top: number; bottom: number }> = [];
+          while (walker.nextNode()) {
+            const range = document.createRange();
+            range.selectNodeContents(walker.currentNode);
+            for (const rect of range.getClientRects()) if (rect.width > 0 && rect.height > 0) textRects.push({ left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom });
+          }
+          return {
+            text: row.textContent, width: row.clientWidth, scrollWidth: row.scrollWidth, height: bounds.height,
+            contained: bounds.left >= bodyRect.left - 1 && bounds.right <= bodyRect.right + 1,
+            textContained: textRects.every((rect) => rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1 && rect.top >= bounds.top - 1 && rect.bottom <= bounds.bottom + 1),
+            lineCount: new Set(textRects.map((rect) => Math.round(rect.top))).size,
+          };
+        });
+        return { bodyWidth: bodyElement.clientWidth, bodyScrollWidth: bodyElement.scrollWidth, rows: rowGeometry };
+      });
+      expect(geometry.bodyScrollWidth, JSON.stringify(geometry)).toBeLessThanOrEqual(geometry.bodyWidth + 1);
+      for (const row of geometry.rows) {
+        expect(row.scrollWidth, JSON.stringify(row)).toBeLessThanOrEqual(row.width + 1);
+        expect(row.contained, JSON.stringify(row)).toBe(true);
+        // Do not accept overflow:hidden as a fix: every rendered text line,
+        // including unbroken IDs and RTL text, must fit inside the actual row.
+        expect(row.textContained, JSON.stringify(row)).toBe(true);
+        if (device.mobile) expect(row.height).toBeGreaterThanOrEqual(44);
+      }
+      expect(geometry.rows[2].lineCount).toBeGreaterThan(1);
+      expect(geometry.rows[2].height).toBeGreaterThan(geometry.rows[0].height);
+      const owner = device.mobile ? body : inspector;
+      await owner.evaluate((element) => { element.scrollTop = element.scrollHeight; element.scrollLeft = 100; });
+      expect(await owner.evaluate((element) => element.scrollLeft)).toBe(0);
+      const scroll = await owner.evaluate((element) => ({ top: element.scrollTop, maximum: element.scrollHeight - element.clientHeight }));
+      expect(scroll.top).toBeCloseTo(scroll.maximum, 0);
+      if (device.width <= 600 || !device.mobile) expect(scroll.top).toBeGreaterThan(0);
+      if (device.mobile) {
+        const scrolledHeader = await header.boundingBox();
+        expect(scrolledHeader!.y).toBeCloseTo(initialHeader!.y, 0);
+        expect(scrolledHeader!.height).toBeCloseTo(initialHeader!.height, 0);
+      }
+      await captureEvidence(page, `related-overflow-${device.name}`);
+
+      // External backlinks open the intended file through the real button
+      // handler; record selection remains inside the inspector for linked notes.
+      const external = rows.filter({ hasText: "Short backlink" });
+      await external.scrollIntoViewIfNeeded();
+      if (device.mobile) await external.tap();
+      else await external.click();
+      await expect.poll(() => page.evaluate(() => (window as unknown as { kbccBrowserHarness: { relatedSnapshot(): { openedPaths: string[] } } }).kbccBrowserHarness.relatedSnapshot().openedPaths)).toEqual(["External/Short backlink.md"]);
+      await external.focus();
+      await page.keyboard.press("Enter");
+      await expect.poll(() => page.evaluate(() => (window as unknown as { kbccBrowserHarness: { relatedSnapshot(): { openedPaths: string[] } } }).kbccBrowserHarness.relatedSnapshot().openedPaths)).toEqual(["External/Short backlink.md", "External/Short backlink.md"]);
+      const linked = rows.filter({ hasText: "Short linked note" });
+      await linked.scrollIntoViewIfNeeded();
+      if (device.mobile) await linked.tap();
+      else await linked.click();
+      await expect(body.locator("h3")).toHaveText("Short linked note");
+      const returnLink = inspector.locator(".ent-cc-related-record").filter({ hasText: "Relationship overview" });
+      await returnLink.focus();
+      await page.keyboard.press("Enter");
+      await expect(body.locator("h3")).toHaveText("Relationship overview");
+      const unbroken = inspector.locator(".ent-cc-related-record").filter({ hasText: "SyntheticUnbrokenLinkedTitle" });
+      await unbroken.focus();
+      await page.keyboard.press("Enter");
+      await expect(body.locator("h3")).toContainText("SyntheticUnbrokenLinkedTitle");
+      expect(await body.evaluate((element) => {
+        const bounds = element.getBoundingClientRect();
+        const title = element.querySelector("h3")!;
+        const range = document.createRange();
+        range.selectNodeContents(title);
+        const titleBounds = title.getBoundingClientRect();
+        return element.scrollWidth <= element.clientWidth + 1
+          && Array.from(range.getClientRects()).every((rect) => rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1 && rect.top >= titleBounds.top - 1 && rect.bottom <= titleBounds.bottom + 1);
+      }), "Following an unbroken title must not reintroduce clipping or horizontal scrolling").toBe(true);
+      await inspector.locator(".ent-cc-related-record").filter({ hasText: "Relationship overview" }).focus();
+      await page.keyboard.press("Enter");
+      await expect(body.locator("h3")).toHaveText("Relationship overview");
+      if (device.mobile) {
+        await page.getByRole("button", { name: "Back to main page", exact: true }).tap();
+        await expect(inspector).toBeHidden();
+        await expect(selected).toBeFocused();
+      }
+      expect(failures.get(page)).toEqual([]);
+    });
+  });
+}
 
 async function expectExactKeyboardResultActivation(page: Page, testInfo: TestInfo, touch: boolean): Promise<void> {
   await openView(page, { mobile: true, phoneChrome: true });

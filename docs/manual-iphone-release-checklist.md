@@ -2,7 +2,19 @@
 
 Complete this checklist on a physical iPhone before tagging a release that changes search, navigation, modals, import/export, Sync handling, or mobile styles. Simulator and automated DOM results may accompany this record but do not replace it.
 
-## 0.25.0 Attachments, setup and plain language
+## 0.25.1 Readable record details
+
+Status: **Maintainer-authorized waiver — Unverified — not executed on a physical iPhone or iPad.** After the implemented fix, automated checks, native desktop smoke result, and remaining physical-device gap were disclosed, the maintainer directed **Publish**. The [0.25.1 evidence](release-evidence/0.25.1-iphone.md) records this fresh authorization; it is not a device Pass or reuse of the 0.25.0 waiver.
+
+Use synthetic notes and record exact asset checksums, device/OS/Obsidian versions and input method before executing these checks:
+
+1. Open a record containing long spaced, unbroken and Arabic/mixed-direction linked-note titles, backlink filenames and IDs. Confirm complete readable rows, vertical-only content scrolling and a fixed detail header in phone/tablet portrait, landscape and Split View.
+2. Follow a long-title note and return; verify its full detail heading, exact selection, list position and keyboard focus. Open an external backlink and confirm the intended note opens. Check 44-point touch targets, VoiceOver and large text with native safe areas and software/hardware keyboards.
+3. Verify one-time update news and the exact release URL after publication: `https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.25.1`.
+
+All physical-device and controlled two-device Sync checks remain **Unexecuted**. Browser and Mac Obsidian results do not execute these rows.
+
+## Historical 0.25.0 Attachments, setup and plain language
 
 Status: **Maintainer-authorized waiver — Unverified — not executed on a physical iPhone or iPad.** The maintainer directed **publish** without device testing. The [0.25.0 evidence](release-evidence/0.25.0-iphone.md) is candidate-specific and does not mark any physical check as Pass.
 

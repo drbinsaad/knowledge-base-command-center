@@ -789,6 +789,7 @@
 
 .ent-cc-inspector-body > h3 {
   margin: 0 0 22px;
+  overflow-wrap: anywhere;
   color: var(--text-normal);
   font-family: var(--font-text), Georgia, Cambria, "Times New Roman", serif;
   font-size: 25px;
@@ -1777,12 +1778,17 @@
   text-transform: uppercase;
 }
 
-.ent-cc-related-record {
+.ent-cc-view .ent-cc-related-record {
+  box-sizing: border-box;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 4px 8px;
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  height: auto;
   min-height: 30px;
   padding: 4px 6px;
   border: 0;
@@ -1792,16 +1798,29 @@
   background: transparent;
   box-shadow: none;
   font-size: 0.75rem;
+  line-height: 1.4;
   text-align: start;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
-.ent-cc-related-record:hover {
+.ent-cc-view .ent-cc-related-record:hover {
   color: var(--text-normal);
   background: var(--background-modifier-hover);
 }
 
+.ent-cc-related-title,
 .ent-cc-related-meta {
-  flex: 0 0 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.ent-cc-related-title {
+  flex: 1 1 14rem;
+}
+
+.ent-cc-related-meta {
+  flex: 0 1 auto;
   color: var(--text-faint);
   font-family: var(--font-monospace);
   font-size: 0.6875rem;
