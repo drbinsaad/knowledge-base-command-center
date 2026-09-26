@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { Menu, Notice, Platform } from "obsidian";
+import { Menu, Notice, Platform, TFile } from "obsidian";
 import {
   libraryTabId,
   migrateData,
@@ -207,13 +207,17 @@ function createView(window: FakeWindow, inputSources: SearchSource[] = []): EntV
       .map((library) => ({ ...library })),
     getLibrary: (libraryId: string) => data.portableIndex.libraries.find((library) => library.id === libraryId) ?? null,
   };
+  const app = {
+    vault: { getAbstractFileByPath: (path: string) => sources.some((source) => source.records.some((record) => record.path === path && !record.isPlaceholder)) ? new TFile(path) : null },
+    metadataCache: { getFileCache: () => ({}) },
+  };
   const ViewConstructor = EntVaultCommandCenterView as unknown as new (
-    leaf: { app: Record<string, never> },
+    leaf: { app: typeof app },
     plugin: typeof plugin,
   ) => EntVaultCommandCenterView;
   const restoreWindow = installWindow(window);
   try {
-    return new ViewConstructor({ app: {} }, plugin);
+    return new ViewConstructor({ app }, plugin);
   } finally {
     restoreWindow();
   }
@@ -268,8 +272,9 @@ test("tablet portrait and landscape keep mobile browse routing above the desktop
         assert.equal(content.getAttribute("data-pane-layout"), mobile ? "compact" : "wide", context);
         assert.equal(Boolean(content.querySelector(".ent-cc-shell.is-mobile-browse")), mobile, context);
         assert.equal(Boolean(content.querySelector(".ent-cc-mobile-toolbar")), mobile, context);
-        assert.equal(Boolean(content.querySelector(".ent-cc-mobile-filter-panel")), mobile, context);
-        assert.equal(content.querySelector(".ent-cc-workspace-options summary")?.textContent, mobile ? "Details" : "More", context);
+        assert.ok(content.querySelector(".ent-cc-mobile-filter-panel"), `${context}: filters remain available through a disclosure on every device`);
+        assert.equal(content.querySelector(".ent-cc-mobile-filters")?.tagName.toLowerCase(), "details", context);
+        assert.equal(content.querySelector(".ent-cc-workspace-options summary")?.textContent, "Details", context);
         assert.equal(content.querySelector(".ent-cc-inspector")?.getAttribute("role") ?? null, mobile ? null : "complementary", context);
         assert.ok(content.querySelector(".ent-cc-subject-title"), `${context}: the same Index record remains available`);
         await view.onClose();
@@ -625,7 +630,7 @@ test("read-only organization disables write-only controls before activation", as
   assert.equal(content.querySelector(".ent-cc-quick-entry-button"), null, "Add is the only primary creation entry point");
   const workspaceOptions = content.querySelector(".ent-cc-workspace-options");
   assert.equal(workspaceOptions?.tagName.toLowerCase(), "details", "management actions belong to a native disclosure");
-  assert.equal(workspaceOptions?.querySelector("summary")?.textContent, "More");
+  assert.equal(workspaceOptions?.querySelector("summary")?.textContent, "Details");
   const organize = content.querySelector(".ent-cc-note-organizer-launch");
   const add = content.querySelector(".ent-cc-header-actions .ent-cc-add-button");
   const arrange = content.querySelector(".ent-cc-header-actions button[aria-pressed]");

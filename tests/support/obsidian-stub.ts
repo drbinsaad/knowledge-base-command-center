@@ -6,6 +6,11 @@ export function normalizePath(path: string): string {
   return (clean === "" ? "/" : clean).normalize("NFC");
 }
 
+export function parseLinktext(linktext: string): { path: string; subpath: string } {
+  const index = linktext.indexOf("#");
+  return index === -1 ? { path: linktext, subpath: "" } : { path: linktext.slice(0, index), subpath: linktext.slice(index) };
+}
+
 export class TAbstractFile {
   constructor(public path: string) {}
 }

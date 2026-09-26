@@ -1,6 +1,21 @@
-# 0.25.1 device and Sync smoke record
+# 0.26.0 device and Sync smoke record
 
-Active candidate: 0.25.1 Readable record details. Physical iPhone/iPad and controlled two-device Sync remain **Unverified — Unexecuted**, under the [candidate-specific maintainer-authorized waiver](0.25.1-iphone.md). This is not a physical-device Pass. No note, organization, data-format or network change is included.
+Active candidate: 0.26.0 Workspace space and attachments. Physical iPhone/iPad and controlled two-device Sync remain **Unverified — Unexecuted**, under the [candidate-specific maintainer-authorized waiver](0.26.0-iphone.md). This is not a physical-device Pass.
+
+| Flow | Pass criteria | Result |
+| --- | --- | --- |
+| Compact header | Details/Filters stay reachable without taking over browse space; search and actions preserve focus. | Unexecuted |
+| Panel sizing | Opt-in wide-tablet split supports touch and keyboard resizing, reset, hide and expand/back without losing selection or scroll. | Unexecuted |
+| Attachment links | Linked and embedded files open in supported handlers; missing/syncing files never create notes or trigger remote downloads. | Unexecuted |
+| Native accessibility | VoiceOver, large text, RTL, native keyboards, safe areas and orientation changes retain usable controls. | Unexecuted |
+| Two-device Sync | Width choices remain local while organization survives controlled concurrent delivery and restart. | Unexecuted |
+| Update news | Upgrade shows 0.26.0 news once with its exact release link. | Unexecuted |
+
+Use synthetic notes only. Waived rows remain Unexecuted; automated checks are supplemental. Record exact device, application, build and input details if these checks are later performed.
+
+## Historical 0.25.1 device and Sync smoke record
+
+Historical candidate: 0.25.1 Readable record details. Physical iPhone/iPad and controlled two-device Sync remain **Unverified — Unexecuted**, under the [candidate-specific maintainer-authorized waiver](0.25.1-iphone.md). This is not a physical-device Pass. No note, organization, data-format or network change is included.
 
 Use synthetic notes and the [manual checklist](../manual-iphone-release-checklist.md). Record exact asset checksums, device/OS/Obsidian versions, input method and Sync provider before executing a row.
 

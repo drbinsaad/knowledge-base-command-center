@@ -369,6 +369,7 @@ test("Arrange temporarily uses a list and restores cards without changing their 
 
 test("scoped Library filters retain cards while all-base search uses the existing list", async ({ page }) => {
   await open(page, { mobile: false, width: 1440, height: 960 });
+  await page.locator(".ent-cc-mobile-filters > summary").click();
   await page.getByRole("combobox", { name: "Search scope", exact: true }).selectOption("library");
   await expect(page.locator(".ent-cc-library-card")).toHaveCount(8);
   await page.getByRole("combobox", { name: "Note availability", exact: true }).selectOption("linked");

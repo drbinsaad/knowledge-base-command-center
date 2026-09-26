@@ -322,7 +322,7 @@ Notes created through the primary action join only the destination explicitly ch
 
 ## Quick entry and shortcuts
 
-Open Quick entry from the lightning-bolt desktop ribbon action or the **Quick entry…** command. The Command Center header uses **Add** for capture and **Organize** for existing-note placement; **Arrange** (or **Edit** in Collections) and **Undo** sit beside them on desktop, and the remaining layout and management controls are under **More** (**Details** on iPhone and iPad). On mobile, Obsidian places ribbon actions in its **Open** menu. The Quick entry hub shows the active knowledge base and offers:
+Open Quick entry from the lightning-bolt desktop ribbon action or the **Quick entry…** command. The Command Center header uses **Add** for capture and **Organize** for existing-note placement; **Arrange** (or **Edit** in Collections) and **Undo** sit beside them on desktop, and the remaining layout and management controls are under **Details**. On mobile, Obsidian places ribbon actions in its **Open** menu. The Quick entry hub shows the active knowledge base and offers:
 
 - switch knowledge base;
 - create a portable **No note** subject;
@@ -488,9 +488,19 @@ The properties may point to supported note, file, or formula values. Native Base
 
 ## Record details
 
-Selecting a record opens its inspector with identity, path/status information, note or study actions, and resolved related knowledge.
+Selecting a record opens its inspector with the note title, primary actions, **Attachments**, collapsible **Note details**, note/study actions and resolved related knowledge. Clinical safety/status fields and AI lock remain visible outside the disclosure.
 
-A wide desktop Obsidian leaf keeps the Index and inspector side by side. Compact or narrow desktop leaves—including stacked tabs, side-by-side splits, and pop-out windows—open the selected record as a focused detail route. iPhone and iPad use that focused route at every width, including tablet landscape and Split View. **Back to main page** or Escape returns to the same row and list position. Expanding a desktop leaf restores the two-column inspector without clearing the current selection or search; widening an iPad view retains the compact single-column layout.
+A wide desktop Obsidian leaf keeps the Index and inspector side by side. Drag the divider, or focus it and use arrow keys (Shift for larger steps), Home or End, to adjust the width. The detail header offers expand/back, width and hide controls. **Expand note details** uses the available workspace width; **Back to split view** restores the split. Hiding details gives the index its full width; selecting a record opens details again.
+
+Compact or narrow desktop leaves—including stacked tabs, side-by-side splits, and pop-out windows—open the selected record as a focused detail route. iPhone and iPad keep that focused route by default, including tablet landscape and Split View. **Back to main page** or Escape returns to the same row and list position. A tablet user may explicitly enable **Details → Split view on wide screens**; it only applies when the actual pane is at least 1050 pixels wide. A narrower pane always returns to full-width details. Width and tablet-split preferences are stored on this device, outside synced organization.
+
+The desktop header stays compact while you scroll the independent index and detail panes. Open **Details** for the workspace description, statistics and secondary actions. Open **Filters** for search scope, availability, linked-first ordering and saved searches; its label shows active filtering. Escape closes either disclosure and returns focus to its toggle.
+
+### Attachment links
+
+**Attachments** lists files linked or embedded in the selected note, including recognized internal property links and the Library's configured local cover reference. It works with attachments already present, not just files imported by this plugin. Repeated links to one file appear once; same-name files in different folders show their paths. Long lists offer **Show more attachments**.
+
+Select a listed file to open it through Obsidian. All resolved non-Markdown file types can be listed, but actual opening/preview support depends on Obsidian and the device. Missing references are labelled **Not available on this device** and never create new notes. An unavailable metadata cache shows a waiting message instead of claiming there are no attachments. This list neither renders attachment contents nor follows web URLs; it changes no note, property or attachment.
 
 ## Saved views, snapshots, and history
 

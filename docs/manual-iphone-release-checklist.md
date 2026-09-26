@@ -2,7 +2,19 @@
 
 Complete this checklist on a physical iPhone before tagging a release that changes search, navigation, modals, import/export, Sync handling, or mobile styles. Simulator and automated DOM results may accompany this record but do not replace it.
 
-## 0.25.1 Readable record details
+## 0.26.0 Workspace space and attachments
+
+Status: **Maintainer-authorized waiver — Unverified — not executed on a physical iPhone or iPad.** After the screenshot/code review and device-test limitation were disclosed, the maintainer instructed implementation, testing and publication unattended. The [0.26.0 evidence](release-evidence/0.26.0-iphone.md) records this candidate-specific instruction; it is not a physical-device Pass.
+
+1. Verify the unchanged phone/full-width tablet default, fixed detail header, native keyboard and safe areas, orientation changes, large text, RTL and VoiceOver.
+2. On a wide iPad explicitly enable split view, resize using touch/Pencil/trackpad and accessible controls, expand/hide/reset, and return to full-width browsing. Selection, filters, scroll and focus must survive.
+3. Open local attachments linked in body text, embeds and properties; check missing/late-synced files, renamed files, long filenames and opening in the device's supported handler.
+4. Verify per-device width preferences stay independent through controlled two-device Sync and restart; ordinary notes and organization remain unchanged.
+5. Upgrade once and verify news links exactly to https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.26.0.
+
+All physical checks remain **Unexecuted**. Automated Chromium/WebKit tests do not execute these rows.
+
+## Historical 0.25.1 Readable record details
 
 Status: **Maintainer-authorized waiver — Unverified — not executed on a physical iPhone or iPad.** After the implemented fix, automated checks, native desktop smoke result, and remaining physical-device gap were disclosed, the maintainer directed **Publish**. The [0.25.1 evidence](release-evidence/0.25.1-iphone.md) records this fresh authorization; it is not a device Pass or reuse of the 0.25.0 waiver.
 

@@ -6565,6 +6565,113 @@
   min-height: 44px;
 }
 
+/* Compact desktop chrome preserves the independent index/detail scroll panes. */
+.ent-cc-view .ent-cc-shell:not(.is-mobile-browse) .ent-cc-header {
+  position: relative;
+  flex: 0 0 auto;
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 8px 12px;
+  z-index: 9;
+}
+
+.ent-cc-view .ent-cc-shell:not(.is-mobile-browse) .ent-cc-header > .ent-cc-title-block {
+  flex: 1 1 180px;
+  width: auto;
+}
+
+.ent-cc-view .ent-cc-shell:not(.is-mobile-browse) .ent-cc-title-kicker-row {
+  margin: 0;
+}
+
+.ent-cc-view .ent-cc-shell:not(.is-mobile-browse) .ent-cc-header-actions {
+  max-width: 100%;
+  align-items: center;
+  gap: 6px;
+}
+
+.ent-cc-view .ent-cc-shell:not(.is-mobile-browse) .ent-cc-workspace-options[open] {
+  flex-basis: auto;
+}
+
+.ent-cc-view .ent-cc-shell:not(.is-mobile-browse) .ent-cc-workspace-details-panel {
+  position: absolute;
+  top: 100%;
+  inset-inline-end: 12px;
+  width: min(560px, calc(100% - 24px));
+  max-height: min(50dvh, 420px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 16px;
+  border: 1px solid var(--ent-cc-border);
+  border-radius: 8px;
+  background: var(--background-primary);
+  box-shadow: var(--shadow-s);
+}
+
+.ent-cc-view .ent-cc-shell:not(.is-mobile-browse) .ent-cc-workspace-details-panel h1 {
+  font-size: 22px;
+  overflow-wrap: anywhere;
+}
+
+.ent-cc-desktop-search {
+  position: relative;
+  flex: 0 0 auto;
+  min-width: 0;
+  z-index: 8;
+}
+
+.ent-cc-view .ent-cc-desktop-search .ent-cc-search-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+}
+
+.ent-cc-desktop-search .ent-cc-search-box {
+  flex: 1 1 240px;
+  max-width: none;
+}
+
+.ent-cc-desktop-search .ent-cc-mobile-filters {
+  flex: 0 0 auto;
+}
+
+.ent-cc-desktop-search .ent-cc-mobile-filters > summary {
+  display: list-item;
+  min-height: 44px;
+  padding: 10px 12px;
+  list-style-position: inside;
+  cursor: pointer;
+}
+
+.ent-cc-view .ent-cc-desktop-search .ent-cc-mobile-filter-panel {
+  inset-inline: 12px;
+  top: 100%;
+  max-height: min(50dvh, 420px);
+  border-radius: 8px;
+  box-shadow: var(--shadow-s);
+}
+
+.ent-cc-desktop-search .ent-cc-topic-count {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.ent-cc-desktop-search .ent-cc-mobile-search-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+}
+
+.ent-cc-view .ent-cc-desktop-search .ent-cc-mobile-search-actions > button {
+  min-width: 44px;
+  min-height: 44px;
+}
+
 /* Mobile-only chrome shares the browse scroll surface. */
 .ent-cc-view .is-mobile-browse .ent-cc-workspace {
   scroll-padding-top: var(--ent-cc-toolbar-height, 104px);
@@ -7155,4 +7262,104 @@
   .ent-cc-library-settings .setting-item-control { flex-wrap: wrap; min-width: 0; }
   .ent-cc-library-settings .setting-item-control input,
   .ent-cc-library-settings .setting-item-control select { font-size: 16px; }
+}
+
+/* Note attachments */
+.ent-cc-note-attachments { min-width: 0; }
+.ent-cc-attachment-list { display: grid; gap: 6px; }
+.ent-cc-view .ent-cc-attachment-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  box-sizing: border-box;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  min-height: 44px;
+  height: auto;
+  padding: 9px 10px;
+  border-radius: 8px;
+  text-align: start;
+  white-space: normal;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.ent-cc-attachment-row > span:first-child { flex: 0 0 auto; }
+.ent-cc-attachment-copy { display: grid; min-width: 0; gap: 2px; }
+.ent-cc-attachment-name { color: var(--text-accent); }
+.ent-cc-attachment-meta,
+.ent-cc-attachments-empty { color: var(--text-muted); font-size: var(--font-ui-smaller); }
+.ent-cc-attachment-row.is-missing { background: var(--background-secondary); }
+.ent-cc-attachment-row.is-missing .ent-cc-attachment-name { color: var(--text-muted); }
+.ent-cc-view .ent-cc-attachments-more { width: 100%; min-height: 44px; height: auto; margin-top: 8px; white-space: normal; }
+.ent-cc-view .ent-cc-attachments-more[hidden] { display: none; }
+.ent-cc-note-details { margin-block: 14px; border-block: 1px solid var(--background-modifier-border); }
+.ent-cc-note-details > summary { min-height: 44px; padding-block: 12px; cursor: pointer; font-weight: 600; }
+
+/* Adjustable workspace: presentation-only, device-local panel sizing. */
+.ent-cc-view.is-pane-wide .ent-cc-workspace.is-adjustable-workspace:not(.is-inspector-collapsed):not(.is-inspector-expanded) {
+  grid-template-columns: minmax(520px, 1fr) 24px var(--ent-cc-inspector-width, 380px);
+}
+.ent-cc-workspace-separator {
+  position: relative;
+  min-width: 0;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+  background: var(--background-primary);
+}
+.ent-cc-workspace-separator::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 11px;
+  width: 2px;
+  background: var(--background-modifier-border);
+}
+.ent-cc-workspace-separator:hover::before,
+.ent-cc-workspace-separator:focus-visible::before,
+.is-resizing-inspector > .ent-cc-workspace-separator::before {
+  width: 4px;
+  inset-inline-start: 10px;
+  background: var(--interactive-accent);
+}
+.ent-cc-workspace-separator:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: -3px;
+}
+.is-resizing-inspector { cursor: col-resize; user-select: none; }
+.ent-cc-workspace.is-inspector-collapsed > .ent-cc-workspace-separator,
+.ent-cc-workspace.is-inspector-expanded > .ent-cc-workspace-separator,
+.ent-cc-workspace.is-inspector-expanded > .ent-cc-tree-panel {
+  display: none;
+}
+.ent-cc-view.is-pane-wide .ent-cc-workspace.is-inspector-expanded {
+  grid-template-columns: minmax(0, 1fr);
+}
+.ent-cc-inspector-layout-actions { display: flex; flex: 0 0 auto; gap: 4px; }
+.ent-cc-view .ent-cc-inspector-layout-actions .ent-cc-icon-button {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+}
+.ent-cc-view.is-pane-wide .ent-cc-inspector { padding-inline: 20px; }
+.ent-cc-view.is-pane-wide .ent-cc-inspector-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding-block: 10px;
+  background: var(--ent-cc-surface);
+}
+.ent-cc-view.is-mobile-split .ent-cc-inspector-layout-actions .ent-cc-icon-button {
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+}
+@media (pointer: coarse) {
+  .ent-cc-view .ent-cc-inspector-layout-actions .ent-cc-icon-button {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+  }
 }
