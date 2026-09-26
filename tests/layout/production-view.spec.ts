@@ -1948,10 +1948,20 @@ for (const mobile of [false, true]) {
       }
       const input = page.locator('.ent-cc-search-box input[type="search"]');
       await input.fill("Research note 003");
+      // This note is already visible in the initial Index. Wait for the actual
+      // debounced search result before clearing, not merely its existing row.
+      await expect(page.locator(".ent-cc-topic-count")).toContainText("1 result · All available bases");
+      await expect(page.locator(".ent-cc-tree-body .ent-cc-subject-title")).toHaveCount(1);
+      await expect(page.locator(".ent-cc-search-pending, .ent-cc-search-base-group.is-stale")).toHaveCount(0);
       await expect(page.getByRole("button", { name: /^Research note 003,/u })).toBeVisible();
       await expect(input).toBeFocused();
       await input.fill("");
       await input.blur();
+      // Clearing schedules another tree replacement. Measure contrast only on
+      // the restored browse DOM, never a detached pre-debounce element handle.
+      await expect(page.locator(".ent-cc-topic-count")).toContainText("9 entries · 8 linked notes · 1 placeholder");
+      await expect(page.locator(".ent-cc-tree-body .ent-cc-subject-title")).toHaveCount(9);
+      await expect(page.locator(".ent-cc-search-pending, .ent-cc-search-base-group.is-stale")).toHaveCount(0);
       if (!mobile) await expectReadableMetadata(page);
       await captureEvidence(page, `generic-${mobile ? "mobile" : "desktop"}-${dark ? "dark" : "light"}`);
     });
