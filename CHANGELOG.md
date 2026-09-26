@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.25.1
+
+- Wrap long linked-note titles, backlink filenames, and IDs in record details instead of letting them push the panel sideways. Rows grow with their text, and IDs move below titles when space is limited, including the narrow desktop inspector. The phone/tablet detail header stays fixed.
+- Keep long selected-note headings readable after following a related note. Preserve touch targets, keyboard activation, mixed-direction text, and Back navigation.
+- Add twelve Chromium/WebKit relationship-row regression cases across six phone, tablet, split-view, and desktop layouts, including long unbroken text and fixed-height host buttons.
+- No note content, organization data, data format, dependency, network permission, or online-cover behavior is changed. Minimum Obsidian version remains 1.13.0.
+- Physical iPhone/iPad and controlled two-device Sync remain **unverified**, under a fresh maintainer-authorized publication waiver. Automated browser tests and the synthetic Mac Obsidian wrapping smoke check are supplemental only. See the [0.25.1 release evidence](https://github.com/drbinsaad/knowledge-base-command-center/blob/0.25.1/docs/release-evidence/0.25.1-iphone.md).
+
 ## 0.25.0
 
 ### Attach files of any type

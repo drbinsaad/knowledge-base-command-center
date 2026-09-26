@@ -23,9 +23,25 @@ import {
   UPDATE_ANNOUNCEMENT_0_23_1,
   UPDATE_ANNOUNCEMENT_0_24_0,
   UPDATE_ANNOUNCEMENT_0_25_0,
+  UPDATE_ANNOUNCEMENT_0_25_1,
   type UpdateAnnouncement,
 } from "../src/update-announcement.ts";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
+
+test("0.25.1 announces readable record details once with exact release identity and honest device limits", () => {
+  const result = planUpdateAnnouncement("0.25.1", "0.25.0", true);
+  assert.equal(result.announcement, UPDATE_ANNOUNCEMENT_0_25_1);
+  assert.equal(result.nextHighestObservedVersion, "0.25.1");
+  assert.equal(result.shouldPersist, true);
+  assert.equal(UPDATE_ANNOUNCEMENT_0_25_1.releaseUrl, "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.25.1");
+  assert.match(UPDATE_ANNOUNCEMENT_0_25_1.intro, /Long titles and backlinks now wrap/u);
+  assert.match(UPDATE_ANNOUNCEMENT_0_25_1.intro, /Physical iPhone\/iPad testing remains unverified/u);
+  assert.match(UPDATE_ANNOUNCEMENT_0_25_1.highlights.join("\n"), /mobile header stays fixed/u);
+  assert.equal(planUpdateAnnouncement("0.25.1", "0.25.1", true).announcement, null);
+  assert.equal(planUpdateAnnouncement("0.25.1", null, false).announcement, null);
+  assert.equal(planUpdateAnnouncement("0.25.0", "0.25.1", true).announcement, null);
+  assert.equal(planUpdateAnnouncement("0.25.1-rc.1", "0.25.0", true).announcement, null);
+});
 
 test("0.25.0 announces attachments and plain language with exact release identity and honest device limits", () => {
   const result = planUpdateAnnouncement("0.25.0", "0.24.0", true);
