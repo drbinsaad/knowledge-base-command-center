@@ -10519,8 +10519,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     // Opened from the Command Center, the note has no active editor cursor, so
     // a cursor default would always be refused; start at the end of the note.
     const configuredMode = this.data.settings.attachmentInsertionMode;
-    const insertionMode = configuredMode === "cursor"
-      && this.app.workspace.getActiveViewOfType(MarkdownView)?.file !== note ? "end" : configuredMode;
+    const cursorAvailable = this.app.workspace.getActiveViewOfType(MarkdownView)?.file === note;
+    const insertionMode = configuredMode === "cursor" && !cursorAvailable ? "end" : configuredMode;
     new AttachmentImportModal(
       this.app,
       note.path,
@@ -10533,6 +10533,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           .sort((left, right) => left.localeCompare(right))
         : [],
       insertionMode,
+      cursorAvailable,
       async (value) => {
         this.assertAttachmentOperationCurrent(note, policy);
         await this.attachFilesToNote(note, value, policy);
@@ -10577,6 +10578,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       throw new Error("The selected note changed or was replaced. Reopen it before attaching the file.");
     }
     if (isImmutableSourcePath(note.path)) throw new Error("Immutable source-book notes cannot receive plugin attachments.");
+  }
+
+  /** Cursor insertion is valid only while the note still owns the active editor. */
+  private assertAttachmentEditorCurrent(note: TFile, mode: AttachmentBatchValue["insertionMode"]): void {
+    if (mode === "cursor" && this.app.workspace.getActiveViewOfType(MarkdownView)?.file !== note) {
+      throw new Error("Open this note in the Markdown editor to insert at the cursor, or choose marker, heading, or end of note.");
+    }
   }
 
   async attachFileToNote(
@@ -10632,10 +10640,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       let destination: string;
       let bytes: ArrayBuffer;
       try {
+        this.assertAttachmentEditorCurrent(note, value.insertionMode);
         destination = await this.availableAttachmentDestination(note, file.name, value.requestedFolder, policy, createdFolders);
         this.assertAttachmentOperationCurrent(note, policy);
+        this.assertAttachmentEditorCurrent(note, value.insertionMode);
         bytes = await file.arrayBuffer();
         this.assertAttachmentOperationCurrent(note, policy);
+        this.assertAttachmentEditorCurrent(note, value.insertionMode);
       } catch (error) {
         await this.removeCreatedEmptyFolders(createdFolders);
         if (created.length === 0) throw error;
@@ -10688,7 +10699,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       const because = reason ? ` (${reason})` : "";
       throw new AttachmentLinkInsertionError(paths.length === 1
         ? `The file was copied to ${paths[0] ?? ""}, but its Markdown link could not be inserted${because}. Add the link manually.`
-        : `The files were copied to ${paths.join(", ")}, but their Markdown links could not be inserted${because}. Add the links manually.`);
+        : `The files were copied to ${paths.join(", ")}, but their Markdown links could not be inserted${because}. Add the links manually.`, paths);
     }
     if (copyFailure !== null) {
       new Notice(

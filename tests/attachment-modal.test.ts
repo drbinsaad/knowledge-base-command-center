@@ -3,7 +3,7 @@ import test from "node:test";
 import type { App } from "obsidian";
 import { Notice } from "./support/obsidian-stub.ts";
 import { AttachmentLinkInsertionError, MAX_ATTACHMENT_BYTES } from "../src/attachment";
-import { AttachmentImportModal, type AttachmentBatchValue } from "../src/attachment-modal";
+import { AttachmentImportModal, attachmentDestinationSummary, type AttachmentBatchValue } from "../src/attachment-modal";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom";
 
 function deferred() {
@@ -22,7 +22,7 @@ function modalHarness(onSubmit: (value: AttachmentBatchValue) => Promise<void>) 
     configuredFolder: "",
     marker: "<!-- kbcc:attachments -->",
     heading: "Attachments",
-  }, [], "end", onSubmit);
+  }, [], "end", false, onSubmit);
   modal.contentEl = asHtmlElement(dom.document.body.createDiv());
   const internal = modal as unknown as {
     selectedFiles: File[];
@@ -46,7 +46,7 @@ function modalHarness(onSubmit: (value: AttachmentBatchValue) => Promise<void>) 
   let closes = 0;
   modal.close = () => { closes += 1; modal.onClose(); };
   internal.updateSubmit();
-  return { internal, button, closeCount: () => closes };
+  return { internal, button, dom, closeCount: () => closes };
 }
 
 test("changing files or destination during attachment upload cannot submit another copy", async () => {
@@ -103,17 +103,62 @@ test("retryable attachment failure revalidates the changed selection before enab
   assert.equal(closeCount(), 1);
 });
 
-test("copied attachment insertion failure closes the form without allowing a duplicate retry", async () => {
+test("copied attachment insertion failure keeps a terminal summary open and never allows a duplicate retry", async () => {
   let submissions = 0;
-  const { internal, closeCount } = modalHarness(async () => {
+  const { internal, button, dom, closeCount } = modalHarness(async () => {
     submissions += 1;
-    throw new AttachmentLinkInsertionError("The copied files need manual links.");
+    throw new AttachmentLinkInsertionError("The copied files need manual links.", ["Files/one.pdf", "Files/two.pdf"]);
   });
   await internal.submit();
-  assert.equal(closeCount(), 1);
-  assert.equal(internal.submitButton, null);
-  assert.deepEqual(internal.selectedFiles, []);
+  assert.equal(closeCount(), 0, "the recovery summary stays open until the user closes it");
+  assert.equal(button.disabled, true, "this batch can no longer be submitted");
+  const alert = dom.document.body.querySelector("[role=alert]");
+  assert.match(alert?.textContent ?? "", /Files copied; links were not inserted/u);
+  assert.match(alert?.textContent ?? "", /Files\/one\.pdf/u);
+  assert.match(alert?.textContent ?? "", /Files\/two\.pdf/u);
   assert.equal(Notice.messages.at(-1), "The copied files need manual links.");
+  internal.updateSubmit();
+  assert.equal(button.disabled, true, "refreshing the form cannot re-enable the copied batch");
   await internal.submit();
   assert.equal(submissions, 1);
+});
+
+test("a failure before any copy stays inline and retryable, and clears when corrected", async () => {
+  let submissions = 0;
+  const { internal, button, dom } = modalHarness(async () => {
+    submissions += 1;
+    if (submissions === 1) throw new Error("Open this note in the Markdown editor to insert at the cursor.");
+  });
+  await internal.submit();
+  const alert = dom.document.body.querySelector("[role=alert]");
+  assert.match(alert?.textContent ?? "", /Open this note in the Markdown editor/u);
+  assert.equal(button.disabled, false, "a pre-copy failure stays retryable");
+  assert.equal(internal.selectedFiles.length, 2, "the draft files are preserved");
+  await internal.submit();
+  assert.equal(submissions, 2);
+  assert.equal(alert?.textContent, "", "a new attempt clears the old alert");
+});
+
+test("the cursor choice falls back to End when the note does not own the editor", () => {
+  const dom = createFakeDom();
+  const policy = {
+    expectedBaseId: "b", expectedDataEpoch: 0, storageMode: "fixed-folder" as const,
+    configuredFolder: "Files", marker: "m", heading: "h",
+  };
+  const without = new AttachmentImportModal({} as App, "Topic.md", policy, [], "cursor", false, async () => {});
+  const owning = new AttachmentImportModal({} as App, "Topic.md", policy, [], "cursor", true, async () => {});
+  assert.equal((without as unknown as { insertionMode: string }).insertionMode, "end");
+  assert.equal((owning as unknown as { insertionMode: string }).insertionMode, "cursor");
+  assert.ok(dom);
+});
+
+test("destination text matches the four storage modes without promising a filename", () => {
+  const base = { configuredFolder: "Assets/Uploads" };
+  assert.match(attachmentDestinationSummary({ ...base, storageMode: "fixed-folder" }, "Notes/Topic.md", "", true), /folder Assets\/Uploads/u);
+  assert.match(attachmentDestinationSummary({ ...base, storageMode: "note-subfolder" }, "Notes/Topic.md", "", true), /folder Notes\/Topic attachments/u);
+  assert.match(attachmentDestinationSummary({ ...base, storageMode: "ask" }, "Notes/Topic.md", "", false), /Choose a vault folder or the vault root/u);
+  assert.match(attachmentDestinationSummary({ ...base, storageMode: "ask" }, "Notes/Topic.md", "", true), /the vault root/u);
+  assert.match(attachmentDestinationSummary({ ...base, storageMode: "ask" }, "Notes/Topic.md", "Scans", true), /folder Scans/u);
+  assert.match(attachmentDestinationSummary({ ...base, storageMode: "obsidian" }, "Notes/Topic.md", "", true), /Obsidian chooses the folder/u);
+  assert.match(attachmentDestinationSummary({ ...base, storageMode: "fixed-folder" }, "Notes/Topic.md", "", true), /number added/u);
 });

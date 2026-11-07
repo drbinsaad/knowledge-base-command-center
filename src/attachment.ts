@@ -7,7 +7,11 @@ export const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
 export const MAX_ATTACHMENT_FILES = 20;
 
 /** The files were copied but their links were not inserted; retrying would copy them again. */
-export class AttachmentLinkInsertionError extends Error {}
+export class AttachmentLinkInsertionError extends Error {
+  constructor(message: string, readonly copiedPaths: readonly string[] = []) {
+    super(message);
+  }
+}
 
 export type AttachmentInsertTarget = "marker" | "heading" | "end";
 

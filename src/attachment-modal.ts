@@ -6,6 +6,8 @@ import {
   MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENT_FILES,
   attachmentCanPreview,
+  canonicalAttachmentFolder,
+  noteAttachmentFolder,
   formatAttachmentSize,
   type AttachmentDisplayMode,
 } from "./attachment";
@@ -51,11 +53,29 @@ export function attachmentSelectionProblem(files: readonly Pick<File, "name" | "
   return null;
 }
 
-function storageLabel(mode: AttachmentStorageMode): string {
-  if (mode === "fixed-folder") return "Configured vault folder";
-  if (mode === "note-subfolder") return "Folder beside this note";
-  if (mode === "ask") return "Choose a vault folder now";
-  return "Obsidian attachment setting";
+/**
+ * Where the files will go, for the selected policy. Obsidian may add a
+ * collision suffix, so a final filename is never promised.
+ */
+export function attachmentDestinationSummary(
+  policy: Pick<AttachmentOperationPolicy, "storageMode" | "configuredFolder">,
+  notePath: string,
+  requestedFolder: string,
+  destinationSelected: boolean,
+): string {
+  const place = (folder: string): string => folder ? `the folder ${folder}` : "the vault root";
+  if (policy.storageMode === "fixed-folder") {
+    return `Configured folder: files are copied into ${place(canonicalAttachmentFolder(policy.configuredFolder))}. A repeated name gets a number added.`;
+  }
+  if (policy.storageMode === "note-subfolder") {
+    return `Beside this note: files are copied into ${place(noteAttachmentFolder(notePath))}. A repeated name gets a number added.`;
+  }
+  if (policy.storageMode === "ask") {
+    return destinationSelected
+      ? `Chosen now: files are copied into ${place(canonicalAttachmentFolder(requestedFolder))}. A repeated name gets a number added.`
+      : "Choose a vault folder or the vault root below before attaching.";
+  }
+  return "Obsidian attachment setting: Obsidian chooses the folder and any number added to a repeated name when each file is copied.";
 }
 
 export class AttachmentImportModal extends Modal {
@@ -67,6 +87,11 @@ export class AttachmentImportModal extends Modal {
   private submitting = false;
   private submitButton: HTMLButtonElement | null = null;
   private selectionEl: HTMLElement | null = null;
+  private storageSetting: Setting | null = null;
+  private statusEl: HTMLElement | null = null;
+  private cancelButton: HTMLButtonElement | null = null;
+  /** Set once files were copied but not linked: this batch can never be submitted again. */
+  private copiedWithoutLinks = false;
 
   constructor(
     app: App,
@@ -74,12 +99,14 @@ export class AttachmentImportModal extends Modal {
     private readonly policy: AttachmentOperationPolicy,
     private readonly availableFolders: string[],
     insertionMode: AttachmentInsertionMode,
+    /** True only while the selected note owns the active Markdown editor. */
+    private readonly cursorAvailable: boolean,
     private readonly onSubmit: (value: AttachmentBatchValue) => Promise<void>,
   ) {
     super(app);
     this.requestedFolder = policy.storageMode === "ask" ? "" : policy.configuredFolder;
     this.destinationSelected = policy.storageMode !== "ask";
-    this.insertionMode = insertionMode;
+    this.insertionMode = insertionMode === "cursor" && !cursorAvailable ? "end" : insertionMode;
   }
 
   onOpen(): void {
@@ -100,13 +127,14 @@ export class AttachmentImportModal extends Modal {
     this.selectionEl.setAttribute("aria-live", "polite");
     input.addEventListener("change", () => {
       this.selectedFiles = Array.from(input.files ?? []);
+      this.clearProblem();
       this.renderSelection();
       this.updateSubmit();
     });
 
-    new Setting(this.contentEl)
+    this.storageSetting = new Setting(this.contentEl)
       .setName("Storage")
-      .setDesc(storageLabel(this.policy.storageMode));
+      .setDesc(this.destinationText());
 
     if (this.policy.storageMode === "ask") {
       const destination = new Setting(this.contentEl)
@@ -117,14 +145,14 @@ export class AttachmentImportModal extends Modal {
             this.requestedFolder = folder;
             this.destinationSelected = true;
             destination.setDesc(folder || "Vault root");
-            this.updateSubmit();
+            this.destinationChanged();
           }).open();
         }))
         .addButton((button) => button.setButtonText("Use vault root").onClick(() => {
           this.requestedFolder = "";
           this.destinationSelected = true;
           destination.setDesc("Vault root");
-          this.updateSubmit();
+          this.destinationChanged();
         }));
     }
 
@@ -141,23 +169,36 @@ export class AttachmentImportModal extends Modal {
         .onChange((value) => {
           this.display = value as AttachmentDisplayMode;
           this.renderSelection();
-        }));
+        })
+        .selectEl.setAttribute("aria-label", "Show in note"));
 
+    const insertOptions: Record<string, string> = this.cursorAvailable
+      ? { cursor: "At the current cursor" }
+      : {};
+    Object.assign(insertOptions, {
+      marker: "At the configured marker",
+      heading: "Under the configured heading",
+      end: "At the end of the note",
+    });
     new Setting(this.contentEl)
       .setName("Insert link")
-      .setDesc("This affects only the links for this upload.")
+      .setDesc(this.cursorAvailable
+        ? "This affects only the links for this upload."
+        : "This affects only the links for this upload. Cursor insertion appears only while this note is open in the editor.")
       .addDropdown((dropdown) => dropdown
-        .addOptions({
-          cursor: "At the current cursor",
-          marker: "At the configured marker",
-          heading: "Under the configured heading",
-          end: "At the end of the note",
-        })
+        .addOptions(insertOptions)
         .setValue(this.insertionMode)
-        .onChange((value) => { this.insertionMode = value as AttachmentInsertionMode; }));
+        .onChange((value) => {
+          this.insertionMode = value as AttachmentInsertionMode;
+          this.clearProblem();
+        })
+        .selectEl.setAttribute("aria-label", "Insert link"));
 
+    this.statusEl = this.contentEl.createDiv({ cls: "ent-cc-attachment-status" });
+    this.statusEl.setAttribute("role", "alert");
     const footer = this.contentEl.createDiv({ cls: "ent-cc-modal-footer ent-cc-attachment-footer" });
-    const cancel = footer.createEl("button", { text: "Cancel" });
+    const cancel = footer.createEl("button", { text: this.copiedWithoutLinks ? "Close" : "Cancel" });
+    this.cancelButton = cancel;
     cancel.addEventListener("click", () => this.close());
     this.submitButton = footer.createEl("button", { cls: "mod-cta", text: "Attach" });
     this.submitButton.addEventListener("click", () => void this.submit());
@@ -169,6 +210,55 @@ export class AttachmentImportModal extends Modal {
     this.selectedFiles = [];
     this.submitButton = null;
     this.selectionEl = null;
+    this.storageSetting = null;
+    this.statusEl = null;
+    this.cancelButton = null;
+  }
+
+  private destinationText(): string {
+    return attachmentDestinationSummary(this.policy, this.notePath, this.requestedFolder, this.destinationSelected);
+  }
+
+  private destinationChanged(): void {
+    this.clearProblem();
+    this.storageSetting?.setDesc(this.destinationText());
+    this.updateSubmit();
+  }
+
+  private statusContainer(): HTMLElement {
+    if (!this.statusEl) {
+      this.statusEl = this.contentEl.createDiv({ cls: "ent-cc-attachment-status" });
+      this.statusEl.setAttribute("role", "alert");
+    }
+    return this.statusEl;
+  }
+
+  private clearProblem(): void {
+    if (this.copiedWithoutLinks) return;
+    this.statusEl?.empty();
+  }
+
+  /** A persistent inline alert for a failure before any file was copied; the draft stays editable. */
+  private showProblem(message: string): void {
+    const status = this.statusContainer();
+    status.empty();
+    status.createEl("p", { cls: "mod-warning", text: message });
+    const dismiss = status.createEl("button", { text: "Dismiss" });
+    dismiss.addEventListener("click", () => this.clearProblem());
+  }
+
+  /** Files exist in the vault but are not linked: show where, and never offer another copy. */
+  private showCopiedWithoutLinks(error: AttachmentLinkInsertionError): void {
+    this.copiedWithoutLinks = true;
+    const status = this.statusContainer();
+    status.empty();
+    status.createEl("p", { cls: "mod-warning", text: "Files copied; links were not inserted. Do not attach them again." });
+    status.createEl("p", { text: error.message });
+    if (error.copiedPaths.length > 0) {
+      const list = status.createEl("ul");
+      for (const path of error.copiedPaths) list.createEl("li", { text: path }).setAttribute("dir", "auto");
+    }
+    this.cancelButton?.setText("Close");
   }
 
   private renderSelection(): void {
@@ -191,7 +281,7 @@ export class AttachmentImportModal extends Modal {
     const count = this.selectedFiles.length;
     if (!this.submitButton) return;
     this.submitButton.setText(count > 1 ? `Attach ${count} files` : "Attach file");
-    this.submitButton.disabled = this.submitting || !attachmentSubmitReady(
+    this.submitButton.disabled = this.submitting || this.copiedWithoutLinks || !attachmentSubmitReady(
       count > 0 && attachmentSelectionProblem(this.selectedFiles) === null,
       this.policy.storageMode,
       this.destinationSelected,
@@ -200,10 +290,11 @@ export class AttachmentImportModal extends Modal {
 
   private async submit(): Promise<void> {
     const files = [...this.selectedFiles];
-    if (this.submitting || files.length === 0
+    if (this.submitting || this.copiedWithoutLinks || files.length === 0
       || attachmentSelectionProblem(files) !== null
       || !attachmentSubmitReady(true, this.policy.storageMode, this.destinationSelected)) return;
     this.submitting = true;
+    this.clearProblem();
     this.updateSubmit();
     try {
       await this.onSubmit({
@@ -215,8 +306,10 @@ export class AttachmentImportModal extends Modal {
       this.close();
     } catch (error) {
       new Notice(errorMessage(error, "The attachment could not be added."), 9000);
-      // Copied files stay in the vault; a retry from this form would copy them again.
-      if (error instanceof AttachmentLinkInsertionError) this.close();
+      // Copied files stay in the vault; a retry from this form would copy them
+      // again, so keep the paths on screen and lock this batch.
+      if (error instanceof AttachmentLinkInsertionError) this.showCopiedWithoutLinks(error);
+      else this.showProblem(errorMessage(error, "The attachment could not be added."));
     } finally {
       this.submitting = false;
       this.updateSubmit();
