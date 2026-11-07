@@ -403,6 +403,24 @@ test("desktop keeps native HTML dragging and never enables touch handles", async
   await expect.poll(async () => (await state(page)).parents["Research/Alpha.md"]).toBe("Research/Beta.md");
 });
 
+test("tablet split view keeps wide-layout indentation for nested headings and notes (browser emulation, not iPad hardware)", async ({ page }) => {
+  await open(page);
+  await options(page);
+  await page.getByRole("button", { name: "Split view on wide screens", exact: true }).click();
+  await expect(page.locator(".ent-cc-view")).toHaveClass(/is-mobile-split/u);
+  await page.locator(".ent-cc-workspace-options > summary").click();
+  const left = async (target: Locator): Promise<number> => {
+    await target.scrollIntoViewIfNeeded();
+    return (await target.boundingBox())!.x;
+  };
+  const note = (title: string): Locator => page.locator(".ent-cc-curriculum-row .ent-cc-subject-title").filter({ hasText: title }).first();
+  expect(await left(note("Child")), "nested note title is indented past its parent").toBeGreaterThan(await left(note("Beta")));
+  await page.getByRole("tab", { name: /^Reading\b/u }).click();
+  const xs: number[] = [];
+  for (const title of ["Sources", "Studies", "Trials", "Randomized"]) xs.push(await left(heading(page, title).getByRole("button", { name: title, exact: true }).first()));
+  for (let index = 1; index < xs.length; index += 1) expect(xs[index], `heading level ${index} x ${xs.join(",")}`).toBeGreaterThan(xs[index - 1]);
+});
+
 test.afterEach(async ({ page }) => {
   expect(errorsByPage.get(page) ?? [], "Production renderer has no console warnings/errors or uncaught errors").toEqual([]);
 });
