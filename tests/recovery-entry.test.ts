@@ -274,6 +274,34 @@ test("Choose another file: a valid file is previewed, an unchosen picker returns
   if (loaded.status === "parsed" && loaded.result.ok) assert.equal(loaded.result.preview.bases[0].name, "Chosen");
 });
 
+test("Choose another file offers recognized raw kept copies as well as JSON files, and nothing else", async () => {
+  const w = await wired();
+  const kept = new TFile("Old Copies/data.json.bak-kept-2026-11-03T10-00-00-000Z");
+  const bak = new TFile("Old Copies/data.json.bak");
+  const rescue = new TFile("Old Copies/rescue.json");
+  for (const other of ["Old Copies/note.md", "Old Copies/data.json.bak-other", "Old Copies/image.png", "Old Copies/data.json.backup"]) w.pickable.push(new TFile(other));
+  w.pickable.push(kept, bak, rescue);
+  let items: string[] = [];
+  RecoveryFilePicker.prototype.open = function open(this: RecoveryFilePicker): void {
+    items = this.getItems().map((file) => file.path);
+    this.onChooseItem(kept);
+  };
+  try {
+    const candidate = await w.callbacks().pickExplicit?.();
+    assert.deepEqual(items, ["Old Copies/data.json.bak", "Old Copies/data.json.bak-kept-2026-11-03T10-00-00-000Z", "Old Copies/rescue.json"]);
+    assert.equal(candidate?.displayName, kept.name);
+    // The filename only nominates it: parse, size and exact bytes still decide.
+    w.files.set(kept.path, JSON.stringify(createDefaultStore(migrateData(null), 100, VAULT)));
+    const loaded = candidate ? await w.callbacks().load(candidate) : null;
+    assert.ok(loaded?.status === "parsed" && loaded.result.ok);
+    w.files.set(kept.path, "not json");
+    const bad = candidate ? await w.callbacks().load(candidate) : null;
+    assert.ok(bad?.status === "parsed" && !bad.result.ok);
+  } finally {
+    delete (RecoveryFilePicker.prototype as { open?: unknown }).open;
+  }
+});
+
 test("Choose another file: oversized and unreadable files are preserved but not restorable, with no read for the oversized one", async () => {
   const w = await wired();
   const big = "Elsewhere/big.json";

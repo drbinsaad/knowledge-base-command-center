@@ -109,7 +109,13 @@ export class RecoveryFilePicker extends FuzzySuggestModal<TFile> {
   }
 }
 
-export function pickRecoveryFile(app: App, files: readonly TFile[]): Promise<RecoveryCandidate | null> {
+/** Name patterns only nominate a file: JSON files, data.json.bak and data.json.bak-kept-*. */
+export function isRecoveryPickName(name: string): boolean {
+  return name.endsWith(".json") || name === "data.json.bak" || name.startsWith("data.json.bak-kept-");
+}
+
+export function pickRecoveryFile(app: App, allFiles: readonly TFile[]): Promise<RecoveryCandidate | null> {
+  const files = allFiles.filter((file) => isRecoveryPickName(file.name)).sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
   return new Promise((resolve) => {
     new RecoveryFilePicker(app, files, (file) => resolve(file ? {
       id: "chosen", path: file.path, displayName: file.name, origin: "chosen-file",

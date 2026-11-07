@@ -6939,7 +6939,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         });
       },
       load: (candidate) => { selected = candidate; return loadRecoveryCopy(host, candidate.path, { currentVaultId: vaultId() }); },
-      pickExplicit: () => pickRecoveryFile(this.app, this.getPortableJsonFiles()),
+      pickExplicit: () => pickRecoveryFile(this.app, this.app.vault.getFiles()),
       getDestination: () => this.getRecoveryDestination(),
       onApply: (intent, destination) => this.restoreKeptCopy(intent, () => selected ? recoverySourceUnchanged(host, selected.path, intent) : Promise.resolve(false), destination),
       onOpenRestored: (baseId) => this.openRestoredKeptBase(baseId),
