@@ -59,6 +59,8 @@
     "tests/conflict-rescue-reuse.test.ts",
     "tests/collections-journey-reload.test.ts",
     "tests/verify-community-guard.test.ts",
-    "tests/release.test.ts"
+    "tests/release.test.ts",
+    "tests/support/legacy-fixtures.ts",
+    "tests/main.test.ts"
   ]
 }

@@ -153,23 +153,7 @@ import {
   type PortableExportSelection,
   type PortableExportV1,
 } from "../src/portability.ts";
-
-/**
- * Raw legacy-input contracts. Historical payloads carry an older `version` (and may omit
- * newer keys); they are fed to migrate/parse code exactly as stored, never re-stamped as
- * current data. These are the only places that adapt such raw input to the current field
- * types so a fixture can be assigned onto a PluginData draft.
- */
-type RawPortableIndexDraft = Omit<PluginData, "portableIndex"> & { portableIndex: object };
-/** The same draft object, viewed so a legacy portable index (older version, missing newer keys) can be assigned as stored. */
-function rawDraft(data: PluginData): RawPortableIndexDraft {
-  return data;
-}
-/** A draft whose `version` is deliberately an older number than the current schema. */
-type LegacyVersionDraft<T extends { version: unknown }> = Omit<T, "version"> & { version: number };
-function asLegacyVersionDraft<T extends { version: unknown }>(value: T): LegacyVersionDraft<T> {
-  return value as unknown as LegacyVersionDraft<T>;
-}
+import { asRawPortableIndexDraft, asRawVersionDraft } from "./support/legacy-fixtures.ts";
 
 /**
  * Production never matches against a raw query string: every caller parses once
@@ -292,7 +276,7 @@ test("flat v10 data migrates into one v12 store without losing workspace state",
   flat.displayNameByPath = { "Knowledge/Airway.md": "Upper Airway" };
   flat.indexGroupAliases = { airway: "Airway" };
   flat.indexGroupOrder = ["Airway"];
-  rawDraft(flat).portableIndex = {
+  asRawPortableIndexDraft(flat).portableIndex = {
     version: 1,
     groups: [{ id: "group-airway", title: "Airway", order: 0 }],
     subjects: [{
@@ -969,7 +953,7 @@ test("current v14 envelopes require a valid semantic revision", () => {
 
 test("provisional rebasing rejects an unstamped semantic payload change", () => {
   const current = migrateData(null);
-  const legacy = asLegacyVersionDraft(current);
+  const legacy = asRawVersionDraft(current);
   legacy.version = DATA_VERSION - 2;
   const before = migrateStore(current, 100);
   const parent = structuredClone(before);
@@ -1196,11 +1180,11 @@ test("a valid v11 store migrates multiple bases as isolated workspace payloads",
   const first = migrateData(null);
   first.settings.workspaceName = "First KB";
   first.pinnedPaths = [sharedPath];
-  rawDraft(first).portableIndex = structuredClone(sharedPortable);
+  asRawPortableIndexDraft(first).portableIndex = structuredClone(sharedPortable);
   const second = migrateData(null);
   second.settings.workspaceName = "Second KB";
   second.nextStudyPaths = [sharedPath];
-  rawDraft(second).portableIndex = structuredClone(sharedPortable);
+  asRawPortableIndexDraft(second).portableIndex = structuredClone(sharedPortable);
   const raw = {
     kind: STORE_KIND,
     version: STORE_VERSION,
@@ -3272,7 +3256,7 @@ test("library-only replace preserves unrelated local topic identities and replac
   const target = migrateData(null);
   const localTopicPath = "Knowledge Base/Local airway topic.md";
   const localSyndromePath = "Knowledge Base/Old syndrome.md";
-  rawDraft(target).portableIndex = {
+  asRawPortableIndexDraft(target).portableIndex = {
     version: 1,
     groups: [
       { id: "group-topics", title: "Airway", order: 0 },
@@ -3622,7 +3606,7 @@ test("collection-only export carries the referenced identity without importing i
   const childId = "subject-child";
   const parentPath = portablePlaceholderPath(parentId);
   const childPath = portablePlaceholderPath(childId);
-  rawDraft(data).portableIndex = {
+  asRawPortableIndexDraft(data).portableIndex = {
     version: 1,
     groups: [{ id: "group-airway", title: "Airway", order: 0 }],
     subjects: [
@@ -4029,7 +4013,7 @@ test("replace import changes only selected components and preserves state omitte
   const target = migrateData(null);
   const oldPlaceholder = portablePlaceholderPath("subject-old");
   target.settings.workspaceName = "Keep Local Workspace";
-  rawDraft(target).portableIndex = {
+  asRawPortableIndexDraft(target).portableIndex = {
     version: 1,
     groups: [{ id: "group-old", title: "Old", order: 0 }],
     subjects: [{
@@ -4070,7 +4054,7 @@ test("replace index preserves unresolved identities referenced by unselected loc
   const target = migrateData(null);
   const oldId = "subject-local-reference";
   const oldPath = portablePlaceholderPath(oldId);
-  rawDraft(target).portableIndex = {
+  asRawPortableIndexDraft(target).portableIndex = {
     version: 1,
     groups: [{ id: "group-local", title: "Local", order: 0 }],
     subjects: [{ id: oldId, title: "Local reference", groupId: "group-local", parentId: null, order: 0, indexed: true, configuredId: "", recordKind: "topic" }],
@@ -4092,7 +4076,7 @@ test("replace index retains protected identities without manufacturing unneeded 
   const droppedPath = "Knowledge Base/Dropped.md";
   const protectedPath = "Knowledge Base/Protected.md";
   const importedPath = "Knowledge Base/Imported ancestor.md";
-  rawDraft(target).portableIndex = {
+  asRawPortableIndexDraft(target).portableIndex = {
     version: 1,
     groups: [{ id: "group-local", title: "Local", order: 0 }],
     subjects: [
@@ -4137,7 +4121,7 @@ test("replace index retains protected identities without manufacturing unneeded 
 
 test("title fallback never conflates incoming identities with a resolved local subject", () => {
   const target = migrateData(null);
-  rawDraft(target).portableIndex = {
+  asRawPortableIndexDraft(target).portableIndex = {
     version: 1,
     groups: [{ id: "group-local", title: "Airway", order: 0 }],
     subjects: [{ id: "subject-local", title: "Shared title", groupId: "group-local", parentId: null, order: 0, indexed: true, configuredId: "", recordKind: "topic" }],
@@ -4167,7 +4151,7 @@ test("title fallback never conflates incoming identities with a resolved local s
 
 test("title fallback still matches one unique unresolved local placeholder", () => {
   const target = migrateData(null);
-  rawDraft(target).portableIndex = {
+  asRawPortableIndexDraft(target).portableIndex = {
     version: 1,
     groups: [{ id: "group-local", title: "Airway", order: 0 }],
     subjects: [{ id: "subject-local", title: "Shared title", groupId: "group-local", parentId: null, order: 0, indexed: true, configuredId: "", recordKind: "topic" }],
@@ -4188,7 +4172,7 @@ test("title fallback still matches one unique unresolved local placeholder", () 
 
 test("clinical configured-ID conflicts do not fall back to title-only matching", () => {
   const target = migrateData(null);
-  rawDraft(target).portableIndex = {
+  asRawPortableIndexDraft(target).portableIndex = {
     version: 1,
     groups: [{ id: "group-local", title: "Airway", order: 0 }],
     subjects: [{ id: "subject-local", title: "Laryngeal Cleft", groupId: "group-local", parentId: null, order: 0, indexed: true, configuredId: "ENT-PED-999", recordKind: "topic" }],
@@ -4638,7 +4622,7 @@ test("portable serialization rejects generated packages the importer cannot read
 test("registry synchronization clears stale inactive bindings and remains linear", () => {
   const data = migrateData(null);
   const count = 10_000;
-  rawDraft(data).portableIndex = {
+  asRawPortableIndexDraft(data).portableIndex = {
     version: 1,
     groups: [{ id: "group-airway", title: "Airway", order: 0 }],
     subjects: Array.from({ length: count }, (_, index) => ({
@@ -4862,7 +4846,7 @@ test("direct-child folder renames migrate folder-derived groups through nested h
     [curriculumContainerKey("Curated Airway", null)]: ["Knowledge Base/Old Group/Current.md"],
   };
   data.collapsed.curriculumDomains = ["Old Group", "Curated Airway"];
-  rawDraft(data).portableIndex = {
+  asRawPortableIndexDraft(data).portableIndex = {
     version: 1,
     groups: [
       { id: "group-old", title: "Old Group", order: 0 },
@@ -5107,7 +5091,7 @@ test("folder renames always preserve old group aliases and portable identity", (
     [curriculumContainerKey("Old Group", null)]: ["Knowledge Base/Old Group/Topic.md"],
   };
   data.collapsed.curriculumDomains = ["Old Group"];
-  rawDraft(data).portableIndex = {
+  asRawPortableIndexDraft(data).portableIndex = {
     version: 1,
     groups: [{ id: "stable-old-group", title: "Old Group", order: 0 }],
     subjects: [{
@@ -5652,7 +5636,7 @@ test("synced history limits count UTF-8 bytes rather than JavaScript code units"
 
 test("ordinary Undo snapshots stay lean after a large portable registry is allocated", () => {
   const data = migrateData(null);
-  rawDraft(data).portableIndex = {
+  asRawPortableIndexDraft(data).portableIndex = {
     version: 1,
     groups: [{ id: "group-large", title: "Large", order: 0 }],
     subjects: Array.from({ length: 10_000 }, (_, index) => ({
@@ -6746,7 +6730,7 @@ test("a v1 medication dependency is not advertised as a full catalog and replace
 
   const target = migrateData(null);
   const localMedicationPath = "Knowledge Base/Local medication.md";
-  rawDraft(target).portableIndex = {
+  asRawPortableIndexDraft(target).portableIndex = {
     version: 1,
     groups: [{ id: "group-local-medications", title: "Local medications", order: 0 }],
     subjects: [{
@@ -6825,7 +6809,7 @@ test("an explicitly selected empty medication catalog is available and replace c
   assert.deepEqual(emptyMedicationCatalog.components.index?.subjects, []);
 
   const target = migrateData(null);
-  rawDraft(target).portableIndex = {
+  asRawPortableIndexDraft(target).portableIndex = {
     version: 1,
     groups: [
       { id: "group-topics", title: "Topics", order: 0 },
@@ -6942,7 +6926,7 @@ test("selective import splits a shared group collision without changing the unse
     },
   });
   const target = migrateData(null);
-  rawDraft(target).portableIndex = {
+  asRawPortableIndexDraft(target).portableIndex = {
     version: 1,
     groups: [{ id: "group-shared", title: "Local topics", order: 0 }],
     subjects: [{
@@ -7887,7 +7871,7 @@ test("device-local collapse state parses legacy flat and nested payloads and cap
 
 test("a valid v14 base with more than 300 layout headings remains loadable", () => {
   const data = migrateData(null);
-  asLegacyVersionDraft(data).version = 14;
+  asRawVersionDraft(data).version = 14;
   data.collections = Array.from({ length: MAX_INDEX_FOLDER_SOURCES + 1 }, (_, index) => ({
     id: `historical-heading-${index}`,
     title: `Historical heading ${index}`,
@@ -7896,7 +7880,7 @@ test("a valid v14 base with more than 300 layout headings remains loadable", () 
     subheadings: [],
   }));
   const raw = createDefaultStore(data, 100, "vault-v14-301-headings");
-  asLegacyVersionDraft(raw).version = 14;
+  asRawVersionDraft(raw).version = 14;
 
   const migrated = migrateStore(raw, 200);
 
