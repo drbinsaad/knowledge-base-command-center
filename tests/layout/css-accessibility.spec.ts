@@ -70,7 +70,8 @@ async function contrastOf(page: Page, selector: string): Promise<number> {
   const target = page.locator(selector).locator("visible=true");
   await expect(target.first(), `${selector} must be rendered`).toBeVisible();
   const ratios = await target.evaluateAll((elements) => elements.map((element) => {
-    const canvas = document.createElement("canvas");
+    const canvas = document.body.createEl("canvas");
+    canvas.remove();
     canvas.width = 1; canvas.height = 1;
     const context = canvas.getContext("2d", { willReadFrequently: true });
     if (!context) throw new Error("Canvas is unavailable for color contrast check");
@@ -202,11 +203,10 @@ test.describe("C01 wide mobile split targets", () => {
 /** Visible elements whose own text renders in the host's faint colour. */
 async function faintTextOffenders(page: Page): Promise<string[]> {
   return page.evaluate(() => {
-    const probe = document.createElement("span");
-    probe.style.color = "var(--text-faint)";
-    document.body.append(probe);
-    const faint = getComputedStyle(probe).color;
-    probe.remove();
+    // The host fixture defines --text-faint as a #rrggbb value.
+    const hex = getComputedStyle(document.body).getPropertyValue("--text-faint").trim().replace("#", "");
+    if (!/^[0-9a-f]{6}$/iu.test(hex)) throw new Error(`Unexpected --text-faint value: ${hex}`);
+    const faint = `rgb(${parseInt(hex.slice(0, 2), 16)}, ${parseInt(hex.slice(2, 4), 16)}, ${parseInt(hex.slice(4, 6), 16)})`;
     const found: string[] = [];
     for (const element of Array.from(document.querySelectorAll<HTMLElement>("body *"))) {
       const ownText = Array.from(element.childNodes).some((node) => node.nodeType === 3 && (node.textContent ?? "").trim().length > 0);
@@ -285,7 +285,8 @@ for (const dark of [false, true]) {
       await page.keyboard.press(tab);
       const indicator = await target.evaluate((element) => {
         const style = getComputedStyle(element);
-        const canvas = document.createElement("canvas");
+        const canvas = document.body.createEl("canvas");
+        canvas.remove();
         canvas.width = 1; canvas.height = 1;
         const context = canvas.getContext("2d", { willReadFrequently: true })!;
         const pixel = (cssColor: string, base?: Uint8ClampedArray): Uint8ClampedArray => {
@@ -316,6 +317,59 @@ for (const dark of [false, true]) {
   });
 }
 
+test.describe("C04 organizer tree focus in forced-colors mode", () => {
+  const focusState = (page: Page) => page.evaluate(() => {
+    const active = document.activeElement as HTMLElement | null;
+    const style = active ? getComputedStyle(active) : null;
+    return {
+      role: active?.getAttribute("role") ?? "",
+      path: active?.getAttribute("data-organizer-node-path") ?? "",
+      outlineStyle: style?.outlineStyle ?? "",
+      outlineWidth: parseFloat(style?.outlineWidth ?? "0"),
+      outlineColor: style?.outlineColor ?? "",
+      boxShadow: style?.boxShadow ?? "",
+      selected: Array.from(document.querySelectorAll("[role='treeitem'][aria-checked='true'], [role='treeitem'][aria-checked='mixed']")).map((node) => node.getAttribute("data-organizer-node-path")),
+    };
+  });
+
+  test("outline follows Arrow and page-edge navigation, stays visible and leaves selection alone", async ({ page }) => {
+    await openView(page, { mobile: false, width: 1280, height: 900, count: 700, parity: true });
+    await page.emulateMedia({ forcedColors: "active" });
+    await expect.poll(() => page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
+    await page.evaluate(() => (window as unknown as { kbccBrowserHarness: { openModal(kind: string): void } }).kbccBrowserHarness.openModal("organizer"));
+    const tree = page.locator("[role='treeitem']");
+    await expect(tree.first()).toBeVisible();
+    await tree.first().focus();
+    const initial = await focusState(page);
+    const visited: string[] = [];
+    const problems: string[] = [];
+    const record = async (label: string) => {
+      const state = await focusState(page);
+      visited.push(state.path);
+      if (state.role !== "treeitem") problems.push(`${label}: focus left the tree (${state.role})`);
+      else if (state.outlineStyle === "none" || state.outlineWidth < 2) problems.push(`${label}: outline ${state.outlineStyle} ${state.outlineWidth}px`);
+      expect(state.selected, `${label}: navigation must not change selection`).toEqual(initial.selected);
+    };
+    await record("start");
+    for (const key of ["ArrowDown", "ArrowDown", "ArrowUp", "End", "ArrowUp", "Home"]) {
+      await page.keyboard.press(key);
+      await expect.poll(() => focusState(page).then((state) => state.role)).toBe("treeitem");
+      await record(key);
+    }
+    expect(new Set(visited).size, "navigation must actually move through several rows").toBeGreaterThan(2);
+    expect(problems).toEqual([]);
+  });
+
+  test("standard appearance keeps the inset focus shadow and no outline", async ({ page }) => {
+    await openView(page, { mobile: false, width: 1280, height: 900, count: 700, parity: true });
+    await page.evaluate(() => (window as unknown as { kbccBrowserHarness: { openModal(kind: string): void } }).kbccBrowserHarness.openModal("organizer"));
+    await page.locator("[role='treeitem']").first().focus();
+    const state = await focusState(page);
+    expect(state.outlineStyle).toBe("none");
+    expect(state.boxShadow).not.toBe("none");
+  });
+});
+
 async function clickCentre(page: Page, target: ReturnType<Page["locator"]>): Promise<void> {
   const rect = await target.boundingBox();
   if (!rect) throw new Error("Target has no bounds");
@@ -325,5 +379,3 @@ async function clickCentre(page: Page, target: ReturnType<Page["locator"]>): Pro
   }), "target must be unobscured").toBe(true);
   await page.mouse.click(rect.x + rect.width / 2, rect.y + rect.height / 2);
 }
-
-export { contrastOf };
