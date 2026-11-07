@@ -11634,7 +11634,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       }
     }
     const behavior = this.data.settings.openNoteBehavior;
-    const leaf = behavior === "same-tab"
+    // A deliberate non-Markdown open from KBCC keeps the command center in
+    // place: request a new tab and leave actual handling to the host.
+    const leaf = origin && file.extension.toLowerCase() !== "md"
+      ? this.app.workspace.getLeaf("tab")
+      : behavior === "same-tab"
       ? this.app.workspace.getLeaf(false)
       : behavior === "split"
         ? this.app.workspace.getLeaf("split", "vertical")
