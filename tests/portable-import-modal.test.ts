@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Notice, Setting } from "obsidian";
+import { Notice, Setting } from "./support/obsidian-stub.ts";
 import {
   canonicalJsonString,
   cloneJsonValue,
@@ -19,26 +19,34 @@ interface CapturedButton {
   click: (() => void) | null;
 }
 
+interface CapturedButtonComponent {
+  setButtonText(value: string): CapturedButtonComponent;
+  setIcon(value: string): CapturedButtonComponent;
+  setDisabled(value: boolean): CapturedButtonComponent;
+  setCta(): CapturedButtonComponent;
+  onClick(value: () => void): CapturedButtonComponent;
+}
+
+/** The support Setting has no button API; the helper below installs addButton on its prototype. */
+interface ButtonCapableSetting {
+  addButton(configure: (button: CapturedButtonComponent) => unknown): unknown;
+}
+const ButtonCapableSetting = Setting as unknown as new (container: HTMLElement) => ButtonCapableSetting;
+
 function withSettingButtons<T>(run: (buttons: CapturedButton[]) => T): T {
   const prototype = Setting.prototype as unknown as Record<string, unknown>;
   const prior = Object.getOwnPropertyDescriptor(Setting.prototype, "addButton");
   const buttons: CapturedButton[] = [];
-  prototype.addButton = function addButton(this: unknown, configure: (button: {
-    setButtonText(value: string): unknown;
-    setIcon(value: string): unknown;
-    setDisabled(value: boolean): unknown;
-    setCta(): unknown;
-    onClick(value: () => void): unknown;
-  }) => void): unknown {
+  prototype.addButton = function addButton(this: unknown, configure: (button: CapturedButtonComponent) => void): unknown {
     const captured: CapturedButton = { label: "", disabled: false, click: null };
-    const component = {
-      setButtonText(value: string): typeof component { captured.label = value; return component; },
+    const component: CapturedButtonComponent = {
+      setButtonText(value: string): CapturedButtonComponent { captured.label = value; return component; },
       // Obsidian 1.14.1 replaces the button contents when setting an icon,
       // including any visible text previously set with setButtonText.
-      setIcon(): typeof component { captured.label = ""; return component; },
-      setDisabled(value: boolean): typeof component { captured.disabled = value; return component; },
-      setCta(): typeof component { return component; },
-      onClick(value: () => void): typeof component { captured.click = value; return component; },
+      setIcon(): CapturedButtonComponent { captured.label = ""; return component; },
+      setDisabled(value: boolean): CapturedButtonComponent { captured.disabled = value; return component; },
+      setCta(): CapturedButtonComponent { return component; },
+      onClick(value: () => void): CapturedButtonComponent { captured.click = value; return component; },
     };
     configure(component);
     buttons.push(captured);
@@ -57,12 +65,12 @@ test("captured buttons model Obsidian icon replacement without losing disabled s
   const content = asHtmlElement(dom.document.body.createDiv());
   const action = (): void => {};
   withSettingButtons((buttons) => {
-    new Setting(content).addButton((button) => button
+    new ButtonCapableSetting(content).addButton((button) => button
       .setButtonText("Text replaced by icon")
       .setDisabled(true)
       .onClick(action)
       .setIcon("undo-2"));
-    new Setting(content).addButton((button) => button
+    new ButtonCapableSetting(content).addButton((button) => button
       .setIcon("file-question")
       .setButtonText("Visible text restored"));
     assert.deepEqual(buttons.map((button) => button.label), ["", "Visible text restored"]);

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { type App, Notice } from "obsidian";
+import type { App } from "obsidian";
+import { Notice } from "./support/obsidian-stub.ts";
 import { AttachmentLinkInsertionError, MAX_ATTACHMENT_BYTES } from "../src/attachment";
 import { AttachmentImportModal, type AttachmentBatchValue } from "../src/attachment-modal";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom";

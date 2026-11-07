@@ -23,6 +23,21 @@
     "tests/library-display-profile.test.ts",
     "tests/collection-entry.test.ts",
     "tests/legacy-index-review-modal.test.ts",
-    "tests/note-attachments.test.ts"
+    "tests/note-attachments.test.ts",
+    "tests/quick-entry.test.ts",
+    "tests/update-announcement.test.ts",
+    "tests/taxonomy-health.test.ts",
+    "tests/note-organizer-modal.test.ts",
+    "tests/note-write-boundaries.test.ts",
+    "tests/follow-up.test.ts",
+    "tests/placeholder-link-picker.test.ts",
+    "tests/scoped-search.test.ts",
+    "tests/workflow-navigation-reliability.test.ts",
+    "tests/kbcc-return-navigation.test.ts",
+    "tests/portable-import-modal.test.ts",
+    "tests/attachment-modal.test.ts",
+    "tests/note-organizer-surfaces.test.ts",
+    "tests/note-organizer.test.ts",
+    "tests/touch-library-move.test.ts"
   ]
 }

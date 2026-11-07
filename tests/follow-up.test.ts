@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Modal, Notice } from "obsidian";
+import { Modal, Notice } from "./support/obsidian-stub.ts";
 import { FollowUpCategoryManagerModal } from "../src/follow-up-modal.ts";
 import {
   appendFollowUpEntry,
@@ -383,16 +383,19 @@ test("reverse metadata is compact and refuses stale or tampered note content", (
   assert.throws(() => reverseFollowUpAppend(result.content, invalidUndo), /metadata is invalid/u);
 });
 
+/** Standalone private seam: member types are derived from the production class so renames fail to compile. */
+interface CategoryManagerTestAccess {
+  categories: FollowUpCategoryManagerModal["categories"];
+  openEditor: FollowUpCategoryManagerModal["openEditor"];
+  render: FollowUpCategoryManagerModal["render"];
+}
+
 test("a rejected duplicate category name keeps the editor open with its typed draft", () => {
   Notice.messages.length = 0;
   const manager = new FollowUpCategoryManagerModal({} as never, [
     { id: "questions", label: "Questions", style: "checkbox", includeDate: false, archived: false },
     { id: "sources", label: "Sources", style: "bullet", includeDate: false, archived: false },
-  ], () => undefined) as FollowUpCategoryManagerModal & {
-    categories: FollowUpCategoryDefinition[];
-    openEditor(initial?: FollowUpCategoryDefinition): void;
-    render(): void;
-  };
+  ], () => undefined) as unknown as CategoryManagerTestAccess;
   let renders = 0;
   manager.render = () => { renders += 1; };
 

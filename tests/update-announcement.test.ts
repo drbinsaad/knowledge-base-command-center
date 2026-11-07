@@ -106,21 +106,31 @@ test("malformed local version state is bounded and recoverable without trusting 
   }
 });
 
+// Standalone private seams: each member's type is derived from the production
+// class, so a rename or signature change fails to compile. The public surface
+// is projected with Omit (an intersection with the class itself collapses to never).
 interface AnnouncementInternal {
-  maybeShowUpdateAnnouncement(result: { compatible: boolean; sourceWasMissing: boolean }): void;
-  openUpdateAnnouncement(announcement: UpdateAnnouncement): void;
-  openCurrentUpdateAnnouncement(announcement: UpdateAnnouncement): void;
-  unloaded: boolean;
-  deviceLocalPersistenceSuppressed: boolean;
-  loadSyncRecoveryLocalState(): void;
+  maybeShowUpdateAnnouncement: EntVaultCommandCenterPlugin["maybeShowUpdateAnnouncement"];
+  openUpdateAnnouncement: EntVaultCommandCenterPlugin["openUpdateAnnouncement"];
+  openCurrentUpdateAnnouncement: EntVaultCommandCenterPlugin["openCurrentUpdateAnnouncement"];
+  unloaded: EntVaultCommandCenterPlugin["unloaded"];
+  deviceLocalPersistenceSuppressed: EntVaultCommandCenterPlugin["deviceLocalPersistenceSuppressed"];
+  loadSyncRecoveryLocalState: EntVaultCommandCenterPlugin["loadSyncRecoveryLocalState"];
 }
+type AnnouncementPlugin = Omit<EntVaultCommandCenterPlugin, keyof AnnouncementInternal> & AnnouncementInternal;
 
 interface LegacyReviewLifecycleInternal {
-  maybeShowLegacyIndexReview(): void;
-  openLegacyIndexReview(sourceId?: string): void;
-  unloaded: boolean;
-  deviceLocalPersistenceSuppressed: boolean;
+  maybeShowLegacyIndexReview: EntVaultCommandCenterPlugin["maybeShowLegacyIndexReview"];
+  openLegacyIndexReview: EntVaultCommandCenterPlugin["openLegacyIndexReview"];
+  unloaded: EntVaultCommandCenterPlugin["unloaded"];
+  deviceLocalPersistenceSuppressed: EntVaultCommandCenterPlugin["deviceLocalPersistenceSuppressed"];
 }
+interface OnloadLifecycleInternal extends AnnouncementInternal {
+  loadPluginData(): Promise<{ compatible: boolean; sourceWasMissing: boolean }>;
+  registerObsidianProtocolHandler(): void;
+}
+type OnloadLifecyclePlugin = Omit<EntVaultCommandCenterPlugin, keyof OnloadLifecycleInternal> & OnloadLifecycleInternal;
+type LegacyReviewPlugin =Omit<EntVaultCommandCenterPlugin, keyof LegacyReviewLifecycleInternal> & LegacyReviewLifecycleInternal;
 
 function availableLegacySource(): IndexFolderSource {
   return { id: "legacy-root", path: INDEX_FOLDER_VAULT_ROOT, origin: "legacy-primary-folder" };
@@ -130,7 +140,7 @@ function announcementPlugin(
   localStorage: Map<string, unknown>,
   opens: UpdateAnnouncement[],
   options: { failSave?: boolean; version?: string } = {},
-): EntVaultCommandCenterPlugin & AnnouncementInternal {
+): AnnouncementPlugin {
   const app = {
     loadLocalStorage: (key: string) => structuredClone(localStorage.get(key) ?? null),
     saveLocalStorage: (key: string, value: unknown) => {
@@ -140,7 +150,7 @@ function announcementPlugin(
   };
   const plugin = new EntVaultCommandCenterPlugin(app as never, {
     version: options.version ?? "0.26.1",
-  } as never) as EntVaultCommandCenterPlugin & AnnouncementInternal;
+  } as never) as unknown as AnnouncementPlugin;
   plugin.openUpdateAnnouncement = (announcement) => { opens.push(announcement); };
   return plugin;
 }
@@ -166,6 +176,8 @@ test("plugin lifecycle persists before opening and never repeats within a sessio
 test("the 0.26.0 to 0.26.1 lifecycle upgrade persists the new marker and never replays after reload", () => {
   const localStorage = new Map<string, unknown>();
   const opens: UpdateAnnouncement[] = [];
+  // Declared before assert.deepEqual(opens, []) narrows `opens` to never[].
+  const recordOpen = (announcement: UpdateAnnouncement): void => { opens.push(announcement); };
   announcementPlugin(localStorage, opens, { version: "0.26.0" })
     .maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
   assert.deepEqual(opens, [], "an uncatalogued release records its marker without a window");
@@ -176,7 +188,7 @@ test("the 0.26.0 to 0.26.1 lifecycle upgrade persists the new marker and never r
       "0.26.1",
       "the new version marker is persisted before presentation",
     );
-    opens.push(announcement);
+    recordOpen(announcement);
   };
   upgraded.maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
   upgraded.maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
@@ -193,8 +205,8 @@ test("two replacement instances with stale local snapshots share one synchronous
   };
   const opened: UpdateAnnouncement[] = [];
   const create = () => {
-    const plugin = new EntVaultCommandCenterPlugin(app as never, { version: "0.26.1" } as never) as
-      EntVaultCommandCenterPlugin & AnnouncementInternal;
+    const plugin = new EntVaultCommandCenterPlugin(app as never, { version: "0.26.1" } as never) as unknown as
+      AnnouncementPlugin;
     plugin.openUpdateAnnouncement = (announcement) => { opened.push(announcement); };
     return plugin;
   };
@@ -210,8 +222,8 @@ test("two replacement instances with stale local snapshots share one synchronous
 test("legacy folder review is offered once per App session and remains eligible after restart", () => {
   const opened: string[] = [];
   const create = (app: object) => {
-    const plugin = new EntVaultCommandCenterPlugin(app as never, { version: "0.16.0" } as never) as
-      EntVaultCommandCenterPlugin & LegacyReviewLifecycleInternal;
+    const plugin = new EntVaultCommandCenterPlugin(app as never, { version: "0.16.0" } as never) as unknown as
+      LegacyReviewPlugin;
     plugin.data.settings.workspaceMode = "generic";
     plugin.data.indexFolderSources = [availableLegacySource()];
     plugin.openLegacyIndexReview = () => { opened.push(plugin.getActiveKnowledgeBaseId()); };
@@ -232,8 +244,8 @@ test("legacy folder review is offered once per App session and remains eligible 
 
 test("legacy folder review is not offered without a writable Generic legacy source", () => {
   for (const mode of ["fresh", "clinical", "read-only", "unloaded", "suppressed"] as const) {
-    const plugin = new EntVaultCommandCenterPlugin({} as never, { version: "0.16.0" } as never) as
-      EntVaultCommandCenterPlugin & LegacyReviewLifecycleInternal;
+    const plugin = new EntVaultCommandCenterPlugin({} as never, { version: "0.16.0" } as never) as unknown as
+      LegacyReviewPlugin;
     if (mode !== "fresh") plugin.data.indexFolderSources = [availableLegacySource()];
     if (mode === "clinical") plugin.data.settings.workspaceMode = "ent-clinical";
     if (mode === "read-only") plugin.dataCompatibilityWarning = "Protected read-only state";
@@ -348,10 +360,10 @@ test("an App-wide What’s New barrier blocks a replacement instance's legacy re
     loadLocalStorage: (key: string) => structuredClone(localStorage.get(key) ?? null),
     saveLocalStorage: (key: string, value: unknown) => { localStorage.set(key, structuredClone(value)); },
   };
-  const announcement = new EntVaultCommandCenterPlugin(app as never, { version: "0.16.0" } as never) as
-    EntVaultCommandCenterPlugin & AnnouncementInternal;
-  const replacement = new EntVaultCommandCenterPlugin(app as never, { version: "0.16.0" } as never) as
-    EntVaultCommandCenterPlugin & LegacyReviewLifecycleInternal;
+  const announcement = new EntVaultCommandCenterPlugin(app as never, { version: "0.16.0" } as never) as unknown as
+    AnnouncementPlugin;
+  const replacement = new EntVaultCommandCenterPlugin(app as never, { version: "0.16.0" } as never) as unknown as
+    LegacyReviewPlugin;
   replacement.data.indexFolderSources = [availableLegacySource()];
   let legacyOpens = 0;
   replacement.openLegacyIndexReview = () => { legacyOpens += 1; };
@@ -396,10 +408,7 @@ test("onLayoutReady owns automatic presentation and unload prevents a late or du
       id: "ent-vault-command-center",
       name: "Knowledge Base Command Center",
       version: "0.26.1",
-    } as never) as EntVaultCommandCenterPlugin & AnnouncementInternal & {
-      loadPluginData(): Promise<{ compatible: boolean; sourceWasMissing: boolean }>;
-      registerObsidianProtocolHandler(): void;
-    };
+    } as never) as unknown as OnloadLifecyclePlugin;
     plugin.loadPluginData = async () => ({ compatible: true, sourceWasMissing: false });
     plugin.registerObsidianProtocolHandler = () => {};
     const opened: UpdateAnnouncement[] = [];
@@ -425,7 +434,7 @@ test("onLayoutReady owns automatic presentation and unload prevents a late or du
 
 test("What’s New modal is semantic, owner-document local, touch-sized, and safely links to the exact release", () => {
   const dom = createFakeDom();
-  const modal = new UpdateAnnouncementModal({}, UPDATE_ANNOUNCEMENT_0_26_1) as UpdateAnnouncementModal & {
+  const modal = new UpdateAnnouncementModal({} as never, UPDATE_ANNOUNCEMENT_0_26_1) as UpdateAnnouncementModal & {
     modalEl: HTMLElement;
     contentEl: HTMLElement;
     titleEl: HTMLElement;

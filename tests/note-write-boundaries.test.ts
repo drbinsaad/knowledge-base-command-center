@@ -1,10 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Modal, TAbstractFile, TFile, TFolder } from "obsidian";
+import { Modal, TAbstractFile, TFile, TFolder } from "./support/obsidian-stub.ts";
 import EntVaultCommandCenterPlugin from "../src/main.ts";
 import { QuickAppendModal } from "../src/follow-up-modal.ts";
 import { createDefaultStore, migrateData } from "../src/model.ts";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
+
+/** Standalone seam: `loadedData` is supplied by the support Plugin fake; `store` is private production state. */
+interface PluginTestAccess {
+  loadedData: unknown;
+  store: EntVaultCommandCenterPlugin["store"];
+}
+function privateAccess(plugin: EntVaultCommandCenterPlugin): PluginTestAccess {
+  return plugin as unknown as PluginTestAccess;
+}
 
 async function harness() {
   const entries = new Map<string, TAbstractFile>();
@@ -51,7 +60,7 @@ async function harness() {
   data.settings.workspaceMode = "generic";
   data.settings.templatesFolder = "Templates";
   const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never);
-  plugin.loadedData = createDefaultStore(data, 1, "vault-write-boundary");
+  privateAccess(plugin).loadedData = createDefaultStore(data, 1, "vault-write-boundary");
   await plugin.loadPluginData(false);
   return { plugin, hooks, entries, writes, removed, template, note, content: () => content };
 }
@@ -65,7 +74,7 @@ test("ordinary creation refuses read-only, stale base/epoch and policy changes d
       const { plugin } = fixture;
       if (change === "read-only") plugin.dataCompatibilityWarning = "Plugin data is protected read-only.";
       else if (change === "templates") plugin.data.settings.templatesFolder = "Other templates";
-      else if (change === "base") plugin.store.activeBaseId = "changed-base";
+      else if (change === "base") privateAccess(plugin).store.activeBaseId = "changed-base";
       else {
         const key = change === "epoch" ? "dataEpoch" : "externalChangeGeneration";
         const internal = plugin as unknown as Record<string, number>;
@@ -123,7 +132,7 @@ test("Quick Append rechecks read-only, base, category and file movement inside t
     const fixture = await harness();
     fixture.hooks.process = () => {
       if (change === "read-only") fixture.plugin.dataCompatibilityWarning = "Protected read-only.";
-      else if (change === "base") fixture.plugin.store.activeBaseId = "changed-base";
+      else if (change === "base") privateAccess(fixture.plugin).store.activeBaseId = "changed-base";
       else if (change === "category") fixture.plugin.data.settings.followUpCategories.find((category) => category.id === "questions")!.archived = true;
       else {
         fixture.entries.delete(fixture.note.path);

@@ -75,6 +75,10 @@ function prepared(rows = 1, token: unknown = { transaction: "opaque" }): Organiz
   };
 }
 
+function firstDraft(harness: Pick<HostHarness, "drafts">): NoteOrganizerDraft {
+  return harness.drafts[0];
+}
+
 interface HostHarness {
   host: NoteOrganizerHost;
   drafts: NoteOrganizerDraft[];
@@ -128,6 +132,18 @@ function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
   let resolvePromise: (value: T) => void = () => undefined;
   const promise = new Promise<T>((resolve) => { resolvePromise = resolve; });
   return { promise, resolve: resolvePromise };
+}
+
+/** Captures the controlled timers installed by openModal's window callback; get() fails if it never ran. */
+function timerCapture(): { install(window: FakeWindow): void; get(): ControlledTimers } {
+  const captured: { timers: ControlledTimers | null } = { timers: null };
+  return {
+    install(window: FakeWindow): void { captured.timers = controlTimers(window); },
+    get(): ControlledTimers {
+      assert.ok(captured.timers, "the modal window callback must install controlled timers");
+      return captured.timers;
+    },
+  };
 }
 
 interface ControlledTimers {
@@ -289,7 +305,9 @@ test("zero-collection organizer stages a new Collection and subheading without h
   parentMember.dispatch("change");
   button(surface.content, "Review placement").click();
   await settle();
-  const draft = harness.drafts[0];
+  // assert.deepEqual(harness.drafts, []) above narrows the property to never[];
+  // read the staged draft back through its declared type.
+  const draft = firstDraft(harness);
   assert.equal(draft.collectionCreations?.length, 2);
   assert.equal(draft.collectionCreations[1].headingId, draft.collectionCreations[0].id);
   assert.equal(draft.destinations[0].collections.targets.length, 1);
@@ -349,7 +367,7 @@ test("single-note existing Index and Library placements prefill exact identities
     assert.deepEqual(harness.appliedTokens, []);
     button(surface.content, "Review placement").click();
     await settle();
-    assert.deepEqual(harness.drafts[0].destinations[0].primary, initialPrimary);
+    assert.deepEqual(firstDraft(harness).destinations[0].primary, initialPrimary);
   }
 });
 
@@ -590,7 +608,7 @@ test("Index parent search filters in place without changing the selected locatio
   assert.deepEqual(harness.appliedTokens, []);
   button(surface.content, "Review placement").click();
   await settle();
-  assert.deepEqual(harness.drafts[0].destinations[0].primary, initialPrimary);
+  assert.deepEqual(firstDraft(harness).destinations[0].primary, initialPrimary);
 
   const small = await openSingleNote(hostHarness(notes(1), [{ ...base, initialPrimary: undefined, indexHeadings: [{ id: "small", name: "Small", subheadings: locations.slice(0, 12) }] }]).host, path);
   assert.equal(small.content.querySelectorAll("input").some((input) => input.getAttribute("aria-label") === "Find a heading or note"), false, "small lists retain the simple picker");
@@ -659,12 +677,12 @@ test("a 250k-node search indexes once and queries in one bounded pass", () => {
 });
 
 test("search input debounces to the last value and close cancels pending work", async () => {
-  let timers: ControlledTimers | null = null;
+  const timers = timerCapture();
   const surface = await openModal(
     hostHarness([{ kind: "folder", name: "ENT", path: "ENT", children: notes(500) }]).host,
     [],
     undefined,
-    (window) => { timers = controlTimers(window); },
+    (window) => { timers.install(window); },
   );
   const search = surface.content.querySelector(".ent-cc-note-organizer-search") as FakeElement;
   search.value = "t";
@@ -673,18 +691,18 @@ test("search input debounces to the last value and close cancels pending work", 
   search.dispatch("input");
   search.value = "topic";
   search.dispatch("input");
-  assert.equal(timers?.pending(), 1, "new keystrokes cancel the preceding debounce");
+  assert.equal(timers.get().pending(), 1, "new keystrokes cancel the preceding debounce");
   assert.equal(surface.content.querySelectorAll("[role=\"treeitem\"]").length, 1, "typing does not synchronously scan or repaint the tree");
-  timers?.runAll();
+  timers.get().runAll();
   assert.equal(surface.content.querySelectorAll("[role=\"treeitem\"]").length, 300);
 
   const refreshedSearch = surface.content.querySelector(".ent-cc-note-organizer-search") as FakeElement;
   refreshedSearch.value = "different";
   refreshedSearch.dispatch("input");
-  assert.equal(timers?.pending(), 1);
+  assert.equal(timers.get().pending(), 1);
   surface.modal.dismissImmediately();
-  assert.ok((timers?.cleared() ?? 0) >= 3, "superseded and close-time timers are cancelled");
-  timers?.runAll();
+  assert.ok(timers.get().cleared() >= 3, "superseded and close-time timers are cancelled");
+  timers.get().runAll();
   assert.equal(surface.content.children.length, 0, "a cancelled search cannot repaint after close");
 });
 
@@ -905,17 +923,17 @@ test("ArrowLeft restores an off-page parent in normal and searched trees", async
     "normal tree navigation returns to the parent page",
   );
 
-  let timers: ControlledTimers | null = null;
+  const timers = timerCapture();
   const searched = await openModal(
     hostHarness([folder]).host,
     [],
     undefined,
-    (window) => { timers = controlTimers(window); },
+    (window) => { timers.install(window); },
   );
   const search = searched.content.querySelector(".ent-cc-note-organizer-search") as FakeElement;
   search.value = "topic";
   search.dispatch("input");
-  timers?.runAll();
+  timers.get().runAll();
   button(searched.content, "Next").click();
   const searchedChild = searched.content.querySelector("[role=\"treeitem\"]") as FakeElement;
   assert.equal(searchedChild.getAttribute("aria-level"), "2");
@@ -957,17 +975,17 @@ test("ArrowRight reaches a child that begins the next normal or search page", as
     "normal tree navigation crosses the page boundary to the first child",
   );
 
-  let timers: ControlledTimers | null = null;
+  const timers = timerCapture();
   const searched = await openModal(
     hostHarness([root]).host,
     [],
     undefined,
-    (window) => { timers = controlTimers(window); },
+    (window) => { timers.install(window); },
   );
   const search = searched.content.querySelector(".ent-cc-note-organizer-search") as FakeElement;
   search.value = "topic";
   search.dispatch("input");
-  timers?.runAll();
+  timers.get().runAll();
   const searchedNested = searched.content.querySelector(`[data-organizer-node-path="${nested.path}"]`) as FakeElement;
   searchedNested.focus();
   searchedNested.dispatch("keydown", { key: "ArrowRight" });
@@ -1008,6 +1026,7 @@ test("draft validation preserves exact primary and collection heading targets", 
     collections: {
       mode: "add" as const,
       targets: [{ headingId: "board-review", subheadingId: "congenital" }],
+      clearAllConfirmed: false,
     },
   };
   const draft = snapshotNoteOrganizerDraft("command", selected, [destination], new Map());

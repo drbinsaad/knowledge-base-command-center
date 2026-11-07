@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { Notice, TFile } from "obsidian";
+import { Notice, TFile } from "./support/obsidian-stub.ts";
 import EntVaultCommandCenterPlugin from "../src/main.ts";
 import type { CatalogPlacementTarget } from "../src/main.ts";
 import {
@@ -17,8 +17,21 @@ import {
 } from "../src/quick-entry.ts";
 import { createQuickEntryButton, EntVaultCommandCenterView } from "../src/view.ts";
 import { AddActionModal, CollectionPickerModal, collectionTargets, IndexGroupModal, KnowledgeNoteModal, type KnowledgeNoteModalOptions, localDateStamp, type NoteDestinationSeed, TextPromptModal, VaultFilePickerModal } from "../src/modals.ts";
-import { MAX_DEVICE_LOCAL_STATE_BYTES, migrateData, portablePlaceholderPath, type LibraryDefinition, type VaultRecord } from "../src/model.ts";
+import { MAX_DEVICE_LOCAL_STATE_BYTES, migrateData, portablePlaceholderPath, type LibraryDefinition } from "../src/model.ts";
 import { createFakeDom, asHtmlElement } from "./support/fake-dom.ts";
+
+// Standalone private seams for views created with Object.create(prototype).
+// Each private member's type is derived from the production class, so a rename
+// or signature change fails to compile. ViewSeam projects the public surface
+// with Omit; intersecting the class itself with redeclared privates collapses to never.
+type ViewSeam<Seam> = Omit<EntVaultCommandCenterView, keyof Seam> & Seam;
+type View = EntVaultCommandCenterView;
+interface ViewStateSeam {
+  loadedBaseId: View["loadedBaseId"];
+  loadedDataEpoch: View["loadedDataEpoch"];
+  staleViewNoticeShown: View["staleViewNoticeShown"];
+}
+type FakeQuickEntryApp = { vault: { getAbstractFileByPath(path: string): TFile | null }; workspace: { getActiveFile(): TFile } };
 
 function quickEntryPlugin(): {
   plugin: EntVaultCommandCenterPlugin & { loadedData: unknown; savedData: unknown[] };
@@ -216,7 +229,8 @@ test("Attach-current protocol target is local, exact, writable, and privacy-safe
   target.openPrivacySafeAttachmentImportCurrentNote();
   assert.equal(opened.length, 1);
   assert.equal(Notice.messages.at(-1), "No eligible active Markdown note is available for attach file.");
-  assert.equal(Notice.messages.some((message) => message.includes("private")), false);
+  const recordedMessages: string[] = Notice.messages; // declared type survives the earlier deepEqual narrowing
+  assert.equal(recordedMessages.some((message) => message.includes("private")), false);
 
   plugin.dataCompatibilityWarning = "";
   active = new TFile("05 Sources/_books/Immutable.md");
@@ -252,17 +266,16 @@ test("Quick Entry delayed menus reject base switches and same-base data replacem
     isClinicalMode: () => false,
   };
   const calls: string[] = [];
-  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView & {
-    app: { vault: { getAbstractFileByPath(path: string): TFile | null }; workspace: { getActiveFile(): TFile } };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as ViewSeam<ViewStateSeam & {
+    app: FakeQuickEntryApp;
     plugin: typeof plugin;
-    loadedBaseId: string;
-    loadedDataEpoch: number;
-    staleViewNoticeShown: boolean;
-    startQuickCreateNote(): void;
-    startCreateKnowledgeNote(): void;
-    startLinkVaultNote(): void;
-    startAddCurrentNote(): void;
-  };
+    startQuickCreateNote: View["startQuickCreateNote"];
+    startCreateKnowledgeNote: View["startCreateKnowledgeNote"];
+    startLinkVaultNote: View["startLinkVaultNote"];
+    startAddCurrentNote: View["startAddCurrentNote"];
+    startQuickAddExistingNote: View["startQuickAddExistingNote"];
+    startQuickAddCurrentNote: View["startQuickAddCurrentNote"];
+  }>;
   view.app = {
     vault: { getAbstractFileByPath: (path) => path === current.path ? current : null },
     workspace: { getActiveFile: () => current },
@@ -363,14 +376,11 @@ test("Quick Entry base picker permits one deliberate switch but rejects an unrel
     },
     async activateView(): Promise<typeof activeView> { return activeView; },
   };
-  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView & {
+  const view = Object.create(EntVaultCommandCenterView.prototype) as ViewSeam<ViewStateSeam & {
     app: object;
     plugin: typeof plugin;
-    loadedBaseId: string;
-    loadedDataEpoch: number;
-    staleViewNoticeShown: boolean;
-    openQuickEntryBasePicker(path?: string): void;
-  };
+    openQuickEntryBasePicker: View["openQuickEntryBasePicker"];
+  }>;
   view.app = {};
   view.plugin = plugin;
   view.loadedBaseId = activeBaseId;
@@ -462,16 +472,13 @@ test("Quick Entry asks for and forwards the selected Library heading or subheadi
     async openFile(): Promise<void> { /* opening is not under test */ },
   };
   const routed: Array<{ flow: string; libraryId: string; path?: string; target: CatalogPlacementTarget }> = [];
-  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView & {
-    app: { vault: { getAbstractFileByPath(path: string): TFile | null }; workspace: { getActiveFile(): TFile } };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as ViewSeam<ViewStateSeam & {
+    app: FakeQuickEntryApp;
     plugin: typeof plugin;
-    records: VaultRecord[];
-    loadedBaseId: string;
-    loadedDataEpoch: number;
-    staleViewNoticeShown: boolean;
-    startAddExistingToLibrary(libraryId: string, target?: CatalogPlacementTarget): void;
-    startAddCurrentToLibrary(libraryId: string, path?: string, target?: CatalogPlacementTarget): void;
-  };
+    records: View["records"];
+    startAddExistingToLibrary: View["startAddExistingToLibrary"];
+    startAddCurrentToLibrary: View["startAddCurrentToLibrary"];
+  }>;
   view.app = {
     vault: { getAbstractFileByPath: (path) => path === current.path ? current : null },
     workspace: { getActiveFile: () => current },
@@ -581,13 +588,10 @@ test("Quick Entry creates a first Library heading before continuing an empty-Lib
     },
     async openFile(): Promise<void> { /* opening is not under test */ },
   };
-  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView & {
+  const view = Object.create(EntVaultCommandCenterView.prototype) as ViewSeam<ViewStateSeam & {
     app: object;
     plugin: typeof plugin;
-    loadedBaseId: string;
-    loadedDataEpoch: number;
-    staleViewNoticeShown: boolean;
-  };
+  }>;
   view.app = {};
   view.plugin = plugin;
   view.loadedBaseId = "base-a";
@@ -693,25 +697,16 @@ test("Library create and add services preserve the Quick Entry placement target"
     },
   };
   let onCreated: ((file: TFile) => void | Promise<void>) | undefined;
-  let createNote: ((value: unknown) => Promise<TFile>) | undefined;
-  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView & {
-    app: { vault: { getAbstractFileByPath(path: string): TFile | null }; workspace: { getActiveFile(): TFile } };
+  let createNote: NonNullable<Parameters<View["startCreateKnowledgeNote"]>[4]>["createNote"];
+  const view = Object.create(EntVaultCommandCenterView.prototype) as ViewSeam<ViewStateSeam & {
+    app: FakeQuickEntryApp;
     plugin: typeof plugin;
-    records: VaultRecord[];
-    loadedBaseId: string;
-    loadedDataEpoch: number;
-    staleViewNoticeShown: boolean;
-    startCreateKnowledgeNote(
-      initial?: object,
-      indexAfterCreate?: boolean,
-      created?: (file: TFile) => void | Promise<void>,
-      completionMessage?: string,
-      formContext?: { createNote?: (value: unknown) => Promise<TFile> },
-    ): void;
-    startCreateLibraryNote(libraryId: string, placement?: CatalogPlacementTarget): void;
-    startAddExistingToLibrary(libraryId: string, placement?: CatalogPlacementTarget): void;
-    startAddCurrentToLibrary(libraryId: string, path?: string, placement?: CatalogPlacementTarget): void;
-  };
+    records: View["records"];
+    startCreateKnowledgeNote: View["startCreateKnowledgeNote"];
+    startCreateLibraryNote: View["startCreateLibraryNote"];
+    startAddExistingToLibrary: View["startAddExistingToLibrary"];
+    startAddCurrentToLibrary: View["startAddCurrentToLibrary"];
+  }>;
   view.app = {
     vault: { getAbstractFileByPath: (path) => path === currentFile.path ? currentFile : null },
     workspace: { getActiveFile: () => currentFile },
@@ -735,7 +730,8 @@ test("Library create and add services preserve the Quick Entry placement target"
     view.startCreateLibraryNote(library.id, target);
     assert.ok(onCreated);
     assert.ok(createNote);
-    await createNote({ title: "Created" });
+    // Deliberately partial input (title only), exactly as before the typing migration.
+    await createNote({ title: "Created" } as unknown as Parameters<typeof createNote>[0]);
     await onCreated(createdFile);
     view.startAddExistingToLibrary(library.id, target);
     view.startAddCurrentToLibrary(library.id, currentFile.path, target);
@@ -1022,14 +1018,11 @@ test("the unified quick-create form defaults to the Inbox and re-targets the Ind
     async saveViewState(): Promise<void> { savedViewState += 1; },
     async openFile(): Promise<void> { /* opening is not under test */ },
   };
-  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView & {
+  const view = Object.create(EntVaultCommandCenterView.prototype) as ViewSeam<ViewStateSeam & {
     app: object;
     plugin: typeof plugin;
-    loadedBaseId: string;
-    loadedDataEpoch: number;
-    staleViewNoticeShown: boolean;
-    reload(): Promise<void>;
-  };
+    reload: View["reload"];
+  }>;
   view.app = {};
   view.plugin = plugin;
   view.loadedBaseId = "base-a";
@@ -1130,13 +1123,10 @@ test("the clinical profile keeps the protected proposal picker for quick note cr
     getTemplateFiles: (): TFile[] => [],
     isClinicalMode: () => true,
   };
-  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView & {
+  const view = Object.create(EntVaultCommandCenterView.prototype) as ViewSeam<ViewStateSeam & {
     app: object;
     plugin: typeof plugin;
-    loadedBaseId: string;
-    loadedDataEpoch: number;
-    staleViewNoticeShown: boolean;
-  };
+  }>;
   view.app = {};
   view.plugin = plugin;
   view.loadedBaseId = "base-a";
@@ -1191,14 +1181,11 @@ test("the Inbox destination cannot silently create a note the plugin would never
     async saveViewState(): Promise<void> { /* not under test */ },
     async openFile(): Promise<void> { /* not under test */ },
   };
-  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView & {
+  const view = Object.create(EntVaultCommandCenterView.prototype) as ViewSeam<ViewStateSeam & {
     app: object;
     plugin: typeof plugin;
-    loadedBaseId: string;
-    loadedDataEpoch: number;
-    staleViewNoticeShown: boolean;
-    reload(): Promise<void>;
-  };
+    reload: View["reload"];
+  }>;
   view.app = {};
   view.plugin = plugin;
   view.loadedBaseId = "base-a";
@@ -1259,13 +1246,10 @@ test("clinical plain create seeds the proposal folder and refuses invisible dest
     isClinicalMode: () => true,
     validateGenericNote: () => null,
   };
-  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView & {
+  const view = Object.create(EntVaultCommandCenterView.prototype) as ViewSeam<ViewStateSeam & {
     app: object;
     plugin: typeof plugin;
-    loadedBaseId: string;
-    loadedDataEpoch: number;
-    staleViewNoticeShown: boolean;
-  };
+  }>;
   view.app = {};
   view.plugin = plugin;
   view.loadedBaseId = "base-a";
@@ -1323,13 +1307,10 @@ test("a failed filing step never orphans the created note", async () => {
     },
     async mutate(_label: string, mutator: () => void): Promise<void> { mutator(); },
   };
-  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView & {
+  const view = Object.create(EntVaultCommandCenterView.prototype) as ViewSeam<ViewStateSeam & {
     app: object;
     plugin: typeof plugin;
-    loadedBaseId: string;
-    loadedDataEpoch: number;
-    staleViewNoticeShown: boolean;
-  };
+  }>;
   view.app = {};
   view.plugin = plugin;
   view.loadedBaseId = "base-a";

@@ -84,10 +84,11 @@ test("return history rejects unsupported formats without modifying their routes"
 });
 
 test("remembering routes replaces one note and keeps only the newest bounded history", () => {
-  let state = null;
+  let state: ReturnType<typeof rememberKbccReturnRoute> | null = null;
   for (let index = 0; index < MAX_KBCC_RETURN_ROUTES + 5; index += 1) {
     state = rememberKbccReturnRoute(state, "vault-main", route(`Notes/${index}.md`, index));
   }
+  assert.ok(state, "the loop remembers at least one route");
   assert.equal(state.routes.length, MAX_KBCC_RETURN_ROUTES);
   assert.equal(state.routes[0]?.notePath, `Notes/${MAX_KBCC_RETURN_ROUTES + 4}.md`);
   assert.equal(state.routes.some((candidate) => candidate.notePath === "Notes/0.md"), false);

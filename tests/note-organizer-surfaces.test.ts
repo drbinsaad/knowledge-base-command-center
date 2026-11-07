@@ -376,18 +376,18 @@ test("indicator controller keeps editor/status host ownership outside the projec
   const shown: NoteOrganizerIndicatorModel[] = [];
   let removals = 0;
   let activations = 0;
-  let activate: (() => void) | null = null;
+  const captured: { activate: (() => void) | null } = { activate: null };
   const controller = createNoteOrganizerIndicatorController({
     show(model, onActivate): void {
       shown.push({ ...model, classNames: [...model.classNames] });
-      activate = onActivate;
+      captured.activate = onActivate;
     },
     remove(): void { removals += 1; },
   }, () => { activations += 1; });
   const summary = summarizeNoteOrganizerMembership("A.md", [base("current", "Current")], "current");
   controller.update(summary);
   assert.equal(shown[0]?.state, "not-organized");
-  if (activate) activate();
+  if (captured.activate) captured.activate();
   assert.equal(activations, 1);
   controller.update(null);
   controller.destroy();
