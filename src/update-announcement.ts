@@ -370,7 +370,7 @@ export const UPDATE_ANNOUNCEMENT_0_26_1: UpdateAnnouncement = {
   title: "What’s new in Knowledge Base Command Center 0.26.1",
   intro: "Safety and reliability fixes for your organization and everyday editing.",
   highlights: [
-    "If plugin data is missing when Obsidian starts, the last readable backup is kept as a separate copy before anything is saved.",
+    "If plugin data is missing, an existing backup that can be read and recognized is preserved before saving.",
     "Sync & recovery explains that organization lives in plugin data, not notes, and how to check sync on each device.",
     "Quick Append and Library editors keep typed text after an unchanged Sync reload. Simple dialogs no longer run twice.",
     "iPad split view keeps touch-sized controls, and note detail labels are easier to read.",
