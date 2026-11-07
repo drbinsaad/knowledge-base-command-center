@@ -4,7 +4,7 @@ import test from "node:test";
 import ts from "typescript";
 
 // Compile canary: tiny in-memory fixtures are compiled with the same options as
-// tsconfig.test-support.json against the real Obsidian declarations. It proves
+// tsconfig.tests.json against the real Obsidian declarations. It proves
 // the fake file shape is checked by the compiler: a valid use compiles clean,
 // invalid fakes are rejected. No suppression comments are involved.
 
@@ -12,9 +12,9 @@ const root = process.cwd();
 const FIXTURE_DIRECTORY = path.join(root, "tests", "__canary__");
 
 function compilerOptions(): ts.CompilerOptions {
-  const configPath = path.join(root, "tsconfig.test-support.json");
+  const configPath = path.join(root, "tsconfig.tests.json");
   const read = ts.readConfigFile(configPath, (file) => ts.sys.readFile(file));
-  assert.equal(read.error, undefined, "tsconfig.test-support.json must be readable");
+  assert.equal(read.error, undefined, "tsconfig.tests.json must be readable");
   const parsed = ts.parseJsonConfigFileContent(read.config, ts.sys, root, undefined, configPath);
   assert.deepEqual(parsed.errors.map((error) => ts.flattenDiagnosticMessageText(error.messageText, "\n")), []);
   return parsed.options;

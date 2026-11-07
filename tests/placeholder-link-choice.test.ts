@@ -7,6 +7,7 @@ import { placeholderChoiceLabels, projectPlaceholderCandidates } from "../src/pl
 import EntVaultCommandCenterPlugin from "../src/main";
 import { EntVaultCommandCenterView } from "../src/view";
 import { createFakeDom } from "./support/fake-dom";
+import { asRawPortableIndexDraft } from "./support/legacy-fixtures.ts";
 
 // WF-10 fixtures P1-P6 (synthetic). Modals are observed through their prototypes; nothing is auto-chosen.
 interface Captured {
@@ -325,7 +326,7 @@ test("WF10 P6 the real link keeps placement, leaves file bytes untouched, and Un
   await plugin.loadPluginData();
   const subjectId = "subject-laryngeal-cleft";
   const placeholder = portablePlaceholderPath(subjectId);
-  plugin.data.portableIndex = {
+  asRawPortableIndexDraft(plugin.data).portableIndex = {
     version: 2,
     groups: [{ id: "group-airway", title: "Airway", order: 0 }],
     subjects: [subject(subjectId, "Laryngeal Cleft", "group-airway")],
