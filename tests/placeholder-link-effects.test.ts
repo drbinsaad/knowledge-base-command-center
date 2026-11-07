@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { TFile } from "./support/obsidian-stub.ts";
+import { asRawPortableIndexDraft } from "./support/legacy-fixtures.ts";
 import EntVaultCommandCenterPlugin from "../src/main";
 import { ConfirmModal } from "../src/modals";
 import { EntVaultCommandCenterView } from "../src/view";
@@ -10,6 +11,7 @@ import { placementFactsAt, previewPlaceholderLinkEffects } from "../src/placehol
 // WF-11 fixtures P7-P12 (synthetic data only).
 interface TestPluginBase { loadedData: unknown; savedData: unknown[] }
 type TestPlugin = EntVaultCommandCenterPlugin & TestPluginBase;
+type ViewSeam<Seam> = Omit<EntVaultCommandCenterView, keyof Seam> & Seam;
 
 const NOTE = "Knowledge Base/Airway/Laryngeal Cleft.md";
 const OTHER = "Knowledge Base/Airway/Cleft Duplicate.md";
@@ -44,7 +46,7 @@ async function scenario(options: { indexed?: boolean; linked?: boolean; owner?: 
     subjects.push(subject("owner", "Imported Duplicate", true));
     resolved.owner = OTHER;
   }
-  plugin.data.portableIndex = {
+  asRawPortableIndexDraft(plugin.data).portableIndex = {
     version: 1,
     groups: [{ id: "group-airway", title: "Airway", order: 0 }],
     subjects,
@@ -120,7 +122,10 @@ function openView(plugin: TestPlugin, files: TFile[]): { review(kind: "unlink" |
     confirms.push({ title: self.titleText, message: self.message, confirm: () => self.onConfirm() });
   };
   const app = { vault: { getAbstractFileByPath: (path: string) => files.find((file) => file.path === path) ?? null } };
-  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView & Record<string, unknown>;
+  const view = Object.create(EntVaultCommandCenterView.prototype) as ViewSeam<{
+    confirmPortableSubjectUnlink: EntVaultCommandCenterView["confirmPortableSubjectUnlink"];
+    resolvePortableSubjectLink: EntVaultCommandCenterView["resolvePortableSubjectLink"];
+  }>;
   Object.assign(view, {
     app, plugin, records: [], recordByPath: new Map(), loadedBaseId: plugin.getActiveKnowledgeBaseId(),
     loadedDataEpoch: plugin.getDataEpoch(), staleViewNoticeShown: false, viewClosed: false,
