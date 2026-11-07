@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
+import { checkJsonExportRoutes } from "./json-export-routes.mjs";
 
 // Static, repository-local invariants that mirror high-risk Community review
 // checks. This is not a substitute for Obsidian staff review or device testing.
@@ -83,15 +84,12 @@ assert.doesNotMatch(main, /id:\s*["'][^"']*(?:ent-vault-command-center|command)[
 assert.doesNotMatch(main, /name:\s*["'][^"']*command[^"']*["']/i, "command names must not include the redundant word command");
 assert.match(runtime, /Platform\.isMobile/);
 assert.match(runtime, /writePortableJson\("backup"/);
-// Every JSON export reaches the vault through one audited helper: the mobile
-// branch writes through writePortableJson(kind, …) and the desktop branch only
-// hands a blob to the user. Assert the helper and the surviving callers — the
-// portable package (which carries the workspace component; the standalone
-// workspace export was removed with the legacy Manage-index path) and the
-// same-vault recovery backup.
-assert.match(runtime, /await plugin\.writePortableJson\(kind, value\)/);
-assert.match(runtime, /deliverJsonExport\(\s*this\.plugin,\s*"portable"/);
-assert.match(runtime, /deliverJsonExport\(this\.plugin, "backup"/);
+// Every JSON export reaches the vault through one audited helper
+// (deliverJsonExport). The route checks are bound to the real reachable call
+// sites (Sync recovery modal -> export center backup purpose, automatic
+// recovery package, portfolio export) and are unit-tested for non-vacuity in
+// tests/verify-community-guard.test.ts.
+checkJsonExportRoutes(sources);
 
 const enumerationCalls = runtime.match(/\.get(?:MarkdownFiles|Files|AllLoadedFiles)\s*\(/g) ?? [];
 const bulkReads = runtime.match(/\.(?:read|cachedRead)\s*\(/g) ?? [];
