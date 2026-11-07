@@ -394,15 +394,23 @@ export function mergeKnowledgeBaseStores(
  * ancestor (both endpoint hashes validated, as in mergeMatchingEntry), and every
  * backup tombstone still present. A scalar revision or timestamp is never proof.
  */
-export function storeBackupIsCoveredBy(backup: PluginStore, primary: PluginStore): boolean {
+export function storeBackupIsCoveredBy(backup: PluginStore, primary: PluginStore, allowLineage: boolean): boolean {
   if (backup.vaultId !== primary.vaultId) return false;
-  for (const id of Object.keys(backup.deletedBaseIds)) {
+  // A deletion's time and causal proof decide later conflict rescue, so they
+  // must match exactly; a timestamp is never proof.
+  for (const [id, deletedAt] of Object.entries(backup.deletedBaseIds)) {
     if (!(id in primary.deletedBaseIds)) return false;
+    if (canonicalJsonString(deletedAt) !== canonicalJsonString(primary.deletedBaseIds[id])) return false;
+    if (canonicalJsonString(backup.deletedBaseCausality?.[id] ?? null)
+      !== canonicalJsonString(primary.deletedBaseCausality?.[id] ?? null)) return false;
   }
   return backup.bases.every((older) => {
     const current = primary.bases.find((entry) => entry.id === older.id);
     if (!current) return false;
     if (entryFingerprint(older) === entryFingerprint(current)) return true;
+    // Pre-v14 stores carry no causal metadata: migration invents heads, so
+    // lineage may only be used when both sides were stored with their own.
+    if (!allowLineage) return false;
     const trusted = older.semanticHash === semanticEntryFingerprint(older)
       && current.semanticHash === semanticEntryFingerprint(current);
     return trusted && current.semanticLineage.includes(older.semanticHead);

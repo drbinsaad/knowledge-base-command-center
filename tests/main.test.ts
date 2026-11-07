@@ -70,7 +70,7 @@ import { QuickAppendModal } from "../src/follow-up-modal.ts";
 import { AttachmentImportModal } from "../src/attachment-modal.ts";
 import { AttachmentLinkInsertionError } from "../src/attachment.ts";
 import { Notice, Plugin, TFile, TFolder, type TAbstractFile } from "obsidian";
-import { mergeKnowledgeBaseStores } from "../src/store-merge.ts";
+import { mergeKnowledgeBaseStores, storeBackupIsCoveredBy } from "../src/store-merge.ts";
 import {
   createPortfolioExport,
   type PortfolioExportV1,
@@ -14356,15 +14356,17 @@ test("a readable Sync replacement observed after loadData fails wins over the ol
   replacementData.settings.workspaceName = "Newer synced primary";
   const replacementStore = createDefaultStore(replacementData, 200, "vault-readable-replacement");
   const adapterWrites: string[] = [];
+  const keptCopies = new Map<string, string>();
   const app = {
     vault: {
       ...emptyWritableTestVault(),
       adapter: {
-        exists: async (path: string) => !path.includes("bak-kept"),
-        read: async (path: string) => path.endsWith("data.json.bak")
+        exists: async (path: string) => !path.includes("bak-kept") || keptCopies.has(path),
+        list: async () => ({ files: [...keptCopies.keys()], folders: [] as string[] }),
+        read: async (path: string) => keptCopies.get(path) ?? (path.endsWith("data.json.bak")
           ? JSON.stringify(backupStore)
-          : JSON.stringify(replacementStore),
-        write: async (path: string) => { adapterWrites.push(path); },
+          : JSON.stringify(replacementStore)),
+        write: async (path: string, content: string) => { adapterWrites.push(path); keptCopies.set(path, content); },
       },
     },
     workspace: { getLeavesOfType: () => [] },
@@ -15944,7 +15946,13 @@ test("vault-side JSON exports honor the configured exports folder", async () => 
   assert.equal(reloaded.settings.exportsFolder, DEFAULT_EXPORTS_FOLDER);
 });
 
-function missingPrimaryWithBackup(options: { backup: string | null; failKeptWrite?: boolean; rejectBackupOnce?: "exists" | "read" }) {
+function missingPrimaryWithBackup(options: {
+  backup: string | null;
+  failKeptWrite?: boolean;
+  rejectBackupOnce?: "exists" | "read";
+  /** Runs after each adapter write completes its bookkeeping, to model a concurrent change. */
+  afterWrite?: (path: string, content: string, files: Map<string, string>) => void;
+}) {
   let pendingRejection = options.rejectBackupOnce;
   const dir = ".obsidian/plugins/knowledge-base-command-center";
   const files = new Map<string, string>();
@@ -15974,7 +15982,12 @@ function missingPrimaryWithBackup(options: { backup: string | null; failKeptWrit
           if (options.failKeptWrite && path.includes("data.json.bak-kept-")) throw new Error("disk full");
           writes.push({ path, content });
           files.set(path, content);
+          options.afterWrite?.(path, content, files);
         },
+        list: async (folder: string) => ({
+          files: [...files.keys()].filter((path) => path.startsWith(`${folder}/`)),
+          folders: [] as string[],
+        }),
       },
     },
     workspace: { getLeavesOfType: () => [] },
@@ -16073,7 +16086,7 @@ function d01Stores() {
   return { older, newer, divergent, foreign };
 }
 
-function d01Setup(primary: unknown, backup: string, options: { failKeptWrite?: boolean; rejectBackupOnce?: "exists" | "read" } = {}) {
+function d01Setup(primary: unknown, backup: string, options: Omit<Parameters<typeof missingPrimaryWithBackup>[0], "backup"> = {}) {
   const setup = missingPrimaryWithBackup({ backup, ...options });
   setup.plugin.loadedData = structuredClone(primary);
   Notice.messages.length = 0;
@@ -16183,4 +16196,161 @@ test("D01: a different backup that arrives after startup is preserved before it 
   files.set(`${dir}/data.json.bak`, arrivedC);
   await plugin.mutate("Pin again", () => { plugin.data.pinnedPaths = ["New.md", "Second.md"]; });
   assert.deepEqual(keptFiles().map((path) => files.get(path)).sort(), [arrivedB, arrivedC].sort());
+});
+
+test("D01 correction 1: a backup that replaces the sampled one while its copy is being written is not destroyed", async () => {
+  const { older, newer, divergent } = d01Stores();
+  const sampleB = JSON.stringify(newer);
+  const sampleC = JSON.stringify(divergent);
+  let armed = false;
+  let fired = false;
+  const { plugin, files, dir } = d01Setup(older, JSON.stringify(older), {
+    afterWrite: (path, content, map) => {
+      if (armed && !fired && path.includes("data.json.bak-kept-") && content === sampleB) {
+        fired = true;
+        map.set(`${dir}/data.json.bak`, sampleC);
+      }
+    },
+  });
+  await plugin.loadPluginData(false);
+  files.set(`${dir}/data.json.bak`, sampleB);
+  armed = true;
+  await plugin.mutate("Pin during replacement", () => { plugin.data.pinnedPaths = ["New.md"]; }).catch(() => undefined);
+
+  assert.equal(fired, true, "the concurrent replacement happened");
+  const stored = [...files.values()];
+  assert.ok(stored.includes(sampleB), "sample B survives");
+  assert.ok(stored.includes(sampleC), "sample C survives (kept, or .bak left untouched)");
+});
+
+test("D01 correction 1: a backup that keeps changing during preservation fails closed after bounded retries", async () => {
+  const { older, newer } = d01Stores();
+  const variants = [1, 2, 3, 4, 5].map((n) => JSON.stringify({ ...newer, activeBaseId: `variant-${n}` }));
+  let next = 0;
+  const { plugin, files, dir, primaryWrites } = d01Setup(older, JSON.stringify(older), {
+    afterWrite: (path, _content, map) => {
+      if (path.includes("data.json.bak-kept-") && next < variants.length) map.set(`${dir}/data.json.bak`, variants[next++]);
+    },
+  });
+  await plugin.loadPluginData(false);
+  files.set(`${dir}/data.json.bak`, variants[next++]);
+  await assert.rejects(plugin.mutate("Pin while backup churns", () => { plugin.data.pinnedPaths = ["New.md"]; }));
+  assert.equal(primaryWrites.length, 0, "no primary write when preservation cannot settle");
+  assert.ok(next <= 4, "at most the initial sample plus two re-inspections were preserved");
+  const last = files.get(`${dir}/data.json.bak`);
+  assert.ok(variants.includes(last ?? ""), "the unpreserved latest sample was not overwritten");
+});
+
+test("D01 correction 2: deleting the startup kept copy cannot make the next edit lose the backup", async () => {
+  const { older, newer } = d01Stores();
+  const backupText = JSON.stringify(newer);
+  const { plugin, files, keptFiles } = d01Setup(older, backupText);
+  await plugin.loadPluginData(false);
+  assert.equal(keptFiles().length, 1);
+  files.delete(keptFiles()[0]);
+  await plugin.mutate("Pin after kept copy removed", () => { plugin.data.pinnedPaths = ["New.md"]; });
+  assert.ok([...files.values()].includes(backupText), "the exact bytes still exist somewhere");
+  assert.equal(keptFiles().length, 1);
+});
+
+function d01TombstoneStores() {
+  const { older } = d01Stores();
+  const removedData = migrateData(null);
+  removedData.directIndexPaths = ["Removed.md"];
+  const removed = createKnowledgeBaseEntry(removedData, "base-removed", 100);
+  const proofAt300 = createDeletedBaseCausality(removed, 300);
+  const proofAt400 = createDeletedBaseCausality(removed, 400);
+  assert.ok(proofAt300 && proofAt400);
+  const otherEdit = structuredClone(removed);
+  advanceStoreEntry(otherEdit, () => { otherEdit.data.directIndexPaths = ["Removed.md", "Other.md"]; });
+  const otherProof = createDeletedBaseCausality(otherEdit, 300);
+  assert.ok(otherProof);
+  const withTombstone = (time: number, proof: typeof proofAt300 | null) => {
+    const store = structuredClone(older);
+    store.deletedBaseIds = { "base-removed": time };
+    if (proof) store.deletedBaseCausality = { "base-removed": structuredClone(proof) };
+    return store;
+  };
+  return { withTombstone, proofAt300, proofAt400, otherProof };
+}
+
+test("D01 correction 3: tombstone time and proof must match exactly for a backup to count as covered", () => {
+  const { withTombstone, proofAt300, otherProof } = d01TombstoneStores();
+  assert.equal(storeBackupIsCoveredBy(withTombstone(300, proofAt300), withTombstone(300, proofAt300), true), true, "equality control stays quiet");
+  assert.equal(storeBackupIsCoveredBy(withTombstone(400, null), withTombstone(300, proofAt300), true), false, "changed deletion time");
+  assert.equal(storeBackupIsCoveredBy(withTombstone(300, null), withTombstone(300, proofAt300), true), false, "proof absent in the backup only");
+  assert.equal(storeBackupIsCoveredBy(withTombstone(300, proofAt300), withTombstone(300, null), true), false, "proof absent in the primary only");
+  assert.equal(storeBackupIsCoveredBy(withTombstone(300, otherProof), withTombstone(300, proofAt300), true), false, "different proofs");
+});
+
+test("D01 correction 3: a backup with different deletion metadata is kept through the real load path", async () => {
+  const { withTombstone, proofAt300 } = d01TombstoneStores();
+  const differing = d01Setup(withTombstone(300, proofAt300), JSON.stringify(withTombstone(400, null)));
+  await differing.plugin.loadPluginData(false);
+  await differing.plugin.mutate("Pin", () => { differing.plugin.data.pinnedPaths = ["New.md"]; });
+  assert.equal(differing.keptFiles().length, 1);
+
+  const equal = d01Setup(withTombstone(300, proofAt300), JSON.stringify(withTombstone(300, proofAt300)));
+  await equal.plugin.loadPluginData(false);
+  await equal.plugin.mutate("Pin", () => { equal.plugin.data.pinnedPaths = ["New.md"]; });
+  assert.equal(equal.keptFiles().length, 0, "identical deletion authority stays quiet");
+});
+
+test("D01 correction 4: restarting without edits reuses the kept copy and shows no new notice", async () => {
+  const { older, newer } = d01Stores();
+  const backupText = JSON.stringify(newer);
+  const first = d01Setup(older, backupText);
+  await first.plugin.loadPluginData(false);
+  assert.equal(first.keptNotices().length, 1);
+  for (let restart = 0; restart < 2; restart += 1) {
+    Notice.messages.length = 0;
+    const next = new EntVaultCommandCenterPlugin(first.plugin.app, { dir: first.dir } as never) as TestPluginBase;
+    next.loadedData = structuredClone(older);
+    next.saveData = async () => {};
+    await next.loadPluginData(false);
+    assert.equal(first.keptFiles().length, 1, `restart ${restart + 1}: still exactly one kept file`);
+    assert.equal(first.keptNotices().length, 0, `restart ${restart + 1}: no new notice`);
+  }
+});
+
+test("D01 correction 5: normal two-device Sync stays quiet when .bak arrives with or after data.json", async () => {
+  const { older, newer } = d01Stores();
+  for (const arrivingBackup of [older, newer]) {
+    const device = d01Setup(older, JSON.stringify(older));
+    await device.plugin.loadPluginData(false);
+    device.plugin.refreshViews = async () => {};
+    device.files.set(`${device.dir}/data.json.bak`, JSON.stringify(arrivingBackup));
+    device.plugin.loadedData = structuredClone(newer);
+    await device.plugin.onExternalSettingsChange();
+    await device.plugin.mutate("Edit after adopting the other device", () => { device.plugin.data.pinnedPaths = ["New.md"]; });
+    assert.equal(device.keptFiles().length, 0);
+    assert.equal(device.keptNotices().length, 0);
+  }
+});
+
+test("D01 correction 5: expected safe case, a .bak that arrives before its data.json is kept once", async () => {
+  const { older, newer } = d01Stores();
+  const device = d01Setup(older, JSON.stringify(newer));
+  await device.plugin.loadPluginData(false);
+  await device.plugin.mutate("Edit", () => { device.plugin.data.pinnedPaths = ["New.md"]; });
+  assert.equal(device.keptFiles().length, 1);
+  assert.equal(device.keptNotices().length, 1);
+});
+
+test("D01 correction 6: an older-format backup that differs from the primary is kept, not trusted through recomputed hashes", async () => {
+  const { older, newer } = d01Stores();
+  const legacy = structuredClone(older) as unknown as Record<string, unknown> & { bases: Array<Record<string, unknown>> };
+  legacy.version = 13;
+  for (const base of legacy.bases) {
+    delete base.semanticRevision;
+    delete base.semanticHead;
+    delete base.semanticHash;
+    delete base.semanticLineage;
+  }
+  const backupText = JSON.stringify(legacy);
+  const { plugin, files, keptFiles } = d01Setup(newer, backupText);
+  await plugin.loadPluginData(false);
+  await plugin.mutate("Pin", () => { plugin.data.pinnedPaths = ["New.md"]; });
+  assert.equal(keptFiles().length, 1);
+  assert.equal(files.get(keptFiles()[0]), backupText);
 });
