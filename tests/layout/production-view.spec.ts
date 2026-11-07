@@ -411,6 +411,17 @@ test.describe("WF10 placeholder choice", () => {
     await expect(page.getByRole("option", { name: /separately, without linking/u })).toHaveCount(1);
     expect(await linkCalls(page)).toEqual({ placed: [], linked: [] });
     await link.click();
+    // WF11 F04: the effects are reviewed before any write; Cancel leaves no link.
+    const review = page.getByRole("dialog", { name: "Link note to imported subject?", exact: true });
+    await expect(review).toContainText("Direct Index membership");
+    await expect(review).toContainText("The Markdown note is not changed");
+    expect(await linkCalls(page)).toEqual({ placed: [], linked: [] });
+    await review.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    expect((await linkCalls(page)).linked).toEqual([]);
+    await startAddExisting(page, "Laryngomalacia");
+    await page.getByRole("option", { name: /Link to “Laryngomalacia”/u }).click();
+    await page.getByRole("dialog", { name: "Link note to imported subject?", exact: true }).getByRole("button", { name: "Link note", exact: true }).click();
     await expect.poll(async () => (await linkCalls(page)).linked).toEqual([{ subjectId: "subject-larynx", path: "Inbox/Laryngomalacia.md", merge: false }]);
     expect((await linkCalls(page)).placed).toEqual([]);
   });

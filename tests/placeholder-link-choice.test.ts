@@ -123,6 +123,8 @@ test("WF10 P1 a title candidate and an ID-only candidate require an explicit cho
     assert.deepEqual(s.calls.assign, []);
     picker.choose(picker.items.find((item) => /ID match/u.test(item)) ?? "");
     await settle();
+    assert.deepEqual(s.calls.resolve, [], "the WF-11 effects review comes before the write");
+    await modals.captured.confirms.at(-1)?.confirm();
     assert.deepEqual(s.calls.resolve, [["id-only", "Notes/Laryngomalacia.md", undefined]]);
     assert.deepEqual(s.calls.assign, [], "linking never also places the note separately");
   } finally { modals.restore(); }
@@ -280,6 +282,7 @@ test("WF10 P4c a different file created at the same path is never linked, before
     assert.ok(control);
     control.choose(control.items[1]);
     await settle();
+    await modals.captured.confirms.at(-1)?.confirm();
     assert.equal(same.calls.resolve.length, 1, "control: the unchanged file links normally");
   } finally { modals.restore(); }
 });
@@ -351,6 +354,8 @@ test("WF10 P6 the real link keeps placement, leaves file bytes untouched, and Un
     assert.ok(picker, "the existing note matches the imported subject");
     picker.choose(picker.items[1]);
     await settle();
+    assert.equal(organization(), before, "the effects review is a pure read");
+    await modals.captured.confirms.at(-1)?.confirm();
     assert.equal(plugin.data.portableIndex.resolvedPathBySubjectId[subjectId], file.path);
     assert.deepEqual(plugin.data.collections[0]?.subjects, [file.path]);
     const linked = organization();
