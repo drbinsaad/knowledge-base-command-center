@@ -2022,16 +2022,17 @@ export class EntVaultCommandCenterView extends ItemView {
     const labels = placeholderChoiceLabels(candidates);
     new StringPickerModal(this.app, [separately, ...labels], `“${file.basename}” matches an imported subject`,
       "Link a subject, or add separately", async (choice) => {
-        if (!ownsBase()) return;
         if (choice === separately) {
-          addSeparately();
+          if (ownsBase()) addSeparately();
           return;
         }
         const candidate = candidates[labels.indexOf(choice)];
-        // A stale choice (file, subject or binding changed) changes nothing.
+        // A stale choice (base, file, subject or binding changed) changes nothing. Read the live data:
+        // a Sync reload may have replaced the object captured when the picker opened.
         const current = this.app.vault.getAbstractFileByPath(file.path);
         const subject = candidate && this.plugin.getPortableSubject(candidate.id);
-        if (!subject || !(current instanceof TFile) || subject.title !== candidate.title || index.resolvedPathBySubjectId[subject.id]) {
+        if (!ownsBase() || !subject || !(current instanceof TFile) || subject.title !== candidate.title
+          || this.plugin.data.portableIndex.resolvedPathBySubjectId[subject.id]) {
           new Notice("That choice is out of date. Nothing was changed.", 8000);
           return;
         }

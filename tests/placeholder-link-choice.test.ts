@@ -57,13 +57,14 @@ function scenario(options: {
   data.portableIndex.libraries = [{ id: "reading", name: "Reading", singularName: "Item", icon: "book", order: 0, sourceKind: null, archivedAt: null }];
   const notePath = options.note?.path ?? "Notes/Laryngomalacia.md";
   const file = new TFile(notePath);
-  const state = { baseId: "base-a", available: options.noteAvailable ?? (() => true), subjectsRemoved: false };
+  const state = { baseId: "base-a", available: options.noteAvailable ?? (() => true), subjectsRemoved: false, data };
   const calls = { resolve: [] as Array<[string, string, boolean | undefined]>, assign: [] as string[] };
   const frontmatter: Record<string, unknown> = {};
   if (options.note?.title) frontmatter.title = options.note.title;
   if (options.note?.id) frontmatter[data.settings.idProperty] = options.note.id;
   const plugin = {
-    data,
+    // An external Sync reload replaces the whole data object; always read the current one.
+    get data() { return state.data; },
     getActiveKnowledgeBaseId: () => state.baseId,
     getDataEpoch: () => 0,
     isClinicalMode: () => false,
@@ -72,7 +73,7 @@ function scenario(options: {
     suggestedIndexGroup: () => "Airway",
     getIndexGroups: () => ["Airway"],
     getLibrary: (id: string) => data.portableIndex.libraries.find((library) => library.id === id) ?? null,
-    getPortableSubject: (id: string) => state.subjectsRemoved ? null : data.portableIndex.subjects.find((candidate) => candidate.id === id) ?? null,
+    getPortableSubject: (id: string) => state.subjectsRemoved ? null : state.data.portableIndex.subjects.find((candidate) => candidate.id === id) ?? null,
     resolvePortableSubject: async (id: string, path: string, merge?: boolean) => { calls.resolve.push([id, path, merge]); },
     assignRecordToCatalog: async (path: string) => { calls.assign.push(path); },
   };
@@ -194,6 +195,27 @@ test("WF10 P4 a removed file, removed subject or switched base rejects safely wi
       assert.deepEqual([s.calls.resolve, s.calls.assign, modals.captured.confirms.length], [[], [], 0], name);
     } finally { modals.restore(); }
   }
+});
+
+test("WF10 P4b a binding made in a replaced data object between opening and choosing is not linked over", async () => {
+  const s = scenario({ subjects: [subject("a", "Laryngomalacia", "airway")] });
+  const modals = captureModals((files) => files[0]);
+  try {
+    s.startExisting();
+    await settle();
+    const picker = modals.captured.pickers[0];
+    assert.ok(picker);
+    // A Sync reload replaced the data object, and the subject is now bound in the replacement.
+    const replaced = cloneJsonValue(s.data);
+    replaced.portableIndex.resolvedPathBySubjectId.a = "Notes/Elsewhere.md";
+    s.state.data = replaced;
+    const notices = (Notice as unknown as { messages: string[] }).messages;
+    notices.length = 0;
+    picker.choose(picker.items[1]);
+    await settle();
+    assert.deepEqual([s.calls.resolve, s.calls.assign, modals.captured.confirms.length], [[], [], 0]);
+    assert.match(notices.at(-1) ?? "", /out of date.*Nothing was changed/u);
+  } finally { modals.restore(); }
 });
 
 test("WF10 P5 a file that already carries another portable identity needs the explicit merge confirmation", async () => {
