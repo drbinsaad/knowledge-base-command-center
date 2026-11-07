@@ -1835,6 +1835,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // vault-ID match; erasing it here would destroy the established vault's
       // route/history during that transient startup window.
       this.deviceLocalState = parsed;
+      // Only a profile that passed the supported-profile parser constrains
+      // rename binding; a cleared or malformed one yields no identity.
+      if (parsed && this.retainedProfileVaultId === null) this.retainedProfileVaultId = parsed.vaultId;
     } catch (error) {
       this.deviceLocalState = null;
       if (error instanceof DeviceLocalFutureVersionError) {
@@ -1858,12 +1861,6 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (this.vaultRenameJournalLoaded || this.deviceLocalPersistenceSuppressed) return;
     this.vaultRenameJournalLoaded = true;
     if (typeof this.app.loadLocalStorage !== "function") return;
-    try {
-      const profile = this.app.loadLocalStorage(DEVICE_LOCAL_STATE_KEY) as { vaultId?: unknown } | null;
-      if (profile && typeof profile.vaultId === "string" && profile.vaultId.trim()) this.retainedProfileVaultId = profile.vaultId.trim();
-    } catch {
-      // An unreadable profile is not a constraint; the device-local loader reports it.
-    }
     try {
       const loaded = this.app.loadLocalStorage(VAULT_RENAME_JOURNAL_KEY) as unknown;
       this.retainedVaultRenameJournal = loaded === null || loaded === undefined
@@ -2027,9 +2024,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
    * against the empty fallback and the event is never consumed by a no-op.
    */
   private recordWaitingVaultRename(entry: PendingVaultRename): boolean {
-    if (!this.renameBootstrapEpisode || this.storeIsFinalEstablishedAuthority()) return false;
-    if (this.vaultRenameJournalWarning) return true;
     const retained = this.retainedVaultRenameJournal;
+    // An outstanding bootstrap journal keeps capturing durably until a binding
+    // actually succeeds, whatever the current store's identity looks like.
+    const bootstrapOutstanding = retained?.scope.kind === "bootstrap";
+    if (!bootstrapOutstanding && (!this.renameBootstrapEpisode || this.storeIsFinalEstablishedAuthority())) return false;
+    if (this.vaultRenameJournalWarning) return true;
     if (retained?.blocked) return true;
     const scope: VaultRenameScope = retained?.scope ?? {
       kind: "bootstrap",

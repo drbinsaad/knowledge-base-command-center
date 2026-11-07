@@ -158,6 +158,44 @@ test("D03: a bootstrap journal binds to a persisted vault-migrated primary loade
   assert.deepEqual(h.plugin.data.directIndexPaths, [C]);
 });
 
+test("D03 R1a: after a failed binding write, a later rename is still captured durably and resolves after restart", async () => {
+  const h = harness({ disk: null, files: [new TFile(A)] });
+  await h.start();
+  h.rename(A, B);
+  const app = h.plugin.app as unknown as { saveLocalStorage(key: string, value: unknown): void };
+  const save = app.saveLocalStorage.bind(app);
+  let failing = true;
+  app.saveLocalStorage = (key, value) => {
+    const scope = (value as { scope?: { kind?: string } } | null)?.scope;
+    if (failing && key === VAULT_RENAME_JOURNAL_KEY && scope?.kind === "bound") throw new Error("simulated binding write failure");
+    save(key, value);
+  };
+  await arrive(h, establishedStore("vault-bind-retry", [A]));
+  assert.equal(journalOf(h)?.scope.kind, "bootstrap", "binding failed; bootstrap scope is kept");
+  failing = false;
+  h.rename(B, C);
+  await h.internal.vaultRenameRepairQueue;
+  assert.deepEqual(journalOf(h)?.renames.map((r) => [r.oldPath, r.newPath]), [[A, B], [B, C]], "the second event is durable");
+
+  const restarted = harness({ disk: h.disk.value, local: new Map(h.local), files: [new TFile(C)] });
+  await restarted.start();
+  assert.deepEqual(restarted.plugin.data.directIndexPaths, [C], "the whole chain resolves at its final path");
+  assert.equal(restarted.local.get(VAULT_RENAME_JOURNAL_KEY), null);
+});
+
+test("D03 R1b: a malformed retained profile yields no identity constraint", async () => {
+  const h = harness({
+    disk: establishedStore("vault-valid", [A]),
+    local: new Map([[DEVICE_LOCAL_STATE_KEY, { vaultId: "bogus-id" }]]),
+    files: [new TFile(A)],
+  });
+  await h.start();
+  h.rename(A, B);
+  await h.internal.vaultRenameRepairQueue;
+  assert.deepEqual(h.plugin.data.directIndexPaths, [B]);
+  assert.equal(h.local.get(VAULT_RENAME_JOURNAL_KEY), null);
+});
+
 test("D03 R3: a retained bound journal (v1 and v2) never relinks a reused source path on restart", async () => {
   const raws = [
     { version: 1, vaultId: "vault-bound", renames: [ENTRY] },
