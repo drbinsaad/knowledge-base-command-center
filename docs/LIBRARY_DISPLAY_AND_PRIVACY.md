@@ -1,6 +1,6 @@
 # Library display and privacy
 
-Version **0.24.0 supports local-vault covers only**, retaining the boundary introduced in 0.23.0. Online cover loading and its opt-in controls are not included. The earlier network-capable proposal remains deferred and unapproved; removing it from this release is not a completed privacy review.
+**Library covers load from local vault images only.** Online cover loading and its opt-in controls are not included. The earlier network-capable proposal remains deferred and unapproved; leaving it out is not a completed privacy review.
 
 ## Library settings
 
@@ -19,7 +19,7 @@ Display configures each Library independently:
 
 Property names are limited to 128 characters and exclude unsafe prototype keys and control characters. Values render as bounded plain text. Settings follow the stable Library ID, so renaming and archiving retain them; permanent deletion removes its display profile. Save and reset use guarded transactions and Undo. Reset display restores these defaults.
 
-Version 0.23.1 pins the explicit Save display action outside the scrolling form and labels unsaved, saving, and saved states. Changes do not autosave or alter note properties. Failed saves retain the draft; closing without saving discards it.
+The explicit Save display action stays pinned outside the scrolling form and labels unsaved, saving, and saved states. Changes do not autosave or alter note properties. Failed saves retain the draft; closing without saving discards it.
 
 Cards preserve headings, nested subheadings, ordering, Unplaced records, and note actions. Arrange uses the list presentation. This is a KBCC Library display, not an Obsidian <code>.base</code> query or a change to note storage.
 
@@ -35,7 +35,7 @@ reading_status: "Reading"
 
 Choose Cards and image property <code>cover</code>. Existing vault paths, wikilinks, and embedded wikilinks resolve relative to the note through Obsidian. Supported local extensions are AVIF, BMP, GIF, JPEG/JPG, PNG, and WebP. The target must resolve to a current vault file; the browser receives an Obsidian-generated resource URL. Cover references are limited to 2,048 characters.
 
-In 0.23.1, the exact property name takes priority. Only if it is absent may a unique case-insensitive name match; multiple matches require an exact selection. Only cover lookup gets this fallback—other visible metadata fields keep exact matching. One-item text lists and simple local Markdown image/link wrappers are accepted. Markdown destinations are decoded before the local-only checks; URL schemes, absolute paths, unsafe markup, and unsupported file types remain blocked.
+The exact property name takes priority. Only if it is absent may a unique case-insensitive name match; multiple matches require an exact selection. Only cover lookup gets this fallback—other visible metadata fields keep exact matching. One-item text lists and simple local Markdown image/link wrappers are accepted. Markdown destinations are decoded before the local-only checks; URL schemes, absolute paths, unsafe markup, and unsupported file types remain blocked.
 
 HTTP/HTTPS URLs, protocol-relative URLs, local SVG, arbitrary HTML, operating-system absolute paths, and supplied <code>file:</code>, <code>data:</code>, <code>javascript:</code>, or app resource URLs are rejected. An existing online URL can remain in the note property, but KBCC will not load it. Save an image into the vault yourself and change the property to its vault link if you want a cover.
 
@@ -47,7 +47,7 @@ Card dimensions, lazy loading, and image fitting do not cap decoded-image memory
 
 ## Legacy private-test state
 
-A private pre-release build offered external images and could leave <code>ent-vault-command-center.library-images.v1</code> in vault-specific App-local storage. Like 0.23.0 and 0.23.1, version 0.24.0 does not use that value to authorize image loads, does not offer an enable action, and does not copy it into plugin data, Sync state, exports, recovery or Undo. A previously allowed value cannot enable remote covers.
+A private pre-release build offered external images and could leave <code>ent-vault-command-center.library-images.v1</code> in vault-specific App-local storage. The plugin does not use that value to authorize image loads, does not offer an enable action, and does not copy it into plugin data, Sync state, exports, recovery or Undo. A previously allowed value cannot enable remote covers.
 
 **Clear device-local data** includes cleanup of this inert legacy key along with the other plugin-owned App-local values. Removing it does not clear browser cookies/cache or undo requests previously sent by a private test build. See [Local data](LOCAL_DATA.md).
 
@@ -74,4 +74,4 @@ Any future proposal must obtain independent review of the final image-loading im
 
 ## Device evidence
 
-Physical iPhone/iPad keyboard, safe-area, image-loading, VoiceOver, image-memory and controlled two-device Sync/import checks remain separately recorded in the [0.24.0 evidence record](release-evidence/0.24.0-iphone.md). After the remaining gap was disclosed, the maintainer explicitly approved publication of this tested update with that physical scope unverified. This is fresh authorization for 0.24.0, not a device Pass or reuse of the historical [0.23.1 record](release-evidence/0.23.1-iphone.md). Use synthetic notes and owned images for future checks, and never publish private vault content or recovery files.
+Automated tests cannot check a physical iPhone or iPad (keyboard, safe area, image loading, VoiceOver, image memory) or two devices syncing through Obsidian Sync. Each release’s record in `docs/release-evidence/` states what was actually run; anything not shown as run is unverified, and an older record is not a pass for a later release. Use synthetic notes and owned images for future checks, and never publish private vault content or recovery files.

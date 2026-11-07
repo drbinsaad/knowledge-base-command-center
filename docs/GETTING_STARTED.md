@@ -2,7 +2,7 @@
 
 Knowledge Base Command Center is an Obsidian plugin for building independent visual indexes over Markdown notes without making their storage folders authoritative. This guide covers installation, first-run setup, note creation, device updates, and safe migration from earlier plugin versions.
 
-Version 0.24.0 improves Collection creation, reviewed placement, scoped search, and workflow safeguards. Library settings and Cards introduced in 0.23.0 continue to use local-vault covers only. Online cover loading is excluded; the [earlier online-cover proposal](LIBRARY_DISPLAY_AND_PRIVACY.md#deferred-online-cover-proposal) remains deferred and unapproved.
+Library covers load only from images already in your vault. Online cover loading is not supported; the [earlier online-cover proposal](LIBRARY_DISPLAY_AND_PRIVACY.md#deferred-online-cover-proposal) remains deferred and unapproved. For what is new in a release, see the in-app **What’s new** window and the [changelog](../CHANGELOG.md).
 
 ## Requirements
 
@@ -87,6 +87,25 @@ The Inbox, default new-note, template, export, attachment, and per-Library creat
 
 When a note's presence is surprising, open its row or inspector and choose **Why this appears**. The explanation lists every active membership authority and then shows the Markdown path separately as storage location. For a whole-base audit, open **Manage Index… → Why included** to compare direct memberships, linked folders, protected sources, imported placeholders, exclusions, and location-only folders before changing a rule.
 
+## Folder roles: where a file is saved is not where it is organized
+
+Two things are always separate:
+
+- **Saved location** is the vault folder that physically holds the Markdown file or attachment.
+- **Placement** is where the plugin shows that note: in the Index, a Library, or a Collection. Placement lives in plugin data, not in the note.
+
+Saving a note in a folder does not place it anywhere, and placing a note somewhere does not move the file. The folders you can configure each have one job:
+
+| Folder | What it does | What it does not do |
+| --- | --- | --- |
+| **Inbox folder** | Notes saved in it appear in the separate **Inbox** section. In a Generic base the Create note form starts aimed at it. | It does not add notes to the Index, a Library, or a Collection. |
+| **Default new-note folder** | Where the Create note form starts when you pick no other destination. | It never adds existing or future notes to the Index. Changing it moves nothing. |
+| **Library creation folder** (optional, per Library, under **Settings → Libraries → Library creation profiles**) | Where notes created for that Library are saved. Left on **Inherit**, it follows the knowledge base's default. | It does not classify notes already saved there. A note joins a Library only through a Library action. |
+| **Attachment folder** | Where **Attach file to current note…** copies files, when **Attachment storage** is set to a fixed folder, a folder beside the note, or ask each time. | Ordinary paste and drag-and-drop still follow Obsidian’s own **Files & links** setting. It is not an Index source. |
+| **Templates folder** and **Exports folder** | Where template choices come from and where exports and rescue files are written inside the vault. | Not Index sources. |
+
+The only folder that adds notes to an Index is one you deliberately link as an Index source. Moving a file in Obsidian therefore changes its Index membership only if that membership came from a linked folder; direct memberships stay with the note. **Why this appears** shows the membership reason and the file’s saved location side by side.
+
 ## Create or add notes
 
 Use **Add → Create note** or **Create note…**. For each note, choose:
@@ -159,7 +178,16 @@ Each base has independent Index membership, Libraries, labels, visual arrangemen
 
 A base can be renamed, duplicated, archived, and restored. At least one available base must remain. The installation retains at most 50 available and archived bases.
 
-Permanent deletion is available only for an archived base and requires typed confirmation. It removes that base's plugin-owned organization, never its Markdown notes. Before deletion, restore the base, switch to it, export a private same-vault recovery, then archive it again.
+Permanent deletion is available only for an archived base and requires typed confirmation. It removes that base's plugin-owned organization, never its Markdown notes. Before deletion, restore the base, switch to it, export a private same-vault recovery, then archive it again. The plugin does not make an extra backup when you delete a base. Its automatic rolling backup of plugin data is a safety net for a failed save, not a permanent archive, so export the organization before you remove a base for good.
+
+### If something looks wrong
+
+Start with **Check sync and backup status**. It shows local facts about this device only. The plugin keeps copies of plugin data in two situations, and does not delete them:
+
+- a **Sync conflict rescue**, written into your Exports folder before the plugin adopts a conflicting or newly arrived store; and
+- a **kept data backup**, a copy of the previous `data.json.bak` (named `data.json.bak-kept-…`, in the plugin’s own folder) set aside when overwriting that backup could have lost content.
+
+The release candidate adds **Sync & recovery center → Review kept copies…**. It lists these copies, previews one, and restores one of its knowledge bases as a **new** base. It never replaces or edits an existing base. Until you are on a build that has it, the copies stay on disk and you can restore a same-vault recovery export from the Export / import center. See [Portability and recovery](PORTABILITY_AND_RECOVERY.md#kept-copies-and-conflict-rescues). This feature is part of the unreleased candidate; do not rely on it in an installed version that does not show it.
 
 ## Upgrade and Sync compatibility
 
@@ -201,7 +229,7 @@ After updating, confirm the plugin is enabled before opening its workspace. For 
 
 An existing installation shows **What’s new in Knowledge Base Command Center _version_** once on this device after the update, where _version_ is the newly installed release. Its complete-release-notes action is a normal link to that exact GitHub release and contacts GitHub only after you activate it; the plugin performs no background version check or network request. Fresh installs establish the local version marker without showing update news. Use **Open what’s new** in the Command Palette whenever you want to reopen the window.
 
-The sanitized [0.10.0 iPhone evidence](release-evidence/0.10.0-iphone.md) remains historical, completed-but-partial physical-device evidence. The [0.24.0 candidate record](release-evidence/0.24.0-iphone.md) and [manual checklist](manual-iphone-release-checklist.md) separately record the fresh maintainer decision to publish the Collections update with physical iPhone/iPad and controlled two-device Sync unverified. Earlier waivers and screenshots do not establish a pass for this candidate.
+Automated tests and desktop browser checks do not replace testing on a real iPhone or iPad, and no automation runs two devices through Obsidian Sync. Each release’s device record in `docs/release-evidence/` states what was actually run on a device; where a record says a check was not executed, it is unverified, not passed. The [manual checklist](manual-iphone-release-checklist.md) lists the checks. Earlier records and screenshots do not establish a pass for a later release.
 
 ## Uninstall
 
