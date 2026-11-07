@@ -358,27 +358,37 @@ function readVersion(value: unknown): number | null {
 /**
  * Recovery-specific completeness rule for one raw base body, by its declared
  * version (migrateStore is intentionally more lenient and is not changed):
- *  - an explicit integer version from 2 up to the current data version;
- *  - arrays: collections, pinnedPaths, savedViews;
- *  - settings: a non-empty plain record;
- *  - from version 11 (the oldest store envelope) also: array nextStudyPaths,
- *    plain records portableIndex and collapsed, string selectedPath, and
- *    string settings.workspaceMode.
- * Undo/Redo and named snapshots are not required (they are optional or local).
+ * An explicit integer version from 2 to the current data version is required,
+ * plus only the fields EVERY writer of that version always wrote (cumulative
+ * by version; from each PluginData interface in the project history, see
+ * logs/a06c-history.md). Undo/Redo and named snapshots are never required.
+ *  - all (2-7): array collections; non-empty plain-record settings
+ *    (history before 0.7.1 is not in the repository, so only what the v2
+ *    migration reads is required);
+ *  - 8+: arrays pinnedPaths, nextStudyPaths, savedViews, excludedIndexPaths,
+ *    indexGroupOrder; records curriculumVisual, indexGroupByPath; string
+ *    selectedPath; string settings.workspaceMode;
+ *  - 9+: record collapsed;  10+: record portableIndex;
+ *  - 12+: records displayNameByPath, indexGroupAliases;
+ *  - 15+: arrays directIndexPaths, indexFolderSources.
  */
 function baseDataIsComplete(data: Record<string, unknown>): boolean {
   const version = readVersion(data.version);
   if (version === null || version < 2 || version > DATA_VERSION) return false;
-  for (const key of ["collections", "pinnedPaths", "savedViews"]) {
-    if (!Array.isArray(data[key])) return false;
-  }
+  if (!Array.isArray(data.collections)) return false;
   if (!isRecord(data.settings) || Object.keys(data.settings).length === 0) return false;
-  if (version >= MIN_RECOGNIZED_STORE_VERSION) {
-    if (!Array.isArray(data.nextStudyPaths)) return false;
-    if (!isRecord(data.portableIndex) || !isRecord(data.collapsed)) return false;
+  const arrays: string[] = [];
+  const records: string[] = [];
+  if (version >= 8) {
+    arrays.push("pinnedPaths", "nextStudyPaths", "savedViews", "excludedIndexPaths", "indexGroupOrder");
+    records.push("curriculumVisual", "indexGroupByPath");
     if (typeof data.selectedPath !== "string" || typeof data.settings.workspaceMode !== "string") return false;
   }
-  return true;
+  if (version >= 9) records.push("collapsed");
+  if (version >= 10) records.push("portableIndex");
+  if (version >= 12) records.push("displayNameByPath", "indexGroupAliases");
+  if (version >= 15) arrays.push("directIndexPaths", "indexFolderSources");
+  return arrays.every((key) => Array.isArray(data[key])) && records.every((key) => isRecord(data[key]));
 }
 
 function trustworthyDate(value: unknown, now: number): RecoveryCopyPreview["date"] {

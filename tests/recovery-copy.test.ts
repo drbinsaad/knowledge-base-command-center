@@ -495,16 +495,76 @@ test("complete current and supported legacy payloads stay restorable", () => {
   expectPreview(parse(wrap(makeEntStore())));
   // Empty-but-complete current Generic base.
   expectPreview(parse(JSON.stringify(createDefaultStore(undefined, NOW - 1000, VAULT))));
-  // Older complete envelopes: store versions 11-16 holding complete bodies.
-  for (const version of [11, 12, 13, 14, 15, 16]) {
-    const source = cloneJsonValue(makeStore()) as unknown as { version: number; bases: Array<{ data: { version: number } }> };
-    source.version = version;
-    source.bases[0].data.version = Math.min(version + 1, DATA_VERSION);
+  // Genuine older bodies, written field by field from each historical
+  // PluginData interface (see logs/a06c-history.md), in the store versions
+  // that carried them (store 11 held data 10; store 13 data 12; store 15 data 15).
+  const legacyBodies: Array<[number, number, Record<string, unknown>]> = [
+    // [store version, data version, body]. Commits: v8 cea2434, v9 3e29330, v10 16ba4e5, v12 8a699c1, v15 d28884d.
+    [11, 10, { ...LEGACY_V10 }],
+    [13, 12, { ...LEGACY_V10, version: 12, displayNameByPath: {}, indexGroupAliases: {} }],
+    [14, 13, { ...LEGACY_V10, version: 13, displayNameByPath: {}, indexGroupAliases: {} }],
+    [15, 14, { ...LEGACY_V10, version: 14, displayNameByPath: {}, indexGroupAliases: {} }],
+    [15, 15, { ...LEGACY_V10, version: 15, displayNameByPath: {}, indexGroupAliases: {}, directIndexPaths: [], indexFolderSources: [] }],
+    [16, 16, { ...LEGACY_V10, version: 16, displayNameByPath: {}, indexGroupAliases: {}, directIndexPaths: [], indexFolderSources: [] }],
+  ];
+  for (const [storeVersion, , body] of legacyBodies) {
+    const source = withBaseData(makeStore(), body) as { version: number };
+    source.version = storeVersion;
     expectPreview(parse(JSON.stringify(source)));
     expectPreview(parse(wrap(source)));
   }
-  // A complete older body (version 5) carries the long-stable core fields.
-  const legacy = cloneJsonValue(makeStore().bases[0].data) as unknown as Record<string, unknown>;
-  legacy.version = 5;
-  expectPreview(parse(JSON.stringify(withBaseData(makeStore(), legacy))));
+  // Earlier writers (v8 and v9 never shipped inside a store, but the rule still covers them).
+  const { portableIndex: _portableIndex, ...v9 } = LEGACY_V10;
+  const { collapsed: _collapsed, ...v8 } = v9;
+  expectPreview(parse(JSON.stringify(withBaseData(makeStore(), { ...v9, version: 9 }))));
+  expectPreview(parse(JSON.stringify(withBaseData(makeStore(), { ...v8, version: 8 }))));
+  // Copied verbatim from tests/model.test.ts "v5 user organization migrates intact into the ENT clinical preset".
+  const v5Fixture = {
+    version: 5,
+    collections: [{ id: "ali", title: "Ali", collapsed: false, subjects: ["topic.md"], subheadings: [] }],
+    pinnedPaths: ["topic.md"],
+    nextStudyPaths: ["topic.md"],
+    activeTab: "syndromes",
+    settings: { proposalFolder: "01 Inbox/ENT Topic Proposals", openNoteBehavior: "split" },
+  };
+  expectPreview(parse(JSON.stringify(withBaseData(makeStore(), v5Fixture))));
+  // Each field a version always wrote is required from that version on.
+  const full15 = { ...LEGACY_V10, version: 15, displayNameByPath: {}, indexGroupAliases: {}, directIndexPaths: [], indexFolderSources: [] };
+  const dropped: Array<[string, Record<string, unknown>]> = [
+    ["portableIndex", { ...LEGACY_V10 }], ["collapsed", { ...LEGACY_V10 }],
+    ["displayNameByPath", { ...full15, version: 12 }], ["indexGroupAliases", { ...full15, version: 12 }],
+    ["directIndexPaths", { ...full15 }], ["indexFolderSources", { ...full15 }],
+    ["nextStudyPaths", { ...LEGACY_V10 }], ["curriculumVisual", { ...LEGACY_V10 }],
+  ];
+  for (const [field, body] of dropped) {
+    delete body[field];
+    expectRejected(parse(JSON.stringify(withBaseData(makeStore(), body))), "incomplete-base");
+  }
+  expectPreview(parse(JSON.stringify(withBaseData(makeStore(), full15))));
+  // Hand-pruned fixtures from other tests are deliberately incomplete, not writer output.
+  expectRejected(parse(JSON.stringify(withBaseData(makeStore(), { version: 12, settings: {} }))), "incomplete-base"); // tests/main.test.ts hand-pruned envelope
+  expectRejected(parse(JSON.stringify(withBaseData(makeStore(), { version: 2, collections: {}, settings: { workspaceMode: "generic" } }))), "incomplete-base");
 });
+
+// Field-by-field body of the version-10 writer (16ba4e5 PluginData, plus the
+// DEFAULT_SETTINGS keys it always wrote). Later versions only add keys.
+const LEGACY_V10: Record<string, unknown> = {
+  version: 10,
+  collections: [],
+  pinnedPaths: [],
+  nextStudyPaths: [],
+  savedViews: [],
+  curriculumVisual: {},
+  manualIndexPaths: [],
+  excludedIndexPaths: [],
+  indexGroupByPath: {},
+  indexGroupOrder: [],
+  portableIndex: { version: 2, groups: [], subjects: [], resolvedPathBySubjectId: {}, libraryLayouts: {} },
+  selectedPath: "",
+  activeTab: "curriculum",
+  settings: { setupComplete: true, workspaceMode: "generic", workspaceName: "Legacy Base" },
+  layoutSnapshots: [],
+  undoStack: [],
+  redoStack: [],
+  collapsed: { curriculumDomains: [], curriculumNodes: [], queues: [] },
+};
