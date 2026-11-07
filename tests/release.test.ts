@@ -3,6 +3,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import test from "node:test";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { localPathPattern } from "../scripts/local-path-pattern.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const readJson = async (name: string): Promise<Record<string, unknown>> => JSON.parse(await readFile(path.join(root, name), "utf8")) as Record<string, unknown>;
@@ -307,8 +308,43 @@ test("manual release surface contains the three required nonempty assets", async
 test("release assets do not embed a local absolute workspace path", async () => {
   for (const asset of ["main.js", "manifest.json", "styles.css"]) {
     const content = await readFile(path.join(root, asset), "utf8");
-    assert.doesNotMatch(content, /(?:\/Users\/|\/Volumes\/|(?:^|[\s"'(])[A-Za-z]:[\\/])/m);
+    assert.doesNotMatch(content, localPathPattern);
   }
+});
+
+test("the shared local-path pattern catches runner, temp, home and file URL paths", async () => {
+  for (const leaked of [
+    "/home/runner/work/x/src/main.ts",
+    "/tmp/x",
+    "/private/var/x",
+    "/var/folders/x",
+    "file:///x",
+    "/root/x",
+    "/Users/someone/x",
+    "/Volumes/Disk/x",
+    'path: "C:\\Users\\x"',
+    "(D:/work/x)",
+  ]) assert.match(leaked, localPathPattern, `${leaked} should be detected as a leaked local path`);
+  for (const fine of ["https://example.com/a/b", "relative/path/x.ts", "a:b"]) {
+    assert.doesNotMatch(fine, localPathPattern, `${fine} should not be flagged`);
+  }
+  const packager = await readFile(path.join(root, "scripts", "package-release.mjs"), "utf8");
+  assert.match(packager, /from "\.\/local-path-pattern\.mjs"/);
+  assert.doesNotMatch(packager, /\\\/Users\\\//, "package-release.mjs must use the shared pattern, not its own copy");
+});
+
+test("the release job verifies SHA256SUMS.txt after download and before attesting", async () => {
+  const workflow = await readFile(path.join(root, ".github", "workflows", "release.yml"), "utf8");
+  const releaseJob = workflow.slice(workflow.indexOf("\n  release:\n"));
+  const download = releaseJob.indexOf("actions/download-artifact@");
+  const verify = releaseJob.indexOf("sha256sum -c SHA256SUMS.txt");
+  const attest = releaseJob.indexOf("actions/attest-build-provenance@");
+  assert.ok(download >= 0, "release job must download the assets");
+  assert.ok(verify >= 0, "release job must run `sha256sum -c SHA256SUMS.txt`");
+  assert.ok(attest >= 0, "release job must attest the assets");
+  assert.ok(download < verify, "verification must come after the download");
+  assert.ok(verify < attest, "verification must come before attestation");
+  assert.doesNotMatch(releaseJob.slice(verify, verify + 40), /--ignore-missing/, "verification must fail on a missing file");
 });
 
 test("mobile flows keep primary actions visible and empty states actionable", async () => {
