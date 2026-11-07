@@ -25,9 +25,24 @@ import {
   UPDATE_ANNOUNCEMENT_0_25_0,
   UPDATE_ANNOUNCEMENT_0_25_1,
   UPDATE_ANNOUNCEMENT_0_26_0,
+  UPDATE_ANNOUNCEMENT_0_26_1,
   type UpdateAnnouncement,
 } from "../src/update-announcement.ts";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
+
+test("0.26.1 announces the safety fixes once with exact release identity", () => {
+  const result = planUpdateAnnouncement("0.26.1", "0.26.0", true);
+  assert.equal(result.announcement, UPDATE_ANNOUNCEMENT_0_26_1);
+  assert.equal(result.nextHighestObservedVersion, "0.26.1");
+  assert.equal(result.shouldPersist, true);
+  assert.equal(UPDATE_ANNOUNCEMENT_0_26_1.releaseUrl, "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.26.1");
+  const highlights = UPDATE_ANNOUNCEMENT_0_26_1.highlights.join("\n");
+  for (const term of ["backup", "plugin data, not notes", "each device", "typed text", "touch-sized"]) assert.ok(highlights.includes(term), term);
+  assert.equal(planUpdateAnnouncement("0.26.1", "0.26.1", true).announcement, null);
+  assert.equal(planUpdateAnnouncement("0.26.1", null, false).announcement, null);
+  assert.equal(planUpdateAnnouncement("0.26.0", "0.26.1", true).announcement, null);
+  assert.equal(planUpdateAnnouncement("0.26.1-rc.1", "0.26.0", true).announcement, null);
+});
 
 test("0.26.0 announces workspace controls and attachments once with exact release identity", () => {
   const result = planUpdateAnnouncement("0.26.0", "0.25.1", true);
