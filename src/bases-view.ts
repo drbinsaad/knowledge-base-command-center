@@ -196,6 +196,7 @@ export class EntHierarchyBasesView extends BasesView {
     const generation = ++this.renderGeneration;
     this.controlsGeneration += 1;
     this.captureRestorePoint();
+    this.rowPaths = new Map();
     this.groups = [];
     this.pageCursors = [];
     this.totalEntries = this.data.data.length;
@@ -343,7 +344,10 @@ export class EntHierarchyBasesView extends BasesView {
     const pageIndex = Math.min(Math.floor(wanted / pageSize), cursors.length - 1);
     this.pageCursors = cursors.slice(0, pageIndex + 1);
     this.renderPage(generation, pageIndex, false);
-    if (restore?.focus == null) return;
+    // Focus may have moved elsewhere while the rebuild was pending; only
+    // restore it when it is still in this view or was lost with the old DOM.
+    const active = this.containerEl.ownerDocument.activeElement;
+    if (restore?.focus == null || (active && active !== this.containerEl.ownerDocument.body && !this.containerEl.contains(active))) return;
     const rows = [...this.rowPaths];
     (rows.find((row) => row[1] === restore.focus) ?? rows[0])?.[0].focus({ preventScroll: true });
   }

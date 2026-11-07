@@ -645,6 +645,29 @@ test("a Bases data update never takes focus from outside the view", () => {
   assert.ok(harness.document.activeElement === outside, "focus must stay on the outside control");
 });
 
+test("focus moved outside while a rebuild is pending is not taken back", () => {
+  const { entries, harness } = openSecondPage();
+  rowByLabel(harness, "Open Item 150")?.focus();
+  setViewData(harness.view, entries, [group(entries)]);
+  harness.view.onDataUpdated();
+  const outside = harness.document.body.createEl("button", { text: "Elsewhere" });
+  outside.focus();
+  harness.window.flushTimeouts();
+  assert.equal(statusText(harness), "Showing 101–200 of 300 entries.");
+  assert.ok(harness.document.activeElement === outside, "focus must stay on the outside control");
+});
+
+test("back-to-back data updates keep the pending focus restore", () => {
+  const { entries, harness } = openSecondPage();
+  rowByLabel(harness, "Open Item 150")?.focus();
+  setViewData(harness.view, entries, [group(entries)]);
+  harness.view.onDataUpdated();
+  harness.view.onDataUpdated();
+  harness.window.flushTimeouts();
+  assert.equal(statusText(harness), "Showing 101–200 of 300 entries.");
+  assert.equal(harness.document.activeElement?.getAttribute("aria-label"), "Open Item 150");
+});
+
 test("a deleted focused row keeps the page and moves focus to the first row of that page", () => {
   const { entries, harness } = openSecondPage();
   rowByLabel(harness, "Open Item 150")?.focus();
