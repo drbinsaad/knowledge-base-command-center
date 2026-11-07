@@ -581,3 +581,104 @@ test("10,000 native groups stay linear and keep the initial DOM bounded", () => 
     "Showing 9901–10000 of 10000 entries.",
   );
 });
+
+function pagedFixtures(count: number): BasesEntry[] {
+  return Array.from({ length: count }, (_, index) => entryFixture(`Notes/Item ${String(index)}.md`, {
+    "note.domain": "Notes",
+    "note.title": `Item ${String(index)}`,
+  }).entry);
+}
+
+function openSecondPage(count = 300): { entries: BasesEntry[]; harness: ViewHarness } {
+  const entries = pagedFixtures(count);
+  const harness = createViewHarness(entries, [group(entries)], { pageSize: 100 });
+  harness.view.onDataUpdated();
+  harness.window.flushTimeouts();
+  harness.container.querySelectorAll("button.ent-cc-button").find((button) => button.textContent === "Next")?.click();
+  harness.window.flushTimeouts();
+  return { entries, harness };
+}
+
+function statusText(harness: ViewHarness): string | null {
+  return harness.container.querySelector('[role="status"]')?.textContent ?? null;
+}
+
+function rowByLabel(harness: ViewHarness, label: string): FakeElement | undefined {
+  return harness.container.querySelectorAll("button.ent-cc-base-record")
+    .find((button) => button.getAttribute("aria-label") === label);
+}
+
+test("a Bases data update keeps the current page and still allows paging back", () => {
+  const { entries, harness } = openSecondPage();
+  assert.equal(statusText(harness), "Showing 101–200 of 300 entries.");
+  setViewData(harness.view, entries, [group(entries)]);
+  harness.view.onDataUpdated();
+  harness.window.flushTimeouts();
+  assert.equal(statusText(harness), "Showing 101–200 of 300 entries.");
+  // Paging with Next moved focus onto the page's first row; the update keeps it there.
+  assert.equal(harness.document.activeElement?.getAttribute("aria-label"), "Open Item 100");
+  harness.container.querySelectorAll("button.ent-cc-button").find((button) => button.textContent === "Previous")?.click();
+  harness.window.flushTimeouts();
+  assert.equal(statusText(harness), "Showing 1–100 of 300 entries.");
+});
+
+test("a Bases data update restores focus to the same row when focus was inside the view", () => {
+  const { entries, harness } = openSecondPage();
+  rowByLabel(harness, "Open Item 150")?.focus();
+  setViewData(harness.view, entries, [group(entries)]);
+  harness.view.onDataUpdated();
+  harness.window.flushTimeouts();
+  assert.equal(statusText(harness), "Showing 101–200 of 300 entries.");
+  const focused = harness.document.activeElement;
+  assert.ok(focused);
+  assert.equal(focused.getAttribute("aria-label"), "Open Item 150");
+});
+
+test("a Bases data update never takes focus from outside the view", () => {
+  const { entries, harness } = openSecondPage();
+  const outside = harness.document.body.createEl("button", { text: "Elsewhere" });
+  outside.focus();
+  setViewData(harness.view, entries, [group(entries)]);
+  harness.view.onDataUpdated();
+  harness.window.flushTimeouts();
+  assert.equal(statusText(harness), "Showing 101–200 of 300 entries.");
+  assert.ok(harness.document.activeElement === outside, "focus must stay on the outside control");
+});
+
+test("a deleted focused row keeps the page and moves focus to the first row of that page", () => {
+  const { entries, harness } = openSecondPage();
+  rowByLabel(harness, "Open Item 150")?.focus();
+  const remaining = entries.filter((entry) => entry.file.path !== "Notes/Item 150.md");
+  setViewData(harness.view, remaining, [group(remaining)]);
+  harness.view.onDataUpdated();
+  harness.window.flushTimeouts();
+  assert.equal(statusText(harness), "Showing 101–200 of 299 entries.");
+  assert.equal(harness.document.activeElement?.getAttribute("aria-label"), "Open Item 100");
+});
+
+test("a deleted anchor row falls back to the nearest valid page", () => {
+  const { entries, harness } = openSecondPage();
+  const shrunk = entries.slice(0, 100).concat(entries.slice(101, 120));
+  setViewData(harness.view, shrunk, [group(shrunk)]);
+  harness.view.onDataUpdated();
+  harness.window.flushTimeouts();
+  assert.equal(statusText(harness), "Showing 101–119 of 119 entries.");
+
+  const tiny = entries.slice(0, 40);
+  setViewData(harness.view, tiny, [group(tiny)]);
+  harness.view.onDataUpdated();
+  harness.window.flushTimeouts();
+  assert.equal(statusText(harness), "Showing 1–40 of 40 entries.");
+});
+
+test("regrouping lands on the page that now holds the anchor row and never throws", () => {
+  const { entries, harness } = openSecondPage();
+  const regrouped = [group(entries.slice(250), "Late"), group(entries.slice(0, 250), "Early")];
+  setViewData(harness.view, entries, regrouped);
+  assert.doesNotThrow(() => {
+    harness.view.onDataUpdated();
+    harness.window.flushTimeouts();
+  });
+  assert.equal(statusText(harness), "Showing 101–200 of 300 entries.");
+  assert.ok(rowByLabel(harness, "Open Item 100"));
+});

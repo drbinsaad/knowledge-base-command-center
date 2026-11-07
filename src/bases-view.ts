@@ -164,6 +164,10 @@ export class EntHierarchyBasesView extends BasesView {
   private windowMigrationCleanup: (() => void) | null = null;
   private groups: RenderGroup[] = [];
   private pageCursors: PageCursor[] = [];
+  private pageOffset = 0;
+  private rowPaths = new Map<HTMLElement, string>();
+  // focus: null = focus was outside the view, "" = inside but not on a row.
+  private restore: { anchor?: string; focus: string | null; offset: number } | null = null;
   private totalEntries = 0;
   private options: ResolvedHierarchyBasesViewOptions | null = null;
   private groupsEl: HTMLElement | null = null;
@@ -191,6 +195,7 @@ export class EntHierarchyBasesView extends BasesView {
     this.cancelPendingCallback();
     const generation = ++this.renderGeneration;
     this.controlsGeneration += 1;
+    this.captureRestorePoint();
     this.groups = [];
     this.pageCursors = [];
     this.totalEntries = this.data.data.length;
@@ -212,12 +217,28 @@ export class EntHierarchyBasesView extends BasesView {
     this.controlsEl = this.containerEl.createDiv({ cls: "ent-cc-base-controls" });
 
     if (this.totalEntries === 0) {
+      this.restore = null;
       this.containerEl.setAttribute("aria-busy", "false");
       return;
     }
 
     this.scheduleForGeneration(generation, () => this.startGroupBuild(generation));
   }
+
+  // Remember where the reader was so a data update does not reset the page or
+  // drop focus. Skipped while no page has rendered yet, which keeps an earlier
+  // restore point alive across back-to-back updates.
+  private captureRestorePoint(): void {
+    if (this.rowPaths.size === 0) return;
+    const active = this.containerEl.ownerDocument.activeElement;
+    const rows = [...this.rowPaths];
+    this.restore = {
+      anchor: rows[0]?.[1],
+      focus: active && this.containerEl.contains(active) ? rows.find((row) => row[0] === active)?.[1] ?? "" : null,
+      offset: this.pageOffset,
+    };
+  }
+
 
   private startGroupBuild(generation: number): void {
     if (generation !== this.renderGeneration) return;
@@ -305,8 +326,26 @@ export class EntHierarchyBasesView extends BasesView {
       this.statusEl?.setText("No entries to show.");
       return;
     }
-    this.pageCursors = [{ entryIndex: 0, groupIndex: 0, offset: 0 }];
-    this.renderPage(generation, 0, false);
+    const restore = this.restore;
+    this.restore = null;
+    const pageSize = this.options?.pageSize ?? 1;
+    const cursors: PageCursor[] = [];
+    let flat = 0;
+    let focusAt = -1;
+    let anchorAt = -1;
+    this.groups.forEach((item, groupIndex) => item.entries.forEach((entry, entryIndex) => {
+      if (flat % pageSize === 0) cursors.push({ entryIndex, groupIndex, offset: flat });
+      if (entry.file.path === restore?.focus) focusAt = flat;
+      if (entry.file.path === restore?.anchor) anchorAt = flat;
+      flat += 1;
+    }));
+    const wanted = [focusAt, anchorAt, restore?.offset ?? 0].find((at) => at >= 0) ?? 0;
+    const pageIndex = Math.min(Math.floor(wanted / pageSize), cursors.length - 1);
+    this.pageCursors = cursors.slice(0, pageIndex + 1);
+    this.renderPage(generation, pageIndex, false);
+    if (restore?.focus == null) return;
+    const rows = [...this.rowPaths];
+    (rows.find((row) => row[1] === restore.focus) ?? rows[0])?.[0].focus({ preventScroll: true });
   }
 
   private renderPage(generation: number, pageIndex: number, moveFocus: boolean): void {
@@ -315,6 +354,8 @@ export class EntHierarchyBasesView extends BasesView {
     if (!pageStart) return;
     this.groupsEl.empty();
     this.controlsEl.empty();
+    this.pageOffset = pageStart.offset;
+    this.rowPaths = new Map();
     const controlsGeneration = ++this.controlsGeneration;
     let groupIndex = pageStart.groupIndex;
     let entryIndex = pageStart.entryIndex;
@@ -330,6 +371,7 @@ export class EntHierarchyBasesView extends BasesView {
         if (entry) {
           const row = this.createRecordRow(rowsEl, entry, generation);
           firstRow ??= row;
+          if (row) this.rowPaths.set(row, entry.file.path);
         }
         entryIndex += 1;
         offset += 1;
