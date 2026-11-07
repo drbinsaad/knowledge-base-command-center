@@ -607,8 +607,6 @@ export interface PendingRequiredUndoCommit {
   candidateSemanticHash: string;
   undoSnapshotAt: number;
   undoSnapshotFingerprint: string;
-  /** Binding of the older stacks, captured before the action. Absent = unverified prior. */
-  priorHistoryBinding?: DeviceHistoryBinding;
 }
 
 export interface PendingRequiredUndoBatchEntry {
@@ -620,8 +618,6 @@ export interface PendingRequiredUndoBatchEntry {
   candidateSemanticHash: string;
   undoSnapshotAt: number;
   undoSnapshotFingerprint: string;
-  /** Binding of the older stacks, captured before the action. Absent = unverified prior. */
-  priorHistoryBinding?: DeviceHistoryBinding;
 }
 
 /**
@@ -656,8 +652,6 @@ export interface PendingHistoryTransitionCommit {
   priorRedoStackFingerprint: string;
   postUndoStackFingerprint: string;
   postRedoStackFingerprint: string;
-  /** Binding of the prior stacks, captured before the action. Absent = unverified prior. */
-  priorHistoryBinding?: DeviceHistoryBinding;
 }
 
 /** Stored through App.saveLocalStorage, never through plugin data.json. */
@@ -675,6 +669,13 @@ export interface DeviceLocalPluginState {
   pendingRequiredUndoBatchCommit?: PendingRequiredUndoBatchCommit;
   /** Present only across the crash window of a user-invoked Undo/Redo transition. */
   pendingHistoryTransitionCommit?: PendingHistoryTransitionCommit;
+  /**
+   * Optional versioned extension holding the binding each journaled base's
+   * older stacks had before the action. It sits at the envelope level, which
+   * the released 0.26.1 reader ignores, so every journal object keeps its
+   * exact released key set. Missing or stripped means an unverified prior.
+   */
+  pendingPriorHistoryBinding?: { v: typeof DEVICE_HISTORY_BINDING_VERSION; bindings: Record<string, DeviceHistoryBinding> };
 }
 
 export const DEFAULT_SETTINGS: PluginSettings = {
@@ -6218,22 +6219,54 @@ export function createDeviceHistoryBinding(
  * changing any organization. Binding to the load-normalized form keeps a
  * same-state restart matching. Never uses an advertised hash.
  */
+const LOADED_FORM_FINGERPRINT_CACHE = new WeakMap<PluginData, {
+  createdAt: number;
+  archivedAt: number | null;
+  source: PluginData;
+  fingerprint: string;
+}>();
+
 function loadedFormSemanticFingerprint(entry: Pick<KnowledgeBaseEntry, "createdAt" | "archivedAt" | "data">): string {
+  // The result is reused while the live payload is still semantically equal to
+  // the copy it was computed from (one pass, no clone), so repeated builds for
+  // one commit pay for normalization once.
+  const cached = LOADED_FORM_FINGERPRINT_CACHE.get(entry.data);
+  if (cached
+    && cached.createdAt === entry.createdAt
+    && cached.archivedAt === entry.archivedAt
+    && pluginDataSemanticallyEqual(entry.data, cached.source)) {
+    return cached.fingerprint;
+  }
   try {
-    const data = JSON.parse(JSON.stringify({ ...entry.data, undoStack: [], redoStack: [] })) as unknown;
-    return semanticEntryFingerprint({ createdAt: entry.createdAt, archivedAt: entry.archivedAt, data: migrateData(data) });
+    const source = JSON.parse(JSON.stringify({ ...entry.data, undoStack: [], redoStack: [] })) as PluginData;
+    const fingerprint = semanticEntryFingerprint({
+      createdAt: entry.createdAt,
+      archivedAt: entry.archivedAt,
+      data: migrateData(source),
+    });
+    LOADED_FORM_FINGERPRINT_CACHE.set(entry.data, {
+      createdAt: entry.createdAt,
+      archivedAt: entry.archivedAt,
+      source,
+      fingerprint,
+    });
+    return fingerprint;
   } catch {
     // Unnormalizable data can only fail to match: the safe direction.
     return semanticEntryFingerprint(entry);
   }
 }
 
-/** Recompute from the loaded payload: an advertised semanticHash is never proof. */
+/**
+ * Recompute from the loaded payload: an advertised semanticHash is never proof.
+ * A loaded entry has already been through the load normalization, so its plain
+ * fingerprint is its load-normalized form (no second migration pass at startup).
+ */
 export function deviceHistoryBindingMatchesEntry(
   binding: DeviceHistoryBinding | null | undefined,
   entry: Pick<KnowledgeBaseEntry, "createdAt" | "archivedAt" | "data">,
 ): boolean {
-  return Boolean(binding) && binding?.fingerprint === loadedFormSemanticFingerprint(entry);
+  return Boolean(binding) && binding?.fingerprint === semanticEntryFingerprint(entry);
 }
 
 function isFutureDeviceHistoryBinding(raw: unknown): boolean {
@@ -6274,20 +6307,23 @@ function assertDeviceLocalVersionIsNotFuture(value: Record<string, unknown>): vo
       }
     }
   }
-  const journals: unknown[] = [value.pendingRequiredUndoCommit, value.pendingHistoryTransitionCommit];
-  if (isPlainRecord(value.pendingRequiredUndoBatchCommit) && Array.isArray(value.pendingRequiredUndoBatchCommit.entries)) {
-    journals.push(...(value.pendingRequiredUndoBatchCommit.entries as unknown[]));
-  }
-  for (const journal of journals) {
-    if (isPlainRecord(journal) && isFutureDeviceHistoryBinding(journal.priorHistoryBinding)) {
-      throw new DeviceLocalFutureVersionError();
-    }
-  }
+  if (isFutureDeviceHistoryBinding(value.pendingPriorHistoryBinding)) throw new DeviceLocalFutureVersionError();
 }
 
-/** Journal keys other than the optional versioned prior-binding extension. */
-function journalCoreKeys(value: Record<string, unknown>): string[] {
-  return Object.keys(value).filter((key) => key !== "priorHistoryBinding").sort();
+/**
+ * Envelope-level prior-binding extension. Malformed or absent input yields
+ * undefined (every journaled base then has an unverified prior); malformed
+ * individual entries are dropped, never trusted.
+ */
+function readPendingPriorHistoryBindings(raw: unknown): Record<string, DeviceHistoryBinding> | undefined {
+  if (raw === undefined) return undefined;
+  if (!isPlainRecord(raw) || raw.v !== DEVICE_HISTORY_BINDING_VERSION || !isPlainRecord(raw.bindings)) return undefined;
+  const bindings: Record<string, DeviceHistoryBinding> = {};
+  for (const [baseId, candidate] of Object.entries(raw.bindings)) {
+    const binding = readDeviceHistoryBinding(candidate);
+    if (binding) bindings[baseId] = binding;
+  }
+  return Object.keys(bindings).length > 0 ? bindings : undefined;
 }
 
 function parsePendingRequiredUndoCommit(
@@ -6307,7 +6343,7 @@ function parsePendingRequiredUndoCommit(
     "undoSnapshotAt",
     "undoSnapshotFingerprint",
   ];
-  if (journalCoreKeys(value).join("\u0000") !== expectedKeys.sort().join("\u0000")) {
+  if (Object.keys(value).sort().join("\u0000") !== expectedKeys.sort().join("\u0000")) {
     throw new Error("Pending required Undo commit has an unsupported shape.");
   }
   const baseId = cleanKnowledgeBaseId(value.baseId, "Pending required Undo knowledge base");
@@ -6332,7 +6368,6 @@ function parsePendingRequiredUndoCommit(
     || fingerprintText(canonicalJsonString(newestUndo)) !== value.undoSnapshotFingerprint) {
     throw new Error("Pending required Undo commit does not identify the newest Undo snapshot exactly.");
   }
-  const priorHistoryBinding = readDeviceHistoryBinding(value.priorHistoryBinding);
   return {
     baseId,
     parentSemanticHead: value.parentSemanticHead,
@@ -6341,7 +6376,6 @@ function parsePendingRequiredUndoCommit(
     candidateSemanticHash: value.candidateSemanticHash,
     undoSnapshotAt,
     undoSnapshotFingerprint: value.undoSnapshotFingerprint,
-    ...(priorHistoryBinding ? { priorHistoryBinding } : {}),
   };
 }
 
@@ -6374,7 +6408,7 @@ function parsePendingRequiredUndoBatchCommit(
       throw new Error(`Pending required Undo batch entry ${index + 1} is malformed.`);
     }
     const entry = raw as Record<string, unknown>;
-    if (journalCoreKeys(entry).join("\u0000") !== expectedEntryKeys.join("\u0000")) {
+    if (Object.keys(entry).sort().join("\u0000") !== expectedEntryKeys.join("\u0000")) {
       throw new Error(`Pending required Undo batch entry ${index + 1} has an unsupported shape.`);
     }
     const baseId = cleanKnowledgeBaseId(entry.baseId, `Pending required Undo batch entry ${index + 1} knowledge base`);
@@ -6409,7 +6443,6 @@ function parsePendingRequiredUndoBatchCommit(
     if (!baseExistedBefore && (undoStack.length !== 1 || localBase.view.redoStack.length !== 0)) {
       throw new Error(`Pending required Undo batch entry ${index + 1} has invalid staged history for a new knowledge base.`);
     }
-    const priorHistoryBinding = readDeviceHistoryBinding(entry.priorHistoryBinding);
     return {
       baseId,
       baseExistedBefore,
@@ -6418,7 +6451,6 @@ function parsePendingRequiredUndoBatchCommit(
       candidateSemanticHash: entry.candidateSemanticHash,
       undoSnapshotAt,
       undoSnapshotFingerprint: entry.undoSnapshotFingerprint,
-      ...(priorHistoryBinding ? { priorHistoryBinding } : {}),
     };
   });
   return { entries };
@@ -6448,7 +6480,7 @@ function parsePendingHistoryTransitionCommit(
     "sourceSnapshotAt",
     "sourceSnapshotFingerprint",
   ];
-  if (journalCoreKeys(value).join("\u0000") !== expectedKeys.sort().join("\u0000")) {
+  if (Object.keys(value).sort().join("\u0000") !== expectedKeys.sort().join("\u0000")) {
     throw new Error("Pending history transition has an unsupported shape.");
   }
   const baseId = cleanKnowledgeBaseId(value.baseId, "Pending history transition knowledge base");
@@ -6483,7 +6515,6 @@ function parsePendingHistoryTransitionCommit(
   }
   const localBase = bases.find((base) => base.baseId === baseId);
   if (!localBase) throw new Error("Pending history transition refers to an unavailable knowledge base.");
-  const priorHistoryBinding = readDeviceHistoryBinding(value.priorHistoryBinding);
   const pending: PendingHistoryTransitionCommit = {
     baseId,
     direction,
@@ -6499,7 +6530,6 @@ function parsePendingHistoryTransitionCommit(
     priorRedoStackFingerprint: value.priorRedoStackFingerprint,
     postUndoStackFingerprint: value.postUndoStackFingerprint,
     postRedoStackFingerprint: value.postRedoStackFingerprint,
-    ...(priorHistoryBinding ? { priorHistoryBinding } : {}),
   };
   projectPendingHistoryTransition(
     localBase.view.undoStack,
@@ -6617,6 +6647,10 @@ export function parseDeviceLocalPluginState(input: unknown): DeviceLocalPluginSt
   const pendingHistoryTransitionCommit = value.pendingHistoryTransitionCommit === undefined
     ? undefined
     : parsePendingHistoryTransitionCommit(value.pendingHistoryTransitionCommit, bases);
+  const pendingPriorHistoryBindings = sourceVersion === DEVICE_LOCAL_STATE_VERSION
+    && (pendingRequiredUndoCommit || pendingRequiredUndoBatchCommit || pendingHistoryTransitionCommit)
+    ? readPendingPriorHistoryBindings(value.pendingPriorHistoryBinding)
+    : undefined;
   return {
     version: DEVICE_LOCAL_STATE_VERSION,
     historyIndexFolderSourcesIncluded: sourceVersion >= DEVICE_HISTORY_PROVENANCE_VERSION,
@@ -6626,6 +6660,9 @@ export function parseDeviceLocalPluginState(input: unknown): DeviceLocalPluginSt
     ...(pendingRequiredUndoCommit ? { pendingRequiredUndoCommit } : {}),
     ...(pendingRequiredUndoBatchCommit ? { pendingRequiredUndoBatchCommit } : {}),
     ...(pendingHistoryTransitionCommit ? { pendingHistoryTransitionCommit } : {}),
+    ...(pendingPriorHistoryBindings
+      ? { pendingPriorHistoryBinding: { v: DEVICE_HISTORY_BINDING_VERSION, bindings: pendingPriorHistoryBindings } }
+      : {}),
   };
 }
 
@@ -6666,6 +6703,16 @@ export function createDeviceLocalPluginStateWithReport(
   const activeBaseId = available.some((entry) => entry.id === store.activeBaseId)
     ? store.activeBaseId
     : available[0]?.id ?? store.bases[0]?.id ?? DEFAULT_KNOWLEDGE_BASE_ID;
+  // While a journal is staged, the overrides are exactly the prior bindings
+  // of the journaled bases. They travel in the envelope-level extension so the
+  // journal objects themselves keep their released shape.
+  const journalIsStaged = Boolean(pendingRequiredUndoCommit || pendingRequiredUndoBatchCommit || pendingHistoryTransitionCommit);
+  const priorBindings: Record<string, DeviceHistoryBinding> = {};
+  if (journalIsStaged) {
+    for (const [baseId, binding] of options.historyBindings ?? []) {
+      if (binding) priorBindings[baseId] = { ...binding };
+    }
+  }
   const state: DeviceLocalPluginState = {
     version: DEVICE_LOCAL_STATE_VERSION,
     historyIndexFolderSourcesIncluded: true,
@@ -6694,6 +6741,9 @@ export function createDeviceLocalPluginStateWithReport(
       : {}),
     ...(pendingHistoryTransitionCommit
       ? { pendingHistoryTransitionCommit: cloneJsonValue(pendingHistoryTransitionCommit) }
+      : {}),
+    ...(Object.keys(priorBindings).length > 0
+      ? { pendingPriorHistoryBinding: { v: DEVICE_HISTORY_BINDING_VERSION, bindings: priorBindings } }
       : {}),
   };
   const protectedUndo = pendingRequiredUndoCommit

@@ -7,14 +7,55 @@ import {
   createDeviceLocalPluginState,
   createKnowledgeBaseEntry,
   migrateData,
-  DeviceLocalFutureVersionError,
   nextSemanticHead,
   parseDeviceLocalPluginState,
   semanticEntryFingerprint,
   snapshotPersonal,
   type PluginStore,
 } from "../src/model.ts";
+import * as model from "../src/model.ts";
 import { Notice, TFile } from "obsidian";
+
+// New D06 exports are read through the namespace so this file still loads (and
+// its assertions can fail for real) against a build that predates them.
+const FutureVersionError = (model as Record<string, unknown>).DeviceLocalFutureVersionError as
+  (new () => Error) | undefined;
+
+/**
+ * Frozen "0.26.1 reader contract": the exact key sets the released journal
+ * parsers (model.ts at e61849f9) require. Any journal this build writes must
+ * match them exactly, or 0.26.1 would reject the profile and wipe it.
+ */
+const RELEASED_JOURNAL_KEYS = {
+  required: [
+    "baseId", "candidateSemanticHash", "candidateSemanticHead", "candidateSemanticRevision",
+    "parentSemanticHead", "undoSnapshotAt", "undoSnapshotFingerprint",
+  ],
+  batch: ["entries"],
+  batchEntry: [
+    "baseExistedBefore", "baseId", "candidateSemanticHash", "candidateSemanticHead",
+    "candidateSemanticRevision", "undoSnapshotAt", "undoSnapshotFingerprint",
+  ],
+  transition: [
+    "baseId", "candidateSemanticHash", "candidateSemanticHead", "candidateSemanticRevision",
+    "direction", "inverseSnapshot", "inverseSnapshotFingerprint", "parentSemanticHead",
+    "postRedoStackFingerprint", "postUndoStackFingerprint", "priorRedoStackFingerprint",
+    "priorUndoStackFingerprint", "sourceSnapshotAt", "sourceSnapshotFingerprint",
+  ],
+};
+
+function assertReleasedJournalShape(state: unknown): void {
+  const value = state as Record<string, Record<string, unknown> | undefined>;
+  const keys = (object: unknown): string[] => Object.keys(object as object).sort();
+  if (value.pendingRequiredUndoCommit) assert.deepEqual(keys(value.pendingRequiredUndoCommit), RELEASED_JOURNAL_KEYS.required);
+  if (value.pendingHistoryTransitionCommit) assert.deepEqual(keys(value.pendingHistoryTransitionCommit), RELEASED_JOURNAL_KEYS.transition);
+  if (value.pendingRequiredUndoBatchCommit) {
+    assert.deepEqual(keys(value.pendingRequiredUndoBatchCommit), RELEASED_JOURNAL_KEYS.batch);
+    for (const entry of (value.pendingRequiredUndoBatchCommit as unknown as { entries: unknown[] }).entries) {
+      assert.deepEqual(keys(entry), RELEASED_JOURNAL_KEYS.batchEntry);
+    }
+  }
+}
 
 // D06 fixtures H01-H16. Everything here is synthetic.
 
@@ -253,9 +294,10 @@ test("H06: supported, absent, malformed and future bindings follow the chosen pa
     assert.equal(parsed.bases[0].historyBinding, undefined, "malformed means unbound, not a deleted profile");
     assert.equal(parsed.bases[0].view.undoStack.length, 1, "stacks still parse");
   }
-  assert.throws(() => parseDeviceLocalPluginState(withBinding({ v: 2, fingerprint: "0123456789abcdef" })), DeviceLocalFutureVersionError);
+  assert.ok(FutureVersionError, "the future-version error type exists");
+  assert.throws(() => parseDeviceLocalPluginState(withBinding({ v: 2, fingerprint: "0123456789abcdef" })), FutureVersionError);
   const future = { ...structuredClone(local), version: 6 };
-  assert.throws(() => parseDeviceLocalPluginState(future), DeviceLocalFutureVersionError);
+  assert.throws(() => parseDeviceLocalPluginState(future), FutureVersionError);
 
   // Plugin level: the raw value is untouched, history is empty, nothing replaces it until Clear.
   for (const raw of [future, withBinding({ v: 2, fingerprint: "0123456789abcdef" })]) {
@@ -305,8 +347,9 @@ test("H08: a required-Undo journal keeps older history only with its prior bindi
   const pending = structuredClone(live.deviceValue());
   release();
   await mutation;
-  const prior = pending?.pendingRequiredUndoCommit?.priorHistoryBinding;
+  const prior = pending?.pendingPriorHistoryBinding?.bindings[BASE_ID];
   assert.ok(prior, "prior binding captured before the action");
+  assertReleasedJournalShape(pending);
   assert.equal(firstBase(pending).historyBinding?.fingerprint, prior.fingerprint, "no false candidate stamp while staged");
   assert.ok(candidate);
 
@@ -328,10 +371,65 @@ test("H08: a required-Undo journal keeps older history only with its prior bindi
   // A genuine old marker (no prior binding anywhere) keeps only the proven step.
   const old = structuredClone(pending) as unknown as Record<string, unknown>;
   for (const base of old.bases as Array<Record<string, unknown>>) delete base.historyBinding;
-  delete (old.pendingRequiredUndoCommit as Record<string, unknown>).priorHistoryBinding;
+  delete old.pendingPriorHistoryBinding;
   const legacy = harness(candidate, old);
   await legacy.plugin.loadPluginData(false);
   assert.deepEqual(legacy.plugin.data.undoStack.map((s) => s.label), ["Crash-guarded"]);
+  // Simulated 0.26.1 writer: it parses the profile (journal shape intact), then
+  // writes it back without the unknown envelope and base keys. No wipe.
+  assert.ok(legacy.localValues.get(DEVICE_LOCAL_STATE_KEY) !== null, "the profile is not deleted");
+  assert.equal(parseDeviceLocalPluginState(structuredClone(old)).pendingRequiredUndoCommit?.baseId, BASE_ID, "the stripped profile still parses");
+});
+
+test("H10: Undo transition journals keep the released shape; older stacks survive only with a proven prior binding", async () => {
+  const stateA = migrateData(null);
+  const stateB = migrateData(null);
+  stateB.pinnedPaths = ["B.md"];
+  const current = structuredClone(stateB);
+  current.undoStack = [snapshotPersonal(stateA, "Earlier undo"), snapshotPersonal(stateA, "Restore state A")];
+  const baseline = createDefaultStore(current, 100, "vault-h10");
+  const live = harness(baseline, createDeviceLocalPluginState(baseline));
+  await live.plugin.loadPluginData(false);
+  let candidate: PluginStore | null = null;
+  let entered!: () => void;
+  const enteredPromise = new Promise<void>((resolve) => { entered = resolve; });
+  let release!: () => void;
+  const releasePromise = new Promise<void>((resolve) => { release = resolve; });
+  live.plugin.saveData = async (value: unknown) => {
+    candidate = structuredClone(value) as PluginStore;
+    entered();
+    await releasePromise;
+    live.plugin.savedData.push(structuredClone(value));
+  };
+  const operation = live.plugin.undo();
+  await enteredPromise;
+  const pending = structuredClone(live.deviceValue());
+  release();
+  await operation;
+  assert.ok(pending?.pendingHistoryTransitionCommit);
+  assertReleasedJournalShape(pending);
+  assert.ok(pending.pendingPriorHistoryBinding?.bindings[BASE_ID], "prior binding captured before the action");
+  assert.ok(candidate);
+
+  const exact = harness(candidate, pending);
+  await exact.plugin.loadPluginData(false);
+  assert.deepEqual(exact.plugin.data.undoStack.map((s) => s.label), ["Earlier undo"]);
+  assert.deepEqual(exact.plugin.data.redoStack.map((s) => s.label), ["Restore state A"]);
+
+  const old = structuredClone(pending) as unknown as Record<string, unknown>;
+  for (const base of old.bases as Array<Record<string, unknown>>) delete base.historyBinding;
+  delete old.pendingPriorHistoryBinding;
+  const legacy = harness(candidate, old);
+  await legacy.plugin.loadPluginData(false);
+  assert.deepEqual(legacy.plugin.data.undoStack, [], "an unverified older tail is not blessed");
+  assert.equal(legacy.plugin.data.redoStack.length, 1, "the exact completed step is kept");
+
+  const newer = structuredClone(candidate) as PluginStore;
+  advance(newer.bases[0], () => { newer.bases[0].data.pinnedPaths = ["Newer.md"]; });
+  const fenced = harness(newer, pending);
+  await fenced.plugin.loadPluginData(false);
+  assert.deepEqual(fenced.plugin.data.undoStack, []);
+  assert.deepEqual(fenced.plugin.data.redoStack, []);
 });
 
 test("H13: saves after fencing never re-stamp old history; a new edit starts a fresh bound chain", async () => {
@@ -377,6 +475,110 @@ test("second gate: applyHistory refuses a pair whose binding no longer names its
   assert.equal(run.primaryWrites().length, 0);
   assert.equal(run.plugin.data.undoStack.length, 0);
   assert.equal(historyNotices().length, 1);
+});
+
+test("H12: a missing-primary bootstrap never overwrites a retained foreign profile; the binding is checked only after authoritative adoption", async () => {
+  for (const changed of [false, true]) {
+    resetNotices();
+    const { s1, local } = await recordPinX(`vault-h12-${changed}`);
+    const incoming = structuredClone(s1);
+    if (changed) advance(incoming.bases[0], () => { incoming.bases[0].data.pinnedPaths = ["X.md", "Y.md"]; });
+    const run = harness(null, local);
+    await run.plugin.loadPluginData(false);
+    assert.equal(run.plugin.data.undoStack.length, 0, "the random bootstrap identity never receives the profile");
+    run.plugin.data.selectedPath = "Bootstrap/Click.md";
+    await run.plugin.saveViewState();
+    assert.deepEqual(run.localValues.get(DEVICE_LOCAL_STATE_KEY), local, "no empty-bootstrap capture overwrites the profile");
+    assert.equal(run.localWrites.filter(([key]) => key === DEVICE_LOCAL_STATE_KEY).length, 0);
+    assert.equal(historyNotices().length, 0, "nothing is reset before the identity is accepted");
+
+    run.plugin.loadedData = incoming;
+    await run.plugin.onExternalSettingsChange();
+    assert.equal(run.plugin.data.undoStack.length, changed ? 0 : 1, "binding is checked against the accepted store");
+    assert.equal(historyNotices().length, changed ? 1 : 0);
+  }
+});
+
+test("H14: binding bytes count toward the 4 MiB budget and never silently crowd out the newest history", () => {
+  const MAX = 4 * 1024 * 1024;
+  const bytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value));
+  const build = (pad: number, withBinding: boolean) => {
+    const data = migrateData(null);
+    data.undoStack = [1, 2, 3].map((index) => {
+      const snapshot = snapshotPersonal(data, `step ${index} ${"x".repeat(pad)}`);
+      return snapshot;
+    });
+    const store = createDefaultStore(data, 100, "vault-h14");
+    return model.createDeviceLocalPluginStateWithReport(
+      store, undefined, undefined, undefined,
+      withBinding ? {} : { historyBindings: new Map([[store.bases[0].id, null]]) },
+    );
+  };
+  // Find the padding at which the unbound profile fits but the bound one cannot.
+  let pad = 1_000_000;
+  for (let round = 0; round < 6; round += 1) {
+    const unbound = bytes(build(pad, false).state);
+    pad += Math.floor((MAX - 20 - unbound) / 3);
+  }
+  const unbound = build(pad, false);
+  assert.ok(bytes(unbound.state) <= MAX && bytes(unbound.state) > MAX - 200, "calibrated just under the budget");
+  assert.equal(unbound.historyTruncated, false);
+  const bound = build(pad, true);
+  assert.ok(bound.state.bases[0].historyBinding, "binding present");
+  assert.equal(bound.historyTruncated, true, "the added binding bytes are counted, so the oldest history is trimmed");
+  assert.ok(bytes(bound.state) <= MAX);
+  assert.ok(bound.state.bases[0].view.undoStack.at(-1)?.label.startsWith("step 3"), "the newest entry survives");
+});
+
+test("second gate: a stale pair cannot apply through the committed-payload fallback", async () => {
+  resetNotices();
+  const { s1, local } = await recordPinX("vault-gate-committed");
+  const run = harness(s1, local);
+  await run.plugin.loadPluginData(false);
+  // An uncommitted in-memory change alone is allowed through only while the
+  // committed payload still matches the recorded binding (the failed-save and
+  // rollback states). Once the committed payload also differs (a pending
+  // adoption), the pair is refused before any write.
+  const internals = run.plugin as unknown as { committedStoreSnapshot: PluginStore | null };
+  assert.ok(internals.committedStoreSnapshot);
+  internals.committedStoreSnapshot.bases[0].data.pinnedPaths = ["X.md", "Remote.md"];
+  run.plugin.data.pinnedPaths = ["X.md", "Local only.md"];
+  await run.plugin.undo();
+  assert.deepEqual(run.plugin.data.pinnedPaths, ["X.md", "Local only.md"], "nothing was restored");
+  assert.equal(run.primaryWrites().length, 0);
+  assert.equal(run.plugin.data.undoStack.length, 0);
+  assert.equal(historyNotices().length, 1);
+});
+
+test("R2: a losing incoming Sync arrival neither resets, announces nor saves empty history; a winning one resets once", async () => {
+  resetNotices();
+  const { s0, s1, local } = await recordPinX("vault-r2");
+  const run = harness(s1, local);
+  run.plugin.scheduleRefresh = () => {};
+  run.plugin.refreshViews = async () => {};
+  await run.plugin.loadPluginData(false);
+  assert.equal(run.plugin.data.undoStack.length, 1);
+  resetNotices();
+  run.localWrites.length = 0;
+
+  run.plugin.loadedData = structuredClone(s0);
+  await run.plugin.onExternalSettingsChange();
+  assert.deepEqual(run.plugin.data.pinnedPaths, ["X.md"], "the local state wins the merge");
+  assert.equal(run.plugin.data.undoStack.length, 1, "its stacks are kept");
+  assert.equal(historyNotices().length, 0, "no reset notice for a losing arrival");
+  for (const [key, value] of run.localWrites) {
+    if (key !== DEVICE_LOCAL_STATE_KEY) continue;
+    assert.ok(firstBase(value as LocalState).view.undoStack.length > 0, "no intermediate empty-history save");
+  }
+
+  resetNotices();
+  const winner = structuredClone(s1);
+  advance(winner.bases[0], () => { winner.bases[0].data.pinnedPaths = ["X.md", "Y.md"]; });
+  run.plugin.loadedData = winner;
+  await run.plugin.onExternalSettingsChange();
+  assert.deepEqual(run.plugin.data.pinnedPaths, ["X.md", "Y.md"]);
+  assert.equal(run.plugin.data.undoStack.length, 0, "a different remote winner resets that base");
+  assert.equal(historyNotices().length, 1, "exactly one notice, after acceptance");
 });
 
 test("H16: Clear removes the profile and nothing recreates it in the suppressed session", async () => {

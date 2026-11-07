@@ -1354,7 +1354,6 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private prepareRequiredUndoCommit(
     entry: KnowledgeBaseEntry,
     snapshot: PersonalSnapshot,
-    priorHistoryBinding?: DeviceHistoryBinding,
   ): PendingRequiredUndoCommit | null {
     const plan = this.planEntrySemanticRevision(entry);
     if (!plan) return null;
@@ -1369,7 +1368,6 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       candidateSemanticHash: plan.semanticHash,
       undoSnapshotAt: snapshot.at,
       undoSnapshotFingerprint: fingerprintText(canonicalJsonString(snapshot)),
-      ...(priorHistoryBinding ? { priorHistoryBinding } : {}),
     };
   }
 
@@ -1414,8 +1412,6 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (!before && candidate.data.undoStack.length !== 1) {
         throw new Error(`The new ${operationLabel} candidate for “${candidate.data.settings.workspaceName}” has invalid staged history.`);
       }
-      // Captured from the pre-operation clone, never from the mutated candidate.
-      const priorHistoryBinding = before ? this.priorHistoryBindingFor(before) : undefined;
       return {
         baseId,
         baseExistedBefore: Boolean(before),
@@ -1424,7 +1420,6 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         candidateSemanticHash: candidate.semanticHash,
         undoSnapshotAt: requiredUndo.at,
         undoSnapshotFingerprint: fingerprintText(canonicalJsonString(requiredUndo)),
-        ...(priorHistoryBinding ? { priorHistoryBinding } : {}),
       };
     });
     return { entries };
@@ -1437,7 +1432,6 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     inverseSnapshot: PersonalSnapshot,
     priorUndoStack: PersonalSnapshot[],
     priorRedoStack: PersonalSnapshot[],
-    priorHistoryBinding?: DeviceHistoryBinding,
   ): PendingHistoryTransitionCommit | null {
     const plan = this.planEntrySemanticRevision(entry);
     if (!plan) return null;
@@ -1459,7 +1453,6 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       priorRedoStackFingerprint: deviceHistoryStackFingerprint(priorRedoStack),
       postUndoStackFingerprint: deviceHistoryStackFingerprint(entry.data.undoStack),
       postRedoStackFingerprint: deviceHistoryStackFingerprint(entry.data.redoStack),
-      ...(priorHistoryBinding ? { priorHistoryBinding } : {}),
     };
     // Prove immediately that the compact inverse delta reconstructs the exact
     // live post-transition stacks before either localStorage or data.json sees it.
@@ -1708,6 +1701,22 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       ?? store.bases.find((entry) => entry.archivedAt === null);
     if (active) store.activeBaseId = active.id;
     if (resetBaseIds.length > 0 && state) this.recordHistoryReset(store, state, resetBaseIds);
+  }
+
+  /**
+   * The accepted merged store is authoritative. A base whose live history was
+   * recorded but whose merged stacks are empty lost its history to a remote
+   * winner with different semantics; report that once, now, and not before.
+   */
+  private noticeHistoryClearedByMerge(store: PluginStore): void {
+    const names: string[] = [];
+    for (const entry of store.bases) {
+      if (!this.historyBindingByBase.has(entry.id)) continue;
+      if (entry.data.undoStack.length > 0 || entry.data.redoStack.length > 0) continue;
+      this.historyBindingByBase.delete(entry.id);
+      names.push(privacySafeBaseName(entry.data.settings.workspaceName));
+    }
+    if (names.length > 0) this.historyResetNotice(names);
   }
 
   private recordHistoryReset(store: PluginStore, state: DeviceLocalPluginState, baseIds: readonly string[]): void {
@@ -1969,14 +1978,22 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       && entry.semanticHash === pending.candidateSemanticHash;
   }
 
-  /** True only when the journal recorded a prior binding and the staged profile still carries that same one. */
+  /** The prior binding recorded for a journaled base, if the envelope extension survived. */
+  private journaledPriorBinding(state: DeviceLocalPluginState, baseId: string): DeviceHistoryBinding | undefined {
+    return state.pendingPriorHistoryBinding?.bindings[baseId];
+  }
+
+  /**
+   * True only when the envelope recorded a prior binding and the staged base
+   * still carries that same one. This is a consistency check between two
+   * values written together before the action, not a recomputation: the
+   * pre-action payload cannot be rebuilt from a loaded candidate.
+   */
   private priorHistoryBindingIsProven(
     local: DeviceLocalKnowledgeBaseState,
-    journal: { priorHistoryBinding?: DeviceHistoryBinding },
+    prior: DeviceHistoryBinding | undefined,
   ): boolean {
-    return Boolean(journal.priorHistoryBinding
-      && local.historyBinding
-      && local.historyBinding.fingerprint === journal.priorHistoryBinding.fingerprint);
+    return Boolean(prior && local.historyBinding && local.historyBinding.fingerprint === prior.fingerprint);
   }
 
   /**
@@ -1986,10 +2003,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
    */
   private promoteExactCandidateHistory(
     local: DeviceLocalKnowledgeBaseState,
-    journal: { priorHistoryBinding?: DeviceHistoryBinding },
+    prior: DeviceHistoryBinding | undefined,
     candidateFingerprint: string,
   ): void {
-    if (!this.priorHistoryBindingIsProven(local, journal)) {
+    if (!this.priorHistoryBindingIsProven(local, prior)) {
       local.view.undoStack = local.view.undoStack.slice(-1);
     }
     local.historyBinding = { v: 1, fingerprint: candidateFingerprint };
@@ -2002,9 +2019,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
    */
   private restorePriorHistoryBinding(
     local: DeviceLocalKnowledgeBaseState,
-    journal: { priorHistoryBinding?: DeviceHistoryBinding },
+    prior: DeviceHistoryBinding | undefined,
   ): void {
-    if (journal.priorHistoryBinding) local.historyBinding = { ...journal.priorHistoryBinding };
+    if (prior) local.historyBinding = { ...prior };
     else delete local.historyBinding;
   }
 
@@ -2025,12 +2042,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (!local) throw new Error("The pending required Undo journal refers to an unavailable knowledge base.");
     if (this.committedAuthorityMatchesPendingUndo(store, pending)) {
       local.view.redoStack = [];
-      this.promoteExactCandidateHistory(local, pending, pending.candidateSemanticHash);
+      this.promoteExactCandidateHistory(local, this.journaledPriorBinding(state, pending.baseId), pending.candidateSemanticHash);
     } else {
       local.view.undoStack = local.view.undoStack.slice(0, -1);
-      this.restorePriorHistoryBinding(local, pending);
+      this.restorePriorHistoryBinding(local, this.journaledPriorBinding(state, pending.baseId));
     }
     delete resolved.pendingRequiredUndoCommit;
+    delete resolved.pendingPriorHistoryBinding;
     // Apply the resolved state in memory even if the cleanup write fails. The
     // durable marker remains safe and will be resolved again on next startup.
     this.deviceLocalState = resolved;
@@ -2077,10 +2095,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       }
       if (this.committedAuthorityMatchesPendingUndo(store, entry)) {
         local.view.redoStack = [];
-        this.promoteExactCandidateHistory(local, entry, entry.candidateSemanticHash);
+        this.promoteExactCandidateHistory(local, this.journaledPriorBinding(state, entry.baseId), entry.candidateSemanticHash);
       } else if (entry.baseExistedBefore) {
         local.view.undoStack = local.view.undoStack.slice(0, -1);
-        this.restorePriorHistoryBinding(local, entry);
+        this.restorePriorHistoryBinding(local, this.journaledPriorBinding(state, entry.baseId));
       } else {
         // A staged local profile for a new destination must never attach to a
         // missing, rejected, or different same-ID semantic authority.
@@ -2088,6 +2106,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       }
     }
     delete resolved.pendingRequiredUndoBatchCommit;
+    delete resolved.pendingPriorHistoryBinding;
     if (!resolved.bases.some((base) => base.baseId === resolved.activeBaseId)) {
       resolved.activeBaseId = resolved.bases.some((base) => base.baseId === store.activeBaseId)
         ? store.activeBaseId
@@ -2115,7 +2134,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const local = resolved.bases.find((base) => base.baseId === pending.baseId);
     if (!local) throw new Error("The pending history transition refers to an unavailable knowledge base.");
     if (this.committedAuthorityMatchesPendingUndo(store, pending)) {
-      const olderIsBound = this.priorHistoryBindingIsProven(local, pending);
+      const olderIsBound = this.priorHistoryBindingIsProven(local, this.journaledPriorBinding(state, pending.baseId));
       const post = projectPendingHistoryTransition(
         local.view.undoStack,
         local.view.redoStack,
@@ -2147,9 +2166,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         local.view.redoStack,
         pending,
       );
-      this.restorePriorHistoryBinding(local, pending);
+      this.restorePriorHistoryBinding(local, this.journaledPriorBinding(state, pending.baseId));
     }
     delete resolved.pendingHistoryTransitionCommit;
+    delete resolved.pendingPriorHistoryBinding;
     this.deviceLocalState = resolved;
     this.deviceLocalStateLoaded = true;
     try {
@@ -2173,6 +2193,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     snapshot: PersonalSnapshot,
     pending: PendingRequiredUndoCommit | null,
     previousRedoStack: PersonalSnapshot[],
+    priorHistoryBinding: DeviceHistoryBinding | undefined,
   ): boolean {
     const entry = this.store.bases.find((candidate) => candidate.id === baseId);
     if (!entry) throw new Error("The knowledge base requiring Undo is unavailable.");
@@ -2188,7 +2209,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         pending ?? undefined,
         undefined,
         undefined,
-        pending ? new Map([[baseId, pending.priorHistoryBinding ?? null]]) : undefined,
+        pending ? new Map([[baseId, priorHistoryBinding ?? null]]) : undefined,
       );
     } catch (error) {
       if (pending && /could not be bounded safely/i.test(errorMessage(error))) {
@@ -2270,7 +2291,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         undefined,
         undefined,
         pending,
-        new Map(pending.entries.map((entry) => [entry.baseId, entry.priorHistoryBinding ?? null])),
+        // Captured from the pre-operation clone, never from the mutated candidate.
+        new Map(pending.entries.map((entry) => {
+          const before = beforeById.get(entry.baseId);
+          return [entry.baseId, (before ? this.priorHistoryBindingFor(before) : undefined) ?? null];
+        })),
       );
     } catch (error) {
       if (/could not be bounded safely/i.test(errorMessage(error))) {
@@ -2417,6 +2442,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     pending: PendingHistoryTransitionCommit,
     priorUndoStack: PersonalSnapshot[],
     priorRedoStack: PersonalSnapshot[],
+    priorHistoryBinding: DeviceHistoryBinding | undefined,
   ): boolean {
     const entry = this.store.bases.find((candidate) => candidate.id === baseId);
     if (!entry) throw new Error("The knowledge base using history is unavailable.");
@@ -2430,7 +2456,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         undefined,
         pending,
         undefined,
-        new Map([[baseId, pending.priorHistoryBinding ?? null]]),
+        new Map([[baseId, priorHistoryBinding ?? null]]),
       );
     } catch (error) {
       if (/could not be bounded safely/i.test(errorMessage(error))) {
@@ -3068,7 +3094,16 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         pendingLegacyViewTruncated = built.viewStateTruncated;
       }
       if (!legacyDeviceStateMigrationBlocked) {
-        this.applyDeviceLocalState(this.store, pendingLegacyDeviceState ?? this.deviceLocalState);
+        // A captured (external) payload is not yet authoritative: its binding
+        // check, reset, notice and local save wait for the accepted merged
+        // store (see the adoption path), so a losing arrival never resets or
+        // saves empty history.
+        this.applyDeviceLocalState(this.store, pendingLegacyDeviceState ?? this.deviceLocalState, {
+          // With no committed local store (a missing-primary bootstrap) the
+          // arriving store is the first authority this profile can attach to,
+          // so it is verified as it attaches.
+          verifyHistory: capturedRead === undefined || !this.committedStoreSnapshot,
+        });
       }
       this.useActiveData(this.requireActiveBase().data);
       if (capturedRead === undefined) {
@@ -4368,6 +4403,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // above, including the ones that omit the term from their own expression.
       const needsWriteback = adopted.needsWriteback || loaded.sourceVersion !== STORE_VERSION;
       this.store = adopted.workingStore;
+      this.noticeHistoryClearedByMerge(this.store);
       if (this.reconcilePendingRequiredUndoCommit(this.store)
         || this.reconcilePendingRequiredUndoBatchCommit(this.store)
         || this.reconcilePendingHistoryTransitionCommit(this.store)) {
@@ -9577,13 +9613,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         this.invalidateRecordCache();
         if (options.requireUndo) {
           const entry = this.requireActiveBase();
-          pendingRequiredUndoCommit = this.prepareRequiredUndoCommit(entry, snapshot, priorHistoryBinding);
+          pendingRequiredUndoCommit = this.prepareRequiredUndoCommit(entry, snapshot);
           this.preparedRequiredUndoCommit = pendingRequiredUndoCommit;
           olderLocalHistoryTruncated = this.persistRequiredUndoState(
             entry.id,
             snapshot,
             pendingRequiredUndoCommit,
             previousRedoStack,
+            priorHistoryBinding,
           );
         }
         storeSaveAttempted = true;
@@ -9738,7 +9775,6 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           inverseSnapshot,
           priorUndoStack,
           priorRedoStack,
-          priorHistoryBinding,
         );
         if (pendingHistoryTransitionCommit) {
           this.preparedHistoryTransitionCommit = pendingHistoryTransitionCommit;
@@ -9747,6 +9783,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
             pendingHistoryTransitionCommit,
             priorUndoStack,
             priorRedoStack,
+            priorHistoryBinding,
           );
         }
         if (pendingHistoryTransitionCommit) {

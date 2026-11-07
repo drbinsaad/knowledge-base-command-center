@@ -287,12 +287,7 @@ function legacyPendingJournalRestart(store: PluginStore, local: ReturnType<typeo
   // A genuine v4 profile predates the history-binding extension entirely.
   const legacy = { ...structuredClone(local), version: 4 } as Record<string, unknown>;
   for (const base of (legacy.bases ?? []) as Array<Record<string, unknown>>) delete base.historyBinding;
-  const journals: Array<Record<string, unknown> | undefined> = [
-    legacy.pendingRequiredUndoCommit as Record<string, unknown> | undefined,
-    legacy.pendingHistoryTransitionCommit as Record<string, unknown> | undefined,
-    ...(((legacy.pendingRequiredUndoBatchCommit as { entries?: Array<Record<string, unknown>> } | undefined)?.entries) ?? []),
-  ];
-  for (const journal of journals) if (journal) delete journal.priorHistoryBinding;
+  delete legacy.pendingPriorHistoryBinding;
   return pluginWithKeyedLocalStorage(source, new Map([[DEVICE_LOCAL_STATE_KEY, legacy]]));
 }
 
@@ -6641,6 +6636,14 @@ test("portfolio batch Undo resolves pre-primary, exact, and mixed newer-head cra
     );
     const newOperation = plan.operations.find((candidate) => candidate.destinationKind === "new");
     assert.ok(newOperation);
+    // Released 0.26.1 reader contract: its batch parser requires exactly these keys.
+    assert.deepEqual(Object.keys(pending?.pendingRequiredUndoBatchCommit ?? {}).sort(), ["entries"]);
+    for (const batchEntry of pending?.pendingRequiredUndoBatchCommit?.entries ?? []) {
+      assert.deepEqual(Object.keys(batchEntry).sort(), [
+        "baseExistedBefore", "baseId", "candidateSemanticHash", "candidateSemanticHead",
+        "candidateSemanticRevision", "undoSnapshotAt", "undoSnapshotFingerprint",
+      ]);
+    }
     const stagedNew = pending?.bases.find((base) => base.baseId === newOperation.destinationBaseId);
     assert.equal(stagedNew?.view.undoStack.length, 1);
     assert.deepEqual(stagedNew?.view.redoStack, []);
