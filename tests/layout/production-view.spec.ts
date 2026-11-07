@@ -224,11 +224,14 @@ for (const device of [
       for (const name of ["Diagram.png", "Minutes.docx", "Results.xlsx", "Slides.pptx", "Recording.mp3", "Walkthrough.mp4", "Archive.zip", "Bundle.custom", "README", "Cover.jpg"]) {
         await expect(section.getByRole("button", { name: `Open attachment: ${name}`, exact: true })).toHaveCount(1);
       }
-      const duplicates = section.getByRole("button", { name: "Open attachment: shared.pdf", exact: true });
-      await expect(duplicates).toHaveCount(2);
-      await expect(duplicates.first()).toContainText("Attachments/One/shared.pdf");
-      await expect(duplicates.last()).toContainText("Attachments/Two/shared.pdf");
-      await expect(section.locator(".is-missing")).toHaveText("Not-synced.pdfNot available on this device");
+      await expect(section.getByRole("button", { name: "Open attachment: shared.pdf", exact: true })).toHaveCount(0);
+      const first = section.getByRole("button", { name: "Open attachment: shared.pdf in Attachments/One", exact: true });
+      const second = section.getByRole("button", { name: "Open attachment: shared.pdf in Attachments/Two", exact: true });
+      await expect(first).toHaveCount(1);
+      await expect(second).toHaveCount(1);
+      await expect(first).toContainText("Attachments/One/shared.pdf");
+      await expect(second).toContainText("Attachments/Two/shared.pdf");
+      await expect(section.locator(".is-missing")).toHaveText("Not-synced.pdfLinked reference not found; it may be a note or file");
       await expect(section.locator(".is-missing button")).toHaveCount(0);
       await expect(section.locator("img, iframe, audio, video, object, embed")).toHaveCount(0);
       await expect(section).not.toContainText("remote.pdf");

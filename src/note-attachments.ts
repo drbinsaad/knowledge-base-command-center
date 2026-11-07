@@ -2,6 +2,10 @@ import { parseLinktext, setIcon, TFile, type App, type CachedMetadata } from "ob
 
 const MAX_REFERENCE_LENGTH = 2048;
 export const ATTACHMENT_PAGE_SIZE = 20;
+/** Attribute holding a row's exact vault path; compare its value, never interpolate it into a selector. */
+export const ATTACHMENT_PATH_ATTRIBUTE = "data-ent-cc-attachment-path";
+/** A missing reference is not evidence of a sync problem; it may be an ordinary note or file name. */
+export const MISSING_REFERENCE_TEXT = "Linked reference not found; it may be a note or file";
 
 export interface NoteAttachment {
   path: string;
@@ -104,16 +108,28 @@ export function renderNoteAttachments(parent: HTMLElement, result: NoteAttachmen
     let firstNew: HTMLElement | null = null;
     for (const item of result.items.slice(shown, end)) {
       const entry = list.createDiv({ attr: { role: "listitem" } });
+      const duplicate = (nameCounts.get(item.name) ?? 0) > 1;
+      // The exact path is an attribute value for later focus restoration; callers compare values, never build selectors from it.
+      const identity = { [ATTACHMENT_PATH_ATTRIBUTE]: item.path };
+      const folder = item.path.includes("/") ? item.path.slice(0, item.path.lastIndexOf("/")) : "";
       const row = item.available
-        ? entry.createEl("button", { cls: "ent-cc-attachment-row ent-cc-attachment-link", type: "button", attr: { title: item.path, "aria-label": `Open attachment: ${item.name}` } })
-        : entry.createDiv({ cls: "ent-cc-attachment-row is-missing" });
+        ? entry.createEl("button", { cls: "ent-cc-attachment-row ent-cc-attachment-link", type: "button", attr: { ...identity, title: item.path, "aria-label": duplicate ? `Open attachment: ${item.name} in ${folder || "vault root"}` : `Open attachment: ${item.name}` } })
+        : entry.createDiv({ cls: "ent-cc-attachment-row is-missing", attr: identity });
       if (!firstNew) firstNew = row;
       setIcon(row.createSpan({ attr: { "aria-hidden": "true" } }), item.available ? "paperclip" : "file-question");
       const copy = row.createSpan({ cls: "ent-cc-attachment-copy" });
       copy.createSpan({ cls: "ent-cc-attachment-name", text: item.name, attr: { dir: "auto" } });
-      copy.createSpan({ cls: "ent-cc-attachment-meta", text: item.available
-        ? `${item.extension ? item.extension.toUpperCase() : "File"}${(nameCounts.get(item.name) ?? 0) > 1 ? ` · ${item.path}` : ""}`
-        : "Not available on this device", attr: { dir: "auto" } });
+      if (item.available) {
+        // Extension and path are separate so an Arabic or long path cannot reorder the type label.
+        const meta = copy.createSpan({ cls: "ent-cc-attachment-meta" });
+        meta.createSpan({ cls: "ent-cc-attachment-extension", text: item.extension ? item.extension.toUpperCase() : "File" });
+        if (duplicate) {
+          meta.createSpan({ text: " · ", attr: { "aria-hidden": "true" } });
+          meta.createSpan({ cls: "ent-cc-attachment-path", text: item.path, attr: { dir: "auto" } });
+        }
+      } else {
+        copy.createSpan({ cls: "ent-cc-attachment-meta", text: MISSING_REFERENCE_TEXT, attr: { dir: "auto" } });
+      }
       if (item.available) row.addEventListener("click", () => onOpen(item.path));
     }
     shown = end;
