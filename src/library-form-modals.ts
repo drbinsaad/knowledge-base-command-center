@@ -1,21 +1,9 @@
 import { Modal, Notice, Setting, setIcon } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
 import type { LibraryDefinitionInput, LibraryRemovalDestination } from "./main";
-import { resolveLibraryIconId } from "./library-icons";
+import { LIBRARY_ICON_IDS, resolveLibraryIconId } from "./library-icons";
 import { errorMessage, type LibraryDefinition } from "./model";
 import { createOpenedBaseGuard, modalOwnerWindow, type OpenedBaseGuard } from "./modals";
-
-/**
- * Temporary local copy of the Library icon choices. The canonical tuple still lives in
- * main.ts; this leaf must not import main at runtime (that would re-create the cycle).
- * tests/library-form-modals.test.ts asserts it stays identical to main's tuple until the
- * tuple moves out of main.ts in its own ticket.
- */
-export const LIBRARY_FORM_ICON_IDS = [
-  "library", "book-open", "book-copy", "folder", "folders", "bookmark", "archive",
-  "clipboard-list", "pill", "dna", "stethoscope", "heart-pulse", "brain", "microscope",
-  "flask-conical", "syringe", "activity", "graduation-cap", "file-text", "notebook-tabs",
-] as const;
 
 export function reportLibraryError(error: unknown): void {
   console.error("Knowledge Base Command Center library action failed", error);
@@ -165,7 +153,7 @@ export class LibraryEditorModal extends Modal {
     });
     const displayedIcon = resolveLibraryIconId(this.icon);
     this.iconButtonEls.clear();
-    for (const icon of LIBRARY_FORM_ICON_IDS) {
+    for (const icon of LIBRARY_ICON_IDS) {
       const label = readableIconName(icon);
       const button = iconGrid.createEl("button", {
         cls: `ent-cc-library-icon-choice ${displayedIcon === icon ? "is-selected" : ""}`,

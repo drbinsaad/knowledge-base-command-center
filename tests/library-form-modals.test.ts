@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import ts from "typescript";
 import { LIBRARY_ICON_IDS } from "../src/main.ts";
+import * as libraryIcons from "../src/library-icons.ts";
 import * as leaf from "../src/library-form-modals.ts";
 import * as libraryModal from "../src/library-modal.ts";
 import * as settingsModal from "../src/library-settings-modal.ts";
@@ -79,6 +80,8 @@ test("the library form leaf has no runtime import of main, library-modal or libr
   }
 });
 
-test("the leaf icon choices stay identical to main's canonical tuple until it moves", () => {
-  assert.deepEqual([...leaf.LIBRARY_FORM_ICON_IDS], [...LIBRARY_ICON_IDS]);
+test("library-icons' tuple stays identical to main's tuple until main imports it", () => {
+  assert.deepEqual([...libraryIcons.LIBRARY_ICON_IDS], [...LIBRARY_ICON_IDS]);
+  assert.equal(libraryIcons.LIBRARY_ICON_IDS.length, 20);
+  assert.equal("LIBRARY_FORM_ICON_IDS" in leaf, false, "the temporary leaf copy is gone");
 });

@@ -45,8 +45,9 @@
     "verify-release": "npm run test:release",
     "verify-community": "node scripts/verify-community.mjs",
     "verify-bundle-size": "node scripts/check-bundle-size.mjs",
+    "verify-import-graph": "node scripts/check-import-graph.mjs",
     "audit:high": "npm audit --audit-level=high",
-    "review": "npm run typecheck && npm run typecheck:tests && npm run typecheck:browser-tests && npm run lint && npm run test:coverage && npm run test:performance && npm run build && npm run verify-bundle-size && npm run verify-community && npm run verify-release",
+    "review": "npm run typecheck && npm run typecheck:tests && npm run typecheck:browser-tests && npm run lint && npm run verify-import-graph && npm run test:coverage && npm run test:performance && npm run build && npm run verify-bundle-size && npm run verify-community && npm run verify-release",
     "check": "npm run review && npm run test:layout",
     "release:checksums": "node scripts/write-release-checksums.mjs",
     "release:bundle": "npm run check && node scripts/package-release.mjs"
