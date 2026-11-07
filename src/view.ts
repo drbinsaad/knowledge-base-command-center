@@ -105,6 +105,7 @@ import {
   WorkspaceSetupModal,
 } from "./modals";
 
+const STALE_CHOICE_NOTICE = "That choice is out of date. Nothing was changed.";
 export const VIEW_TYPE = "ent-vault-command-center-view";
 export const MAX_RENDERED_SEARCH_RESULTS = DEFAULT_CROSS_BASE_SEARCH_LIMIT;
 export const MAX_RENDERED_BROWSE_RECORDS = 300;
@@ -2031,12 +2032,12 @@ export class EntVaultCommandCenterView extends ItemView {
         // a Sync reload may have replaced the object captured when the picker opened.
         const current = this.app.vault.getAbstractFileByPath(file.path);
         const subject = candidate && this.plugin.getPortableSubject(candidate.id);
-        if (!ownsBase() || !subject || !(current instanceof TFile) || subject.title !== candidate.title
-          || this.plugin.data.portableIndex.resolvedPathBySubjectId[subject.id]) {
-          new Notice("That choice is out of date. Nothing was changed.", 8000);
+        // The exact chosen file object, not merely a file at the same path.
+        if (!ownsBase() || !subject || current !== file || this.plugin.data.portableIndex.resolvedPathBySubjectId[subject.id]) {
+          new Notice(STALE_CHOICE_NOTICE);
           return;
         }
-        await this.resolvePortableSubjectLink(subject.id, subject.title, current);
+        await this.resolvePortableSubjectLink(subject.id, subject.title, file);
       }).open();
   }
 
@@ -2405,6 +2406,10 @@ export class EntVaultCommandCenterView extends ItemView {
         "Merge and link",
         async () => {
           if (!ownsBase()) return;
+          if (this.app.vault.getAbstractFileByPath(file.path) !== file) {
+            new Notice(STALE_CHOICE_NOTICE);
+            return;
+          }
           await this.plugin.resolvePortableSubject(subjectId, file.path, true);
           if (!ownsBase()) return;
           new Notice(`Linked “${subjectTitle}” to “${file.basename}” after merging the duplicate portable identity. The Markdown note was not changed.`);
