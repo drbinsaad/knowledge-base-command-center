@@ -7,7 +7,7 @@
  * Pages: list -> preview -> name -> confirm -> done. Status text never
  * contains a vault or device path; only file names are shown.
  */
-import { Modal, type App } from "obsidian";
+import { FuzzySuggestModal, Modal, type App, type TFile } from "obsidian";
 import { normalizedNameKey } from "./model";
 import {
   RECOVERY_RESTORE_OMITTED_ITEMS,
@@ -77,7 +77,41 @@ function sizeLabel(size: number | null): string {
 }
 
 function originLabel(candidate: RecoveryCandidate): string {
-  return candidate.origin === "kept-backup" ? "Kept data backup" : "Sync conflict rescue";
+  return candidate.origin === "kept-backup" ? "Kept data backup" : candidate.origin === "chosen-file" ? "Chosen file" : "Sync conflict rescue";
+}
+
+/** "Choose another file": pick a retained JSON file from the vault. The path stays inside this picker. */
+export class RecoveryFilePicker extends FuzzySuggestModal<TFile> {
+  private settled = false;
+
+  constructor(app: App, private readonly files: readonly TFile[], private readonly done: (file: TFile | null) => void) {
+    super(app);
+    this.setPlaceholder("Choose a kept copy (JSON)…");
+  }
+
+  getItems(): TFile[] { return [...this.files]; }
+
+  getItemText(file: TFile): string { return file.path; }
+
+  onChooseItem(file: TFile): void { this.finish(file); }
+
+  // Obsidian closes the chooser before it reports the choice, so an unchosen close settles on the next turn.
+  onClose(): void { window.activeWindow.setTimeout(() => this.finish(null), 0); }
+
+  private finish(file: TFile | null): void {
+    if (this.settled) return;
+    this.settled = true;
+    this.done(file);
+  }
+}
+
+export function pickRecoveryFile(app: App, files: readonly TFile[]): Promise<RecoveryCandidate | null> {
+  return new Promise((resolve) => {
+    new RecoveryFilePicker(app, files, (file) => resolve(file ? {
+      id: "chosen", path: file.path, displayName: file.name, origin: "chosen-file",
+      size: file.stat?.size ?? null, mtime: file.stat?.mtime ?? null,
+    } : null)).open();
+  });
 }
 
 function nameProblem(name: string, existingNames: readonly string[]): string {

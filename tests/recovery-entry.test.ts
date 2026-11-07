@@ -5,7 +5,9 @@ import { RecoveryCopyModal, type RecoveryCopyModalCallbacks } from "../src/recov
 import { RECOVERY_COPY_CONFLICT_RESCUE_KIND } from "../src/recovery-copy.ts";
 import { SyncRecoveryCenterModal } from "../src/sync-recovery-modal.ts";
 import { createDefaultStore, migrateData, type PluginStore } from "../src/model.ts";
-import { Notice } from "./support/obsidian-stub.ts";
+import { Notice, TFile } from "./support/obsidian-stub.ts";
+import { RecoveryFilePicker } from "../src/recovery-copy-modal.ts";
+import { RECOVERY_COPY_LIMITS, createRecoveryRestoreIntent as makeIntent } from "../src/recovery-copy.ts";
 import { asHtmlElement, createFakeDom, type FakeElement } from "./support/fake-dom.ts";
 
 // A07 entry wiring. Synthetic data only; the adapter is an in-memory map.
@@ -27,11 +29,13 @@ interface Wired {
   callbacks: () => RecoveryCopyModalCallbacks;
   disk: () => PluginStore;
   adapterCalls: string[];
+  pickable: TFile[];
 }
 
 async function wired(): Promise<Wired> {
   const files = new Map<string, string>();
   const adapterCalls: string[] = [];
+  const pickable: TFile[] = [];
   const adapter = {
     exists: async (path: string) => files.has(path),
     write: async (path: string, text: string) => { files.set(path, text); },
@@ -58,7 +62,7 @@ async function wired(): Promise<Wired> {
     },
   };
   const app = {
-    vault: { configDir: ".obsidian", getMarkdownFiles: () => [], getAbstractFileByPath: () => null, adapter },
+    vault: { configDir: ".obsidian", getMarkdownFiles: () => [], getFiles: () => [...pickable], getAbstractFileByPath: () => null, adapter },
     workspace: { getLeavesOfType: () => [] },
     metadataCache: { getFileCache: () => null },
     fileManager: {},
@@ -77,7 +81,7 @@ async function wired(): Promise<Wired> {
   };
   plugin.openRecoveryCopyReview();
   delete (RecoveryCopyModal.prototype as { open?: unknown }).open; // back to the inherited open()
-  return { plugin, files, callbacks: () => { assert.ok(captured); return captured; }, disk: () => disk, adapterCalls };
+  return { plugin, files, callbacks: () => { assert.ok(captured); return captured; }, disk: () => disk, adapterCalls, pickable };
 }
 
 test("the review discovers copies in the configured, legacy and plugin folders without reading them", async () => {
@@ -162,6 +166,90 @@ test("creating or switching a base after the preview refuses the old window's Ap
     assert.equal(w.disk().bases.length, before, "no new base on disk");
     assert.match(Notice.messages.join("\n"), /Reopen the review\. Nothing was changed/);
   }
+});
+
+async function choose(w: Wired, file: TFile | null): Promise<Awaited<ReturnType<NonNullable<RecoveryCopyModalCallbacks["pickExplicit"]>>>> {
+  RecoveryFilePicker.prototype.open = function open(this: RecoveryFilePicker): void {
+    if (file) this.onChooseItem(file);
+    else (this as unknown as { finish(value: null): void }).finish(null);
+  };
+  try {
+    const picked = await w.callbacks().pickExplicit?.();
+    assert.notEqual(picked, undefined, "Choose another file is wired");
+    return picked ?? null;
+  } finally {
+    delete (RecoveryFilePicker.prototype as { open?: unknown }).open;
+  }
+}
+
+test("Choose another file: a valid file is previewed, an unchosen picker returns nothing, the path is not in messages", async () => {
+  const w = await wired();
+  const path = "Elsewhere/retained-rescue.json";
+  w.files.set(path, rescueText("Chosen"));
+  const file = new TFile(path);
+  w.pickable.push(file);
+  assert.equal(await choose(w, null), null);
+  const candidate = await choose(w, file);
+  assert.ok(candidate);
+  if (!candidate) return;
+  assert.equal(candidate.origin, "chosen-file");
+  assert.equal(candidate.displayName, "retained-rescue.json");
+  const loaded = await w.callbacks().load(candidate);
+  assert.ok(loaded.status === "parsed" && loaded.result.ok);
+  if (loaded.status === "parsed" && loaded.result.ok) assert.equal(loaded.result.preview.bases[0].name, "Chosen");
+});
+
+test("Choose another file: oversized and unreadable files are preserved but not restorable, with no read for the oversized one", async () => {
+  const w = await wired();
+  const big = "Elsewhere/big.json";
+  w.files.set(big, "x");
+  const bigFile = new TFile(big);
+  w.pickable.push(bigFile);
+  // Declare a size above the cap through the adapter without allocating it.
+  const adapter = (w.plugin.app.vault as unknown as { adapter: { stat(path: string): Promise<unknown> } }).adapter;
+  const stat = adapter.stat.bind(adapter);
+  adapter.stat = async (path: string) => (path === big ? { type: "file", ctime: 0, mtime: 0, size: RECOVERY_COPY_LIMITS.maxBytes + 1 } : stat(path));
+  const candidate = await choose(w, bigFile);
+  assert.ok(candidate);
+  if (!candidate) return;
+  w.adapterCalls.length = 0;
+  const oversized = await w.callbacks().load(candidate);
+  assert.ok(oversized.status === "parsed" && !oversized.result.ok);
+  if (oversized.status === "parsed" && !oversized.result.ok) assert.equal(oversized.result.reason, "too-large");
+  assert.equal(w.adapterCalls.includes("readBinary"), false, "bounded before reading");
+  adapter.stat = stat;
+  w.files.delete(big);
+  assert.equal((await w.callbacks().load(candidate)).status, "unreadable");
+});
+
+test("Choose another file: a file changed between preview and Apply is refused", async () => {
+  const w = await wired();
+  const path = "Elsewhere/changing.json";
+  w.files.set(path, rescueText("Alpha"));
+  const file = new TFile(path);
+  w.pickable.push(file);
+  const callbacks = w.callbacks();
+  const candidate = await choose(w, file);
+  assert.ok(candidate);
+  if (!candidate) return;
+  const loaded = await callbacks.load(candidate);
+  assert.ok(loaded.status === "parsed" && loaded.result.ok);
+  if (!(loaded.status === "parsed" && loaded.result.ok)) return;
+  const destination = callbacks.getDestination();
+  const made = makeIntent({
+    parsed: loaded.result, selectedBaseId: loaded.result.store.bases[0].id,
+    existingNames: callbacks.getExistingNames(), existingBaseIds: callbacks.getExistingBaseIds(),
+    generateIdentity: () => callbacks.generateIdentity(),
+  });
+  assert.ok(made.ok);
+  if (!made.ok) return;
+  w.files.set(path, rescueText("Alpha").replace("Alpha", "Alphb"));
+  Notice.messages.length = 0;
+  assert.equal((await callbacks.onApply(made.intent, destination)).status, "failed");
+  assert.equal(w.disk().bases.length, 1);
+  assert.doesNotMatch(Notice.messages.join("\n"), /Elsewhere|changing\.json/);
+  w.files.set(path, rescueText("Alpha"));
+  assert.equal((await callbacks.onApply(made.intent, destination)).status, "applied");
 });
 
 test("Review kept copies is in the Sync and recovery center, also in protected read-only mode", async () => {

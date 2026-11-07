@@ -23,7 +23,7 @@ export interface RecoveryHost {
   read(path: string): Promise<Uint8Array | string>;
 }
 
-export type RecoveryCandidateOrigin = "export-folder" | "legacy-export-folder" | "kept-backup";
+export type RecoveryCandidateOrigin = "export-folder" | "legacy-export-folder" | "kept-backup" | "chosen-file";
 
 export interface RecoveryCandidate {
   /** Stable id for this discovery run; safe to show or log. */

@@ -296,7 +296,7 @@ import {
 } from "./sync-recovery";
 import { ClearDeviceLocalDataModal, SyncRecoveryCenterModal } from "./sync-recovery-modal";
 import type { RecoveryRestoreIntent } from "./recovery-copy";
-import { RecoveryCopyModal, type RecoveryApplyResult, type RecoveryDestination } from "./recovery-copy-modal";
+import { RecoveryCopyModal, pickRecoveryFile, type RecoveryApplyResult, type RecoveryDestination } from "./recovery-copy-modal";
 import { discoverRecoveryCopies, loadRecoveryCopy, recoverySourceUnchanged, type RecoveryCandidate, type RecoveryHost } from "./recovery-discovery";
 import {
   planUpdateAnnouncement,
@@ -6929,6 +6929,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         pluginDir: this.manifest.dir ?? "",
       }),
       load: (candidate) => { selected = candidate; return loadRecoveryCopy(host, candidate.path, { currentVaultId: vaultId() }); },
+      pickExplicit: () => pickRecoveryFile(this.app, this.getPortableJsonFiles()),
       getDestination: () => this.getRecoveryDestination(),
       onApply: (intent, destination) => this.restoreKeptCopy(intent, () => selected ? recoverySourceUnchanged(host, selected.path, intent) : Promise.resolve(false), destination),
       onOpenRestored: (baseId) => this.openRestoredKeptBase(baseId),
