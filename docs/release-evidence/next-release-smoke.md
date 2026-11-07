@@ -1,6 +1,21 @@
-# 0.26.0 device and Sync smoke record
+# 0.26.1 device and Sync smoke record
 
-Active candidate: 0.26.0 Workspace space and attachments. Physical iPhone/iPad and controlled two-device Sync remain **Unverified — Unexecuted**, under the [candidate-specific maintainer-authorized waiver](0.26.0-iphone.md). This is not a physical-device Pass.
+Active candidate: 0.26.1 Safety and reliability fixes. Physical iPhone/iPad and controlled two-device Sync are **Unexecuted**. The owner's candidate-specific decision is recorded in the [0.26.1 evidence](0.26.1-iphone.md); no earlier waiver is reused. This is not a physical-device Pass.
+
+| Flow | Pass criteria | Result |
+| --- | --- | --- |
+| Missing plugin data | A readable, recognized backup is kept as `data.json.bak-kept-<timestamp>` before the first save; an uninspectable backup keeps organization read-only. | Unexecuted |
+| Sync clarity | Sync & recovery shows where organization is stored, the per-device Sync settings to check and a neutral external-change fact. | Unexecuted |
+| Typed text | Quick Append and Library editors save after an unchanged Sync reload; a real base change is refused. | Unexecuted |
+| iPad split view | 44-point targets with touch, Pencil and trackpad; heading indentation kept; readable detail labels. | Unexecuted |
+| Two-device Sync | Organization survives controlled delivery and restart on two devices. | Unexecuted |
+| Update news | Upgrade shows 0.26.1 news once with its exact release link. | Unexecuted |
+
+Use synthetic notes only. Automated checks are supplemental. Record exact device, application, build and input details if these checks are later performed.
+
+## Historical 0.26.0 device and Sync smoke record
+
+Historical candidate: 0.26.0 Workspace space and attachments. Physical iPhone/iPad and controlled two-device Sync remain **Unverified — Unexecuted**, under the [candidate-specific maintainer-authorized waiver](0.26.0-iphone.md). This is not a physical-device Pass.
 
 | Flow | Pass criteria | Result |
 | --- | --- | --- |

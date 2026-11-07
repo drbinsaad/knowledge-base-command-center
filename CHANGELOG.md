@@ -22,7 +22,7 @@
 
 ### Release safety
 
-- Development-only dependencies were updated so the high-severity dependency audit passes (13 moderate development-only advisories remain, with no non-breaking fix; none are in the plugin file).
+- Development-only dependencies were updated so the high-severity dependency audit passes. 13 moderate development-dependency findings remain, with no non-breaking fix; none are in the plugin file.
 - The release workflow now verifies downloaded assets against `SHA256SUMS.txt` before attesting and publishing, and the leaked-local-path check covers Linux, temporary and `file://` paths.
 
 ### Compatibility
