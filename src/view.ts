@@ -74,8 +74,6 @@ import {
   PluginData,
   TemplateTokenContext,
   unknownQueryTokens,
-  validateWritableFolderPath,
-  validateTemplateFilePath,
   VaultRecord,
   visualPlacementPathSet,
 } from "./model";
@@ -99,7 +97,6 @@ import {
   KnowledgeNoteModal,
   type NoteDestinationSeed,
   RecordPickerModal,
-  SetupReviewOutdatedError,
   StringPickerModal,
   TextPromptModal,
   TopicEditorModal,
@@ -2722,43 +2719,14 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     const ownsBase = this.createOpenedBaseGuard();
     new WorkspaceSetupModal(this.app, this.plugin.data.settings, async (value, reviewed) => {
-      if (!ownsBase()) throw new Error("Setup was not saved. Wait for sync to finish; if the knowledge base changed, reopen setup.");
-      this.plugin.assertDataWritable();
-      // A settled no-op Sync reload preserves this form's ownership while
-      // replacing PluginData. Apply its draft to the current settings object.
-      const settings = this.plugin.data.settings;
-      if (settings.workspaceMode !== "generic") throw new Error("Setup is only for generic knowledge bases.");
-      // The Inbox effects the user reviewed must still be the real effects.
-      // The count is the existing orphan-count helper, read again at commit.
-      // (Main hook pending: this recheck moves into the guarded required-Undo
-      // settings transaction; the contract is unchanged.)
-      const cleanInbox = (folder: string): string => folder.trim().replace(/^\/+|\/+$/gu, "");
-      const nextInbox = cleanInbox(value.proposalFolder);
-      const currentInbox = cleanInbox(settings.proposalFolder);
-      if (reviewed) {
-        if (reviewed.previousFolder !== currentInbox
-          || reviewed.nextFolder !== nextInbox
-          || reviewed.affectedCount !== this.plugin.countOrphanedByProposalFolderChange(nextInbox)) {
-          throw new SetupReviewOutdatedError();
-        }
-      } else if (nextInbox !== currentInbox) {
-        throw new SetupReviewOutdatedError("The Inbox folder changed while setup was open. Review the change before applying it.");
-      }
-      for (const folder of [value.primaryFolder, value.defaultNoteFolder, value.templatesFolder, value.proposalFolder, value.exportsFolder]) {
-        const error = validateWritableFolderPath(folder, this.app.vault.configDir);
-        if (error) throw new Error(error);
-      }
-      if (value.defaultNewNoteMode === "template") {
-        const templatePathError = validateTemplateFilePath(value.defaultTemplatePath, value.templatesFolder, this.app.vault.configDir);
-        if (templatePathError) throw new Error(templatePathError);
-        const template = this.app.vault.getAbstractFileByPath(value.defaultTemplatePath);
-        if (!(template instanceof TFile)) throw new Error("The selected default template could not be found.");
-      }
-      Object.assign(settings, value, { setupComplete: true });
-      await this.plugin.savePluginData();
+      // Ownership, writability, Generic mode, path/template validation and the
+      // reviewed Inbox effects are all rechecked inside the one required-Undo
+      // settings transaction, immediately before it writes.
+      await this.plugin.commitSetupSettings(value, reviewed, ownsBase);
       if (!ownsBase()) return;
       await this.plugin.refreshViews();
       if (!ownsBase()) return;
+      const settings = this.plugin.data.settings;
       new Notice(`${settings.workspaceName} is ready. Next, choose Add → Add existing note to Index to bring in your notes. No existing note was modified.`, 10000);
     }, {
       // Live reads: a settled no-op Sync reload replaces the settings object.

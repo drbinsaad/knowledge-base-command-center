@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TFile, TFolder } from "./support/obsidian-stub.ts";
+import { Modal, TFile, TFolder } from "./support/obsidian-stub.ts";
 import EntVaultCommandCenterPlugin from "../src/main.ts";
 import { createDefaultStore, migrateData, type PluginSettings } from "../src/model.ts";
 import { SetupReviewOutdatedError, WorkspaceSetupModal, type WorkspaceSetupValue } from "../src/modals.ts";
@@ -47,12 +47,15 @@ function openSetupModal(
   const title = root.createEl("h2");
   const ModalCtor = WorkspaceSetupModal as unknown as new (app: unknown, settings: PluginSettings, onSubmit: unknown, review?: ReviewSourceShape) => WorkspaceSetupModal;
   const modal = new ModalCtor({ vault: { getAbstractFileByPath: () => null } }, settings, onSubmit, review);
+  // The production close() override is exercised for real; only the host
+  // Modal.close (the actual dismissal) is counted.
   let closes = 0;
+  const originalClose = Object.getOwnPropertyDescriptor(Modal.prototype, "close");
+  Modal.prototype.close = function (): void { closes += 1; };
   Object.assign(modal, {
     modalEl: asHtmlElement(root),
     contentEl: asHtmlElement(content),
     titleEl: asHtmlElement(title),
-    close: () => { closes += 1; },
   });
   modal.onOpen();
   const internals = modal as unknown as ModalInternals;
@@ -70,7 +73,10 @@ function openSetupModal(
     text: () => content.textContent,
     impact: () => content.querySelector("[data-role=inbox-impact]")?.textContent ?? "",
     row,
-    restore: recorder.restore,
+    restore: () => {
+      recorder.restore();
+      if (originalClose) Object.defineProperty(Modal.prototype, "close", originalClose);
+    },
     /** Buttons are re-created on every render, so look up the newest one each time. */
     button: (label: string): (() => void | Promise<void>) => {
       const found = [...recorder.rows].reverse().find((candidate) => candidate.buttons.has(label));
@@ -144,11 +150,51 @@ test("S1 review previews old and new Inbox and only the Inbox-only notes; Cancel
     assert.match(ui.impact(), /^2 Inbox-only notes/u);
     assert.doesNotMatch(review, /4 notes|\b4\b/u, "Direct and Collection notes are not counted as leaving");
     await ui.button("Cancel")();
-    assert.equal(ui.closes(), 1, "Cancel closes the wizard");
+    assert.equal(ui.closes(), 0, "Cancel in the review returns to the editable form instead of closing");
+    assert.ok(ui.text().includes(HINT), "the editable form is showing again");
+    assert.equal(ui.internals.value.proposalFolder, "New Inbox", "the draft is retained (cleaned as submit cleans it)");
     assert.equal(submissions.length, 0, "Cancel never reaches the commit");
     assert.equal(JSON.stringify(plugin.data), before, "serialized settings and history are unchanged");
   } finally {
     ui.restore();
+  }
+});
+
+test("S1c dismissing the review by Cancel, Close or Escape keeps the draft; the form's own Cancel and a finished commit still close", async () => {
+  // Obsidian routes the close button and Escape through Modal.close(), the same
+  // call the review's Cancel makes, so one entry point covers all three.
+  for (const dismissal of ["Cancel", "Close", "Escape"] as const) {
+    const submissions: unknown[] = [];
+    const ui = openSetupModal(namedSettings("Old Inbox"), (value, reviewed) => { submissions.push([value, reviewed]); }, {
+      currentInboxFolder: () => "Old Inbox",
+      countInboxOnlyAffected: () => 3,
+    });
+    try {
+      ui.internals.value.workspaceName = "Unsaved draft";
+      ui.internals.value.proposalFolder = "New Inbox";
+      await ui.internals.submit();
+      assert.match(ui.impact(), /^3 Inbox-only notes/u);
+      if (dismissal === "Cancel") await ui.button("Cancel")();
+      else ui.modal.close();
+      assert.equal(ui.closes(), 0, `${dismissal}: the wizard stays open`);
+      assert.equal(ui.internals.value.workspaceName, "Unsaved draft", `${dismissal}: draft retained`);
+      assert.equal(ui.internals.value.proposalFolder, "New Inbox", `${dismissal}: draft retained`);
+      assert.ok(ui.text().includes(HINT), `${dismissal}: back on the editable form`);
+      assert.equal(submissions.length, 0, `${dismissal}: no write`);
+      // The form itself still closes with no write.
+      ui.modal.close();
+      assert.equal(ui.closes(), 1, `${dismissal}: form-level close really closes`);
+      assert.equal(submissions.length, 0);
+    } finally {
+      ui.restore();
+    }
+  }
+  const form = openSetupModal(namedSettings("Old Inbox"), () => undefined);
+  try {
+    await form.button("Cancel")();
+    assert.equal(form.closes(), 1, "form-level Cancel closes");
+  } finally {
+    form.restore();
   }
 });
 
@@ -291,7 +337,7 @@ async function openWizardThroughView() {
   return { ...fixture, modal, internals: modal as unknown as ModalInternals, content, closes: () => closes, recorder };
 }
 
-test("view setup route reviews a changed Inbox before the existing save and rechecks the reviewed count at commit (UI; main hook pending)", async () => {
+test("S5 view route: a stale reviewed count refreshes the review with no write, then the refreshed review commits", async () => {
   const h = await openWizardThroughView();
   try {
     h.plugin.savedData.length = 0;
@@ -323,7 +369,7 @@ test("view setup route reviews a changed Inbox before the existing save and rech
   }
 });
 
-test("S6 a settled no-op Sync reload during the review keeps the draft and applies it to the current settings (UI; main hook pending)", async () => {
+test("S6 a settled no-op Sync reload during the review keeps the draft and applies it to the current settings through the real transaction", async () => {
   const h = await openWizardThroughView();
   try {
     h.internals.value.workspaceName = "After setup";
@@ -346,7 +392,79 @@ test("S6 a settled no-op Sync reload during the review keeps the draft and appli
   }
 });
 
-test("view setup route rejects a review confirmed after read-only protection starts (UI; main hook pending)", async () => {
+test("S4 view route: base change, read-only and ENT transitions during the review are rejected at commit with no write", async () => {
+  const transitions: Array<[string, (h: Awaited<ReturnType<typeof openWizardThroughView>>) => void]> = [
+    ["base switch", (h) => { (h.plugin as unknown as { store: { activeBaseId: string } }).store.activeBaseId = "another-base"; }],
+    ["read-only", (h) => { h.plugin.dataCompatibilityWarning = "Protected read-only."; }],
+    ["ENT", (h) => { h.plugin.data.settings.workspaceMode = "ent-clinical"; }],
+  ];
+  for (const [name, change] of transitions) {
+    const h = await openWizardThroughView();
+    try {
+      h.internals.value.proposalFolder = "New Inbox";
+      await h.internals.submit();
+      h.plugin.savedData.length = 0;
+      const undoDepth = h.plugin.data.undoStack.length;
+      change(h);
+      const confirm = [...h.recorder.rows].reverse().find((row) => row.buttons.has("Apply Inbox change and finish setup"));
+      await confirm?.buttons.get("Apply Inbox change and finish setup")?.();
+      assert.equal(h.plugin.savedData.length, 0, `${name}: nothing saved`);
+      assert.equal(h.plugin.data.undoStack.length, undoDepth, `${name}: no history entry`);
+      assert.equal(h.plugin.data.settings.proposalFolder, "Old Inbox", `${name}: Inbox unchanged`);
+      assert.equal(h.closes(), 0, `${name}: the draft stays open`);
+    } finally {
+      h.recorder.restore();
+    }
+  }
+});
+
+test("S3 view route: one confirmed change is one history entry and Undo/Redo restore the exact settings", async () => {
+  const h = await openWizardThroughView();
+  try {
+    const before = JSON.stringify(h.plugin.data.settings);
+    const depth = h.plugin.data.undoStack.length;
+    h.plugin.savedData.length = 0;
+    h.internals.value.workspaceName = "After setup";
+    h.internals.value.proposalFolder = "New Inbox";
+    await h.internals.submit();
+    assert.equal(h.plugin.savedData.length, 0);
+    const confirm = [...h.recorder.rows].reverse().find((row) => row.buttons.has("Apply Inbox change and finish setup"));
+    await confirm?.buttons.get("Apply Inbox change and finish setup")?.();
+    assert.equal(h.plugin.data.undoStack.length, depth + 1, "exactly one history entry");
+    assert.equal(h.plugin.data.settings.proposalFolder, "New Inbox");
+    assert.equal(h.plugin.data.settings.setupComplete, true);
+    const after = JSON.stringify(h.plugin.data.settings);
+    await h.plugin.undo();
+    assert.equal(JSON.stringify(h.plugin.data.settings), before, "Undo restores the exact prior settings");
+    await h.plugin.redo();
+    assert.equal(JSON.stringify(h.plugin.data.settings), after, "Redo restores the exact new settings");
+    for (const file of h.files) assert.ok(file.path.startsWith("Old Inbox/"), "no note moved");
+  } finally {
+    h.recorder.restore();
+  }
+});
+
+test("createKnowledgeBase derives the folders with the shared rules and creates nothing when they are invalid", async () => {
+  const { plugin, app } = await realPluginWithInbox();
+  const count = (): number => plugin.getKnowledgeBases(true).length;
+  const start = count();
+  const created = await plugin.createKnowledgeBase("Étude", "generic", " /Études/Ñandú 研究/ ");
+  assert.equal(count(), start + 1);
+  assert.equal(created.data.settings.primaryFolder, "Études/Ñandú 研究");
+  assert.equal(created.data.settings.defaultNoteFolder, "Études/Ñandú 研究");
+  assert.equal(created.data.settings.proposalFolder, "Études/Ñandú 研究/Inbox");
+  const root = await plugin.createKnowledgeBase("Plain", "generic", "Research");
+  assert.equal(root.data.settings.proposalFolder, "Research/Inbox");
+
+  const before = count();
+  await assert.rejects(plugin.createKnowledgeBase("Bad", "generic", "Notes/a?b"), /Folder names cannot contain/u);
+  assert.equal(count(), before, "an invalid parent creates no base");
+  app.vault.configDir = "Notes/Inbox";
+  await assert.rejects(plugin.createKnowledgeBase("Derived", "generic", "Notes"), /Inbox folder derived from this folder/u);
+  assert.equal(count(), before, "an invalid derived Inbox creates no base");
+});
+
+test("view setup route rejects a review confirmed after read-only protection starts (legacy single-transition case)", async () => {
   const h = await openWizardThroughView();
   try {
     h.plugin.savedData.length = 0;

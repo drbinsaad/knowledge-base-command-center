@@ -187,7 +187,7 @@ import {
   type FollowUpUndoMetadata,
 } from "./follow-up";
 import { QuickAppendModal } from "./follow-up-modal";
-import { createOpenedBaseGuard, VaultFilePickerModal } from "./modals";
+import { createOpenedBaseGuard, SetupReviewOutdatedError, VaultFilePickerModal, type SetupInboxEffects, type WorkspaceSetupValue } from "./modals";
 import {
   ATTACHMENT_PROTOCOL_ACTIONS,
   createQuickEntryCommands,
@@ -217,7 +217,7 @@ import {
   type KbccReturnNavigationState,
   type KbccReturnRoute,
 } from "./kbcc-return-navigation";
-import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge-base-modal";
+import { CreateKnowledgeBaseModal, deriveNewBaseFolders, ManageKnowledgeBasesModal } from "./knowledge-base-modal";
 import { LIBRARY_ICON_IDS } from "./library-icons";
 import { ManageLibrariesModal } from "./library-modal";
 import { LibrarySettingsModal } from "./library-settings-modal";
@@ -6803,12 +6803,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       next.settings.setupComplete = true;
       next.settings.workspaceName = cleanName;
       if (mode === "generic" && defaultNoteFolder.trim()) {
-        const folder = defaultNoteFolder.trim().replace(/^\/+|\/+$/g, "");
-        const error = validateWritableFolderPath(folder, this.app.vault.configDir);
-        if (error) throw new Error(error);
-        next.settings.primaryFolder = folder;
-        next.settings.defaultNoteFolder = folder;
-        next.settings.proposalFolder = `${folder}/Inbox`;
+        // The same derivation and path rules the New knowledge base form previews.
+        const derived = deriveNewBaseFolders(defaultNoteFolder, this.app.vault.configDir);
+        if (derived.error) throw new Error(derived.error);
+        next.settings.primaryFolder = derived.folder;
+        next.settings.defaultNoteFolder = derived.folder;
+        next.settings.proposalFolder = derived.inbox;
       }
       created = this.createUniqueKnowledgeBaseEntry(next);
       this.store.bases.push(created);
@@ -7081,6 +7081,57 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       }
       if (cleaned) this.data.settings.libraryDisplayProfiles[libraryId] = normalizeLibraryDisplayProfile(cleaned);
       else delete this.data.settings.libraryDisplayProfiles[libraryId];
+    }, { includeSettings: true, requireUndo: true });
+  }
+
+  /**
+   * Finishes the generic setup wizard as ONE required-Undo settings
+   * transaction (the same mutate route as every other settings-bearing
+   * organization change). Everything the user reviewed is rechecked inside the
+   * queued action, immediately before the write; any mismatch throws and
+   * mutate restores the prior data, so nothing is half-applied. Never moves,
+   * creates or edits a Markdown note or folder.
+   */
+  async commitSetupSettings(
+    value: WorkspaceSetupValue,
+    reviewed: SetupInboxEffects | null,
+    ownsBase: () => boolean,
+  ): Promise<void> {
+    const cleanFolder = (folder: string): string => folder.trim().replace(/^\/+|\/+$/gu, "");
+    const verify = (): typeof this.data.settings => {
+      if (!ownsBase()) throw new Error("Setup was not saved. Wait for sync to finish; if the knowledge base changed, reopen setup.");
+      this.assertDataWritable();
+      // A settled no-op Sync reload replaces PluginData; always use the live settings.
+      const settings = this.data.settings;
+      if (settings.workspaceMode !== "generic") throw new Error("Setup is only for generic knowledge bases.");
+      for (const folder of [value.primaryFolder, value.defaultNoteFolder, value.templatesFolder, value.proposalFolder, value.exportsFolder]) {
+        const error = validateWritableFolderPath(folder, this.app.vault.configDir);
+        if (error) throw new Error(error);
+      }
+      if (value.defaultNewNoteMode === "template") {
+        const templatePathError = validateTemplateFilePath(value.defaultTemplatePath, value.templatesFolder, this.app.vault.configDir);
+        if (templatePathError) throw new Error(templatePathError);
+        if (!(this.app.vault.getAbstractFileByPath(value.defaultTemplatePath) instanceof TFile)) throw new Error("The selected default template could not be found.");
+      }
+      const currentInbox = cleanFolder(settings.proposalFolder);
+      const nextInbox = cleanFolder(value.proposalFolder);
+      if (reviewed) {
+        if (reviewed.previousFolder !== currentInbox
+          || reviewed.nextFolder !== nextInbox
+          || reviewed.affectedCount !== this.countOrphanedByProposalFolderChange(nextInbox)) {
+          throw new SetupReviewOutdatedError();
+        }
+      } else if (nextInbox !== currentInbox) {
+        throw new SetupReviewOutdatedError("The Inbox folder changed while setup was open. Review the change before applying it.");
+      }
+      return settings;
+    };
+    // Checked once before the transaction so a refused review rolls nothing
+    // back (a rollback replaces the active data and would close the wizard's
+    // ownership), and again inside the queued action, right before the write.
+    verify();
+    await this.mutate("Finish setup", () => {
+      Object.assign(verify(), value, { setupComplete: true });
     }, { includeSettings: true, requireUndo: true });
   }
 

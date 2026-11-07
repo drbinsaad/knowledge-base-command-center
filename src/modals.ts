@@ -1087,6 +1087,26 @@ export class WorkspaceSetupModal extends Modal {
   private pendingReview: SetupInboxEffects | null = null;
   private reviewNotice = "";
   private committing = false;
+  private finished = false;
+
+  /**
+   * Cancel, the close button and Escape all end here. While the Inbox review is
+   * showing they return to the editable form with the draft intact, exactly
+   * like Back; only the form itself, or a finished commit, really closes.
+   */
+  close(): void {
+    if (this.pendingReview && !this.finished) {
+      this.backToEdit();
+      return;
+    }
+    super.close();
+  }
+
+  private backToEdit(): void {
+    this.pendingReview = null;
+    this.reviewNotice = "";
+    this.onOpen();
+  }
 
   constructor(
     app: App,
@@ -1286,6 +1306,7 @@ export class WorkspaceSetupModal extends Modal {
     this.committing = true;
     try {
       await this.onSubmit({ ...this.value }, reviewed);
+      this.finished = true;
       this.close();
     } catch (error) {
       if (error instanceof SetupReviewOutdatedError) {
@@ -1320,12 +1341,8 @@ export class WorkspaceSetupModal extends Modal {
     this.errorEl = this.contentEl.createDiv({ cls: "ent-cc-form-error", attr: { role: "alert" } });
     const showError = (message: string): void => { this.errorEl?.setText(message); };
     new Setting(this.contentEl)
-      .addButton((button) => button.setButtonText("Back to edit").onClick(() => {
-        // The draft lives in this.value, so going back loses nothing.
-        this.pendingReview = null;
-        this.reviewNotice = "";
-        this.onOpen();
-      }))
+      // The draft lives in this.value, so going back loses nothing.
+      .addButton((button) => button.setButtonText("Back to edit").onClick(() => this.backToEdit()))
       .addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()))
       .addButton((button) => button.setButtonText(SETUP_REVIEW_APPLY_LABEL).setCta().onClick(() => this.commit(effects, showError)));
   }
