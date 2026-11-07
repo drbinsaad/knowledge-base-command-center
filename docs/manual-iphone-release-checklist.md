@@ -4,7 +4,7 @@ Complete this checklist on a physical iPhone before tagging a release that chang
 
 ## 0.26.1 Safety and reliability fixes
 
-Status: **Unexecuted on a physical iPhone or iPad.** The owner's candidate-specific decision for 0.26.1 is recorded in the [0.26.1 evidence](release-evidence/0.26.1-iphone.md); no earlier waiver is reused. Automated Chromium/WebKit tests do not execute these rows.
+Status: **Unexecuted on a physical iPhone or iPad.** The owner's candidate-specific decision for 0.26.1 is pending; see the [0.26.1 evidence](release-evidence/0.26.1-iphone.md). No earlier waiver is reused. Automated Chromium/WebKit tests do not execute these rows.
 
 Use a disposable synthetic vault and record exact asset checksums, device/OS/Obsidian versions and input method before executing these checks:
 
