@@ -2299,7 +2299,7 @@ type AttachmentHarness = {
   attachmentImportSnapshot(): { submissions: number; copies: string[] };
 };
 
-for (const [label, width, height, mobile] of [["phone 390", 390, 844, true], ["tablet 820", 820, 1180, false]] as const) {
+for (const [label, width, height, mobile] of [["phone 390", 390, 844, true], ["tablet 820", 820, 1180, true]] as const) {
   test(`WF-03 real attachment modal ${label}: stale editor, corrected End retry and terminal copied-path recovery`, async ({ page }) => {
     await openView(page, { mobile, width, height, count: 8 });
     const harness = (): Promise<{ submissions: number; copies: string[] }> =>
