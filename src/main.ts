@@ -765,6 +765,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   /** Window that created the pending refresh timer; timer IDs are per-window. */
   private refreshTimerWindow: Window | null = null;
   private searchGeneration = 0;
+  /** Candidate-projection token; search restarts and note-candidate freshness are separate duties. */
+  private vaultNoteGeneration = 0;
   private knowledgeBaseSearchVaultSnapshot: KnowledgeBaseSearchVaultSnapshot | null = null;
   private recordsCacheByBase = new Map<string, VaultRecord[]>();
   /** Stable search-only projections are bounded by retained records across bases. */
@@ -5003,11 +5005,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
   getSearchGeneration(): number { return this.searchGeneration; }
   /**
-   * O(1) invalidation token for eligible Markdown-note projections. The shared
-   * search generation already advances for Markdown create/delete/rename,
-   * metadata changes, base changes, and settings-driven record invalidation.
+   * O(1) invalidation token for eligible Markdown-note projections. It advances
+   * for every Markdown create/delete/rename and metadata change (including an
+   * outside note's title or ID edit, which changes placeholder candidates
+   * without adding a file), base changes, and record-cache invalidation. It is
+   * independent of the global-search generation, which advances less often.
    */
-  getVaultNoteGeneration(): number { return this.searchGeneration; }
+  getVaultNoteGeneration(): number { return this.vaultNoteGeneration; }
   getVaultId(): string { return this.store.vaultId; }
 
   private noteOrganizerPathIsRestricted(path: string): boolean {
@@ -7779,6 +7783,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   private invalidateKnowledgeBaseSearchSnapshot(): void {
     this.searchGeneration += 1;
+    this.vaultNoteGeneration += 1;
     this.knowledgeBaseSearchVaultSnapshot = null;
   }
 
