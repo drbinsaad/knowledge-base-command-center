@@ -7130,9 +7130,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     // back (a rollback replaces the active data and would close the wizard's
     // ownership), and again inside the queued action, right before the write.
     verify();
+    // The preflight is the same check run synchronously inside the queued
+    // operation, before mutate snapshots or can roll back anything.
     await this.mutate("Finish setup", () => {
       Object.assign(verify(), value, { setupComplete: true });
-    }, { includeSettings: true, requireUndo: true });
+    }, { includeSettings: true, requireUndo: true, preflight: () => { verify(); } });
   }
 
   openLibrarySettings(libraryId: string): void {
@@ -9961,6 +9963,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       includeActiveTab?: boolean;
       requireUndo?: boolean;
       normalizeAfterRestore?: boolean;
+      /**
+       * Synchronous check run inside the queued operation before the snapshot,
+       * the undo-stack change and the rollback try. A throw here mutates and
+       * rolls back nothing, so it does not advance base ownership.
+       */
+      preflight?: () => void;
     } = {},
   ): Promise<void> {
     this.assertDataWritable();
@@ -9971,6 +9979,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.dataTransactionBusy = true;
     try {
       await this.enqueueAppLogicalOperation(async () => {
+      options.preflight?.();
       const transactionMetadata = {
         updatedAt: this.requireActiveBase().updatedAt,
         semanticRevision: this.requireActiveBase().semanticRevision,

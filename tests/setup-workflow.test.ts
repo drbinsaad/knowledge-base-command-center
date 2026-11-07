@@ -464,6 +464,70 @@ test("createKnowledgeBase derives the folders with the shared rules and creates 
   assert.equal(count(), before, "an invalid derived Inbox creates no base");
 });
 
+test("S5 queue race: an Inbox-only file removed while the queue is blocked refreshes the review and the second confirm saves once with exact Undo/Redo", async () => {
+  const h = await openWizardThroughView();
+  try {
+    const before = JSON.stringify(h.plugin.data.settings);
+    const depth = h.plugin.data.undoStack.length;
+    h.internals.value.proposalFolder = "New Inbox";
+    await h.internals.submit();
+    assert.match(h.content.querySelector("[data-role=inbox-impact]")?.textContent ?? "", /^2 Inbox-only notes/u);
+    h.plugin.savedData.length = 0;
+    // Block the real logical-operation queue, then confirm: the confirm passes
+    // its first check (count 2) and waits behind the blocker.
+    let release: () => void = () => undefined;
+    const blocker = new Promise<void>((resolve) => { release = resolve; });
+    const queued = (h.plugin as unknown as { enqueueAppLogicalOperation(operation: () => Promise<void>): Promise<void> }).enqueueAppLogicalOperation(() => blocker);
+    const confirm = [...h.recorder.rows].reverse().find((row) => row.buttons.has("Apply Inbox change and finish setup"));
+    const first = confirm?.buttons.get("Apply Inbox change and finish setup")?.();
+    // An Inbox-only note disappears while the confirm is queued.
+    h.files.splice(h.files.findIndex((file) => file.path === "Old Inbox/a-source-only.md"), 1);
+    h.plugin.invalidateRecordCache();
+    release();
+    await queued;
+    await first;
+    assert.equal(h.plugin.savedData.length, 0, "the stale review is refused without a write");
+    assert.equal(h.plugin.data.settings.proposalFolder, "Old Inbox");
+    assert.equal(h.closes(), 0);
+    assert.match(h.content.querySelector("[data-role=inbox-impact]")?.textContent ?? "", /^1 Inbox-only note /u, "the refreshed review shows the new count");
+    // The refused attempt must not cost the wizard its ownership.
+    const again = [...h.recorder.rows].reverse().find((row) => row.buttons.has("Apply Inbox change and finish setup"));
+    await again?.buttons.get("Apply Inbox change and finish setup")?.();
+    assert.equal(h.plugin.savedData.length, 1, "the second confirm saves exactly once");
+    assert.equal(h.plugin.data.undoStack.length, depth + 1);
+    assert.equal(h.plugin.data.settings.proposalFolder, "New Inbox");
+    const after = JSON.stringify(h.plugin.data.settings);
+    await h.plugin.undo();
+    assert.equal(JSON.stringify(h.plugin.data.settings), before, "exact Undo");
+    await h.plugin.redo();
+    assert.equal(JSON.stringify(h.plugin.data.settings), after, "exact Redo");
+  } finally {
+    h.recorder.restore();
+  }
+});
+
+test("mutate preflight: a throwing preflight changes nothing and does not advance ownership; a throwing action still rolls back as before", async () => {
+  const { plugin } = await realPluginWithInbox();
+  const mutate = plugin.mutate.bind(plugin);
+  const surface = plugin.getBaseSurfaceVersion();
+  const data = plugin.data;
+  const depth = data.undoStack.length;
+  let ran = false;
+  await assert.rejects(mutate("preflight refuses", () => { ran = true; }, {
+    includeSettings: true, requireUndo: true,
+    preflight: () => { throw new Error("refused up front"); },
+  }), /refused up front/u);
+  assert.equal(ran, false, "the action never ran");
+  assert.equal(plugin.data, data, "no data replacement");
+  assert.equal(plugin.getBaseSurfaceVersion(), surface, "ownership is not advanced");
+  assert.equal(plugin.data.undoStack.length, depth, "no history entry");
+
+  // Control: callers without a preflight behave exactly as before (rollback on a throwing action).
+  await assert.rejects(mutate("action refuses", () => { throw new Error("refused inside"); }, { includeSettings: true, requireUndo: true }), /refused inside/u);
+  assert.equal(plugin.data.undoStack.length, depth, "rolled back");
+  assert.notEqual(plugin.data, data, "the existing rollback still replaces the active data");
+});
+
 test("view setup route rejects a review confirmed after read-only protection starts (legacy single-transition case)", async () => {
   const h = await openWizardThroughView();
   try {
