@@ -2717,6 +2717,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const sourceWasMissing = loaded === null
       || loaded === undefined
       || (typeof loaded === "object" && !Array.isArray(loaded) && Object.keys(loaded).length === 0);
+    // A missing data.json starts an empty bootstrap whose first save would
+    // overwrite the last committed .bak. Keep that backup aside first.
+    if (capturedRead === undefined && sourceWasMissing && !restoredFromBackup) await this.keepBackupBesideMissingPrimary();
     const sourceVersion = storedDataVersion(loaded);
     const loadedRecord = asUnknownRecord(loaded);
     const recognizedStore = isRecognizedPluginStore(loaded);
@@ -3345,6 +3348,46 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const currentRaw = await adapter.read(guard.path);
     if (currentRaw !== guard.expectedRaw) {
       throw new CorruptPrimarySupersededError("data.json changed after corrupt-file recovery preserved it.");
+    }
+  }
+
+  /**
+   * Startup found no data.json but a recognized same-device .bak. Copy its exact
+   * text to a new data.json.bak-kept-<time> file (never overwriting) before any
+   * save can replace .bak. If the copy fails, saving stays blocked. The backup
+   * is never loaded as authority here.
+   */
+  private async keepBackupBesideMissingPrimary(): Promise<void> {
+    const backupPath = this.storeBackupPath();
+    const dir = this.manifest.dir;
+    if (!backupPath || !dir) return;
+    const adapter = this.app.vault.adapter;
+    let raw: string;
+    try {
+      if (!(await adapter.exists(backupPath))) return;
+      raw = await adapter.read(backupPath);
+    } catch (error) {
+      console.error("Knowledge Base Command Center could not inspect the data.json backup", error);
+      this.markPersistenceUncertain(`data.json is missing and its last automatic backup could not be inspected (${errorMessage(error)}). Organization stays read-only so that backup is not overwritten; restart Obsidian once storage is available.`);
+      return;
+    }
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!isRecognizedPluginStore(parsed) && !isRecognizedPluginData(parsed)) return;
+    } catch {
+      return;
+    }
+    try {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      let keptPath = normalizePath(`${dir}/data.json.bak-kept-${stamp}`);
+      for (let n = 2; await adapter.exists(keptPath); n += 1) {
+        keptPath = normalizePath(`${dir}/data.json.bak-kept-${stamp}-${n}`);
+      }
+      await adapter.write(keptPath, raw);
+      new Notice(`data.json is missing, so your last automatic backup was kept as ${keptPath}. Organization starts empty until data.json arrives or you restore from that file.`, 15000);
+    } catch (error) {
+      console.error("Knowledge Base Command Center could not keep the data.json backup", error);
+      this.markPersistenceUncertain(`data.json is missing and its last automatic backup could not be kept (${errorMessage(error)}). Organization stays read-only so that backup is not overwritten; restart Obsidian after data.json is restored or the backup is copied.`);
     }
   }
 
