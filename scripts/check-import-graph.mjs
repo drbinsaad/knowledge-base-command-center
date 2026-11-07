@@ -12,38 +12,32 @@ import { discoverRuntimeSources } from "./runtime-source-guards.mjs";
  * resolved (or a dynamic import/require) is a failure, never silently dropped.
  */
 
-function isTypeOnlyImport(statement) {
-  const clause = statement.importClause;
-  if (!clause) return false; // side-effect import: a runtime edge
-  if (clause.isTypeOnly) return true;
-  if (!clause.name && clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
-    const elements = clause.namedBindings.elements;
-    return elements.length > 0 && elements.every((element) => element.isTypeOnly);
-  }
-  return false;
-}
+/** Compiler settings matching the production build (tsconfig.json): non-verbatim ESNext, ES2018. */
+const EMIT_OPTIONS = {
+  module: ts.ModuleKind.ESNext,
+  target: ts.ScriptTarget.ES2018,
+  verbatimModuleSyntax: false,
+};
 
-function isTypeOnlyExport(statement) {
-  if (statement.isTypeOnly) return true;
-  const clause = statement.exportClause;
-  if (clause && ts.isNamedExports(clause)) {
-    return clause.elements.length > 0 && clause.elements.every((element) => element.isTypeOnly);
-  }
-  return false;
-}
-
-/** Runtime module specifiers of one file, plus constructs the check cannot follow. */
+/**
+ * Runtime module specifiers of one file, read from what TypeScript actually emits
+ * (imports only used as types and unused imports are elided), plus constructs the
+ * check cannot follow, detected on the original source so that nothing is lost to elision.
+ */
 export function runtimeSpecifiers(file, content) {
-  const source = ts.createSourceFile(file, content, ts.ScriptTarget.Latest, true);
+  const emitted = ts.transpileModule(content, { fileName: file, compilerOptions: EMIT_OPTIONS }).outputText;
+  const output = ts.createSourceFile(file.replace(/\.ts$/, ".js"), emitted, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
   const specifiers = [];
+  for (const statement of output.statements) {
+    if ((ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement)) && statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)) {
+      specifiers.push(statement.moduleSpecifier.text);
+    }
+  }
+  const source = ts.createSourceFile(file, content, ts.ScriptTarget.Latest, true);
   const unsupported = [];
   for (const statement of source.statements) {
-    if (ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier)) {
-      if (!isTypeOnlyImport(statement)) specifiers.push(statement.moduleSpecifier.text);
-    } else if (ts.isExportDeclaration(statement) && statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)) {
-      if (!isTypeOnlyExport(statement)) specifiers.push(statement.moduleSpecifier.text);
-    } else if (ts.isImportEqualsDeclaration(statement) && ts.isExternalModuleReference(statement.moduleReference)) {
-      if (!statement.isTypeOnly) unsupported.push(`import-equals in ${file}`);
+    if (ts.isImportEqualsDeclaration(statement) && ts.isExternalModuleReference(statement.moduleReference) && !statement.isTypeOnly) {
+      unsupported.push(`import-equals in ${file}`);
     }
   }
   const visit = (node) => {

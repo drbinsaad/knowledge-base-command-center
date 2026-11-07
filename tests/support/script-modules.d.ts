@@ -23,3 +23,25 @@ declare module "*/runtime-source-guards.mjs" {
   export function checkCommands(sources: ReadonlyArray<readonly [string, string]>): void;
   export function checkRuntimeSources(sources: ReadonlyArray<readonly [string, string]>): void;
 }
+
+declare module "*/check-import-graph.mjs" {
+  export interface RuntimeGraph {
+    nodes: string[];
+    edges: Map<string, Set<string>>;
+    unresolved: string[];
+    unsupported: string[];
+  }
+  export interface GraphEvaluation {
+    graph: RuntimeGraph;
+    cycles: string[][];
+    problems: string[];
+  }
+  export function runtimeSpecifiers(file: string, content: string): { specifiers: string[]; unsupported: string[] };
+  /** `files` is an array of [relative path under src/, content]. Edges come from TypeScript's emitted imports. */
+  export function buildRuntimeGraph(files: ReadonlyArray<readonly [string, string]>): RuntimeGraph;
+  export function findCycles(graph: RuntimeGraph): string[][];
+  export function evaluateGraph(
+    files: ReadonlyArray<readonly [string, string]>,
+    allowed?: ReadonlyArray<ReadonlyArray<string>>,
+  ): GraphEvaluation;
+}

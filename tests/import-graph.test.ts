@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
-// @ts-expect-error untyped dev-only script (plain .mjs with no declaration file)
 import { buildRuntimeGraph, evaluateGraph, findCycles } from "../scripts/check-import-graph.mjs";
 import { discoverRuntimeSources } from "../scripts/runtime-source-guards.mjs";
 
@@ -30,8 +29,37 @@ test("an explicitly allowed cyclic component is reported but not a failure; a ne
   assert.deepEqual(result.problems, ["runtime import cycle: c.ts <-> d.ts"]);
 });
 
-test("a self-import is a cycle", () => {
-  assert.deepEqual(findCycles(buildRuntimeGraph([["a.ts", 'import { a } from "./a";\nexport const a = 1;\n']])), [["a.ts"]]);
+test("a retained self-import is a cycle", () => {
+  const self = 'import { a as me } from "./a";\nexport const a = 1;\nexport function again() { return me; }\n';
+  assert.deepEqual(findCycles(buildRuntimeGraph([["a.ts", self]])), [["a.ts"]]);
+});
+
+test("ordinary imports used only as types, and unused value imports, are elided and are not cycles", () => {
+  const typeOnlyUse: Files = [
+    ["a.ts", 'import { B } from "./b";\nexport interface A { b: B }\n'],
+    ["b.ts", 'import { A } from "./a";\nexport interface B { a: A }\n'],
+  ];
+  const unusedValue: Files = [
+    ["a.ts", 'import { b } from "./b";\nexport const a = 1;\n'],
+    ["b.ts", 'import { a } from "./a";\nexport const b = 2;\n'],
+  ];
+  for (const files of [typeOnlyUse, unusedValue]) {
+    const result = evaluateGraph(files);
+    assert.deepEqual(result.cycles, []);
+    assert.deepEqual(result.problems, []);
+  }
+});
+
+test("retained side-effect imports and value re-exports still form runtime cycles", () => {
+  const sideEffect: Files = [
+    ["a.ts", 'import "./b";\nexport const a = 1;\n'],
+    ["b.ts", 'import "./a";\nexport const b = 1;\n'],
+  ];
+  const reexport: Files = [
+    ["a.ts", 'export * from "./b";\n'],
+    ["b.ts", 'export { a } from "./a";\n'],
+  ];
+  for (const files of [sideEffect, reexport]) assert.deepEqual(evaluateGraph(files).cycles, [["a.ts", "b.ts"]]);
 });
 
 test("an apparent cycle through type-only imports is not a runtime cycle", () => {
