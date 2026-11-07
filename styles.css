@@ -7406,3 +7406,23 @@
     height: 44px;
   }
 }
+
+/* Keyboard focus. Obsidian removes outlines and draws focus as a button box-shadow
+   that the rules above switch off, so these controls carry their own outline.
+   text-accent is chosen for contrast against the theme background (3:1 or more). */
+.ent-cc-view :is(
+  button.ent-cc-disclosure,
+  button.ent-cc-row-more,
+  button.ent-cc-drag-handle,
+  button.ent-cc-row-title,
+  button.ent-cc-subject-title,
+  .ent-cc-related-record,
+  .ent-cc-note-details > summary,
+  .ent-cc-tree-panel
+):focus-visible {
+  outline: 2px solid var(--text-accent, var(--interactive-accent));
+  outline-offset: -2px;
+}
+.ent-cc-view :is(.ent-cc-subject-row, .ent-cc-tab, .ent-cc-button, .ent-cc-icon-button):focus-visible {
+  outline-color: var(--text-accent, var(--interactive-accent));
+}

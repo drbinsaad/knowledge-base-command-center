@@ -254,6 +254,68 @@ for (const dark of [false, true]) {
   });
 }
 
+for (const dark of [false, true]) {
+  test(`C03 keyboard focus is visible on menu, expansion, related records and Details controls (${dark ? "dark" : "light"}, host-parity)`, async ({ page }) => {
+    await openView(page, { mobile: false, dark, width: 1440, height: 960, scenario: "related-overflow", parity: true });
+    await page.getByRole("button", { name: /^Relationship overview,/u }).click();
+    await expect(page.locator(".ent-cc-related-record").first()).toBeVisible();
+    await page.locator(".ent-cc-workspace-options > summary").click();
+    // The Note details disclosure is part of the inspector; open it so its summary is a rendered target.
+    const targets: Array<[string, string]> = [
+      ["row menu", ".ent-cc-row-more"],
+      ["expansion", ".ent-cc-disclosure"],
+      ["row title", "button.ent-cc-row-title"],
+      ["subject title", "button.ent-cc-subject-title"],
+      ["related record", ".ent-cc-related-record"],
+      ["Details summary", ".ent-cc-workspace-options > summary"],
+      ["Details menu", "button[aria-label='Command center actions']"],
+      ["Note details summary", ".ent-cc-note-details > summary"],
+      ["tree panel", ".ent-cc-tree-panel"],
+    ];
+    const missing: string[] = [];
+    await page.keyboard.press("Shift");
+    for (const [name, selector] of targets) {
+      const target = page.locator(selector).locator("visible=true").first();
+      if ((await target.count()) === 0) { missing.push(`${name}: not rendered`); continue; }
+      // Arrive by keyboard (Shift+Tab away, Tab back) so :focus-visible applies in every engine.
+      await target.focus();
+      // Safari/WebKit skips buttons on plain Tab (Option+Tab reaches them), so use it there.
+      const tab = test.info().project.name === "webkit" ? "Alt+Tab" : "Tab";
+      await page.keyboard.press(`Shift+${tab}`);
+      await page.keyboard.press(tab);
+      const indicator = await target.evaluate((element) => {
+        const style = getComputedStyle(element);
+        const canvas = document.createElement("canvas");
+        canvas.width = 1; canvas.height = 1;
+        const context = canvas.getContext("2d", { willReadFrequently: true })!;
+        const pixel = (cssColor: string, base?: Uint8ClampedArray): Uint8ClampedArray => {
+          context.clearRect(0, 0, 1, 1);
+          if (base) { context.fillStyle = `rgb(${base[0]} ${base[1]} ${base[2]})`; context.fillRect(0, 0, 1, 1); }
+          context.fillStyle = cssColor; context.fillRect(0, 0, 1, 1);
+          return context.getImageData(0, 0, 1, 1).data;
+        };
+        let background = pixel("white");
+        const ancestors: Element[] = [];
+        for (let current: Element | null = element.parentElement; current; current = current.parentElement) ancestors.unshift(current);
+        for (const ancestor of ancestors) background = pixel(getComputedStyle(ancestor).backgroundColor, background);
+        // Own background sits under an inset outline too.
+        background = pixel(style.backgroundColor, background);
+        const outline = pixel(style.outlineColor, background);
+        const luminance = (c: Uint8ClampedArray): number => {
+          const v = [c[0], c[1], c[2]].map((n) => { const s = n / 255; return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; });
+          return v[0] * 0.2126 + v[1] * 0.7152 + v[2] * 0.0722;
+        };
+        const a = luminance(outline); const b = luminance(background);
+        return { matches: element.matches(":focus-visible"), style: style.outlineStyle, width: parseFloat(style.outlineWidth), ratio: (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05) };
+      });
+      if (!indicator.matches) missing.push(`${name}: not :focus-visible`);
+      else if (indicator.style === "none" || indicator.width < 2) missing.push(`${name}: outline ${indicator.style} ${indicator.width}px`);
+      else if (indicator.ratio < 3) missing.push(`${name}: outline contrast ${indicator.ratio.toFixed(2)}`);
+    }
+    expect(missing).toEqual([]);
+  });
+}
+
 async function clickCentre(page: Page, target: ReturnType<Page["locator"]>): Promise<void> {
   const rect = await target.boundingBox();
   if (!rect) throw new Error("Target has no bounds");
