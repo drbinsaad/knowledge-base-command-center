@@ -2370,7 +2370,10 @@ interface SetupJourneySnapshot {
 type SetupJourneyHarness = { openSetupWizard(): void; undoSetup(): Promise<void>; setupSnapshot(): SetupJourneySnapshot };
 const setupJourney = (page: Page): Promise<SetupJourneySnapshot> => page.evaluate(() => (window as unknown as { kbccBrowserHarness: SetupJourneyHarness }).kbccBrowserHarness.setupSnapshot());
 
-test.describe("WF01 setup Inbox review (synthetic host; real wizard)", () => {
+// UI-only: the production wizard and view route run for real, but the harness
+// stubs the commit. The persistence claim (one required-Undo transaction, exact
+// Undo/Redo) is proven by tests/setup-workflow.test.ts over the real plugin, not here.
+test.describe("WF01 setup Inbox review (UI-only; stubbed commit)", () => {
   test("open setup, change the Inbox, review, Cancel keeps the draft, confirm once, then Undo", async ({ page }) => {
     await openView(page, { count: 8 });
     const before = await setupJourney(page);
