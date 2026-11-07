@@ -358,6 +358,7 @@ test("mobile flows keep primary actions visible and empty states actionable", as
   const modals = await readFile(path.join(root, "src/modals.ts"), "utf8");
   const followUpModal = await readFile(path.join(root, "src/follow-up-modal.ts"), "utf8");
   const libraryModal = await readFile(path.join(root, "src/library-modal.ts"), "utf8");
+  const libraryFormModals = await readFile(path.join(root, "src/library-form-modals.ts"), "utf8");
   const styles = await readFile(path.join(root, "styles.css"), "utf8");
   assert.match(view, /Add existing \$\{settings\.itemPlural\}/);
   assert.match(view, /ent-cc-history-action/);
@@ -374,8 +375,8 @@ test("mobile flows keep primary actions visible and empty states actionable", as
   assert.match(modals, /visualViewport/);
   assert.match(modals, /calculateModalViewportLayout/);
   assert.match(libraryModal, /Manage libraries/);
-  assert.match(libraryModal, /Archive this library before permanently deleting it|Delete library/);
-  assert.match(libraryModal, /setDestructive\(\)/);
+  assert.match(libraryFormModals, /Archive this library before permanently deleting it|Delete library/);
+  assert.match(libraryFormModals, /setDestructive\(\)/);
   assert.match(styles, /ent-cc-library-manager-action/);
   assert.match(styles, /ent-cc-knowledge-note-content/);
   assert.match(styles, /--ent-cc-modal-visual-height/);
