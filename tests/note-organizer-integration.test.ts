@@ -1858,9 +1858,9 @@ test("the App-wide organizer claim blocks replacement instances and unload relea
 
 test("membership indicator styles distinguish success, neutral, and broken states accessibly", () => {
   const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
-  assert.match(css, /\.ent-cc-note-membership-organized-current[\s\S]*?var\(--color-green\)/u);
-  assert.match(css, /\.ent-cc-note-membership-not-organized[\s\S]*?var\(--text-faint\)/u);
-  assert.match(css, /\.ent-cc-note-membership-broken[\s\S]*?var\(--text-error\)/u);
+  assert.match(css, /\.ent-cc-note-membership-organized-current[^{}]*\{[^}]*color:\s*var\(--color-green\)/u);
+  assert.match(css, /\.ent-cc-note-membership-not-organized\s*\{[^}]*color:\s*var\(--text-muted\)/u);
+  assert.match(css, /\.ent-cc-note-membership-broken\s*\{[^}]*color:\s*var\(--text-error\)/u);
   assert.match(css, /data-kbcc-count[\s\S]*?font-size:\s*0\.5625rem/u);
   assert.match(css, /@media \(max-width: 760px\), \(any-pointer: coarse\)\s*\{\s*\.ent-cc-note-membership-indicator,\s*\.ent-cc-return-to-kbcc\s*\{\s*min-width:\s*44px;\s*min-height:\s*44px;/u);
   assert.doesNotMatch(css, /\.ent-cc-note-organizer-actions[\s\S]{0,220}flex-direction:\s*column-reverse/u);
