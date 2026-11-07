@@ -2033,7 +2033,8 @@ export class EntVaultCommandCenterView extends ItemView {
         const current = this.app.vault.getAbstractFileByPath(file.path);
         const subject = candidate && this.plugin.getPortableSubject(candidate.id);
         // The exact chosen file object, not merely a file at the same path.
-        if (!ownsBase() || !subject || current !== file || this.plugin.data.portableIndex.resolvedPathBySubjectId[subject.id]) {
+        if (!ownsBase() || !subject || current !== file || subject.title !== candidate.title
+          || this.plugin.data.portableIndex.resolvedPathBySubjectId[subject.id]) {
           new Notice(STALE_CHOICE_NOTICE);
           return;
         }

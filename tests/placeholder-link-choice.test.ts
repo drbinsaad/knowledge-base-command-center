@@ -219,6 +219,24 @@ test("WF10 P4b a binding made in a replaced data object between opening and choo
   } finally { modals.restore(); }
 });
 
+test("WF10 P4d a subject renamed between opening and choosing gives the out-of-date notice and no link", async () => {
+  const s = scenario({ subjects: [subject("a", "Laryngomalacia", "airway")] });
+  const modals = captureModals((files) => files[0]);
+  try {
+    s.startExisting();
+    await settle();
+    const picker = modals.captured.pickers[0];
+    assert.ok(picker);
+    s.data.portableIndex.subjects[0].title = "Renamed after the list was built";
+    const notices = (Notice as unknown as { messages: string[] }).messages;
+    notices.length = 0;
+    picker.choose(picker.items[1]);
+    await settle();
+    assert.deepEqual([s.calls.resolve, s.calls.assign], [[], []]);
+    assert.match(notices.at(-1) ?? "", /out of date.*Nothing was changed/u);
+  } finally { modals.restore(); }
+});
+
 test("WF10 P4c a different file created at the same path is never linked, before or after the merge confirmation", async () => {
   const notices = (Notice as unknown as { messages: string[] }).messages;
   const stale = /out of date.*Nothing was changed/u;
