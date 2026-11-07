@@ -274,17 +274,23 @@ export class TextPromptModal extends Modal {
     modalOwnerWindow(this.contentEl).setTimeout(() => input?.focus(), 40);
   }
 
+  private submitting = false;
+
   private async submit(raw: string): Promise<void> {
+    if (this.submitting) return;
     const value = raw.trim();
     if (!value) {
       new Notice("Enter a name first.");
       return;
     }
+    this.submitting = true;
     try {
       await this.options.onSubmit(value);
       this.close();
     } catch (error) {
       reportAsyncError(error);
+    } finally {
+      this.submitting = false;
     }
   }
 }
@@ -300,6 +306,8 @@ export class ConfirmModal extends Modal {
     super(app);
   }
 
+  private confirming = false;
+
   onOpen(): void {
     this.contentEl.empty();
     this.contentEl.addClass("ent-cc-modal");
@@ -308,11 +316,15 @@ export class ConfirmModal extends Modal {
     new Setting(this.contentEl)
       .addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()))
       .addButton((button) => button.setButtonText(this.confirmLabel).setDestructive().onClick(async () => {
+        if (this.confirming) return;
+        this.confirming = true;
         try {
           await this.onConfirm();
           this.close();
         } catch (error) {
           reportAsyncError(error);
+        } finally {
+          this.confirming = false;
         }
       }));
   }
@@ -537,14 +549,20 @@ export class IndexGroupModal extends Modal {
     modalOwnerWindow(this.contentEl).setTimeout(() => input?.focus(), 40);
   }
 
+  private submitting = false;
+
   private async submit(raw: string): Promise<void> {
+    if (this.submitting) return;
     const group = raw.trim();
     if (!group) { new Notice(`Enter a ${this.options.groupLabel.toLowerCase()} name first.`); return; }
+    this.submitting = true;
     try {
       await this.options.onSubmit(group);
       this.close();
     } catch (error) {
       reportAsyncError(error);
+    } finally {
+      this.submitting = false;
     }
   }
 }
