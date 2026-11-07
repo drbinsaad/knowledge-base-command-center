@@ -1669,9 +1669,13 @@ test("1440px desktop keeps the side inspector with compact Details and Filters",
   await captureEvidence(page, "desktop-compact-header-side-inspector");
 });
 
-async function expectReadableMetadata(page: Page): Promise<void> {
-  for (const selector of [".ent-cc-health-summary", ".ent-cc-subject-id"]) {
-    const target = page.locator(selector).first();
+const baseMetadataSelectors = [".ent-cc-health-summary", ".ent-cc-subject-id"];
+const detailMetadataSelectors = [".ent-cc-inspector-field .ent-cc-inspector-label", ".ent-cc-inspector-section h4"];
+
+async function expectReadableMetadata(page: Page, selectors: string[] = baseMetadataSelectors): Promise<void> {
+  for (const selector of selectors) {
+    // Detail-panel selectors match some hidden copies; measure the first rendered one.
+    const target = page.locator(selector).locator("visible=true").first();
     const details = page.locator(".ent-cc-workspace-options");
     const revealSummary = selector === ".ent-cc-health-summary" && !(await target.isVisible());
     if (revealSummary) await details.locator(":scope > summary").click();
@@ -1711,6 +1715,13 @@ async function expectReadableMetadata(page: Page): Promise<void> {
     if (revealSummary) await details.locator(":scope > summary").click();
   }
 }
+
+test("related-note meta in the detail panel is readable (4.5:1)", async ({ page }) => {
+  await openView(page, { mobile: false, count: 8, scenario: "related-overflow" });
+  await page.getByRole("button", { name: /^Relationship overview,/u }).click();
+  await expect(page.locator(".ent-cc-related-meta").first()).toBeVisible();
+  await expectReadableMetadata(page, [".ent-cc-related-meta"]);
+});
 
 test.afterEach(async ({ page }) => {
   expect(failures.get(page) ?? [], "production renderer must not emit runtime or console errors").toEqual([]);
@@ -2026,7 +2037,13 @@ for (const mobile of [false, true]) {
       await expect(page.locator(".ent-cc-topic-count")).toContainText("9 entries · 8 linked notes · 1 placeholder");
       await expect(page.locator(".ent-cc-tree-body .ent-cc-subject-title")).toHaveCount(9);
       await expect(page.locator(".ent-cc-search-pending, .ent-cc-search-base-group.is-stale")).toHaveCount(0);
-      if (!mobile) await expectReadableMetadata(page);
+      if (!mobile) {
+        await page.locator(".ent-cc-tree-body .ent-cc-subject-title").first().click();
+        // Field labels live in the collapsed "Note details" disclosure.
+        const noteDetails = page.locator(".ent-cc-note-details").first();
+        if (await noteDetails.getAttribute("open") === null) await noteDetails.locator(":scope > summary").click();
+        await expectReadableMetadata(page, [...baseMetadataSelectors, ...detailMetadataSelectors]);
+      }
       await captureEvidence(page, `generic-${mobile ? "mobile" : "desktop"}-${dark ? "dark" : "light"}`);
     });
   }
