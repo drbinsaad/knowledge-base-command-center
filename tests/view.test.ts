@@ -7618,6 +7618,52 @@ test("the Library editor answers every stale Save, unlike the latched shared gua
   );
 });
 
+function libraryEditorAfterSync(): {
+  plugin: { epoch: number; baseId: string; created: Array<{ name: string }> };
+  submit: () => Promise<void>;
+} {
+  Notice.messages.length = 0;
+  const state = { epoch: 0, baseId: "base-a", created: [] as Array<{ name: string }> };
+  const plugin = {
+    app: {},
+    data: {},
+    getActiveKnowledgeBaseId: () => state.baseId,
+    getDataEpoch: () => state.epoch,
+    getBaseSurfaceVersion: () => "surface-1",
+    isExternalReloadInProgress: () => false,
+    async createLibrary(input: { name: string }): Promise<string> { state.created.push(input); return "new-library"; },
+  };
+  const modal = new LibraryEditorModal(
+    plugin as unknown as ConstructorParameters<typeof LibraryEditorModal>[0],
+    null,
+  );
+  const harness = modal as unknown as { name: string; render(): void; close(): void; submit(): Promise<void> };
+  harness.name = "Typed before the reload";
+  harness.render = () => undefined;
+  harness.close = () => undefined;
+  return { plugin: state, submit: () => harness.submit() };
+}
+
+test("the Library editor saves typed text after a settled no-op Sync reload", async () => {
+  const { plugin, submit } = libraryEditorAfterSync();
+  plugin.epoch += 1;
+  await submit();
+  assert.deepEqual(plugin.created.map((input) => input.name), ["Typed before the reload"]);
+  assert.deepEqual(Notice.messages.filter((message) => /Reopen this dialog/.test(message)), []);
+});
+
+test("the Library editor still refuses to save after a real knowledge-base change", async () => {
+  const { plugin, submit } = libraryEditorAfterSync();
+  plugin.epoch += 1;
+  plugin.baseId = "base-b";
+  await submit();
+  assert.deepEqual(plugin.created, []);
+  assert.equal(
+    Notice.messages.filter((message) => /Reopen this dialog before continuing/.test(message)).length,
+    1,
+  );
+});
+
 test("Manage Libraries re-baselines its epoch after its own write and re-arms the stale notice", async () => {
   Notice.messages.length = 0;
   let epoch = 0;
@@ -8240,4 +8286,115 @@ test("desktop compact chrome keeps descriptions inside Details and restores disc
   } finally {
     platform.isMobile = previous;
   }
+});
+
+type ClosedLoadView = ReturnType<typeof mobileSearchPointerHarness>["view"] & {
+  plugin: {
+    getRecords(): VaultRecord[];
+    reconcileRecords(records: VaultRecord[], withinOperation?: boolean): Promise<boolean>;
+    saveViewState(): Promise<void>;
+    data: { activeTab: string };
+  };
+  render(): void;
+  onOpen(): Promise<void>;
+  reload(): Promise<void>;
+  selectionSaveTimer: number | null;
+  saveSelectionState(): Promise<void>;
+};
+
+function closedLoadHarness(): {
+  dom: ReturnType<typeof createFakeDom>;
+  view: ClosedLoadView;
+  renders: () => number;
+  deferReconcile: () => { resolve: () => void };
+  timersSet: () => number;
+} {
+  const { dom, view: base } = mobileSearchPointerHarness();
+  const view = base as ClosedLoadView;
+  let renders = 0;
+  let timersSet = 0;
+  const setTimer = dom.window.setTimeout.bind(dom.window);
+  dom.window.setTimeout = (...args: Parameters<typeof setTimer>) => { timersSet += 1; return setTimer(...args); };
+  view.render = () => { renders += 1; };
+  view.plugin.getRecords = () => [];
+  view.plugin.saveViewState = async () => {};
+  view.plugin.reconcileRecords = async () => false;
+  return {
+    dom, view,
+    renders: () => renders,
+    timersSet: () => timersSet,
+    deferReconcile: () => {
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      view.plugin.reconcileRecords = async () => { await gate; return true; };
+      return { resolve: release };
+    },
+  };
+}
+
+function assertNoViewportListeners(dom: ReturnType<typeof createFakeDom>): void {
+  assert.equal(dom.window.listenerCount("resize"), 0, "no window resize listener");
+  assert.equal(dom.window.visualViewport.listenerCount("resize"), 0, "no visualViewport resize listener");
+  assert.equal(dom.window.visualViewport.listenerCount("scroll"), 0, "no visualViewport scroll listener");
+}
+
+test("closing while onOpen waits for reconcileRecords renders nothing and binds no listeners", async () => {
+  const { dom, view, renders, deferReconcile, timersSet } = closedLoadHarness();
+  const gate = deferReconcile();
+  const opening = view.onOpen();
+  await view.onClose();
+  const rendersAtClose = renders();
+  const timersAtClose = timersSet();
+  gate.resolve();
+  await opening;
+  assert.equal(renders(), rendersAtClose, "no render after close");
+  assert.equal(timersSet(), timersAtClose, "no new timers after close");
+  assertNoViewportListeners(dom);
+});
+
+test("closing during a background reload renders nothing after the refresh resolves", async () => {
+  const { dom, view, renders, deferReconcile } = closedLoadHarness();
+  await view.onOpen();
+  assert.equal(dom.window.listenerCount("resize") > 0, true, "a normal open binds the viewport listeners");
+  assert.equal(dom.window.visualViewport.listenerCount("resize"), 1);
+  assert.equal(dom.window.visualViewport.listenerCount("scroll"), 1);
+  const gate = deferReconcile();
+  const reloading = view.reload();
+  await view.onClose();
+  const rendersAtClose = renders();
+  gate.resolve();
+  await reloading;
+  assert.equal(renders(), rendersAtClose, "no render after close");
+  assertNoViewportListeners(dom);
+});
+
+test("closing while saveViewState is pending after a tab repair renders nothing", async () => {
+  const { dom, view, renders } = closedLoadHarness();
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let markStarted: () => void = () => {};
+  const saveStarted = new Promise<void>((resolve) => { markStarted = resolve; });
+  let saveCalls = 0;
+  view.plugin.data.activeTab = "removed-tab";
+  view.plugin.saveViewState = async () => { saveCalls += 1; markStarted(); await gate; };
+  const reloading = view.reload();
+  await saveStarted;
+  await view.onClose();
+  const rendersAtClose = renders();
+  release();
+  await reloading;
+  assert.equal(saveCalls, 1, "the tab repair save was entered before close");
+  assert.equal(renders(), rendersAtClose, "no render after close");
+  assertNoViewportListeners(dom);
+});
+
+test("closing still saves a pending selection after an open that finished normally", async () => {
+  const { dom, view } = closedLoadHarness();
+  await view.onOpen();
+  let saved = 0;
+  view.saveSelectionState = async () => { saved += 1; };
+  view.selectionSaveTimer = 99;
+  await view.onClose();
+  assert.equal(saved, 1, "pending selection saved on close");
+  assertNoViewportListeners(dom);
 });

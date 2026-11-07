@@ -2,7 +2,22 @@
 
 Complete this checklist on a physical iPhone before tagging a release that changes search, navigation, modals, import/export, Sync handling, or mobile styles. Simulator and automated DOM results may accompany this record but do not replace it.
 
-## 0.26.0 Workspace space and attachments
+## 0.26.1 Safety and reliability fixes
+
+Status: **Maintainer-authorized waiver — Unverified — Unexecuted on a physical iPhone or iPad.** The owner directed publication of 0.26.1 after the remaining physical-device and two-device Sync limitations were disclosed; see the exact instruction and context in the [0.26.1 evidence](release-evidence/0.26.1-iphone.md). This is not a physical-device Pass, and no earlier waiver is reused. Automated Chromium/WebKit tests do not execute these rows.
+
+Use a disposable synthetic vault and record exact asset checksums, device/OS/Obsidian versions and input method before executing these checks:
+
+1. With plugin data missing at startup and a readable, recognized `data.json.bak` present, confirm one notice names the kept `data.json.bak-kept-<timestamp>` copy and that the backup bytes are unchanged after the first edit. With an unreadable backup, organization stays read-only.
+2. Open **Sync & recovery** and confirm the always-visible text says organization is stored in plugin data, not notes, and names Settings → Sync → Vault configuration sync → Active community plugin list and Installed community plugin list; the "Last time plugin data changed outside this session" fact is shown without interpretation.
+3. Type into Quick Append and a Library editor, let an unchanged Sync reload settle, then save: the text is saved. A real knowledge-base change is still refused.
+4. On a wide iPad with split view enabled, check 44-point row menus, disclosures, rows, header buttons, Undo/Pin, related notes and the resize bar with touch, Pencil and trackpad; heading levels stay indented; detail labels are readable in light and dark themes.
+5. Press Enter twice quickly in a name or confirmation dialog: the action runs once.
+6. Upgrade once and verify news links exactly to https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.26.1.
+
+All physical-device and controlled two-device Sync checks for 0.26.1 are **Unexecuted** unless this section is later updated with exact device evidence.
+
+## Historical 0.26.0 Workspace space and attachments
 
 Status: **Maintainer-authorized waiver — Unverified — not executed on a physical iPhone or iPad.** After the screenshot/code review and device-test limitation were disclosed, the maintainer instructed implementation, testing and publication unattended. The [0.26.0 evidence](release-evidence/0.26.0-iphone.md) records this candidate-specific instruction; it is not a physical-device Pass.
 

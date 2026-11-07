@@ -5884,6 +5884,35 @@ test("rewriting a note heading treats the title as literal text", () => {
   assert.equal(rewriteTopLevelHeading("no heading here\n", "New"), "no heading here\n");
 });
 
+test("rewriting a note heading skips frontmatter and fenced code", () => {
+  const frontmatter = "---\ntitle: x\n# x\n---\n\n# Real Title\n\nbody\n";
+  assert.equal(rewriteTopLevelHeading(frontmatter, "New"), "---\ntitle: x\n# x\n---\n\n# New\n\nbody\n");
+  const backtick = "intro\n\n```bash\n# install deps\nnpm ci\n```\n\n# Real Title\n";
+  assert.equal(rewriteTopLevelHeading(backtick, "New"), "intro\n\n```bash\n# install deps\nnpm ci\n```\n\n# New\n");
+  const tilde = "~~~\n# comment\n~~~\n# Real Title\n";
+  assert.equal(rewriteTopLevelHeading(tilde, "New"), "~~~\n# comment\n~~~\n# New\n");
+  // A longer outer fence is not closed by a shorter inner one.
+  const nested = "````md\n```\n# inner\n```\n````\n# Real Title\n";
+  assert.equal(rewriteTopLevelHeading(nested, "New"), "````md\n```\n# inner\n```\n````\n# New\n");
+  // Notes whose only '# ' lines are in code or frontmatter are returned unchanged.
+  const onlyFrontmatter = "---\n# x\n---\nbody\n";
+  assert.equal(rewriteTopLevelHeading(onlyFrontmatter, "New"), onlyFrontmatter);
+  const onlyCode = "text\n```\n# comment\n```\n";
+  assert.equal(rewriteTopLevelHeading(onlyCode, "New"), onlyCode);
+  // CRLF notes keep their line endings.
+  assert.equal(rewriteTopLevelHeading("---\r\n# x\r\n---\r\n# Old\r\nbody\r\n", "New"), "---\r\n# x\r\n---\r\n# New\r\nbody\r\n");
+  const crlfFence = "---\r\ntitle: x\r\n# x\r\n---\r\n```bash\r\n# install deps\r\n```\r\n# Old\r\nbody\r\n";
+  assert.equal(rewriteTopLevelHeading(crlfFence, "New"), crlfFence.replace("# Old", "# New"));
+});
+
+test("rewriting a note heading handles mixed and CR-only line terminators", () => {
+  // A bare CR inside a fence is a line break: the first fence content line is "# first comment".
+  const mixed = "---\ntype: topic-proposal\n---\n```bash\r# first comment\n# install deps\n```\n# Real Title\n";
+  assert.equal(rewriteTopLevelHeading(mixed, "New"), mixed.replace("# Real Title", "# New"));
+  // CR-only notes (old Mac line endings) are still rewritten, terminators preserved.
+  assert.equal(rewriteTopLevelHeading("# Old\r\rbody\r", "New"), "# New\r\rbody\r");
+});
+
 test("a pathological parent chain degrades gracefully instead of exhausting the stack", () => {
   // Every note pointing at its predecessor is easy to produce by import or by a
   // parent-property convention. Recursive tree walking used to throw

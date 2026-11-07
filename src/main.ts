@@ -314,6 +314,8 @@ export const KBCC_RETURN_NAVIGATION_STATE_KEY = "ent-vault-command-center.return
 /** Inert key from an unreleased experiment; only explicit local-data cleanup may touch it. */
 export const LEGACY_LIBRARY_IMAGE_PERMISSION_KEY = "ent-vault-command-center.library-images.v1";
 const FOLLOW_UP_UNDO_WINDOW_MS = 5 * 60 * 1000;
+const QUICK_APPEND_BASE_CHANGED_MESSAGE = "The active knowledge base changed. Reopen Quick Append before continuing.";
+const QUICK_APPEND_SYNC_PENDING_MESSAGE = "Checking a synced update. Your text is still open; try again when the check finishes.";
 
 /**
  * The single (root, filename prefix, kind) table for native clinical Library
@@ -2717,6 +2719,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const sourceWasMissing = loaded === null
       || loaded === undefined
       || (typeof loaded === "object" && !Array.isArray(loaded) && Object.keys(loaded).length === 0);
+    // A missing data.json starts an empty bootstrap whose first save would
+    // overwrite the last committed .bak. Keep that backup aside first.
+    if (capturedRead === undefined && sourceWasMissing && !restoredFromBackup) await this.keepBackupBesideMissingPrimary();
     const sourceVersion = storedDataVersion(loaded);
     const loadedRecord = asUnknownRecord(loaded);
     const recognizedStore = isRecognizedPluginStore(loaded);
@@ -3345,6 +3350,46 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const currentRaw = await adapter.read(guard.path);
     if (currentRaw !== guard.expectedRaw) {
       throw new CorruptPrimarySupersededError("data.json changed after corrupt-file recovery preserved it.");
+    }
+  }
+
+  /**
+   * Startup found no data.json but a recognized same-device .bak. Copy its exact
+   * text to a new data.json.bak-kept-<time> file (never overwriting) before any
+   * save can replace .bak. If the copy fails, saving stays blocked. The backup
+   * is never loaded as authority here.
+   */
+  private async keepBackupBesideMissingPrimary(): Promise<void> {
+    const backupPath = this.storeBackupPath();
+    const dir = this.manifest.dir;
+    if (!backupPath || !dir) return;
+    const adapter = this.app.vault.adapter;
+    let raw: string;
+    try {
+      if (!(await adapter.exists(backupPath))) return;
+      raw = await adapter.read(backupPath);
+    } catch (error) {
+      console.error("Knowledge Base Command Center could not inspect the data.json backup", error);
+      this.markPersistenceUncertain(`data.json is missing and its last automatic backup could not be inspected (${errorMessage(error)}). Organization stays read-only so that backup is not overwritten; restart Obsidian once storage is available.`);
+      return;
+    }
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!isRecognizedPluginStore(parsed) && !isRecognizedPluginData(parsed)) return;
+    } catch {
+      return;
+    }
+    try {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      let keptPath = normalizePath(`${dir}/data.json.bak-kept-${stamp}`);
+      for (let n = 2; await adapter.exists(keptPath); n += 1) {
+        keptPath = normalizePath(`${dir}/data.json.bak-kept-${stamp}-${n}`);
+      }
+      await adapter.write(keptPath, raw);
+      new Notice(`data.json is missing, so your last automatic backup was kept as ${keptPath}. Organization starts empty until data.json arrives or you restore from that file.`, 15000);
+    } catch (error) {
+      console.error("Knowledge Base Command Center could not keep the data.json backup", error);
+      this.markPersistenceUncertain(`data.json is missing and its last automatic backup could not be kept (${errorMessage(error)}). Organization stays read-only so that backup is not overwritten; restart Obsidian after data.json is restored or the backup is copied.`);
     }
   }
 
@@ -5813,8 +5858,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   openQuickAppendExistingNote(): void {
     try {
       this.assertDataWritable();
-      const openedBaseId = this.store.activeBaseId;
-      const openedDataEpoch = this.dataEpoch;
+      const ownsBase = createOpenedBaseGuard(this, { message: QUICK_APPEND_BASE_CHANGED_MESSAGE });
       const files = this.getVaultNoteFiles()
         .filter((file) => !isImmutableSourcePath(file.path))
         .sort((left, right) => left.path.localeCompare(right.path));
@@ -5823,8 +5867,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         return;
       }
       new VaultFilePickerModal(this.app, files, "Choose a note for Quick Append", (file) => {
-        if (this.store.activeBaseId !== openedBaseId || this.dataEpoch !== openedDataEpoch) {
-          new Notice("The active knowledge base changed. Reopen quick append before choosing a note.", 8000);
+        if (!ownsBase.owns()) {
+          new Notice(
+            this.isExternalReloadInProgress()
+              ? QUICK_APPEND_SYNC_PENDING_MESSAGE
+              : "The active knowledge base changed. Reopen quick append before choosing a note.",
+            8000,
+          );
           return;
         }
         this.openQuickAppendForFile(file);
@@ -5835,8 +5884,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private openQuickAppendForFile(file: TFile): void {
-    const openedBaseId = this.store.activeBaseId;
-    const openedDataEpoch = this.dataEpoch;
+    const ownsBase = createOpenedBaseGuard(this, { message: QUICK_APPEND_BASE_CHANGED_MESSAGE });
     const categories = this.getFollowUpCategories();
     if (!categories.some((category) => !category.archived)) {
       new Notice("No active quick append categories are configured. Restore or add one in plugin settings.", 8000);
@@ -5847,9 +5895,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       categories,
       initialDate: this.today(),
       onSubmit: async ({ categoryId, date, text }) => {
-        if (this.store.activeBaseId !== openedBaseId || this.dataEpoch !== openedDataEpoch) {
-          throw new Error("The active knowledge base changed. Reopen Quick Append before continuing.");
-        }
+        if (this.isExternalReloadInProgress()) throw new Error(QUICK_APPEND_SYNC_PENDING_MESSAGE);
+        if (!ownsBase.owns()) throw new Error(QUICK_APPEND_BASE_CHANGED_MESSAGE);
         await this.appendFollowUpToFile(file, categoryId, text, date);
       },
     }).open();

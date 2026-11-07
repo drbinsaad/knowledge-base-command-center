@@ -813,7 +813,7 @@
 .ent-cc-inspector-field .ent-cc-inspector-label {
   align-self: start;
   margin: 0;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: 0.75rem;
   letter-spacing: 0.065em;
 }
@@ -1727,7 +1727,7 @@
 
 .ent-cc-inspector-section h4 {
   margin: 0 0 9px;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: 0.75rem;
   font-weight: 750;
   letter-spacing: 0.11em;
@@ -1821,7 +1821,7 @@
 
 .ent-cc-related-meta {
   flex: 0 1 auto;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-family: var(--font-monospace);
   font-size: 0.6875rem;
 }
@@ -4579,60 +4579,68 @@
   padding: 2px 4px;
 }
 
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-subject-row {
+/* Split view keeps the wide depth indentation (inline padding), so only block padding is set. */
+.ent-cc-view.is-mobile-split .ent-cc-row {
+  grid-template-columns: 44px minmax(0, 1fr) 44px;
+  min-height: 48px;
+  gap: 2px;
+  padding-block: 2px;
+}
+
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) .ent-cc-subject-row {
   grid-template-columns: 44px minmax(0, 1fr) max-content 44px;
   grid-template-rows: 44px;
 }
 
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-disclosure,
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-row-more,
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-drag-handle {
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) .ent-cc-disclosure,
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) .ent-cc-row-more,
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) .ent-cc-drag-handle {
   width: 44px;
   height: 44px;
 }
 
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-heading-row .ent-cc-leading-icon,
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-subheading-row .ent-cc-leading-icon,
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-subject-id,
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-subject-id.has-membership-provenance,
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-row-count {
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) .ent-cc-heading-row .ent-cc-leading-icon,
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) .ent-cc-subheading-row .ent-cc-leading-icon,
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) .ent-cc-subject-id,
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) .ent-cc-subject-id.has-membership-provenance,
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) .ent-cc-row-count {
   display: none;
 }
 
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-subject-row .ent-cc-disclosure,
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-subject-row .ent-cc-record-icon {
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) .ent-cc-subject-row .ent-cc-disclosure,
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) .ent-cc-subject-row .ent-cc-record-icon {
   grid-column: 1;
   grid-row: 1;
 }
 
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-curriculum-row .ent-cc-record-icon {
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) .ent-cc-curriculum-row .ent-cc-record-icon {
   display: none;
 }
 
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-heading-row .ent-cc-row-title,
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-subheading-row .ent-cc-row-title,
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-subject-row .ent-cc-subject-title {
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) .ent-cc-heading-row .ent-cc-row-title,
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) .ent-cc-subheading-row .ent-cc-row-title,
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) .ent-cc-subject-row .ent-cc-subject-title {
   grid-column: 2;
 }
 
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) button.ent-cc-row-title,
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) button.ent-cc-subject-title {
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) button.ent-cc-row-title,
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) button.ent-cc-subject-title {
   min-height: 44px;
 }
 
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-heading-row .ent-cc-row-more,
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-subheading-row .ent-cc-row-more {
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) .ent-cc-heading-row .ent-cc-row-more,
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) .ent-cc-subheading-row .ent-cc-row-more {
   display: inline-grid;
   grid-column: 3;
 }
 
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-subject-row .ent-cc-row-more {
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) .ent-cc-subject-row .ent-cc-row-more {
   display: inline-grid;
   grid-column: 4;
   grid-row: 1;
 }
 
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-subject-row .ent-cc-row-badges {
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) .ent-cc-subject-row .ent-cc-row-badges {
   display: flex;
   grid-column: 3;
   grid-row: 1;
@@ -4641,8 +4649,8 @@
   gap: 2px;
 }
 
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-row-badges .ent-cc-priority,
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-row-badges .ent-cc-visual-badge {
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) .ent-cc-row-badges .ent-cc-priority,
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) .ent-cc-row-badges .ent-cc-visual-badge {
   display: none;
 }
 
@@ -7351,10 +7359,21 @@
   padding-block: 10px;
   background: var(--ent-cc-surface);
 }
-.ent-cc-view.is-mobile-split .ent-cc-inspector-layout-actions .ent-cc-icon-button {
+.ent-cc-view.is-mobile-split .ent-cc-inspector-layout-actions .ent-cc-icon-button,
+.ent-cc-view.is-mobile-split .ent-cc-history-action,
+.ent-cc-view.is-mobile-split .ent-cc-inspector-actions .ent-cc-icon-button {
   width: 44px;
   min-width: 44px;
   height: 44px;
+}
+.ent-cc-view.is-mobile-split .ent-cc-header-actions .ent-cc-button,
+.ent-cc-view.is-mobile-split .ent-cc-inspector-actions .ent-cc-button,
+.ent-cc-view.is-mobile-split .ent-cc-related-record { min-height: 44px; }
+.ent-cc-view.is-mobile-split .ent-cc-workspace-separator::after {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline: -10px;
 }
 @media (pointer: coarse) {
   .ent-cc-view .ent-cc-inspector-layout-actions .ent-cc-icon-button {

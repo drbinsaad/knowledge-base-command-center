@@ -7,7 +7,7 @@ import {
 } from "./main";
 import { resolveLibraryIconId } from "./library-icons";
 import { errorMessage, type LibraryDefinition } from "./model";
-import { ConfirmModal, modalOwnerWindow } from "./modals";
+import { ConfirmModal, createOpenedBaseGuard, modalOwnerWindow, type OpenedBaseGuard } from "./modals";
 import { LibrarySettingsModal } from "./library-settings-modal";
 
 function reportLibraryError(error: unknown): void {
@@ -27,6 +27,27 @@ function suggestedSingular(name: string): string {
 }
 
 const NEW_LIBRARY_FOCUS_KEY = "library-new";
+const LIBRARY_STALE_MESSAGE = "The active knowledge base or its libraries changed.";
+
+/**
+ * Library form dialogs keep their draft through a settled, unchanged Sync reload
+ * and still refuse after a real base change. Every refused press is answered;
+ * the shared guard's own once-only notice is deliberately not used here.
+ */
+function libraryDialogOwnsBase(
+  plugin: EntVaultCommandCenterPlugin,
+  ownsBase: OpenedBaseGuard,
+  reopenAdvice: string,
+): boolean {
+  if (ownsBase.owns()) return true;
+  new Notice(
+    plugin.isExternalReloadInProgress?.()
+      ? "Checking a synced update. Your draft is still open; try again when the check finishes."
+      : `${LIBRARY_STALE_MESSAGE} ${reopenAdvice}`,
+    8000,
+  );
+  return false;
+}
 
 function libraryActionFocusKey(libraryId: string, action: string): string {
   return `library-${libraryId}-${action}`;
@@ -47,8 +68,7 @@ function libraryDefinitionFingerprint(library: LibraryDefinition): string {
 
 /** Create or edit one top-level library without deriving identity from its editable name. */
 export class LibraryEditorModal extends Modal {
-  private readonly openedBaseId: string;
-  private readonly openedDataEpoch: number;
+  private readonly ownsBase: OpenedBaseGuard;
   private readonly existingId: string | null;
   private readonly originalFingerprint: string | null;
   private name: string;
@@ -71,8 +91,7 @@ export class LibraryEditorModal extends Modal {
     private readonly onSaved?: (libraryId: string) => void,
   ) {
     super(plugin.app);
-    this.openedBaseId = plugin.getActiveKnowledgeBaseId();
-    this.openedDataEpoch = plugin.getDataEpoch();
+    this.ownsBase = createOpenedBaseGuard(plugin, { message: LIBRARY_STALE_MESSAGE });
     this.existingId = existing?.id ?? null;
     this.originalFingerprint = existing ? libraryDefinitionFingerprint(existing) : null;
     this.name = existing?.name ?? "";
@@ -212,10 +231,7 @@ export class LibraryEditorModal extends Modal {
   }
 
   private isCurrent(): boolean {
-    if (this.plugin.getActiveKnowledgeBaseId() === this.openedBaseId
-      && this.plugin.getDataEpoch() === this.openedDataEpoch) return true;
-    new Notice("The active knowledge base or its libraries changed. Reopen this dialog before continuing.", 8000);
-    return false;
+    return libraryDialogOwnsBase(this.plugin, this.ownsBase, "Reopen this dialog before continuing.");
   }
 
   private existingLibraryIsOriginal(): boolean {
@@ -261,8 +277,7 @@ export class LibraryEditorModal extends Modal {
 
 /** Destructive removal is available only after a custom library has been archived. */
 export class DeleteArchivedLibraryModal extends Modal {
-  private readonly openedBaseId: string;
-  private readonly openedDataEpoch: number;
+  private readonly ownsBase: OpenedBaseGuard;
   private destinationValue = "";
   private busy = false;
   private error = "";
@@ -276,8 +291,7 @@ export class DeleteArchivedLibraryModal extends Modal {
     private readonly onDeleted: () => void,
   ) {
     super(plugin.app);
-    this.openedBaseId = plugin.getActiveKnowledgeBaseId();
-    this.openedDataEpoch = plugin.getDataEpoch();
+    this.ownsBase = createOpenedBaseGuard(plugin, { message: LIBRARY_STALE_MESSAGE });
   }
 
   onOpen(): void {
@@ -351,10 +365,7 @@ export class DeleteArchivedLibraryModal extends Modal {
   }
 
   private isCurrent(): boolean {
-    if (this.plugin.getActiveKnowledgeBaseId() === this.openedBaseId
-      && this.plugin.getDataEpoch() === this.openedDataEpoch) return true;
-    new Notice("The active knowledge base or its libraries changed. Reopen this confirmation before continuing.", 8000);
-    return false;
+    return libraryDialogOwnsBase(this.plugin, this.ownsBase, "Reopen this confirmation before continuing.");
   }
 
   private destination(): LibraryRemovalDestination {

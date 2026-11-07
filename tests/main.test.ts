@@ -13771,6 +13771,69 @@ test("Quick Append existing-note picker refuses a base or data-epoch change befo
   }
 });
 
+async function openedQuickAppendHarness(): Promise<{
+  plugin: EntVaultCommandCenterPlugin & TestPluginBase;
+  submit: (text: string) => Promise<void>;
+  content: () => string;
+}> {
+  const file = new TFile("Knowledge Base/Topic.md");
+  let content = "# Topic\n";
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getMarkdownFiles: () => [file],
+      getAbstractFileByPath: (path: string) => path === file.path ? file : null,
+      process: async (_file: TFile, transform: (value: string) => string) => { content = transform(content); },
+      createFolder: async () => {},
+      create: async (path: string) => new TFile(path),
+    },
+    workspace: { getLeavesOfType: () => [], getActiveFile: () => file },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+    fileManager: {},
+  };
+  const first = migrateData(null);
+  first.settings.workspaceMode = "generic";
+  const second = migrateData(null);
+  second.settings.workspaceMode = "generic";
+  second.settings.workspaceName = "Second";
+  const store = createDefaultStore(first, 1, "vault-quick-append-reload");
+  store.bases.push(createKnowledgeBaseEntry(second, "base-second", 2));
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = store;
+  await plugin.loadPluginData();
+  const appendOpen = Object.getOwnPropertyDescriptor(QuickAppendModal.prototype, "open");
+  let onSubmit: ((value: { categoryId: string; date: string; text: string }) => Promise<void>) | null = null;
+  QuickAppendModal.prototype.open = function captureAppend(): void {
+    onSubmit = (this as unknown as { options: { onSubmit: typeof onSubmit } }).options.onSubmit;
+  };
+  try {
+    plugin.openQuickAppendCurrentNote(file.path);
+  } finally {
+    if (appendOpen) Object.defineProperty(QuickAppendModal.prototype, "open", appendOpen);
+    else Reflect.deleteProperty(QuickAppendModal.prototype, "open");
+  }
+  assert.ok(onSubmit, "Quick Append opened");
+  const submit = onSubmit as (value: { categoryId: string; date: string; text: string }) => Promise<void>;
+  return { plugin, submit: (text) => submit({ categoryId: "questions", date: "2026-01-02", text }), content: () => content };
+}
+
+test("Quick Append still saves typed text after a settled no-op Sync reload", async () => {
+  const { plugin, submit, content } = await openedQuickAppendHarness();
+  const epoch = plugin.getDataEpoch();
+  plugin.loadedData = structuredClone((plugin as unknown as { store: PluginStore }).store);
+  await plugin.onExternalSettingsChange();
+  assert.notEqual(plugin.getDataEpoch(), epoch, "the no-op reload bumps the data epoch");
+  await submit("Typed before the reload");
+  assert.match(content(), /Typed before the reload/u);
+});
+
+test("Quick Append is still refused after a real knowledge-base change", async () => {
+  const { plugin, submit, content } = await openedQuickAppendHarness();
+  await plugin.switchKnowledgeBase("base-second");
+  await assert.rejects(() => submit("Must not be written"), /active knowledge base changed\. Reopen Quick Append/u);
+  assert.equal(content().includes("Must not be written"), false);
+});
+
 // --- Operation-barrier re-entrancy: a refresh inside a base switch or mutate
 // --- transaction must never queue or wait behind the operation that owns it.
 
@@ -15891,4 +15954,119 @@ test("vault-side JSON exports honor the configured exports folder", async () => 
   // so exports can never land at the vault root.
   const reloaded = migrateData(JSON.parse(JSON.stringify({ ...data, settings: { ...data.settings, exportsFolder: "   " } })));
   assert.equal(reloaded.settings.exportsFolder, DEFAULT_EXPORTS_FOLDER);
+});
+
+function missingPrimaryWithBackup(options: { backup: string | null; failKeptWrite?: boolean; rejectBackupOnce?: "exists" | "read" }) {
+  let pendingRejection = options.rejectBackupOnce;
+  const dir = ".obsidian/plugins/knowledge-base-command-center";
+  const files = new Map<string, string>();
+  if (options.backup !== null) files.set(`${dir}/data.json.bak`, options.backup);
+  const writes: Array<{ path: string; content: string }> = [];
+  const app = {
+    vault: {
+      ...emptyWritableTestVault(),
+      adapter: {
+        exists: async (path: string) => {
+          if (pendingRejection === "exists" && path.endsWith("data.json.bak")) {
+            pendingRejection = undefined;
+            throw new Error("storage unavailable");
+          }
+          return files.has(path);
+        },
+        read: async (path: string) => {
+          if (pendingRejection === "read" && path.endsWith("data.json.bak")) {
+            pendingRejection = undefined;
+            throw new Error("storage unavailable");
+          }
+          const value = files.get(path);
+          if (value === undefined) throw new Error("missing");
+          return value;
+        },
+        write: async (path: string, content: string) => {
+          if (options.failKeptWrite && path.includes("data.json.bak-kept-")) throw new Error("disk full");
+          writes.push({ path, content });
+          files.set(path, content);
+        },
+      },
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null },
+    fileManager: {},
+    loadLocalStorage: () => null,
+    saveLocalStorage: () => {},
+  };
+  const plugin = new EntVaultCommandCenterPlugin(app as never, { dir } as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = null;
+  const primaryWrites: unknown[] = [];
+  plugin.saveData = async (value: unknown) => { primaryWrites.push(structuredClone(value)); };
+  return { plugin, files, writes, primaryWrites, dir };
+}
+
+function syntheticBackupText(): string {
+  const data = migrateData(null);
+  data.directIndexPaths = ["Kept note.md"];
+  data.settings.workspaceName = "Last good organization";
+  return JSON.stringify(createDefaultStore(data, 100, "vault-t08b-backup"));
+}
+
+test("T08b: a missing data.json keeps the last backup in a separate file before any save", async () => {
+  Notice.messages.length = 0;
+  const backupText = syntheticBackupText();
+  const { plugin, files, writes, primaryWrites, dir } = missingPrimaryWithBackup({ backup: backupText });
+
+  await plugin.loadPluginData();
+  assert.equal(plugin.isDataReadOnly(), false);
+  await plugin.mutate("Pin after missing data.json", () => { plugin.data.pinnedPaths = ["New.md"]; });
+
+  const kept = [...files.keys()].filter((path) => path.startsWith(`${dir}/data.json.bak-kept-`));
+  assert.equal(kept.length, 1);
+  assert.equal(files.get(kept[0]), backupText, "the kept copy holds the exact original backup text");
+  assert.ok(writes.findIndex((write) => write.path === kept[0]) < writes.findIndex((write) => write.path === `${dir}/data.json.bak`), "the copy exists before .bak is touched");
+  assert.equal(primaryWrites.length, 1);
+  const notices = Notice.messages.filter((message) => message.includes("data.json.bak-kept-"));
+  assert.equal(notices.length, 1);
+  assert.match(notices[0], /data\.json is missing/i);
+});
+
+test("T08b: if the kept copy cannot be written, .bak is never written and organization is read-only", async () => {
+  Notice.messages.length = 0;
+  const backupText = syntheticBackupText();
+  const { plugin, files, writes, primaryWrites, dir } = missingPrimaryWithBackup({ backup: backupText, failKeptWrite: true });
+
+  await plugin.loadPluginData();
+  assert.equal(plugin.isDataReadOnly(), true);
+  assert.match(plugin.dataCompatibilityWarning, /could not be kept/i);
+  await assert.rejects(plugin.mutate("Pin after failed keep", () => { plugin.data.pinnedPaths = ["New.md"]; }));
+
+  assert.equal(writes.length, 0, "no adapter write at all");
+  assert.equal(primaryWrites.length, 0);
+  assert.equal(files.get(`${dir}/data.json.bak`), backupText);
+});
+
+for (const failing of ["exists", "read"] as const) {
+  test(`T08b: if the backup cannot be inspected (${failing} rejects), organization is read-only and .bak is untouched`, async () => {
+    const backupText = syntheticBackupText();
+    const { plugin, files, writes, primaryWrites, dir } = missingPrimaryWithBackup({ backup: backupText, rejectBackupOnce: failing });
+
+    await plugin.loadPluginData();
+    assert.equal(plugin.isDataReadOnly(), true);
+    await assert.rejects(plugin.mutate("Pin after uninspectable backup", () => { plugin.data.pinnedPaths = ["New.md"]; }));
+
+    assert.equal(files.get(`${dir}/data.json.bak`), backupText);
+    assert.equal(writes.length, 0, "no write to data.json.bak or anywhere else");
+    assert.equal(primaryWrites.length, 0, "no write to data.json");
+  });
+}
+
+test("T08b: no kept copy is made when data.json exists or when there is no backup", async () => {
+  const present = missingPrimaryWithBackup({ backup: syntheticBackupText() });
+  present.plugin.loadedData = JSON.parse(syntheticBackupText());
+  await present.plugin.loadPluginData(false);
+  assert.equal(present.writes.length, 0, "an existing data.json writes nothing new at startup");
+
+  const none = missingPrimaryWithBackup({ backup: null });
+  await none.plugin.loadPluginData();
+  await none.plugin.mutate("Pin without backup", () => { none.plugin.data.pinnedPaths = ["New.md"]; });
+  assert.equal(none.writes.some((write) => write.path.includes("bak-kept")), false);
+  assert.equal(none.primaryWrites.length, 1);
 });

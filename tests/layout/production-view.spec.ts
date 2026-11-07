@@ -436,6 +436,70 @@ test.describe("tablet split opt-in", () => {
     await expect(page.locator(".ent-cc-inspector")).toHaveAttribute("role", "dialog");
     expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
   });
+
+  test("split view keeps 44 px touch targets (browser emulation, not iPad hardware)", async ({ page }) => {
+    await openView(page, { mobile: true, width: 1180, height: 820, count: 8, scenario: "related-overflow" });
+    await page.locator(".ent-cc-workspace-options > summary").tap();
+    await page.getByRole("button", { name: "Split view on wide screens", exact: true }).tap();
+    await expect(page.locator("#kbcc-view")).toHaveAttribute("data-pane-layout", "wide");
+    await page.getByRole("button", { name: /^Relationship overview,/u }).tap();
+    await expect(page.locator(".ent-cc-view")).toHaveClass(/is-mobile-split/u);
+    const targets: Array<{ name: string; selector: string; axes: Array<"width" | "height"> }> = [
+      { name: "row more", selector: ".ent-cc-row-more", axes: ["width", "height"] },
+      { name: "disclosure", selector: ".ent-cc-disclosure", axes: ["width", "height"] },
+      { name: "subject row", selector: ".ent-cc-subject-row", axes: ["height"] },
+      { name: "subject title", selector: ".ent-cc-subject-title", axes: ["height"] },
+      { name: "header buttons", selector: ".ent-cc-header-actions .ent-cc-button", axes: ["height"] },
+      { name: "undo", selector: ".ent-cc-history-action", axes: ["width", "height"] },
+      { name: "inspector buttons", selector: ".ent-cc-inspector-actions .ent-cc-button, .ent-cc-inspector-actions .ent-cc-icon-button", axes: ["height"] },
+      { name: "pin", selector: ".ent-cc-inspector-actions .ent-cc-icon-button", axes: ["width", "height"] },
+      { name: "related records", selector: ".ent-cc-related-record", axes: ["height"] },
+    ];
+    const small: string[] = [];
+    for (const target of targets) {
+      const sizes = await page.locator(target.selector).evaluateAll((nodes) => nodes
+        .map((node) => node.getBoundingClientRect()).filter((r) => r.width > 0 && r.height > 0)
+        .map((r) => ({ width: r.width, height: r.height })));
+      if (sizes.length === 0) { small.push(`${target.name}: not found`); continue; }
+      for (const axis of target.axes) {
+        const min = Math.min(...sizes.map((s) => s[axis]));
+        if (min < 44) small.push(`${target.name} ${axis} ${min}`);
+      }
+    }
+    expect(small).toEqual([]);
+    // The separator stays 24 px wide; a pseudo-element must extend the real hit area to 44 px.
+    const separator = page.locator(".ent-cc-workspace-separator");
+    const box = (await separator.boundingBox())!;
+    const owner = (x: number) => page.evaluate(([px, py]) => {
+      const hit = document.elementFromPoint(px, py);
+      return Boolean(hit?.closest(".ent-cc-workspace-separator"));
+    }, [x, box.y + box.height / 2]);
+    const centre = box.x + box.width / 2;
+    expect(await owner(centre - 20)).toBe(true);
+    expect(await owner(centre + 20)).toBe(true);
+    expect(await owner(centre - 24)).toBe(false);
+    expect(await owner(centre + 24)).toBe(false);
+    const before = Number(await separator.getAttribute("aria-valuenow"));
+    const y = box.y + 60;
+    await page.mouse.move(centre - 20, y); await page.mouse.down();
+    await page.mouse.move(centre - 60, y); await page.mouse.up();
+    expect(Number(await separator.getAttribute("aria-valuenow"))).not.toBe(before);
+  });
+});
+
+test("fine-pointer desktop keeps compact control sizes", async ({ page }) => {
+  await openView(page, { mobile: false, width: 1440, height: 960, count: 80 });
+  await page.getByRole("button", { name: /^Research note 000,/u }).click();
+  const size = (selector: string) => page.locator(selector).first().evaluate((node) => {
+    const r = node.getBoundingClientRect(); return { width: Math.round(r.width), height: Math.round(r.height) };
+  });
+  await expect(page.locator(".ent-cc-view")).not.toHaveClass(/is-mobile-split/u);
+  expect((await size(".ent-cc-workspace-separator")).width).toBe(24);
+  expect((await size(".ent-cc-header-actions .ent-cc-button")).height).toBe(32);
+  expect((await size(".ent-cc-inspector-actions .ent-cc-icon-button")).height).toBe(32);
+  const more = await size(".ent-cc-row-more");
+  expect(more.width).toBeLessThan(44);
+  expect(more.height).toBeLessThan(44);
 });
 
 for (const device of [
@@ -1605,9 +1669,13 @@ test("1440px desktop keeps the side inspector with compact Details and Filters",
   await captureEvidence(page, "desktop-compact-header-side-inspector");
 });
 
-async function expectReadableMetadata(page: Page): Promise<void> {
-  for (const selector of [".ent-cc-health-summary", ".ent-cc-subject-id"]) {
-    const target = page.locator(selector).first();
+const baseMetadataSelectors = [".ent-cc-health-summary", ".ent-cc-subject-id"];
+const detailMetadataSelectors = [".ent-cc-inspector-field .ent-cc-inspector-label", ".ent-cc-inspector-section h4"];
+
+async function expectReadableMetadata(page: Page, selectors: string[] = baseMetadataSelectors): Promise<void> {
+  for (const selector of selectors) {
+    // Detail-panel selectors match some hidden copies; measure the first rendered one.
+    const target = page.locator(selector).locator("visible=true").first();
     const details = page.locator(".ent-cc-workspace-options");
     const revealSummary = selector === ".ent-cc-health-summary" && !(await target.isVisible());
     if (revealSummary) await details.locator(":scope > summary").click();
@@ -1647,6 +1715,13 @@ async function expectReadableMetadata(page: Page): Promise<void> {
     if (revealSummary) await details.locator(":scope > summary").click();
   }
 }
+
+test("related-note meta in the detail panel is readable (4.5:1)", async ({ page }) => {
+  await openView(page, { mobile: false, count: 8, scenario: "related-overflow" });
+  await page.getByRole("button", { name: /^Relationship overview,/u }).click();
+  await expect(page.locator(".ent-cc-related-meta").first()).toBeVisible();
+  await expectReadableMetadata(page, [".ent-cc-related-meta"]);
+});
 
 test.afterEach(async ({ page }) => {
   expect(failures.get(page) ?? [], "production renderer must not emit runtime or console errors").toEqual([]);
@@ -1962,7 +2037,13 @@ for (const mobile of [false, true]) {
       await expect(page.locator(".ent-cc-topic-count")).toContainText("9 entries · 8 linked notes · 1 placeholder");
       await expect(page.locator(".ent-cc-tree-body .ent-cc-subject-title")).toHaveCount(9);
       await expect(page.locator(".ent-cc-search-pending, .ent-cc-search-base-group.is-stale")).toHaveCount(0);
-      if (!mobile) await expectReadableMetadata(page);
+      if (!mobile) {
+        await page.locator(".ent-cc-tree-body .ent-cc-subject-title").first().click();
+        // Field labels live in the collapsed "Note details" disclosure.
+        const noteDetails = page.locator(".ent-cc-note-details").first();
+        if (await noteDetails.getAttribute("open") === null) await noteDetails.locator(":scope > summary").click();
+        await expectReadableMetadata(page, [...baseMetadataSelectors, ...detailMetadataSelectors]);
+      }
       await captureEvidence(page, `generic-${mobile ? "mobile" : "desktop"}-${dark ? "dark" : "light"}`);
     });
   }

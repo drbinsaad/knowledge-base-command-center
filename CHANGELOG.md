@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.26.1
+
+### Safer organization data
+
+- If `data.json` is missing when Obsidian starts but an earlier same-device backup (`data.json.bak`) can be read and recognised, KBCC now keeps an exact copy of that backup (`data.json.bak-kept-<timestamp>`) before anything new is saved, and says where it is. If the backup cannot be inspected or copied, organization stays read-only instead of overwriting it. A missing, unreadable or malformed backup is not copied. The backup is never loaded automatically.
+- The Sync & recovery center says plainly that organization is stored in this plugin's data, not in notes, and how to check sync on each device (Settings → Sync → Vault configuration sync → **Active community plugin list** and **Installed community plugin list**). It shows a neutral "Last time plugin data changed outside this session" fact without interpreting it.
+- Troubleshooting explains the kept-backup copy, and that a conflict-rescue file cannot be imported through the Import center yet.
+
+### Fewer lost edits
+
+- Quick Append and the Library editors keep your typed text after an unchanged Sync reload instead of refusing to save. A real knowledge-base change is still refused, and a reload in progress asks you to try again with your text still open.
+- Simple name, confirmation and group dialogs run their action once even if Enter or the button is pressed twice.
+- Closing the command center while it is still loading no longer leaves it rendering or listening in the background.
+- ENT promote and re-place actions only rewrite the real top-level heading, never a `# ` line inside frontmatter or a code block, and keep every line ending as it was.
+
+### iPad and readability
+
+- With **Split view on wide screens** on an iPad, rows, row menus, disclosures, header buttons, Undo/Pin, related notes and the resize bar keep 44-point touch targets, and heading levels keep their indentation.
+- Note detail labels and section headings use a more readable text colour.
+
+### Release safety
+
+- Development-only dependencies were updated so the high-severity dependency audit passes. 13 moderate development-dependency findings remain, with no non-breaking fix; none are in the plugin file.
+- The release workflow now verifies downloaded assets against `SHA256SUMS.txt` before attesting and publishing, and the leaked-local-path check covers Linux, temporary and `file://` paths.
+- The reviewed safeguards and release news add 3,530 raw / 1,107 gzip bytes over 0.26.0. After disclosure of the 122-byte gzip overrun, the maintainer directed publication; the JavaScript size limits are now 1,251,000 raw / 330,000 gzip bytes. The tested build remains 1,249,993 / 329,622 bytes, with no new runtime dependencies.
+
+### Compatibility
+
+- Minimum Obsidian version stays 1.13.0. Data formats, command IDs and the plugin ID are unchanged. No dependencies, network access or analytics are added.
+- Physical iPhone/iPad and controlled two-device Sync were **not tested** for 0.26.1; publication follows the maintainer's candidate-specific instruction. Automated browser tests and the synthetic Mac Obsidian check are supplemental, not physical-device passes. See the [0.26.1 release evidence](https://github.com/drbinsaad/knowledge-base-command-center/blob/0.26.1/docs/release-evidence/0.26.1-iphone.md).
+
 ## 0.26.0
 
 ### More room to browse

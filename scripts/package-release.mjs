@@ -3,6 +3,7 @@ import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import process from "node:process";
+import { localPathPattern } from "./local-path-pattern.mjs";
 
 const root = process.cwd();
 const readJson = async (file) => JSON.parse(await readFile(path.join(root, file), "utf8"));
@@ -21,7 +22,7 @@ for (const asset of assets) {
   const info = await stat(assetPath);
   if (!info.isFile() || info.size === 0) throw new Error(`Release asset is missing or empty: ${asset}`);
   const content = await readFile(assetPath, "utf8");
-  if (/(?:\/Users\/|\/Volumes\/|(?:^|[\s"'(])[A-Za-z]:[\\/])/m.test(content)) throw new Error(`Release asset contains a local absolute path: ${asset}`);
+  if (localPathPattern.test(content)) throw new Error(`Release asset contains a local absolute path: ${asset}`);
 }
 
 const dist = path.join(root, "dist");

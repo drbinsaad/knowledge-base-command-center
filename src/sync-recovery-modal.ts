@@ -4,6 +4,9 @@ import { createOpenedBaseGuard, type OpenedBaseGuard } from "./modals";
 import { formatLocalAge, type SyncRecoveryCenterSnapshot } from "./sync-recovery";
 import { ExportImportCenterModal } from "./portability-modal";
 
+/** Hoisted: sentence-case lint would lowercase Obsidian's official setting names. */
+const CHECK_SYNC_EACH_DEVICE = "Check this on each device (sync settings are per device): Settings → Sync → Vault configuration sync → Active community plugin list and Installed community plugin list.";
+
 export class SyncRecoveryCenterModal extends Modal {
   private openedBaseId = "";
   private openedDataEpoch = 0;
@@ -140,7 +143,10 @@ export class SyncRecoveryCenterModal extends Modal {
 
   private renderActiveBase(parent: HTMLElement, snapshot: SyncRecoveryCenterSnapshot): void {
     const section = this.section(parent, "Active knowledge base", "library-big");
+    section.createEl("p", { text: "Your organization is stored in this plugin's data, not in your notes. On several devices it travels only if your sync includes community plugin data." });
+    section.createEl("p", { text: CHECK_SYNC_EACH_DEVICE });
     const facts = section.createEl("dl", { cls: "ent-cc-sync-recovery-facts" });
+    this.fact(facts, "Last time plugin data changed outside this session", formatLocalAge(snapshot.lastExternalReloadAt, Date.now()));
     this.fact(facts, "Name", snapshot.activeBaseName);
     this.fact(facts, "Profile", snapshot.workspaceProfile);
     this.fact(facts, "Local commit state", snapshot.semanticCommitState === "committed"

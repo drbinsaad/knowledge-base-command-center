@@ -517,3 +517,34 @@ test("diagnostic failure logs omit thrown identifiers and paths", async () => {
   const output = [...warnings, ...errors].join("\n");
   assert.doesNotMatch(output, /\/Users\/private|base-secret|vault-secret-identifier/iu);
 });
+
+test("modal says where organization is stored and how to check sync, outside collapsed diagnostics", () => {
+  const dom = createFakeDom();
+  const plugin = {
+    app: {},
+    getActiveKnowledgeBaseId: () => "base-a",
+    getDataEpoch: () => 1,
+    getSyncRecoveryCenterSnapshot: () => snapshot({ lastExternalReloadAt: null, lastExternalReloadOutcome: null }),
+  };
+  const modal = new SyncRecoveryCenterModal(plugin as never) as SyncRecoveryCenterModal & {
+    modalEl: HTMLElement;
+    contentEl: HTMLElement;
+    titleEl: HTMLElement;
+  };
+  modal.modalEl = asHtmlElement(dom.document.body.createDiv());
+  modal.contentEl = asHtmlElement(dom.document.body.createDiv());
+  modal.titleEl = asHtmlElement(dom.document.body.createEl("h2"));
+  modal.onOpen();
+
+  const diagnostics = modal.contentEl.querySelector(".ent-cc-sync-recovery-diagnostics")?.textContent ?? "";
+  const visible = (modal.contentEl.textContent ?? "").replace(diagnostics, "");
+  assert.match(visible, /organization is stored in this plugin's data, not in your notes/u);
+  assert.match(visible, /only if your sync includes community plugin data/u);
+  assert.match(visible, /each device/u);
+  assert.match(visible, /Settings → Sync → Vault configuration sync/u);
+  assert.match(visible, /Active community plugin list/u);
+  assert.match(visible, /Installed community plugin list/u);
+  assert.match(visible, /Last time plugin data changed outside this sessionNot recorded on this device/u);
+  assert.doesNotMatch(modal.contentEl.textContent ?? "", /received from another device|synced successfully/iu);
+  assert.doesNotMatch(modal.contentEl.textContent ?? "", /never.{0,40}(not|isn't|no longer)\s+sync|not syncing|sync(ing)? is (off|broken|not working)/iu);
+});
