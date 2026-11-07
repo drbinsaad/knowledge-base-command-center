@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.test-support.json",
+  "include": [],
+  "files": [
+    "tests/browser/obsidian-browser.ts",
+    "tests/browser/view-harness.ts",
+    "tests/browser/library-cover-privacy-harness.ts",
+    "tests/layout/css-accessibility.spec.ts",
+    "tests/layout/index-row-geometry.spec.ts",
+    "tests/layout/library-cover-privacy.spec.ts",
+    "tests/layout/library-gallery.spec.ts",
+    "tests/layout/note-organizer-layout.spec.ts",
+    "tests/layout/tab-navigation.spec.ts",
+    "tests/layout/touch-drag.spec.ts"
+  ]
+}

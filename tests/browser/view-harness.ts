@@ -1,4 +1,13 @@
-import { Platform, Setting, TFile, type Modal, type SettingDefinitionItem } from "obsidian";
+import { Platform, Setting, type Modal, type SettingDefinitionItem, type SettingGroup } from "obsidian";
+import * as obsidianHost from "obsidian";
+import { TFile, TestHarnessError } from "./obsidian-browser";
+
+// The harness imports TFile from the esbuild override module directly; the
+// production code imports it through the "obsidian" alias. They must be one
+// constructor or instanceof checks in production would silently fail.
+if (!Object.is(obsidianHost.TFile, TFile)) {
+  throw new TestHarnessError("Browser harness TFile differs from the obsidian alias TFile");
+}
 import type EntVaultCommandCenterPlugin from "../../src/main";
 import { EntVaultCommandCenterView } from "../../src/view";
 import { buildCurriculumTree, canonicalJsonString, childSubheadings, clonePersonalOrganization, createDefaultStore, createKnowledgeBaseEntry, migrateData, parseQuery, portablePlaceholderPath, restoreSnapshot, semanticEntryFingerprint, snapshotPersonal, type LayoutHeading, type LayoutSubheading, type VaultRecord } from "../../src/model";
@@ -569,16 +578,25 @@ const settingsActions = { reviews: [] as string[], unlinked: [] as string[], kep
 // Obsidian owns the outer Settings search/group layout. This narrow host uses
 // the actual public definitions and invokes their production render callbacks;
 // it never duplicates KBCC setting names, buttons, guards, or event handlers.
+// Production render callbacks use only the Setting; the group argument is a
+// loud placeholder so any future use fails visibly instead of silently.
+const unsupportedSettingGroup = new Proxy({}, {
+  get(): never {
+    throw new TestHarnessError("SettingGroup is not supported by the browser harness");
+  },
+}) as SettingGroup;
+
 function renderSettingDefinitions(parent: HTMLElement, definitions: SettingDefinitionItem[]): void {
   for (const definition of definitions) {
     if ("type" in definition && definition.type === "group") {
       const group = parent.createEl("section");
       group.createEl("h2", { text: definition.heading });
-      renderSettingDefinitions(group, definition.items);
+      renderSettingDefinitions(group, definition.items ?? []);
     } else if ("name" in definition) {
       const row = new Setting(parent).setName(definition.name);
       if (definition.desc) row.setDesc(definition.desc);
-      if ("render" in definition) definition.render(row);
+      const render = "render" in definition ? definition.render : undefined;
+      if (render) render(row, unsupportedSettingGroup);
       else if ("control" in definition || "action" in definition) throw new Error("Unsupported Settings host control");
     } else {
       throw new Error("Unsupported Settings host definition");
@@ -713,11 +731,11 @@ const harness = {
   async refreshOrganizer() { await organizer?.refreshAfterExternalChange(); },
   touchDragSnapshot() {
     const tree = buildCurriculumTree(currentRecords(), data.curriculumVisual, false);
-    const placements = (headings: LayoutHeading[]): Record<string, string[]> => {
+    const placements = (headings: readonly LayoutHeading[]): Record<string, string[]> => {
       const result: Record<string, string[]> = {};
-      const visit = (nodes: LayoutHeading[]): void => nodes.forEach((node) => {
+      const visit = (nodes: readonly (LayoutHeading | LayoutSubheading)[]): void => nodes.forEach((node) => {
         result[node.id] = [...node.subjects];
-        visit(node.subheadings);
+        visit(childSubheadings(node));
       });
       visit(headings);
       return result;
