@@ -7337,7 +7337,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       for (const subject of sourceSubjects) {
         const path = portableSubjectPath(this.data, subject.id);
         subject.indexed = destination === "index";
-        subject.libraryId = targetLibraryId;
+        if (subject.indexed) delete subject.libraryId;
+        else subject.libraryId = targetLibraryId;
         subject.parentId = null;
         if (targetGroupId) subject.groupId = targetGroupId;
         if (destination === "index") {
