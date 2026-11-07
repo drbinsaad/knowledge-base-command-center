@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import EntVaultCommandCenterPlugin from "../src/main.ts";
 import { createDefaultStore, migrateData, type PluginStore } from "../src/model.ts";
-import { TFile } from "obsidian";
+import { TFile } from "./support/obsidian-stub.ts";
 
 // D02. Synthetic data only. A cached conflict-rescue path may be reused only
 // when the saved file still exists with exactly the bytes that were written.

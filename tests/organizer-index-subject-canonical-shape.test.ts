@@ -10,7 +10,7 @@ import {
   type PluginData,
   type PluginStore,
 } from "../src/model.ts";
-import { Notice, TFile } from "obsidian";
+import { Notice, TFile } from "./support/obsidian-stub.ts";
 import { COMPLETE_PORTABLE_SELECTION, applyPortableExport, createPortableExport, parsePortableExport } from "../src/portability.ts";
 import { mergeKnowledgeBaseStores } from "../src/store-merge.ts";
 
@@ -20,7 +20,19 @@ import { mergeKnowledgeBaseStores } from "../src/store-merge.ts";
 // differently and a pending required Undo batch was dropped after a
 // committed crash-window restart.
 
-type TestPlugin = EntVaultCommandCenterPlugin & { loadedData: unknown; savedData: unknown[] };
+// Standalone private seam: member types are derived from the production class so a rename
+// fails to compile; the public surface is projected with Omit (an intersection with the class
+// itself would collapse to never). loadedData/savedData come from the support Plugin fake.
+interface OrganizerPrivateSeam {
+  store: EntVaultCommandCenterPlugin["store"];
+  noteOrganizerBaseOptions: EntVaultCommandCenterPlugin["noteOrganizerBaseOptions"];
+  prepareNoteOrganizer: EntVaultCommandCenterPlugin["prepareNoteOrganizer"];
+  applyPreparedNoteOrganizer: EntVaultCommandCenterPlugin["applyPreparedNoteOrganizer"];
+}
+type TestPlugin = Omit<EntVaultCommandCenterPlugin, keyof OrganizerPrivateSeam> & OrganizerPrivateSeam & {
+  loadedData: unknown;
+  savedData: unknown[];
+};
 
 function harness(primary: unknown, local: unknown, files: readonly TFile[]) {
   const values = new Map<string, unknown>();
@@ -38,7 +50,7 @@ function harness(primary: unknown, local: unknown, files: readonly TFile[]) {
     loadLocalStorage: (key: string) => structuredClone(values.get(key) ?? null),
     saveLocalStorage: (key: string, value: unknown) => { values.set(key, structuredClone(value)); },
   };
-  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as TestPlugin;
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as unknown as TestPlugin;
   plugin.loadedData = structuredClone(primary);
   plugin.scheduleRefresh = () => {};
   plugin.refreshViews = async () => {};

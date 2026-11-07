@@ -7,7 +7,7 @@ import {
   parseVaultRenameJournal,
   type VaultRenameJournal,
 } from "../src/vault-rename-journal.ts";
-import { TAbstractFile, TFile, TFolder } from "obsidian";
+import { TAbstractFile, TFile, TFolder } from "./support/obsidian-stub.ts";
 
 // D03 correction batch (R1-R4). Each case is an actual-handler reproduction of
 // a reviewed defect; synthetic data only.
@@ -21,6 +21,7 @@ type Internals = {
   handleVaultRenameEvent(file: TAbstractFile, oldPath: string): void;
   projectPendingRenamePath(path: string): string;
   scheduleRefresh(): void;
+  store: EntVaultCommandCenterPlugin["store"];
 };
 
 interface Harness {
@@ -262,7 +263,7 @@ test("D03 R1: two Sync captures (legacy, then established) never bind early to t
   const second = h.plugin.onExternalSettingsChange();
   await Promise.all([first, second]);
   await h.internal.vaultRenameRepairQueue;
-  assert.equal(h.plugin.store.vaultId, "vault-final-established");
+  assert.equal(h.internal.store.vaultId, "vault-final-established");
   assert.deepEqual(h.plugin.data.directIndexPaths, [B], "the repair reaches the final identity");
   const left = journalOf(h);
   if (left !== null) assert.deepEqual(left.scope, { kind: "bound", vaultId: "vault-final-established" });

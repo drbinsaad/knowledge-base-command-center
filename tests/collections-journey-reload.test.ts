@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TFile } from "obsidian";
+import { TFile } from "./support/obsidian-stub.ts";
 import EntVaultCommandCenterPlugin, { DEVICE_LOCAL_STATE_KEY } from "../src/main";
 import {
   createDefaultStore,

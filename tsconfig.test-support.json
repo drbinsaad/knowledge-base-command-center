@@ -45,6 +45,20 @@
     "tests/view-state.test.ts",
     "tests/touch-view.test.ts",
     "tests/touch-drag.test.ts",
-    "tests/recovery-copy.test.ts"
+    "tests/recovery-copy.test.ts",
+    "tests/support/script-modules.d.ts",
+    "tests/note-organizer-integration.test.ts",
+    "tests/vault-rename-bootstrap.test.ts",
+    "tests/sync-recovery.test.ts",
+    "tests/vault-rename-authority.test.ts",
+    "tests/model.test.ts",
+    "tests/organizer-index-subject-canonical-shape.test.ts",
+    "tests/runtime-source-guards.test.ts",
+    "tests/device-local-history-binding.test.ts",
+    "tests/store-merge.test.ts",
+    "tests/conflict-rescue-reuse.test.ts",
+    "tests/collections-journey-reload.test.ts",
+    "tests/verify-community-guard.test.ts",
+    "tests/release.test.ts"
   ]
 }

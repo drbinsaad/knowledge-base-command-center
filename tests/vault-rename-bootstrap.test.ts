@@ -7,7 +7,7 @@ import {
   parseVaultRenameJournal,
   type VaultRenameJournal,
 } from "../src/vault-rename-journal.ts";
-import { Notice, TAbstractFile, TFile, TFolder } from "obsidian";
+import { Notice, TAbstractFile, TFile, TFolder } from "./support/obsidian-stub.ts";
 
 // D03. Synthetic data only. A rename captured while primary authority is
 // missing stays pending until an authoritative, compatible store is adopted

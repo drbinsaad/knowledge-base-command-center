@@ -14,7 +14,7 @@ import {
   type PluginStore,
 } from "../src/model.ts";
 import * as model from "../src/model.ts";
-import { Notice, TFile } from "obsidian";
+import { Notice, TFile } from "./support/obsidian-stub.ts";
 
 // New D06 exports are read through the namespace so this file still loads (and
 // its assertions can fail for real) against a build that predates them.
