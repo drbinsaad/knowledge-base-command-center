@@ -68,6 +68,7 @@ import {
   fingerprintText,
   isImmutableSourcePath,
   isFreshVaultId,
+  provisionalMigratedVaultFingerprint,
   isLibraryKind,
   isPortablePlaceholderPath,
   isLegacyDeterministicMigratedVaultId,
@@ -311,6 +312,9 @@ import {
   type VaultRenameScope,
 } from "./vault-rename-journal";
 
+/** A rename repair that must wait (identity, authority or path doubt): evidence stays, nothing retries. */
+class VaultRenameReplayWaiting extends Error {}
+
 /** Bound stable inactive projections by records, not an arbitrary base count. */
 const MAX_INACTIVE_SEARCH_CACHED_RECORDS = 50_000;
 const MAX_NOTE_ORGANIZER_MEMBERSHIP_CACHE_ENTRIES = 32;
@@ -318,7 +322,7 @@ const NOTE_ORGANIZER_INDICATOR_DEBOUNCE_MS = 100;
 export const DEVICE_LOCAL_STATE_KEY = "ent-vault-command-center.device-state.v1";
 export const SYNC_RECOVERY_LOCAL_STATE_KEY = "ent-vault-command-center.sync-recovery-state.v1";
 export const VAULT_RENAME_OVERFLOW_NOTICE = "Many notes were renamed while organization was still loading, more than this plugin can safely track. Automatic link repair for those renames is paused. Your notes were not changed. Before restarting Obsidian, run “Back up, export, or import…” and export “Same-vault recovery”.";
-export const VAULT_RENAME_AMBIGUOUS_NOTICE = "A note was renamed while organization was still loading, and another note now has its old name. To avoid linking the wrong note, this plugin did not repair that rename. Your notes were not changed. Check that note's place in your organization.";
+export const VAULT_RENAME_AMBIGUOUS_NOTICE = "A note was renamed while organization was still loading, and this plugin cannot tell for certain which note the old link meant (another note may now have its old name, or the renamed item is missing or is a different kind of item). To avoid linking the wrong note, it did not repair that rename. Your notes were not changed. Check that note's place in your organization.";
 export const VAULT_RENAME_JOURNAL_KEY ="ent-vault-command-center.vault-rename-journal.v1";
 export const KBCC_RETURN_NAVIGATION_STATE_KEY = "ent-vault-command-center.return-navigation.v1";
 /** Inert key from an unreleased experiment; only explicit local-data cleanup may touch it. */
@@ -809,6 +813,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   /** Parsed journal may belong to an established identity still arriving through Sync. */
   private retainedVaultRenameJournal: VaultRenameJournal | null = null;
   private vaultRenameJournalLoaded = false;
+  /** A missing-primary start (or a persisted bootstrap journal) is still waiting for final authority. */
+  private renameBootstrapEpisode = false;
+  /** Vault identity of the device profile present at startup: a constraint on rename binding. */
+  private retainedProfileVaultId: string | null = null;
+  /** Foreign/read-only/blocked state hit the bound: further events are refused, not stored. */
+  private vaultRenameSessionOverflow = false;
+  /** Entries restored from a journal rather than observed against the current capture. */
+  private readonly journalOriginRenames = new WeakSet<PendingVaultRename>();
   /** Number of pending-prefix entries known to be present in localStorage. */
   private journaledVaultRenameCount = 0;
   /** Malformed recovery authority is never discarded or silently reopened writable. */
@@ -1845,10 +1857,19 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.vaultRenameJournalLoaded = true;
     if (typeof this.app.loadLocalStorage !== "function") return;
     try {
+      const profile = this.app.loadLocalStorage(DEVICE_LOCAL_STATE_KEY) as { vaultId?: unknown } | null;
+      if (profile && typeof profile.vaultId === "string" && profile.vaultId.trim()) this.retainedProfileVaultId = profile.vaultId.trim();
+    } catch {
+      // An unreadable profile is not a constraint; the device-local loader reports it.
+    }
+    try {
       const loaded = this.app.loadLocalStorage(VAULT_RENAME_JOURNAL_KEY) as unknown;
       this.retainedVaultRenameJournal = loaded === null || loaded === undefined
         ? null
         : parseVaultRenameJournal(loaded);
+      // A persisted bootstrap journal proves a missing-primary episode is
+      // still open, whatever fallback identity this start generated.
+      if (this.retainedVaultRenameJournal?.scope.kind === "bootstrap") this.renameBootstrapEpisode = true;
     } catch (error) {
       // Unlike disposable UI state, this value may be the only surviving map
       // from physically renamed notes to stale synced membership paths. Keep
@@ -1866,10 +1887,22 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     // A bootstrap journal waits for an accepted established identity; it binds
     // durably first and only then becomes an ordinary exact-ID journal.
     if (this.retainedVaultRenameJournal?.scope.kind === "bootstrap") this.bindBootstrapVaultRenameJournal();
+    // The episode ends only once a final, accepted, established identity is in
+    // place and no bootstrap journal still waits for it.
+    if (this.renameBootstrapEpisode
+      && this.retainedVaultRenameJournal?.scope.kind !== "bootstrap"
+      && this.storeIsFinalEstablishedAuthority()) {
+      this.renameBootstrapEpisode = false;
+    }
     const journal = this.retainedVaultRenameJournal;
-    if (!journal || boundVaultIdOf(journal) !== this.store.vaultId) return this.pendingVaultRenames.length > 0;
+    if (!journal || boundVaultIdOf(journal) !== this.store.vaultId) return this.vaultRenameReplayAllowed() && this.pendingVaultRenames.length > 0;
+    // A retained profile for a different identity is a constraint: preserve
+    // both pieces of evidence instead of replaying either.
+    const profile = this.knownEstablishedVaultId();
+    if (profile !== null && profile !== this.store.vaultId) return false;
     if (this.pendingVaultRenames.length === 0) {
       this.pendingVaultRenames = journal.renames.map((entry) => ({ ...entry }));
+      for (const entry of this.pendingVaultRenames) this.journalOriginRenames.add(entry);
       this.journaledVaultRenameCount = this.pendingVaultRenames.length;
       // Search and active-note summaries must project the restored overlay in
       // the same turn in which it becomes visible.
@@ -1877,15 +1910,54 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     } else if (this.journaledVaultRenameCount === 0) {
       // A physical rename can arrive while a previously retained established
       // identity is still being delivered by Sync. Its session-only entries
-      // happened after the durable journal, so append them to that exact order.
-      this.pendingVaultRenames = [
-        ...journal.renames.map((entry) => ({ ...entry })),
-        ...this.pendingVaultRenames,
-      ];
+      // happened after the durable journal, so append them to that exact order,
+      // keeping the aggregate within the journal bounds.
+      const scope = { kind: "bound", vaultId: this.store.vaultId } as const;
+      const restored = journal.renames.map((entry) => ({ ...entry }));
+      for (const entry of restored) this.journalOriginRenames.add(entry);
+      const merged: PendingVaultRename[] = [...restored];
+      let overflowed = false;
+      for (const sessionEntry of this.pendingVaultRenames) {
+        if (!vaultRenameAppendFits(scope, merged, sessionEntry)) { overflowed = true; break; }
+        merged.push(sessionEntry);
+      }
+      this.pendingVaultRenames = merged;
       this.journaledVaultRenameCount = journal.renames.length;
+      if (overflowed && journal.blocked === null) this.blockVaultRenameJournal("overflow", scope, restored);
       this.invalidateRecordCache();
     }
-    return this.pendingVaultRenames.length > 0;
+    return this.vaultRenameReplayAllowed() && this.pendingVaultRenames.length > 0;
+  }
+
+  /** The current store is an accepted, established identity: not a provisional fresh or migrated one. */
+  private storeIsFinalEstablishedAuthority(): boolean {
+    const id = this.store.vaultId;
+    return !isFreshVaultId(id)
+      && provisionalMigratedVaultFingerprint(id) === null
+      && !isLegacyDeterministicMigratedVaultId(id)
+      && !this.isDataReadOnly()
+      && !this.deviceLocalPersistenceSuppressed;
+  }
+
+  /**
+   * Whether replay may run now: the retained journal (if any) is bound to
+   * exactly this identity and not blocked, and no bootstrap episode or
+   * session-level overflow is still open. A false result retains all evidence.
+   */
+  private vaultRenameReplayAllowed(): boolean {
+    if (this.vaultRenameSessionOverflow) return false;
+    const journal = this.retainedVaultRenameJournal;
+    if (!journal) return !this.renameBootstrapEpisode;
+    if (boundVaultIdOf(journal) !== this.store.vaultId || journal.blocked !== null) return false;
+    const profile = this.knownEstablishedVaultId();
+    return profile === null || profile === this.store.vaultId;
+  }
+
+  /** Only entries that belong to this identity may influence projections. */
+  private applicableVaultRenames(): readonly PendingVaultRename[] {
+    const journal = this.retainedVaultRenameJournal;
+    if (journal && boundVaultIdOf(journal) !== this.store.vaultId) return [];
+    return this.pendingVaultRenames;
   }
 
   private writeVaultRenameJournal(renames: readonly PendingVaultRename[]): void {
@@ -1940,14 +2012,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.noticeVaultRenameBlocked(reason);
   }
 
-  private vaultRenameReplayBlocked(): boolean {
-    const journal = this.retainedVaultRenameJournal;
-    return Boolean(journal && journal.blocked !== null && boundVaultIdOf(journal) === this.store.vaultId);
-  }
-
   /** An established identity this device already knows, if any (a constraint, never permission). */
   private knownEstablishedVaultId(): string | null {
-    const known = this.deviceLocalState?.vaultId ?? "";
+    // The profile identity seen at startup, before any adoption can replace it.
+    const known = this.retainedProfileVaultId ?? this.deviceLocalState?.vaultId ?? "";
     return known && !isFreshVaultId(known) ? known : null;
   }
 
@@ -1957,7 +2025,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
    * against the empty fallback and the event is never consumed by a no-op.
    */
   private recordWaitingVaultRename(entry: PendingVaultRename): boolean {
-    if (!isFreshVaultId(this.store.vaultId)) return false;
+    if (!this.renameBootstrapEpisode || this.storeIsFinalEstablishedAuthority()) return false;
     if (this.vaultRenameJournalWarning) return true;
     const retained = this.retainedVaultRenameJournal;
     if (retained?.blocked) return true;
@@ -1981,20 +2049,40 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
    * missing, or the chain is a cycle. Nothing is guessed from titles.
    */
   private vaultRenameReplayIsAmbiguous(renames: readonly PendingVaultRename[]): boolean {
-    const exists = (path: string): boolean => this.app.vault.getAbstractFileByPath(path) !== null;
-    for (let index = 0; index < renames.length; index += 1) {
-      const rename = renames[index];
-      if (!rename) continue;
-      let terminal = rename.newPath;
-      let reoccupiedByLater = false;
-      for (const later of renames.slice(index + 1)) {
-        terminal = replacePathPrefix(terminal, later.oldPath, later.newPath);
-        if (later.newPath === rename.oldPath || later.newPath.startsWith(`${rename.oldPath}/`)) reoccupiedByLater = true;
-      }
-      if (terminal === rename.oldPath || !exists(terminal)) return true;
-      if (exists(rename.oldPath) && !reoccupiedByLater) return true;
+    return renames.some((_, index) => this.vaultRenameEntryIsAmbiguous(renames, index));
+  }
+
+  /** One entry of the check above: the composed terminal must exist as the right kind of item. */
+  private vaultRenameEntryIsAmbiguous(renames: readonly PendingVaultRename[], index: number): boolean {
+    const rename = renames[index];
+    if (!rename) return false;
+    const lookup = (path: string): TAbstractFile | null => this.app.vault.getAbstractFileByPath(path);
+    let terminal = rename.newPath;
+    let reoccupiedByLater = false;
+    for (const later of renames.slice(index + 1)) {
+      terminal = replacePathPrefix(terminal, later.oldPath, later.newPath);
+      if (later.newPath === rename.oldPath || later.newPath.startsWith(`${rename.oldPath}/`)) reoccupiedByLater = true;
     }
-    return false;
+    if (terminal === rename.oldPath) return true;
+    const target = lookup(terminal);
+    // A missing terminal, or a file where a folder was renamed (or the reverse), is never accepted.
+    if (!target || (target instanceof TFolder) !== rename.folderRename) return true;
+    return lookup(rename.oldPath) !== null && !reoccupiedByLater;
+  }
+
+  /**
+   * Revalidate a journal-origin entry at the guarded repair boundary. Entries
+   * observed live against the current capture keep the ordinary path.
+   */
+  private vaultRenameHeadNeedsHold(head: PendingVaultRename): boolean {
+    if (!this.vaultRenameReplayAllowed()) return true;
+    if (!this.journalOriginRenames.has(head)) return false;
+    const index = this.pendingVaultRenames.indexOf(head);
+    if (index < 0 || !this.vaultRenameEntryIsAmbiguous(this.pendingVaultRenames, index)) return false;
+    const journal = this.retainedVaultRenameJournal;
+    const scope: VaultRenameScope = journal?.scope ?? { kind: "bound", vaultId: this.store.vaultId };
+    this.blockVaultRenameJournal("ambiguous-path", scope, this.pendingVaultRenames);
+    return true;
   }
 
   /**
@@ -2007,7 +2095,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const vaultId = this.store.vaultId;
     // A provisional identity, a read-only state or suppressed persistence is
     // never authority to bind or rewrite anything.
-    if (isFreshVaultId(vaultId) || this.isDataReadOnly() || this.deviceLocalPersistenceSuppressed) return false;
+    if (!this.storeIsFinalEstablishedAuthority()) return false;
     const expected = journal.scope.expectedVaultId;
     if (expected !== null && expected !== vaultId) return false;
     const profile = this.knownEstablishedVaultId();
@@ -2850,6 +2938,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.pendingVaultRenames = [];
     this.retainedVaultRenameJournal = null;
     this.journaledVaultRenameCount = 0;
+    this.renameBootstrapEpisode = false;
+    this.retainedProfileVaultId = null;
+    this.vaultRenameSessionOverflow = false;
     this.vaultRenameJournalLoaded = true;
     if (this.dataCompatibilityWarning === this.vaultRenameJournalWarning) this.dataCompatibilityWarning = "";
     this.vaultRenameJournalWarning = "";
@@ -3125,6 +3216,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const sourceWasMissing = loaded === null
       || loaded === undefined
       || (typeof loaded === "object" && !Array.isArray(loaded) && Object.keys(loaded).length === 0);
+    // A real missing-primary start opens a rename-bootstrap episode that ends
+    // only when a final established identity is accepted (never inferred from
+    // the shape of a vault ID).
+    if (capturedRead === undefined && sourceWasMissing && !restoredFromBackup) this.renameBootstrapEpisode = true;
     // A missing data.json starts an empty bootstrap whose first save would
     // overwrite the last committed .bak. Keep that backup aside first.
     if (capturedRead === undefined && sourceWasMissing && !restoredFromBackup) await this.keepBackupBesideMissingPrimary();
@@ -4551,7 +4646,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.useActiveData(this.requireActiveBase().data);
       this.dataCompatibilityWarning = this.vaultRenameJournalWarning;
       this.retainedExternalSettingsPayload = null;
-      if (this.activateVaultRenameJournalForCurrentStore()) this.schedulePendingVaultRenameRepairs();
+      // Rename journals activate only from the worker's final settled outcome
+      // (below), never from an intermediate capture's provisional adoption.
       return publishOutcome({
         capture,
         workingStore: adopted.workingStore,
@@ -4804,6 +4900,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
             reloadOutcome = latestOutcome.compatible && !latestOutcome.blockingWarning && !this.persistenceUncertain
               ? "applied"
               : "blocked";
+            // Final accepted authority: the batch is merged and written back and
+            // no later capture is waiting. Only now may a rename journal bind.
+            if (reloadOutcome === "applied" && !this.externalReloadPending && this.externalReloadCaptures.length === 0
+              && this.activateVaultRenameJournalForCurrentStore()) {
+              this.schedulePendingVaultRenameRepairs();
+            }
           }
           try {
             // The batch's merge and writeback are complete: the refresh is
@@ -7756,7 +7858,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   private projectPendingRenamePath(path: string): string {
     let projected = path;
-    for (const rename of this.pendingVaultRenames) {
+    for (const rename of this.applicableVaultRenames()) {
       projected = replacePathPrefix(projected, rename.oldPath, rename.newPath);
     }
     return projected;
@@ -7767,7 +7869,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     for (const [path, value] of Object.entries(source)) projected[path] = value;
     // Match rewritePluginDataPathPrefix exactly: a renamed source key replaces
     // any stale destination key, irrespective of object insertion order.
-    for (const rename of this.pendingVaultRenames) {
+    for (const rename of this.applicableVaultRenames()) {
       for (const [path, value] of Object.entries(projected)) {
         const next = replacePathPrefix(path, rename.oldPath, rename.newPath);
         if (next === path) continue;
@@ -11076,11 +11178,22 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.invalidateRecordCache();
       return;
     }
-    // The bound path must not grow past the journal bound in memory or storage.
+    // Every state obeys the same bound. A blocked journal's complete prefix is
+    // frozen, and a foreign or read-only session refuses (rather than stores)
+    // the event that would pass the bound, keeping the foreign raw evidence.
     const retained = this.retainedVaultRenameJournal;
-    if ((!retained || boundVaultIdOf(retained) === this.store.vaultId)
-      && !vaultRenameAppendFits({ kind: "bound", vaultId: this.store.vaultId }, this.pendingVaultRenames, event)) {
-      this.blockVaultRenameJournal("overflow", { kind: "bound", vaultId: this.store.vaultId }, this.pendingVaultRenames);
+    const ownsJournal = !retained || boundVaultIdOf(retained) === this.store.vaultId;
+    if (this.vaultRenameSessionOverflow || (ownsJournal && retained?.blocked)) {
+      this.invalidateRecordCache();
+      return;
+    }
+    if (!vaultRenameAppendFits({ kind: "bound", vaultId: this.store.vaultId }, this.pendingVaultRenames, event)) {
+      if (ownsJournal) {
+        this.blockVaultRenameJournal("overflow", { kind: "bound", vaultId: this.store.vaultId }, this.pendingVaultRenames);
+      } else {
+        this.vaultRenameSessionOverflow = true;
+        this.noticeVaultRenameBlocked("overflow");
+      }
       this.invalidateRecordCache();
       return;
     }
@@ -11104,15 +11217,22 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private schedulePendingVaultRenameRepairs(): void {
-    if (this.pendingVaultRenames.length === 0 || this.vaultRenameReplayBlocked()) return;
+    if (this.pendingVaultRenames.length === 0 || !this.vaultRenameReplayAllowed()) return;
     const repair = this.vaultRenameRepairQueue.then(async () => {
       // Process physical renames in event order. If one durable repair fails,
       // later overlays and their journal remain composed instead of being
       // removed from underneath an earlier stale persisted path.
-      while (this.pendingVaultRenames.length > 0 && !this.vaultRenameReplayBlocked()) {
+      while (this.pendingVaultRenames.length > 0) {
         const pending = this.pendingVaultRenames[0];
         if (!pending) break;
-        await this.handleRename(pending.oldPath, pending.newPath, pending.folderRename);
+        // Waiting is a result, not an error: evidence stays, nothing spins.
+        if (this.vaultRenameHeadNeedsHold(pending)) break;
+        try {
+          await this.handleRename(pending.oldPath, pending.newPath, pending.folderRename);
+        } catch (error) {
+          if (error instanceof VaultRenameReplayWaiting) break;
+          throw error;
+        }
         if (this.journaledVaultRenameCount > 0) {
           const remaining = this.pendingVaultRenames.slice(1);
           try {
@@ -11175,6 +11295,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       || this.externalReloadBusy || this.externalReloadPromise !== null) return false;
 
     this.assertDataWritable();
+    // Recheck identity, authority and path applicability inside the guarded
+    // operation, before anything is rewritten or dequeued.
+    const head = this.pendingVaultRenames[0];
+    if (head && head.oldPath === oldPath && head.newPath === newPath && head.folderRename === folderRename
+      && this.vaultRenameHeadNeedsHold(head)) {
+      throw new VaultRenameReplayWaiting();
+    }
     const storeBackup = cloneJsonValue(this.store);
     const attemptExternalGeneration = this.externalChangeGeneration;
     this.baseOperationBusy = true;

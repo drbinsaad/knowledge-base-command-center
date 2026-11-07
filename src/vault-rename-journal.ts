@@ -196,11 +196,28 @@ export function vaultRenameAppendFits(
   entry: PendingVaultRename,
 ): boolean {
   if (renames.length + 1 > MAX_PENDING_VAULT_RENAMES) return false;
-  const bytes = serializedUtf8Bytes({
-    version: VAULT_RENAME_JOURNAL_VERSION,
-    scope,
-    renames: [...renames, entry],
-    blocked: null,
-  });
+  // Exact UTF-8 size of the serialized envelope, summed incrementally so a long
+  // run of events does not re-serialize the whole prefix every time.
+  const envelope = serializedUtf8Bytes({ version: VAULT_RENAME_JOURNAL_VERSION, scope, renames: [], blocked: null });
+  const bytes = envelope + entriesBytes(renames) + serializedUtf8Bytes(entry) + (renames.length > 0 ? 1 : 0);
   return bytes + VAULT_RENAME_BLOCKED_RESERVE_BYTES <= MAX_VAULT_RENAME_JOURNAL_BYTES;
+}
+
+const ENTRY_BYTES_CACHE = new WeakMap<readonly PendingVaultRename[], { length: number; last: PendingVaultRename | undefined; bytes: number }>();
+
+/** Serialized size of the entries joined by commas, extended incrementally for a growing array. */
+function entriesBytes(renames: readonly PendingVaultRename[]): number {
+  if (renames.length === 0) return 0;
+  const cached = ENTRY_BYTES_CACHE.get(renames);
+  let from = 0;
+  let bytes = 0;
+  if (cached && cached.length <= renames.length && cached.last === renames[cached.length - 1]) {
+    from = cached.length;
+    bytes = cached.bytes;
+  }
+  for (let index = from; index < renames.length; index += 1) {
+    bytes += serializedUtf8Bytes(renames[index]) + (index > 0 ? 1 : 0);
+  }
+  ENTRY_BYTES_CACHE.set(renames, { length: renames.length, last: renames[renames.length - 1], bytes });
+  return bytes;
 }

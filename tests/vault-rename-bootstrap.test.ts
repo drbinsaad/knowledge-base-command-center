@@ -224,7 +224,7 @@ test("D03: a new file with the old name is not confused with the renamed one", a
   Notice.messages.length = 0;
   await arrive(h, establishedStore("vault-d03-same-name", [A]));
   assert.ok(Notice.messages.includes(
-    "A note was renamed while organization was still loading, and another note now has its old name. To avoid linking the wrong note, this plugin did not repair that rename. Your notes were not changed. Check that note's place in your organization.",
+    "A note was renamed while organization was still loading, and this plugin cannot tell for certain which note the old link meant (another note may now have its old name, or the renamed item is missing or is a different kind of item). To avoid linking the wrong note, it did not repair that rename. Your notes were not changed. Check that note's place in your organization.",
   ), "the paused repair says what happened, that nothing was lost, and what to check");
   assert.deepEqual(h.plugin.data.directIndexPaths, [A], "the new file's membership is not rewritten");
   const kept = journalOf(h);
