@@ -710,6 +710,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   /** Exact .bak text this instance last wrote and the Sync generation it was written under; never proof that a kept copy exists. */
   private ownBackupWrite: { text: string; generation: number } | null = null;
   private lastConflictRescueStore = "";
+  private lastConflictRescueContent = "";
   private lastConflictRescuePath = "";
   private deviceLocalState: DeviceLocalPluginState | null = null;
   private deviceLocalStateLoaded = false;
@@ -10394,10 +10395,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private async writeConflictRescueStore(store: PluginStore, reason: string): Promise<string> {
     try {
       const serializedStore = JSON.stringify(store);
-      if (serializedStore === this.lastConflictRescueStore && this.lastConflictRescuePath) {
+      // A cached path is a claim, not proof: reuse it only when the saved file
+      // still exists holding exactly the bytes that were written.
+      if (serializedStore === this.lastConflictRescueStore && this.lastConflictRescuePath
+        && await this.conflictRescueFileHolds(this.lastConflictRescuePath, this.lastConflictRescueContent, true)) {
         return this.lastConflictRescuePath;
       }
-      const file = await this.writePortableJson("conflict", {
+      const written = await this.writePortableJsonText("conflict", {
         kind: "knowledge-base-command-center-conflict-rescue",
         version: 1,
         exportedAt: new Date().toISOString(),
@@ -10405,16 +10409,46 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         privacy: "Contains plugin organization and exact vault-relative paths; note contents are not included.",
         store,
       });
+      // The new file is never trusted until it reads back byte-for-byte.
+      if (!await this.conflictRescueFileHolds(written.file.path, written.content, false)) {
+        throw new Error("the conflict rescue could not be verified");
+      }
       this.lastConflictRescueStore = serializedStore;
-      this.lastConflictRescuePath = file.path;
-      return file.path;
+      this.lastConflictRescuePath = written.file.path;
+      this.lastConflictRescueContent = written.content;
+      return written.file.path;
     } catch {
       console.error("Knowledge Base Command Center could not write a Sync conflict rescue.");
       return "";
     }
   }
 
+  /**
+   * True when `path` holds exactly `content`. With `checkSize`, the reported
+   * size must equal the UTF-8 byte length before the file is read; any error or
+   * doubt is "no", which makes the caller write a new verified file.
+   */
+  private async conflictRescueFileHolds(path: string, content: string, checkSize: boolean): Promise<boolean> {
+    try {
+      const adapter = this.app.vault.adapter;
+      if (checkSize) {
+        const stat = await adapter.stat(path);
+        if (!stat || stat.size !== new TextEncoder().encode(content).length) return false;
+      }
+      return await adapter.read(path) === content;
+    } catch {
+      return false;
+    }
+  }
+
   async writePortableJson(kind: "backup" | "workspace" | "portable" | "portfolio" | "conflict", value: unknown): Promise<TFile> {
+    return (await this.writePortableJsonText(kind, value)).file;
+  }
+
+  private async writePortableJsonText(
+    kind: "backup" | "workspace" | "portable" | "portfolio" | "conflict",
+    value: unknown,
+  ): Promise<{ file: TFile; content: string }> {
     // Per-base setting; cleanSettings guarantees it non-empty, and the
     // classifier never reads it, so relocating it cannot orphan notes.
     const configuredFolder = this.data.settings.exportsFolder.trim().replace(/^\/+|\/+$/gu, "")
@@ -10434,7 +10468,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const createdFolders: TFolder[] = [];
     try {
       await this.ensureFolder(folder, createdFolders);
-      return await this.app.vault.create(path, content);
+      return { file: await this.app.vault.create(path, content), content };
     } catch (error) {
       await this.removeCreatedEmptyFolders(createdFolders);
       throw error;

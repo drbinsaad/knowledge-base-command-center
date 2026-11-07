@@ -200,14 +200,53 @@ function emptyWritableTestVault(): {
   getAbstractFileByPath: () => null;
   createFolder: () => Promise<void>;
   create: (path: string) => Promise<TFile>;
+  adapter: unknown;
 } {
-  return {
+  return withRescueReadBack({
     configDir: ".obsidian",
-    getMarkdownFiles: () => [],
-    getAbstractFileByPath: () => null,
-    createFolder: async () => {},
-    create: async (path) => new TFile(path),
-  };
+    getMarkdownFiles: (): TFile[] => [],
+    getAbstractFileByPath: (): null => null,
+    createFolder: async (): Promise<void> => {},
+    create: async (path: string): Promise<TFile> => new TFile(path),
+  }) as ReturnType<typeof emptyWritableTestVault>;
+}
+
+/**
+ * D02: a conflict rescue is read back after it is created. Give a test vault
+ * that only fakes `create` a byte-exact adapter over what it created, unless it
+ * already supplies its own adapter.
+ */
+function withRescueReadBack<T extends object>(vault: T): T {
+  const candidate = vault as T & { create?: (path: string, content: string) => Promise<TFile>; adapter?: unknown };
+  if (typeof candidate.create !== "function" || candidate.adapter !== undefined) return vault;
+  const created = new Map<string, string>();
+  const create = candidate.create.bind(vault);
+  return Object.assign(Object.create(null) as object, vault, {
+    create: async (path: string, content: string): Promise<TFile> => {
+      const file = await create(path, content);
+      created.set(path, content);
+      return file;
+    },
+    adapter: {
+      stat: async (path: string) => (created.has(path) ? { size: new TextEncoder().encode(created.get(path)).length } : null),
+      read: async (path: string) => {
+        const text = created.get(path);
+        if (text === undefined) throw new Error("ENOENT");
+        return text;
+      },
+    },
+  });
+}
+
+/** Wrap every vault a test later assigns to this app object. */
+function installRescueReadBack(app: { vault: unknown }): void {
+  let current = withRescueReadBack(app.vault as object);
+  Object.defineProperty(app, "vault", {
+    configurable: true,
+    enumerable: true,
+    get: () => current,
+    set: (next: object) => { current = withRescueReadBack(next); },
+  });
 }
 
 function testDeviceLocalStorage(): {
@@ -235,6 +274,7 @@ function pluginWith(data: unknown, initialDeviceState: unknown = null): EntVault
       deviceLocalWrites.push(structuredClone(value));
     },
   };
+  installRescueReadBack(app);
   const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
   plugin.loadedData = data;
   plugin.deviceLocalWrites = deviceLocalWrites;
@@ -4142,6 +4182,7 @@ test("external Sync rescues a concurrent payload before a rejected local write i
   const initial = migrateData(null);
   initial.settings.workspaceName = "Sync race";
   let disk = createDefaultStore(initial, 100, "vault-sync-race");
+  installRescueReadBack(app);
   const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never);
   plugin.loadData = async () => structuredClone(disk);
   const saveStarted = deferred();
@@ -4207,6 +4248,7 @@ test("external Sync discards rejected direct and queued saves by merging from th
   const initial = migrateData(null);
   initial.settings.workspaceName = "Direct save race";
   let disk = createDefaultStore(initial, 100, "vault-direct-sync-race");
+  installRescueReadBack(app);
   const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never);
   plugin.loadData = async () => structuredClone(disk);
   const saveStarted = deferred();
@@ -4951,6 +4993,7 @@ test("a vault rename retries after repeated Sync callbacks and rewrites every ba
     fileManager: {},
   };
   let disk = structuredClone(original);
+  installRescueReadBack(app);
   const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never);
   plugin.loadData = async () => structuredClone(disk);
   const firstRenameSaveStarted = deferred();
