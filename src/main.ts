@@ -296,7 +296,8 @@ import {
 } from "./sync-recovery";
 import { ClearDeviceLocalDataModal, SyncRecoveryCenterModal } from "./sync-recovery-modal";
 import type { RecoveryRestoreIntent } from "./recovery-copy";
-import type { RecoveryApplyResult } from "./recovery-copy-modal";
+import { RecoveryCopyModal, type RecoveryApplyResult } from "./recovery-copy-modal";
+import { discoverRecoveryCopies, loadRecoveryCopy, recoverySourceUnchanged, type RecoveryCandidate, type RecoveryHost } from "./recovery-discovery";
 import {
   planUpdateAnnouncement,
   updateAnnouncementForVersion,
@@ -6894,6 +6895,33 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         : failed("The restored base could not be saved.");
     }
     return outcome({ status: "applied", baseId: intent.newBaseId });
+  }
+
+  /** "Review kept copies": discovery over the export folders and plugin directory, then the review window. */
+  openRecoveryCopyReview(): void {
+    const adapter = this.app.vault.adapter;
+    const host: RecoveryHost = {
+      list: async (folder) => { try { return (await adapter.list(folder)).files; } catch { return null; } },
+      stat: async (path) => { const info = await adapter.stat(path); return info?.type === "file" ? { size: info.size, mtime: info.mtime } : null; },
+      read: async (path) => new Uint8Array(await adapter.readBinary(path)),
+    };
+    let selected: RecoveryCandidate | null = null;
+    const vaultId = (): string => this.store.vaultId;
+    new RecoveryCopyModal(this.app, {
+      isReadOnly: () => this.isDataReadOnly(),
+      getCurrentVaultId: vaultId,
+      getExistingNames: () => this.store.bases.filter((entry) => entry.archivedAt === null).map((entry) => entry.data.settings.workspaceName),
+      getExistingBaseIds: () => [...this.store.bases.map((entry) => entry.id), ...Object.keys(this.store.deletedBaseIds)],
+      generateIdentity: () => ({ baseId: makeId("base"), semanticHead: fingerprintText(`${makeId("head")}:${Math.random()}`) }),
+      discover: () => discoverRecoveryCopies(host, {
+        exportFolders: [...new Set(this.store.bases.map((entry) => normalizePath(entry.data.settings.exportsFolder || SYNC_RECOVERY_EXPORT_FOLDER)))],
+        legacyExportFolder: SYNC_RECOVERY_EXPORT_FOLDER,
+        pluginDir: this.manifest.dir ?? "",
+      }),
+      load: (candidate) => { selected = candidate; return loadRecoveryCopy(host, candidate.path, { currentVaultId: vaultId() }); },
+      onApply: (intent) => this.restoreKeptCopy(intent, () => selected ? recoverySourceUnchanged(host, selected.path, intent) : Promise.resolve(false)),
+      onOpenRestored: (baseId) => this.openRestoredKeptBase(baseId),
+    }).open();
   }
 
   /** Separate from the restore: switches to the restored base only on request. */

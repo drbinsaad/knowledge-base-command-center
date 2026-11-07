@@ -110,6 +110,13 @@ export class SyncRecoveryCenterModal extends Modal {
     }
     if (snapshot.readOnly) this.renderProtection(scroll, snapshot);
     this.renderRecovery(scroll, snapshot, now);
+    // Always available, including in protected read-only mode: reviewing never writes.
+    const review = this.section(scroll, "Kept copies", "archive-restore");
+    review.createEl("p", { text: "Review a kept rescue copy or data backup and restore one of its knowledge bases as a new base." });
+    this.actionButton(review, "archive-restore", "Review kept copies…", () => {
+      this.close();
+      this.plugin.openRecoveryCopyReview();
+    });
     const diagnostics = scroll.createEl("details", { cls: "ent-cc-sync-recovery-diagnostics" });
     diagnostics.open = this.diagnosticsOpen;
     diagnostics.addEventListener("toggle", () => { this.diagnosticsOpen = diagnostics.open; });
@@ -206,7 +213,7 @@ export class SyncRecoveryCenterModal extends Modal {
     }
     section.createEl("p", {
       cls: "ent-cc-sync-recovery-note",
-      text: "Counts inspect the configured export folders for all knowledge bases and the legacy default folder, using only documented filenames and modification times. The combined scan is capped at 2,000 direct entries; capped counts are lower bounds. Full paths, JSON contents, and note bodies are not displayed or read.",
+      text: "Counts inspect the configured export folders for all knowledge bases and the legacy default folder, using only documented filenames and modification times. The combined scan is capped at 2,000 direct entries; capped counts are lower bounds. Full paths and note bodies are not displayed or read. A copy's contents are read only after you choose one in the kept-copies list.",
     });
   }
 
