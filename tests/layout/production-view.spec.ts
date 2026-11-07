@@ -225,8 +225,8 @@ for (const device of [
         await expect(section.getByRole("button", { name: `Open attachment: ${name}`, exact: true })).toHaveCount(1);
       }
       await expect(section.getByRole("button", { name: "Open attachment: shared.pdf", exact: true })).toHaveCount(0);
-      const first = section.getByRole("button", { name: "Open attachment: shared.pdf in Attachments/One", exact: true });
-      const second = section.getByRole("button", { name: "Open attachment: shared.pdf in Attachments/Two", exact: true });
+      const first = section.getByRole("button", { name: "Open attachment: shared.pdf, path Attachments/One/shared.pdf", exact: true });
+      const second = section.getByRole("button", { name: "Open attachment: shared.pdf, path Attachments/Two/shared.pdf", exact: true });
       await expect(first).toHaveCount(1);
       await expect(second).toHaveCount(1);
       await expect(first).toContainText("Attachments/One/shared.pdf");

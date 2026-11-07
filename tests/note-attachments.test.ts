@@ -226,6 +226,25 @@ test("WF06 L4 unresolved dotted references use neutral wording; resolved any-fil
   assert.deepEqual(r.opened, []);
 });
 
+test("WF06 L1b root file and a folder literally named 'vault root' stay distinguishable", () => {
+  const r = renderRows(["shared.pdf", "vault root/shared.pdf"]);
+  const buttons = r.dom.document.body.querySelectorAll(".ent-cc-attachment-link");
+  const labels = buttons.map((button) => button.getAttribute("aria-label"));
+  assert.equal(new Set(labels).size, 2, JSON.stringify(labels));
+  assert.deepEqual(labels, ["Open attachment: shared.pdf, path shared.pdf", "Open attachment: shared.pdf, path vault root/shared.pdf"]);
+  for (const button of buttons) button.dispatch("click");
+  assert.deepEqual(r.opened, ["shared.pdf", "vault root/shared.pdf"]);
+});
+
+test("WF06 L1c missing duplicate rows show their exact path as visible text", () => {
+  const r = renderRows(["A/gone.pdf", "B/gone.pdf", "A/here.pdf", "B/here.pdf"], ["A/here.pdf", "B/here.pdf"]);
+  const missing = r.dom.document.body.querySelectorAll(".is-missing");
+  assert.equal(missing.length, 2);
+  assert.deepEqual(missing.map((row) => row.querySelector(".ent-cc-attachment-path")?.textContent), ["A/gone.pdf", "B/gone.pdf"]);
+  assert.ok(missing.every((row) => row.querySelector(".ent-cc-attachment-path")?.getAttribute("dir") === "auto"));
+  assert.ok(missing.every((row) => row.textContent.includes(NEUTRAL_MISSING)));
+});
+
 test("WF06 L5 URLs stay excluded and listing makes no network or open call", () => {
   const originalFetch = globalThis.fetch;
   let network = 0;

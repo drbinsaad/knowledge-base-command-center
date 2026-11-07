@@ -111,9 +111,8 @@ export function renderNoteAttachments(parent: HTMLElement, result: NoteAttachmen
       const duplicate = (nameCounts.get(item.name) ?? 0) > 1;
       // The exact path is an attribute value for later focus restoration; callers compare values, never build selectors from it.
       const identity = { [ATTACHMENT_PATH_ATTRIBUTE]: item.path };
-      const folder = item.path.includes("/") ? item.path.slice(0, item.path.lastIndexOf("/")) : "";
       const row = item.available
-        ? entry.createEl("button", { cls: "ent-cc-attachment-row ent-cc-attachment-link", type: "button", attr: { ...identity, title: item.path, "aria-label": duplicate ? `Open attachment: ${item.name} in ${folder || "vault root"}` : `Open attachment: ${item.name}` } })
+        ? entry.createEl("button", { cls: "ent-cc-attachment-row ent-cc-attachment-link", type: "button", attr: { ...identity, title: item.path, "aria-label": duplicate ? `Open attachment: ${item.name}, path ${item.path}` : `Open attachment: ${item.name}` } })
         : entry.createDiv({ cls: "ent-cc-attachment-row is-missing", attr: identity });
       if (!firstNew) firstNew = row;
       setIcon(row.createSpan({ attr: { "aria-hidden": "true" } }), item.available ? "paperclip" : "file-question");
@@ -128,7 +127,12 @@ export function renderNoteAttachments(parent: HTMLElement, result: NoteAttachmen
           meta.createSpan({ cls: "ent-cc-attachment-path", text: item.path, attr: { dir: "auto" } });
         }
       } else {
-        copy.createSpan({ cls: "ent-cc-attachment-meta", text: MISSING_REFERENCE_TEXT, attr: { dir: "auto" } });
+        const meta = copy.createSpan({ cls: "ent-cc-attachment-meta" });
+        meta.createSpan({ text: MISSING_REFERENCE_TEXT, attr: { dir: "auto" } });
+        if (duplicate) {
+          meta.createSpan({ text: " · ", attr: { "aria-hidden": "true" } });
+          meta.createSpan({ cls: "ent-cc-attachment-path", text: item.path, attr: { dir: "auto" } });
+        }
       }
       if (item.available) row.addEventListener("click", () => onOpen(item.path));
     }
