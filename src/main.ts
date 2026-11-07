@@ -295,6 +295,8 @@ import {
   type SyncRecoveryLocalState,
 } from "./sync-recovery";
 import { ClearDeviceLocalDataModal, SyncRecoveryCenterModal } from "./sync-recovery-modal";
+import type { RecoveryRestoreIntent } from "./recovery-copy";
+import type { RecoveryApplyResult } from "./recovery-copy-modal";
 import {
   planUpdateAnnouncement,
   updateAnnouncementForVersion,
@@ -6838,6 +6840,57 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     });
     if (!duplicate) throw new Error("The knowledge base could not be duplicated.");
     return duplicate;
+  }
+
+  /**
+   * Restore a previewed kept copy as a NEW base. `sourceMatches` rereads the
+   * copy and compares it byte for byte. The active base, every existing base
+   * and all Markdown are untouched. The final outcome is always shown here,
+   * so it is surfaced even when the review window was closed.
+   */
+  async restoreKeptCopy(intent: RecoveryRestoreIntent, sourceMatches: () => Promise<boolean>): Promise<RecoveryApplyResult> {
+    const outcome = (result: RecoveryApplyResult): RecoveryApplyResult => {
+      new Notice(result.status === "applied"
+        ? `Restored “${intent.name}” as a new knowledge base. Your active base did not change.`
+        : result.status === "failed" ? `${result.message} Nothing was changed.`
+          : `${result.message} Check Manage knowledge bases before trying again.`, 12000);
+      return result;
+    };
+    const failed = (message: string): RecoveryApplyResult => outcome({ status: "failed", message });
+    const epoch = this.dataEpoch;
+    const vaultId = this.store.vaultId;
+    const stale = (): boolean => this.dataEpoch !== epoch || this.store.vaultId !== vaultId || intent.sourceVaultId !== vaultId;
+    try { this.assertDataWritable(); } catch { return failed("Knowledge bases are read-only, so the copy was not restored."); }
+    let same = false;
+    try { same = await sourceMatches(); } catch { same = false; }
+    if (!same) return failed("The kept copy changed or is no longer available. Reopen the review.");
+    if (stale()) return failed("Knowledge-base data changed while the copy was checked. Reopen the review.");
+    let refusal = "";
+    try {
+      await this.commitBaseStoreChange(() => {
+        if (stale()) refusal = "Knowledge-base data changed before the copy could be added. Reopen the review.";
+        else if (this.store.bases.length >= MAX_KNOWLEDGE_BASES) refusal = `This installation already contains the maximum of ${MAX_KNOWLEDGE_BASES} knowledge bases, including archived bases.`;
+        else if (this.knowledgeBaseNameExists(intent.name)) refusal = "A knowledge base with that name now exists. Reopen the review.";
+        else if (this.store.bases.some((entry) => entry.id === intent.newBaseId) || intent.newBaseId in this.store.deletedBaseIds) refusal = "The new base identity is no longer available. Reopen the review.";
+        if (refusal) throw new Error(refusal);
+        this.store.bases.push(cloneJsonValue(intent.entry));
+      });
+    } catch {
+      if (refusal) return failed(refusal);
+      return this.isDataReadOnly()
+        ? outcome({ status: "uncertain", message: "The restore may not have finished saving." })
+        : failed("The restored base could not be saved.");
+    }
+    return outcome({ status: "applied", baseId: intent.newBaseId });
+  }
+
+  /** Separate from the restore: switches to the restored base only on request. */
+  async openRestoredKeptBase(baseId: string): Promise<void> {
+    try {
+      await this.switchKnowledgeBase(baseId);
+    } catch {
+      new Notice("The restored base could not be opened. Choose it in the knowledge-base list.", 8000);
+    }
   }
 
   async archiveKnowledgeBase(id: string): Promise<void> {
