@@ -1,6 +1,6 @@
 # 0.26.1 device and Sync smoke record
 
-Active candidate: 0.26.1 Safety and reliability fixes. Physical iPhone/iPad and controlled two-device Sync are **Unexecuted**. The owner's candidate-specific decision is pending; see the [0.26.1 evidence](0.26.1-iphone.md). No earlier waiver is reused. This is not a physical-device Pass.
+Active candidate: 0.26.1 Safety and reliability fixes. Physical iPhone/iPad and controlled two-device Sync are **Unverified — Unexecuted**, under the [candidate-specific maintainer-authorized waiver](0.26.1-iphone.md). The evidence records the exact fresh instruction and its context. No earlier waiver is reused. This is not a physical-device Pass.
 
 | Flow | Pass criteria | Result |
 | --- | --- | --- |

@@ -14,7 +14,12 @@ const budgets = [
   // accessible panel actions and compact disclosures. The initial integrated
   // candidate adds ~15.7 kB raw / 4.1 kB gzip over 0.25.1 (1,229,742 /
   // 323,923). Keep bounded feature headroom, no new runtime dependencies.
-  { file: "main.js", raw: 1_250_000, gzip: 329_500 },
+  // 0.26.1's reviewed backup, draft-preservation and lifecycle safeguards plus
+  // curated release news add 3,530 raw / 1,107 gzip bytes over 0.26.0.
+  // The tested build is 1,249,993 raw / 329,622 gzip. The maintainer directed
+  // publication after the 122-byte gzip overrun and this bounded adjustment
+  // were disclosed; keep 1,007 raw / 378 gzip bytes of headroom.
+  { file: "main.js", raw: 1_251_000, gzip: 330_000 },
   // Touch-sized membership choices/actions and tablet wrapping add ~1.6 kB raw.
   // Compact disclosures, attachment rows and resizing add ~6 kB raw / 1 kB
   // gzip over 0.25.1 (162,088 / 22,375), including safe touch/focus states.
