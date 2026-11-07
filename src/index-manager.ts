@@ -30,6 +30,12 @@ import { ExportImportCenterModal } from "./portability-modal";
 import { TaxonomyHealthModal } from "./taxonomy-health-modal";
 import { SyncRecoveryCenterModal } from "./sync-recovery-modal";
 
+/**
+ * Shared truth for removal dialogs: removing a note from a knowledge base also
+ * clears its visual placement and manual order (model behaviour, unchanged).
+ */
+export const REMOVAL_PLACEMENT_AND_UNDO_NOTE = "Any custom visual placement and manual sibling order is discarded, and the notes beside it can return to their default order. Adding it back later does not restore the earlier placement or order. Undo restores the earlier organization while it is still available.";
+
 export type ManagerTab = "indexed" | "available" | "hidden" | "sources" | "groups" | "diagnostics";
 
 type NoteListTab = Extract<ManagerTab, "indexed" | "available" | "hidden">;
@@ -612,7 +618,7 @@ export class IndexManagerModal extends Modal {
     if (!this.guardOpenedBase()) return;
     const paths = [...this.selected];
     if (paths.length === 0) return;
-    new ConfirmModal(this.app, "Remove selected notes from index?", `${paths.length} membership${paths.length === 1 ? "" : "s"} will be removed. Markdown notes and collection memberships remain untouched.`, "Remove from index", async () => {
+    new ConfirmModal(this.app, "Remove selected notes from index?", `${paths.length} membership${paths.length === 1 ? "" : "s"} will be removed. Markdown notes and collection memberships remain untouched. ${REMOVAL_PLACEMENT_AND_UNDO_NOTE}`, "Remove from index", async () => {
       if (!this.guardOpenedBase()) return;
       await this.plugin.removeRecordsFromIndex(paths, `Remove ${paths.length} notes from this knowledge base`);
       if (!this.guardOpenedBase()) return;
@@ -839,8 +845,8 @@ export class IndexManagerModal extends Modal {
     const count = paths.length;
     const noun = count === 1 ? this.plugin.data.settings.itemSingular : this.plugin.data.settings.itemPlural;
     const message = count === 0
-      ? `“${group}” will be removed from this knowledge base. No Markdown note, property, or folder will be changed.`
-      : `“${group}” and its ${count} indexed ${noun} will be removed from this knowledge base. The subjects can be restored from Available or Hidden. Markdown notes, properties, folders, and collection memberships will remain untouched.`;
+      ? `“${group}” will be removed from this knowledge base. No Markdown note, property, or folder will be changed. ${REMOVAL_PLACEMENT_AND_UNDO_NOTE}`
+      : `“${group}” and its ${count} indexed ${noun} will be removed from this knowledge base. The subjects can be restored from Available or Hidden. Markdown notes, properties, folders, and collection memberships will remain untouched. ${REMOVAL_PLACEMENT_AND_UNDO_NOTE}`;
     new ConfirmModal(this.app, `Remove “${group}” from this knowledge base?`, message, "Remove group", async () => {
       if (!this.guardOpenedBase()) return;
       const sourceGroups = this.sourceGroupsForDisplayGroup(group, members);

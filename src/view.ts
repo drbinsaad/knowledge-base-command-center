@@ -4,7 +4,7 @@ import { captureViewFocus, restoreViewFocus, readableStatus, relativeUpdatedTime
 import { DEFAULT_INSPECTOR_WIDTH, loadWorkspaceLayoutPreference, saveWorkspaceLayoutPreference, WorkspaceResizeController, type WorkspaceLayoutPreference } from "./workspace-layout";
 import { cleanSearchViewFilters, type SearchViewFilters } from "./model";
 import type { CatalogPlacementTarget } from "./main";
-import { IndexManagerModal, type ManagerTab } from "./index-manager";
+import { IndexManagerModal, REMOVAL_PLACEMENT_AND_UNDO_NOTE, type ManagerTab } from "./index-manager";
 import { ExportImportCenterModal } from "./portability-modal";
 import { PortfolioTransferModal } from "./portfolio-modal";
 import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge-base-modal";
@@ -232,6 +232,11 @@ export function canRelinkPortableRecord(
   record: Pick<VaultRecord, "portableId" | "portableRelinkable" | "isPlaceholder">,
 ): boolean {
   return Boolean(record.portableId && record.portableRelinkable && !record.isPlaceholder);
+}
+
+/** Confirmation text for "Reset all visual arrangement". Wording only; the reset behaviour is unchanged. */
+export function resetAllVisualArrangementMessage(clinical: boolean): string {
+  return `All visual nesting and custom order will return to the ${clinical ? "canonical note metadata" : "configured parent metadata and folder grouping"}, so the remaining siblings go back to their default order. Source notes will not be changed. Undo restores the earlier organization while it is still available.`;
 }
 
 function libraryLabel(library: Pick<LibraryDefinition, "name" | "singularName">, plural = false): string {
@@ -7037,7 +7042,7 @@ export class EntVaultCommandCenterView extends ItemView {
       resetCurriculumVisualPath(this.plugin.data.curriculumVisual, record.path);
       if (this.plugin.canVisuallyMoveAcrossGroups()) delete this.plugin.data.indexGroupByPath[record.path];
     }, { requireUndo: true })
-      .then(() => new Notice(`${this.plugin.isClinicalMode() ? "Canonical" : "Configured"} parent and sibling order restored. Source notes were not changed.`)));
+      .then(() => new Notice(`${this.plugin.isClinicalMode() ? "Canonical" : "Configured"} parent restored, and the notes beside it can return to their default order. Source notes were not changed. Undo restores the earlier organization while it is still available.`)));
   }
 
   private openIndexGroupPicker(record: VaultRecord): void {
@@ -7101,7 +7106,7 @@ export class EntVaultCommandCenterView extends ItemView {
     new ConfirmModal(
       this.app,
       `${action}?`,
-      `“${record.title}” will leave ${settings.indexLabel} in “${settings.workspaceName}”. Its Markdown file, path, metadata, and memberships in other knowledge bases will not change. You can restore it from Manage → Available or Hidden.`,
+      `“${record.title}” will leave ${settings.indexLabel} in “${settings.workspaceName}”. Its Markdown file, path, metadata, and memberships in other knowledge bases will not change. You can restore it from Manage → Available or Hidden. ${REMOVAL_PLACEMENT_AND_UNDO_NOTE}`,
       "Remove from base",
       async () => {
         if (!ownsBase()) return;
@@ -7490,7 +7495,7 @@ export class EntVaultCommandCenterView extends ItemView {
       menu.addSeparator();
       menu.addItem((item) => item.setTitle(`Reset all visual ${this.plugin.data.settings.indexLabel.toLowerCase()} arrangement`).setIcon("rotate-ccw").onClick(() => {
         if (!ownsBase()) return;
-        new ConfirmModal(this.app, `Reset visual ${this.plugin.data.settings.indexLabel.toLowerCase()} arrangement?`, `All visual nesting and custom order will return to the ${this.plugin.isClinicalMode() ? "canonical note metadata" : "configured parent metadata and folder grouping"}. Source notes will not be changed, and Undo remains available.`, "Reset arrangement", async () => {
+        new ConfirmModal(this.app, `Reset visual ${this.plugin.data.settings.indexLabel.toLowerCase()} arrangement?`, resetAllVisualArrangementMessage(this.plugin.isClinicalMode()), "Reset arrangement", async () => {
           if (!ownsBase()) return;
           await this.plugin.mutate(`Reset all visual ${this.plugin.data.settings.indexLabel.toLowerCase()} arrangement`, () => {
             this.plugin.data.curriculumVisual = { parentByPath: {}, orderByContainer: {} };
