@@ -279,6 +279,8 @@ test("Choose another file offers recognized raw kept copies as well as JSON file
   const kept = new TFile("Old Copies/data.json.bak-kept-2026-11-03T10-00-00-000Z");
   const bak = new TFile("Old Copies/data.json.bak");
   const rescue = new TFile("Old Copies/rescue.json");
+  const upper = new TFile("Old Copies/Rescue.JSON"); // the old picker matched the extension case-insensitively
+  w.pickable.push(upper);
   for (const other of ["Old Copies/note.md", "Old Copies/data.json.bak-other", "Old Copies/image.png", "Old Copies/data.json.backup"]) w.pickable.push(new TFile(other));
   w.pickable.push(kept, bak, rescue);
   let items: string[] = [];
@@ -288,7 +290,7 @@ test("Choose another file offers recognized raw kept copies as well as JSON file
   };
   try {
     const candidate = await w.callbacks().pickExplicit?.();
-    assert.deepEqual(items, ["Old Copies/data.json.bak", "Old Copies/data.json.bak-kept-2026-11-03T10-00-00-000Z", "Old Copies/rescue.json"]);
+    assert.deepEqual(items, ["Old Copies/Rescue.JSON", "Old Copies/data.json.bak", "Old Copies/data.json.bak-kept-2026-11-03T10-00-00-000Z", "Old Copies/rescue.json"]);
     assert.equal(candidate?.displayName, kept.name);
     // The filename only nominates it: parse, size and exact bytes still decide.
     w.files.set(kept.path, JSON.stringify(createDefaultStore(migrateData(null), 100, VAULT)));

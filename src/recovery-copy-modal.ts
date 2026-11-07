@@ -111,7 +111,7 @@ export class RecoveryFilePicker extends FuzzySuggestModal<TFile> {
 
 /** Name patterns only nominate a file: JSON files, data.json.bak and data.json.bak-kept-*. */
 export function isRecoveryPickName(name: string): boolean {
-  return name.endsWith(".json") || name === "data.json.bak" || name.startsWith("data.json.bak-kept-");
+  return name.toLowerCase().endsWith(".json") || name === "data.json.bak" || name.startsWith("data.json.bak-kept-");
 }
 
 export function pickRecoveryFile(app: App, allFiles: readonly TFile[]): Promise<RecoveryCandidate | null> {
