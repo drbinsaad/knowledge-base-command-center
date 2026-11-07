@@ -4596,6 +4596,18 @@ export function sanitizeFileName(value: string): string {
   return dotIndex < 0 ? `${clean}-note` : `${basename}-note${clean.slice(dotIndex)}`;
 }
 
+/**
+ * Form error for a title that would create a hidden, dot-only or empty Markdown
+ * file. Checked on the sanitized basename only; sanitizeFileName itself stays
+ * unchanged because attachments and existing canonical paths depend on it.
+ */
+export function newNoteBasenameError(title: string): string | null {
+  const basename = sanitizeFileName(title);
+  if (!basename) return "The note title must contain at least one valid filename character.";
+  if (basename.startsWith(".")) return "The note title cannot start with a dot, because the file would be hidden. Remove the leading dot.";
+  return null;
+}
+
 export function canonicalIdIsValid(curriculumId: string, domain: string): boolean {
   const definition = DOMAIN_DEFINITIONS.find((item) => item.name === domain);
   if (!definition) return false;

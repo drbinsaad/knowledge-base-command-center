@@ -128,7 +128,7 @@ import {
   rewritePluginDataFolderRename,
   rewritePluginDataPathPrefix,
   rewritePluginDataTemplatePathRename,
-  sanitizeFileName,
+  newNoteBasenameError,
   semanticEntryFingerprint,
   semanticPluginDataProjection,
   nextSemanticHead,
@@ -10255,7 +10255,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   validateGenericNote(value: GenericNoteFormValue): string | null {
     if (!value.title.trim()) return "Enter a note title.";
-    if (!sanitizeFileName(value.title)) return "The note title must contain at least one valid filename character.";
+    const basenameError = newNoteBasenameError(value.title);
+    if (basenameError) return basenameError;
     if (!genericNotePath(value.folder, value.title)) return "Choose a valid note title and destination.";
     const folderError = validateWritableFolderPath(value.folder, this.app.vault.configDir);
     if (folderError) return folderError;
@@ -10844,6 +10845,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   validateProposal(value: TopicFormValue, currentPath = ""): string | null {
     if (!value.title) return "Enter a topic title.";
+    const basenameError = newNoteBasenameError(value.title);
+    if (basenameError) return basenameError;
     const folder = normalizePath(this.data.settings.proposalFolder);
     const folderError = this.isClinicalMode()
       ? validateProposalFolderPath(folder, this.app.vault.configDir)
