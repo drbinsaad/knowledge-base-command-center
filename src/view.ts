@@ -3044,6 +3044,7 @@ export class EntVaultCommandCenterView extends ItemView {
       this.createInspector(shell);
       this.renderInspector();
       restoreViewFocus(this.contentEl, focusedControl);
+      this.scheduleTouchRefreshSettle();
       return;
     }
 
@@ -3308,6 +3309,7 @@ export class EntVaultCommandCenterView extends ItemView {
       : "Personal organization and visual hierarchy stay in plugin data. Index actions never move or rewrite source notes." });
     restoreViewFocus(this.contentEl, focusedControl);
     this.bindMobileToolbarLayout();
+    this.scheduleTouchRefreshSettle();
   }
 
   private renderLegacyIndexSourceWarning(parent: HTMLElement): void {
@@ -7623,6 +7625,16 @@ export class EntVaultCommandCenterView extends ItemView {
         this.touchDropsInFlight -= 1;
         this.settleTouchRefresh();
       });
+  }
+
+  /**
+   * A route or tab render replaces the touch controller and silently abandons any held gesture, so the
+   * owner settles the deferred refresh after that render has finished. Deliberately not called from
+   * destroyTouchDrag, which must never re-enter rendering.
+   */
+  private scheduleTouchRefreshSettle(): void {
+    if (!this.touchRefreshDirty || this.viewClosed) return;
+    this.timerWindow.setTimeout(() => this.settleTouchRefresh(), 0);
   }
 
   /** One follow-up refresh once no gesture and no commit is pending; never for a closed view. */

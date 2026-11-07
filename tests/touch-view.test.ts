@@ -643,6 +643,28 @@ async function fullTouchView() {
   };
 }
 
+test("WF09 R1 a tab change that replaces the controller of a held gesture settles the deferred refresh once, and an ordinary tab change adds none", async () => {
+  const h = await fullTouchView();
+  const changeTab = (tab: string): Promise<void> => (h.view as unknown as { changeTab(tab: string): Promise<void> }).changeTab(tab);
+  h.busy = true;
+  h.records[4].priority = "P1";
+  h.records[4].mtime += 1;
+  h.realPlugin.invalidateRecordCache();
+  await h.view.reload();
+  assert.equal(h.view.touchRefreshDirty, true, "the refresh was deferred under the held gesture");
+  assert.equal(h.renders, 0);
+  // ArrowRight on the focused tab while the pointer is still down: the real tab route replaces the controller.
+  await changeTab("collections");
+  h.busy = false;
+  await Promise.resolve();
+  assert.equal(h.view.touchRefreshDirty, false, "the deferred refresh is not stranded");
+  assert.equal(h.renders, 2, "one render for the tab, exactly one deferred refresh");
+  await changeTab("curriculum");
+  assert.equal(h.renders, 3, "control: a tab change with nothing deferred schedules no extra refresh");
+  await Promise.resolve();
+  assert.equal(h.renders, 3);
+});
+
 test("WF09 D1 an unrelated refresh and a real search-generation advance during a gesture leave one valid move and exactly one deferred refresh", async () => {
   const h = await fullTouchView();
   assert.ok(h.source, "the gesture source is available");
