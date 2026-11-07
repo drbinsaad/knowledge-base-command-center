@@ -143,12 +143,15 @@ export function renderLibraryCover(parent: HTMLElement, cover: LibraryCover, pro
     frame.addClass("is-placeholder");
     const diagnostic = reason ? COVER_DIAGNOSTICS[reason] : null;
     if (reason) frame.setAttribute("data-cover-reason", reason);
+    const status = diagnostic?.label ?? (cover.state === "empty" ? "No cover" : "Cover unavailable");
+    // A button's aria-label hides its descendants, so the status must be in the name itself.
+    if (activation) frame.setAttribute("aria-label", `${activation.label}. ${status}`);
     if (diagnostic) {
       frame.setAttribute("title", diagnostic.help);
       frame.setAttribute("aria-description", diagnostic.help);
     }
     setIcon(frame.createSpan({ attr: { "aria-hidden": "true" } }), "image");
-    frame.createSpan({ text: diagnostic?.label ?? (cover.state === "empty" ? "No cover" : "Cover unavailable") });
+    frame.createSpan({ text: status });
   };
   if (cover.state !== "ready") {
     placeholder(cover.reason);

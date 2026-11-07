@@ -105,6 +105,59 @@ test("blocked URLs never create an image element while local covers retain lands
   assert.equal(dom.document.body.querySelector("img")?.getAttribute("height"), "400");
 });
 
+function renderActivated(value: unknown, property = true) {
+  const dom = createFakeDom();
+  const { app } = resolver();
+  const activations: string[] = [];
+  const cover = property ? resolveLibraryCover(app, value, "Book.md") : resolveLibraryCoverFromProperty(app, {}, "cover", "Book.md");
+  renderLibraryCover(asHtmlElement(dom.document.body), cover, normalizeLibraryDisplayProfile({ layout: "cards" }), {
+    label: "Select Alpha", onActivate: () => activations.push("activate"), onKeyDown: () => undefined, keyShortcuts: "Enter", current: false,
+  });
+  const button = dom.document.body.querySelector("button.ent-cc-library-cover-button");
+  assert.ok(button);
+  return { dom, button, activations };
+}
+
+test("WF08 C1 a valid local cover keeps its action name and the activation behaviour", () => {
+  const { dom, button, activations } = renderActivated("Covers/Book.png");
+  assert.equal(button.getAttribute("aria-label"), "Select Alpha");
+  assert.ok(dom.document.body.querySelector("img"));
+  button.click();
+  assert.deepEqual(activations, ["activate"]);
+});
+
+test("WF08 C2 a missing cover property is part of the cover button's accessible name", () => {
+  const { button } = renderActivated(undefined, false);
+  assert.match(button.getAttribute("aria-label") ?? "", /^Select Alpha\b.*Add a cover property/);
+});
+
+test("WF08 C3 invalid and remote references are named in the accessible name without leaking the reference", () => {
+  const remote = renderActivated("https://example.com/secret-cover.png");
+  assert.match(remote.button.getAttribute("aria-label") ?? "", /^Select Alpha\b.*Online covers unsupported/);
+  assert.doesNotMatch(remote.button.getAttribute("aria-label") ?? "", /example\.com|secret/);
+  assert.equal(remote.dom.document.body.querySelector("img"), null);
+  const invalid = renderActivated("/private/image.png");
+  assert.match(invalid.button.getAttribute("aria-label") ?? "", /^Select Alpha\b.*Use a vault image link/);
+});
+
+test("WF08 C4 an unavailable local target is named in the accessible name", () => {
+  const { button } = renderActivated("Covers/Missing.png");
+  assert.match(button.getAttribute("aria-label") ?? "", /^Select Alpha\b.*Image not found in vault/);
+  assert.match(button.getAttribute("aria-description") ?? "", /Check that the linked image exists/);
+});
+
+test("WF08 C5 a runtime image error updates the same button's accessible name and keeps activation", () => {
+  const { dom, button, activations } = renderActivated("Covers/Book.png");
+  assert.equal(button.getAttribute("aria-label"), "Select Alpha");
+  dom.document.body.querySelector("img")?.dispatch("error");
+  assert.equal(dom.document.body.querySelectorAll("button.ent-cc-library-cover-button").length, 1);
+  assert.equal(dom.document.body.querySelector("button.ent-cc-library-cover-button"), button);
+  assert.match(button.getAttribute("aria-label") ?? "", /^Select Alpha\b.*Image could not load/);
+  assert.doesNotMatch(button.getAttribute("aria-label") ?? "", /Book\.png|app:\/\//);
+  button.click();
+  assert.deepEqual(activations, ["activate"]);
+});
+
 test("card properties remain bounded plain scalar text and ignore prototype keys", () => {
   assert.equal(libraryPropertyText(["Ali", "Smith", { private: "never shown" }]), "Ali, Smith");
   assert.equal(libraryPropertyText({ private: "never shown" }), "");
@@ -266,10 +319,14 @@ test("interactive covers remain native labelled buttons for failed, blocked and 
     const button = parent.querySelector("button");
     assert.ok(button);
     assert.equal(button.getAttribute("type"), "button");
-    assert.equal(button.getAttribute("aria-label"), "Select Example book");
+    assert.equal(button.getAttribute("aria-label"), state === "failed" ? "Select Example book"
+      : `Select Example book. ${state === "empty" ? "No cover" : "Cover unavailable"}`);
     assert.equal(button.getAttribute("aria-current"), "true");
     assert.equal(button.querySelector("button"), null);
-    if (state === "failed") parent.querySelector("img")?.dispatch("error");
+    if (state === "failed") {
+      parent.querySelector("img")?.dispatch("error");
+      assert.equal(button.getAttribute("aria-label"), "Select Example book. Image could not load");
+    }
     assert.equal(parent.querySelector("button"), button, "placeholder updates retain the same focusable action");
     button.click();
     button.dispatch("keydown", { key: "Enter" });
