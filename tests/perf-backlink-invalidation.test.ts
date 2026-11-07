@@ -126,9 +126,25 @@ test("a later global resolved event (graph updated after modifications) refreshe
   const host = await backlinkHost();
   host.plugin.getBacklinkPaths(TARGET);
   // The first `resolved` was consumed by startup; Obsidian fires it again after later modifications.
+  host.scheduledRefreshes.length = 0;
   host.resolvedLinks[sourcePath(3)] = { [TARGET]: 1 };
   host.emitMetadata("resolved");
+  assert.ok(host.scheduledRefreshes.length >= 1, "a genuine fallback invalidation tells the visible view to consume the refreshed graph");
   assert.deepEqual(sorted(host.plugin.getBacklinkPaths(TARGET)), [sourcePath(0), sourcePath(1), sourcePath(3)]);
+});
+
+test("a complete changed, resolve, resolved cycle for an unchanged source keeps the targeted cache", async () => {
+  const host = await backlinkHost();
+  const before = sorted(host.plugin.getBacklinkPaths(TARGET));
+  for (const source of [host.sources[0], host.sources[50]]) {
+    host.resetCounters();
+    host.emitMetadata("changed", source);
+    host.emitMetadata("resolve", source);
+    host.emitMetadata("resolved"); // Obsidian's final boundary after the modified file resolves
+    assert.deepEqual(sorted(host.plugin.getBacklinkPaths(TARGET)), before, "exact results are unchanged");
+    assert.equal(host.counters.resolvedRootEnumerations, 0, `no whole-graph rescan for ${source.path}`);
+    assert.ok(host.counters.resolvedSourceReads <= 4, `bounded per-source work, saw ${host.counters.resolvedSourceReads}`);
+  }
 });
 
 test("removing the genuinely last backlink empties the target and a LATE resolve still refreshes the inspector", async () => {

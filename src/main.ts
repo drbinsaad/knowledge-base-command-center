@@ -816,6 +816,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private backlinkDirty = new Set<string>();
   /** The resolvedLinks object the index was built from; a different object forces a rebuild. */
   private backlinkGraph: object | null = null;
+  /** Per-file resolves applied since the last global `resolved` (an "accounted" cycle). */
+  private backlinkResolvesSinceResolved = 0;
   private refreshShouldInvalidateRecords = false;
   /**
    * Session overlay applied only to persisted path references while the durable
@@ -1163,17 +1165,36 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // and repairs a projection built from any earlier partial inventory.
       this.registerEvent(this.app.metadataCache.on("resolve", (file) => {
         // The per-file link resolution can follow `changed`; apply its final edges.
+        this.backlinkResolvesSinceResolved += 1;
         if (this.patchBacklinkSource(file.path)
           && this.app.workspace.getLeavesOfType(VIEW_TYPE).length > 0) this.scheduleRefresh(false);
       }));
       let initialMetadataResolutionHandled = false;
       this.registerEvent(this.app.metadataCache.on("resolved", () => {
         if (initialMetadataResolutionHandled) {
-          // Obsidian fires `resolved` again after later modifications.
+          // Obsidian fires `resolved` again after later modifications. When the
+          // per-file resolves of this cycle were already applied, keep the targeted
+          // cache and settle any remaining dirty sources; otherwise this is a coarse
+          // fallback and the visible backlinks must consume a rebuilt graph.
+          const hadIndex = this.backlinkIndex !== null;
+          const accounted = hadIndex
+            && (this.backlinkResolvesSinceResolved > 0 || this.backlinkDirty.size > 0)
+            && this.backlinkGraph === this.app.metadataCache.resolvedLinks;
+          this.backlinkResolvesSinceResolved = 0;
+          if (accounted) {
+            // `changed` and `resolve` already scheduled the redraw for these sources.
+            for (const source of [...this.backlinkDirty]) {
+              this.backlinkDirty.delete(source);
+              this.patchBacklinkSource(source);
+            }
+            return;
+          }
           this.backlinkIndex = null;
+          if (hadIndex && this.app.workspace.getLeavesOfType(VIEW_TYPE).length > 0) this.scheduleRefresh(false);
           return;
         }
         initialMetadataResolutionHandled = true;
+        this.backlinkResolvesSinceResolved = 0;
         refreshVaultProjectionAfterReadinessBoundary();
       }));
       this.registerEvent(this.app.vault.on("create", (file) => {
@@ -5130,8 +5151,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       ? !this.noteOrganizerPathIsRestricted(entry.path)
       : this.noteOrganizerFileIsSelectable(entry)));
     if (!viable) return;
-    const items = selection.map((entry): NoteOrganizerSelectedVaultItem => ({
-      path: entry.path,
+    // Freeze every selected entry's menu-time path together with its object.
+    const frozen = selection.map((entry) => ({ entry, path: entry.path }));
+    const items = frozen.map(({ entry, path }): NoteOrganizerSelectedVaultItem => ({
+      path,
       kind: entry instanceof TFolder ? "folder" : "file",
     }));
     menu.addSeparator();
@@ -5139,15 +5162,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       .setTitle("Organize current Markdown notes in the command center…")
       .setIcon("network")
       .onClick(() => {
-        // A folder renamed, deleted or replaced since the menu opened must not
-        // silently organize a different target.
-        const moved = selection.some((entry) => {
-          if (!(entry instanceof TFolder)) return false;
-          const current = this.app.vault.getAbstractFileByPath(entry.path);
-          return current !== null && current !== entry;
-        });
+        // Any selected entry that was renamed, deleted or replaced since the menu
+        // opened rejects the whole action: it must neither organize a different
+        // target nor silently shrink to the remaining entries.
+        const moved = frozen.some(({ entry, path }) => (
+          entry.path !== path || this.app.vault.getAbstractFileByPath(path) !== entry
+        ));
         if (moved) {
-          new Notice("The selected folder changed since the menu opened. Nothing was opened; choose it again.");
+          new Notice("The selection changed since the menu opened. Nothing was opened; choose it again.");
           return;
         }
         const snapshot = this.noteOrganizerSelection(items);

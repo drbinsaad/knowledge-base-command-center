@@ -221,6 +221,40 @@ test("a different folder recreated at the same path between open and click is ne
   assert.match(Notice.messages.at(-1) ?? "", /folder changed|choose it again/iu);
 });
 
+test("a folder renamed with an unrelated folder created at its old path is never organized", () => {
+  const fx = subtreeFixture();
+  const known: Array<TFile | TFolder> = [fx.folder, fx.nestedFolder];
+  const host = menuHost(fx.vaultFiles, known);
+  const action = organize(host.openMenu("file-menu", fx.folder));
+  assert.ok(action);
+  // The same folder object moves to "Moved" together with its notes ...
+  for (const file of [...fx.direct, ...fx.nested]) file.path = file.path.replace(/^Subtree/u, "Moved");
+  fx.folder.path = "Moved";
+  fx.nestedFolder.path = "Moved/Nested";
+  // ... and a different folder with a different note takes over the old path.
+  const impostor = new TFile("Subtree/Unrelated.md");
+  host.vaultFiles.push(impostor);
+  known.push(createTestFolder("Subtree", { children: [impostor] }));
+  Notice.messages.length = 0;
+  action.click();
+  assert.equal(host.opened.length, 0, "the unrelated replacement's notes are never opened");
+  assert.ok(Notice.messages.length >= 1, "a safe Notice explains");
+});
+
+test("a selected folder deleted from a mixed selection rejects the whole action, not just the folder", () => {
+  const fx = subtreeFixture();
+  const known: Array<TFile | TFolder> = [fx.folder, fx.nestedFolder];
+  const host = menuHost(fx.vaultFiles, known);
+  const action = organize(host.openMenu("files-menu", [fx.folder, fx.outside[0]]));
+  assert.ok(action);
+  known.length = 0;
+  for (const path of fx.expected) host.vaultFiles.splice(host.vaultFiles.findIndex((file) => file.path === path), 1);
+  Notice.messages.length = 0;
+  action.click();
+  assert.equal(host.opened.length, 0, "the remaining outside note must not silently become the whole selection");
+  assert.ok(Notice.messages.length >= 1);
+});
+
 function capFixture(selectedNotes: number, extraOutside: number) {
   const inside = Array.from({ length: selectedNotes }, (_, index) => new TFile(`Big/${index}.md`));
   const outside = Array.from({ length: extraOutside }, (_, index) => new TFile(`Out/${index}.md`));

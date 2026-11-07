@@ -1583,6 +1583,12 @@ test("official single, multi, and folder context menus pass one-time Markdown sn
   const folder = new TFolder("Folder", [first, second, image]);
   const callbacks = new Map<string, (...args: never[]) => void>();
   const app = organizerApp([first, second, restricted]);
+  // The vault resolves the selected folder, as Obsidian does; the deferred
+  // menu action verifies each selected entry's frozen path and identity.
+  const resolveFile = app.vault.getAbstractFileByPath;
+  Object.assign(app.vault, {
+    getAbstractFileByPath: (path: string): TFile | TFolder | null => (path === folder.path ? folder : resolveFile(path)),
+  });
   Object.assign(app.workspace, {
     on: (event: string, callback: (...args: never[]) => void) => {
       callbacks.set(event, callback);
