@@ -1142,10 +1142,18 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         // resolvedLinks after this event, so the source is re-read lazily and again
         // by the per-file `resolve` event below.
         this.markBacklinkSourceDirty(file.path);
-        this.invalidateKnowledgeBaseSearchSnapshot();
-        if (this.invalidateRecordCachesForPath(file.path, { file })) this.scheduleRefresh(false);
-        // Outside notes can change the inspector's external backlinks and
-        // cancel an in-flight search through the generation invalidation above.
+        // A title or ID edit changes placeholder candidates without adding a file,
+        // so the candidate token advances for every metadata change.
+        this.vaultNoteGeneration += 1;
+        const relevantToABase = this.invalidateRecordCachesForPath(file.path, { file });
+        // Global search restarts only when the edit can change a result. A clinical
+        // base discovers topic proposals anywhere, so irrelevance cannot be proved there.
+        if (relevantToABase || this.getKnowledgeBases().some((entry) => entry.data.settings.workspaceMode === "ent-clinical")) {
+          this.invalidateKnowledgeBaseSearchSnapshot();
+        }
+        if (relevantToABase) this.scheduleRefresh(false);
+        // Outside notes can still change the inspector's external backlinks and
+        // placeholder candidates, so the open view refreshes.
         else if (this.app.workspace.getLeavesOfType(VIEW_TYPE).length > 0) {
           this.scheduleRefresh(false);
         }

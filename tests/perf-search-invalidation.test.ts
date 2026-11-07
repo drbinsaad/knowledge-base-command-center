@@ -7,10 +7,8 @@ import { startE05Host, type E05Host } from "./support/e05-host.ts";
 /**
  * E05 follow-up 3 (search half): an unrelated Markdown metadata edit must not
  * discard a valid Generic search or its inventory, while every relevant edit
- * keeps full freshness and generation fencing. Counters, not timing. Red tests
- * carry node:test `todo` until the implementation lands.
+ * keeps full freshness and generation fencing. Counters, not timing.
  */
-const PENDING = { todo: "E05 implementation pending" } as const;
 const ID_PROPERTY = migrateData(null).settings.idProperty;
 const QUICK = { yieldEvery: Number.MAX_SAFE_INTEGER } as const;
 
@@ -74,7 +72,7 @@ test("control: the search finds the base members and the referenced outside note
   assert.deepEqual(paths(result), [active.path, inactive.path, outsideRef.path].sort());
 });
 
-test("an unrelated Markdown metadata edit keeps a completed search valid and rebuilds no inventory", PENDING, async () => {
+test("an unrelated Markdown metadata edit keeps a completed search valid and rebuilds no inventory", async () => {
   const { host, unrelated } = await searchHost();
   host.plugin.getRecords();
   const first = await search(host, "zebra");
@@ -87,6 +85,9 @@ test("an unrelated Markdown metadata edit keeps a completed search valid and reb
 
   assert.equal(generation(host), before, "no global search restart for an edit outside every searchable base");
   assert.equal((host.plugin as unknown as { knowledgeBaseSearchVaultSnapshot: unknown }).knowledgeBaseSearchVaultSnapshot, snapshotBefore, "the retained inventory is not discarded");
+  // The event handler itself may inspect the edited file once (clinical-proposal check).
+  assert.ok(host.counters.metadataReads <= 1, "the handler reads at most the edited file");
+  host.resetCounters();
   const second = await search(host, "zebra");
   assert.deepEqual(paths(second), paths(first), "exact results are unchanged");
   assert.equal(second?.total, first?.total);
@@ -94,7 +95,7 @@ test("an unrelated Markdown metadata edit keeps a completed search valid and reb
   assert.equal(host.counters.metadataReads, 0, "no record preparation attributable to the edit");
 });
 
-test("an unrelated edit during a yielded search lets that search complete with exact results", PENDING, async () => {
+test("an unrelated edit during a yielded search lets that search complete with exact results", async () => {
   const { host, active, inactive, outsideRef, unrelated } = await searchHost();
   host.plugin.getRecords();
   const running = search(host, "zebra", { yieldEvery: 1 });
@@ -152,6 +153,23 @@ test("control: an outside note that becomes, then stops being, a topic-proposal 
   assert.deepEqual(paths(await search(host, "adhoc")), [], "removed once it stops being a proposal");
 });
 
+test("control: an uncached inactive clinical base still discovers and drops an outside proposal", async () => {
+  const { host, unrelated } = await searchHost({ clinicalInactive: true });
+  host.plugin.getRecords();
+  // No search has run, so the inactive clinical base has no retained projection at any edit.
+  const internals = host.plugin as unknown as { inactiveSearchRecordsCache: Map<string, unknown>; recordsCacheByBase: Map<string, unknown> };
+  assert.equal(internals.inactiveSearchRecordsCache.has("base-second"), false);
+  assert.equal(internals.recordsCacheByBase.has("base-second"), false);
+
+  host.frontmatter[unrelated.path] = { type: "topic-proposal", title: "Adhoc proposal" };
+  host.emitMetadata("changed", unrelated);
+  assert.deepEqual(paths(await search(host, "adhoc")), [unrelated.path], "proposal false to true discovered");
+
+  host.frontmatter[unrelated.path] = { title: "Daily journal" };
+  host.emitMetadata("changed", unrelated);
+  assert.deepEqual(paths(await search(host, "adhoc")), [], "proposal true to false removed");
+});
+
 test("control: create, delete and rename keep generation fencing", async () => {
   const { host, unrelated } = await searchHost();
   host.plugin.getRecords();
@@ -167,7 +185,7 @@ test("control: create, delete and rename keep generation fencing", async () => {
   }
 });
 
-test("cross-path independence: an unrelated edit keeps search work but still refreshes candidates and backlinks", PENDING, async () => {
+test("cross-path independence: an unrelated edit keeps search work but still refreshes candidates and backlinks", async () => {
   const { host, unrelated } = await searchHost();
   host.plugin.getRecords();
   const searchBefore = generation(host);

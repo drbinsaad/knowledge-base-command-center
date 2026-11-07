@@ -8458,7 +8458,7 @@ test("outside-note metadata changes refresh rendered external backlinks without 
   assert.deepEqual(scheduledRefreshes, [false, false], "removing the final external backlink also refreshes");
 });
 
-test("outside-note metadata changes schedule a retry for cancelled in-flight search", async () => {
+test("a truly unrelated outside-note edit keeps an in-flight search valid and still refreshes the view", async () => {
   const { plugin, app, unrelated, metadataChanged, scheduledRefreshes } = await unrelatedMetadataRefreshHarness();
   const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView;
   const { document } = createFakeDom();
@@ -8480,7 +8480,39 @@ test("outside-note metadata changes schedule a retry for cancelled in-flight sea
   });
   internals.renderTree();
   assert.match(parent.textContent, /Searching all available knowledge bases/u);
+  const generationBefore = plugin.getSearchGeneration();
   metadataChanged(unrelated);
+  assert.equal(plugin.getSearchGeneration(), generationBefore, "no global search restart for an edit outside every searchable base");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const publishedSearchResult = (): { total: number } | null => internals.globalSearchResult;
+  assert.equal(publishedSearchResult()?.total, 0, "the valid search publishes its exact result");
+  assert.equal(internals.globalSearchPendingKey, "");
+  assert.deepEqual(scheduledRefreshes, [false], "external backlinks and placeholder candidates still refresh");
+});
+
+test("a related outside-note metadata change cancels an in-flight search and schedules its retry", async () => {
+  const { plugin, app, indexed, metadataChanged, scheduledRefreshes } = await unrelatedMetadataRefreshHarness();
+  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView;
+  const { document } = createFakeDom();
+  const parent = document.body;
+  const internals = view as unknown as {
+    renderTree(): void;
+    renderGlobalSearchResults(parent: HTMLElement): number;
+    globalSearchResult: { total: number } | null;
+    globalSearchPendingKey: string;
+  };
+  Object.assign(view, {
+    plugin, app, query: "no matching knowledge", searchScope: "all", viewClosed: false,
+    globalSearchRequestGeneration: 0, globalSearchResult: null,
+    renderTree: () => {
+      parent.empty();
+      internals.renderGlobalSearchResults(asHtmlElement(parent));
+    },
+    resetSearchScrollPosition: () => {},
+  });
+  internals.renderTree();
+  assert.match(parent.textContent, /Searching all available knowledge bases/u);
+  metadataChanged(indexed);
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(internals.globalSearchResult, null, "the invalidated search cannot publish stale results");
   assert.equal(internals.globalSearchPendingKey, "");
