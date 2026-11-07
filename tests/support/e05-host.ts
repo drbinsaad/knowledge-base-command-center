@@ -72,7 +72,7 @@ export async function startE05Host(options: E05HostOptions): Promise<E05Host> {
   const scheduledRefreshes: boolean[] = [];
   let deviceState: unknown = null;
 
-  const countedLinks = (raw: ResolvedLinks): ResolvedLinks => new Proxy({} as ResolvedLinks, {
+  const countedLinks = (raw: ResolvedLinks): ResolvedLinks => new Proxy(Object.create(null) as ResolvedLinks, {
     ownKeys: () => { counters.resolvedRootEnumerations += 1; return Reflect.ownKeys(raw); },
     getOwnPropertyDescriptor: (_target, key) => {
       const descriptor = Reflect.getOwnPropertyDescriptor(raw, key);
@@ -135,7 +135,7 @@ export async function startE05Host(options: E05HostOptions): Promise<E05Host> {
   };
   const host: E05Host = {
     plugin,
-    app: app as never,
+    app,
     files,
     frontmatter,
     get resolvedLinks(): ResolvedLinks { return rawLinks; },
