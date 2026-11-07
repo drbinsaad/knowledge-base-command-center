@@ -275,10 +275,41 @@ test("R3 Direct-state text and facts match the real service for Generic and ENT,
       const text = preview.lines.join(" ");
       const expectedDirect = indexed || mode === "ent-clinical";
       assert.equal(preview.after.direct, expectedDirect);
-      if (!indexed) assert.match(text, expectedDirect ? /leaves the note's Direct Index membership on/ : /Direct Index membership is cleared/);
+      if (!indexed) assert.match(text, expectedDirect ? /has Direct Index membership after linking/ : /Direct Index membership is cleared/);
       if (!indexed && expectedDirect) assert.doesNotMatch(text, /cleared|hidden/);
     }
   }
+});
+
+test("R3b an ENT relink that moves Direct onto a non-Direct note is worded from the real after-state", async () => {
+  const { plugin } = await scenario({ indexed: false });
+  plugin.data.settings.workspaceMode = "ent-clinical";
+  plugin.data.portableIndex.resolvedPathBySubjectId.subject = OTHER;
+  plugin.data.directIndexPaths = [OTHER];
+  const preview = previewPlaceholderLinkEffects(plugin.data, "link", "subject", NOTE);
+  assert.ok(preview);
+  assert.equal(preview.toBefore.direct, false);
+  assert.equal(preview.after.direct, true);
+  assert.doesNotMatch(preview.lines.join(" "), /cleared/);
+  await plugin.resolvePortableSubject("subject", NOTE);
+  assert.deepEqual(placementFactsAt(plugin.data, NOTE), preview.after);
+});
+
+test("R2b moving an affected Library heading under another heading, keeping its id, changes the key", async () => {
+  const { plugin } = await libraryMergeScenario();
+  const shelf = { id: "shelf", title: "Shelf", collapsed: false, subjects: ["owner"], subheadings: [] };
+  const [headingB, headingA] = [
+    { id: "b", title: "B", collapsed: false, subjects: ["subject"], subheadings: [] as typeof shelf[] },
+    { id: "a", title: "A", collapsed: false, subjects: [], subheadings: [shelf] },
+  ];
+  plugin.data.portableIndex.libraryLayouts = { reading: [headingB, headingA] };
+  const first = previewPlaceholderLinkEffects(plugin.data, "link", "subject", OTHER);
+  assert.ok(first);
+  headingA.subheadings = [];
+  headingB.subheadings = [shelf];
+  const second = previewPlaceholderLinkEffects(plugin.data, "link", "subject", OTHER);
+  assert.notEqual(second?.key, first.key);
+  assert.notEqual(second?.lines.join(" "), first.lines.join(" "));
 });
 
 function libraryMergeScenario() {

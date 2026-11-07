@@ -70,12 +70,14 @@ interface Placement { id: string; label: string }
 
 function libraryPlacements(layouts: PluginData["portableIndex"]["libraryLayouts"], ids: string[]): Placement[] {
   const out: Placement[] = [];
-  const walk = (libraryId: string, node: LayoutSubheading, trail: string[]): void => {
+  // The id carries every ancestor node id, so moving a heading under another one changes it.
+  const walk = (libraryId: string, node: LayoutSubheading, trail: string[], trailIds: string[]): void => {
     const here = [...trail, node.title];
-    for (const id of ids) if (node.subjects.includes(id)) out.push({ id: `${libraryId}/${node.id}/${id}`, label: `${libraryId} › ${here.join(" › ")}` });
-    for (const child of childSubheadings(node)) walk(libraryId, child, here);
+    const hereIds = [...trailIds, node.id];
+    for (const id of ids) if (node.subjects.includes(id)) out.push({ id: `${libraryId}/${hereIds.join("/")}/${id}`, label: `${libraryId} › ${here.join(" › ")}` });
+    for (const child of childSubheadings(node)) walk(libraryId, child, here, hereIds);
   };
-  for (const [libraryId, layout] of Object.entries(layouts ?? {})) for (const heading of layout) walk(libraryId, heading, []);
+  for (const [libraryId, layout] of Object.entries(layouts ?? {})) for (const heading of layout) walk(libraryId, heading, [], []);
   return out;
 }
 
@@ -221,8 +223,8 @@ export function previewPlaceholderLinkEffects(
     // Worded from the projected transition, so the ENT profile (which keeps Direct state) is never misdescribed.
     lines.push(subject.indexed || owner?.indexed
       ? "This subject is indexed, so the note gets Direct Index membership."
-      : toBefore.direct === after.direct
-        ? `This subject is not indexed; linking leaves the note's Direct Index membership ${after.direct ? "on" : "off"}${after.hidden ? " and hidden" : ""}.`
+      : after.direct
+        ? "This subject is not indexed, and the note has Direct Index membership after linking."
         : `This subject is not indexed, so the note's Direct Index membership is cleared${after.hidden ? " and it is hidden from the Index folder that would otherwise supply it" : ""}.`);
     if (owner) {
       lines.push(`The note already belongs to the portable identity “${owner.title}”, which is merged into this subject.`);
@@ -238,7 +240,7 @@ export function previewPlaceholderLinkEffects(
     kind, subjectId, from, to, before, toBefore, after, folderSupplies, mergesOwnerId: ownerId, lines,
     key: JSON.stringify([
       kind, subjectId, subject.title, from, to, ownerId, before, toBefore, after, folderSupplies,
-      libraryBefore.map((item) => item.id), libraryAfter.map((item) => item.id), movedChildren.map((child) => child.id), detaches,
+      libraryBefore, libraryAfter, movedChildren.map((child) => child.id), detaches,
     ]),
   };
 }
