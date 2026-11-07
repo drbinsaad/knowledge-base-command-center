@@ -55,6 +55,23 @@ button.mod-cta { background: var(--interactive-accent); color: var(--text-on-acc
    This optional fixture includes the existing host's 20px padding per side;
    it does not impose a different row direction or override KBCC controls. */
 .kbcc-browser-native-settings-width { max-width: 740px; margin-inline: auto; }
+/* Opt-in host parity (body.kbcc-host-parity). Mirrors only the Obsidian 1.15.0
+   rules that matter to focus, contrast and control height, as read in review
+   V2-C-ui (V2C-5): outlines removed, focus drawn solely as a button box-shadow,
+   faint text #ababab (light) / #666 (dark), buttons sized by --input-height,
+   44px on .is-mobile. The border-focus colour is an approximation; the product
+   overrides that box-shadow, so it never supplies the only indicator. Specs that
+   do not add the class are unaffected. */
+body.kbcc-host-parity { --text-faint: #ababab; --background-modifier-border-focus: #a8a8a8; }
+body.kbcc-host-parity.theme-dark { --text-faint: #666666; --background-modifier-border-focus: #666666; }
+body.kbcc-host-parity.is-mobile { --input-height: 44px; }
+:where(body.kbcc-host-parity) :focus,
+:where(body.kbcc-host-parity) button,
+:where(body.kbcc-host-parity) button:focus-visible,
+:where(body.kbcc-host-parity) input:focus-visible,
+:where(body.kbcc-host-parity) select:focus-visible { outline: none; }
+:where(body.kbcc-host-parity) button { height: var(--input-height); }
+:where(body.kbcc-host-parity) button:focus-visible { box-shadow: 0 0 0 3px var(--background-modifier-border-focus); }
 @media (max-width: 600px) {
   .setting-item { flex-direction: column; align-items: stretch; gap: 8px; }
   .setting-item-control { justify-content: flex-start; }

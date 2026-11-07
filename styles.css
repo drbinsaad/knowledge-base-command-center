@@ -7369,6 +7369,30 @@
 .ent-cc-view.is-mobile-split .ent-cc-header-actions .ent-cc-button,
 .ent-cc-view.is-mobile-split .ent-cc-inspector-actions .ent-cc-button,
 .ent-cc-view.is-mobile-split .ent-cc-related-record { min-height: 44px; }
+/* Touch split view: the remaining search, Details and filter targets. */
+.ent-cc-view.is-mobile-split .ent-cc-search-box input {
+  height: 44px;
+  padding-inline-end: 50px;
+  font-size: 16px;
+}
+.ent-cc-view.is-mobile-split .ent-cc-search-clear {
+  top: 0;
+  inset-inline-end: 0;
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+}
+.ent-cc-view.is-mobile-split .ent-cc-search-icon { top: 14px; }
+.ent-cc-view.is-mobile-split .ent-cc-workspace-options-actions .ent-cc-icon-button {
+  width: 44px;
+  min-width: 44px;
+  min-height: 44px;
+}
+.ent-cc-view.is-mobile-split .ent-cc-search-option select {
+  height: 44px; /* WebKit's native select ignores min-height */
+  min-height: 44px;
+}
+.ent-cc-view.is-mobile-split .ent-cc-linked-first { min-height: 44px; }
 .ent-cc-view.is-mobile-split .ent-cc-workspace-separator::after {
   content: "";
   position: absolute;
