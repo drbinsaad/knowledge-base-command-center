@@ -6629,6 +6629,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     persistSyncedStore = true,
     requiredUndoBatchBaseIds: readonly string[] = [],
     requiredUndoBatchOperationLabel: RequiredUndoBatchOperationLabel = "multi-base change",
+    /** Optional async check that runs inside the logical operation, after the save queue, before the backup clone and change(). */
+    beforeChange?: () => Promise<void>,
   ): Promise<void> {
     this.assertDataWritable();
     if (this.baseOperationBusy) throw new Error("Another knowledge-base change is still being saved.");
@@ -6656,6 +6658,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (this.externalReloadBusy) throw new Error("Finish reloading synced knowledge-base data before switching bases.");
       await this.enqueueAppLogicalOperation(async () => {
         await this.saveQueue;
+        if (beforeChange) await beforeChange();
         const backup = cloneJsonValue(this.store);
         let attemptedStore: PluginStore | null = null;
         let pendingRequiredUndoBatchCommit: PendingRequiredUndoBatchCommit | null = null;
@@ -6861,23 +6864,32 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const vaultId = this.store.vaultId;
     const stale = (): boolean => this.dataEpoch !== epoch || this.store.vaultId !== vaultId || intent.sourceVaultId !== vaultId;
     try { this.assertDataWritable(); } catch { return failed("Knowledge bases are read-only, so the copy was not restored."); }
-    let same = false;
-    try { same = await sourceMatches(); } catch { same = false; }
-    if (!same) return failed("The kept copy changed or is no longer available. Reopen the review.");
-    if (stale()) return failed("Knowledge-base data changed while the copy was checked. Reopen the review.");
     let refusal = "";
+    let changeRan = false;
     try {
       await this.commitBaseStoreChange(() => {
-        if (stale()) refusal = "Knowledge-base data changed before the copy could be added. Reopen the review.";
+        changeRan = true;
+        // Synchronous and immediately before the mutation: nothing can interleave after these checks.
+        if (this.isDataReadOnly()) refusal = "Knowledge bases became read-only, so the copy was not restored.";
+        else if (stale()) refusal = "Knowledge-base data changed before the copy could be added. Reopen the review.";
         else if (this.store.bases.length >= MAX_KNOWLEDGE_BASES) refusal = `This installation already contains the maximum of ${MAX_KNOWLEDGE_BASES} knowledge bases, including archived bases.`;
         else if (this.knowledgeBaseNameExists(intent.name)) refusal = "A knowledge base with that name now exists. Reopen the review.";
         else if (this.store.bases.some((entry) => entry.id === intent.newBaseId) || intent.newBaseId in this.store.deletedBaseIds) refusal = "The new base identity is no longer available. Reopen the review.";
         if (refusal) throw new Error(refusal);
         this.store.bases.push(cloneJsonValue(intent.entry));
+      }, true, [], "multi-base change", async () => {
+        // Inside the logical operation, after the save queue: the bounded exact-bytes revalidation.
+        let same = false;
+        try { same = await sourceMatches(); } catch { same = false; }
+        if (!same) { refusal = "The kept copy changed or is no longer available. Reopen the review."; throw new Error(refusal); }
       });
     } catch {
       if (refusal) return failed(refusal);
-      return this.isDataReadOnly()
+      if (!changeRan) {
+        return failed(this.isDataReadOnly() ? "Knowledge bases became read-only, so the copy was not restored." : "Another knowledge-base change is still saving. Try again in a moment.");
+      }
+      // The change ran and the commit rejected it: it has compensated and rolled memory back.
+      return this.persistenceUncertain
         ? outcome({ status: "uncertain", message: "The restore may not have finished saving." })
         : failed("The restored base could not be saved.");
     }

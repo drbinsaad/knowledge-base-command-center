@@ -237,6 +237,104 @@ test("the outcome is surfaced by the plugin even when the caller discarded the r
   assert.match(Notice.messages.join("\n"), /Restored “Recovered \(restored\)”/);
 });
 
+interface QueueProbe {
+  enqueueAppLogicalOperation(operation: () => Promise<void>): Promise<void>;
+  baseOperationBusy: boolean;
+  dataCompatibilityWarning: string;
+}
+
+function gate(): { promise: Promise<void>; open: () => void } {
+  let open: () => void = () => undefined;
+  const promise = new Promise<void>((resolve) => { open = resolve; });
+  return { promise, open };
+}
+
+async function blockQueue(plugin: EntVaultCommandCenterPlugin): Promise<{ release: () => Promise<void> }> {
+  const entered = gate();
+  const hold = gate();
+  const blocker = (plugin as unknown as QueueProbe).enqueueAppLogicalOperation(async () => { entered.open(); await hold.promise; });
+  await entered.promise;
+  return { release: async () => { hold.open(); await blocker; } };
+}
+
+const tick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+test("the source is revalidated after the real queue wait, not before it", async () => {
+  const f = await fixture();
+  const block = await blockQueue(f.plugin);
+  let same = true;
+  let calls = 0;
+  Notice.messages.length = 0;
+  const restore = f.plugin.restoreKeptCopy(intentFor(sourceStore("Recovered")), async () => { calls += 1; return same; });
+  await tick();
+  assert.equal((f.plugin as unknown as QueueProbe).baseOperationBusy, true, "waiting behind the logical barrier");
+  assert.equal(calls, 0, "no revalidation happens before the restore owns the queue");
+  same = false; // the copy changes while the restore waits
+  await block.release();
+  const result = await restore;
+  assert.equal(calls, 1);
+  assert.equal(result.status, "failed");
+  assert.equal(f.writes(), 0);
+  assert.equal(f.plugin.getKnowledgeBases(true).length, 1);
+  assert.match(Notice.messages.join("\n"), /changed or is no longer available.*Nothing was changed/);
+});
+
+test("protection set while the restore waits in the queue is refused, never reported as applied", async () => {
+  const f = await fixture();
+  const block = await blockQueue(f.plugin);
+  Notice.messages.length = 0;
+  const restore = f.plugin.restoreKeptCopy(intentFor(sourceStore("Recovered")), yes);
+  await tick();
+  (f.plugin as unknown as QueueProbe).dataCompatibilityWarning = "Synthetic protected state while queued";
+  await block.release();
+  const result = await restore;
+  assert.equal(result.status, "failed", JSON.stringify(result));
+  assert.equal(f.writes(), 0);
+  assert.equal(f.plugin.getKnowledgeBases(true).length, 1, "no ghost base in memory");
+  assert.match(Notice.messages.join("\n"), /became read-only.*Nothing was changed/);
+});
+
+test("data turning read-only during the source reread is a failure, not an uncertain write", async () => {
+  const f = await fixture();
+  Notice.messages.length = 0;
+  const result = await f.plugin.restoreKeptCopy(intentFor(sourceStore("Recovered")), async () => {
+    (f.plugin as unknown as QueueProbe).dataCompatibilityWarning = "Synthetic protected state during the reread";
+    return true;
+  });
+  assert.equal(result.status, "failed", JSON.stringify(result));
+  assert.equal(f.writes(), 0);
+  assert.doesNotMatch(Notice.messages.join("\n"), /may not have finished/);
+});
+
+test("another base operation in progress is a failure with nothing attempted", async () => {
+  const f = await fixture();
+  (f.plugin as unknown as QueueProbe).baseOperationBusy = true;
+  let reread = 0;
+  Notice.messages.length = 0;
+  const result = await f.plugin.restoreKeptCopy(intentFor(sourceStore("Recovered")), async () => { reread += 1; return true; });
+  assert.equal(result.status, "failed");
+  assert.equal(reread, 0, "the source is not even read when the commit cannot start");
+  assert.equal(f.writes(), 0);
+  assert.match(Notice.messages.join("\n"), /still saving.*Nothing was changed/);
+});
+
+test("controls: two concurrent restores of one intent apply once, and D06 history survives a restore and restart", async () => {
+  const f = await fixture();
+  const intent = intentFor(sourceStore("Concurrent"));
+  const outcomes = await Promise.all([f.plugin.restoreKeptCopy(intent, yes), f.plugin.restoreKeptCopy(intent, yes)]);
+  assert.equal(outcomes.filter((result) => result.status === "applied").length, 1);
+  assert.equal(f.plugin.getKnowledgeBases(true).length, 2);
+  assert.equal(f.writes(), 1);
+
+  const g = await fixture();
+  await g.plugin.mutate("Pin current", () => { g.plugin.data.pinnedPaths = ["Synthetic/current.md"]; }, { requireUndo: true });
+  assert.equal(g.plugin.data.undoStack.length, 1);
+  const original = cloneJsonValue(g.plugin.getKnowledgeBases(true)[0]);
+  assert.equal((await g.plugin.restoreKeptCopy(intentFor(sourceStore("Recovered")), yes)).status, "applied");
+  assert.deepEqual(g.plugin.getKnowledgeBases(true)[0], original);
+  assert.equal(g.plugin.getKnowledgeBases(true)[1].data.undoStack.length, 0);
+});
+
 test("opening the restored base is a separate action and the restore never switches", async () => {
   const f = await fixture();
   await f.plugin.restoreKeptCopy(intentFor(sourceStore("Recovered")), yes);
