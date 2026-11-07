@@ -891,6 +891,63 @@ for (const device of [
       await expect(dialog).toHaveCount(0);
       expect(await quickOrganizerSnapshot(page)).toMatchObject({ applied: 2, undoCount: 2, collections: [], collectionNames: saved.collectionNames, parent: original.parent, group: original.group });
     });
+
+    // In-memory browser host: this proves UI operability only. Real commit, Undo,
+    // Redo and restart persistence are in tests/collections-journey-reload.test.ts.
+    test("WF13 in-memory host: long labels and empty Collection state stay operable through both cancel points and save", async ({ page }) => {
+      const longTitle = "Long Collection title that wraps across many phone lines without hiding its controls ".repeat(1).trim();
+      const longChild = "Long subheading title that must also wrap and stay selectable on a narrow phone";
+      await openView(page, { ...device, count: 8 });
+      await page.evaluate(() => (window as unknown as { kbccBrowserHarness: { clearQuickCollections(): void } }).kbccBrowserHarness.clearQuickCollections());
+      await openModal(page, "quick-organizer");
+      const dialog = page.getByRole("dialog", { name: "Organize this note", exact: true });
+      await expect(dialog.getByText("No collections yet. Create one below.", { exact: true })).toBeVisible();
+      const name = dialog.getByRole("textbox", { name: "New collection or subheading name", exact: true });
+      const create = dialog.getByRole("button", { name: "Create and select", exact: true });
+      const createUnder = dialog.getByRole("combobox", { name: "Create under", exact: true });
+      const review = dialog.getByRole("button", { name: "Review placement", exact: true });
+      await name.fill(longTitle);
+      await create.click();
+      await createUnder.selectOption({ label: longTitle });
+      await name.fill(longChild);
+      await create.click();
+      const nested = dialog.getByRole("checkbox", { name: `${longTitle} / ${longChild}`, exact: true });
+      await expect(nested).toBeChecked();
+      await nested.scrollIntoViewIfNeeded();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth), "long labels cause no page overflow").toBeLessThanOrEqual(1);
+
+      // Cancel before review: nothing exists after discarding.
+      await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+      await dialog.getByRole("button", { name: "Discard and close", exact: true }).click();
+      await expect(dialog).toHaveCount(0);
+      expect(await quickOrganizerSnapshot(page)).toMatchObject({ unchanged: true, collectionNames: [], applied: 0, undoCount: 0 });
+
+      // Cancel after preview.
+      await openModal(page, "quick-organizer");
+      await expect(dialog.getByText("No collections yet. Create one below.", { exact: true })).toBeVisible();
+      await name.fill(longTitle);
+      await create.click();
+      await review.scrollIntoViewIfNeeded();
+      await review.click();
+      await expect(dialog.getByText(`Collections: ${longTitle}`, { exact: true })).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
+      await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+      await dialog.getByRole("button", { name: "Discard and close", exact: true }).click();
+      await expect(dialog).toHaveCount(0);
+      expect(await quickOrganizerSnapshot(page)).toMatchObject({ unchanged: true, collectionNames: [], applied: 0, undoCount: 0 });
+
+      // Save the long path, then reopen and see it checked.
+      await openModal(page, "quick-organizer");
+      await name.fill(longTitle);
+      await create.click();
+      await review.scrollIntoViewIfNeeded();
+      await review.click();
+      await dialog.getByRole("button", { name: "Save organization", exact: true }).click();
+      await expect(dialog).toHaveCount(0);
+      expect(await quickOrganizerSnapshot(page)).toMatchObject({ applied: 1, undoCount: 1, collections: [longTitle], collectionNames: [longTitle] });
+      await openModal(page, "quick-organizer");
+      await expect(dialog.getByRole("checkbox", { name: longTitle, exact: true })).toBeChecked();
+    });
   });
 }
 
