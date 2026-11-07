@@ -564,9 +564,35 @@ export interface PluginStore {
   deletedBaseCausality?: Record<string, DeletedKnowledgeBaseCausality>;
 }
 
+/** Version of the optional history-binding extension inside device-local envelope v5. */
+export const DEVICE_HISTORY_BINDING_VERSION = 1;
+
+/**
+ * Names the semantic state (via `semanticEntryFingerprint`) that a base's
+ * executable Undo/Redo pair operates on. Absent means unbound: never trusted.
+ */
+export interface DeviceHistoryBinding {
+  v: typeof DEVICE_HISTORY_BINDING_VERSION;
+  fingerprint: string;
+}
+
+/**
+ * A local value written by a newer build (envelope or binding version). It is
+ * deliberately distinct from corrupt content: the caller must leave the raw
+ * stored value untouched and must not replace it with a supported empty profile.
+ */
+export class DeviceLocalFutureVersionError extends Error {
+  constructor(message = "Device-local state was written by a newer version of this plugin.") {
+    super(message);
+    this.name = "DeviceLocalFutureVersionError";
+  }
+}
+
 export interface DeviceLocalKnowledgeBaseState {
   baseId: string;
   view: PluginViewState;
+  /** Optional v5 extension. Missing or malformed means this base's history is unbound. */
+  historyBinding?: DeviceHistoryBinding;
 }
 
 /**
@@ -581,6 +607,8 @@ export interface PendingRequiredUndoCommit {
   candidateSemanticHash: string;
   undoSnapshotAt: number;
   undoSnapshotFingerprint: string;
+  /** Binding of the older stacks, captured before the action. Absent = unverified prior. */
+  priorHistoryBinding?: DeviceHistoryBinding;
 }
 
 export interface PendingRequiredUndoBatchEntry {
@@ -592,6 +620,8 @@ export interface PendingRequiredUndoBatchEntry {
   candidateSemanticHash: string;
   undoSnapshotAt: number;
   undoSnapshotFingerprint: string;
+  /** Binding of the older stacks, captured before the action. Absent = unverified prior. */
+  priorHistoryBinding?: DeviceHistoryBinding;
 }
 
 /**
@@ -626,6 +656,8 @@ export interface PendingHistoryTransitionCommit {
   priorRedoStackFingerprint: string;
   postUndoStackFingerprint: string;
   postRedoStackFingerprint: string;
+  /** Binding of the prior stacks, captured before the action. Absent = unverified prior. */
+  priorHistoryBinding?: DeviceHistoryBinding;
 }
 
 /** Stored through App.saveLocalStorage, never through plugin data.json. */
@@ -6172,6 +6204,92 @@ function parseDeviceHistory(
   return cleaned;
 }
 
+/** Bind the stacks a base currently holds to the exact semantic state they operate on. */
+export function createDeviceHistoryBinding(
+  entry: Pick<KnowledgeBaseEntry, "createdAt" | "archivedAt" | "data">,
+): DeviceHistoryBinding {
+  return { v: DEVICE_HISTORY_BINDING_VERSION, fingerprint: loadedFormSemanticFingerprint(entry) };
+}
+
+/**
+ * Fingerprint of the payload as the next load will see it. A live payload can
+ * carry representation that loading canonicalizes away (for example an
+ * explicit null field), which changes `semanticEntryFingerprint` without
+ * changing any organization. Binding to the load-normalized form keeps a
+ * same-state restart matching. Never uses an advertised hash.
+ */
+function loadedFormSemanticFingerprint(entry: Pick<KnowledgeBaseEntry, "createdAt" | "archivedAt" | "data">): string {
+  try {
+    const data = JSON.parse(JSON.stringify({ ...entry.data, undoStack: [], redoStack: [] })) as unknown;
+    return semanticEntryFingerprint({ createdAt: entry.createdAt, archivedAt: entry.archivedAt, data: migrateData(data) });
+  } catch {
+    // Unnormalizable data can only fail to match: the safe direction.
+    return semanticEntryFingerprint(entry);
+  }
+}
+
+/** Recompute from the loaded payload: an advertised semanticHash is never proof. */
+export function deviceHistoryBindingMatchesEntry(
+  binding: DeviceHistoryBinding | null | undefined,
+  entry: Pick<KnowledgeBaseEntry, "createdAt" | "archivedAt" | "data">,
+): boolean {
+  return Boolean(binding) && binding?.fingerprint === loadedFormSemanticFingerprint(entry);
+}
+
+function isFutureDeviceHistoryBinding(raw: unknown): boolean {
+  return isPlainRecord(raw)
+    && typeof raw.v === "number"
+    && Number.isInteger(raw.v)
+    && raw.v > DEVICE_HISTORY_BINDING_VERSION;
+}
+
+/**
+ * Missing or malformed binding input yields undefined (unbound, never trusted).
+ * A recognizable newer binding version is a different case and throws.
+ */
+function readDeviceHistoryBinding(raw: unknown): DeviceHistoryBinding | undefined {
+  if (raw === undefined) return undefined;
+  if (isFutureDeviceHistoryBinding(raw)) throw new DeviceLocalFutureVersionError();
+  if (!isPlainRecord(raw)
+    || Object.keys(raw).sort().join("\u0000") !== "fingerprint\u0000v"
+    || raw.v !== DEVICE_HISTORY_BINDING_VERSION
+    || !isSemanticFingerprint(raw.fingerprint)) return undefined;
+  return { v: DEVICE_HISTORY_BINDING_VERSION, fingerprint: raw.fingerprint.toLowerCase() };
+}
+
+/**
+ * Recognize a newer envelope or binding version before any strict parsing, so
+ * it is never confused with corrupt content (which callers may discard).
+ */
+function assertDeviceLocalVersionIsNotFuture(value: Record<string, unknown>): void {
+  const version = value.version;
+  if (typeof version === "number" && Number.isInteger(version) && version > DEVICE_LOCAL_STATE_VERSION) {
+    throw new DeviceLocalFutureVersionError();
+  }
+  if (version !== DEVICE_LOCAL_STATE_VERSION) return;
+  if (Array.isArray(value.bases)) {
+    for (const base of value.bases) {
+      if (isPlainRecord(base) && isFutureDeviceHistoryBinding(base.historyBinding)) {
+        throw new DeviceLocalFutureVersionError();
+      }
+    }
+  }
+  const journals: unknown[] = [value.pendingRequiredUndoCommit, value.pendingHistoryTransitionCommit];
+  if (isPlainRecord(value.pendingRequiredUndoBatchCommit) && Array.isArray(value.pendingRequiredUndoBatchCommit.entries)) {
+    journals.push(...(value.pendingRequiredUndoBatchCommit.entries as unknown[]));
+  }
+  for (const journal of journals) {
+    if (isPlainRecord(journal) && isFutureDeviceHistoryBinding(journal.priorHistoryBinding)) {
+      throw new DeviceLocalFutureVersionError();
+    }
+  }
+}
+
+/** Journal keys other than the optional versioned prior-binding extension. */
+function journalCoreKeys(value: Record<string, unknown>): string[] {
+  return Object.keys(value).filter((key) => key !== "priorHistoryBinding").sort();
+}
+
 function parsePendingRequiredUndoCommit(
   input: unknown,
   bases: readonly DeviceLocalKnowledgeBaseState[],
@@ -6189,7 +6307,7 @@ function parsePendingRequiredUndoCommit(
     "undoSnapshotAt",
     "undoSnapshotFingerprint",
   ];
-  if (Object.keys(value).sort().join("\u0000") !== expectedKeys.sort().join("\u0000")) {
+  if (journalCoreKeys(value).join("\u0000") !== expectedKeys.sort().join("\u0000")) {
     throw new Error("Pending required Undo commit has an unsupported shape.");
   }
   const baseId = cleanKnowledgeBaseId(value.baseId, "Pending required Undo knowledge base");
@@ -6214,6 +6332,7 @@ function parsePendingRequiredUndoCommit(
     || fingerprintText(canonicalJsonString(newestUndo)) !== value.undoSnapshotFingerprint) {
     throw new Error("Pending required Undo commit does not identify the newest Undo snapshot exactly.");
   }
+  const priorHistoryBinding = readDeviceHistoryBinding(value.priorHistoryBinding);
   return {
     baseId,
     parentSemanticHead: value.parentSemanticHead,
@@ -6222,6 +6341,7 @@ function parsePendingRequiredUndoCommit(
     candidateSemanticHash: value.candidateSemanticHash,
     undoSnapshotAt,
     undoSnapshotFingerprint: value.undoSnapshotFingerprint,
+    ...(priorHistoryBinding ? { priorHistoryBinding } : {}),
   };
 }
 
@@ -6254,7 +6374,7 @@ function parsePendingRequiredUndoBatchCommit(
       throw new Error(`Pending required Undo batch entry ${index + 1} is malformed.`);
     }
     const entry = raw as Record<string, unknown>;
-    if (Object.keys(entry).sort().join("\u0000") !== expectedEntryKeys.join("\u0000")) {
+    if (journalCoreKeys(entry).join("\u0000") !== expectedEntryKeys.join("\u0000")) {
       throw new Error(`Pending required Undo batch entry ${index + 1} has an unsupported shape.`);
     }
     const baseId = cleanKnowledgeBaseId(entry.baseId, `Pending required Undo batch entry ${index + 1} knowledge base`);
@@ -6289,6 +6409,7 @@ function parsePendingRequiredUndoBatchCommit(
     if (!baseExistedBefore && (undoStack.length !== 1 || localBase.view.redoStack.length !== 0)) {
       throw new Error(`Pending required Undo batch entry ${index + 1} has invalid staged history for a new knowledge base.`);
     }
+    const priorHistoryBinding = readDeviceHistoryBinding(entry.priorHistoryBinding);
     return {
       baseId,
       baseExistedBefore,
@@ -6297,6 +6418,7 @@ function parsePendingRequiredUndoBatchCommit(
       candidateSemanticHash: entry.candidateSemanticHash,
       undoSnapshotAt,
       undoSnapshotFingerprint: entry.undoSnapshotFingerprint,
+      ...(priorHistoryBinding ? { priorHistoryBinding } : {}),
     };
   });
   return { entries };
@@ -6326,7 +6448,7 @@ function parsePendingHistoryTransitionCommit(
     "sourceSnapshotAt",
     "sourceSnapshotFingerprint",
   ];
-  if (Object.keys(value).sort().join("\u0000") !== expectedKeys.sort().join("\u0000")) {
+  if (journalCoreKeys(value).join("\u0000") !== expectedKeys.sort().join("\u0000")) {
     throw new Error("Pending history transition has an unsupported shape.");
   }
   const baseId = cleanKnowledgeBaseId(value.baseId, "Pending history transition knowledge base");
@@ -6361,6 +6483,7 @@ function parsePendingHistoryTransitionCommit(
   }
   const localBase = bases.find((base) => base.baseId === baseId);
   if (!localBase) throw new Error("Pending history transition refers to an unavailable knowledge base.");
+  const priorHistoryBinding = readDeviceHistoryBinding(value.priorHistoryBinding);
   const pending: PendingHistoryTransitionCommit = {
     baseId,
     direction,
@@ -6376,6 +6499,7 @@ function parsePendingHistoryTransitionCommit(
     priorRedoStackFingerprint: value.priorRedoStackFingerprint,
     postUndoStackFingerprint: value.postUndoStackFingerprint,
     postRedoStackFingerprint: value.postRedoStackFingerprint,
+    ...(priorHistoryBinding ? { priorHistoryBinding } : {}),
   };
   projectPendingHistoryTransition(
     localBase.view.undoStack,
@@ -6388,6 +6512,8 @@ function parsePendingHistoryTransitionCommit(
 /** Strictly parse one device's state; malformed input is discarded by the caller. */
 export function parseDeviceLocalPluginState(input: unknown): DeviceLocalPluginState {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Device-local state is malformed.");
+  // A newer envelope or binding version must never be mistaken for corruption.
+  assertDeviceLocalVersionIsNotFuture(input as Record<string, unknown>);
   if (serializedUtf8Bytes(input) > MAX_DEVICE_LOCAL_STATE_BYTES) throw new Error("Device-local state is too large.");
   const value = input as Record<string, unknown>;
   const sourceVersion = Number(value.version);
@@ -6451,8 +6577,14 @@ export function parseDeviceLocalPluginState(input: unknown): DeviceLocalPluginSt
         headings: parseLocalCollapsedLayout(library.headings, `Device-local base ${baseId} Library ${library.libraryId}`, budget),
       };
     });
+    // The binding extension exists only in the current envelope; an older
+    // envelope can never carry proof, and malformed input stays unbound.
+    const historyBinding = sourceVersion === DEVICE_LOCAL_STATE_VERSION
+      ? readDeviceHistoryBinding(base.historyBinding)
+      : undefined;
     return {
       baseId,
+      ...(historyBinding ? { historyBinding } : {}),
       view: {
         selectedPath: strictLocalString(view.selectedPath, `Device-local base ${baseId} selected path`, 4096),
         activeTab: view.activeTab,
@@ -6514,6 +6646,14 @@ export function createDeviceLocalPluginStateWithReport(
   pendingRequiredUndoCommit?: PendingRequiredUndoCommit,
   pendingHistoryTransitionCommit?: PendingHistoryTransitionCommit,
   pendingRequiredUndoBatchCommit?: PendingRequiredUndoBatchCommit,
+  options: {
+    /**
+     * Binding to serialize for a base instead of recomputing from the live
+     * payload (`null` = write none). Used while a journal stages stacks whose
+     * authority is the pre-action state rather than the live candidate.
+     */
+    historyBindings?: ReadonlyMap<string, DeviceHistoryBinding | null>;
+  } = {},
 ): DeviceLocalPluginStateBuildResult {
   if ([
     pendingRequiredUndoCommit,
@@ -6531,7 +6671,21 @@ export function createDeviceLocalPluginStateWithReport(
     historyIndexFolderSourcesIncluded: true,
     vaultId: store.vaultId,
     activeBaseId,
-    bases: store.bases.map((entry) => ({ baseId: entry.id, view: capturePluginViewState(entry.data) })),
+    bases: store.bases.map((entry) => {
+      const view = capturePluginViewState(entry.data);
+      const holdsHistory = view.undoStack.length > 0 || view.redoStack.length > 0;
+      const override = options.historyBindings?.get(entry.id);
+      const historyBinding = !holdsHistory
+        ? undefined
+        : override === undefined
+          ? createDeviceHistoryBinding(entry)
+          : override ?? undefined;
+      return {
+        baseId: entry.id,
+        view,
+        ...(historyBinding ? { historyBinding: { ...historyBinding } } : {}),
+      };
+    }),
     ...(pendingRequiredUndoCommit
       ? { pendingRequiredUndoCommit: cloneJsonValue(pendingRequiredUndoCommit) }
       : {}),
@@ -6583,6 +6737,12 @@ export function createDeviceLocalPluginStateWithReport(
     }
   };
   validatePendingCommits();
+  /** A binding is meaningful only beside a nonempty stack; trimming may have emptied it. */
+  const dropBindingsForEmptyHistory = (): void => {
+    for (const base of state.bases) {
+      if (base.view.undoStack.length === 0 && base.view.redoStack.length === 0) delete base.historyBinding;
+    }
+  };
   if (serializedUtf8Bytes(state) <= MAX_DEVICE_LOCAL_STATE_BYTES) {
     return { state, historyTruncated: false, viewStateTruncated: false };
   }
@@ -6653,6 +6813,7 @@ export function createDeviceLocalPluginStateWithReport(
   }
   applyHistoryDropCount(low);
   const historyTruncated = low > 0;
+  dropBindingsForEmptyHistory();
   if (serializedUtf8Bytes(state) <= MAX_DEVICE_LOCAL_STATE_BYTES) {
     validatePendingCommits();
     return { state, historyTruncated, viewStateTruncated: false };

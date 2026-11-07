@@ -284,7 +284,16 @@ function legacyPendingJournalRestart(store: PluginStore, local: ReturnType<typeo
     ]));
     assert.equal(entry.semanticHash, publishedHash, "the old committed authority is reproduced exactly");
   }
-  return pluginWithKeyedLocalStorage(source, new Map([[DEVICE_LOCAL_STATE_KEY, { ...structuredClone(local), version: 4 }]]));
+  // A genuine v4 profile predates the history-binding extension entirely.
+  const legacy = { ...structuredClone(local), version: 4 } as Record<string, unknown>;
+  for (const base of (legacy.bases ?? []) as Array<Record<string, unknown>>) delete base.historyBinding;
+  const journals: Array<Record<string, unknown> | undefined> = [
+    legacy.pendingRequiredUndoCommit as Record<string, unknown> | undefined,
+    legacy.pendingHistoryTransitionCommit as Record<string, unknown> | undefined,
+    ...(((legacy.pendingRequiredUndoBatchCommit as { entries?: Array<Record<string, unknown>> } | undefined)?.entries) ?? []),
+  ];
+  for (const journal of journals) if (journal) delete journal.priorHistoryBinding;
+  return pluginWithKeyedLocalStorage(source, new Map([[DEVICE_LOCAL_STATE_KEY, legacy]]));
 }
 
 function portfolioJournalFixture(vaultId: string): {
@@ -3002,7 +3011,9 @@ test("v2 device-local Undo inherits the matching base's migrated legacy folder s
   const migratedSource = plugin.data.indexFolderSources[0];
   assert.equal(migratedSource?.path, "Legacy Knowledge");
   assert.equal(migratedSource?.origin, "legacy-primary-folder");
-  assert.deepEqual(plugin.data.undoStack[0]?.indexFolderSources, [migratedSource]);
+  // D06 policy: a genuine v2 profile has no history binding, so its unverified
+  // Undo is reset; the profile still loads and the migrated rule is untouched.
+  assert.deepEqual(plugin.data.undoStack, []);
 
   await plugin.undo();
 
@@ -3010,6 +3021,7 @@ test("v2 device-local Undo inherits the matching base's migrated legacy folder s
   const rewrittenLocal = plugin.deviceLocalWrites.at(-1) as ReturnType<typeof createDeviceLocalPluginState> | undefined;
   assert.equal(rewrittenLocal?.version, DEVICE_LOCAL_STATE_VERSION);
   assert.equal(rewrittenLocal?.historyIndexFolderSourcesIncluded, true);
+  assert.deepEqual(rewrittenLocal?.bases[0]?.view.undoStack, []);
 });
 
 test("a retained device profile never attaches after data.json was removed and reinstalled", async () => {
@@ -6669,9 +6681,15 @@ test("portfolio batch Undo resolves pre-primary, exact, and mixed newer-head cra
       assert.equal(upgrade.plugin.isDataReadOnly(), false);
       assert.equal(upgrade.plugin.getKnowledgeBases(true).length, committed ? 3 : 2);
       for (const entry of upgrade.plugin.getKnowledgeBases(true)) {
-        assert.match(entry.data.undoStack.at(-1)?.label ?? "", committed ? /portfolio source/i : /prior Undo/);
-        if (committed) assert.deepEqual(entry.data.redoStack, []);
-        else assert.match(entry.data.redoStack.at(-1)?.label ?? "", /prior Redo/);
+        // D06 policy: a legacy journal has no prior binding, so its older
+        // history is unverified and reset; the exact committed step is kept.
+        if (committed) {
+          assert.match(entry.data.undoStack.at(-1)?.label ?? "", /portfolio source/i);
+          assert.deepEqual(entry.data.undoStack.length, 1);
+        } else {
+          assert.deepEqual(entry.data.undoStack, []);
+        }
+        assert.deepEqual(entry.data.redoStack, []);
       }
     }
 
@@ -6693,8 +6711,10 @@ test("portfolio batch Undo resolves pre-primary, exact, and mixed newer-head cra
         .find((candidate) => candidate.id === mapped.destinationBaseId);
       assert.ok(entry);
       if (mapped.destinationBaseId === mismatchedOperation.destinationBaseId) {
-        assert.match(entry.data.undoStack.at(-1)?.label ?? "", /prior Undo/);
-        assert.match(entry.data.redoStack.at(-1)?.label ?? "", /prior Redo/);
+        // D06 policy: prior history is restored with its prior binding, which
+        // no longer names the newer synced payload, so only this base resets.
+        assert.deepEqual(entry.data.undoStack, []);
+        assert.deepEqual(entry.data.redoStack, []);
       } else {
         assert.match(entry.data.undoStack.at(-1)?.label ?? "", /portfolio source/i);
         assert.deepEqual(entry.data.redoStack, []);
@@ -8997,9 +9017,11 @@ test("required Undo journal resolves both hard-crash windows against exact commi
     const upgrade = legacyPendingJournalRestart(committed ? candidatePrimary : baseline, pendingState);
     await upgrade.plugin.loadPluginData(false);
     assert.equal(upgrade.plugin.isDataReadOnly(), false);
+    // D06 policy: a legacy journal proves only its own step. The unverified
+    // older tail is reset; the exact newly staged step is kept.
     assert.deepEqual(upgrade.plugin.data.undoStack.map((snapshot) => snapshot.label),
-      committed ? ["Earlier undo", "Crash-guarded change"] : ["Earlier undo"]);
-    assert.deepEqual(upgrade.plugin.data.redoStack.map((snapshot) => snapshot.label), committed ? [] : ["Earlier redo"]);
+      committed ? ["Crash-guarded change"] : []);
+    assert.deepEqual(upgrade.plugin.data.redoStack.map((snapshot) => snapshot.label), []);
     assert.deepEqual(upgrade.plugin.data.pinnedPaths, committed ? ["Knowledge Base/Committed only with authority.md"] : []);
   }
 
@@ -9207,10 +9229,12 @@ test("Undo and Redo journals resolve pre-primary, committed, and newer-head cras
         await upgrade.plugin.loadPluginData(false);
         assert.equal(upgrade.plugin.isDataReadOnly(), false);
         assert.deepEqual(upgrade.plugin.data.pinnedPaths, committed ? destination.pinnedPaths : current.pinnedPaths);
+        // D06 policy: a legacy journal has no prior binding. The exact completed
+        // step is kept; unverified prior stacks are reset.
         assert.deepEqual(upgrade.plugin.data.undoStack.map((snapshot) => snapshot.label),
-          (committed ? direction === "redo" : direction === "undo") ? [label] : []);
+          (committed && direction === "redo") ? [label] : []);
         assert.deepEqual(upgrade.plugin.data.redoStack.map((snapshot) => snapshot.label),
-          (committed ? direction === "undo" : direction === "redo") ? [label] : []);
+          (committed && direction === "undo") ? [label] : []);
       }
 
       const newer = structuredClone(candidatePrimary);
@@ -9225,8 +9249,11 @@ test("Undo and Redo journals resolve pre-primary, committed, and newer-head cras
       );
       await newerRestart.plugin.loadPluginData(false);
       assert.deepEqual(newerRestart.plugin.data.pinnedPaths, ["Knowledge Base/Newer synced state.md"]);
-      assert.deepEqual(newerRestart.plugin.data.undoStack.map((snapshot) => snapshot.label), direction === "undo" ? [label] : []);
-      assert.deepEqual(newerRestart.plugin.data.redoStack.map((snapshot) => snapshot.label), direction === "redo" ? [label] : []);
+      // D06 policy: the exact pre-transition stacks return with their prior
+      // binding, which no longer names the newer synced payload, so that base's
+      // history is reset (never executed against the newer state).
+      assert.deepEqual(newerRestart.plugin.data.undoStack, []);
+      assert.deepEqual(newerRestart.plugin.data.redoStack, []);
       assert.equal(
         (newerRestart.localValues.get(DEVICE_LOCAL_STATE_KEY) as ReturnType<typeof createDeviceLocalPluginState>)
           .pendingHistoryTransitionCommit,

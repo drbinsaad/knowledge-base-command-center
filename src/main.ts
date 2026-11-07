@@ -46,8 +46,12 @@ import {
   curriculumContainerKey,
   createDefaultStore,
   createDeletedBaseCausality,
-  createDeviceLocalPluginState,
+  createDeviceHistoryBinding,
   createDeviceLocalPluginStateWithReport,
+  DeviceHistoryBinding,
+  DeviceLocalFutureVersionError,
+  DeviceLocalKnowledgeBaseState,
+  deviceHistoryBindingMatchesEntry,
   deviceHistoryStackFingerprint,
   deterministicSemanticHead,
   createKnowledgeBaseEntry,
@@ -709,6 +713,18 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private lastConflictRescuePath = "";
   private deviceLocalState: DeviceLocalPluginState | null = null;
   private deviceLocalStateLoaded = false;
+  /**
+   * True when the stored device-local value was written by a newer envelope or
+   * binding version. The raw value stays untouched, history runs empty, and no
+   * device-local write may replace it until the explicit Clear command.
+   */
+  private deviceLocalFutureVersionRetained = false;
+  /**
+   * Semantic fingerprint each base's live Undo/Redo pair was last verified or
+   * built against. Set by the verified attach and by the local-state builder;
+   * applyHistory compares the live payload with it before touching any stack.
+   */
+  private historyBindingByBase = new Map<string, string>();
   /** Exact causal identity reserved by a required-Undo preflight for the next semantic write. */
   private preparedRequiredUndoCommit: PendingRequiredUndoCommit | null = null;
   /** Exact causal identity reserved by an Undo/Redo transition preflight. */
@@ -1335,7 +1351,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     };
   }
 
-  private prepareRequiredUndoCommit(entry: KnowledgeBaseEntry, snapshot: PersonalSnapshot): PendingRequiredUndoCommit | null {
+  private prepareRequiredUndoCommit(
+    entry: KnowledgeBaseEntry,
+    snapshot: PersonalSnapshot,
+    priorHistoryBinding?: DeviceHistoryBinding,
+  ): PendingRequiredUndoCommit | null {
     const plan = this.planEntrySemanticRevision(entry);
     if (!plan) return null;
     if (!Number.isSafeInteger(snapshot.at) || snapshot.at <= 0) {
@@ -1349,6 +1369,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       candidateSemanticHash: plan.semanticHash,
       undoSnapshotAt: snapshot.at,
       undoSnapshotFingerprint: fingerprintText(canonicalJsonString(snapshot)),
+      ...(priorHistoryBinding ? { priorHistoryBinding } : {}),
     };
   }
 
@@ -1393,6 +1414,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (!before && candidate.data.undoStack.length !== 1) {
         throw new Error(`The new ${operationLabel} candidate for “${candidate.data.settings.workspaceName}” has invalid staged history.`);
       }
+      // Captured from the pre-operation clone, never from the mutated candidate.
+      const priorHistoryBinding = before ? this.priorHistoryBindingFor(before) : undefined;
       return {
         baseId,
         baseExistedBefore: Boolean(before),
@@ -1401,6 +1424,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         candidateSemanticHash: candidate.semanticHash,
         undoSnapshotAt: requiredUndo.at,
         undoSnapshotFingerprint: fingerprintText(canonicalJsonString(requiredUndo)),
+        ...(priorHistoryBinding ? { priorHistoryBinding } : {}),
       };
     });
     return { entries };
@@ -1413,6 +1437,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     inverseSnapshot: PersonalSnapshot,
     priorUndoStack: PersonalSnapshot[],
     priorRedoStack: PersonalSnapshot[],
+    priorHistoryBinding?: DeviceHistoryBinding,
   ): PendingHistoryTransitionCommit | null {
     const plan = this.planEntrySemanticRevision(entry);
     if (!plan) return null;
@@ -1434,6 +1459,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       priorRedoStackFingerprint: deviceHistoryStackFingerprint(priorRedoStack),
       postUndoStackFingerprint: deviceHistoryStackFingerprint(entry.data.undoStack),
       postRedoStackFingerprint: deviceHistoryStackFingerprint(entry.data.redoStack),
+      ...(priorHistoryBinding ? { priorHistoryBinding } : {}),
     };
     // Prove immediately that the compact inverse delta reconstructs the exact
     // live post-transition stacks before either localStorage or data.json sees it.
@@ -1567,19 +1593,112 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return snapshot;
   }
 
-  private applyDeviceLocalState(store: PluginStore, state = this.deviceLocalState): void {
+  /**
+   * Build the bounded device-local profile from `this.store` and remember which
+   * semantic state each base's history is bound to. The memory is what the
+   * Undo/Redo gate compares against; it is recorded before any write attempt.
+   */
+  private buildDeviceLocalState(
+    pendingRequiredUndoCommit?: PendingRequiredUndoCommit,
+    pendingHistoryTransitionCommit?: PendingHistoryTransitionCommit,
+    pendingRequiredUndoBatchCommit?: PendingRequiredUndoBatchCommit,
+    historyBindings?: ReadonlyMap<string, DeviceHistoryBinding | null>,
+  ): ReturnType<typeof createDeviceLocalPluginStateWithReport> {
+    const built = createDeviceLocalPluginStateWithReport(
+      this.store,
+      pendingRequiredUndoCommit,
+      pendingHistoryTransitionCommit,
+      pendingRequiredUndoBatchCommit,
+      historyBindings ? { historyBindings } : {},
+    );
+    this.rememberHistoryBindings(built.state);
+    return built;
+  }
+
+  private rememberHistoryBindings(state: DeviceLocalPluginState): void {
+    for (const base of state.bases) {
+      if (base.historyBinding) this.historyBindingByBase.set(base.baseId, base.historyBinding.fingerprint);
+      else this.historyBindingByBase.delete(base.baseId);
+    }
+  }
+
+  /**
+   * The binding of a base's current history, captured before an action changes
+   * anything. Present only when the live pair is known to be bound to the live
+   * payload; otherwise the prior is unverified and journals record none.
+   */
+  private priorHistoryBindingFor(entry: KnowledgeBaseEntry): DeviceHistoryBinding | undefined {
+    if (entry.data.undoStack.length === 0 && entry.data.redoStack.length === 0) return undefined;
+    const recorded = this.historyBindingByBase.get(entry.id);
+    if (recorded === undefined || this.historyBindingIsStale(entry)) return undefined;
+    return { v: 1, fingerprint: recorded };
+  }
+
+  /**
+   * Second gate: history whose recorded binding no longer names the payload it
+   * would act on is not executable. The comparison uses the load-normalized
+   * fingerprint of the live payload or, failing that, of the last committed one.
+   * Bases with no recorded binding (history created in a session that never
+   * persisted it) are not blocked.
+   */
+  private historyBindingIsStale(entry: KnowledgeBaseEntry): boolean {
+    if (entry.data.undoStack.length === 0 && entry.data.redoStack.length === 0) return false;
+    const recorded = this.historyBindingByBase.get(entry.id);
+    if (recorded === undefined) return false;
+    if (createDeviceHistoryBinding(entry).fingerprint === recorded) return false;
+    // The view layer may normalize the live payload in memory after the last
+    // persisted save; the last committed payload is the other legitimate
+    // witness. A stale pair matches neither.
+    const committed = this.committedStoreSnapshot?.bases.find((candidate) => candidate.id === entry.id);
+    return !committed || createDeviceHistoryBinding(committed).fingerprint !== recorded;
+  }
+
+  private historyResetNotice(names: readonly string[]): void {
+    const shown = names.slice(0, 5).map((name) => `“${name}”`);
+    const rest = names.length - shown.length;
+    new Notice(
+      `Undo history was reset for ${shown.join(", ")}${rest > 0 ? ` and ${rest} more` : ""}. It could not be matched to the organization now on this device (for example after an update or a change from another device). Your notes and organization are unchanged.`,
+      12000,
+    );
+  }
+
+  /**
+   * Attach the device-local view to a store. Unless `verifyHistory` is false,
+   * every base's nonempty Undo/Redo pair must be bound to the semantic state
+   * loaded for that base (recomputed, never an advertised hash); a missing or
+   * mismatched binding resets only that base's history. Navigation and
+   * collapse state, other bases and empty stacks are untouched.
+   */
+  private applyDeviceLocalState(
+    store: PluginStore,
+    state = this.deviceLocalState,
+    options: { verifyHistory?: boolean } = {},
+  ): void {
+    const verifyHistory = options.verifyHistory !== false;
     for (const entry of store.bases) resetPluginViewState(entry.data);
+    const resetBaseIds: string[] = [];
     if (state?.vaultId === store.vaultId) {
       for (const local of state.bases) {
         const entry = store.bases.find((candidate) => candidate.id === local.baseId);
         if (entry) {
-          const view = state.historyIndexFolderSourcesIncluded
+          let view = state.historyIndexFolderSourcesIncluded
             ? local.view
             : migrateLegacyDeviceViewFolderSources(
               local.view,
               entry.data.indexFolderSources,
               entry.data.settings.workspaceMode,
             );
+          if (verifyHistory) {
+            if (local.view.undoStack.length === 0 && local.view.redoStack.length === 0) {
+              this.historyBindingByBase.delete(entry.id);
+            } else if (deviceHistoryBindingMatchesEntry(local.historyBinding, entry)) {
+              this.historyBindingByBase.set(entry.id, local.historyBinding?.fingerprint ?? "");
+            } else {
+              view = { ...view, undoStack: [], redoStack: [] };
+              this.historyBindingByBase.delete(entry.id);
+              resetBaseIds.push(entry.id);
+            }
+          }
           applyPluginViewState(entry.data, view, true);
         }
       }
@@ -1588,6 +1707,38 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const active = store.bases.find((entry) => entry.id === requested && entry.archivedAt === null)
       ?? store.bases.find((entry) => entry.archivedAt === null);
     if (active) store.activeBaseId = active.id;
+    if (resetBaseIds.length > 0 && state) this.recordHistoryReset(store, state, resetBaseIds);
+  }
+
+  private recordHistoryReset(store: PluginStore, state: DeviceLocalPluginState, baseIds: readonly string[]): void {
+    this.historyResetNotice(baseIds.map((id) => {
+      const entry = store.bases.find((candidate) => candidate.id === id);
+      return privacySafeBaseName(entry?.data.settings.workspaceName ?? "");
+    }));
+    // Persist the reset so a restart is stable and the base is reported once.
+    // Never touch a profile that still carries a journal: its stacks are the
+    // journal's proof. Only localStorage is written, never data.json.
+    if (state !== this.deviceLocalState
+      || state.pendingRequiredUndoCommit
+      || state.pendingRequiredUndoBatchCommit
+      || state.pendingHistoryTransitionCommit) return;
+    const reset = cloneJsonValue(state);
+    // A pre-v3 profile never carried the linked-folder marker. Its histories
+    // are all unbound, so every one is emptied and the marker can be true.
+    const legacyProfile = !reset.historyIndexFolderSourcesIncluded;
+    reset.historyIndexFolderSourcesIncluded = true;
+    for (const base of reset.bases) {
+      if (!legacyProfile && !baseIds.includes(base.baseId)) continue;
+      base.view.undoStack = [];
+      base.view.redoStack = [];
+      delete base.historyBinding;
+    }
+    this.deviceLocalState = reset;
+    try {
+      this.storeDeviceLocalState(reset);
+    } catch (error) {
+      console.error("Knowledge Base Command Center could not save its reset Undo history", error);
+    }
   }
 
   private storeDeviceLocalState(
@@ -1597,6 +1748,15 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   ): void {
     if (this.deviceLocalPersistenceSuppressed) {
       if (requireStorage) throw new Error("Device-local storage is unavailable while local persistence is suppressed.");
+      return;
+    }
+    // A value written by a newer build is kept byte-for-byte: no ordinary
+    // route, history or journal write may replace it. Only the explicit Clear
+    // command (which suppresses further writes) discards it.
+    if (this.deviceLocalFutureVersionRetained) {
+      if (requireStorage) {
+        throw new Error("Undo data on this device was saved by a newer version of this plugin and is kept untouched. Update the plugin, or run Clear device-local data, before making changes that need Undo.");
+      }
       return;
     }
     // Defense in depth for direct local-state writers (legacy migration,
@@ -1647,6 +1807,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.deviceLocalState = parsed;
     } catch (error) {
       this.deviceLocalState = null;
+      if (error instanceof DeviceLocalFutureVersionError) {
+        // Newer content is not corruption. Leave the raw value untouched,
+        // run with empty history, and block writes that would replace it.
+        this.deviceLocalFutureVersionRetained = true;
+        new Notice("This device holds navigation and undo data saved by a newer version of this plugin. It was left untouched, and undo history is unavailable until you update the plugin or clear device-local data. Your notes and organization are unchanged.", 12000);
+        return;
+      }
       try {
         if (typeof this.app.saveLocalStorage === "function") this.app.saveLocalStorage(DEVICE_LOCAL_STATE_KEY, null);
       } catch (clearError) {
@@ -1747,7 +1914,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       return;
     }
     try {
-      this.deviceLocalState = createDeviceLocalPluginState(this.store);
+      this.deviceLocalState = this.buildDeviceLocalState().state;
       this.deviceLocalStateLoaded = true;
     } catch (error) {
       console.error("Knowledge Base Command Center could not capture device-local state", error);
@@ -1767,7 +1934,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // missing-data fallback replace a retained established-vault profile.
       return;
     }
-    const state = createDeviceLocalPluginState(this.store);
+    const state = this.buildDeviceLocalState().state;
     this.storeDeviceLocalState(state);
   }
 
@@ -1802,6 +1969,45 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       && entry.semanticHash === pending.candidateSemanticHash;
   }
 
+  /** True only when the journal recorded a prior binding and the staged profile still carries that same one. */
+  private priorHistoryBindingIsProven(
+    local: DeviceLocalKnowledgeBaseState,
+    journal: { priorHistoryBinding?: DeviceHistoryBinding },
+  ): boolean {
+    return Boolean(journal.priorHistoryBinding
+      && local.historyBinding
+      && local.historyBinding.fingerprint === journal.priorHistoryBinding.fingerprint);
+  }
+
+  /**
+   * Exact candidate loaded: keep the newly proven required-Undo step. Entries
+   * beneath it survive only with a proven prior binding; an unverified older
+   * tail is reset rather than blessed by this one proof.
+   */
+  private promoteExactCandidateHistory(
+    local: DeviceLocalKnowledgeBaseState,
+    journal: { priorHistoryBinding?: DeviceHistoryBinding },
+    candidateFingerprint: string,
+  ): void {
+    if (!this.priorHistoryBindingIsProven(local, journal)) {
+      local.view.undoStack = local.view.undoStack.slice(-1);
+    }
+    local.historyBinding = { v: 1, fingerprint: candidateFingerprint };
+  }
+
+  /**
+   * Parent or noncandidate loaded: the prior history returns with the binding
+   * it had before the action (none for a legacy journal). The ordinary
+   * per-base comparison against the loaded payload then decides its fate.
+   */
+  private restorePriorHistoryBinding(
+    local: DeviceLocalKnowledgeBaseState,
+    journal: { priorHistoryBinding?: DeviceHistoryBinding },
+  ): void {
+    if (journal.priorHistoryBinding) local.historyBinding = { ...journal.priorHistoryBinding };
+    else delete local.historyBinding;
+  }
+
   /**
    * Resolve a pre-commit local journal only against an accepted store identity.
    * A matching causal head promotes Undo and clears pre-transaction Redo; any
@@ -1819,8 +2025,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (!local) throw new Error("The pending required Undo journal refers to an unavailable knowledge base.");
     if (this.committedAuthorityMatchesPendingUndo(store, pending)) {
       local.view.redoStack = [];
+      this.promoteExactCandidateHistory(local, pending, pending.candidateSemanticHash);
     } else {
       local.view.undoStack = local.view.undoStack.slice(0, -1);
+      this.restorePriorHistoryBinding(local, pending);
     }
     delete resolved.pendingRequiredUndoCommit;
     // Apply the resolved state in memory even if the cleanup write fails. The
@@ -1869,8 +2077,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       }
       if (this.committedAuthorityMatchesPendingUndo(store, entry)) {
         local.view.redoStack = [];
+        this.promoteExactCandidateHistory(local, entry, entry.candidateSemanticHash);
       } else if (entry.baseExistedBefore) {
         local.view.undoStack = local.view.undoStack.slice(0, -1);
+        this.restorePriorHistoryBinding(local, entry);
       } else {
         // A staged local profile for a new destination must never attach to a
         // missing, rejected, or different same-ID semantic authority.
@@ -1905,13 +2115,29 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const local = resolved.bases.find((base) => base.baseId === pending.baseId);
     if (!local) throw new Error("The pending history transition refers to an unavailable knowledge base.");
     if (this.committedAuthorityMatchesPendingUndo(store, pending)) {
+      const olderIsBound = this.priorHistoryBindingIsProven(local, pending);
       const post = projectPendingHistoryTransition(
         local.view.undoStack,
         local.view.redoStack,
         pending,
       );
-      local.view.undoStack = post.undoStack;
-      local.view.redoStack = post.redoStack;
+      // The inverse snapshot is the one step this journal proves exactly.
+      // Entries beneath it come from the prior stacks and are kept only when
+      // their prior binding is present and was the staged one.
+      let undoStack = post.undoStack;
+      let redoStack = post.redoStack;
+      if (!olderIsBound) {
+        if (pending.direction === "undo") {
+          undoStack = [];
+          redoStack = post.redoStack.slice(-1);
+        } else {
+          redoStack = [];
+          undoStack = post.undoStack.slice(-1);
+        }
+      }
+      local.view.undoStack = undoStack;
+      local.view.redoStack = redoStack;
+      local.historyBinding = { v: 1, fingerprint: pending.candidateSemanticHash };
     } else {
       // The local base already carries the exact pre-transition stacks. A
       // rejected, compensated, or newer synced head must never receive the
@@ -1921,6 +2147,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         local.view.redoStack,
         pending,
       );
+      this.restorePriorHistoryBinding(local, pending);
     }
     delete resolved.pendingHistoryTransitionCommit;
     this.deviceLocalState = resolved;
@@ -1953,7 +2180,16 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (pending) entry.data.redoStack = previousRedoStack;
     let built: ReturnType<typeof createDeviceLocalPluginStateWithReport>;
     try {
-      built = createDeviceLocalPluginStateWithReport(this.store, pending ?? undefined);
+      // While the journal is staged, the older stacks are still bound to the
+      // pre-action state (the live payload is already the candidate), so the
+      // profile carries the prior binding the journal recorded, never a
+      // fingerprint inferred from the candidate.
+      built = this.buildDeviceLocalState(
+        pending ?? undefined,
+        undefined,
+        undefined,
+        pending ? new Map([[baseId, pending.priorHistoryBinding ?? null]]) : undefined,
+      );
     } catch (error) {
       if (pending && /could not be bounded safely/i.test(errorMessage(error))) {
         throw new Error("This change cannot keep its required Undo snapshot within the 4 MiB device-local limit. Export a same-vault recovery backup, then reduce the operation size.");
@@ -2001,7 +2237,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       return;
     }
     try {
-      const built = createDeviceLocalPluginStateWithReport(this.store);
+      const built = this.buildDeviceLocalState();
       if (!this.localStateRetainsPendingUndo(built.state, pending)) {
         throw new Error("The committed change's required Undo snapshot was not retained.");
       }
@@ -2030,7 +2266,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
     let built: ReturnType<typeof createDeviceLocalPluginStateWithReport>;
     try {
-      built = createDeviceLocalPluginStateWithReport(this.store, undefined, undefined, pending);
+      built = this.buildDeviceLocalState(
+        undefined,
+        undefined,
+        pending,
+        new Map(pending.entries.map((entry) => [entry.baseId, entry.priorHistoryBinding ?? null])),
+      );
     } catch (error) {
       if (/could not be bounded safely/i.test(errorMessage(error))) {
         if (operationLabel === "portfolio import") {
@@ -2103,12 +2344,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         && current.vaultId === this.store.vaultId
         && !current.pendingRequiredUndoBatchCommit
         && pending.entries.every((entry) => this.localStateRetainsPendingUndoBatchEntry(current, entry))) {
-        this.applyDeviceLocalState(this.store, current);
+        this.applyDeviceLocalState(this.store, current, { verifyHistory: false });
         this.useActiveData(this.requireActiveBase().data);
         this.invalidateRecordCache();
         return { finalized: true, historyTruncated: false, viewStateTruncated: false };
       }
-      const built = createDeviceLocalPluginStateWithReport(this.store, undefined, undefined, pending);
+      const built = this.buildDeviceLocalState(undefined, undefined, pending);
       if (!pending.entries.every((entry) => this.localStateRetainsPendingUndoBatchEntry(built.state, entry))) {
         throw new Error(`One or more committed ${operationLabel} Undo snapshots were not retained.`);
       }
@@ -2123,7 +2364,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // caller lowers the write barrier. Otherwise an immediate ordinary view
       // save could rebuild from pressure that the protected finalizer removed
       // and discard a non-active mapped base's required Undo.
-      this.applyDeviceLocalState(this.store, markerFree);
+      this.applyDeviceLocalState(this.store, markerFree, { verifyHistory: false });
       this.useActiveData(this.requireActiveBase().data);
       this.invalidateRecordCache();
       return {
@@ -2185,7 +2426,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     entry.data.undoStack = priorUndoStack;
     entry.data.redoStack = priorRedoStack;
     try {
-      built = createDeviceLocalPluginStateWithReport(this.store, undefined, pending);
+      built = this.buildDeviceLocalState(
+        undefined,
+        pending,
+        undefined,
+        new Map([[baseId, pending.priorHistoryBinding ?? null]]),
+      );
     } catch (error) {
       if (/could not be bounded safely/i.test(errorMessage(error))) {
         throw new Error(`This ${pending.direction} cannot keep its exact crash-safe history transition within the 4 MiB device-local limit. Export a same-vault recovery backup, then reduce local history size.`);
@@ -2229,7 +2475,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       && !current.pendingHistoryTransitionCommit
       && this.localStateMatchesHistoryTransitionPost(current, pending)) return;
     try {
-      const built = createDeviceLocalPluginStateWithReport(this.store);
+      const built = this.buildDeviceLocalState();
       if (!this.localStateMatchesHistoryTransitionPost(built.state, pending)) {
         throw new Error("The committed history transition was not retained exactly.");
       }
@@ -2359,6 +2605,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const activeHasDeviceProfile = this.deviceLocalState?.bases.some((entry) => entry.baseId === active.id) ?? false;
     const deviceLocalStateProfile = !localStateApiAvailable
       ? "Device-local profile API unavailable"
+      : this.deviceLocalFutureVersionRetained
+        ? "Newer-version profile kept untouched on this device"
       : activeHasDeviceProfile
         ? "Active-base view profile stored on this device"
         : this.deviceLocalState?.bases.length
@@ -2443,6 +2691,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.useActiveData(this.requireActiveBase().data);
     this.deviceLocalState = null;
     this.deviceLocalStateLoaded = true;
+    this.deviceLocalFutureVersionRetained = false;
+    this.historyBindingByBase.clear();
     this.pendingVaultRenames = [];
     this.retainedVaultRenameJournal = null;
     this.journaledVaultRenameCount = 0;
@@ -4128,7 +4378,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         // route/history to the final semantic winner and durably bind it before
         // the v14 write can neutralize the legacy fields in data.json.
         this.applyDeviceLocalState(adopted.workingStore, loaded.legacyDeviceState);
-        this.storeDeviceLocalState(createDeviceLocalPluginState(adopted.workingStore), true);
+        this.storeDeviceLocalState(this.buildDeviceLocalState().state, true);
         this.noticeLegacyDeviceStateTruncation(
           loaded.legacyDeviceStateHistoryTruncated === true,
           loaded.legacyDeviceStateViewTruncated === true,
@@ -4314,7 +4564,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         // Sync-driven active-base change feed back into subsequent merges.
         const preferredActiveId = this.store.activeBaseId;
         let workingStore = cloneJsonValue(initialCommittedStore ?? this.store);
-        this.applyDeviceLocalState(workingStore);
+        this.applyDeviceLocalState(workingStore, undefined, { verifyHistory: false });
         let baselineTrust: ExternalReloadBaselineTrust = initialCommittedStore
           ? isFreshVaultId(initialCommittedStore.vaultId) ? "fresh" : "identified"
           : "none";
@@ -4335,7 +4585,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           // A transaction that was active when the callback arrived may have
           // committed or rolled back its local history while we waited.
           this.captureLiveDeviceLocalState();
-          this.applyDeviceLocalState(workingStore);
+          this.applyDeviceLocalState(workingStore, undefined, { verifyHistory: false });
           // A local write can be rejected only after the adapter has already
           // replaced data.json. Its transaction restores memory and records
           // that attempted causal head. Make the restored state a descendant
@@ -9285,6 +9535,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         semanticHash: this.requireActiveBase().semanticHash,
         semanticLineage: [...this.requireActiveBase().semanticLineage],
       };
+      // Captured before the action runs, never inferred from mutated data.
+      const priorHistoryBinding = options.requireUndo
+        ? this.priorHistoryBindingFor(this.requireActiveBase())
+        : undefined;
       const transactionBackup = options.requireUndo ? cloneJsonValue(this.data) : null;
       const previousUndoStack = [...this.data.undoStack];
       const previousRedoStack = [...this.data.redoStack];
@@ -9323,7 +9577,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         this.invalidateRecordCache();
         if (options.requireUndo) {
           const entry = this.requireActiveBase();
-          pendingRequiredUndoCommit = this.prepareRequiredUndoCommit(entry, snapshot);
+          pendingRequiredUndoCommit = this.prepareRequiredUndoCommit(entry, snapshot, priorHistoryBinding);
           this.preparedRequiredUndoCommit = pendingRequiredUndoCommit;
           olderLocalHistoryTruncated = this.persistRequiredUndoState(
             entry.id,
@@ -9414,10 +9668,22 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (this.externalReloadBusy) throw new Error("Finish reloading synced knowledge-base data before using history.");
     const source = direction === "undo" ? this.data.undoStack : this.data.redoStack;
     if (source.length === 0) return;
+    // Second gate: before popping, reserving an inverse or writing anything,
+    // re-check that this pair is still bound to the payload it will act on.
+    const gatedEntry = this.requireActiveBase();
+    if (this.historyBindingIsStale(gatedEntry)) {
+      gatedEntry.data.undoStack = [];
+      gatedEntry.data.redoStack = [];
+      this.historyBindingByBase.delete(gatedEntry.id);
+      this.persistDeviceLocalStateSafely();
+      this.historyResetNotice([privacySafeBaseName(gatedEntry.data.settings.workspaceName)]);
+      return;
+    }
 
     this.dataTransactionBusy = true;
     try {
       await this.enqueueAppLogicalOperation(async () => {
+      const priorHistoryBinding = this.priorHistoryBindingFor(this.requireActiveBase());
       const priorUndoStack = [...this.data.undoStack];
       const priorRedoStack = [...this.data.redoStack];
       const sourceStack = direction === "undo" ? priorUndoStack : priorRedoStack;
@@ -9472,6 +9738,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           inverseSnapshot,
           priorUndoStack,
           priorRedoStack,
+          priorHistoryBinding,
         );
         if (pendingHistoryTransitionCommit) {
           this.preparedHistoryTransitionCommit = pendingHistoryTransitionCommit;
@@ -9491,7 +9758,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           // differs only in device-local view/history). Persist that completed
           // history transition directly: there is no synced payload to commit
           // and therefore no primary-write crash window to journal.
-          const built = createDeviceLocalPluginStateWithReport(this.store);
+          const built = this.buildDeviceLocalState();
           if (built.historyTruncated) {
             const localByBaseId = new Map(built.state.bases.map((base) => [base.baseId, base.view]));
             for (const candidate of this.store.bases) {

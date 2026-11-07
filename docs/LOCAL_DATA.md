@@ -28,6 +28,10 @@ Version 0.24.0 has no external-image enable control or authorization path. A leg
 
 Update every synced device to 0.24.0 or a newer compatible release before editing. Older 0.23.1 preserves the newer store read-only. Return-navigation format 2 uses the same App-local key; older builds reject it rather than drop a collection filter. A writable downgrade needs matching pre-upgrade organization backups, a complete vault backup, and coordinated Sync handling; do not lower schema fields or install older assets over newer organization data.
 
+## Undo history after updates
+
+Each knowledge base's device-local Undo/Redo is stored with a fingerprint of the organization it operates on, inside the same version-5 device-interaction value. At startup, a base whose history is not bound to the organization now loaded (for example Sync changed it while Obsidian was closed, or the history was saved before this binding existed) has only that base's Undo/Redo reset, with one notice. Its route and collapsed sections, other bases' history, and your notes and organization are unchanged. After updating from an earlier release, expect existing Undo history to be reset once. Returning to an older release is not protected: it drops the binding when it saves, so the newer release resets those bases again. A value written by a newer release is left untouched, history stays empty, and nothing replaces it until you run **Clear device-local data**.
+
 ## Reset or uninstall
 
 Export current private recovery and back up the vault first. Run **Clear device-local data…**, confirm, and then disable or uninstall in the same session. On success, the command removes all five plugin-owned App-local values and suppresses new local tracking until restart. It does not remove `data.json`, Markdown notes, attachments, recovery files, browser cookies, or browser image cache.
