@@ -5089,21 +5089,76 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
   }
 
+  /**
+   * A selection containing a folder is expanded only when the user chooses the
+   * action, so merely opening the menu never enumerates the vault. The label
+   * states no note count because none exists yet; the one-time snapshot is taken
+   * at the click, with the same caps, restricted-path filter and explanations.
+   */
+  private addDeferredNoteOrganizerMenuItem(
+    menu: Menu,
+    selection: readonly TAbstractFile[],
+    source: Extract<NoteOrganizerSource, "file-menu" | "files-menu">,
+  ): void {
+    const viable = selection.some((entry) => (entry instanceof TFolder
+      ? !this.noteOrganizerPathIsRestricted(entry.path)
+      : this.noteOrganizerFileIsSelectable(entry)));
+    if (!viable) return;
+    const items = selection.map((entry): NoteOrganizerSelectedVaultItem => ({
+      path: entry.path,
+      kind: entry instanceof TFolder ? "folder" : "file",
+    }));
+    menu.addSeparator();
+    menu.addItem((item) => item
+      .setTitle("Organize current Markdown notes in the command center…")
+      .setIcon("network")
+      .onClick(() => {
+        // A folder renamed, deleted or replaced since the menu opened must not
+        // silently organize a different target.
+        const moved = selection.some((entry) => {
+          if (!(entry instanceof TFolder)) return false;
+          const current = this.app.vault.getAbstractFileByPath(entry.path);
+          return current !== null && current !== entry;
+        });
+        if (moved) {
+          new Notice("The selected folder changed since the menu opened. Nothing was opened; choose it again.");
+          return;
+        }
+        const snapshot = this.noteOrganizerSelection(items);
+        if (!snapshot.complete) {
+          new Notice(snapshot.blockedReason === "selection-limit"
+            ? `Folder contains more than ${MAX_NOTE_ORGANIZER_NOTES.toLocaleString()} reviewable notes`
+            : "Folder is too large to snapshot safely");
+          return;
+        }
+        if (snapshot.paths.length === 0) {
+          new Notice("No reviewable Markdown notes were found in the selection. Nothing was opened.");
+          return;
+        }
+        this.openNoteOrganizer(snapshot.paths, source);
+      }));
+  }
+
   private registerNoteOrganizerContextMenus(): void {
     const workspace = this.app.workspace;
     if (typeof workspace.on !== "function") return;
     this.registerEvent(workspace.on("file-menu", (menu, file) => {
-      const item: NoteOrganizerSelectedVaultItem = {
-        path: file.path,
-        kind: file instanceof TFolder ? "folder" : "file",
-      };
-      this.addNoteOrganizerContextMenuItems(menu, this.noteOrganizerSelection([item]), "file-menu");
+      if (file instanceof TFolder) {
+        this.addDeferredNoteOrganizerMenuItem(menu, [file], "file-menu");
+        return;
+      }
+      this.addNoteOrganizerContextMenuItems(
+        menu,
+        this.noteOrganizerSelection([{ path: file.path, kind: "file" }]),
+        "file-menu",
+      );
     }));
     this.registerEvent(workspace.on("files-menu", (menu, files) => {
-      const selected = files.map((file): NoteOrganizerSelectedVaultItem => ({
-        path: file.path,
-        kind: file instanceof TFolder ? "folder" : "file",
-      }));
+      if (files.some((file) => file instanceof TFolder)) {
+        this.addDeferredNoteOrganizerMenuItem(menu, files, "files-menu");
+        return;
+      }
+      const selected = files.map((file): NoteOrganizerSelectedVaultItem => ({ path: file.path, kind: "file" }));
       this.addNoteOrganizerContextMenuItems(menu, this.noteOrganizerSelection(selected), "files-menu");
     }));
     this.registerEvent(workspace.on("editor-menu", (menu, _editor, info) => {

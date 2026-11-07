@@ -6,9 +6,8 @@ import EntVaultCommandCenterPlugin from "../src/main.ts";
 /**
  * E05 follow-up 2: choosing the file/files context menu must not enumerate the
  * whole vault before an action is chosen. Counters on the synthetic vault, no
- * timing. Red tests carry node:test `todo` until the implementation lands.
+ * timing.
  */
-const PENDING = { todo: "E05 implementation pending" } as const;
 const SELECTION_CAP = 5_000;
 const CANDIDATE_CAP = 250_000;
 
@@ -100,12 +99,12 @@ function subtreeFixture() {
   const folder = createTestFolder("Subtree", { children: [...direct, nestedFolder, image] });
   const vaultFiles = [...outside, sibling, protectedNote, ...direct, ...nested];
   const expected = [...direct, ...nested].map((file) => file.path).sort();
-  return { folder, nestedFolder, direct, nested, vaultFiles, expected, outside };
+  return { folder, nestedFolder, direct, nested, vaultFiles, expected, outside, protectedNote };
 }
 
 const organize = (actions: MenuAction[]): MenuAction | undefined => actions.find((action) => /Organize/iu.test(action.title));
 
-test("opening the single-folder menu performs no whole-vault expansion or metadata projection", PENDING, () => {
+test("opening the single-folder menu performs no whole-vault expansion or metadata projection", () => {
   const fx = subtreeFixture();
   const host = menuHost(fx.vaultFiles, [fx.folder, fx.nestedFolder]);
   const actions = host.openMenu("file-menu", fx.folder);
@@ -115,7 +114,7 @@ test("opening the single-folder menu performs no whole-vault expansion or metada
   assert.equal(host.opened.length, 0, "opening the menu opens nothing");
 });
 
-test("opening a mixed folder/files menu performs no whole-vault expansion", PENDING, () => {
+test("opening a mixed folder/files menu performs no whole-vault expansion", () => {
   const fx = subtreeFixture();
   const host = menuHost(fx.vaultFiles, [fx.folder, fx.nestedFolder]);
   host.openMenu("files-menu", [fx.folder, fx.outside[0]]);
@@ -124,7 +123,7 @@ test("opening a mixed folder/files menu performs no whole-vault expansion", PEND
   assert.equal(host.opened.length, 0);
 });
 
-test("a deferred folder label does not claim a current-note count before it exists", PENDING, () => {
+test("a deferred folder label does not claim a current-note count before it exists", () => {
   const fx = subtreeFixture();
   const host = menuHost(fx.vaultFiles, [fx.folder, fx.nestedFolder]);
   const title = organize(host.openMenu("file-menu", fx.folder))?.title ?? "";
@@ -165,7 +164,7 @@ test("choosing Organize on overlapping file and folder selections does not multi
   assert.deepEqual(host.opened[0]?.paths, [...fx.expected, fx.outside[0].path].sort());
 });
 
-test("additions and removals before the click are reflected in the one-time chosen snapshot", PENDING, () => {
+test("additions and removals before the click are reflected in the one-time chosen snapshot", () => {
   const fx = subtreeFixture();
   const host = menuHost(fx.vaultFiles, [fx.folder, fx.nestedFolder]);
   const action = organize(host.openMenu("file-menu", fx.folder));
@@ -181,6 +180,45 @@ test("additions and removals before the click are reflected in the one-time chos
   action.click();
   const expected = [...fx.expected.filter((path) => path !== removedPath), added.path].sort();
   assert.deepEqual(host.opened[0]?.paths, expected, "the snapshot is the vault at click time, not menu-open time");
+});
+
+test("a protected path inside a mixed selection is excluded by the restricted-path filter", () => {
+  const fx = subtreeFixture();
+  const configNote = new TFile(".obsidian/Private.md");
+  fx.vaultFiles.push(configNote);
+  const host = menuHost(fx.vaultFiles, [fx.folder, fx.nestedFolder, fx.protectedNote, configNote]);
+  const action = organize(host.openMenu("files-menu", [fx.folder, fx.protectedNote, configNote]));
+  assert.ok(action?.enabled);
+  action.click();
+  assert.deepEqual(host.opened[0]?.paths, fx.expected, "neither protected note reaches the Organizer");
+});
+
+test("a folder deleted between menu open and click opens nothing and explains", () => {
+  const fx = subtreeFixture();
+  const known: Array<TFile | TFolder> = [fx.folder, fx.nestedFolder];
+  const host = menuHost(fx.vaultFiles, known);
+  const action = organize(host.openMenu("file-menu", fx.folder));
+  assert.ok(action);
+  // The folder and everything in it is gone when the user clicks.
+  known.length = 0;
+  for (const path of fx.expected) host.vaultFiles.splice(host.vaultFiles.findIndex((file) => file.path === path), 1);
+  Notice.messages.length = 0;
+  action.click();
+  assert.equal(host.opened.length, 0, "no wrong-folder or partial Organizer");
+  assert.ok(Notice.messages.length >= 1, "a safe Notice is shown");
+});
+
+test("a different folder recreated at the same path between open and click is never organized", () => {
+  const fx = subtreeFixture();
+  const known: Array<TFile | TFolder> = [fx.folder, fx.nestedFolder];
+  const host = menuHost(fx.vaultFiles, known);
+  const action = organize(host.openMenu("file-menu", fx.folder));
+  assert.ok(action);
+  known.splice(0, known.length, createTestFolder("Subtree"));
+  Notice.messages.length = 0;
+  action.click();
+  assert.equal(host.opened.length, 0);
+  assert.match(Notice.messages.at(-1) ?? "", /folder changed|choose it again/iu);
 });
 
 function capFixture(selectedNotes: number, extraOutside: number) {
