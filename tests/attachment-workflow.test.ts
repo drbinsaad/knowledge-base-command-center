@@ -4,6 +4,7 @@ import type { TAbstractFile } from "obsidian";
 import EntVaultCommandCenterPlugin from "../src/main.ts";
 import { createDefaultStore, migrateData } from "../src/model.ts";
 import { AttachmentLinkInsertionError } from "../src/attachment.ts";
+import { AttachmentImportModal } from "../src/attachment-modal.ts";
 import { TFile, TFolder } from "./support/obsidian-stub.ts";
 
 interface PluginBase {
@@ -186,6 +187,75 @@ test("a failure after the first copy keeps and reports the copied file instead o
   );
   assert.equal(f.state.createBinaryCalls, 1, "the first file was copied once; the second never started");
   assert.equal(f.files.has("Files/a.pdf"), true);
+  assert.equal(f.state.removals, 0);
+});
+
+test("control (already correct): openAttachmentImport passes the real cursor capability for owning note, another note and no editor", async () => {
+  const f = await fixture();
+  const settings = (f.plugin as unknown as { data: { settings: { attachmentInsertionMode: string } } }).data.settings;
+  settings.attachmentInsertionMode = "cursor";
+  const opened: { cursorAvailable: boolean; insertionMode: string }[] = [];
+  const original = Object.getOwnPropertyDescriptor(AttachmentImportModal.prototype, "open");
+  AttachmentImportModal.prototype.open = function open(): void {
+    const modal = this as unknown as { cursorAvailable: boolean; insertionMode: string };
+    opened.push({ cursorAvailable: modal.cursorAvailable, insertionMode: modal.insertionMode });
+  };
+  try {
+    f.state.activeView = { file: f.note, editor: f.editor };
+    f.plugin.openAttachmentImport(f.note);
+    f.state.activeView = { file: new TFile("Other.md"), editor: f.editor };
+    f.plugin.openAttachmentImport(f.note);
+    f.state.activeView = null;
+    f.plugin.openAttachmentImport(f.note);
+  } finally {
+    if (original) Object.defineProperty(AttachmentImportModal.prototype, "open", original);
+    else Reflect.deleteProperty(AttachmentImportModal.prototype, "open");
+  }
+  assert.deepEqual(opened, [
+    { cursorAvailable: true, insertionMode: "cursor" },
+    { cursorAvailable: false, insertionMode: "end" },
+    { cursorAvailable: false, insertionMode: "end" },
+  ]);
+});
+
+test("control (already correct): a data-epoch change before the first copy writes nothing", async () => {
+  const f = await fixture();
+  const file = new File(["x"], "a.pdf");
+  const original = file.arrayBuffer.bind(file);
+  file.arrayBuffer = async () => { (f.plugin as unknown as { dataEpoch: number }).dataEpoch += 1; return original(); };
+  await assert.rejects(f.plugin.attachFilesToNote(f.note, { ...batch([]), files: [file] }), /synced data changed/u);
+  assert.equal(f.state.createBinaryCalls, 0);
+});
+
+test("control (already correct): a data-epoch change after the first copy keeps and reports the copied file", async () => {
+  const f = await fixture();
+  const second = new File(["y"], "b.pdf");
+  const original = second.arrayBuffer.bind(second);
+  second.arrayBuffer = async () => { (f.plugin as unknown as { dataEpoch: number }).dataEpoch += 1; return original(); };
+  await assert.rejects(
+    f.plugin.attachFilesToNote(f.note, { ...batch([]), files: [new File(["x"], "a.pdf"), second] }),
+    (error: unknown) => {
+      assert.ok(error instanceof AttachmentLinkInsertionError);
+      assert.deepEqual(error.copiedPaths, ["Files/a.pdf"]);
+      assert.match(error.message, /synced data changed/u);
+      return true;
+    },
+  );
+  assert.equal(f.state.createBinaryCalls, 1);
+  assert.equal(f.state.removals, 0);
+  assert.equal(f.markdown().includes("a.pdf"), false, "no note write after the epoch changed");
+});
+
+test("control (already correct): A5 insertion failure after a partial copy keeps the first path as terminal recovery", async () => {
+  const f = await fixture();
+  f.state.failCreateOn = "b.pdf";
+  f.state.failLinkGeneration = true;
+  await assert.rejects(f.plugin.attachFilesToNote(f.note, batch(["a.pdf", "b.pdf", "c.pdf"])), (error: unknown) => {
+    assert.ok(error instanceof AttachmentLinkInsertionError);
+    assert.deepEqual(error.copiedPaths, ["Files/a.pdf"]);
+    return true;
+  });
+  assert.equal(f.state.createBinaryCalls, 2, "the whole batch is not retried and c.pdf never starts");
   assert.equal(f.state.removals, 0);
 });
 
