@@ -1071,7 +1071,8 @@ export class EntVaultCommandCenterView extends ItemView {
       // Focus the user moved to another surface meanwhile must not be pulled back either.
       if (focusUnchanged && this.focusBelongsToView()) restoreViewFocus(this.contentEl, focusBefore);
     }
-    if (searchWasFocused && !baseChanged) {
+    // Same rule as above: only a user who is still where the snapshot was taken gets the search box back.
+    if (searchWasFocused && !baseChanged && focusUnchanged && this.focusBelongsToView()) {
       const replacement = this.contentEl.querySelector<HTMLInputElement>('.ent-cc-search-box input[type="search"]');
       replacement?.focus({ preventScroll: true });
       if (replacement && searchSelectionStart !== null && searchSelectionEnd !== null
@@ -5467,8 +5468,9 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   /** Replace the persistent view message. It stays through rerenders until replaced or dismissed. */
-  private setViewFeedback(message: string, tone: "status" | "error", source: string, context?: { baseId: string; generation: number }): void {
-    if (context && (this.viewClosed || context.generation !== this.feedbackGeneration || context.baseId !== this.plugin.getActiveKnowledgeBaseId())) return;
+  private setViewFeedback(message: string, tone: "status" | "error", source: string, context?: { baseId: string; generation: number; recordPath: string }): void {
+    if (context && (this.viewClosed || context.generation !== this.feedbackGeneration || context.baseId !== this.plugin.getActiveKnowledgeBaseId()
+      || context.recordPath !== this.plugin.data.selectedPath)) return;
     const doc = this.contentEl?.ownerDocument;
     const active = doc?.activeElement as HTMLElement | null | undefined;
     this.viewFeedbackOrigin = active && this.contentEl.contains(active) && !this.viewFeedbackEl?.contains(active) ? active : this.viewFeedbackOrigin;
@@ -5477,8 +5479,8 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   /** Captured when an action starts; its completion is dropped if the base or view lifetime changed. */
-  private feedbackContext(): { baseId: string; generation: number } {
-    return { baseId: this.plugin.getActiveKnowledgeBaseId(), generation: this.feedbackGeneration };
+  private feedbackContext(): { baseId: string; generation: number; recordPath: string } {
+    return { baseId: this.plugin.getActiveKnowledgeBaseId(), generation: this.feedbackGeneration, recordPath: this.plugin.data.selectedPath };
   }
 
   private clearViewFeedback(): void {

@@ -265,7 +265,7 @@ test("attachment activation rechecks the file and delegates to the existing open
   const view = Object.create(EntVaultCommandCenterView.prototype) as unknown as { renderInspectorAttachments(parent: HTMLElement, record: VaultRecord): void };
   const opened: TFile[] = [];
   const operations: Promise<unknown>[] = [];
-  Object.assign(view, { app: h.app, plugin: { getActiveKnowledgeBaseId: () => "base-test", openFile: async (file: TFile, origin: unknown) => { assert.equal(origin, view); opened.push(file); } }, run: (action: () => Promise<unknown>) => { operations.push(action()); } });
+  Object.assign(view, { app: h.app, plugin: { data: { selectedPath: h.source.path }, getActiveKnowledgeBaseId: () => "base-test", openFile: async (file: TFile, origin: unknown) => { assert.equal(origin, view); opened.push(file); } }, run: (action: () => Promise<unknown>) => { operations.push(action()); } });
   view.renderInspectorAttachments(asHtmlElement(dom.document.body), { path: h.source.path } as VaultRecord);
   const button = dom.document.body.querySelector(".ent-cc-attachment-link");
   button?.dispatch("click");

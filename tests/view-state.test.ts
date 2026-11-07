@@ -95,7 +95,7 @@ interface Wf07 {
   content: FakeElement;
   view: EntVaultCommandCenterView;
   harness: { selectRecord(path: string): void; saveWorkspaceLayoutPreference(): void; mobileInspectorOpen: boolean };
-  state: { baseId: string; readOnly: boolean; links: Record<string, string[]>; present: Set<string>; opened: string[]; openFailure: Error | null; openGate: Promise<void> | null; storageOk: boolean; organizerOpened: number };
+  state: { baseId: string; readOnly: boolean; links: Record<string, string[]>; present: Set<string>; opened: string[]; openFailure: Error | null; openGate: Promise<void> | null; storageOk: boolean; organizerOpened: number; epoch: number };
   plugin: { data: PluginData; reconcileRecords: () => Promise<boolean> };
   rows(): FakeElement[];
   rowPaths(): string[];
@@ -120,7 +120,7 @@ async function wf07Open(options: { mobile?: boolean; width?: number; count?: num
   const count = options.count ?? 45;
   const state: Wf07["state"] = {
     baseId: "base-wf07", readOnly: Boolean(options.readOnly), links: { [WF07_ALPHA]: wf07Range(count), [WF07_BETA]: wf07Range(count) },
-    present: new Set(wf07Range(count)), opened: [], openFailure: null, openGate: null, storageOk: true, organizerOpened: 0,
+    present: new Set(wf07Range(count)), opened: [], openFailure: null, openGate: null, storageOk: true, organizerOpened: 0, epoch: 0,
   };
   const fileObjects = new Map<string, TFile>();
   const fileFor = (path: string): TFile => {
@@ -131,7 +131,7 @@ async function wf07Open(options: { mobile?: boolean; width?: number; count?: num
   const plugin = {
     data,
     getActiveKnowledgeBaseId: () => state.baseId,
-    getDataEpoch: () => 0,
+    getDataEpoch: () => state.epoch,
     getSearchGeneration: () => 0,
     getRecords: () => records,
     reconcileRecords: async () => false,
@@ -475,5 +475,49 @@ test("WF07 R1 focus moved to another inspector control during the awaited reload
     s.rows()[5].focus();
     await s.view.reload();
     assert.equal(wf07ActivePath(s.dom), wf07Path(6), "control: focus left on the attachment returns to it");
+  } finally { await s.close(); }
+});
+
+test("WF07 R1b the search refocus after a full refresh obeys the latest focus choice", async () => {
+  for (const destination of ["outside", "expand", "unchanged"] as const) {
+    const s = await wf07Open({ count: 3 });
+    try {
+      s.harness.selectRecord(WF07_ALPHA);
+      const searchSelector = '.ent-cc-search-box input[type="search"]';
+      s.content.querySelector(searchSelector)?.focus();
+      const outside = s.dom.document.body.createEl("input", { attr: { id: "wf07-outside-search" } });
+      const expand = s.content.querySelector(".ent-cc-inspector-expand");
+      assert.ok(expand);
+      s.state.epoch += 1;
+      s.plugin.reconcileRecords = async () => {
+        if (destination === "outside") outside.focus();
+        else if (destination === "expand") expand.focus();
+        return false;
+      };
+      await s.view.reload();
+      const active = s.dom.document.activeElement;
+      if (destination === "outside") assert.ok(active === outside, "focus stays outside the view");
+      else if (destination === "expand") assert.equal(active?.getAttribute("data-kbcc-focus"), "inspector-expand");
+      else assert.ok(active === s.content.querySelector(searchSelector), "control: search stays focused on its replacement");
+    } finally { await s.close(); }
+  }
+});
+
+test("WF07 R2b a delayed attachment open is dropped after another record is selected; the same record still reports", async () => {
+  const s = await wf07Open({ count: 3 });
+  try {
+    s.harness.selectRecord(WF07_ALPHA);
+    let release = (): void => undefined;
+    s.state.openGate = new Promise<void>((resolve) => { release = resolve; });
+    s.rows()[0].dispatch("click");
+    s.harness.selectRecord(WF07_BETA);
+    release();
+    await wf07Settle();
+    assert.equal(s.feedback()?.hidden, true, "Alpha's result must not describe Beta");
+    assert.equal((s.view as unknown as { viewFeedback: unknown }).viewFeedback, null);
+    s.state.openGate = null;
+    s.rows()[0].dispatch("click");
+    await wf07Settle();
+    assert.match(s.feedback()?.textContent ?? "", /Opened f01\.pdf/u, "control: the selected record's own completion reports");
   } finally { await s.close(); }
 });
