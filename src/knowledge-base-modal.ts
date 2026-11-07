@@ -1,11 +1,45 @@
 import { Modal, Notice, Setting, setIcon } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
-import { errorMessage, sanitizeFileName, type KnowledgeBaseEntry, type WorkspaceMode } from "./model";
+import { errorMessage, sanitizeFileName, validateWritableFolderPath, type KnowledgeBaseEntry, type WorkspaceMode } from "./model";
 import { ConfirmModal, createOpenedBaseGuard, modalOwnerWindow, TextPromptModal, type OpenedBaseGuard } from "./modals";
 
 function reportError(error: unknown): void {
   console.error("Knowledge Base Command Center base action failed", error);
   new Notice(errorMessage(error), 8000);
+}
+
+const countLabel = (count: number, singular: string, plural: string): string => `${count} ${count === 1 ? singular : plural}`;
+
+/**
+ * Hoisted for the sentence-case lint rule, like the other folder copy. The one
+ * folder here is the saved location, the parent of the derived Inbox and the
+ * grouping root; none of those is Index, Collection or Library placement.
+ */
+const NEW_BASE_FOLDER_DESCRIPTION = "Saved location for this base's new notes. Its Inbox folder is derived inside it, as shown below, and the same folder is the grouping root. Folders are created when a note is saved there. Index, Collection and Library placement is chosen separately.";
+
+export interface NewBaseFolders {
+  /** Trimmed, slash-stripped parent folder as stored for the new base. */
+  folder: string;
+  /** The Inbox folder createKnowledgeBase derives inside it. */
+  inbox: string;
+  /** A message for the folder field, or null when both folders pass the existing path rules. */
+  error: string | null;
+}
+
+/**
+ * The single place the New knowledge base form and createKnowledgeBase agree on
+ * the derived folders: the same trimming and the same validateWritableFolderPath
+ * rules, applied to the parent and to the derived Inbox before anything is created.
+ */
+export function deriveNewBaseFolders(folder: string, configDir: string): NewBaseFolders {
+  const clean = folder.trim().replace(/^\/+|\/+$/gu, "");
+  const inbox = clean ? `${clean}/Inbox` : "";
+  if (!clean) return { folder: clean, inbox, error: "Choose where newly created notes should be stored." };
+  const folderError = validateWritableFolderPath(clean, configDir);
+  if (folderError) return { folder: clean, inbox, error: folderError };
+  const inboxError = validateWritableFolderPath(inbox, configDir);
+  if (inboxError) return { folder: clean, inbox, error: `The Inbox folder derived from this folder (“${inbox}”) cannot be used. ${inboxError}` };
+  return { folder: clean, inbox, error: null };
 }
 
 export class CreateKnowledgeBaseModal extends Modal {
@@ -19,6 +53,7 @@ export class CreateKnowledgeBaseModal extends Modal {
   private nameErrorEl: HTMLElement | null = null;
   private nameCountEl: HTMLElement | null = null;
   private folderInputEl: HTMLInputElement | null = null;
+  private folderErrorEl: HTMLElement | null = null;
   private scopeWarningEl: HTMLElement | null = null;
   private submitButtonEl: HTMLButtonElement | null = null;
 
@@ -88,7 +123,7 @@ export class CreateKnowledgeBaseModal extends Modal {
     if (this.mode === "generic") {
       new Setting(this.contentEl)
         .setName("Default new-note folder")
-        .setDesc("New notes start here. Storage never adds a note to the index; use add existing note or explicitly link a folder after creating the base.")
+        .setDesc(NEW_BASE_FOLDER_DESCRIPTION)
         .addText((text) => {
           this.folderInputEl = text.inputEl;
           text.setPlaceholder("Knowledge bases/research")
@@ -100,6 +135,11 @@ export class CreateKnowledgeBaseModal extends Modal {
             this.updateNameFeedback();
           });
         });
+      // Folder and derived-Inbox errors belong beside the folder, not under Name.
+      this.folderErrorEl = this.contentEl.createDiv({
+        cls: "ent-cc-base-name-error",
+        attr: { role: "alert", "data-field": "folder" },
+      });
       this.scopeWarningEl = this.contentEl.createDiv({
         cls: "ent-cc-base-scope-warning is-hidden",
         attr: { role: "status" },
@@ -138,13 +178,18 @@ export class CreateKnowledgeBaseModal extends Modal {
   private renderScopeWarning(): void {
     const warning = this.scopeWarningEl;
     if (!warning || this.mode !== "generic") return;
-    const folder = this.folder.trim().replace(/^\/+|\/+$/g, "");
-    if (!folder) {
-      warning.setText("Choose where newly created notes should be stored.");
+    const derived = deriveNewBaseFolders(this.folder, this.plugin.app.vault.configDir);
+    // An empty field is not an error until the user tries to create; the
+    // button is already disabled and the preview below explains the need.
+    const showError = derived.error !== null && derived.folder !== "";
+    this.folderErrorEl?.setText(showError ? derived.error ?? "" : "");
+    this.folderInputEl?.setAttribute("aria-invalid", String(showError));
+    if (derived.error) {
+      warning.setText(derived.folder ? "Fix the folder above to see where notes and the Inbox will be saved." : "Choose where newly created notes should be stored.");
       warning.removeClass("is-hidden");
       return;
     }
-    warning.setText("This base will start with an empty index. Notes in this folder remain outside it until you explicitly add them or link the folder.");
+    warning.setText(`New notes are saved in “${derived.folder}”, and the Inbox folder will be “${derived.inbox}”. Saving a note there does not place it in the Index, a Collection or a Library; that placement is chosen separately. This base starts with an empty index, and notes already in these folders stay outside it until you add them or link the folder.`);
     warning.removeClass("is-hidden");
   }
 
@@ -156,15 +201,23 @@ export class CreateKnowledgeBaseModal extends Modal {
       this.nameInputEl?.focus();
       return;
     }
-    if (this.mode === "generic" && !this.folder.trim()) {
-      this.error = "Choose a default folder for newly created notes.";
-      this.updateNameFeedback();
-      return;
+    let folder = this.folder;
+    if (this.mode === "generic") {
+      // Validate the parent and the derived Inbox with the shared path rules
+      // before any creation; the error lands on the folder field.
+      const derived = deriveNewBaseFolders(this.folder, this.plugin.app.vault.configDir);
+      if (derived.error) {
+        this.folderErrorEl?.setText(derived.error);
+        this.folderInputEl?.setAttribute("aria-invalid", "true");
+        this.folderInputEl?.focus();
+        return;
+      }
+      folder = derived.folder;
     }
     this.busy = true;
     this.render();
     try {
-      const entry = await this.plugin.createKnowledgeBase(this.name, this.mode, this.folder);
+      const entry = await this.plugin.createKnowledgeBase(this.name, this.mode, folder);
       this.close();
       this.onCreated?.(entry);
       new Notice(`Created and opened “${entry.data.settings.workspaceName}”.`);
@@ -350,11 +403,12 @@ export class ManageKnowledgeBasesModal extends Modal {
       cls: "ent-cc-picker-meta",
       text: [
         entry.data.settings.workspaceMode === "ent-clinical" ? "ENT clinical" : "Generic",
-        entry.data.settings.primaryFolder || "Vault root",
+        // The folder is a grouping root (or the clinical preset's root), not the base's storage folder.
+        `${entry.data.settings.workspaceMode === "ent-clinical" ? "Clinical folder" : "Grouping root"}: ${entry.data.settings.primaryFolder || "Vault root"}`,
         activeIndexCount === null
-          ? `${entry.data.portableIndex.subjects.filter((subject) => subject.indexed).length} portable identities`
-          : `${activeIndexCount} index entries`,
-        `${entry.data.collections.length} collections`,
+          ? countLabel(entry.data.portableIndex.subjects.filter((subject) => subject.indexed).length, "portable identity", "portable identities")
+          : countLabel(activeIndexCount, "index entry", "index entries"),
+        countLabel(entry.data.collections.length, "collection", "collections"),
       ].join(" · "),
     });
     const actions = row.createDiv({ cls: "ent-cc-base-manager-actions" });
@@ -403,14 +457,14 @@ export class ManageKnowledgeBasesModal extends Modal {
       const subjects = active
         ? this.plugin.getIndexRecords().length
         : entry.data.portableIndex.subjects.filter((subject) => subject.indexed).length;
-      const countLabel = active ? "index entries" : "portable identities";
+      const countNoun = active ? countLabel(subjects, "index entry", "index entries") : countLabel(subjects, "portable identity", "portable identities");
       const fallback = active
         ? this.plugin.getKnowledgeBases().find((candidate) => candidate.id !== entry.id)?.data.settings.workspaceName
         : "";
       new ConfirmModal(
         this.app,
         "Archive knowledge base?",
-        `“${entry.data.settings.workspaceName}” will leave the switcher but remain fully restorable.${fallback ? ` The Command Center will switch to “${fallback}”.` : ""} Its ${subjects} ${countLabel}, collections, pins, views, and history stay in plugin data. No Markdown note will be deleted, moved, or changed.`,
+        `“${entry.data.settings.workspaceName}” will leave the switcher but remain fully restorable.${fallback ? ` The Command Center will switch to “${fallback}”.` : ""} Its ${countNoun}, collections, pins, views, and history stay in plugin data. No Markdown note will be deleted, moved, or changed.`,
         "Archive base",
         async () => {
           if (!this.guardRenderedData()) return;

@@ -99,6 +99,7 @@ import {
   KnowledgeNoteModal,
   type NoteDestinationSeed,
   RecordPickerModal,
+  SetupReviewOutdatedError,
   StringPickerModal,
   TextPromptModal,
   TopicEditorModal,
@@ -2720,13 +2721,29 @@ export class EntVaultCommandCenterView extends ItemView {
       return;
     }
     const ownsBase = this.createOpenedBaseGuard();
-    new WorkspaceSetupModal(this.app, this.plugin.data.settings, async (value) => {
+    new WorkspaceSetupModal(this.app, this.plugin.data.settings, async (value, reviewed) => {
       if (!ownsBase()) throw new Error("Setup was not saved. Wait for sync to finish; if the knowledge base changed, reopen setup.");
       this.plugin.assertDataWritable();
       // A settled no-op Sync reload preserves this form's ownership while
       // replacing PluginData. Apply its draft to the current settings object.
       const settings = this.plugin.data.settings;
       if (settings.workspaceMode !== "generic") throw new Error("Setup is only for generic knowledge bases.");
+      // The Inbox effects the user reviewed must still be the real effects.
+      // The count is the existing orphan-count helper, read again at commit.
+      // (Main hook pending: this recheck moves into the guarded required-Undo
+      // settings transaction; the contract is unchanged.)
+      const cleanInbox = (folder: string): string => folder.trim().replace(/^\/+|\/+$/gu, "");
+      const nextInbox = cleanInbox(value.proposalFolder);
+      const currentInbox = cleanInbox(settings.proposalFolder);
+      if (reviewed) {
+        if (reviewed.previousFolder !== currentInbox
+          || reviewed.nextFolder !== nextInbox
+          || reviewed.affectedCount !== this.plugin.countOrphanedByProposalFolderChange(nextInbox)) {
+          throw new SetupReviewOutdatedError();
+        }
+      } else if (nextInbox !== currentInbox) {
+        throw new SetupReviewOutdatedError("The Inbox folder changed while setup was open. Review the change before applying it.");
+      }
       for (const folder of [value.primaryFolder, value.defaultNoteFolder, value.templatesFolder, value.proposalFolder, value.exportsFolder]) {
         const error = validateWritableFolderPath(folder, this.app.vault.configDir);
         if (error) throw new Error(error);
@@ -2743,6 +2760,10 @@ export class EntVaultCommandCenterView extends ItemView {
       await this.plugin.refreshViews();
       if (!ownsBase()) return;
       new Notice(`${settings.workspaceName} is ready. Next, choose Add → Add existing note to Index to bring in your notes. No existing note was modified.`, 10000);
+    }, {
+      // Live reads: a settled no-op Sync reload replaces the settings object.
+      currentInboxFolder: () => this.plugin.data.settings.proposalFolder,
+      countInboxOnlyAffected: (nextFolder) => this.plugin.countOrphanedByProposalFolderChange(nextFolder),
     }).open();
   }
 

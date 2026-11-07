@@ -1027,19 +1027,73 @@ export function missingSetupFolderHint(
   folder: string,
   consequence: string,
   folderExists: (path: string) => boolean,
+  kind: "legacy" | "storage" | "grouping" = "legacy",
 ): string | null {
   const clean = folder.trim().replace(/^\/+|\/+$/g, "");
   if (!clean || folderExists(clean)) return null;
-  return `“${clean}” does not exist yet — it will be created empty. ${consequence.charAt(0).toUpperCase()}${consequence.slice(1)}.`;
+  const effect = `${consequence.charAt(0).toUpperCase()}${consequence.slice(1)}.`;
+  // Setup never creates folders. A real save destination is created when a
+  // note is saved into it; a grouping-only path is never created at all.
+  if (kind === "storage") return `“${clean}” does not exist yet. It is created when a note is saved there. ${effect}`;
+  if (kind === "grouping") return `“${clean}” does not exist yet. It is not created for you, and grouping by this folder stays empty until it exists. ${effect}`;
+  return `“${clean}” does not exist yet — it will be created empty. ${effect}`;
 }
+
+/**
+ * Hoisted for the same sentence-case reason as the home-folder text. One
+ * description serves setup, Settings and the New knowledge base form so the
+ * physical location and the separate placement choice are worded identically.
+ */
+export const DEFAULT_NOTE_FOLDER_DESCRIPTION = "Saved location for notes created into the Index or a Collection. The Inbox destination saves into the Inbox folder instead, and a Library can use its own folder. Index, Collection and Library placement is chosen separately and is never decided by this folder. A missing folder is created when a note is saved there.";
+
+export const SYNC_FIRST_HINT = "Already using this knowledge base on another device? Let Sync finish before setting it up here.";
+
+/** What the reviewed Inbox change will do, as the user saw it. Handed back to the commit so it can refuse stale effects. */
+export interface SetupInboxEffects {
+  previousFolder: string;
+  nextFolder: string;
+  /** Inbox-only notes that would leave every view, from countOrphanedByProposalFolderChange. */
+  affectedCount: number;
+}
+
+/** The two live facts the setup review needs. The count must be the existing orphan-count helper. */
+export interface SetupInboxReviewSource {
+  currentInboxFolder(): string;
+  countInboxOnlyAffected(nextFolder: string): number;
+}
+
+/** Thrown by the commit when the reviewed Inbox effects no longer match; the wizard re-reviews instead of saving. */
+export class SetupReviewOutdatedError extends Error {
+  constructor(message = "Your notes changed while you were reviewing. Review the updated effects before applying.") {
+    super(message);
+    this.name = "SetupReviewOutdatedError";
+  }
+}
+
+/** Hoisted: obsidianmd/ui/sentence-case would lower-case the plugin's proper name "Inbox" at a UI call site. */
+const SETUP_REVIEW_TITLE = "Review the Inbox change";
+const SETUP_REVIEW_APPLY_LABEL = "Apply Inbox change and finish setup";
+
+export type SetupSubmitHandler = (value: WorkspaceSetupValue, reviewed: SetupInboxEffects | null) => void | Promise<void>;
+
+const cleanSetupFolder = (folder: string): string => folder.trim().replace(/^\/+|\/+$/gu, "");
 
 export class WorkspaceSetupModal extends Modal {
   private value: WorkspaceSetupValue;
   private errorEl: HTMLElement | null = null;
   private advancedEl: HTMLDetailsElement | null = null;
   private advancedOpen = false;
+  /** Effects the user is reviewing, or null while the form is shown. Cancel/Back/Close never write. */
+  private pendingReview: SetupInboxEffects | null = null;
+  private reviewNotice = "";
+  private committing = false;
 
-  constructor(app: App, initial: PluginSettings, private readonly onSubmit: (value: WorkspaceSetupValue) => void | Promise<void>) {
+  constructor(
+    app: App,
+    initial: PluginSettings,
+    private readonly onSubmit: SetupSubmitHandler,
+    private readonly review?: SetupInboxReviewSource,
+  ) {
     super(app);
     this.value = {
       // The product name is only a placeholder default; ask for the user's own name.
@@ -1067,9 +1121,16 @@ export class WorkspaceSetupModal extends Modal {
     this.contentEl.empty();
     this.modalEl.addClass("ent-cc-topic-editor-modal");
     this.contentEl.addClass("ent-cc-modal", "ent-cc-topic-editor");
+    if (this.pendingReview) {
+      this.renderInboxReview(this.pendingReview);
+      return;
+    }
     this.titleEl.setText("Set up your knowledge base");
     this.contentEl.createEl("p", { cls: "ent-cc-modal-lead", text: "Nothing in your vault is moved or changed. Your index starts empty; after setup you choose which notes to add." });
     this.contentEl.createEl("p", { text: "Start with a name. After setup, add existing notes and choose their destination. You can customize these options later." });
+    // Missing primary data is not evidence that Sync is incomplete, so this
+    // hint is unconditional text, never a detected state.
+    this.contentEl.createEl("p", { cls: "ent-cc-muted", text: SYNC_FIRST_HINT });
     let fieldParent = this.contentEl;
     const textField = (name: string, description: string, key: Exclude<keyof WorkspaceSetupValue, "defaultNewNoteMode">, placeholder: string): void => {
       new Setting(fieldParent).setName(name).setDesc(description).addText((text) => text
@@ -1113,10 +1174,11 @@ export class WorkspaceSetupModal extends Modal {
       key: "primaryFolder" | "proposalFolder",
       placeholder: string,
       consequence: string,
+      kind: "storage" | "grouping",
     ): void => {
       const row = new Setting(advanced).setName(name);
       const updateHint = (value: string): void => {
-        row.setDesc(missingSetupFolderHint(value, consequence, folderExists) ?? description);
+        row.setDesc(missingSetupFolderHint(value, consequence, folderExists, kind) ?? description);
       };
       row.addText((text) => text
         .setPlaceholder(placeholder)
@@ -1127,10 +1189,10 @@ export class WorkspaceSetupModal extends Modal {
         }));
       updateHint(this.value[key]);
     };
-    folderField("Folder grouping root", "Optional path used only as a folder-based grouping fallback. It never adds notes to the Index.", "primaryFolder", "Knowledge Base", "folder-based grouping will remain empty");
-    folderField("Inbox folder", "Notes here appear in the separate Inbox section.", "proposalFolder", "Inbox", "existing notes will not appear in the Inbox");
+    folderField("Folder grouping root", "Optional path used only as a folder-based grouping fallback. It never adds notes to the Index.", "primaryFolder", "Knowledge Base", "folder-based grouping will remain empty", "grouping");
+    folderField("Inbox folder", "Notes here appear in the separate Inbox section. Changing it never moves a note.", "proposalFolder", "Inbox", "existing notes will not appear in the Inbox", "storage");
     textField("Inbox name", "Name shown on the Inbox tab.", "inboxLabel", "Inbox");
-    textField("Default new-note folder", "Initial storage destination when creating a note. Saving there does not add the note to the Index.", "defaultNoteFolder", "Knowledge Base");
+    textField("Default new-note folder", DEFAULT_NOTE_FOLDER_DESCRIPTION, "defaultNoteFolder", "Knowledge Base");
     textField("ID property", "Optional property shown beside each indexed note.", "idProperty", "id");
     textField("Group property", "Falls back to the first subfolder when absent.", "groupProperty", "category");
     textField("Parent property", "Optional wikilink/title used for default nesting.", "parentProperty", "parent");
@@ -1198,12 +1260,74 @@ export class WorkspaceSetupModal extends Modal {
       showError("Choose a default template, or use empty note as the default.");
       return;
     }
+    // A changed Inbox is reviewed first. Nothing is written until the user
+    // confirms the review; the draft stays in this.value throughout.
+    const effects = this.reviewedInboxEffects();
+    if (effects) {
+      this.pendingReview = effects;
+      this.reviewNotice = "";
+      this.onOpen();
+      return;
+    }
+    await this.commit(null, showError);
+  }
+
+  /** Old/new Inbox and the existing Inbox-only count, or null when the Inbox is unchanged or no review source exists. */
+  private reviewedInboxEffects(): SetupInboxEffects | null {
+    if (!this.review) return null;
+    const previousFolder = cleanSetupFolder(this.review.currentInboxFolder());
+    const nextFolder = cleanSetupFolder(this.value.proposalFolder);
+    if (previousFolder === nextFolder) return null;
+    return { previousFolder, nextFolder, affectedCount: this.review.countInboxOnlyAffected(nextFolder) };
+  }
+
+  private async commit(reviewed: SetupInboxEffects | null, showError: (message: string) => void): Promise<void> {
+    if (this.committing) return;
+    this.committing = true;
     try {
-      await this.onSubmit({ ...this.value });
+      await this.onSubmit({ ...this.value }, reviewed);
       this.close();
     } catch (error) {
-      showError(errorMessage(error));
+      if (error instanceof SetupReviewOutdatedError) {
+        // The reviewed effects no longer hold. Show the current ones and
+        // require a fresh confirmation; never apply different effects.
+        this.pendingReview = this.reviewedInboxEffects();
+        this.reviewNotice = error.message;
+        this.onOpen();
+        if (!this.pendingReview) this.errorEl?.setText(error.message);
+      } else {
+        showError(errorMessage(error));
+      }
+    } finally {
+      this.committing = false;
     }
+  }
+
+  private renderInboxReview(effects: SetupInboxEffects): void {
+    const shown = (name: string): string => name || "the vault root";
+    this.titleEl.setText(SETUP_REVIEW_TITLE);
+    this.contentEl.createEl("p", { cls: "ent-cc-modal-lead", text: "Nothing is saved yet. No note will be moved, renamed or changed." });
+    if (this.reviewNotice) this.contentEl.createDiv({ cls: "ent-cc-form-error", text: this.reviewNotice, attr: { role: "status" } });
+    this.contentEl.createEl("p", { text: `Current Inbox folder: ${shown(effects.previousFolder)}` });
+    this.contentEl.createEl("p", { text: `New Inbox folder: ${shown(effects.nextFolder)}` });
+    const count = effects.affectedCount;
+    this.contentEl.createEl("p", {
+      attr: { "data-role": "inbox-impact" },
+      text: count === 0
+        ? "0 Inbox-only notes are affected. Notes already in your Index or a Collection stay there."
+        : `${count} Inbox-only ${count === 1 ? "note" : "notes"} would no longer appear anywhere in this plugin. They are not in your Index or a Collection. The files stay in the vault; Add existing note to Index brings any of them back.`,
+    });
+    this.errorEl = this.contentEl.createDiv({ cls: "ent-cc-form-error", attr: { role: "alert" } });
+    const showError = (message: string): void => { this.errorEl?.setText(message); };
+    new Setting(this.contentEl)
+      .addButton((button) => button.setButtonText("Back to edit").onClick(() => {
+        // The draft lives in this.value, so going back loses nothing.
+        this.pendingReview = null;
+        this.reviewNotice = "";
+        this.onOpen();
+      }))
+      .addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()))
+      .addButton((button) => button.setButtonText(SETUP_REVIEW_APPLY_LABEL).setCta().onClick(() => this.commit(effects, showError)));
   }
 }
 
