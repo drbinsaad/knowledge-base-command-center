@@ -378,6 +378,215 @@ test("the taxonomy filter keeps the caret where the user is typing", () => {
   assert.deepEqual(restores, [[5, 5]], "the caret must not jump to the end of the filter");
 });
 
+interface CaretInput extends FakeElement {
+  selectionStart: number | null;
+  selectionEnd: number | null;
+}
+
+function openTaxonomyModalWith(count: number): { modal: TaxonomyHealthModal & { contentEl: HTMLElement }; dom: ReturnType<typeof createFakeDom> } {
+  const findings: TaxonomyHealthFinding[] = Array.from({ length: count }, (_, index) => ({
+    id: `f${index}`,
+    kind: "duplicate-name",
+    severity: "warning",
+    title: index < 3 ? `Beta finding ${index}` : `Alpha finding ${index}`,
+    detail: "Detail",
+    scope: "Index",
+  }));
+  const plugin = {
+    app: {},
+    getActiveKnowledgeBaseId: () => "base",
+    getDataEpoch: () => 1,
+    getTaxonomyHealthFindings: () => findings,
+    isDataReadOnly: () => false,
+  };
+  const dom = createFakeDom();
+  const modal = new TaxonomyHealthModal(plugin as never) as TaxonomyHealthModal & {
+    modalEl: HTMLElement;
+    contentEl: HTMLElement;
+    titleEl: HTMLElement;
+  };
+  modal.modalEl = asHtmlElement(dom.document.body.createDiv());
+  modal.contentEl = asHtmlElement(dom.document.body.createDiv());
+  modal.titleEl = asHtmlElement(dom.document.body.createEl("h2"));
+  modal.onOpen();
+  return { modal, dom };
+}
+
+const taxonomySearch = (modal: { contentEl: HTMLElement }): CaretInput =>
+  modal.contentEl.querySelector('.ent-cc-taxonomy-toolbar input[type="search"]') as unknown as CaretInput;
+const taxonomyRows = (modal: { contentEl: HTMLElement }): number =>
+  modal.contentEl.querySelectorAll(".ent-cc-taxonomy-finding").length;
+
+test("taxonomy filter keeps the composing input mounted and applies the final query once", () => {
+  const { modal } = openTaxonomyModalWith(10);
+  withCaretSupport(() => {
+    const search = taxonomySearch(modal);
+    const list = modal.contentEl.querySelector(".ent-cc-taxonomy-list");
+    assert.equal(taxonomyRows(modal), 10);
+
+    search.dispatch("compositionstart");
+    search.value = "b";
+    search.dispatch("input");
+    // A pause while the candidate window is open must not re-render anything.
+    search.value = "be";
+    search.dispatch("input");
+    assert.equal(taxonomySearch(modal), search, "the composing input node must survive");
+    assert.equal(modal.contentEl.querySelector(".ent-cc-taxonomy-list"), list, "the query must not be applied mid-composition");
+    assert.equal(taxonomyRows(modal), 10);
+
+    search.value = "beta";
+    search.dispatch("compositionend");
+    assert.equal(taxonomySearch(modal), search);
+    assert.equal(taxonomyRows(modal), 3, "the committed query filters the list");
+    const applied = modal.contentEl.querySelector(".ent-cc-taxonomy-list");
+
+    // Some engines fire a trailing input after compositionend; same value, no second pass.
+    search.dispatch("input");
+    assert.equal(modal.contentEl.querySelector(".ent-cc-taxonomy-list"), applied, "the final query is applied exactly once");
+  });
+});
+
+test("taxonomy filter without IME still filters on each input", () => {
+  const { modal } = openTaxonomyModalWith(10);
+  withCaretSupport(() => {
+    const search = taxonomySearch(modal);
+    search.value = "beta";
+    search.dispatch("input");
+    assert.equal(taxonomyRows(modal), 3);
+    search.value = "alpha";
+    search.dispatch("input");
+    assert.equal(taxonomyRows(modal), 7);
+  });
+});
+
+test("taxonomy Recheck and Show more keep the filter input, its caret and keyboard focus", () => {
+  const { modal, dom } = openTaxonomyModalWith(230);
+  withCaretSupport(() => {
+    const search = taxonomySearch(modal);
+    search.value = "finding";
+    search.dispatch("input");
+    search.selectionStart = 2;
+    search.selectionEnd = 5;
+    search.focus();
+
+    const recheck = modal.contentEl.querySelectorAll(".ent-cc-taxonomy-toolbar button")[0] as unknown as FakeElement;
+    assert.match(recheck.textContent, /Recheck/u);
+    recheck.focus();
+    recheck.click();
+    assert.equal(taxonomySearch(modal), search, "Recheck must not replace the filter input");
+    assert.equal(search.selectionStart, 2);
+    assert.equal(search.selectionEnd, 5);
+    assert.ok(dom.document.activeElement && modal.contentEl.contains(dom.document.activeElement), "focus stays inside the dialog after Recheck");
+    assert.equal(dom.document.activeElement, recheck);
+
+    const more = modal.contentEl.querySelector(".ent-cc-taxonomy-more") as unknown as FakeElement;
+    assert.ok(more);
+    more.focus();
+    more.click();
+    assert.equal(taxonomySearch(modal), search, "Show more must not replace the filter input");
+    assert.equal(taxonomyRows(modal), 230);
+    assert.ok(dom.document.activeElement && modal.contentEl.contains(dom.document.activeElement), "keyboard focus must not be dropped by Show more");
+  });
+});
+
+test("index manager search holds the composing input and applies the final query once", () => {
+  const notes = [
+    { path: "A.md", title: "Alpha", meta: "A.md" },
+    { path: "B.md", title: "Beta", meta: "B.md" },
+  ];
+  const plugin = {
+    data: { settings: { groupLabel: "Group", indexLabel: "Index", itemSingular: "note", itemPlural: "notes" }, manualIndexPaths: [], excludedIndexPaths: [] },
+    isClinicalMode: () => false,
+    canVisuallyMoveAcrossGroups: () => true,
+  };
+  const dom = createFakeDom();
+  const manager = Object.create(IndexManagerModal.prototype) as {
+    app: unknown;
+    plugin: typeof plugin;
+    contentEl: HTMLElement;
+    tab: string;
+    query: string;
+    selected: Set<string>;
+    managerOpen: boolean;
+    searchTimer: number | null;
+    pendingTimers: Set<number>;
+    selectionButtons: unknown[];
+    guardOpenedBase(): boolean;
+    renderSnapshot(): void;
+    renderNoteManager(notes: Array<{ path: string; title: string; meta: string }>, availableCount: () => number): void;
+  };
+  manager.app = { vault: { getAbstractFileByPath: () => null } };
+  manager.plugin = plugin;
+  manager.contentEl = asHtmlElement(dom.document.body.createDiv());
+  manager.tab = "indexed";
+  manager.query = "";
+  manager.selected = new Set(["A.md"]);
+  manager.managerOpen = true;
+  manager.searchTimer = null;
+  manager.pendingTimers = new Set();
+  manager.selectionButtons = [];
+  manager.guardOpenedBase = () => true;
+  let snapshots = 0;
+  manager.renderSnapshot = () => {
+    snapshots += 1;
+    manager.contentEl.empty();
+    manager.renderNoteManager(notes, () => 0);
+  };
+
+  const queued: Array<() => void> = [];
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      activeWindow: {
+        setTimeout: (callback: () => void) => { queued.push(callback); return queued.length; },
+        clearTimeout: () => undefined,
+      },
+    },
+  });
+  const flush = (): void => { while (queued.length) queued.shift()?.(); };
+  const searchBox = (): CaretInput => manager.contentEl.querySelector('.ent-cc-manager-toolbar input[type="search"]') as unknown as CaretInput;
+  try {
+    withCaretSupport((restores) => {
+      manager.renderNoteManager(notes, () => 0);
+      const search = searchBox();
+      search.focus();
+
+      search.dispatch("compositionstart");
+      search.value = "b";
+      search.dispatch("input");
+      search.value = "be";
+      search.dispatch("input");
+      flush();
+      assert.equal(searchBox(), search, "the composing input must not be replaced, even after the debounce delay");
+      assert.equal(snapshots, 0, "nothing is applied mid-composition");
+      assert.deepEqual([...manager.selected], ["A.md"], "selection is untouched while the query is still unapplied");
+
+      search.value = "beta";
+      search.selectionStart = 1;
+      search.selectionEnd = 3;
+      search.dispatch("compositionend");
+      flush();
+      assert.equal(snapshots, 1, "the final query is applied exactly once");
+      assert.equal(manager.query, "beta");
+      assert.equal(manager.selected.size, 0, "selection safety: a new query drops hidden notes");
+      const next = searchBox();
+      assert.equal(dom.document.activeElement, next, "keyboard focus survives the refresh");
+      assert.deepEqual(restores.at(-1), [1, 3], "the mid-string selection is restored, not collapsed");
+
+      // Control: plain typing without IME still filters after the debounce.
+      next.value = "alpha";
+      next.dispatch("input");
+      flush();
+      assert.equal(snapshots, 2);
+      assert.equal(manager.query, "alpha");
+    });
+  } finally {
+    if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
 test("knowledge-base manager actions refuse to act on rows a synced replacement invalidated", () => {
   Notice.messages.length = 0;
   let dataEpoch = 1;

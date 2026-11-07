@@ -12,6 +12,7 @@ import {
   resetCurriculumVisualPath,
   VaultRecord,
 } from "./model";
+import { guardComposition } from "./composition-guard";
 import { linkedSourceLabel } from "./membership-explanation";
 import {
   clearGuardedTimer,
@@ -436,8 +437,9 @@ export class IndexManagerModal extends Modal {
     const toolbar = parent.createDiv({ cls: "ent-cc-manager-toolbar" });
     const search = toolbar.createEl("input", { type: "search", placeholder: "Search note title or path…", attr: { "aria-label": "Search index manager notes" } });
     search.value = this.query;
-    search.addEventListener("input", () => {
-      const cursor = search.selectionStart ?? search.value.length;
+    const applyQuery = (): void => {
+      const start = search.selectionStart ?? search.value.length;
+      const end = search.selectionEnd ?? start;
       if (search.value !== this.query) {
         // A new query shows a different set of rows; keeping hidden notes
         // selected would let a bulk action reach notes the user cannot see.
@@ -448,15 +450,24 @@ export class IndexManagerModal extends Modal {
       if (this.searchTimer !== null) this.clearTimer(this.searchTimer);
       this.searchTimer = this.setGuardedTimer(() => {
         this.searchTimer = null;
+        // A composition may have opened after this keystroke was queued; the
+        // render would replace the composing input. compositionend re-applies.
+        if (composition.isComposing()) return;
         // Filtering the memoized snapshot: a keystroke must never trigger the
         // full vault scan that building the candidate list requires.
         this.renderSnapshot();
         this.setGuardedTimer(() => {
           const next = this.contentEl.querySelector<HTMLInputElement>('.ent-cc-manager-toolbar input[type="search"]');
           next?.focus();
-          next?.setSelectionRange(cursor, cursor);
+          next?.setSelectionRange(start, end);
         }, 0);
       }, 150);
+    };
+    const composition = guardComposition(search, applyQuery);
+    search.addEventListener("input", (event) => {
+      // Mid-composition the value is provisional; wait for compositionend.
+      if (composition.isComposing(event)) return;
+      applyQuery();
     });
     const filtered = this.filterNotes(notes);
     // One predicate owns both the label and the action: a selection that also
