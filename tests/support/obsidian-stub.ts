@@ -64,18 +64,24 @@ export interface TestFileOptions {
 export function createTestFile(path: string, options: TestFileOptions = {}): TFile {
   const file = new TFile(path);
   file.stat = { ...file.stat, ...options.stat };
-  attachToParent(file, options.parent ?? null);
+  setTestParent(file, options.parent ?? null);
   return file;
 }
 
 export function createTestFolder(path: string, options: { parent?: TFolder | null; children?: TAbstractFile[] } = {}): TFolder {
   const folder = new TFolder(path);
-  for (const child of options.children ?? []) attachToParent(child, folder);
-  attachToParent(folder, options.parent ?? null);
+  for (const child of options.children ?? []) setTestParent(child, folder);
+  setTestParent(folder, options.parent ?? null);
   return folder;
 }
 
-function attachToParent(child: TAbstractFile, parent: TFolder | null): void {
+/** The one place that changes a node's parent: detaches from the old folder, attaches once to the new one. */
+export function setTestParent(child: TAbstractFile, parent: TFolder | null): void {
+  const previous = child.parent;
+  if (previous && previous !== parent) {
+    const index = previous.children.indexOf(child);
+    if (index >= 0) previous.children.splice(index, 1);
+  }
   child.parent = parent;
   if (parent && !parent.children.includes(child)) parent.children.push(child);
 }

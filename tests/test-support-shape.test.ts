@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TFile, TFolder, TestHarnessError, createTestFile, createTestFolder } from "./support/obsidian-stub.ts";
+import { TFile, TFolder, TestHarnessError, createTestFile, createTestFolder, setTestParent } from "./support/obsidian-stub.ts";
 
 test("a fake file derives name, basename, extension and carries full stat", () => {
   const file = new TFile("Books/Deep/My.book.md");
@@ -38,8 +38,36 @@ test("the factory sets parent, children and stat consistently", () => {
   assert.deepEqual(books.children, [file]);
   assert.deepEqual(root.children, [books]);
   assert.deepEqual(file.stat, { ctime: 0, mtime: 5, size: 12 });
-  assert.equal(createTestFolder("X", { children: [file] }).children[0], file);
-  assert.equal(file.parent?.path, "X");
+  const other = createTestFolder("X", { children: [file] });
+  assert.equal(other.children[0], file);
+  assert.equal(file.parent, other);
+  assert.deepEqual(books.children, [], "reparenting removes the node from the old folder");
+});
+
+test("reparenting moves a node between folders without duplicates", () => {
+  const folderA = createTestFolder("A");
+  const folderB = createTestFolder("B");
+  const file = createTestFile("A/Note.md", { parent: folderA });
+  assert.deepEqual(folderA.children, [file]);
+
+  setTestParent(file, folderB);
+  assert.deepEqual(folderA.children, []);
+  assert.deepEqual(folderB.children, [file]);
+  assert.equal(file.parent, folderB);
+  assert.equal(file.path, "A/Note.md");
+  assert.equal(file.name, "Note.md");
+});
+
+test("reparenting to the same parent adds no duplicate and to null detaches", () => {
+  const folder = createTestFolder("A");
+  const file = createTestFile("A/Note.md", { parent: folder });
+  setTestParent(file, folder);
+  assert.deepEqual(folder.children, [file]);
+  assert.equal(file.parent, folder);
+  setTestParent(file, null);
+  assert.deepEqual(folder.children, []);
+  assert.equal(file.parent, null);
+  assert.equal(file.path, "A/Note.md");
 });
 
 test("an unsupported host capability throws a named harness error", () => {
