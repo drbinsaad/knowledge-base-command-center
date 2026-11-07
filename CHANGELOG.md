@@ -19,6 +19,9 @@
 
 ### Everyday interaction
 
+- Folder organization menus defer note enumeration until the action is chosen and reject selections renamed, removed or replaced in the meantime. Backlinks update the changed sources without rebuilding the whole graph during ordinary link resolution, with a refreshed view when a full rebuild is needed.
+- Edits unrelated to Generic search results no longer restart the search. Related note changes and clinical proposal discovery still invalidate results; an empty unresolved-placeholder queue avoids building unused note candidates.
+
 - Index removal and placement-reset messages explain when custom placement and sibling order are discarded, and that adding a note back does not recreate that arrangement. Undo commands distinguish an Organizer batch across affected bases, organization in the current base, and the latest Quick append.
 
 - Attachment lists distinguish files with the same name and describe unresolved references without assuming a Sync failure. Expanded attachment details and relevant focus survive harmless refreshes.
