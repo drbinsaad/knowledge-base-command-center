@@ -70,6 +70,7 @@ export type RecoveryCopyRejectReason =
   | "future-outer-version"
   | "future-inner-version"
   | "too-many-bases"
+  | "incomplete-base"
   | "damaged-store";
 
 export type RecoveryCopySourceKind = "raw-store" | "conflict-rescue";
@@ -189,6 +190,7 @@ const MESSAGES: Record<RecoveryCopyRejectReason, string> = {
   "future-outer-version": "This copy was written by a newer version of the plugin. It is kept untouched; update the plugin before using it.",
   "future-inner-version": "This copy contains data from a newer version of the plugin. It is kept untouched; update the plugin before using it.",
   "too-many-bases": "This copy lists more knowledge bases than the plugin supports. It is kept untouched but cannot be restored here.",
+  "incomplete-base": "A knowledge base in this copy is missing required data. It is kept untouched but cannot be restored here.",
   "damaged-store": "This copy looks like a plugin store but is damaged. It is kept untouched but cannot be restored here.",
 };
 
@@ -353,6 +355,32 @@ function readVersion(value: unknown): number | null {
   return Number.isInteger(version) && version > 0 ? version : null;
 }
 
+/**
+ * Recovery-specific completeness rule for one raw base body, by its declared
+ * version (migrateStore is intentionally more lenient and is not changed):
+ *  - an explicit integer version from 2 up to the current data version;
+ *  - arrays: collections, pinnedPaths, savedViews;
+ *  - settings: a non-empty plain record;
+ *  - from version 11 (the oldest store envelope) also: array nextStudyPaths,
+ *    plain records portableIndex and collapsed, string selectedPath, and
+ *    string settings.workspaceMode.
+ * Undo/Redo and named snapshots are not required (they are optional or local).
+ */
+function baseDataIsComplete(data: Record<string, unknown>): boolean {
+  const version = readVersion(data.version);
+  if (version === null || version < 2 || version > DATA_VERSION) return false;
+  for (const key of ["collections", "pinnedPaths", "savedViews"]) {
+    if (!Array.isArray(data[key])) return false;
+  }
+  if (!isRecord(data.settings) || Object.keys(data.settings).length === 0) return false;
+  if (version >= MIN_RECOGNIZED_STORE_VERSION) {
+    if (!Array.isArray(data.nextStudyPaths)) return false;
+    if (!isRecord(data.portableIndex) || !isRecord(data.collapsed)) return false;
+    if (typeof data.selectedPath !== "string" || typeof data.settings.workspaceMode !== "string") return false;
+  }
+  return true;
+}
+
 function trustworthyDate(value: unknown, now: number): RecoveryCopyPreview["date"] {
   if (typeof value !== "string" || value.length > 64) return null;
   const ms = Date.parse(value);
@@ -455,6 +483,13 @@ export function parseRecoveryCopy(input: ParseRecoveryCopyInput): RecoveryCopyPa
     if (!isRecord(rawBase) || !isRecord(rawBase.data)) continue; // migrateStore reports the damage
     const dataVersion = readVersion(rawBase.data.version);
     if (dataVersion !== null && dataVersion > DATA_VERSION) return rejectWith("future-inner-version", sourceToken);
+  }
+  // The general loader deliberately fills defaults for minimal bodies ({} or
+  // {settings:{}}). A recovery copy must never be presented as restorable on
+  // that basis, so completeness is checked here, before migrateStore.
+  for (const rawBase of store.bases as unknown[]) {
+    if (!isRecord(rawBase) || !isRecord(rawBase.data)) continue;
+    if (!baseDataIsComplete(rawBase.data)) return rejectWith("incomplete-base", sourceToken);
   }
   if (!isRecognizedPluginStore(store)) return rejectWith("unrecognized", sourceToken);
 

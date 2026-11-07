@@ -464,3 +464,47 @@ test("a created entry matches the store entry shape used by createKnowledgeBaseE
   assert.equal(result.intent.entry.createdAt, NOW);
   assert.equal(result.intent.entry.updatedAt, NOW);
 });
+
+function withBaseData(store: PluginStore, data: unknown): unknown {
+  const raw = cloneJsonValue(store) as unknown as { bases: Array<{ data: unknown }> };
+  raw.bases[0].data = data;
+  return raw;
+}
+
+test("incomplete base payloads are preserved but not restorable, never defaulted", () => {
+  for (const data of [{}, { settings: {} }, { version: 2 }, { version: DATA_VERSION }, { version: DATA_VERSION, settings: {} }]) {
+    const raw = withBaseData(makeStore(), data);
+    expectRejected(parse(JSON.stringify(raw)), "incomplete-base");
+    expectRejected(parse(wrap(raw)), "incomplete-base");
+  }
+  // A current body missing one required field, and one with no explicit version.
+  const missing = cloneJsonValue(makeStore().bases[0].data) as unknown as Record<string, unknown>;
+  delete missing.pinnedPaths;
+  expectRejected(parse(JSON.stringify(withBaseData(makeStore(), missing))), "incomplete-base");
+  const noVersion = cloneJsonValue(makeStore().bases[0].data) as unknown as Record<string, unknown>;
+  delete noVersion.version;
+  expectRejected(parse(JSON.stringify(withBaseData(makeStore(), noVersion))), "incomplete-base");
+  // Future data versions still report the more specific reason first.
+  expectRejected(parse(JSON.stringify(withBaseData(makeStore(), { version: DATA_VERSION + 1 }))), "future-inner-version");
+});
+
+test("complete current and supported legacy payloads stay restorable", () => {
+  expectPreview(parse(JSON.stringify(makeStore())));
+  expectPreview(parse(wrap(makeStore())));
+  expectPreview(parse(JSON.stringify(makeEntStore())));
+  expectPreview(parse(wrap(makeEntStore())));
+  // Empty-but-complete current Generic base.
+  expectPreview(parse(JSON.stringify(createDefaultStore(undefined, NOW - 1000, VAULT))));
+  // Older complete envelopes: store versions 11-16 holding complete bodies.
+  for (const version of [11, 12, 13, 14, 15, 16]) {
+    const source = cloneJsonValue(makeStore()) as unknown as { version: number; bases: Array<{ data: { version: number } }> };
+    source.version = version;
+    source.bases[0].data.version = Math.min(version + 1, DATA_VERSION);
+    expectPreview(parse(JSON.stringify(source)));
+    expectPreview(parse(wrap(source)));
+  }
+  // A complete older body (version 5) carries the long-stable core fields.
+  const legacy = cloneJsonValue(makeStore().bases[0].data) as unknown as Record<string, unknown>;
+  legacy.version = 5;
+  expectPreview(parse(JSON.stringify(withBaseData(makeStore(), legacy))));
+});
