@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Menu, Modal, Notice, Platform, Setting, TFile, TFolder } from "obsidian";
+import type { SettingGroup } from "obsidian";
+import { Menu, Modal, Notice, Platform, Setting, TFile, TFolder, TestHarnessError } from "./support/obsidian-stub.ts";
 import { AddActionModal, calculateModalViewportLayout, CollectionPickerModal, type CollectionTarget, ConfirmModal, IndexGroupModal, KnowledgeNoteModal, localDateStamp, missingSetupFolderHint, nestSetupFoldersUnderHome, RecordPickerModal, StringPickerModal, TextPromptModal, TopicEditorModal, VaultFilePickerModal, WorkspaceSetupModal, type WorkspaceSetupValue } from "../src/modals.ts";
 import {
   canRelinkPortableRecord,
@@ -761,19 +762,53 @@ test("Add existing routes a folder-only or Library note through the Index placem
   assert.deepEqual(assignments, [{ path: libraryNote.path, kind: "topic", group: "Research" }]);
 });
 
+/**
+ * Standalone private seam. Seam members are declared with types derived from the
+ * production class (`Class["member"]`) so renames fail to compile, and the public
+ * surface is projected with Omit: intersecting a class with redeclared private
+ * members collapses the whole type to never.
+ */
+type Seam<Host, Members> = Omit<Host, keyof Members> & Members;
+
+/** Inverse of asHtmlElement: the same object seen through its fake-DOM handle. */
+function fakeOf(element: HTMLElement): FakeElement {
+  return element as unknown as FakeElement;
+}
+
+// Chainable stand-ins for Obsidian's Setting components. Named interfaces avoid
+// self-referential `typeof` inference; only the members a test exercises exist.
+interface FakeTextComponent<Input> {
+  inputEl: Input;
+  setPlaceholder(): FakeTextComponent<Input>;
+  setValue(value: string): FakeTextComponent<Input>;
+  setDisabled(): FakeTextComponent<Input>;
+  onChange(callback: (next: string) => void | Promise<void>): FakeTextComponent<Input>;
+}
+interface FakeButtonComponent {
+  setButtonText(): FakeButtonComponent;
+  setDisabled(): FakeButtonComponent;
+  onClick(callback: () => void): FakeButtonComponent;
+}
+
+// Production Settings render callbacks use only the Setting; the group argument
+// is a loud placeholder so any future use fails visibly.
+const noSettingGroup = new Proxy({}, {
+  get(): never { throw new TestHarnessError("SettingGroup is not supported by this view test"); },
+}) as SettingGroup;
+
 test("record and vault-file pickers use the command center's normalized multilingual search", () => {
   const records = [
     record("Knowledge Base/Ménière’s disease.md", "Ménière’s disease"),
     record("Knowledge Base/مدرسة الصوت.md", "مدرسة الصوت"),
   ];
-  const recordPicker = Object.create(RecordPickerModal.prototype) as RecordPickerModal & { records: VaultRecord[] };
+  const recordPicker = Object.create(RecordPickerModal.prototype) as Seam<RecordPickerModal, { records: VaultRecord[] }>;
   recordPicker.records = records;
   assert.equal(recordPicker.getSuggestions("").length, records.length, "opening a picker still lists every item");
   assert.deepEqual(recordPicker.getSuggestions("menieres").map((match) => match.item.title), ["Ménière’s disease"]);
   assert.deepEqual(recordPicker.getSuggestions("مدرسه").map((match) => match.item.title), ["مدرسة الصوت"]);
 
   const files = [new TFile("Reference/ٱلحنجرة.md")];
-  const filePicker = Object.create(VaultFilePickerModal.prototype) as VaultFilePickerModal & { files: TFile[] };
+  const filePicker = Object.create(VaultFilePickerModal.prototype) as Seam<VaultFilePickerModal, { files: TFile[] }>;
   filePicker.files = files;
   assert.deepEqual(filePicker.getSuggestions("الحنجرة").map((match) => match.item.path), [files[0]?.path]);
 });
@@ -1271,7 +1306,7 @@ test("creating a note from a custom library carries its exact target into the co
     getPortableSubject: () => null,
     validateGenericNote: () => null,
     async createKnowledgeNoteInLibrary(_value, libraryId, target, policy): Promise<TFile> {
-      creation = { libraryId, target, policy };
+      captured.creation = { libraryId, target, policy };
       return new TFile("Reference notes/Airway guideline.md");
     },
     async openFile(): Promise<void> { /* not under test */ },
@@ -1279,7 +1314,7 @@ test("creating a note from a custom library carries its exact target into the co
   view.loadedBaseId = "base-a";
   view.loadedDataEpoch = 0;
   view.staleViewNoticeShown = false;
-  let options: {
+  type CapturedNoteOptions = {
     createLabel?: string;
     contextNotice?: string;
     initial?: { folder: string; mode: string; templatePath: string };
@@ -1298,26 +1333,31 @@ test("creating a note from a custom library carries its exact target into the co
       templatePath: string;
       addToCollection: boolean;
     }) => string | null;
-  } | null = null;
-  let creation: {
-    libraryId: string;
-    target: { headingId?: string; subheadingId?: string };
-    policy: { openedData: typeof data; openedBaseId: string; openedDataEpoch: number; openedExternalChangeGeneration: number };
-  } | null = null;
+  };
+  // Typed capture object: the modal callback and the host write it, the test reads it back.
+  const captured: {
+    options: CapturedNoteOptions | null;
+    creation: {
+      libraryId: string;
+      target: { headingId?: string; subheadingId?: string };
+      policy: { openedData: typeof data; openedBaseId: string; openedDataEpoch: number; openedExternalChangeGeneration: number };
+    } | null;
+  } = { options: null, creation: null };
   let untargetedContextNotice = "";
   KnowledgeNoteModal.prototype.open = function openForTest(): void {
-    options = (this as unknown as { options: typeof options }).options;
+    captured.options = (this as unknown as { options: CapturedNoteOptions }).options;
   };
   try {
     view.startCreateLibraryNote(library.id, { headingId: "heading-evidence", subheadingId: "sub-guidelines" });
-    const targetedOptions = options;
+    const targetedOptions = captured.options;
     view.startCreateLibraryNote(library.id);
-    untargetedContextNotice = options?.contextNotice ?? "";
-    options = targetedOptions;
+    untargetedContextNotice = captured.options?.contextNotice ?? "";
+    captured.options = targetedOptions;
   } finally {
     delete (KnowledgeNoteModal.prototype as { open?: () => void }).open;
   }
 
+  const options = captured.options;
   assert.equal(options?.createLabel, "Reference");
   assert.match(options?.contextNotice ?? "", /Reference Sets \/ Evidence \/ Guidelines/);
   assert.match(options?.contextNotice ?? "", /destination is fixed/i);
@@ -1341,10 +1381,10 @@ test("creating a note from a custom library carries its exact target into the co
   };
   assert.equal(options?.validate?.(validValue), null);
   await options?.onSubmit?.(validValue);
-  assert.equal(creation?.libraryId, library.id);
-  assert.deepEqual(creation?.target, { headingId: "heading-evidence", subheadingId: "sub-guidelines" });
-  assert.equal(creation?.policy.openedData, data);
-  assert.equal(creation?.policy.openedBaseId, "base-a");
+  assert.equal(captured.creation?.libraryId, library.id);
+  assert.deepEqual(captured.creation?.target, { headingId: "heading-evidence", subheadingId: "sub-guidelines" });
+  assert.equal(captured.creation?.policy.openedData, data);
+  assert.equal(captured.creation?.policy.openedBaseId, "base-a");
   data.portableIndex.libraryLayouts[library.id]?.[0]?.subheadings.splice(0);
   assert.match(options?.validate?.(validValue) ?? "", /subheading is no longer available/i);
   library.archivedAt = Date.now();
@@ -1573,10 +1613,15 @@ test("an ENT custom-Library placeholder uses its profile while protected built-i
     placeholderNoteCompatibilityIssue: (subjectId: string, destinationFolder: string) =>
       subjectId === "paper" && destinationFolder === "Evidence" ? compatibilityIssue : "unexpected preflight arguments",
   };
-  let created: {
-    initial: Record<string, unknown>;
-    context: { createLabel?: string; tokenContext?: Record<string, string> } | undefined;
-  } | null = null;
+  type ModalItem = ReturnType<AddActionModal["getItems"]>[number];
+  // Typed capture object: callbacks write it, the test reads it back.
+  const capture: {
+    created: {
+      initial: Record<string, unknown>;
+      context: { createLabel?: string; tokenContext?: Record<string, string> } | undefined;
+    } | null;
+    choose: ((item: ModalItem) => void) | null;
+  } = { created: null, choose: null };
   const view = Object.create(EntVaultCommandCenterView.prototype) as {
     app: object;
     plugin: typeof plugin;
@@ -1597,47 +1642,46 @@ test("an ENT custom-Library placeholder uses its profile while protected built-i
   view.loadedBaseId = "base-a";
   view.loadedDataEpoch = 0;
   view.staleViewNoticeShown = false;
-  view.startCreateKnowledgeNote = (initial, _index, _created, _message, context) => { created = { initial, context }; };
+  view.startCreateKnowledgeNote = (initial, _index, _created, _message, context) => { capture.created = { initial, context }; };
   let modalItems: ReturnType<AddActionModal["getItems"]> = [];
-  let chooseModalItem: ((item: ReturnType<AddActionModal["getItems"]>[number]) => void) | null = null;
   const hadOwnOpen = Object.prototype.hasOwnProperty.call(AddActionModal.prototype, "open");
   const originalOpen = Object.getOwnPropertyDescriptor(AddActionModal.prototype, "open");
   AddActionModal.prototype.open = function openForTest(this: AddActionModal): void {
     modalItems = this.getItems();
-    chooseModalItem = (item) => this.onChooseItem(item);
+    capture.choose = (item) => this.onChooseItem(item);
   };
   try {
     view.openPlaceholderActions(placeholder);
     assert.deepEqual(modalItems.map((item) => item.id), ["empty", "template", "link", "keep"]);
     const empty = modalItems.find((item) => item.id === "empty");
     assert.ok(empty);
-    chooseModalItem?.(empty);
+    capture.choose?.(empty);
 
     // An incompatible subject is refused BEFORE the note form opens: the
     // compatibility preflight surfaces the linking error as a notice, so no
     // orphan-to-be file can ever be created.
     compatibilityIssue = "This note note cannot be linked to a portable topic subject.";
     Notice.messages.length = 0;
-    const createdBeforeRefusal = created;
+    const createdBeforeRefusal = capture.created;
     view.openPlaceholderActions(placeholder);
     const refusedEmpty = modalItems.find((item) => item.id === "empty");
     assert.ok(refusedEmpty);
-    chooseModalItem?.(refusedEmpty);
-    assert.equal(created, createdBeforeRefusal, "the note form never opens for an incompatible subject");
+    capture.choose?.(refusedEmpty);
+    assert.equal(capture.created, createdBeforeRefusal, "the note form never opens for an incompatible subject");
     assert.deepEqual(Notice.messages, [compatibilityIssue]);
   } finally {
     if (hadOwnOpen && originalOpen) Object.defineProperty(AddActionModal.prototype, "open", originalOpen);
     else Reflect.deleteProperty(AddActionModal.prototype, "open");
   }
 
-  assert.deepEqual(created?.initial, {
+  assert.deepEqual(capture.created?.initial, {
     title: "Airway evidence",
     folder: "Evidence",
     mode: "empty",
     templatePath: "Templates/Evidence.md",
   });
-  assert.equal(created?.context?.createLabel, "Reference");
-  assert.deepEqual(created?.context?.tokenContext, {
+  assert.equal(capture.created?.context?.createLabel, "Reference");
+  assert.deepEqual(capture.created?.context?.tokenContext, {
     id: "REF-001",
     category: "Guidelines",
     parent: "",
@@ -3105,8 +3149,8 @@ test("dependency-only Library copy covers every selected-section source", () => 
 });
 
 test("portability center ignores a second action while an import is busy", async () => {
-  let finish: (() => void) | null = null;
-  const gate = new Promise<void>((resolve) => { finish = resolve; });
+  const gateControl: { finish: (() => void) | null } = { finish: null };
+  const gate = new Promise<void>((resolve) => { gateControl.finish = resolve; });
   let starts = 0;
   let renders = 0;
   const center = Object.create(ExportImportCenterModal.prototype) as {
@@ -3125,7 +3169,7 @@ test("portability center ignores a second action while an import is busy", async
   center.run("import", async () => { starts += 1; });
   assert.equal(starts, 1);
   assert.equal(center.busyAction, "import");
-  finish?.();
+  gateControl.finish?.();
   await gate;
   await new Promise<void>((resolve) => { setImmediate(resolve); });
 
@@ -3851,6 +3895,7 @@ test("Library creation profiles are discoverable through Obsidian settings searc
     "heading" in definition && definition.heading === "Libraries"
   ));
   assert.ok(libraries && "items" in libraries);
+  assert.ok(libraries.items, "the Libraries group lists its items");
   assert.ok(libraries.items.some((item) => "name" in item && item.name === "Library creation profiles"));
 });
 
@@ -3898,8 +3943,10 @@ test("Settings Browse commits a folder selected from a pop-out window input real
     "heading" in definition && definition.heading === "Note storage and creation"
   ));
   assert.ok(group && "items" in group);
+  assert.ok(group.items, "the Note storage group lists its items");
   const definition = group.items.find((item) => "name" in item && item.name === "Inbox folder");
   assert.ok(definition && "render" in definition);
+  assert.ok(definition.render, "the Inbox folder definition renders a custom control");
 
   class PopoutInput {
     value = "Old Inbox";
@@ -3911,27 +3958,33 @@ test("Settings Browse commits a folder selected from a pop-out window input real
   }
   class MainWindowInput {}
   const input = new PopoutInput();
-  let browse: (() => void) | null = null;
-  const text = {
+  const browse: { callback: (() => void) | null } = { callback: null };
+  const text: FakeTextComponent<PopoutInput> = {
     inputEl: input,
-    setPlaceholder(): typeof text { return this; },
-    setValue(value: string): typeof text { input.value = value; return this; },
-    setDisabled(): typeof text { return this; },
-    onChange(): typeof text { return this; },
+    setPlaceholder() { return this; },
+    setValue(value: string) { input.value = value; return this; },
+    setDisabled() { return this; },
+    onChange() { return this; },
   };
-  const button = {
-    setButtonText(): typeof button { return this; },
-    setDisabled(): typeof button { return this; },
-    onClick(callback: () => void): typeof button { browse = callback; return this; },
+  const button: FakeButtonComponent = {
+    setButtonText() { return this; },
+    setDisabled() { return this; },
+    onClick(callback: () => void) { browse.callback = callback; return this; },
   };
-  const row = {
+  interface FakeSettingRow {
+    settingEl: { addClass(): void; querySelector(): PopoutInput };
+    setDesc(): FakeSettingRow;
+    addText(callback: (component: FakeTextComponent<PopoutInput>) => void): FakeSettingRow;
+    addButton(callback: (component: FakeButtonComponent) => void): FakeSettingRow;
+  }
+  const row: FakeSettingRow = {
     settingEl: {
       addClass: () => undefined,
       querySelector: () => input,
     },
     setDesc: () => row,
-    addText(callback: (component: typeof text) => void): typeof row { callback(text); return this; },
-    addButton(callback: (component: typeof button) => void): typeof row { callback(button); return this; },
+    addText(callback) { callback(text); return this; },
+    addButton(callback) { callback(button); return this; },
   };
 
   const priorInput = Object.getOwnPropertyDescriptor(globalThis, "HTMLInputElement");
@@ -3941,9 +3994,9 @@ test("Settings Browse commits a folder selected from a pop-out window input real
     void (this as unknown as { onChoose(value: string): void | Promise<void> }).onChoose("New Inbox");
   };
   try {
-    definition.render(row as never);
-    assert.ok(browse);
-    browse();
+    definition.render(row as never, noSettingGroup);
+    assert.ok(browse.callback);
+    browse.callback();
     await new Promise((resolve) => { globalThis.setTimeout(resolve, 0); });
     assert.equal(input.value, "New Inbox");
     assert.equal(data.settings.proposalFolder, "New Inbox");
@@ -3993,38 +4046,41 @@ test("attachment text settings use the buffered non-refresh save pipeline", () =
     "heading" in definition && definition.heading === "Note storage and creation"
   ));
   assert.ok(folders && "items" in folders);
+  assert.ok(folders.items, "the Note storage group lists its items");
+  const folderItems = folders.items;
 
   const renderAndChange = (name: string, value: string): void => {
-    const definition = folders.items.find((item) => "name" in item && item.name === name);
+    const definition = folderItems.find((item) => "name" in item && item.name === name);
     assert.ok(definition && "render" in definition);
-    let change: ((next: string) => void | Promise<void>) | null = null;
+    assert.ok(definition.render, `${name} renders a custom control`);
+    const captured: { change: ((next: string) => void | Promise<void>) | null } = { change: null };
     const inputEl = {
       addEventListener: () => undefined,
       blur: () => undefined,
       toggleClass: () => undefined,
     };
-    const text = {
+    const text: FakeTextComponent<typeof inputEl> = {
       inputEl,
-      setPlaceholder(): typeof text { return this; },
-      setValue(): typeof text { return this; },
-      setDisabled(): typeof text { return this; },
-      onChange(callback: (next: string) => void | Promise<void>): typeof text {
-        change = callback;
+      setPlaceholder() { return this; },
+      setValue() { return this; },
+      setDisabled() { return this; },
+      onChange(callback) {
+        captured.change = callback;
         return this;
       },
     };
-    const button = {
-      setButtonText(): typeof button { return this; },
-      setDisabled(): typeof button { return this; },
-      onClick(): typeof button { return this; },
+    const button: FakeButtonComponent = {
+      setButtonText() { return this; },
+      setDisabled() { return this; },
+      onClick() { return this; },
     };
     definition.render({
       settingEl: { addClass: () => undefined },
       addText(callback: (component: typeof text) => void) { callback(text); return this; },
       addButton(callback: (component: typeof button) => void) { callback(button); return this; },
-    } as never);
-    assert.ok(change);
-    void change(value);
+    } as never, noSettingGroup);
+    assert.ok(captured.change);
+    void captured.change(value);
   };
 
   renderAndChange("Fixed attachment folder", "/Assets/Uploads/");
@@ -4203,13 +4259,14 @@ test("a create-note form cannot submit into a different active knowledge base", 
   Notice.messages.length = 0;
   let activeBaseId = "base-a";
   let createCalls = 0;
-  let submit: ((value: {
+  type NoteSubmit = (value: {
     title: string;
     folder: string;
     mode: "empty";
     templatePath: string;
     addToCollection: boolean;
-  }) => void | Promise<void>) | null = null;
+  }) => void | Promise<void>;
+  const submitCapture: { submit: NoteSubmit | null } = { submit: null };
   const plugin = {
     data: {
       settings: {
@@ -4245,12 +4302,12 @@ test("a create-note form cannot submit into a different active knowledge base", 
   view.staleViewNoticeShown = false;
 
   KnowledgeNoteModal.prototype.open = function openForTest(): void {
-    submit = (this as unknown as { options: { onSubmit: typeof submit } }).options.onSubmit;
+    submitCapture.submit = (this as unknown as { options: { onSubmit: NoteSubmit } }).options.onSubmit;
   };
   try {
     view.startCreateKnowledgeNote();
     activeBaseId = "base-b";
-    await submit?.({ title: "Stale", folder: "Notes", mode: "empty", templatePath: "", addToCollection: false });
+    await submitCapture.submit?.({ title: "Stale", folder: "Notes", mode: "empty", templatePath: "", addToCollection: false });
   } finally {
     delete (KnowledgeNoteModal.prototype as { open?: () => void }).open;
   }
@@ -4930,9 +4987,9 @@ test("bulk collection actions use current global search text during the render d
 });
 
 test("closing the view waits for a pending selection save", async () => {
-  let finishSave: (() => void) | null = null;
+  const saveRelease: { finish: (() => void) | null } = { finish: null };
   let saveFinished = false;
-  const saveGate = new Promise<void>((resolve) => { finishSave = resolve; });
+  const saveGate = new Promise<void>((resolve) => { saveRelease.finish = resolve; });
   const cleared: number[] = [];
   const view = Object.create(EntVaultCommandCenterView.prototype) as {
     setupTimer: number | null;
@@ -4970,7 +5027,7 @@ test("closing the view waits for a pending selection save", async () => {
   const closing = view.onClose();
   await Promise.resolve();
   assert.equal(saveFinished, false);
-  finishSave?.();
+  saveRelease.finish?.();
   await closing;
 
   assert.equal(saveFinished, true);
@@ -4979,9 +5036,9 @@ test("closing the view waits for a pending selection save", async () => {
 });
 
 test("closing the view also waits for a selection save already in flight", async () => {
-  let finishSave: (() => void) | null = null;
+  const saveRelease: { finish: (() => void) | null } = { finish: null };
   let closeFinished = false;
-  const inFlight = new Promise<void>((resolve) => { finishSave = resolve; });
+  const inFlight = new Promise<void>((resolve) => { saveRelease.finish = resolve; });
   const view = Object.create(EntVaultCommandCenterView.prototype) as {
     setupTimer: number | null;
     searchDebounce: number | null;
@@ -5001,7 +5058,7 @@ test("closing the view also waits for a selection save already in flight", async
   const closing = view.onClose().then(() => { closeFinished = true; });
   await Promise.resolve();
   assert.equal(closeFinished, false);
-  finishSave?.();
+  saveRelease.finish?.();
   await closing;
   assert.equal(closeFinished, true);
 });
@@ -5039,7 +5096,7 @@ test("closing the compact record inspector hides it and restores row focus", () 
 });
 
 test("zero-delay inspector restoration does not touch a view closed before the callback", () => {
-  let callback: (() => void) | null = null;
+  const scheduled: { callback: (() => void) | null } = { callback: null };
   let focusCount = 0;
   const workspace = { scrollTop: 0 };
   const selected = { focus: () => { focusCount += 1; } };
@@ -5061,11 +5118,11 @@ test("zero-delay inspector restoration does not touch a view closed before the c
   view.workspaceEl = workspace;
   view.treeEl = { querySelector: () => selected, focus: () => { focusCount += 1; } };
   view.render = () => undefined;
-  view.timerWindow = { setTimeout: (scheduled) => { callback = scheduled; return 1; } };
+  view.timerWindow = { setTimeout: (run) => { scheduled.callback = run; return 1; } };
 
   view.closeMobileInspector();
   view.viewClosed = true;
-  callback?.();
+  scheduled.callback?.();
 
   assert.equal(workspace.scrollTop, 0);
   assert.equal(focusCount, 0);
@@ -5076,7 +5133,7 @@ test("zero-delay tab reveal ignores DOM replaced before the callback", () => {
   const content = dom.document.body.createDiv();
   const tablist = content.createDiv();
   const active = tablist.createEl("button", { attr: { "aria-selected": "true" } });
-  let callback: (() => void) | null = null;
+  const scheduled: { callback: (() => void) | null } = { callback: null };
   const view = Object.create(EntVaultCommandCenterView.prototype) as {
     contentEl: HTMLElement;
     viewClosed: boolean;
@@ -5085,11 +5142,11 @@ test("zero-delay tab reveal ignores DOM replaced before the callback", () => {
   };
   view.contentEl = content as unknown as HTMLElement;
   view.viewClosed = false;
-  view.timerWindow = { setTimeout: (scheduled) => { callback = scheduled; return 1; } };
+  view.timerWindow = { setTimeout: (run) => { scheduled.callback = run; return 1; } };
 
   view.revealActiveTab(tablist as unknown as HTMLElement);
   content.empty();
-  callback?.();
+  scheduled.callback?.();
 
   assert.equal(active.scrollIntoViewCalls, 0);
 });
@@ -7207,7 +7264,9 @@ test("the category template token resolves the deepest placed node title at any 
   const view = createLayoutRenderView(data, []);
 
   assert.equal(view.libraryTemplateTokenContext(library, { headingId: "lib-h1", subheadingId: "lib-d3" }).category, "Level three");
-  assert.equal(view.libraryTemplateTokenContext(library, { subheadingId: "lib-d3" }).category, "Level three", "a deep subheading id alone locates its heading recursively");
+  // Deliberately partial raw target (no headingId): the production lookup must locate the heading itself.
+  const subheadingOnly = { subheadingId: "lib-d3" } as unknown as Parameters<typeof view.libraryTemplateTokenContext>[1];
+  assert.equal(view.libraryTemplateTokenContext(library, subheadingOnly).category, "Level three", "a deep subheading id alone locates its heading recursively");
   assert.equal(view.libraryTemplateTokenContext(library, { headingId: "lib-h1" }).category, "Guidelines", "heading placements fall back to the heading title");
 });
 
@@ -7220,13 +7279,19 @@ test("the category template token resolves the deepest placed node title at any 
  */
 function withSettingStub<T>(run: () => T): T {
   const prototype = Setting.prototype as unknown as Record<string, unknown>;
-  const button = {
-    setButtonText: (): typeof button => button,
-    onClick: (): typeof button => button,
-    setCta: (): typeof button => button,
-    setDisabled: (): typeof button => button,
+  interface ChainableButton {
+    setButtonText(): ChainableButton;
+    onClick(): ChainableButton;
+    setCta(): ChainableButton;
+    setDisabled(): ChainableButton;
+  }
+  const button: ChainableButton = {
+    setButtonText: () => button,
+    onClick: () => button,
+    setCta: () => button,
+    setDisabled: () => button,
   };
-  prototype.addButton = function addButton(this: unknown, callback: (value: typeof button) => void): unknown {
+  prototype.addButton = function addButton(this: unknown, callback: (value: ChainableButton) => void): unknown {
     callback(button);
     return this;
   };
@@ -7363,14 +7428,14 @@ test("index manager keystrokes filter one cached vault snapshot instead of resca
 
     // Switching to another list builds only that list. It must not enumerate
     // Available notes merely to fill an inactive badge.
-    const hidden = manager.contentEl.querySelector('[data-manager-tab="hidden"]');
+    const hidden = manager.contentEl.querySelector<HTMLElement>('[data-manager-tab="hidden"]');
     assert.ok(hidden);
     hidden.click();
     assert.equal(scans(), 1, "the Hidden tab does not enumerate Available notes");
 
     // Returning to Available deliberately refreshes its vault-derived list:
     // files may have appeared without advancing plugin data state.
-    const available = manager.contentEl.querySelector('[data-manager-tab="available"]');
+    const available = manager.contentEl.querySelector<HTMLElement>('[data-manager-tab="available"]');
     assert.ok(available);
     available.click();
     assert.equal(scans(), 2, "opening Available again re-reads the vault");
@@ -7661,14 +7726,15 @@ test("a collection move whose target vanished keeps the source membership and sa
     getDataEpoch: () => 1,
     async mutate(_label: string, mutator: () => void): Promise<void> { mutator(); },
   };
-  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView & {
+  type View = EntVaultCommandCenterView;
+  const view = Object.create(EntVaultCommandCenterView.prototype) as Seam<View, {
     app: object;
     plugin: typeof plugin;
-    loadedBaseId: string;
-    loadedDataEpoch: number;
-    staleViewNoticeShown: boolean;
-    openCollectionPicker(path: string, source?: { headingId: string; subheadingId?: string }, move?: boolean): void;
-  };
+    loadedBaseId: View["loadedBaseId"];
+    loadedDataEpoch: View["loadedDataEpoch"];
+    staleViewNoticeShown: View["staleViewNoticeShown"];
+    openCollectionPicker: View["openCollectionPicker"];
+  }>;
   view.app = {};
   view.plugin = plugin;
   view.loadedBaseId = "base-a";
@@ -7730,7 +7796,7 @@ test("Command Center return capture reads the live wide and compact scroll owner
   const tree = asHtmlElement(dom.document.body.createDiv());
   const workspace = asHtmlElement(dom.document.body.createDiv());
   const inspector = asHtmlElement(dom.document.body.createDiv());
-  const inspectorBody = asHtmlElement(inspector.createDiv({ cls: "ent-cc-inspector-body" }));
+  const inspectorBody = asHtmlElement(fakeOf(inspector).createDiv({ cls: "ent-cc-inspector-body" }));
   tree.scrollTop = 321;
   workspace.scrollTop = 654;
   inspector.scrollTop = 42;
@@ -7802,9 +7868,9 @@ test("Command Center return capture reads the live wide and compact scroll owner
 test("Command Center return restores its exact route and unrelated notes can open a clean home", async () => {
   const dom = createFakeDom();
   const content = asHtmlElement(dom.document.body.createDiv());
-  const workspace = asHtmlElement(content.createDiv());
-  const inspector = asHtmlElement(content.createDiv());
-  const inspectorBody = asHtmlElement(inspector.createDiv({ cls: "ent-cc-inspector-body" }));
+  const workspace = asHtmlElement(fakeOf(content).createDiv());
+  const inspector = asHtmlElement(fakeOf(content).createDiv());
+  const inspectorBody = asHtmlElement(fakeOf(inspector).createDiv({ cls: "ent-cc-inspector-body" }));
   const selected = record("Notes/Selected.md", "Selected");
   const data = migrateData(null);
   data.settings.defaultTab = "collections";
@@ -7980,10 +8046,10 @@ test("queued return scroll restoration cannot affect replaced owners or a change
       for (const when of ["first frame", "second frame"] as const) {
         const { document } = createFakeDom();
         const content = asHtmlElement(document.body.createDiv());
-        const workspace = asHtmlElement(content.createDiv());
-        const tree = asHtmlElement(workspace.createDiv());
-        const inspector = asHtmlElement(content.createDiv());
-        const inspectorBody = asHtmlElement(inspector.createDiv({ cls: "ent-cc-inspector-body" }));
+        const workspace = asHtmlElement(fakeOf(content).createDiv());
+        const tree = asHtmlElement(fakeOf(workspace).createDiv());
+        const inspector = asHtmlElement(fakeOf(content).createDiv());
+        const inspectorBody = asHtmlElement(fakeOf(inspector).createDiv({ cls: "ent-cc-inspector-body" }));
         const frames: Array<() => void> = [];
         const data = migrateData(null);
         let baseId = "base-first";
@@ -8019,10 +8085,10 @@ test("queued return scroll restoration cannot affect replaced owners or a change
 
         if (change === "replace") {
           content.empty();
-          view.workspaceEl = asHtmlElement(content.createDiv());
-          view.treeEl = asHtmlElement(view.workspaceEl.createDiv());
-          view.inspectorEl = asHtmlElement(content.createDiv());
-          const nextBody = asHtmlElement(view.inspectorEl.createDiv({ cls: "ent-cc-inspector-body" }));
+          view.workspaceEl = asHtmlElement(fakeOf(content).createDiv());
+          view.treeEl = asHtmlElement(fakeOf(view.workspaceEl).createDiv());
+          view.inspectorEl = asHtmlElement(fakeOf(content).createDiv());
+          const nextBody = asHtmlElement(fakeOf(view.inspectorEl).createDiv({ cls: "ent-cc-inspector-body" }));
           listOwner = paneLayout === "wide" ? view.treeEl : view.workspaceEl;
           detailOwner = paneLayout === "wide" ? view.inspectorEl : nextBody;
         } else if (change === "base") baseId = "base-second";
@@ -8049,7 +8115,7 @@ test("queued return scroll restoration cannot affect replaced owners or a change
 
 test("a deferred global search applies the matching return scroll after results render", async () => {
   const result = { groups: [], total: 0, rendered: 0 };
-  let resolveSearch: ((value: typeof result) => void) | null = null;
+  const searchGate: { resolve: ((value: typeof result) => void) | null } = { resolve: null };
   let renders = 0;
   let resets = 0;
   const restored: Array<[number, number]> = [];
@@ -8057,7 +8123,7 @@ test("a deferred global search applies the matching return scroll after results 
     getActiveKnowledgeBaseId: () => "base-main",
     getDataEpoch: () => 5,
     getSearchGeneration: () => 9,
-    searchKnowledgeBases: () => new Promise<typeof result>((resolve) => { resolveSearch = resolve; }),
+    searchKnowledgeBases: () => new Promise<typeof result>((resolve) => { searchGate.resolve = resolve; }),
   };
   const view = Object.create(EntVaultCommandCenterView.prototype) as unknown as {
     plugin: typeof plugin;
@@ -8098,8 +8164,8 @@ test("a deferred global search applies the matching return scroll after results 
 
   view.requestGlobalSearch(key, view.query);
   await Promise.resolve();
-  assert.ok(resolveSearch);
-  resolveSearch(result);
+  assert.ok(searchGate.resolve);
+  searchGate.resolve(result);
   await Promise.resolve();
   await Promise.resolve();
 
@@ -8112,9 +8178,9 @@ test("a deferred global search applies the matching return scroll after results 
 test("explicit return focus enters compact detail and gives Home a stable tab target", () => {
   const dom = createFakeDom();
   const content = asHtmlElement(dom.document.body.createDiv());
-  const tab = asHtmlElement(content.createEl("button", { attr: { "data-tab": "collections" } }));
-  const inspector = asHtmlElement(content.createEl("aside"));
-  const back = asHtmlElement(inspector.createEl("button", { cls: "ent-cc-inspector-close" }));
+  const tab = asHtmlElement(fakeOf(content).createEl("button", { attr: { "data-tab": "collections" } }));
+  const inspector = asHtmlElement(fakeOf(content).createEl("aside"));
+  const back = asHtmlElement(fakeOf(inspector).createEl("button", { cls: "ent-cc-inspector-close" }));
   const view = Object.create(EntVaultCommandCenterView.prototype) as unknown as {
     paneLayout: "compact" | "wide";
     mobileInspectorOpen: boolean;

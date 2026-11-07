@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { captureViewFocus, restoreViewFocus, readableStatus, relativeUpdatedTime, recordAvailabilitySummary } from "../src/view-state.ts";
 import { asHtmlElement, createFakeDom, type FakeElement, type FakeWindow } from "./support/fake-dom.ts";
-import { Notice, Platform, TFile } from "obsidian";
+import { Notice, Platform, TFile } from "./support/obsidian-stub.ts";
 import { migrateData, type PluginData, type VaultRecord } from "../src/model.ts";
 import { ATTACHMENT_PAGE_SIZE, ATTACHMENT_PATH_ATTRIBUTE, MISSING_REFERENCE_TEXT } from "../src/note-attachments.ts";
 import { EntVaultCommandCenterView } from "../src/view.ts";
@@ -26,7 +26,8 @@ test("focus follows a stable identity through DOM replacement, including punctua
 test("focus restoration supports stable input IDs and accessible control names without claiming unfocused controls", () => {
   const dom = createFakeDom();
   const root = dom.document.body.createDiv();
-  for (const attr of [{ id: "search" }, { "aria-label": "Manage workspace" }]) {
+  const controlAttributes: Array<Record<string, string>> = [{ id: "search" }, { "aria-label": "Manage workspace" }];
+  for (const attr of controlAttributes) {
     const old = root.createEl("input", { attr });
     old.focus();
     const captured = captureViewFocus(asHtmlElement(root));
@@ -354,7 +355,7 @@ test("WF07 I6 a missing attachment gives persistent live feedback that survives 
     first.dispatch("click");
     await wf07Settle();
     let region = s.feedback();
-    assert.ok(region && region.textContent.includes(MISSING_REFERENCE_TEXT), region?.textContent);
+    assert.ok(region && region.textContent.includes(MISSING_REFERENCE_TEXT), region?.textContent ?? "no feedback region");
     assert.ok(region.querySelector('[role="alert"]') && region.querySelector('[role="status"]'), "both live regions exist before any message");
     assert.doesNotMatch(region.textContent, /syncing|this device/u);
     assert.deepEqual(Notice.messages, [], "the view-owned surface replaces the transient Notice");

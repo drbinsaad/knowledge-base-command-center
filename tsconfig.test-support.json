@@ -40,6 +40,11 @@
     "tests/note-organizer.test.ts",
     "tests/touch-library-move.test.ts",
     "tests/bases-view.test.ts",
+    "tests/view.test.ts",
+    "tests/mobile-dom.test.ts",
+    "tests/view-state.test.ts",
+    "tests/touch-view.test.ts",
+    "tests/touch-drag.test.ts",
     "tests/recovery-copy.test.ts"
   ]
 }

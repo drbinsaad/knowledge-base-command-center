@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Notice, TFile } from "obsidian";
+import { Notice, TFile } from "./support/obsidian-stub.ts";
 import EntVaultCommandCenterPlugin from "../src/main.ts";
 import { buildCurriculumTree, libraryTabId, migrateData, restoreSnapshot, snapshotPersonal, type LayoutHeading, type MainTab, type PluginData, type VaultRecord } from "../src/model.ts";
 import { EntVaultCommandCenterView } from "../src/view.ts";
@@ -624,17 +624,17 @@ async function fullTouchView() {
   view.contentEl = asHtmlElement(content);
   await view.reload();
   const touch = view as unknown as TouchView & { touchDrag: unknown; render: (...args: unknown[]) => void; reload(): Promise<void> };
-  let getSource: (() => Source | null) | null = null;
+  const handle: { getSource: (() => Source | null) | null } = { getSource: null };
   touch.touchDrag = {
     hasGesture: () => busy, destroy: () => undefined,
-    registerHandle: (_h: HTMLElement, _r: HTMLElement, _l: string, callback: () => Source | null) => { getSource = callback; },
+    registerHandle: (_h: HTMLElement, _r: HTMLElement, _l: string, callback: () => Source | null) => { handle.getSource = callback; },
   };
   touch.curriculumArrangeMode = true;
   let renders = 0;
   const originalRender = (view as unknown as { render(...args: unknown[]): void }).render.bind(view);
   touch.render = (...args: unknown[]) => { renders += 1; originalRender(...args); };
   touch.renderTouchHandle(asHtmlElement(dom.document.body.createDiv()), records[0], { kind: "index", path: records[0].path });
-  const source = getSource?.() ?? null;
+  const source = handle.getSource?.() ?? null;
   return {
     view: touch, records, data, source, content, realPlugin,
     panel: () => content.querySelector(".ent-cc-tree-panel"),
