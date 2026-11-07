@@ -102,6 +102,8 @@ export function missingImportedFolderNoticeText(
   return sentences.map((sentence) => ` ${sentence}`).join("");
 }
 
+/** Hoisted so the official names (Undo, Clear device-local data) keep their capitals. */
+const RESCUE_HISTORY_DISCLOSURE = "Automatic conflict rescues are fuller: they can also hold per-base view and Undo history, and Clear device-local data does not remove them.";
 const CENTER_MODES: readonly CenterMode[] = ["export", "import"];
 let portabilityCenterSequence = 0;
 
@@ -450,7 +452,7 @@ export class ExportImportCenterModal extends Modal {
       const warning = parent.createDiv({ cls: "ent-cc-manager-diagnostic ent-cc-portability-path-warning", attr: { role: "alert" } });
       warning.createEl("strong", { text: "Exact vault paths will be included" });
       warning.createEl("p", {
-        text: "Same-vault recovery contains exact folder and Markdown filenames from this vault. Treat the JSON as private. The plugin embeds this vault's identity and will reject it in every other vault.",
+        text: `Same-vault recovery contains exact folder and Markdown filenames from this vault. Treat the JSON as private. The plugin embeds this vault's identity and will reject it in every other vault. ${RESCUE_HISTORY_DISCLOSURE}`,
       });
       const confirmation = new Setting(parent)
         .setName("Confirm private recovery export")
@@ -508,7 +510,7 @@ export class ExportImportCenterModal extends Modal {
     const compatibilityReadOnly = this.plugin.isDataReadOnly();
     new Setting(parent)
       .setName("What would you like to export?")
-      .setDesc("Transfer your structure to another vault, back up organization for this vault, or choose custom sections. None of these includes note bodies or attachments.")
+      .setDesc("Transfer your structure to another vault, back up organization for this vault, or choose custom sections. Each export covers this one knowledge base only, so back up every base you rely on. None of these includes note bodies or attachments.")
       .addButton((button) => {
         button.buttonEl.dataset.portabilityFocus = "preset-portable";
         button.setButtonText("Transfer structure").setDisabled(Boolean(this.busyAction)).onClick(() => {
@@ -1151,7 +1153,7 @@ export class ExportImportCenterModal extends Modal {
         return;
       }
       if (selection.recovery) this.plugin.recordRecoveryExport(now.getTime());
-      new Notice(`Exported ${selectionCount(selection)} selected sections. Note contents and attachments were not included.`);
+      new Notice(`Export started: ${selectionCount(selection)} selected sections were sent to your downloads. This plugin cannot confirm the file was saved, so check your downloads folder. Note contents and attachments were not included.`, 10000);
       this.close();
     } catch (error) {
       if (!this.guardOpenedBase()) return;

@@ -183,13 +183,19 @@ Open **Sync & recovery center** to review the locally recorded conflict warning 
 
 The plugin preserved meaningful organization before adopting another authoritative store or entering protected read-only mode.
 
-The file is under the configured Exports folder (<code>Knowledge Base Command Center Exports/</code> by default; Settings → Exports folder) and can contain exact vault-relative paths and complete plugin organization, but not Markdown note bodies. Keep it private and safe. It cannot be imported through the Import center yet, so do not try to import it. Do not attach it to a public issue.
+The file is under the configured Exports folder (<code>Knowledge Base Command Center Exports/</code> by default; Settings → Exports folder) and can contain exact vault-relative paths and complete plugin organization, but not Markdown note bodies. Keep it private and safe. A full rescue can also carry per-base view and Undo history, and **Clear device-local data** does not remove it. Do not attach it to a public issue.
 
-Back up the vault and ask for help restoring it, with sanitized version, timing, and Sync details.
+To use it, open **Sync & recovery center** and choose **Review kept copies…**. It lists the configured and legacy Exports folders and the plugin folder, shows what a copy contains (source, date when trustworthy, base names, preset, counts, whether it is from this vault), and restores one base as a **new** base. Your active base and existing bases are not changed, Undo and Redo start empty, and nothing in your notes moves. A copy from a different vault, a newer plugin version, or a damaged file is kept untouched and cannot be restored. A listed file is only a name hint until you open it, and the counts cover only the folders checked. **Choose another file** reviews a kept JSON file stored elsewhere in the vault. Do not use the Import center for a conflict rescue.
 
 ## data.json was missing when Obsidian started
 
-KBCC started with an empty organization. If an earlier same-device backup (<code>data.json.bak</code>) existed and could be read and recognised, KBCC kept a copy of it beside the plugin data as <code>data.json.bak-kept-&lt;timestamp&gt;</code>. A missing, unreadable or malformed backup is not copied. If that copy exists, keep it. If your organization does not arrive through Sync, ask for help restoring it.
+KBCC started with an empty organization. If an earlier same-device backup (<code>data.json.bak</code>) existed and could be read and recognised, KBCC kept a copy of it beside the plugin data as <code>data.json.bak-kept-&lt;timestamp&gt;</code>. A missing, unreadable or malformed backup is not copied. If that copy exists, keep it; it is private. If your organization does not arrive through Sync, open **Sync & recovery center**, choose **Review kept copies…**, and restore a base from it as a new base. Nothing is restored automatically.
+
+The same applies to the notice that says your automatic backup differs from <code>data.json</code> and was kept: review that copy with **Review kept copies…**.
+
+## Export wording
+
+On desktop, an export says **Export started** and that the plugin cannot confirm the file was saved; check your downloads folder. On mobile the export is written inside the vault, and the notice appears only after the write completed. Each backup or export covers the active knowledge base only.
 
 ## A save says the automatic backup could not be refreshed
 

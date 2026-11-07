@@ -324,6 +324,8 @@ const MAX_NOTE_ORGANIZER_MEMBERSHIP_CACHE_ENTRIES = 32;
 const NOTE_ORGANIZER_INDICATOR_DEBOUNCE_MS = 100;
 export const DEVICE_LOCAL_STATE_KEY = "ent-vault-command-center.device-state.v1";
 export const SYNC_RECOVERY_LOCAL_STATE_KEY = "ent-vault-command-center.sync-recovery-state.v1";
+/** Hoisted: sentence-case lint would lowercase these official names. The route is the real entry in the Sync & recovery center. */
+export const REVIEW_KEPT_COPIES_ROUTE = "To review it, open Sync & recovery center and choose “Review kept copies…”. Keep the file; it is private and can hold exact paths.";
 export const VAULT_RENAME_OVERFLOW_NOTICE = "Many notes were renamed while organization was still loading, more than this plugin can safely track. Automatic link repair for those renames is paused. Your notes were not changed. Before restarting Obsidian, run “Back up, export, or import…” and export “Same-vault recovery”.";
 export const VAULT_RENAME_AMBIGUOUS_NOTICE = "A note was renamed while organization was still loading, and this plugin cannot tell for certain which note the old link meant (another note may now have its old name, or the renamed item is missing or is a different kind of item). To avoid linking the wrong note, it did not repair that rename. Your notes were not changed. Check that note's place in your organization.";
 export const VAULT_RENAME_JOURNAL_KEY ="ent-vault-command-center.vault-rename-journal.v1";
@@ -3914,7 +3916,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
     try {
       const kept = await this.keepExactBackupCopy(raw);
-      if (kept.created) new Notice(`data.json is missing, so your last automatic backup was kept as ${kept.path}. Organization starts empty until data.json arrives or you restore from that file.`, 15000);
+      if (kept.created) new Notice(`data.json is missing, so your last automatic backup was kept as ${kept.path}. Organization starts empty until data.json arrives. ${REVIEW_KEPT_COPIES_ROUTE}`, 15000);
     } catch (error) {
       console.error("Knowledge Base Command Center could not keep the data.json backup", error);
       this.markPersistenceUncertain(`data.json is missing and its last automatic backup could not be kept (${errorMessage(error)}). Organization stays read-only so that backup is not overwritten; restart Obsidian after data.json is restored or the backup is copied.`);
@@ -4007,7 +4009,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (current === null || this.backupIsCoveredBy(current, authority)) return;
       const kept = await this.keepExactBackupCopy(current);
       if (kept.created) {
-        new Notice(`Your automatic backup differs from data.json and may hold newer changes, so it was kept as ${kept.path}. Nothing was restored automatically. Keep that file and ask for help restoring it.`, 15000);
+        new Notice(`Your automatic backup differs from data.json and may hold newer changes, so it was kept as ${kept.path}. Nothing was restored automatically. ${REVIEW_KEPT_COPIES_ROUTE}`, 15000);
       }
       const recheck = await this.readBackupSample(backupPath);
       if (recheck === null || recheck === current) return;
