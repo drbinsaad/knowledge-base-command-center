@@ -135,6 +135,59 @@ test("select, restore and open go through the real hook, and a changed source is
   assert.equal(w.plugin.getActiveKnowledgeBaseId(), intent.newBaseId);
 });
 
+test("a verified no-op Sync reload after the preview does not invalidate the reviewed Apply", async () => {
+  const w = await wired();
+  const path = `${EXPORTS}/knowledge-base-command-center-conflict-2026-11-01T10-00-00-000Z.json`;
+  w.files.set(path, rescueText("Alpha"));
+  const callbacks = w.callbacks();
+  const [candidate] = (await callbacks.discover()).candidates;
+  const loaded = await callbacks.load(candidate);
+  assert.ok(loaded.status === "parsed" && loaded.result.ok);
+  if (!(loaded.status === "parsed" && loaded.result.ok)) return;
+  const reviewed = callbacks.getDestination();
+  const epochBefore = w.plugin.getDataEpoch();
+  await w.plugin.onExternalSettingsChange(); // same bytes on disk, nothing meaningful changed
+  assert.notEqual(w.plugin.getDataEpoch(), epochBefore, "the raw epoch does advance on a reload (why it is not the binding)");
+  const made = makeIntent({
+    parsed: loaded.result, selectedBaseId: loaded.result.store.bases[0].id,
+    existingNames: callbacks.getExistingNames(), existingBaseIds: callbacks.getExistingBaseIds(),
+    generateIdentity: () => callbacks.generateIdentity(),
+  });
+  assert.ok(made.ok);
+  if (!made.ok) return;
+  const result = await callbacks.onApply(made.intent, reviewed);
+  assert.equal(result.status, "applied", JSON.stringify(result));
+  assert.equal(w.disk().bases.length, 2);
+});
+
+test("switching away and back after the preview is still refused", async () => {
+  const w = await wired();
+  const path = `${EXPORTS}/knowledge-base-command-center-conflict-2026-11-01T10-00-00-000Z.json`;
+  w.files.set(path, rescueText("Alpha"));
+  await w.plugin.createKnowledgeBase("Other", "generic", "Knowledge Base");
+  await w.plugin.switchKnowledgeBase("base-default");
+  const callbacks = w.callbacks();
+  const [candidate] = (await callbacks.discover()).candidates;
+  const loaded = await callbacks.load(candidate);
+  assert.ok(loaded.status === "parsed" && loaded.result.ok);
+  if (!(loaded.status === "parsed" && loaded.result.ok)) return;
+  const reviewed = callbacks.getDestination();
+  const otherId = w.plugin.getKnowledgeBases().find((entry) => entry.id !== "base-default")?.id ?? "";
+  await w.plugin.switchKnowledgeBase(otherId);
+  await w.plugin.switchKnowledgeBase("base-default");
+  assert.equal(w.plugin.getActiveKnowledgeBaseId(), reviewed.activeBaseId, "back on the reviewed base");
+  const made = makeIntent({
+    parsed: loaded.result, selectedBaseId: loaded.result.store.bases[0].id,
+    existingNames: callbacks.getExistingNames(), existingBaseIds: callbacks.getExistingBaseIds(),
+    generateIdentity: () => callbacks.generateIdentity(),
+  });
+  assert.ok(made.ok);
+  if (!made.ok) return;
+  const before = w.disk().bases.length;
+  assert.equal((await callbacks.onApply(made.intent, reviewed)).status, "failed");
+  assert.equal(w.disk().bases.length, before);
+});
+
 test("creating or switching a base after the preview refuses the old window's Apply", async () => {
   for (const change of ["create", "switch"] as const) {
     const w = await wired();

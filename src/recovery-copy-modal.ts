@@ -21,9 +21,13 @@ import {
 } from "./recovery-copy";
 import type { RecoveryCandidate, RecoveryCopyLoadResult, RecoveryDiscoveryResult } from "./recovery-discovery";
 
-/** What the review window showed: data epoch, vault identity and active base at preview time. */
+/**
+ * What the review window showed: the plugin's stable base-surface version (it
+ * advances on a base switch, including a switch back, and on a meaningful
+ * reload, but not on a no-op reload), the vault identity and the active base.
+ */
 export interface RecoveryDestination {
-  epoch: number;
+  surface: string;
   vaultId: string;
   activeBaseId: string;
 }

@@ -153,7 +153,7 @@ test("read-only data refuses the restore without rereading the source", async ()
 test("a destination, vault or base switch during the source reread invalidates the restore", async () => {
   const epoch = await fixture();
   const switched = await epoch.plugin.restoreKeptCopy(intentFor(sourceStore("Recovered")), async () => {
-    (epoch.plugin as unknown as { dataEpoch: number }).dataEpoch += 1;
+    (epoch.plugin as unknown as { surfaceEpoch: number }).surfaceEpoch += 1;
     return true;
   });
   assert.equal(switched.status, "failed");
@@ -345,7 +345,7 @@ test("the restore is bound to the destination reviewed at preview time", async (
   // Data changed between preview and Apply, before the queue: refused without rereading.
   const epoch = await fixture();
   const epochToken = await reviewed(epoch);
-  (epoch.plugin as unknown as { dataEpoch: number }).dataEpoch += 1;
+  (epoch.plugin as unknown as { surfaceEpoch: number }).surfaceEpoch += 1;
   let reread = 0;
   Notice.messages.length = 0;
   const changed = await epoch.plugin.restoreKeptCopy(intentFor(sourceStore("Recovered")), async () => { reread += 1; return true; }, epochToken);
@@ -372,7 +372,7 @@ test("the restore is bound to the destination reviewed at preview time", async (
   const block = await blockQueue(queued.plugin);
   const waiting = queued.plugin.restoreKeptCopy(intentFor(sourceStore("Recovered")), yes, queuedToken);
   await tick();
-  (queued.plugin as unknown as { dataEpoch: number }).dataEpoch += 1;
+  (queued.plugin as unknown as { surfaceEpoch: number }).surfaceEpoch += 1;
   await block.release();
   assert.equal((await waiting).status, "failed");
   assert.equal(queued.writes(), 0);

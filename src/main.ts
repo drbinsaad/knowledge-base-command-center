@@ -6856,7 +6856,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
    */
   /** The destination a review window is about to show: data epoch, vault identity and active base. */
   getRecoveryDestination(): RecoveryDestination {
-    return { epoch: this.dataEpoch, vaultId: this.store.vaultId, activeBaseId: this.store.activeBaseId };
+    return { surface: this.getBaseSurfaceVersion(), vaultId: this.store.vaultId, activeBaseId: this.store.activeBaseId };
   }
 
   async restoreKeptCopy(
@@ -6873,7 +6873,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       return result;
     };
     const failed = (message: string): RecoveryApplyResult => outcome({ status: "failed", message });
-    const stale = (): boolean => this.dataEpoch !== destination.epoch || this.store.vaultId !== destination.vaultId
+    const stale = (): boolean => this.getBaseSurfaceVersion() !== destination.surface || this.store.vaultId !== destination.vaultId
       || this.store.activeBaseId !== destination.activeBaseId || intent.sourceVaultId !== destination.vaultId;
     if (stale()) return failed("Knowledge-base data changed since this copy was reviewed. Reopen the review.");
     try { this.assertDataWritable(); } catch { return failed("Knowledge bases are read-only, so the copy was not restored."); }

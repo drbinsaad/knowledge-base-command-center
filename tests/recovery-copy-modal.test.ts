@@ -309,7 +309,7 @@ async function openModal(options: HarnessOptions = {}): Promise<Harness> {
       if (options.unreadable) return { status: "unreadable" };
       return loadRecoveryCopy(host, candidate.path, { currentVaultId: options.vaultId === undefined ? VAULT : options.vaultId });
     },
-    getDestination: () => ({ epoch: destinationEpoch.value, vaultId: VAULT, activeBaseId: "base-default" }),
+    getDestination: () => ({ surface: String(destinationEpoch.value), vaultId: VAULT, activeBaseId: "base-default" }),
     onApply: async (intent, destination) => {
       applied.push(intent);
       destinations.push(destination);
@@ -675,7 +675,7 @@ test("Apply passes the destination captured at preview time, not the one at Appl
   button(harness.content, "Restore as new base").click();
   await settle();
   assert.equal(harness.destinations.length, 1);
-  assert.equal(harness.destinations[0].epoch, 7);
+  assert.equal(harness.destinations[0].surface, "7");
 });
 
 test("opening the list reads nothing: no candidate is loaded until Review", async () => {
