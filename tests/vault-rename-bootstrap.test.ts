@@ -7,7 +7,7 @@ import {
   parseVaultRenameJournal,
   type VaultRenameJournal,
 } from "../src/vault-rename-journal.ts";
-import { TAbstractFile, TFile, TFolder } from "obsidian";
+import { Notice, TAbstractFile, TFile, TFolder } from "obsidian";
 
 // D03. Synthetic data only. A rename captured while primary authority is
 // missing stays pending until an authoritative, compatible store is adopted
@@ -221,7 +221,11 @@ test("D03: a new file with the old name is not confused with the renamed one", a
   await h.start();
   h.rename(A, B);
   h.files.set(A, new TFile(A)); // an unrelated new note now uses the old name
+  Notice.messages.length = 0;
   await arrive(h, establishedStore("vault-d03-same-name", [A]));
+  assert.ok(Notice.messages.includes(
+    "A note was renamed while organization was still loading, and another note now has its old name. To avoid linking the wrong note, this plugin did not repair that rename. Your notes were not changed. Check that note's place in your organization.",
+  ), "the paused repair says what happened, that nothing was lost, and what to check");
   assert.deepEqual(h.plugin.data.directIndexPaths, [A], "the new file's membership is not rewritten");
   const kept = journalOf(h);
   assert.equal(kept?.blocked, "ambiguous-path");
@@ -283,6 +287,9 @@ test("D03: overflow keeps the bound, persists an incomplete marker and never rep
     lastGood = journal?.renames.length ?? 0;
   }
   const blocked = journalOf(h);
+  assert.ok(Notice.messages.includes(
+    "Many notes were renamed while organization was still loading, more than this plugin can safely track. Automatic link repair for those renames is paused. Your notes were not changed. Before restarting Obsidian, run “Back up, export, or import…” and export “Same-vault recovery”.",
+  ), "the overflow notice names the real command and export option");
   assert.equal(blocked?.blocked, "overflow");
   assert.equal(blocked?.renames.length, lastGood, "the recorded prefix is kept whole");
   assert.ok(new TextEncoder().encode(JSON.stringify(h.local.get(VAULT_RENAME_JOURNAL_KEY))).length <= MAX_VAULT_RENAME_JOURNAL_BYTES);

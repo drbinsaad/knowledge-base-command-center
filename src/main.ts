@@ -317,7 +317,9 @@ const MAX_NOTE_ORGANIZER_MEMBERSHIP_CACHE_ENTRIES = 32;
 const NOTE_ORGANIZER_INDICATOR_DEBOUNCE_MS = 100;
 export const DEVICE_LOCAL_STATE_KEY = "ent-vault-command-center.device-state.v1";
 export const SYNC_RECOVERY_LOCAL_STATE_KEY = "ent-vault-command-center.sync-recovery-state.v1";
-export const VAULT_RENAME_JOURNAL_KEY = "ent-vault-command-center.vault-rename-journal.v1";
+export const VAULT_RENAME_OVERFLOW_NOTICE = "Many notes were renamed while organization was still loading, more than this plugin can safely track. Automatic link repair for those renames is paused. Your notes were not changed. Before restarting Obsidian, run “Back up, export, or import…” and export “Same-vault recovery”.";
+export const VAULT_RENAME_AMBIGUOUS_NOTICE = "A note was renamed while organization was still loading, and another note now has its old name. To avoid linking the wrong note, this plugin did not repair that rename. Your notes were not changed. Check that note's place in your organization.";
+export const VAULT_RENAME_JOURNAL_KEY ="ent-vault-command-center.vault-rename-journal.v1";
 export const KBCC_RETURN_NAVIGATION_STATE_KEY = "ent-vault-command-center.return-navigation.v1";
 /** Inert key from an unreleased experiment; only explicit local-data cleanup may touch it. */
 export const LEGACY_LIBRARY_IMAGE_PERMISSION_KEY = "ent-vault-command-center.library-images.v1";
@@ -1929,9 +1931,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private noticeVaultRenameBlocked(reason: VaultRenameBlockedReason): void {
-    new Notice(reason === "overflow"
-      ? "Too many note renames are waiting to be applied, so automatic note-path repair is paused to protect your organization. Your notes were not changed. Back up the plugin data before restarting."
-      : "A note was renamed while organization was still loading, and a different note now uses its earlier name. Automatic note-path repair is paused so the wrong note is not relinked. Your notes were not changed.", 15000);
+    new Notice(reason === "overflow" ? VAULT_RENAME_OVERFLOW_NOTICE : VAULT_RENAME_AMBIGUOUS_NOTICE, 15000);
   }
 
   /** Mark the retained journal blocked, keeping its recorded prefix and scope. */
