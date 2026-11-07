@@ -1,6 +1,7 @@
 import {
   cleanFollowUpCategoryDefinitions,
   DEFAULT_FOLLOW_UP_CATEGORIES,
+  markdownBodyStartLine,
   MAX_FOLLOW_UP_CATEGORIES,
   type FollowUpCategoryDefinition,
 } from "./follow-up";
@@ -4491,9 +4492,46 @@ export function groupRecordsByGroup(records: VaultRecord[], fallbackGroup: strin
 /**
  * Replace the first top-level Markdown heading. A replacer function is required:
  * a plain replacement string would expand `$&`, `$\'` and `` $` `` inside a title.
+ * YAML frontmatter and fenced code blocks are skipped (same fence rules as the
+ * attachment inserter); a note with no heading outside them is returned unchanged.
  */
 export function rewriteTopLevelHeading(content: string, title: string): string {
-  return content.replace(/^# .+$/m, () => `# ${title}`);
+  // CRLF, LF and CR terminators, each left byte-for-byte untouched.
+  const lines: Array<{ text: string; start: number }> = [];
+  const breaks = /\r\n|\n|\r/gu;
+  let lineStart = 0;
+  for (let match = breaks.exec(content); match !== null; match = breaks.exec(content)) {
+    lines.push({ text: content.slice(lineStart, match.index), start: lineStart });
+    lineStart = breaks.lastIndex;
+  }
+  lines.push({ text: content.slice(lineStart), start: lineStart });
+  let bodyStart: number;
+  try {
+    bodyStart = markdownBodyStartLine(lines.map((line) => line.text));
+  } catch {
+    return content; // Unclosed frontmatter: never guess where the body starts.
+  }
+  let fence: { character: string; length: number } | null = null;
+  for (let index = bodyStart; index < lines.length; index += 1) {
+    const text = lines[index]?.text ?? "";
+    if (fence) {
+      const closing = /^ {0,3}(`{3,}|~{3,})[ \t]*$/u.exec(text);
+      if (closing && closing[1]?.[0] === fence.character && closing[1].length >= fence.length) fence = null;
+      continue;
+    }
+    const opening = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(text);
+    if (opening && !(opening[1]?.startsWith("`") && (opening[2] ?? "").includes("`"))) {
+      fence = { character: opening[1]?.[0] ?? "`", length: opening[1]?.length ?? 3 };
+      continue;
+    }
+    // `.` stops at U+2028/U+2029 too, as the original `m`-flag regex did.
+    const heading = /^# .+/u.exec(text);
+    if (heading) {
+      const offset = lines[index]?.start ?? 0;
+      return `${content.slice(0, offset)}# ${title}${content.slice(offset + heading[0].length)}`;
+    }
+  }
+  return content;
 }
 
 export function metadataHasGap(record: VaultRecord): boolean {
