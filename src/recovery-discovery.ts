@@ -89,6 +89,7 @@ export function describeRecoveryDiscovery(
   unreadableFolders: number,
   partial: boolean,
   moreKnown = false,
+  pluginFolderSkipped = false,
 ): string {
   const folders = `${inspectedFolders} ${inspectedFolders === 1 ? "folder" : "folders"} checked`;
   const plural = listed === 1 ? "file" : "files";
@@ -108,6 +109,9 @@ export function describeRecoveryDiscovery(
     "A file name is only a hint: nothing is checked until you open it, and a listed file may not be restorable.",
     "Other folders and older locations are not searched, so this is not a count of every copy that exists.",
   ];
+  if (pluginFolderSkipped) {
+    notes.push("The plugin folder could not be identified, so kept data backups were not searched. Use Choose another file to review one.");
+  }
   if (unreadableFolders > 0) {
     notes.push(`${unreadableFolders} ${unreadableFolders === 1 ? "folder" : "folders"} could not be read; that does not mean nothing is there.`);
   }
@@ -138,6 +142,8 @@ export async function discoverRecoveryCopies(
   let matchesBeyondStat = false;
 
   const scan = async (folder: string, origin: RecoveryCandidateOrigin, isMatch: (name: string) => boolean): Promise<void> => {
+    // An empty path means the vault root: never list it as a stand-in for an unknown folder.
+    if (folder === "") return;
     const key = `${origin === "kept-backup" ? "k" : "e"}:${folder}`;
     if (seenFolders.has(key)) return;
     seenFolders.add(key);
@@ -198,7 +204,7 @@ export async function discoverRecoveryCopies(
     inspectedFolders,
     unreadableFolders,
     truncated,
-    summary: describeRecoveryDiscovery(candidates.length, inspectedFolders, unreadableFolders, truncated, moreKnown),
+    summary: describeRecoveryDiscovery(candidates.length, inspectedFolders, unreadableFolders, truncated, moreKnown, pluginDir === ""),
   };
 }
 

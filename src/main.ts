@@ -6923,11 +6923,19 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       getExistingNames: () => this.store.bases.filter((entry) => entry.archivedAt === null).map((entry) => entry.data.settings.workspaceName),
       getExistingBaseIds: () => [...this.store.bases.map((entry) => entry.id), ...Object.keys(this.store.deletedBaseIds)],
       generateIdentity: () => ({ baseId: makeId("base"), semanticHead: fingerprintText(`${makeId("head")}:${Math.random()}`) }),
-      discover: () => discoverRecoveryCopies(host, {
-        exportFolders: [...new Set(this.store.bases.map((entry) => normalizePath(entry.data.settings.exportsFolder || SYNC_RECOVERY_EXPORT_FOLDER)))],
-        legacyExportFolder: SYNC_RECOVERY_EXPORT_FOLDER,
-        pluginDir: this.manifest.dir ?? "",
-      }),
+      discover: async () => {
+        // Never substitute the vault root: use manifest.dir, else the official config folder plus the plugin id if it exists, else skip.
+        let pluginDir = this.manifest.dir ?? "";
+        if (!pluginDir && this.manifest.id) {
+          const derived = normalizePath(`${this.app.vault.configDir}/plugins/${this.manifest.id}`);
+          if (await adapter.exists(derived).catch(() => false)) pluginDir = derived;
+        }
+        return discoverRecoveryCopies(host, {
+          exportFolders: [...new Set(this.store.bases.map((entry) => normalizePath(entry.data.settings.exportsFolder || SYNC_RECOVERY_EXPORT_FOLDER)))],
+          legacyExportFolder: SYNC_RECOVERY_EXPORT_FOLDER,
+          pluginDir,
+        });
+      },
       load: (candidate) => { selected = candidate; return loadRecoveryCopy(host, candidate.path, { currentVaultId: vaultId() }); },
       pickExplicit: () => pickRecoveryFile(this.app, this.getPortableJsonFiles()),
       getDestination: () => this.getRecoveryDestination(),

@@ -32,12 +32,12 @@ interface Wired {
   pickable: TFile[];
 }
 
-async function wired(): Promise<Wired> {
+async function wired(manifest: Record<string, string> = { dir: PLUGIN_DIR }, existingFolders: readonly string[] = []): Promise<Wired> {
   const files = new Map<string, string>();
   const adapterCalls: string[] = [];
   const pickable: TFile[] = [];
   const adapter = {
-    exists: async (path: string) => files.has(path),
+    exists: async (path: string) => files.has(path) || existingFolders.includes(path),
     write: async (path: string, text: string) => { files.set(path, text); },
     read: async (path: string) => { const text = files.get(path); if (text === undefined) throw new Error("ENOENT"); return text; },
     remove: async (path: string) => { files.delete(path); },
@@ -71,7 +71,7 @@ async function wired(): Promise<Wired> {
   };
   let disk = createDefaultStore(migrateData(null), 100, VAULT);
   disk.bases[0].data.settings.exportsFolder = EXPORTS;
-  const plugin = new EntVaultCommandCenterPlugin(app as never, { dir: PLUGIN_DIR } as never);
+  const plugin = new EntVaultCommandCenterPlugin(app as never, manifest as never);
   plugin.loadData = async () => structuredClone(disk);
   plugin.saveData = async (value: unknown) => { disk = structuredClone(value) as PluginStore; };
   await plugin.loadPluginData(false);
@@ -165,6 +165,28 @@ test("creating or switching a base after the preview refuses the old window's Ap
     assert.equal(result.status, "failed", change);
     assert.equal(w.disk().bases.length, before, "no new base on disk");
     assert.match(Notice.messages.join("\n"), /Reopen the review\. Nothing was changed/);
+  }
+});
+
+test("a missing manifest.dir never lists the vault root: derive the folder from the config folder and id, or omit it", async () => {
+  const kept = "data.json.bak-kept-2026-11-03T10-00-00-000Z";
+  // Derived and verified to exist: the kept backup is found there, and the root is never listed.
+  const derived = await wired({ id: "synthetic" }, [PLUGIN_DIR]);
+  derived.files.set(`${PLUGIN_DIR}/${kept}`, "{}");
+  derived.adapterCalls.length = 0;
+  const found = await derived.callbacks().discover();
+  assert.equal(found.candidates.some((candidate) => candidate.origin === "kept-backup"), true);
+  assert.equal(derived.adapterCalls.includes("list "), false, "the vault root is never listed");
+  assert.equal(derived.adapterCalls.includes(`list ${PLUGIN_DIR}`), true);
+  // Not derivable (no id) or not present: omitted with an honest, path-free explanation.
+  for (const [manifest, folders] of [[{}, []], [{ id: "synthetic" }, []]] as const) {
+    const w = await wired({ ...manifest }, folders);
+    w.adapterCalls.length = 0;
+    const result = await w.callbacks().discover();
+    assert.equal(w.adapterCalls.includes("list "), false);
+    assert.equal(w.adapterCalls.some((call) => call.startsWith("list .obsidian")), false);
+    assert.match(result.summary, /plugin folder could not be identified/);
+    assert.doesNotMatch(result.summary, /\.obsidian|synthetic/);
   }
 });
 

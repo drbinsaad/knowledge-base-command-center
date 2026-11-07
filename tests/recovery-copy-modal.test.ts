@@ -160,6 +160,19 @@ test("a partial scan says so for zero and nonzero results and never claims more 
   assert.match(known.summary, /more were found than are listed/);
 });
 
+test("an unknown plugin folder or a blank export folder never lists the vault root", async () => {
+  const listed: string[] = [];
+  const host: RecoveryHost = { list: async (folder) => { listed.push(folder); return []; }, stat: async () => null, read: async () => "" };
+  const result = await discoverRecoveryCopies(host, { exportFolders: ["", "  /  ", EXPORTS], legacyExportFolder: "", pluginDir: "" });
+  assert.deepEqual(listed, [EXPORTS], "only the real export folder is listed; '' would be the vault root");
+  assert.equal(result.inspectedFolders, 1);
+  assert.match(result.summary, /plugin folder could not be identified/);
+  assert.match(result.summary, /Choose another file/);
+  assert.doesNotMatch(result.summary, /\//);
+  const known = await discoverRecoveryCopies(host, { exportFolders: [EXPORTS], pluginDir: PLUGIN_DIR });
+  assert.doesNotMatch(known.summary, /could not be identified/);
+});
+
 test("one physical folder named twice is counted once", async () => {
   const { host } = makeHost({}, { [PLUGIN_DIR]: [] });
   const result = await discoverRecoveryCopies(host, { exportFolders: [PLUGIN_DIR], legacyExportFolder: PLUGIN_DIR, pluginDir: PLUGIN_DIR });
