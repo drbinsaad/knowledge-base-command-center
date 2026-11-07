@@ -26,7 +26,7 @@ test.beforeAll(async () => {
   hostStyles = host;
 });
 
-async function openView(page: Page, options: { mobile?: boolean; dark?: boolean; count?: number; phoneChrome?: boolean; width?: number; height?: number; largeText?: boolean; scenario?: "related-overflow" | "attachments" } = {}): Promise<void> {
+async function openView(page: Page, options: { mobile?: boolean; dark?: boolean; count?: number; phoneChrome?: boolean; width?: number; height?: number; largeText?: boolean; scenario?: "related-overflow" | "attachments" | "placeholder-link" } = {}): Promise<void> {
   const errors: string[] = [];
   failures.set(page, errors);
   page.on("pageerror", (error) => errors.push(error.message));
@@ -392,6 +392,48 @@ for (const direction of ["ltr", "rtl"] as const) test(`WF07 I6 ${direction} a de
   await page.keyboard.press("Enter");
   await expect(feedback).toBeHidden();
   expect(await page.evaluate(() => document.activeElement === document.body)).toBe(false);
+});
+
+interface PlaceholderLinkCalls { placed: Array<{ path: string; group: string }>; linked: Array<{ subjectId: string; path: string; merge: boolean }> }
+const linkCalls = (page: Page): Promise<PlaceholderLinkCalls> => page.evaluate(() => (window as unknown as { kbccBrowserHarness: { placeholderLinkSnapshot(): PlaceholderLinkCalls } }).kbccBrowserHarness.placeholderLinkSnapshot());
+async function startAddExisting(page: Page, note: string): Promise<void> {
+  await page.evaluate(() => (window as unknown as { kbccBrowserHarness: { startAddExisting(): void } }).kbccBrowserHarness.startAddExisting());
+  await page.getByRole("option", { name: new RegExp(note, "u") }).click();
+}
+
+test.describe("WF10 placeholder choice", () => {
+  test("P1 a matching note offers an explicit choice and linking happens only when chosen", async ({ page }) => {
+    await openView(page, { scenario: "placeholder-link", count: 8 });
+    await startAddExisting(page, "Laryngomalacia");
+    await expect(page.getByRole("dialog")).toContainText("matches an imported subject");
+    const link = page.getByRole("option", { name: /Link to “Laryngomalacia”.*Airway.*title match/u });
+    await expect(link).toHaveCount(1);
+    await expect(page.getByRole("option", { name: /separately, without linking/u })).toHaveCount(1);
+    expect(await linkCalls(page)).toEqual({ placed: [], linked: [] });
+    await link.click();
+    await expect.poll(async () => (await linkCalls(page)).linked).toEqual([{ subjectId: "subject-larynx", path: "Inbox/Laryngomalacia.md", merge: false }]);
+    expect((await linkCalls(page)).placed).toEqual([]);
+  });
+
+  test("P3 add separately keeps the group picker, cancel writes nothing, and no match skips the choice", async ({ page }) => {
+    await openView(page, { scenario: "placeholder-link", count: 8 });
+    await startAddExisting(page, "Laryngomalacia");
+    await page.getByRole("option", { name: /separately, without linking/u }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toContainText("Place “Laryngomalacia”");
+    await dialog.getByRole("button", { name: /^Add to /u }).click();
+    await expect.poll(async () => (await linkCalls(page)).placed).toEqual([{ path: "Inbox/Laryngomalacia.md", group: "Airway" }]);
+    expect((await linkCalls(page)).linked).toEqual([]);
+
+    await startAddExisting(page, "Laryngomalacia");
+    await page.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    expect(await linkCalls(page)).toEqual({ placed: [{ path: "Inbox/Laryngomalacia.md", group: "Airway" }], linked: [] });
+
+    await startAddExisting(page, "Standalone");
+    await expect(page.getByRole("dialog")).toContainText("Place “Standalone”");
+    await expect(page.getByRole("dialog")).not.toContainText("matches an imported subject");
+  });
 });
 
 test.describe("WF07 R4 phone", () => {

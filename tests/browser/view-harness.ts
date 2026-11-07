@@ -12,7 +12,7 @@ import type EntVaultCommandCenterPlugin from "../../src/main";
 import { EntVaultCommandCenterView } from "../../src/view";
 import { buildCurriculumTree, canonicalJsonString, childSubheadings, clonePersonalOrganization, createDefaultStore, createKnowledgeBaseEntry, migrateData, parseQuery, portablePlaceholderPath, restoreSnapshot, semanticEntryFingerprint, snapshotPersonal, type LayoutHeading, type LayoutSubheading, type VaultRecord } from "../../src/model";
 import { BoundedKnowledgeBaseSearchCollector } from "../../src/search";
-import { KnowledgeNoteModal, WorkspaceSetupModal } from "../../src/modals";
+import { KnowledgeNoteModal, StringPickerModal, VaultFilePickerModal, WorkspaceSetupModal } from "../../src/modals";
 import { ExportImportCenterModal } from "../../src/portability-modal";
 import { SyncRecoveryCenterModal } from "../../src/sync-recovery-modal";
 import { NoteOrganizerModal, type NoteOrganizerHost } from "../../src/note-organizer-modal";
@@ -53,6 +53,10 @@ const touchDrag = parameters.get("scenario") === "touch-drag";
 const libraryGallery = parameters.get("scenario") === "library-gallery";
 const relatedOverflow = parameters.get("scenario") === "related-overflow";
 const attachmentScenario = parameters.get("scenario") === "attachments";
+const placeholderLinkScenario = parameters.get("scenario") === "placeholder-link";
+// Honest recording fakes for WF-10: they only note what the production view asked for.
+const placeholderLinkCalls = { placed: [] as Array<{ path: string; group: string }>, linked: [] as Array<{ subjectId: string; path: string; merge: boolean }> };
+const placeholderLinkNotes = ["Inbox/Laryngomalacia.md", "Inbox/Standalone.md"];
 const attachmentNotePath = "Reading/Attachment overview.md";
 const attachmentPaths = [
   "Attachments/Diagram.png", "Attachments/Review.pdf", "Attachments/Minutes.docx",
@@ -103,6 +107,12 @@ if (mobileSpace) {
   data.pinnedPaths = records.slice(0, 2).map((item) => item.path);
 }
 data.directIndexPaths = records.filter((item) => !item.libraryId && !item.portableId).map((item) => item.path);
+if (placeholderLinkScenario) {
+  // One unresolved imported subject whose title matches the unindexed note "Laryngomalacia".
+  data.portableIndex.groups = [{ id: "airway", title: "Airway", order: 0 }];
+  data.portableIndex.subjects = [{ id: "subject-larynx", title: "Laryngomalacia", groupId: "airway", parentId: null, order: 0, indexed: true, configuredId: "", recordKind: "topic" }];
+  data.portableIndex.resolvedPathBySubjectId = {};
+}
 data.collections = [{ id: "favorites", title: "Reading this week", collapsed: false, subjects: records.slice(0, 4).map((item) => item.path), subheadings: [] }];
 if (touchDrag) {
   records.splice(0, records.length,
@@ -234,6 +244,8 @@ const completedImportActions = { undo: 0, placeholderQueue: 0, closed: [] as boo
 const files = records.filter((item) => touchDrag || libraryGallery ? !item.isPlaceholder : !item.portableId).map((item) => new TFile(item.path));
 files.push(...externalBacklinkPaths.map((path) => new TFile(path)));
 if (attachmentScenario) files.push(...[...attachmentPaths, "Attachments/Cover.jpg"].map((path) => new TFile(path)));
+const placeholderLinkFiles = placeholderLinkNotes.map((path) => new TFile(path));
+if (placeholderLinkScenario) files.push(...placeholderLinkFiles);
 const openedRelatedPaths: string[] = [];
 const coverFile = new TFile("Covers/Example.png");
 const deviceLocalValues = new Map<string, unknown>();
@@ -292,7 +304,15 @@ const plugin = {
   getRecord: (path: string) => currentRecords().find((item) => item.path === path),
   getVaultId: () => "browser-synthetic-vault",
   librarySubjectCount: (id: string) => records.filter((item) => item.libraryId === id).length,
-  getIndexCandidateFiles: () => files,
+  getIndexCandidateFiles: () => placeholderLinkScenario ? placeholderLinkFiles : files,
+  suggestedIndexGroup: () => "Airway",
+  getIndexGroups: () => ["Airway"],
+  assignRecordToCatalog: async (path: string, _kind: string, options: { headingTitle: string }) => {
+    placeholderLinkCalls.placed.push({ path, group: options.headingTitle });
+  },
+  resolvePortableSubject: async (subjectId: string, path: string, merge = false) => {
+    placeholderLinkCalls.linked.push({ subjectId, path, merge });
+  },
   getVaultNoteFiles: () => files,
   getTemplateFiles: () => [],
   validateGenericNote: (value: { title: string }) => value.title.trim() ? null : "Enter a title.",
@@ -604,8 +624,26 @@ function renderSettingDefinitions(parent: HTMLElement, definitions: SettingDefin
   }
 }
 
+if (placeholderLinkScenario) {
+  // The synthetic FuzzySuggestModal host draws no suggestion list. Draw a plain listbox of the picker's own
+  // items; choosing one closes the modal and then calls the production onChooseItem, as the real host does.
+  for (const picker of [VaultFilePickerModal, StringPickerModal] as const) {
+    const hostOpen: (this: Modal) => void = Reflect.get(picker.prototype, "open");
+    picker.prototype.open = function openWithSuggestions(this: Modal & { getItems(): unknown[]; getItemText(item: never): string; onChooseItem(item: never): void }): void {
+      hostOpen.call(this);
+      const list = this.contentEl.createDiv({ attr: { role: "listbox", "aria-label": "Choices" } });
+      for (const item of this.getItems()) {
+        const option = list.createEl("button", { text: this.getItemText(item as never), attr: { role: "option", type: "button" } });
+        option.addEventListener("click", () => { this.close(); this.onChooseItem(item as never); });
+      }
+    };
+  }
+}
+
 const harness = {
   ready: false,
+  startAddExisting() { view.startAddExistingToIndex(); },
+  placeholderLinkSnapshot() { return structuredClone(placeholderLinkCalls); },
   workspaceLayoutSnapshot() {
     return { localValues: Object.fromEntries(deviceLocalValues), organizationUnchanged: organizationFingerprint() === initialOrganization };
   },
