@@ -72,18 +72,19 @@ export async function startE05Host(options: E05HostOptions): Promise<E05Host> {
   const scheduledRefreshes: boolean[] = [];
   let deviceState: unknown = null;
 
-  const countedLinks = (): ResolvedLinks => new Proxy({} as ResolvedLinks, {
-    ownKeys: () => { counters.resolvedRootEnumerations += 1; return Reflect.ownKeys(rawLinks); },
+  const countedLinks = (raw: ResolvedLinks): ResolvedLinks => new Proxy({} as ResolvedLinks, {
+    ownKeys: () => { counters.resolvedRootEnumerations += 1; return Reflect.ownKeys(raw); },
     getOwnPropertyDescriptor: (_target, key) => {
-      const descriptor = Reflect.getOwnPropertyDescriptor(rawLinks, key);
+      const descriptor = Reflect.getOwnPropertyDescriptor(raw, key);
       return descriptor ? { ...descriptor, configurable: true } : undefined;
     },
-    has: (_target, key) => Reflect.has(rawLinks, key),
+    has: (_target, key) => Reflect.has(raw, key),
     get: (_target, key) => {
       if (typeof key === "string") counters.resolvedSourceReads += 1;
-      return Reflect.get(rawLinks, key);
+      return Reflect.get(raw, key);
     },
   });
+  let linksProxy = countedLinks(rawLinks);
 
   const forbidden = (): never => { throw new Error("E05 host: a vault mutation was attempted."); };
   const app = {
@@ -110,7 +111,8 @@ export async function startE05Host(options: E05HostOptions): Promise<E05Host> {
         metadataListeners.set(name, [...(metadataListeners.get(name) ?? []), callback]);
         return { unsubscribe: () => {} };
       },
-      resolvedLinks: countedLinks(),
+      // A getter, so replaceResolvedLinks genuinely changes the object identity Obsidian exposes.
+      get resolvedLinks(): ResolvedLinks { return linksProxy; },
     },
     fileManager: { renameFile: forbidden, processFrontMatter: forbidden },
     loadLocalStorage: (): unknown => structuredClone(deviceState),
@@ -137,7 +139,10 @@ export async function startE05Host(options: E05HostOptions): Promise<E05Host> {
     files,
     frontmatter,
     get resolvedLinks(): ResolvedLinks { return rawLinks; },
-    replaceResolvedLinks(next: ResolvedLinks): void { rawLinks = next; },
+    replaceResolvedLinks(next: ResolvedLinks): void {
+      rawLinks = next;
+      linksProxy = countedLinks(next); // new object identity at app.metadataCache.resolvedLinks
+    },
     counters,
     resetCounters(): void {
       counters.enumerations = 0;

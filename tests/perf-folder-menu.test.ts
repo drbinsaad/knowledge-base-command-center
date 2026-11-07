@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Notice, TFile, TFolder } from "./support/obsidian-stub.ts";
+import { createTestFolder, Notice, setTestParent, TFile, TFolder } from "./support/obsidian-stub.ts";
 import EntVaultCommandCenterPlugin from "../src/main.ts";
 
 /**
@@ -95,8 +95,9 @@ function subtreeFixture() {
   const protectedNote = new TFile("05 Sources/_books/Book.md");
   const outside = Array.from({ length: 200 }, (_, index) => new TFile(`Outside/Other ${index}.md`));
   const sibling = new TFile("Subtreeish/Not inside.md");
-  const nestedFolder = new TFolder("Subtree/Nested", nested);
-  const folder = new TFolder("Subtree", [...direct, nestedFolder, image]);
+  // Coherent tree: children and parent links are set together via the support factory.
+  const nestedFolder = createTestFolder("Subtree/Nested", { children: nested });
+  const folder = createTestFolder("Subtree", { children: [...direct, nestedFolder, image] });
   const vaultFiles = [...outside, sibling, protectedNote, ...direct, ...nested];
   const expected = [...direct, ...nested].map((file) => file.path).sort();
   return { folder, nestedFolder, direct, nested, vaultFiles, expected, outside };
@@ -170,9 +171,13 @@ test("additions and removals before the click are reflected in the one-time chos
   const action = organize(host.openMenu("file-menu", fx.folder));
   assert.ok(action);
   const added = new TFile("Subtree/Added later.md");
+  // Inventory, TFolder.children and parent links change together, so both a
+  // whole-vault expansion and a bounded subtree traversal see the same tree.
   host.vaultFiles.push(added);
+  setTestParent(added, fx.folder);
   const removedPath = fx.direct[0].path;
   host.vaultFiles.splice(host.vaultFiles.findIndex((file) => file.path === removedPath), 1);
+  setTestParent(fx.direct[0], null);
   action.click();
   const expected = [...fx.expected.filter((path) => path !== removedPath), added.path].sort();
   assert.deepEqual(host.opened[0]?.paths, expected, "the snapshot is the vault at click time, not menu-open time");
@@ -181,7 +186,7 @@ test("additions and removals before the click are reflected in the one-time chos
 function capFixture(selectedNotes: number, extraOutside: number) {
   const inside = Array.from({ length: selectedNotes }, (_, index) => new TFile(`Big/${index}.md`));
   const outside = Array.from({ length: extraOutside }, (_, index) => new TFile(`Out/${index}.md`));
-  const folder = new TFolder("Big", inside);
+  const folder = createTestFolder("Big", { children: inside });
   return { folder, vaultFiles: [...inside, ...outside], inside };
 }
 

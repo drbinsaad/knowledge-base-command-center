@@ -197,10 +197,12 @@ test("control: target delete then recreation restores its reverse edges exactly"
   assert.deepEqual(sorted(host.plugin.getBacklinkPaths(TARGET)), [sourcePath(0), sourcePath(1)]);
 });
 
-test("control: a replaced resolvedLinks object is read on the next lookup", async () => {
+test("control: a replaced resolvedLinks object (new identity on metadataCache) is read on the next lookup", async () => {
   const host = await backlinkHost();
   assert.deepEqual(sorted(host.plugin.getBacklinkPaths(TARGET)), [sourcePath(0), sourcePath(1)]);
+  const identityBefore = host.app.metadataCache.resolvedLinks;
   host.replaceResolvedLinks({ [sourcePath(7)]: { [TARGET]: 1 } });
+  assert.notEqual(host.app.metadataCache.resolvedLinks, identityBefore, "the exposed object is genuinely replaced");
   host.emitMetadata("changed", host.sources[7]);
   host.emitMetadata("resolve", host.sources[7]);
   assert.deepEqual(host.plugin.getBacklinkPaths(TARGET), [sourcePath(7)]);
