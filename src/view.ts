@@ -26,6 +26,7 @@ import {
 import { MembershipExplanationModal } from "./membership-explanation-modal";
 import { CreatedNoteRecoveryModal } from "./created-note-recovery-modal";
 import { localeInvariantTaxonomyKey } from "./taxonomy-health";
+import { placeholderChoiceLabels, projectPlaceholderCandidates, unresolvedChoiceSubjects } from "./placeholder-link-choice";
 import {
   buildCurriculumTree,
   canonicalPath,
@@ -97,6 +98,7 @@ import {
   KnowledgeNoteModal,
   type NoteDestinationSeed,
   RecordPickerModal,
+  StringPickerModal,
   TextPromptModal,
   TopicEditorModal,
   VaultFilePickerModal,
@@ -1986,7 +1988,7 @@ export class EntVaultCommandCenterView extends ItemView {
       return;
     }
     const ownsBase = this.createOpenedBaseGuard();
-    new IndexGroupModal(this.app, {
+    this.offerPlaceholderLinkChoice(file, ownsBase, () => new IndexGroupModal(this.app, {
       title: `Place “${file.basename}” in ${this.plugin.data.settings.indexLabel}`,
       groupLabel: this.plugin.data.settings.groupLabel,
       initialValue: this.plugin.suggestedIndexGroup(file),
@@ -1998,7 +2000,43 @@ export class EntVaultCommandCenterView extends ItemView {
         if (!ownsBase()) return;
         new Notice(`Added “${file.basename}” under ${group}. The Markdown note was not changed.`);
       },
-    }).open();
+    }).open());
+  }
+
+  /**
+   * Before an existing note is placed in the Index, offer every same-base unresolved subject whose exact
+   * normalized title or configured ID matches it. The user links one explicitly or adds the note separately;
+   * closing the choice cancels. The linking itself stays in the guarded resolvePortableSubject service.
+   */
+  private offerPlaceholderLinkChoice(file: TFile, ownsBase: () => boolean, addSeparately: () => void): void {
+    const data = this.plugin.data;
+    const index = data.portableIndex;
+    const unresolved = unresolvedChoiceSubjects(index, data.settings.indexLabel, (id) => this.plugin.getLibrary(id)?.name);
+    const note = unresolved.length > 0 && !this.plugin.isDataReadOnly() ? this.placeholderMatchNotes([file])[0] : undefined;
+    const candidates = note ? projectPlaceholderCandidates(note, unresolved) : [];
+    if (candidates.length === 0) {
+      addSeparately();
+      return;
+    }
+    const separately = `Add “${file.basename}” separately, without linking`;
+    const labels = placeholderChoiceLabels(candidates);
+    new StringPickerModal(this.app, [separately, ...labels], `“${file.basename}” matches an imported subject`,
+      "Link a subject, or add separately", async (choice) => {
+        if (!ownsBase()) return;
+        if (choice === separately) {
+          addSeparately();
+          return;
+        }
+        const candidate = candidates[labels.indexOf(choice)];
+        // A stale choice (file, subject or binding changed) changes nothing.
+        const current = this.app.vault.getAbstractFileByPath(file.path);
+        const subject = candidate && this.plugin.getPortableSubject(candidate.id);
+        if (!subject || !(current instanceof TFile) || subject.title !== candidate.title || index.resolvedPathBySubjectId[subject.id]) {
+          new Notice("That choice is out of date. Nothing was changed.", 8000);
+          return;
+        }
+        await this.resolvePortableSubjectLink(subject.id, subject.title, current);
+      }).open();
   }
 
   public openAddActions(): void {
@@ -2691,7 +2729,7 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     new VaultFilePickerModal(this.app, files, `Add existing note to ${settings.indexLabel}`, async (file) => {
       if (!ownsBase()) return;
-      new IndexGroupModal(this.app, {
+      this.offerPlaceholderLinkChoice(file, ownsBase, () => new IndexGroupModal(this.app, {
         title: `Place “${file.basename}” in ${settings.indexLabel}`,
         groupLabel: settings.groupLabel,
         initialValue: this.plugin.suggestedIndexGroup(file),
@@ -2703,7 +2741,7 @@ export class EntVaultCommandCenterView extends ItemView {
           if (!ownsBase()) return;
           new Notice(`Added to ${settings.indexLabel} under ${group}. The note stayed at ${file.path}.`);
         },
-      }).open();
+      }).open());
     }).open();
   }
 
