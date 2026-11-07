@@ -2359,3 +2359,54 @@ for (const [label, width, height, mobile] of [["phone 390", 390, 844, true], ["t
     await expect(terminal).toBeHidden();
   });
 }
+
+interface SetupJourneySnapshot {
+  commits: Array<{ inbox: string; reviewed: { previousFolder: string; nextFolder: string; affectedCount: number } | null }>;
+  inbox: string;
+  workspaceName: string;
+  setupComplete: boolean;
+  undoCount: number;
+}
+type SetupJourneyHarness = { openSetupWizard(): void; undoSetup(): Promise<void>; setupSnapshot(): SetupJourneySnapshot };
+const setupJourney = (page: Page): Promise<SetupJourneySnapshot> => page.evaluate(() => (window as unknown as { kbccBrowserHarness: SetupJourneyHarness }).kbccBrowserHarness.setupSnapshot());
+
+test.describe("WF01 setup Inbox review (synthetic host; real wizard)", () => {
+  test("open setup, change the Inbox, review, Cancel keeps the draft, confirm once, then Undo", async ({ page }) => {
+    await openView(page, { count: 8 });
+    const before = await setupJourney(page);
+    await page.evaluate(() => (window as unknown as { kbccBrowserHarness: SetupJourneyHarness }).kbccBrowserHarness.openSetupWizard());
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText("Already using this knowledge base on another device? Let Sync finish before setting it up here.");
+    await dialog.getByRole("textbox", { name: "Name this knowledge base", exact: true }).fill("Unsaved draft name");
+    await dialog.locator(".ent-cc-setup-advanced summary").click();
+    await dialog.getByRole("textbox", { name: "Inbox folder", exact: true }).fill("Triage Inbox");
+    await dialog.getByRole("button", { name: "Finish setup", exact: true }).click();
+
+    // Review: old, new and the Inbox-only count; nothing is written yet.
+    await expect(dialog).toContainText(`Current Inbox folder: ${before.inbox}`);
+    await expect(dialog).toContainText("New Inbox folder: Triage Inbox");
+    await expect(dialog).toContainText("2 Inbox-only notes");
+    expect((await setupJourney(page)).commits).toEqual([]);
+
+    // Cancel in the review returns to the editable wizard with the draft intact.
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("textbox", { name: "Name this knowledge base", exact: true })).toHaveValue("Unsaved draft name");
+    await expect(dialog.getByRole("textbox", { name: "Inbox folder", exact: true })).toHaveValue("Triage Inbox");
+    expect(await setupJourney(page)).toEqual(before);
+
+    // Review again and confirm: exactly one commit carrying the reviewed effects.
+    await dialog.getByRole("button", { name: "Finish setup", exact: true }).click();
+    await dialog.getByRole("button", { name: "Apply Inbox change and finish setup", exact: true }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    const after = await setupJourney(page);
+    expect(after.commits).toEqual([{ inbox: "Triage Inbox", reviewed: { previousFolder: before.inbox, nextFolder: "Triage Inbox", affectedCount: 2 } }]);
+    expect(after).toMatchObject({ inbox: "Triage Inbox", workspaceName: "Unsaved draft name", setupComplete: true, undoCount: before.undoCount + 1 });
+
+    // Undo restores the earlier settings exactly.
+    await page.evaluate(() => (window as unknown as { kbccBrowserHarness: SetupJourneyHarness }).kbccBrowserHarness.undoSetup());
+    expect(await setupJourney(page)).toMatchObject({ inbox: before.inbox, workspaceName: before.workspaceName, setupComplete: before.setupComplete, undoCount: before.undoCount });
+    expect(failures.get(page) ?? []).toEqual([]);
+  });
+});

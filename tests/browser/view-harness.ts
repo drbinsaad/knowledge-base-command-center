@@ -234,6 +234,7 @@ const sources = [
 let epoch = 0;
 let generation = 0;
 const touchDragActions = { mutations: [] as string[], undo: 0, redo: 0 };
+const setupActions = { commits: [] as Array<{ inbox: string; reviewed: unknown }> };
 const hostSwipeTouches: Array<{ ignored: boolean; handle: boolean; trusted: boolean }> = [];
 function organizationFingerprint(): string {
   return canonicalJsonString({ ...clonePersonalOrganization(data), portableIndex: data.portableIndex });
@@ -340,6 +341,20 @@ const plugin = {
   resolveLink: (link: string) => relatedOverflow ? records.find((item) => item.path === link) ?? null : null,
   openFile: async (file: TFile) => { openedRelatedPaths.push(file.path); },
   isDataReadOnly: () => false, isClinicalMode: () => false,
+  // Synthetic stand-ins for the setup journey. The real queued required-Undo
+  // transaction is proven in the runtime tests; this host only records what the
+  // production wizard asks it to commit and restores a real snapshot on Undo.
+  assertDataWritable: () => undefined,
+  refreshViews: async () => { await view.reload(); },
+  countOrphanedByProposalFolderChange: () => 2,
+  commitSetupSettings: async (value: Record<string, unknown>, reviewed: unknown, ownsBase: () => boolean) => {
+    if (!ownsBase()) throw new Error("Setup was not saved.");
+    const before = snapshotPersonal(data, "Finish setup", true);
+    Object.assign(data.settings, value, { setupComplete: true });
+    data.undoStack.push(before);
+    data.redoStack = [];
+    setupActions.commits.push({ inbox: String(value.proposalFolder), reviewed });
+  },
   canVisuallyMoveAcrossGroups: () => touchDrag, countMemberships: () => 0,
   initializeLibraryCatalog: async () => undefined,
   moveLibraryRecordVisually: async (
@@ -763,6 +778,18 @@ const harness = {
     };
     Object.assign(tab, { containerEl: container, update: render });
     render();
+  },
+  /** Opens the real production wizard route (view.openSetupWizard), not a directly constructed modal. */
+  openSetupWizard() { view.openSetupWizard(); },
+  async undoSetup() {
+    const previous = data.undoStack.pop();
+    if (!previous) return;
+    data.redoStack.push(snapshotPersonal(data, previous.label, true));
+    restoreSnapshot(data, previous);
+    await view.reload();
+  },
+  setupSnapshot() {
+    return { commits: setupActions.commits.map((commit) => ({ ...commit })), inbox: data.settings.proposalFolder, workspaceName: data.settings.workspaceName, setupComplete: data.settings.setupComplete, undoCount: data.undoStack.length };
   },
   invalidateSettings() { settingsEpoch += 1; },
   releaseSettingsSave() { releaseSettingsSave?.(); releaseSettingsSave = null; },
