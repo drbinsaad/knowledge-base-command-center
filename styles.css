@@ -329,7 +329,8 @@
   cursor: progress;
 }
 
-.ent-cc-portability-file-label {
+.ent-cc-portability-file-label,
+.ent-cc-attachment-status {
   overflow-wrap: anywhere;
 }
 
