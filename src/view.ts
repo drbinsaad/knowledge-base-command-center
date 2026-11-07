@@ -12,7 +12,7 @@ import { LibraryEditorModal, ManageLibrariesModal } from "./library-modal";
 import { resolveLibraryIconId } from "./library-icons";
 import { DEFAULT_LIBRARY_DISPLAY_PROFILE, type LibraryDisplayProfile } from "./library-display-profile";
 import { libraryPropertyText, ownLibraryProperty, renderLibraryCover, resolveLibraryCoverFromProperty } from "./library-cover";
-import { collectNoteAttachments, renderNoteAttachments } from "./note-attachments";
+import { ATTACHMENT_PAGE_SIZE, collectNoteAttachments, focusAttachmentNear, focusedAttachmentRow, MISSING_REFERENCE_TEXT, renderNoteAttachments } from "./note-attachments";
 import { TouchDragController, type TouchDragTarget } from "./touch-drag";
 import {
   MAX_KBCC_RETURN_BROWSE_LIMIT,
@@ -752,6 +752,12 @@ export class EntVaultCommandCenterView extends ItemView {
   private browseStructuresRendered = 0;
   private browseStructuresOmitted = 0;
   private viewClosed = false;
+  /** Volatile attachment-list state for the selected note; keyed by base and note, never persisted. */
+  private attachmentView: { key: string; revealed: number; focusedPath: string | null; focusedIndex: number } | null = null;
+  /** One view-owned feedback region that outlives rerenders until replaced or dismissed. */
+  private viewFeedback: { message: string; tone: "status" | "error"; source: string } | null = null;
+  private viewFeedbackEl: HTMLElement | null = null;
+  private viewFeedbackOrigin: HTMLElement | null = null;
   private searchViewportWindow: Window | null = null;
   private searchPointerCleanup: (() => void) | null = null;
   private mobileToolbarCleanup: (() => void) | null = null;
@@ -815,6 +821,10 @@ export class EntVaultCommandCenterView extends ItemView {
     this.globalSearchRequestGeneration += 1;
     this.globalSearchPendingKey = "";
     this.pendingReturnScroll = null;
+    this.viewFeedback = null;
+    this.viewFeedbackEl = null;
+    this.viewFeedbackOrigin = null;
+    this.attachmentView = null;
     this.unbindWindowMigration();
     this.unbindPaneLayout();
     this.unbindSearchViewportLayout();
@@ -954,6 +964,7 @@ export class EntVaultCommandCenterView extends ItemView {
 
   async reload(withinOperation = false): Promise<void> {
     const focusBefore = captureViewFocus(this.contentEl);
+    this.captureAttachmentFocus();
     const listScrollBefore = this.paneLayout === "wide" ? this.treeEl?.scrollTop ?? 0 : this.workspaceEl?.scrollTop ?? 0;
     const detailScrollBefore = this.paneLayout === "wide" ? this.inspectorEl?.scrollTop ?? 0
       : this.inspectorEl?.querySelector<HTMLElement>(".ent-cc-inspector-body")?.scrollTop ?? 0;
@@ -988,6 +999,8 @@ export class EntVaultCommandCenterView extends ItemView {
       // A Sync refresh of the same base must not erase what the user is typing.
       // A real base switch intentionally starts from that base's clean route.
       if (baseChanged) {
+        // Feedback about the previous base's files must not describe this one.
+        this.viewFeedback = null;
         this.query = "";
         this.parsedQuery = parseQuery("");
         this.searchScope = "all";
@@ -1044,7 +1057,9 @@ export class EntVaultCommandCenterView extends ItemView {
     this.render(!baseChanged);
     if (!baseChanged && this.contentEl?.ownerDocument) {
       this.restoreReturnScrollPosition(listScrollBefore, detailScrollBefore);
-      restoreViewFocus(this.contentEl, focusBefore);
+      // The snapshot was taken before the awaits above; focus the user moved
+      // to another surface since then must not be pulled back.
+      if (this.focusBelongsToView()) restoreViewFocus(this.contentEl, focusBefore);
     }
     if (searchWasFocused && !baseChanged) {
       const replacement = this.contentEl.querySelector<HTMLInputElement>('.ent-cc-search-box input[type="search"]');
@@ -2951,6 +2966,7 @@ export class EntVaultCommandCenterView extends ItemView {
     this.clearSearchPointerInteraction();
     this.unbindMobileToolbarLayout();
     const focusedControl = this.mobileInspectorNeedsFocus ? null : captureViewFocus(this.contentEl);
+    this.captureAttachmentFocus();
     // Native details toggle events are queued; read the live state before
     // replacement so an immediate keyboard action cannot close the panel.
     const currentOptions = this.contentEl.querySelector<HTMLDetailsElement>(".ent-cc-workspace-options");
@@ -3002,6 +3018,7 @@ export class EntVaultCommandCenterView extends ItemView {
     }
 
     shell.toggleClass("is-mobile-browse", mobileBrowse);
+    this.mountViewFeedback(shell);
     const header = shell.createDiv({ cls: "ent-cc-header" });
     const titleBlock = header.createDiv({ cls: "ent-cc-title-block" });
     const kickerRow = titleBlock.createDiv({ cls: "ent-cc-title-kicker-row" });
@@ -3085,7 +3102,7 @@ export class EntVaultCommandCenterView extends ItemView {
     disableWhenReadOnly(organize, readOnly, "Organize notes");
     organize.addEventListener("click", () => {
       if (readOnly) {
-        new Notice(organizerReadOnlyNotice, 8000);
+        this.setViewFeedback(organizerReadOnlyNotice, "error", "organizer");
         return;
       }
       this.plugin.openNoteOrganizer();
@@ -3114,7 +3131,7 @@ export class EntVaultCommandCenterView extends ItemView {
       event.stopPropagation();
       organize.removeClass("is-drop-target");
       if (readOnly) {
-        new Notice(organizerReadOnlyNotice, 8000);
+        this.setViewFeedback(organizerReadOnlyNotice, "error", "organizer");
         return;
       }
       this.plugin.openNoteOrganizerDrop(event.dataTransfer);
@@ -3201,7 +3218,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const density = actions.createEl("button", {
       cls: "ent-cc-button ent-cc-density-toggle", type: "button",
       text: this.viewDensity === "compact" ? "Comfortable" : "Compact",
-      attr: { "aria-label": this.viewDensity === "compact" ? "Use comfortable view density" : "Use compact view density", "aria-pressed": String(this.viewDensity === "compact"), "data-kbcc-focus": "density" },
+      attr: { "aria-label": this.viewDensity === "compact" ? "Use comfortable view density" : "Use compact view density", "data-kbcc-focus": "density" },
     });
     density.addEventListener("click", () => {
       this.viewDensity = this.viewDensity === "compact" ? "comfortable" : "compact";
@@ -5370,9 +5387,97 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private saveWorkspaceLayoutPreference(): void {
-    if (saveWorkspaceLayoutPreference(this.app, this.getWorkspaceLayoutPreference()) || this.layoutStorageWarningShown) return;
+    if (saveWorkspaceLayoutPreference(this.app, this.getWorkspaceLayoutPreference())) {
+      this.layoutStorageWarningShown = false;
+      if (this.viewFeedback?.source === "layout") this.clearViewFeedback();
+      return;
+    }
+    if (this.layoutStorageWarningShown) return;
     this.layoutStorageWarningShown = true;
-    new Notice("The layout changed for this session, but this device could not remember it.");
+    this.setViewFeedback("The layout changed for this session, but this device could not remember it.", "error", "layout");
+  }
+
+  /** Narrow geometry alone is not modality: only an actual mobile compact inspector behaves as a dialog. */
+  private isModalInspectorLayout(): boolean {
+    return Platform.isMobile && this.isCompactInspectorLayout();
+  }
+
+  /** Focus that stayed in this view, or sits on nothing, may be restored; focus on another surface is never taken. */
+  private focusBelongsToView(): boolean {
+    const doc = this.contentEl.ownerDocument;
+    const active = doc.activeElement;
+    return !active || active === doc.body || this.contentEl.contains(active) || !doc.body.contains(active);
+  }
+
+  private captureAttachmentFocus(): void {
+    const state = this.attachmentView;
+    const inspector = this.inspectorEl;
+    if (!state || !inspector) return;
+    const active = inspector.ownerDocument.activeElement;
+    if (!active || !inspector.contains(active)) return;
+    const focused = focusedAttachmentRow(inspector);
+    state.focusedPath = focused?.path ?? null;
+    state.focusedIndex = focused?.index ?? 0;
+  }
+
+  /** Creates the feedback region once; it is re-attached, not rebuilt, so a refresh does not re-announce it. */
+  private mountViewFeedback(parent: HTMLElement): void {
+    let region = this.viewFeedbackEl;
+    if (region) parent.append(region);
+    else {
+      region = parent.createDiv({ cls: "ent-cc-view-feedback" });
+      // Both live regions exist before any message so assistive technology observes the text change.
+      region.createDiv({ cls: "ent-cc-view-feedback-status", attr: { role: "status", "aria-live": "polite", "aria-atomic": "true" } });
+      region.createDiv({ cls: "ent-cc-view-feedback-alert", attr: { role: "alert", "aria-atomic": "true" } });
+      const dismiss = region.createEl("button", {
+        cls: "ent-cc-button ent-cc-view-feedback-dismiss", type: "button", text: "Dismiss",
+        attr: { "aria-label": "Dismiss message", "data-kbcc-focus": "view-feedback-dismiss" },
+      });
+      dismiss.addEventListener("click", () => this.dismissViewFeedback());
+      this.viewFeedbackEl = region;
+    }
+    this.paintViewFeedback();
+  }
+
+  private paintViewFeedback(): void {
+    const region = this.viewFeedbackEl;
+    if (!region) return;
+    const feedback = this.viewFeedback;
+    const status = region.querySelector<HTMLElement>('[role="status"]');
+    const alert = region.querySelector<HTMLElement>('[role="alert"]');
+    status?.setText(feedback?.tone === "status" ? feedback.message : "");
+    alert?.setText(feedback?.tone === "error" ? feedback.message : "");
+    region.hidden = !feedback;
+    region.toggleClass("is-error", feedback?.tone === "error");
+  }
+
+  /** Replace the persistent view message. It stays through rerenders until replaced or dismissed. */
+  private setViewFeedback(message: string, tone: "status" | "error", source: string): void {
+    const doc = this.contentEl?.ownerDocument;
+    const active = doc?.activeElement as HTMLElement | null | undefined;
+    this.viewFeedbackOrigin = active && this.contentEl.contains(active) && !this.viewFeedbackEl?.contains(active) ? active : this.viewFeedbackOrigin;
+    this.viewFeedback = { message, tone, source };
+    this.paintViewFeedback();
+  }
+
+  private clearViewFeedback(): void {
+    this.viewFeedback = null;
+    this.paintViewFeedback();
+  }
+
+  private dismissViewFeedback(): void {
+    const region = this.viewFeedbackEl;
+    const doc = this.contentEl.ownerDocument;
+    const hadFocus = Boolean(region && doc.activeElement && region.contains(doc.activeElement));
+    this.clearViewFeedback();
+    if (!hadFocus) return;
+    // The dismiss button is now hidden. Return to where the user was, else a stable landmark.
+    const origin = this.viewFeedbackOrigin;
+    const fallback = this.isCompactInspectorLayout() && this.mobileInspectorOpen
+      ? this.inspectorEl?.querySelector<HTMLElement>(".ent-cc-inspector-close")
+      : this.treeEl;
+    const target = origin && this.contentEl.contains(origin) && doc.body.contains(origin) ? origin : fallback;
+    target?.focus({ preventScroll: true });
   }
 
   /** Hook in More/Details: tablets retain full-width browsing unless requested. */
@@ -5406,7 +5511,6 @@ export class EntVaultCommandCenterView extends ItemView {
       const label = expanded ? "Back to split view" : "Expand note details";
       button.setAttribute("aria-label", label);
       button.setAttribute("title", label);
-      button.setAttribute("aria-pressed", String(expanded));
       setIcon(button, expanded ? "minimize-2" : "maximize-2");
       button.focus({ preventScroll: true });
     }
@@ -5468,7 +5572,8 @@ export class EntVaultCommandCenterView extends ItemView {
       this.closeMobileInspector();
       return;
     }
-    if (event.key !== "Tab") return;
+    // A narrow desktop pane is an ordinary in-pane region: Tab may leave it.
+    if (event.key !== "Tab" || !this.isModalInspectorLayout()) return;
     const focusable = Array.from(this.inspectorEl.querySelectorAll<HTMLElement>(
       'button:not([disabled]), summary, a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
     )).filter((element) => element.offsetParent !== null);
@@ -5494,8 +5599,9 @@ export class EntVaultCommandCenterView extends ItemView {
     const compact = this.isCompactInspectorLayout();
     const mobileOpen = compact && this.mobileInspectorOpen && Boolean(record);
     this.inspectorEl.toggleClass("is-mobile-open", mobileOpen);
-    this.inspectorEl.setAttribute("role", compact ? "dialog" : "complementary");
-    if (compact) {
+    const modal = this.isModalInspectorLayout();
+    this.inspectorEl.setAttribute("role", modal ? "dialog" : "complementary");
+    if (modal) {
       this.inspectorEl.setAttribute("aria-modal", "true");
     } else {
       this.inspectorEl.removeAttribute("aria-modal");
@@ -5514,11 +5620,13 @@ export class EntVaultCommandCenterView extends ItemView {
     setIcon(close.createSpan(), "arrow-left");
     close.createSpan({ text: backLabel });
     close.addEventListener("click", () => this.closeMobileInspector());
+    // Inside the dialog in a modal route (outside content is hidden from assistive technology); otherwise the shell hosts it.
+    if (mobileOpen) this.mountViewFeedback(this.inspectorEl);
     if (!compact) {
       const controls = header.createDiv({ cls: "ent-cc-inspector-layout-actions" });
       const expandLabel = this.inspectorExpanded ? "Back to split view" : "Expand note details";
       const expand = iconButton(controls, this.inspectorExpanded ? "minimize-2" : "maximize-2", expandLabel, "ent-cc-inspector-expand");
-      expand.setAttribute("aria-pressed", String(this.inspectorExpanded));
+      expand.setAttribute("data-kbcc-focus", "inspector-expand");
       expand.addEventListener("click", () => this.setInspectorExpanded(!this.inspectorExpanded));
       const widthMenu = iconButton(controls, "sliders-horizontal", "Panel width options");
       widthMenu.setAttribute("aria-haspopup", "menu");
@@ -5672,15 +5780,29 @@ export class EntVaultCommandCenterView extends ItemView {
   private renderInspectorAttachments(parent: HTMLElement, record: VaultRecord): void {
     const property = record.libraryId ? this.libraryDisplayProfile(record.libraryId).imageProperty : undefined;
     const attachments = collectNoteAttachments(this.app, record.path, property);
-    renderNoteAttachments(parent, attachments, (path) => this.run(async () => {
+    // Volatile expansion/focus state is keyed by base and note; any other note or base starts clean.
+    const key = `${this.plugin.getActiveKnowledgeBaseId()}\u0000${record.path}`;
+    if (this.attachmentView?.key !== key) this.attachmentView = { key, revealed: ATTACHMENT_PAGE_SIZE, focusedPath: null, focusedIndex: 0 };
+    const state = this.attachmentView;
+    const section = renderNoteAttachments(parent, attachments, (path) => this.run(async () => {
+      const name = path.split("/").pop() ?? path;
       // The row can outlive a sync/delete/rename. Never open an unresolved link or create a note.
       const file = this.app.vault.getAbstractFileByPath(path);
       if (!(file instanceof TFile)) {
-        new Notice("This attachment is not available on this device. Check that it has finished syncing.", 7000);
+        this.setViewFeedback(`${MISSING_REFERENCE_TEXT}: ${name}`, "error", "attachment");
         return;
       }
-      await this.plugin.openFile(file, this);
-    }));
+      try {
+        await this.plugin.openFile(file, this);
+        this.setViewFeedback(`Opened ${name}.`, "status", "attachment");
+      } catch (error) {
+        this.setViewFeedback(`Could not open ${name}: ${errorMessage(error)}`, "error", "attachment");
+      }
+    }), { revealed: state.revealed, onReveal: (revealed) => { state.revealed = revealed; } });
+    // Focus belonging to the inspector returns to the same path, else a live neighbour or the section; focus held elsewhere is left alone.
+    const focusedPath = state.focusedPath;
+    state.focusedPath = null;
+    if (focusedPath !== null && this.focusBelongsToView()) focusAttachmentNear(section, focusedPath, state.focusedIndex);
   }
 
   /**
@@ -5725,7 +5847,8 @@ export class EntVaultCommandCenterView extends ItemView {
     const next = section.createEl("button", {
       cls: `ent-cc-study-action ${isNext ? "is-active" : ""}`,
       type: "button",
-      attr: { "aria-pressed": String(isNext) },
+      // The action name changes with the state; a pressed state would contradict it.
+      attr: { "data-kbcc-focus": "study-next" },
     });
     setIcon(next.createSpan(), isNext ? "check" : "list-plus");
     next.createSpan({ text: isNext
@@ -5755,11 +5878,11 @@ export class EntVaultCommandCenterView extends ItemView {
       const clipboard = this.contentEl.ownerDocument.defaultView?.navigator.clipboard;
       if (!clipboard) throw new Error("Clipboard unavailable");
       await clipboard.writeText(text);
-      new Notice(`${label} copied.`);
+      this.setViewFeedback(`${label} copied.`, "status", "copy");
     } catch {
-      new Notice(this.plugin.isClinicalMode()
+      this.setViewFeedback(this.plugin.isClinicalMode()
         ? "Clipboard access was unavailable. Open the note and use the command manually."
-        : "Clipboard access was unavailable. Open the note and copy its wikilink or path manually.");
+        : "Clipboard access was unavailable. Open the note and copy its wikilink or path manually.", "error", "copy");
     }
   }
 

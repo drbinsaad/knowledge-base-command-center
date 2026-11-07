@@ -284,6 +284,110 @@ test("attachment metadata refresh distinguishes waiting, missing, empty and dele
   await expect(section).toContainText("No linked files in this note yet.");
 });
 
+const focusedAttachmentPath = (page: Page): Promise<string | null> => page.evaluate(() => document.activeElement?.getAttribute("data-ent-cc-attachment-path") ?? null);
+
+test("WF07 I1 I2 I3 revealed attachments and focus survive a harmless refresh, are not stolen, and reset for another note", async ({ page }) => {
+  await openView(page, { scenario: "attachments" });
+  await page.getByRole("button", { name: /^Attachment overview,/u }).click();
+  const section = page.locator(".ent-cc-note-attachments");
+  const rows = section.locator(".ent-cc-attachment-row");
+  await expect(rows).toHaveCount(20);
+  await section.locator(".ent-cc-attachments-more").click();
+  await expect(rows).toHaveCount(28);
+  const target = rows.nth(24);
+  const path = await target.getAttribute("data-ent-cc-attachment-path");
+  expect(path).toBeTruthy();
+  await target.focus();
+  await refresh(page);
+  await expect(rows).toHaveCount(28);
+  expect(await focusedAttachmentPath(page)).toBe(path);
+  await page.evaluate(() => {
+    const outside = document.body.createEl("input");
+    outside.id = "wf07-outside";
+    outside.focus();
+  });
+  await refresh(page);
+  await expect(page.locator("#wf07-outside")).toBeFocused();
+  await expect(rows).toHaveCount(28);
+  await page.getByRole("button", { name: /^Plain note,/u }).click();
+  await page.getByRole("button", { name: /^Attachment overview,/u }).click();
+  await expect(rows).toHaveCount(20);
+});
+
+test("WF07 I4 a narrow desktop pane is not a modal dialog and lets Tab leave the inspector", async ({ page }) => {
+  await openView(page, { scenario: "attachments", width: 600, height: 900 });
+  await page.getByRole("button", { name: /^Attachment overview,/u }).click();
+  const inspector = page.locator(".ent-cc-inspector");
+  await expect(inspector).toHaveAttribute("role", "complementary");
+  await expect(inspector).not.toHaveAttribute("aria-modal", /.*/u);
+  await page.evaluate(() => {
+    const items = Array.from(document.querySelectorAll<HTMLElement>(".ent-cc-inspector button, .ent-cc-inspector summary")).filter((element) => element.offsetParent !== null);
+    items[items.length - 1].focus();
+  });
+  await page.keyboard.press("Tab");
+  expect(await page.evaluate(() => Boolean(document.activeElement?.closest(".ent-cc-inspector")))).toBe(false);
+});
+
+test.describe("WF07 I4 phone", () => {
+  test.use({ hasTouch: true });
+  test("an actual mobile compact inspector keeps its dialog trap and Escape", async ({ page }) => {
+    await openView(page, { scenario: "attachments", mobile: true });
+    await page.getByRole("button", { name: /^Attachment overview,/u }).click();
+    const inspector = page.locator(".ent-cc-inspector");
+    await expect(inspector).toHaveAttribute("role", "dialog");
+    await expect(inspector).toHaveAttribute("aria-modal", "true");
+    await page.evaluate(() => {
+      const items = Array.from(document.querySelectorAll<HTMLElement>(".ent-cc-inspector button, .ent-cc-inspector summary")).filter((element) => element.offsetParent !== null);
+      items[items.length - 1].focus();
+    });
+    await page.keyboard.press("Tab");
+    await expect(page.locator(".ent-cc-inspector-close")).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(inspector).toHaveCount(0);
+  });
+});
+
+test("WF07 I5 Expand and Next-list controls change their names without contradictory pressed state", async ({ page }) => {
+  await openView(page, { scenario: "attachments" });
+  await page.getByRole("button", { name: /^Attachment overview,/u }).click();
+  const expand = page.getByRole("button", { name: "Expand note details", exact: true });
+  await expect(expand).not.toHaveAttribute("aria-pressed", /.*/u);
+  await expand.click();
+  const back = page.getByRole("button", { name: "Back to split view", exact: true });
+  await expect(back).toBeFocused();
+  await expect(back).not.toHaveAttribute("aria-pressed", /.*/u);
+  await back.click();
+  await expect(page.getByRole("button", { name: "Expand note details", exact: true })).toBeFocused();
+  const add = page.getByRole("button", { name: "Add to Next list", exact: true });
+  await expect(add).not.toHaveAttribute("aria-pressed", /.*/u);
+  // The synthetic host does not persist Next-list state; the click-and-rerender half is a runtime test (view-state WF07 I5).
+});
+
+test("WF07 I6 a deleted attachment gives persistent live feedback that survives refresh, is replaced, and can be dismissed", async ({ page }) => {
+  await openView(page, { scenario: "attachments" });
+  await page.getByRole("button", { name: /^Attachment overview,/u }).click();
+  const feedback = page.locator(".ent-cc-view-feedback");
+  await expect(feedback).toBeHidden();
+  await expect(page.locator('.ent-cc-view-feedback [role="status"]')).toHaveCount(1);
+  await expect(page.locator('.ent-cc-view-feedback [role="alert"]')).toHaveCount(1);
+  const pdf = page.locator(".ent-cc-note-attachments").getByRole("button", { name: "Open attachment: Review.pdf", exact: true });
+  await page.evaluate(() => (window as unknown as { kbccBrowserHarness: { removeAttachment(path: string): void } }).kbccBrowserHarness.removeAttachment("Attachments/Review.pdf"));
+  await pdf.click();
+  await expect(feedback).toBeVisible();
+  await expect(feedback).toContainText("Linked reference not found; it may be a note or file: Review.pdf");
+  await expect(feedback).not.toContainText(/syncing|this device/u);
+  await refresh(page);
+  await expect(feedback).toContainText("Review.pdf");
+  await page.locator(".ent-cc-note-attachments").getByRole("button", { name: "Open attachment: Diagram.png", exact: true }).click();
+  await expect(feedback).toContainText("Opened Diagram.png.");
+  await expect(feedback).not.toContainText("Linked reference not found");
+  const dismiss = feedback.getByRole("button", { name: "Dismiss message", exact: true });
+  await dismiss.focus();
+  await page.keyboard.press("Enter");
+  await expect(feedback).toBeHidden();
+  expect(await page.evaluate(() => document.activeElement === document.body)).toBe(false);
+});
+
 async function workspaceLayoutSnapshot(page: Page): Promise<{ localValues: Record<string, { version: number; inspectorWidth: number; tabletSplit: boolean }>; organizationUnchanged: boolean }> {
   return page.evaluate(() => (window as unknown as { kbccBrowserHarness: { workspaceLayoutSnapshot(): { localValues: Record<string, { version: number; inspectorWidth: number; tabletSplit: boolean }>; organizationUnchanged: boolean } } }).kbccBrowserHarness.workspaceLayoutSnapshot());
 }
@@ -1311,7 +1415,10 @@ for (const scenario of [
     const longName = "Long knowledge base name — Research evidence and reference notes for the whole project";
     // Supply only the native option's text fixture, not alternate product DOM or
     // CSS. The production Settings renderer owns the select, row and controls.
-    await select.evaluate((element, text) => { element.selectedOptions[0].textContent = text; }, longName);
+    await select.evaluate((element, text) => {
+      if (!(element instanceof HTMLSelectElement)) throw new Error("The Active knowledge base combobox must be a native select.");
+      element.selectedOptions[0].textContent = text;
+    }, longName);
     await expect(select.locator("option:checked")).toHaveText(longName);
     await row.scrollIntoViewIfNeeded();
     const manage = row.getByRole("button", { name: "Manage…", exact: true });
@@ -1759,7 +1866,8 @@ test("workspace options expose a keyboard-operable density choice that survives 
   await expect(page.locator(".ent-cc-view")).toHaveClass(/is-density-compact/u);
   const density = page.getByRole("button", { name: "Use comfortable view density" });
   await expect(density).toBeFocused();
-  await expect(density).toHaveAttribute("aria-pressed", "true");
+  // WF-07: the control's name carries the action; a pressed state would contradict it.
+  await expect(density).not.toHaveAttribute("aria-pressed", /.*/u);
   expect(await row.evaluate((element) => element.getBoundingClientRect().height)).toBeLessThan(comfortableHeight);
   await refresh(page);
   await expect(density).toBeFocused();

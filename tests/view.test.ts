@@ -5761,11 +5761,17 @@ test("compact record inspector traps forward focus at its last control", () => {
     contains: () => true,
   };
 
-  view.handleMobileInspectorKeydown({
-    key: "Tab",
-    shiftKey: false,
-    preventDefault: () => { prevented = true; },
-  });
+  // WF-07: only an actual mobile compact inspector traps Tab.
+  const platform = Platform as unknown as { isMobile: boolean };
+  const previousMobile = platform.isMobile;
+  platform.isMobile = true;
+  try {
+    view.handleMobileInspectorKeydown({
+      key: "Tab",
+      shiftKey: false,
+      preventDefault: () => { prevented = true; },
+    });
+  } finally { platform.isMobile = previousMobile; }
 
   assert.equal(prevented, true);
   assert.equal(firstFocusCount, 1);
@@ -5794,11 +5800,16 @@ test("compact record inspector traps backward focus at its first control", () =>
     contains: () => true,
   };
 
-  view.handleMobileInspectorKeydown({
-    key: "Tab",
-    shiftKey: true,
-    preventDefault: () => { prevented = true; },
-  });
+  const platform = Platform as unknown as { isMobile: boolean };
+  const previousMobile = platform.isMobile;
+  platform.isMobile = true;
+  try {
+    view.handleMobileInspectorKeydown({
+      key: "Tab",
+      shiftKey: true,
+      preventDefault: () => { prevented = true; },
+    });
+  } finally { platform.isMobile = previousMobile; }
 
   assert.equal(prevented, true);
   assert.equal(lastFocusCount, 1);

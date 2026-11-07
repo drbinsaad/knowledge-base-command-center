@@ -4,7 +4,7 @@ import type { App, CachedMetadata } from "obsidian";
 import { ATTACHMENT_PAGE_SIZE, collectNoteAttachments, renderNoteAttachments } from "../src/note-attachments.ts";
 import { EntVaultCommandCenterView } from "../src/view.ts";
 import { asHtmlElement, createFakeDom, FakeEvent } from "./support/fake-dom.ts";
-import { Notice, TFile, TFolder } from "./support/obsidian-stub.ts";
+import { Platform, TFile, TFolder } from "./support/obsidian-stub.ts";
 import { migrateData, type VaultRecord } from "../src/model.ts";
 
 const references = (paths: string[]) => paths.map((link) => ({ link, original: `[[${link}]]` }));
@@ -265,7 +265,7 @@ test("attachment activation rechecks the file and delegates to the existing open
   const view = Object.create(EntVaultCommandCenterView.prototype) as unknown as { renderInspectorAttachments(parent: HTMLElement, record: VaultRecord): void };
   const opened: TFile[] = [];
   const operations: Promise<unknown>[] = [];
-  Object.assign(view, { app: h.app, plugin: { openFile: async (file: TFile, origin: unknown) => { assert.equal(origin, view); opened.push(file); } }, run: (action: () => Promise<unknown>) => { operations.push(action()); } });
+  Object.assign(view, { app: h.app, plugin: { getActiveKnowledgeBaseId: () => "base-test", openFile: async (file: TFile, origin: unknown) => { assert.equal(origin, view); opened.push(file); } }, run: (action: () => Promise<unknown>) => { operations.push(action()); } });
   view.renderInspectorAttachments(asHtmlElement(dom.document.body), { path: h.source.path } as VaultRecord);
   const button = dom.document.body.querySelector(".ent-cc-attachment-link");
   button?.dispatch("click");
@@ -275,7 +275,10 @@ test("attachment activation rechecks the file and delegates to the existing open
   button?.dispatch("click");
   await Promise.all(operations);
   assert.equal(opened.length, 1);
-  assert.match((Notice as unknown as { messages: string[] }).messages.at(-1) ?? "", /not available on this device/u);
+  // WF-07: neutral wording on the persistent view surface, not a sync claim in a transient Notice.
+  const feedback = (view as unknown as { viewFeedback: { message: string; tone: string } | null }).viewFeedback;
+  assert.match(feedback?.message ?? "", /Linked reference not found; it may be a note or file: Paper\.pdf/u);
+  assert.equal(feedback?.tone, "error");
   (h.app.vault.getAbstractFileByPath as unknown) = () => new TFolder("Files/Paper.pdf");
   button?.dispatch("click");
   await Promise.all(operations);
@@ -326,6 +329,14 @@ function bareNoteInspector() {
 }
 
 test("compact vault-note focus trap includes the final Note details summary without related links", () => {
+  // WF-07: only an actual mobile compact inspector is a trapped dialog.
+  const platform = Platform as { isMobile: boolean };
+  const previousMobile = platform.isMobile;
+  platform.isMobile = true;
+  try { assertCompactVaultNoteTrap(); } finally { platform.isMobile = previousMobile; }
+});
+
+function assertCompactVaultNoteTrap(): void {
   const h = bareNoteInspector();
   const summary = h.inspector.querySelector(".ent-cc-note-details summary");
   const back = h.inspector.querySelector(".ent-cc-inspector-close");
@@ -349,7 +360,7 @@ test("compact vault-note focus trap includes the final Note details summary with
   assert.equal(h.dom.document.activeElement, back);
   h.view.handleMobileInspectorKeydown(new FakeEvent("keydown", { key: "Tab", shiftKey: true }) as unknown as KeyboardEvent);
   assert.equal(h.dom.document.activeElement, summary, "reverse wrapping reaches the real final control");
-});
+}
 
 test("inspector refresh samples live Note details state and ignores a detached queued toggle", () => {
   const h = bareNoteInspector();

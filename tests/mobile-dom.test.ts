@@ -470,7 +470,9 @@ test("stacked-pane transitions preserve active list and detail scroll owners in 
   harness.selectRecord(selected.path);
   assert.equal(harness.mobileInspectorOpen, true);
   assert.ok(content.querySelector(".ent-cc-shell.is-inspector-route"));
-  assert.equal(content.querySelector(".ent-cc-inspector")?.getAttribute("role"), "dialog");
+  // WF-07: this fixture is a narrow DESKTOP pane (Platform.isMobile is false), so it is not a dialog.
+  assert.equal(content.querySelector(".ent-cc-inspector")?.getAttribute("role"), "complementary");
+  assert.equal(content.querySelector(".ent-cc-inspector")?.getAttribute("aria-modal"), null);
   const compactInspectorBody = content.querySelector(".ent-cc-inspector-body");
   assert.ok(compactInspectorBody);
   compactInspectorBody.scrollTop = 73;
@@ -661,7 +663,9 @@ test("read-only organization disables write-only controls before activation", as
   assert.equal(drop?.defaultPrevented, true);
   assert.equal(drop?.propagationStopped, true);
   assert.equal(organizerDropCount, 0, "read-only drops must not reach the organizer");
-  assert.deepEqual(Notice.messages, ["Organizing notes is unavailable while organization data is read-only."]);
+  // WF-07: the rejection now lives on the persistent view surface instead of a transient Notice.
+  assert.deepEqual(Notice.messages, []);
+  assert.equal(content.querySelector('.ent-cc-view-feedback [role="alert"]')?.textContent, "Organizing notes is unavailable while organization data is read-only.");
 });
 
 test("the dedicated Organizer drop target intercepts safe and rejected payloads without bubbling", async () => {
@@ -1483,7 +1487,8 @@ test("the production copy action writes to the clipboard only after its button i
   await Promise.resolve();
 
   assert.deepEqual(writes, ["Knowledge Base/Topic.md"]);
-  assert.equal(Notice.messages.includes("Copy path copied."), true);
+  // WF-07: the copy result is persistent view feedback, not a transient Notice.
+  assert.equal((view as unknown as { viewFeedback: { message: string } | null }).viewFeedback?.message, "Copy path copied.");
 });
 
 test("a depth-three nested subheading keeps 44px menu-driven controls on mobile", () => {

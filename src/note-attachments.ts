@@ -87,8 +87,39 @@ export function collectNoteAttachments(app: Pick<App, "metadataCache" | "vault">
   return { state: "ready", items };
 }
 
+/** Volatile renderer state the owning view may hoist across a rerender. */
+export interface NoteAttachmentRenderOptions {
+  /** Previously revealed count; rounded up to whole pages and clamped to the current list. */
+  revealed?: number;
+  /** Called with the new revealed count after the user reveals another page. */
+  onReveal?: (revealed: number) => void;
+}
+
+/** The exact path and position of the attachment row holding focus inside `root`, if any. */
+export function focusedAttachmentRow(root: HTMLElement): { path: string; index: number } | null {
+  const active = root.ownerDocument.activeElement;
+  if (!active || !root.contains(active)) return null;
+  const path = active.getAttribute(ATTACHMENT_PATH_ATTRIBUTE);
+  if (path === null) return null;
+  const rows = Array.from(root.querySelectorAll<HTMLElement>(".ent-cc-attachment-row"));
+  return { path, index: Math.max(0, rows.indexOf(active as HTMLElement)) };
+}
+
+/**
+ * Focus the row with this exact path, else the nearest remaining row, else the
+ * section itself. Never returns focus to a detached element.
+ */
+export function focusAttachmentNear(section: HTMLElement, path: string, index: number): void {
+  const rows = Array.from(section.querySelectorAll<HTMLElement>(".ent-cc-attachment-row"));
+  const target = rows.find((row) => row.getAttribute(ATTACHMENT_PATH_ATTRIBUTE) === path)
+    ?? rows[Math.min(Math.max(index, 0), rows.length - 1)]
+    ?? section;
+  if (target.tagName !== "BUTTON") target.setAttribute("tabindex", "-1");
+  target.focus({ preventScroll: true });
+}
+
 /** Lists links, never attachment payloads or previews. More reveals a bounded page at a time. */
-export function renderNoteAttachments(parent: HTMLElement, result: NoteAttachments, onOpen: (path: string) => void): void {
+export function renderNoteAttachments(parent: HTMLElement, result: NoteAttachments, onOpen: (path: string) => void, options: NoteAttachmentRenderOptions = {}): HTMLElement {
   const section = parent.createDiv({ cls: "ent-cc-inspector-section ent-cc-note-attachments" });
   section.createEl("h4", { text: result.items.length ? `Attachments (${result.items.length})` : "Attachments" });
   if (result.state !== "ready" || result.items.length === 0) {
@@ -96,7 +127,7 @@ export function renderNoteAttachments(parent: HTMLElement, result: NoteAttachmen
       ? "Waiting for Obsidian to read this note’s links."
       : result.state === "note-unavailable" ? "The note is not available on this device."
         : "No linked files in this note yet." });
-    return;
+    return section;
   }
   const list = section.createDiv({ cls: "ent-cc-attachment-list", attr: { role: "list", "aria-label": "Note attachments" } });
   const nameCounts = new Map<string, number>();
@@ -144,6 +175,12 @@ export function renderNoteAttachments(parent: HTMLElement, result: NoteAttachmen
       firstNew.focus();
     }
   };
-  more.addEventListener("click", () => appendPage(true));
-  appendPage();
+  more.addEventListener("click", () => {
+    appendPage(true);
+    options.onReveal?.(shown);
+  });
+  const requested = Math.max(1, Math.ceil((options.revealed ?? ATTACHMENT_PAGE_SIZE) / ATTACHMENT_PAGE_SIZE)) * ATTACHMENT_PAGE_SIZE;
+  const target = Math.min(requested, result.items.length);
+  do appendPage(); while (shown < target);
+  return section;
 }
