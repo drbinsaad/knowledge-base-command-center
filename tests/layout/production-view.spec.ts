@@ -2292,3 +2292,70 @@ for (const mobile of [false, true]) {
     });
   }
 }
+
+type AttachmentHarness = {
+  openAttachmentImport(options?: { insertFails?: boolean }): void;
+  loseAttachmentEditor(): void;
+  attachmentImportSnapshot(): { submissions: number; copies: string[] };
+};
+
+for (const [label, width, height, mobile] of [["phone 390", 390, 844, true], ["tablet 820", 820, 1180, false]] as const) {
+  test(`WF-03 real attachment modal ${label}: stale editor, corrected End retry and terminal copied-path recovery`, async ({ page }) => {
+    await openView(page, { mobile, width, height, count: 8 });
+    const harness = (): Promise<{ submissions: number; copies: string[] }> =>
+      page.evaluate(() => (window as unknown as { kbccBrowserHarness: AttachmentHarness }).kbccBrowserHarness.attachmentImportSnapshot());
+    const open = (insertFails: boolean): Promise<void> =>
+      page.evaluate((fails) => (window as unknown as { kbccBrowserHarness: AttachmentHarness }).kbccBrowserHarness.openAttachmentImport({ insertFails: fails }), insertFails);
+    const longName = `${"a".repeat(216)}.pdf`;
+    const noOverflow = async (targets: Locator[]): Promise<void> => {
+      for (const target of targets) {
+        expect(await target.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(0);
+      }
+    };
+
+    // 1. Stale editor: Cursor was offered, the editor is lost, Attach shows an inline alert and keeps the draft.
+    await open(false);
+    const dialog = page.getByRole("dialog", { name: "Attach files to note", exact: true });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByLabel("Insert link", { exact: true }).locator("option")).toHaveText([
+      "At the current cursor", "At the configured marker", "Under the configured heading", "At the end of the note",
+    ]);
+    await expect(dialog.getByLabel("Show in note", { exact: true })).toBeVisible();
+    await dialog.locator("input[type=file]").setInputFiles([
+      { name: "one.pdf", mimeType: "application/pdf", buffer: Buffer.from("one") },
+      { name: "two.pdf", mimeType: "application/pdf", buffer: Buffer.from("two") },
+    ]);
+    await page.evaluate(() => (window as unknown as { kbccBrowserHarness: AttachmentHarness }).kbccBrowserHarness.loseAttachmentEditor());
+    await dialog.getByRole("button", { name: "Attach 2 files", exact: true }).click();
+    const alert = dialog.getByRole("alert");
+    await expect(alert).toContainText("Open this note in the Markdown editor");
+    await expect(dialog.locator(".ent-cc-attachment-selection li")).toHaveCount(2);
+    expect((await harness()).copies).toEqual([]);
+    await noOverflow([dialog]);
+
+    // 2. Corrected End retry copies each file exactly once and closes.
+    await dialog.getByLabel("Insert link", { exact: true }).selectOption("end");
+    await expect(alert).toHaveText("");
+    await dialog.getByRole("button", { name: "Attach 2 files", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    expect(await harness()).toEqual({ submissions: 2, copies: ["Files/one.pdf", "Files/two.pdf"] });
+
+    // 3. Copied-but-not-linked: terminal summary with a 220-character unbroken basename.
+    await open(true);
+    const terminal = page.getByRole("dialog", { name: "Attach files to note", exact: true });
+    await terminal.getByLabel("Insert link", { exact: true }).selectOption("end");
+    await terminal.locator("input[type=file]").setInputFiles({ name: longName, mimeType: "application/pdf", buffer: Buffer.from("x") });
+    const attach = terminal.getByRole("button", { name: "Attach file", exact: true });
+    await attach.click();
+    const summary = terminal.getByRole("alert");
+    await expect(summary).toContainText("Files copied; links were not inserted");
+    await expect(summary.locator("li")).toHaveText([`Files/${longName}`]);
+    await expect(attach).toBeDisabled();
+    await attach.click({ force: true });
+    expect(await harness()).toEqual({ submissions: 1, copies: [`Files/${longName}`] });
+    await noOverflow([terminal, summary, summary.locator("li").first()]);
+    await captureEvidence(page, `attachment-terminal-${width}`);
+    await terminal.getByRole("button", { name: "Close", exact: true }).last().click();
+    await expect(terminal).toBeHidden();
+  });
+}

@@ -14,6 +14,8 @@ import { buildCurriculumTree, canonicalJsonString, childSubheadings, clonePerson
 import { BoundedKnowledgeBaseSearchCollector } from "../../src/search";
 import { KnowledgeNoteModal, StringPickerModal, VaultFilePickerModal, WorkspaceSetupModal } from "../../src/modals";
 import { ExportImportCenterModal } from "../../src/portability-modal";
+import { AttachmentImportModal } from "../../src/attachment-modal";
+import { AttachmentLinkInsertionError } from "../../src/attachment";
 import { SyncRecoveryCenterModal } from "../../src/sync-recovery-modal";
 import { NoteOrganizerModal, type NoteOrganizerHost } from "../../src/note-organizer-modal";
 import { EntCommandCenterSettingsTab } from "../../src/settings";
@@ -640,8 +642,35 @@ if (placeholderLinkScenario) {
   }
 }
 
+// WF-03: the REAL AttachmentImportModal runs against a recording stand-in for the
+// service. The stand-in only records what the modal submitted and applies the
+// documented outcomes (stale editor refused before any copy; copied-but-not-linked
+// error carrying the copied paths). It never touches a vault.
+const attachmentImport = { editorOwned: true, insertFails: false, submissions: 0, copies: [] as string[] };
+
 const harness = {
   ready: false,
+  openAttachmentImport(options: { insertFails?: boolean } = {}) {
+    openedModal?.close();
+    Object.assign(attachmentImport, { editorOwned: true, insertFails: Boolean(options.insertFails), submissions: 0, copies: [] });
+    openedModal = new AttachmentImportModal(app as never, "Reading/Attachment overview.md", {
+      expectedBaseId: store.activeBaseId, expectedDataEpoch: 0, storageMode: "fixed-folder",
+      configuredFolder: "Files", marker: "<!-- kbcc:attachments -->", heading: "Attachments",
+    }, [], "cursor", true, async (value) => {
+      attachmentImport.submissions += 1;
+      if (value.insertionMode === "cursor" && !attachmentImport.editorOwned) {
+        throw new Error("Open this note in the Markdown editor to insert at the cursor, or choose marker, heading, or end of note.");
+      }
+      const paths = value.files.map((file) => `Files/${file.name}`);
+      attachmentImport.copies.push(...paths);
+      if (attachmentImport.insertFails) {
+        throw new AttachmentLinkInsertionError(`The files were copied to ${paths.join(", ")}, but their Markdown links could not be inserted. Add the links manually.`, paths);
+      }
+    });
+    openedModal.open();
+  },
+  loseAttachmentEditor() { attachmentImport.editorOwned = false; },
+  attachmentImportSnapshot() { return { submissions: attachmentImport.submissions, copies: [...attachmentImport.copies] }; },
   startAddExisting() { view.startAddExistingToIndex(); },
   placeholderLinkSnapshot() { return structuredClone(placeholderLinkCalls); },
   workspaceLayoutSnapshot() {
