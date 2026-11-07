@@ -533,57 +533,108 @@ test("index manager search holds the composing input and applies the final query
     manager.renderNoteManager(notes, () => 0);
   };
 
-  const queued: Array<() => void> = [];
-  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
-  Object.defineProperty(globalThis, "window", {
-    configurable: true,
-    value: {
-      activeWindow: {
-        setTimeout: (callback: () => void) => { queued.push(callback); return queued.length; },
-        clearTimeout: () => undefined,
-      },
-    },
-  });
-  const flush = (): void => { while (queued.length) queued.shift()?.(); };
+  // Production schedules on contentEl.ownerDocument.defaultView, so the
+  // controllable, cancellable queue must live on that window (not on a global).
+  interface Timer { id: number; delay: number; callback: () => void; cancelled: boolean }
+  const timers: Timer[] = [];
+  const ownerWindow = dom.window as unknown as {
+    setTimeout?: (callback: () => void, delay?: number) => number;
+    clearTimeout?: (id: number) => void;
+  };
+  ownerWindow.setTimeout = (callback, delay = 0) => {
+    const timer: Timer = { id: timers.length + 1, delay, callback, cancelled: false };
+    timers.push(timer);
+    return timer.id;
+  };
+  ownerWindow.clearTimeout = (id) => {
+    const timer = timers.find((candidate) => candidate.id === id);
+    if (timer) timer.cancelled = true;
+  };
+  const live = (delay: number): Timer[] => timers.filter((timer) => !timer.cancelled && timer.delay === delay);
+  const fire = (delay: number): void => {
+    for (const timer of live(delay)) {
+      timer.cancelled = true;
+      timer.callback();
+    }
+  };
   const searchBox = (): CaretInput => manager.contentEl.querySelector('.ent-cc-manager-toolbar input[type="search"]') as unknown as CaretInput;
+  const reset = (): void => {
+    timers.length = 0;
+    snapshots = 0;
+    manager.query = "";
+    manager.selected = new Set(["A.md"]);
+    manager.managerOpen = true;
+    manager.searchTimer = null;
+    manager.pendingTimers.clear();
+    manager.contentEl.empty();
+    manager.renderNoteManager(notes, () => 0);
+  };
+  const closeManager = (): void => (manager as unknown as { onClose(): void }).onClose();
   try {
     withCaretSupport((restores) => {
-      manager.renderNoteManager(notes, () => 0);
+      // 1. A keystroke is queued, then composition starts before it fires.
+      reset();
       const search = searchBox();
       search.focus();
-
-      search.dispatch("compositionstart");
       search.value = "b";
       search.dispatch("input");
+      assert.equal(live(150).length, 1, "the plain keystroke queued one debounce");
+      search.dispatch("compositionstart");
       search.value = "be";
       search.dispatch("input");
-      flush();
-      assert.equal(searchBox(), search, "the composing input must not be replaced, even after the debounce delay");
+      fire(150);
+      assert.equal(searchBox() === search, true, "the composing input must not be replaced when the old debounce fires");
       assert.equal(snapshots, 0, "nothing is applied mid-composition");
-      assert.deepEqual([...manager.selected], ["A.md"], "selection is untouched while the query is still unapplied");
 
       search.value = "beta";
       search.selectionStart = 1;
       search.selectionEnd = 3;
       search.dispatch("compositionend");
-      flush();
+      search.dispatch("input"); // trailing input some engines send after compositionend
+      assert.equal(live(150).length, 1, "compositionend plus trailing input queue a single application");
+      fire(150);
+      fire(0);
       assert.equal(snapshots, 1, "the final query is applied exactly once");
       assert.equal(manager.query, "beta");
       assert.equal(manager.selected.size, 0, "selection safety: a new query drops hidden notes");
-      const next = searchBox();
-      assert.equal(dom.document.activeElement, next, "keyboard focus survives the refresh");
-      assert.deepEqual(restores.at(-1), [1, 3], "the mid-string selection is restored, not collapsed");
+      assert.equal(dom.document.activeElement === searchBox(), true, "keyboard focus survives the refresh");
+      assert.equal(restores.at(-1)?.join(","), "1,3", "the mid-string selection is restored, not collapsed");
 
       // Control: plain typing without IME still filters after the debounce.
+      const next = searchBox();
       next.value = "alpha";
       next.dispatch("input");
-      flush();
+      fire(150);
+      fire(0);
       assert.equal(snapshots, 2);
       assert.equal(manager.query, "alpha");
+
+      // 2. Closing before the pending query fires: even a captured late callback must not render.
+      reset();
+      searchBox().value = "x";
+      searchBox().dispatch("input");
+      const late = live(150)[0];
+      assert.equal(late === undefined, false);
+      closeManager();
+      assert.equal(live(150).length, 0, "close cancels the pending query");
+      late.callback();
+      assert.equal(snapshots, 0, "a late query callback must not render a closed dialog");
+
+      // 3. Closing after the render but before its zero-delay focus callback.
+      reset();
+      searchBox().value = "y";
+      searchBox().dispatch("input");
+      fire(150);
+      assert.equal(snapshots, 1);
+      const lateFocus = live(0)[0];
+      assert.equal(lateFocus === undefined, false);
+      closeManager();
+      lateFocus.callback();
+      assert.equal(dom.document.activeElement === searchBox(), false, "close prevents the focus restore");
     });
   } finally {
-    if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
-    else Reflect.deleteProperty(globalThis, "window");
+    Reflect.deleteProperty(ownerWindow, "setTimeout");
+    Reflect.deleteProperty(ownerWindow, "clearTimeout");
   }
 });
 
