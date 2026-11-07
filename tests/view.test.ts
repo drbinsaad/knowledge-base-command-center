@@ -7618,6 +7618,52 @@ test("the Library editor answers every stale Save, unlike the latched shared gua
   );
 });
 
+function libraryEditorAfterSync(): {
+  plugin: { epoch: number; baseId: string; created: Array<{ name: string }> };
+  submit: () => Promise<void>;
+} {
+  Notice.messages.length = 0;
+  const state = { epoch: 0, baseId: "base-a", created: [] as Array<{ name: string }> };
+  const plugin = {
+    app: {},
+    data: {},
+    getActiveKnowledgeBaseId: () => state.baseId,
+    getDataEpoch: () => state.epoch,
+    getBaseSurfaceVersion: () => "surface-1",
+    isExternalReloadInProgress: () => false,
+    async createLibrary(input: { name: string }): Promise<string> { state.created.push(input); return "new-library"; },
+  };
+  const modal = new LibraryEditorModal(
+    plugin as unknown as ConstructorParameters<typeof LibraryEditorModal>[0],
+    null,
+  );
+  const harness = modal as unknown as { name: string; render(): void; close(): void; submit(): Promise<void> };
+  harness.name = "Typed before the reload";
+  harness.render = () => undefined;
+  harness.close = () => undefined;
+  return { plugin: state, submit: () => harness.submit() };
+}
+
+test("the Library editor saves typed text after a settled no-op Sync reload", async () => {
+  const { plugin, submit } = libraryEditorAfterSync();
+  plugin.epoch += 1;
+  await submit();
+  assert.deepEqual(plugin.created.map((input) => input.name), ["Typed before the reload"]);
+  assert.deepEqual(Notice.messages.filter((message) => /Reopen this dialog/.test(message)), []);
+});
+
+test("the Library editor still refuses to save after a real knowledge-base change", async () => {
+  const { plugin, submit } = libraryEditorAfterSync();
+  plugin.epoch += 1;
+  plugin.baseId = "base-b";
+  await submit();
+  assert.deepEqual(plugin.created, []);
+  assert.equal(
+    Notice.messages.filter((message) => /Reopen this dialog before continuing/.test(message)).length,
+    1,
+  );
+});
+
 test("Manage Libraries re-baselines its epoch after its own write and re-arms the stale notice", async () => {
   Notice.messages.length = 0;
   let epoch = 0;

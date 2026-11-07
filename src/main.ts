@@ -314,6 +314,8 @@ export const KBCC_RETURN_NAVIGATION_STATE_KEY = "ent-vault-command-center.return
 /** Inert key from an unreleased experiment; only explicit local-data cleanup may touch it. */
 export const LEGACY_LIBRARY_IMAGE_PERMISSION_KEY = "ent-vault-command-center.library-images.v1";
 const FOLLOW_UP_UNDO_WINDOW_MS = 5 * 60 * 1000;
+const QUICK_APPEND_BASE_CHANGED_MESSAGE = "The active knowledge base changed. Reopen Quick Append before continuing.";
+const QUICK_APPEND_SYNC_PENDING_MESSAGE = "Checking a synced update. Your text is still open; try again when the check finishes.";
 
 /**
  * The single (root, filename prefix, kind) table for native clinical Library
@@ -5856,8 +5858,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   openQuickAppendExistingNote(): void {
     try {
       this.assertDataWritable();
-      const openedBaseId = this.store.activeBaseId;
-      const openedDataEpoch = this.dataEpoch;
+      const ownsBase = createOpenedBaseGuard(this, { message: QUICK_APPEND_BASE_CHANGED_MESSAGE });
       const files = this.getVaultNoteFiles()
         .filter((file) => !isImmutableSourcePath(file.path))
         .sort((left, right) => left.path.localeCompare(right.path));
@@ -5866,8 +5867,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         return;
       }
       new VaultFilePickerModal(this.app, files, "Choose a note for Quick Append", (file) => {
-        if (this.store.activeBaseId !== openedBaseId || this.dataEpoch !== openedDataEpoch) {
-          new Notice("The active knowledge base changed. Reopen quick append before choosing a note.", 8000);
+        if (!ownsBase.owns()) {
+          new Notice(
+            this.isExternalReloadInProgress()
+              ? QUICK_APPEND_SYNC_PENDING_MESSAGE
+              : "The active knowledge base changed. Reopen quick append before choosing a note.",
+            8000,
+          );
           return;
         }
         this.openQuickAppendForFile(file);
@@ -5878,8 +5884,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private openQuickAppendForFile(file: TFile): void {
-    const openedBaseId = this.store.activeBaseId;
-    const openedDataEpoch = this.dataEpoch;
+    const ownsBase = createOpenedBaseGuard(this, { message: QUICK_APPEND_BASE_CHANGED_MESSAGE });
     const categories = this.getFollowUpCategories();
     if (!categories.some((category) => !category.archived)) {
       new Notice("No active quick append categories are configured. Restore or add one in plugin settings.", 8000);
@@ -5890,9 +5895,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       categories,
       initialDate: this.today(),
       onSubmit: async ({ categoryId, date, text }) => {
-        if (this.store.activeBaseId !== openedBaseId || this.dataEpoch !== openedDataEpoch) {
-          throw new Error("The active knowledge base changed. Reopen Quick Append before continuing.");
-        }
+        if (this.isExternalReloadInProgress()) throw new Error(QUICK_APPEND_SYNC_PENDING_MESSAGE);
+        if (!ownsBase.owns()) throw new Error(QUICK_APPEND_BASE_CHANGED_MESSAGE);
         await this.appendFollowUpToFile(file, categoryId, text, date);
       },
     }).open();

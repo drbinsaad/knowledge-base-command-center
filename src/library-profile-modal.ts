@@ -8,7 +8,13 @@ import {
   type LibraryNoteProfile,
   type NewNoteMode,
 } from "./model";
-import { calculateModalViewportLayout, StringPickerModal, VaultFilePickerModal } from "./modals";
+import {
+  calculateModalViewportLayout,
+  createOpenedBaseGuard,
+  StringPickerModal,
+  VaultFilePickerModal,
+  type OpenedBaseGuard,
+} from "./modals";
 
 function profileFingerprint(profile: LibraryNoteProfile | null): string {
   if (!profile) return "inherit";
@@ -54,8 +60,7 @@ export function libraryCreationFolderChoices(files: readonly unknown[]): string[
 
 /** Edit one optional base → Library note-creation override without touching notes. */
 export class LibraryNoteProfileEditorModal extends Modal {
-  private readonly openedBaseId: string;
-  private readonly openedDataEpoch: number;
+  private readonly ownsBase: OpenedBaseGuard;
   private readonly originalProfileFingerprint: string;
   private readonly originalLibraryFingerprint: string;
   private readonly originalBaseDefaultsFingerprint: string;
@@ -108,9 +113,8 @@ export class LibraryNoteProfileEditorModal extends Modal {
     private readonly onSaved?: () => void,
   ) {
     super(plugin.app);
-    this.openedBaseId = plugin.getActiveKnowledgeBaseId();
-    this.openedDataEpoch = plugin.getDataEpoch();
-    const profile = plugin.getLibraryNoteProfile(library.id);
+    this.ownsBase = createOpenedBaseGuard(plugin, { message: "The active knowledge base changed." });
+    const profile =plugin.getLibraryNoteProfile(library.id);
     this.originalProfileFingerprint = profileFingerprint(profile);
     this.originalLibraryFingerprint = libraryFingerprint(library);
     this.originalBaseDefaultsFingerprint = baseCreationDefaultsFingerprint(plugin);
@@ -309,8 +313,9 @@ export class LibraryNoteProfileEditorModal extends Modal {
   private isCurrent(): boolean {
     const current = this.plugin.getLibrary(this.library.id);
     const currentProfile = this.plugin.getLibraryNoteProfile(this.library.id);
-    const valid = this.plugin.getActiveKnowledgeBaseId() === this.openedBaseId
-      && this.plugin.getDataEpoch() === this.openedDataEpoch
+    // The fingerprints below catch any real change to this Library, its profile
+    // or the creation defaults; the guard tolerates unchanged settled reloads.
+    const valid = this.ownsBase.owns()
       && libraryFingerprint(current) === this.originalLibraryFingerprint
       && profileFingerprint(currentProfile) === this.originalProfileFingerprint
       && baseCreationDefaultsFingerprint(this.plugin) === this.originalBaseDefaultsFingerprint;

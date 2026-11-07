@@ -13771,6 +13771,69 @@ test("Quick Append existing-note picker refuses a base or data-epoch change befo
   }
 });
 
+async function openedQuickAppendHarness(): Promise<{
+  plugin: EntVaultCommandCenterPlugin & TestPluginBase;
+  submit: (text: string) => Promise<void>;
+  content: () => string;
+}> {
+  const file = new TFile("Knowledge Base/Topic.md");
+  let content = "# Topic\n";
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getMarkdownFiles: () => [file],
+      getAbstractFileByPath: (path: string) => path === file.path ? file : null,
+      process: async (_file: TFile, transform: (value: string) => string) => { content = transform(content); },
+      createFolder: async () => {},
+      create: async (path: string) => new TFile(path),
+    },
+    workspace: { getLeavesOfType: () => [], getActiveFile: () => file },
+    metadataCache: { getFileCache: () => null, resolvedLinks: {} },
+    fileManager: {},
+  };
+  const first = migrateData(null);
+  first.settings.workspaceMode = "generic";
+  const second = migrateData(null);
+  second.settings.workspaceMode = "generic";
+  second.settings.workspaceName = "Second";
+  const store = createDefaultStore(first, 1, "vault-quick-append-reload");
+  store.bases.push(createKnowledgeBaseEntry(second, "base-second", 2));
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & TestPluginBase;
+  plugin.loadedData = store;
+  await plugin.loadPluginData();
+  const appendOpen = Object.getOwnPropertyDescriptor(QuickAppendModal.prototype, "open");
+  let onSubmit: ((value: { categoryId: string; date: string; text: string }) => Promise<void>) | null = null;
+  QuickAppendModal.prototype.open = function captureAppend(): void {
+    onSubmit = (this as unknown as { options: { onSubmit: typeof onSubmit } }).options.onSubmit;
+  };
+  try {
+    plugin.openQuickAppendCurrentNote(file.path);
+  } finally {
+    if (appendOpen) Object.defineProperty(QuickAppendModal.prototype, "open", appendOpen);
+    else Reflect.deleteProperty(QuickAppendModal.prototype, "open");
+  }
+  assert.ok(onSubmit, "Quick Append opened");
+  const submit = onSubmit as (value: { categoryId: string; date: string; text: string }) => Promise<void>;
+  return { plugin, submit: (text) => submit({ categoryId: "questions", date: "2026-01-02", text }), content: () => content };
+}
+
+test("Quick Append still saves typed text after a settled no-op Sync reload", async () => {
+  const { plugin, submit, content } = await openedQuickAppendHarness();
+  const epoch = plugin.getDataEpoch();
+  plugin.loadedData = structuredClone((plugin as unknown as { store: PluginStore }).store);
+  await plugin.onExternalSettingsChange();
+  assert.notEqual(plugin.getDataEpoch(), epoch, "the no-op reload bumps the data epoch");
+  await submit("Typed before the reload");
+  assert.match(content(), /Typed before the reload/u);
+});
+
+test("Quick Append is still refused after a real knowledge-base change", async () => {
+  const { plugin, submit, content } = await openedQuickAppendHarness();
+  await plugin.switchKnowledgeBase("base-second");
+  await assert.rejects(() => submit("Must not be written"), /active knowledge base changed\. Reopen Quick Append/u);
+  assert.equal(content().includes("Must not be written"), false);
+});
+
 // --- Operation-barrier re-entrancy: a refresh inside a base switch or mutate
 // --- transaction must never queue or wait behind the operation that owns it.
 
