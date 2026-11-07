@@ -6209,52 +6209,10 @@ function parseDeviceHistory(
 export function createDeviceHistoryBinding(
   entry: Pick<KnowledgeBaseEntry, "createdAt" | "archivedAt" | "data">,
 ): DeviceHistoryBinding {
-  return { v: DEVICE_HISTORY_BINDING_VERSION, fingerprint: loadedFormSemanticFingerprint(entry) };
-}
-
-/**
- * Fingerprint of the payload as the next load will see it. A live payload can
- * carry representation that loading canonicalizes away (for example an
- * explicit null field), which changes `semanticEntryFingerprint` without
- * changing any organization. Binding to the load-normalized form keeps a
- * same-state restart matching. Never uses an advertised hash.
- */
-const LOADED_FORM_FINGERPRINT_CACHE = new WeakMap<PluginData, {
-  createdAt: number;
-  archivedAt: number | null;
-  source: PluginData;
-  fingerprint: string;
-}>();
-
-function loadedFormSemanticFingerprint(entry: Pick<KnowledgeBaseEntry, "createdAt" | "archivedAt" | "data">): string {
-  // The result is reused while the live payload is still semantically equal to
-  // the copy it was computed from (one pass, no clone), so repeated builds for
-  // one commit pay for normalization once.
-  const cached = LOADED_FORM_FINGERPRINT_CACHE.get(entry.data);
-  if (cached
-    && cached.createdAt === entry.createdAt
-    && cached.archivedAt === entry.archivedAt
-    && pluginDataSemanticallyEqual(entry.data, cached.source)) {
-    return cached.fingerprint;
-  }
-  try {
-    const source = JSON.parse(JSON.stringify({ ...entry.data, undoStack: [], redoStack: [] })) as PluginData;
-    const fingerprint = semanticEntryFingerprint({
-      createdAt: entry.createdAt,
-      archivedAt: entry.archivedAt,
-      data: migrateData(source),
-    });
-    LOADED_FORM_FINGERPRINT_CACHE.set(entry.data, {
-      createdAt: entry.createdAt,
-      archivedAt: entry.archivedAt,
-      source,
-      fingerprint,
-    });
-    return fingerprint;
-  } catch {
-    // Unnormalizable data can only fail to match: the safe direction.
-    return semanticEntryFingerprint(entry);
-  }
+  // Recomputed from the actual payload, never from an advertised hash. Writers
+  // emit the canonical shape (D06-J), so the live form already equals the
+  // reloaded form and no load-normalization pass is needed.
+  return { v: DEVICE_HISTORY_BINDING_VERSION, fingerprint: semanticEntryFingerprint(entry) };
 }
 
 /**

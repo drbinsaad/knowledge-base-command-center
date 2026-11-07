@@ -777,6 +777,8 @@ export function synchronizePortableRegistry(data: PluginData, records: VaultReco
       subject.indexed = false;
       subject.parentId = null;
     }
+    // Canonical shape: an Index subject carries no libraryId key.
+    if (subject.indexed) delete subject.libraryId;
   }
 
   // Refresh parent identities and sibling order from the effective visual tree.
@@ -798,7 +800,7 @@ export function synchronizePortableRegistry(data: PluginData, records: VaultReco
           subject.parentId = parentId;
           subject.order = order;
           subject.indexed = true;
-          subject.libraryId = null;
+          delete subject.libraryId;
           subject.groupId = getGroup("index", node.record.domain).id;
         }
         visit(node.children, subject?.id ?? parentId);

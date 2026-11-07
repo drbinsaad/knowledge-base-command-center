@@ -8305,7 +8305,6 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         indexed: true,
         configuredId: "",
         recordKind: "topic",
-        libraryId: null,
       });
       this.setDirectIndexMembershipState(path, true);
       const parentPath = parent?.path ?? null;
@@ -8664,7 +8663,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           indexed: !currentLibrary,
           configuredId,
           recordKind: semanticKind,
-          libraryId: currentLibrary?.id ?? null,
+          ...(currentLibrary ? { libraryId: currentLibrary.id } : {}),
         };
         this.data.portableIndex.subjects.push(subject);
         if (file instanceof TFile) this.data.portableIndex.resolvedPathBySubjectId[subject.id] = file.path;
@@ -8673,7 +8672,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (!currentLibrary) {
         this.removePortableSubjectFromLibraryLayouts(subject.id);
         subject.indexed = true;
-        subject.libraryId = null;
+        delete subject.libraryId;
         subject.parentId = null;
         subject.groupId = this.ensureTopicPortableGroup(topicGroupTitle);
         this.setDirectIndexMembershipState(path, true);
@@ -8867,7 +8866,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           const subject = subjectById.get(portableId);
           if (subject) {
             this.removePortableSubjectFromLibraryLayouts(subject.id);
-            subject.libraryId = null;
+            delete subject.libraryId;
             subject.indexed = true;
             if (cleanTargetGroup) subject.groupId = this.ensureTopicPortableGroup(cleanTargetGroup);
           }

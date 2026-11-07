@@ -1079,7 +1079,9 @@ function ensureSubject(
     indexed: library === null,
     configuredId: fact.configuredId,
     recordKind,
-    libraryId: library?.id ?? null,
+    // Canonical optional shape: an Index subject carries no libraryId key, so
+    // the live payload and its reloaded form hash identically.
+    ...(library ? { libraryId: library.id } : {}),
   };
   context.entry.data.portableIndex.subjects.push(subject);
   context.entry.data.portableIndex.resolvedPathBySubjectId[id] = fact.path;
@@ -1330,7 +1332,11 @@ function applyPrimary(
     const subject = ensureSubject(context, fact, null, groupId, tracker);
     setSubjectLibraryLayoutPlacement(context, subject.id, null, tracker);
     assignSubjectField(subject, "indexed", true, tracker);
-    assignSubjectField(subject, "libraryId", null, tracker);
+    // Canonical shape for an Index subject: no libraryId key (loading omits it).
+    if (Object.prototype.hasOwnProperty.call(subject, "libraryId")) {
+      delete subject.libraryId;
+      mark(tracker);
+    }
     assignSubjectField(subject, "parentId", parentId, tracker);
     assignSubjectField(subject, "groupId", groupId, tracker);
     reconcileSubjectPlacement(context, beforePlacement, subject);
