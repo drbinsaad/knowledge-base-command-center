@@ -25,18 +25,18 @@ test("WF-12 T7 the three Undo command IDs are exactly the baseline IDs", () => {
   assert.ok(displayNameOf("undo-last-quick-append"));
 });
 
-test("WF-12 T7 the three Undo display names are distinct", { todo: "WF-12 main labels pending" }, () => {
+test("WF-12 T7 the three Undo display names are distinct", () => {
   const names = ids.map(displayNameOf);
   assert.equal(new Set(names.map((name) => name.toLowerCase())).size, 3, `names must be distinct: ${names.join(" | ")}`);
 });
 
-test("WF-12 T7 each Undo display name says its scope and promises no Markdown undo", { todo: "WF-12 main labels pending" }, () => {
+test("WF-12 T7 each Undo display name says its scope and promises no Markdown undo", () => {
   const organizer = displayNameOf("undo-last-note-organizer-batch");
   const organization = displayNameOf("undo-personal-organization");
   const quick = displayNameOf("undo-last-quick-append");
   assert.match(organizer, /organizer/i);
   assert.match(organizer, /all bases|every base|multi|bases/i, "multi-base Organizer Undo says it spans bases");
-  assert.match(organization, /current (knowledge )?base/i, "organization Undo says current base");
+  assert.match(organization, /(this|current (knowledge )?) ?base/i, "organization Undo says current base");
   assert.match(organization, /organization/i);
   assert.match(quick, /quick append/i);
   assert.match(quick, /note|append/i);

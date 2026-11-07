@@ -893,7 +893,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     });
     this.addCommand({
       id: "undo-last-note-organizer-batch",
-      name: "Undo last organizer change",
+      name: "Undo last organizer batch (all affected bases)",
       icon: "undo-2",
       checkCallback: (checking) => {
         if (!this.canUndoNoteOrganizerBatch()) return false;
@@ -1014,7 +1014,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
     this.addCommand({
       id: "undo-last-quick-append",
-      name: "Quick append: Undo last append",
+      name: "Quick append: Undo last note append",
       icon: "undo-2",
       checkCallback: (checking) => {
         if (!this.canUndoLastFollowUpAppend()) return false;
@@ -1074,7 +1074,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     });
     this.addCommand({
       id: "undo-personal-organization",
-      name: "Undo last organization change",
+      name: "Undo last organization change in this base",
       checkCallback: (checking) => {
         if (this.data.undoStack.length === 0) return false;
         if (!checking) this.run(() => this.undo());

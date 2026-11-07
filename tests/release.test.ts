@@ -125,7 +125,7 @@ test("public repository metadata is present", async () => {
     "Organize notes…",
     "Organize this note…",
     "Where is this note organized?",
-    "Undo last Organizer batch (all affected bases)",
+    "Undo last organizer batch (all affected bases)",
     "Redo last organizer change",
   ]) {
     assert.match(userGuide, new RegExp(`^- ${organizerCommand.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}$`, "mu"),
