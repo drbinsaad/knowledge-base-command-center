@@ -65,11 +65,11 @@ async function enterSplit(page: Page): Promise<void> {
   await expect(page.locator(".ent-cc-view")).toHaveClass(/is-mobile-split/u);
 }
 
-/** Contrast of an element's text against composited solid ancestor backgrounds. */
+/** Lowest contrast of every rendered match, text against composited solid ancestor backgrounds. */
 async function contrastOf(page: Page, selector: string): Promise<number> {
-  const target = page.locator(selector).locator("visible=true").first();
-  await expect(target, `${selector} must be rendered`).toBeVisible();
-  return target.evaluate((element) => {
+  const target = page.locator(selector).locator("visible=true");
+  await expect(target.first(), `${selector} must be rendered`).toBeVisible();
+  const ratios = await target.evaluateAll((elements) => elements.map((element) => {
     const canvas = document.createElement("canvas");
     canvas.width = 1; canvas.height = 1;
     const context = canvas.getContext("2d", { willReadFrequently: true });
@@ -94,7 +94,8 @@ async function contrastOf(page: Page, selector: string): Promise<number> {
     };
     const a = luminance(foreground); const b = luminance(background);
     return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
-  });
+  }));
+  return Math.min(...ratios);
 }
 
 test.describe("C01 wide mobile split targets", () => {
@@ -197,6 +198,61 @@ test.describe("C01 wide mobile split targets", () => {
     expect((await size("button[aria-label='Command center actions']")).width).toBe(32);
   });
 });
+
+/** Visible elements whose own text renders in the host's faint colour. */
+async function faintTextOffenders(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const probe = document.createElement("span");
+    probe.style.color = "var(--text-faint)";
+    document.body.append(probe);
+    const faint = getComputedStyle(probe).color;
+    probe.remove();
+    const found: string[] = [];
+    for (const element of Array.from(document.querySelectorAll<HTMLElement>("body *"))) {
+      const ownText = Array.from(element.childNodes).some((node) => node.nodeType === 3 && (node.textContent ?? "").trim().length > 0);
+      if (!ownText) continue;
+      const rect = element.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0 || getComputedStyle(element).visibility === "hidden") continue;
+      if (getComputedStyle(element).color === faint) found.push(`${element.tagName.toLowerCase()}.${Array.from(element.classList).join(".")}: ${(element.textContent ?? "").trim().slice(0, 30)}`);
+    }
+    return found;
+  });
+}
+
+for (const dark of [false, true]) {
+  test.describe(`C02 informational text contrast (${dark ? "dark" : "light"}, host-parity faint colour)`, () => {
+    test("inspector headings, related labels, empty state, footer and tab counts reach 4.5:1", async ({ page }) => {
+      await openView(page, { mobile: false, dark, width: 1440, height: 960, scenario: "related-overflow", parity: true });
+      await page.getByRole("button", { name: /^Relationship overview,/u }).click();
+      await expect(page.locator(".ent-cc-related-label").first()).toBeVisible();
+      const low: string[] = [];
+      for (const selector of [".ent-cc-inspector-header h2", ".ent-cc-related-label", ".ent-cc-footer", ".ent-cc-tab-count"]) {
+        const ratio = await contrastOf(page, selector);
+        if (ratio < 4.5) low.push(`${selector} ${ratio.toFixed(2)}`);
+      }
+      expect(low).toEqual([]);
+      expect(await faintTextOffenders(page)).toEqual([]);
+    });
+
+    test("empty related section label reaches 4.5:1", async ({ page }) => {
+      await openView(page, { mobile: false, dark, width: 1440, height: 960, count: 80, parity: true });
+      await page.getByRole("button", { name: /^Research note 000,/u }).click();
+      await expect(page.locator(".ent-cc-related-empty").first()).toBeVisible();
+      expect(await contrastOf(page, ".ent-cc-related-empty")).toBeGreaterThanOrEqual(4.5);
+      expect(await faintTextOffenders(page)).toEqual([]);
+    });
+
+    for (const kind of ["note", "setup", "export", "sync", "organizer", "quick-organizer", "whats-new"] as const) {
+      test(`${kind} dialog text reaches 4.5:1`, async ({ page }) => {
+        await openView(page, { mobile: false, dark, width: 1440, height: 960, count: 80, parity: true });
+        await page.evaluate((value) => (window as unknown as { kbccBrowserHarness: { openModal(kind: string): void } }).kbccBrowserHarness.openModal(value), kind);
+        await expect(page.getByRole("dialog")).toBeVisible();
+        const offenders = (await faintTextOffenders(page)).filter((item) => !item.startsWith("div.kbcc-"));
+        expect(offenders).toEqual([]);
+      });
+    }
+  });
+}
 
 async function clickCentre(page: Page, target: ReturnType<Page["locator"]>): Promise<void> {
   const rect = await target.boundingBox();
