@@ -108,6 +108,7 @@ test("select, restore and open go through the real hook, and a changed source is
   assert.ok(loaded.status === "parsed" && loaded.result.ok);
   if (!(loaded.status === "parsed" && loaded.result.ok)) return;
   assert.equal(loaded.result.preview.identity, "same-vault", "identity comes from the live store");
+  const reviewed = callbacks.getDestination(); // captured at preview time, as the review window does
   const { createRecoveryRestoreIntent } = await import("../src/recovery-copy.ts");
   const make = () => {
     const made = createRecoveryRestoreIntent({
@@ -122,12 +123,12 @@ test("select, restore and open go through the real hook, and a changed source is
   };
   // Source changed after the preview: refused, nothing written.
   w.files.set(path, rescueText("Alpha").replace("Alpha", "Alphb"));
-  assert.equal((await callbacks.onApply(make())).status, "failed");
+  assert.equal((await callbacks.onApply(make(), reviewed)).status, "failed");
   assert.equal(w.plugin.getKnowledgeBases(true).length, 1);
   // Source restored: the same bytes pass.
   w.files.set(path, rescueText("Alpha"));
   const intent = make();
-  const result = await callbacks.onApply(intent);
+  const result = await callbacks.onApply(intent, reviewed);
   assert.equal(result.status, "applied", JSON.stringify(result));
   assert.equal(w.plugin.getActiveKnowledgeBaseId(), "base-default");
   assert.equal(w.disk().bases.length, 2);
