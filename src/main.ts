@@ -817,6 +817,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private renameBootstrapEpisode = false;
   /** Vault identity of the device profile present at startup: a constraint on rename binding. */
   private retainedProfileVaultId: string | null = null;
+  /** Identity of the compatible primary loaded from disk at startup (persisted, not merely arrived). */
+  private startupPersistedVaultId: string | null = null;
   /** Foreign/read-only/blocked state hit the bound: further events are refused, not stored. */
   private vaultRenameSessionOverflow = false;
   /** Entries restored from a journal rather than observed against the current capture. */
@@ -1932,9 +1934,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   /** The current store is an accepted, established identity: not a provisional fresh or migrated one. */
   private storeIsFinalEstablishedAuthority(): boolean {
     const id = this.store.vaultId;
+    const provisionalMigrated = provisionalMigratedVaultFingerprint(id) !== null || isLegacyDeterministicMigratedVaultId(id);
     return !isFreshVaultId(id)
-      && provisionalMigratedVaultFingerprint(id) === null
-      && !isLegacyDeterministicMigratedVaultId(id)
+      && (!provisionalMigrated || id === this.startupPersistedVaultId)
       && !this.isDataReadOnly()
       && !this.deviceLocalPersistenceSuppressed;
   }
@@ -3499,6 +3501,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     // rotates it in memory. External Sync can therefore reconcile it with a
     // concurrently rotated pristine copy instead of misclassifying it as flat
     // identity-less data.
+    // The identity of a compatible primary loaded from disk at startup is a
+    // persisted identity (a vault-migrated-… ID is written back and kept, see
+    // model.ts migrateStore), so it is authoritative for rename binding. A
+    // provisional ID that merely arrives through Sync in this session is not.
+    if (capturedRead === undefined && !sourceWasMissing) this.startupPersistedVaultId = this.store.vaultId;
     return {
       recognizedStore,
       hasVaultId: recognizedStore && Boolean(this.store.vaultId),

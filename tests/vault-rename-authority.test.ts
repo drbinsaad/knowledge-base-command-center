@@ -121,6 +121,43 @@ test("D03 R2: a persisted fresh-ID primary keeps ordinary rename behaviour", asy
   assert.equal(h.local.get(VAULT_RENAME_JOURNAL_KEY), null, "the journal clears after the durable save");
 });
 
+// vault-migrated-<fingerprint>-<nonce> is created for upgraded stores that had
+// no vault ID (model.ts migrateStore) and is then written back and kept: it is
+// a real, persisted identity, not a transient one.
+const MIGRATED_ID = "vault-migrated-0123456789abcdef-abcdefghijkl";
+
+test("D03: a persisted vault-migrated primary keeps ordinary rename behaviour (one save, journal cleared)", async () => {
+  const h = harness({ disk: establishedStore(MIGRATED_ID, [A]), files: [new TFile(A)] });
+  await h.start();
+  h.rename(A, B);
+  await h.internal.vaultRenameRepairQueue;
+  assert.deepEqual(h.plugin.data.directIndexPaths, [B]);
+  assert.equal(h.local.get(VAULT_RENAME_JOURNAL_KEY), null);
+  assert.equal(h.saves.length, 1);
+});
+
+test("D03: a bootstrap journal binds to a persisted vault-migrated primary loaded from disk at startup", async () => {
+  const bootstrap = {
+    version: 2,
+    scope: { kind: "bootstrap", bootstrapId: "bootstrap-d03-migrated", expectedVaultId: null },
+    renames: [ENTRY],
+    blocked: null,
+  };
+  const h = harness({
+    disk: establishedStore(MIGRATED_ID, [A]),
+    local: new Map([[VAULT_RENAME_JOURNAL_KEY, bootstrap]]),
+    files: [new TFile(B)],
+  });
+  await h.start();
+  assert.deepEqual(h.plugin.data.directIndexPaths, [B], "the persisted identity is authoritative at startup");
+  assert.equal(h.local.get(VAULT_RENAME_JOURNAL_KEY), null);
+  // And a later ordinary rename is not stranded in the closed episode.
+  h.files.set(B, new TFile(B));
+  h.rename(B, C);
+  await h.internal.vaultRenameRepairQueue;
+  assert.deepEqual(h.plugin.data.directIndexPaths, [C]);
+});
+
 test("D03 R3: a retained bound journal (v1 and v2) never relinks a reused source path on restart", async () => {
   const raws = [
     { version: 1, vaultId: "vault-bound", renames: [ENTRY] },
