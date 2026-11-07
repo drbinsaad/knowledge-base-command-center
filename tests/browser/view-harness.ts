@@ -20,7 +20,7 @@ import { SyncRecoveryCenterModal } from "../../src/sync-recovery-modal";
 import { NoteOrganizerModal, type NoteOrganizerHost } from "../../src/note-organizer-modal";
 import { EntCommandCenterSettingsTab } from "../../src/settings";
 import { UpdateAnnouncementModal } from "../../src/update-announcement-modal";
-import { UPDATE_ANNOUNCEMENT_0_26_1 } from "../../src/update-announcement";
+import { UPDATE_ANNOUNCEMENT_0_27_0 } from "../../src/update-announcement";
 import { applyNoteOrganizerPlan, createNoteOrganizerPlan, type NoteOrganizerDirective, type NoteOrganizerFileFact, type NoteOrganizerPrimaryState } from "../../src/note-organizer";
 import { organizerIndexPlacement, organizerIndexTrail } from "../../src/note-organizer-index";
 import { applyLibraryVisualMove, type LibraryVisualMoveRequest } from "../../src/library-visual-move";
@@ -812,7 +812,7 @@ const harness = {
     } else if (kind === "sync") {
       openedModal = new SyncRecoveryCenterModal(plugin as unknown as EntVaultCommandCenterPlugin);
     } else if (kind === "whats-new") {
-      openedModal = new UpdateAnnouncementModal(app as never, UPDATE_ANNOUNCEMENT_0_26_1);
+      openedModal = new UpdateAnnouncementModal(app as never, UPDATE_ANNOUNCEMENT_0_27_0);
     } else if (kind === "quick-organizer") {
       organizer = new NoteOrganizerModal(quickOrganizerHost, { singleNote: true, source: "file-menu", preselectedPaths: [quickNotePath] });
       openedModal = organizer;

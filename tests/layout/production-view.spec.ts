@@ -1605,21 +1605,21 @@ for (const scenario of [
 
 for (const mobile of [false, true]) {
   const viewport = mobile ? "mobile" : "desktop";
-  test(`production 0.26.1 update announcement ${viewport}: readable news and reachable actions`, async ({ page }, testInfo) => {
+  test(`production 0.27.0 update announcement ${viewport}: readable news and reachable actions`, async ({ page }, testInfo) => {
     await openView(page, { mobile, count: 8 });
     await openModal(page, "whats-new");
-    const dialog = page.getByRole("dialog", { name: "What’s new in Knowledge Base Command Center 0.26.1", exact: true });
-    await expect(dialog).toHaveAccessibleDescription("Safety and reliability fixes for your organization and everyday editing.");
-    const body = dialog.getByRole("region", { name: "Version 0.26.1 highlights", exact: true });
+    const dialog = page.getByRole("dialog", { name: "What’s new in Knowledge Base Command Center 0.27.0", exact: true });
+    await expect(dialog).toHaveAccessibleDescription("Safer recovery, clearer note setup, and more reliable everyday organization.");
+    const body = dialog.getByRole("region", { name: "Version 0.27.0 highlights", exact: true });
     await expect(body.getByRole("listitem")).toHaveCount(4);
-    await expect(body).toContainText("backup");
-    await expect(body).toContainText("plugin data, not notes");
-    await expect(body).toContainText("typed text");
-    await expect(body).toContainText("touch-sized");
-    const link = dialog.getByRole("link", { name: "Read the complete 0.26.1 release notes on GitHub (opens in your browser)", exact: true });
+    await expect(body).toContainText("kept backups");
+    await expect(body).toContainText("Inbox changes");
+    await expect(body).toContainText("copied-file recovery");
+    await expect(body).toContainText("Older history may reset");
+    const link = dialog.getByRole("link", { name: "Read the complete 0.27.0 release notes on GitHub (opens in your browser)", exact: true });
     const continueButton = dialog.getByRole("button", { name: "Continue", exact: true });
     await expect(link).toHaveText("Read complete release notes");
-    await expect(link).toHaveAttribute("href", "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.26.1");
+    await expect(link).toHaveAttribute("href", "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.27.0");
     await expect(link).toHaveAttribute("target", "_blank");
     await expect(link).toHaveAttribute("rel", "noopener noreferrer");
     for (const action of [link, continueButton]) {
@@ -1627,11 +1627,11 @@ for (const mobile of [false, true]) {
       expect(await action.evaluate((element) => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
     }
     expect(await dialog.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
-    await captureEvidence(page, `whats-new-0.26.1-${viewport}`);
+    await captureEvidence(page, `whats-new-0.27.0-${viewport}`);
     await body.getByRole("listitem").last().scrollIntoViewIfNeeded();
     await expect(body.getByRole("listitem").last()).toBeInViewport({ ratio: 1 });
     await expect(continueButton).toBeInViewport();
-    await captureEvidence(page, `whats-new-0.26.1-${viewport}-last-highlight`);
+    await captureEvidence(page, `whats-new-0.27.0-${viewport}-last-highlight`);
     await link.focus();
     await page.keyboard.press(testInfo.project.name === "webkit" ? "Alt+Tab" : "Tab");
     await expect(continueButton).toBeFocused();

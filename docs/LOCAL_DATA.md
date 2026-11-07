@@ -18,7 +18,7 @@ Obsidian stores these as vault-specific App-local values outside the plugin fold
 | --- | --- |
 | Device interaction state | Active routes, collapsed sections, bounded Undo/Redo, and pending transaction/history journals; format version 5; version-4 journals remain readable |
 | Local diagnostic facts | Sync/recovery observations and update-announcement history |
-| Rename-recovery journal | Bounded, vault-scoped repair state containing vault identity and old/new vault-relative paths |
+| Rename-recovery journal | Format version 2; bounded, vault-scoped repair state containing vault identity and old/new vault-relative paths; version-1 journals remain readable |
 | Return-navigation history | Format version 2, with version-1 histories readable: vault identity, up to 24 opened-note paths, originating base/tab, selected-record path, literal search text, compact-detail state, and scroll position |
 | Legacy external Library-image permission | An inert versioned boolean that may remain from a private test build; ignored for image loading and included only for cleanup |
 
@@ -31,6 +31,8 @@ Update every synced device to 0.24.0 or a newer compatible release before editin
 ## Undo history after updates
 
 Each knowledge base's device-local Undo/Redo is stored with a fingerprint of the organization it operates on, inside the same version-5 device-interaction value. At startup, a base whose history is not bound to the organization now loaded (for example Sync changed it while Obsidian was closed, or the history was saved before this binding existed) has only that base's Undo/Redo reset, with one notice. Its route and collapsed sections, other bases' history, and your notes and organization are unchanged. After updating from an earlier release, expect existing Undo history to be reset once. Returning to an older release is not protected: it drops the binding when it saves, so the newer release resets those bases again. A value written by a newer release is left untouched, history stays empty, and nothing replaces it until you run **Clear device-local data**.
+
+Rename recovery now writes journal format 2 at the existing App-local storage address. Recognized version-1 journals remain readable. If you return to 0.26.1 while a version-2 journal is still present, that older build can enter protected recovery rather than ignoring outstanding renames. This local journal change does not change the synced organization format or rewrite Markdown notes.
 
 ## Reset or uninstall
 

@@ -8,33 +8,33 @@ import {
   compareSemanticVersions,
   isSemanticVersion,
   planUpdateAnnouncement,
-  UPDATE_ANNOUNCEMENT_0_26_1,
+  UPDATE_ANNOUNCEMENT_0_27_0,
   updateAnnouncementForVersion,
   type UpdateAnnouncement,
 } from "../src/update-announcement.ts";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
 
-test("0.26.1 announces the safety fixes once with exact release identity", () => {
-  const result = planUpdateAnnouncement("0.26.1", "0.26.0", true);
-  assert.equal(result.announcement, UPDATE_ANNOUNCEMENT_0_26_1);
-  assert.equal(result.nextHighestObservedVersion, "0.26.1");
+test("0.27.0 announces recovery and workflow improvements once with exact release identity", () => {
+  const result = planUpdateAnnouncement("0.27.0", "0.26.1", true);
+  assert.equal(result.announcement, UPDATE_ANNOUNCEMENT_0_27_0);
+  assert.equal(result.nextHighestObservedVersion, "0.27.0");
   assert.equal(result.shouldPersist, true);
-  assert.equal(UPDATE_ANNOUNCEMENT_0_26_1.releaseUrl, "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.26.1");
-  const highlights = UPDATE_ANNOUNCEMENT_0_26_1.highlights.join("\n");
-  for (const term of ["backup", "plugin data, not notes", "each device", "typed text", "touch-sized"]) assert.ok(highlights.includes(term), term);
-  assert.equal(planUpdateAnnouncement("0.26.1", "0.26.1", true).announcement, null);
-  assert.equal(planUpdateAnnouncement("0.26.1", null, false).announcement, null);
-  assert.equal(planUpdateAnnouncement("0.26.0", "0.26.1", true).announcement, null);
-  assert.equal(planUpdateAnnouncement("0.26.1-rc.1", "0.26.0", true).announcement, null);
+  assert.equal(UPDATE_ANNOUNCEMENT_0_27_0.releaseUrl, "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.27.0");
+  const highlights = UPDATE_ANNOUNCEMENT_0_27_0.highlights.join("\n");
+  for (const term of ["kept backups", "Inbox changes", "copied-file recovery", "Older history may reset"]) assert.ok(highlights.includes(term), term);
+  assert.equal(planUpdateAnnouncement("0.27.0", "0.27.0", true).announcement, null);
+  assert.equal(planUpdateAnnouncement("0.27.0", null, false).announcement, null);
+  assert.equal(planUpdateAnnouncement("0.26.1", "0.27.0", true).announcement, null);
+  assert.equal(planUpdateAnnouncement("0.27.0-rc.1", "0.26.1", true).announcement, null);
 });
 
 test("the catalogue holds only the current release, which is the only entry the plugin can look up", () => {
-  assert.equal(updateAnnouncementForVersion("0.26.1"), UPDATE_ANNOUNCEMENT_0_26_1);
-  assert.equal(UPDATE_ANNOUNCEMENT_0_26_1.version, "0.26.1");
-  for (const other of ["0.26.0", "0.25.1", "0.12.0", "0.26.2", "0.26.1-rc.1", "0.26.1+local", "development"]) {
+  assert.equal(updateAnnouncementForVersion("0.27.0"), UPDATE_ANNOUNCEMENT_0_27_0);
+  assert.equal(UPDATE_ANNOUNCEMENT_0_27_0.version, "0.27.0");
+  for (const other of ["0.26.1", "0.26.0", "0.25.1", "0.12.0", "0.27.1", "0.27.0-rc.1", "0.27.0+local", "development"]) {
     assert.equal(updateAnnouncementForVersion(other), null, other);
   }
-  assert.equal(planUpdateAnnouncement("0.26.0", "0.25.1", true).announcement, null, "an uncatalogued release is never announced");
+  assert.equal(planUpdateAnnouncement("0.26.1", "0.25.1", true).announcement, null, "an uncatalogued release is never announced");
 });
 
 test("semantic version comparison handles large identifiers, prereleases, builds, and invalid values", () => {
@@ -52,44 +52,44 @@ test("semantic version comparison handles large identifiers, prereleases, builds
 });
 
 test("fresh installs establish a baseline without showing an update window", () => {
-  const first = planUpdateAnnouncement("0.26.1", null, false);
+  const first = planUpdateAnnouncement("0.27.0", null, false);
   assert.equal(first.announcement, null);
   assert.equal(first.shouldPersist, true);
-  assert.equal(first.nextHighestObservedVersion, "0.26.1");
+  assert.equal(first.nextHighestObservedVersion, "0.27.0");
 
-  const later = planUpdateAnnouncement("0.26.1", first.nextHighestObservedVersion, true);
+  const later = planUpdateAnnouncement("0.27.0", first.nextHighestObservedVersion, true);
   assert.equal(later.announcement, null);
   assert.equal(later.shouldPersist, false);
 });
 
 test("existing installs see the catalogued upgrade once and receive the exact release URL", () => {
-  const noPriorMarker = planUpdateAnnouncement("0.26.1", null, true);
-  assert.equal(noPriorMarker.announcement?.version, "0.26.1");
-  assert.equal(noPriorMarker.announcement?.releaseUrl, "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.26.1");
-  assert.equal(noPriorMarker.nextHighestObservedVersion, "0.26.1");
+  const noPriorMarker = planUpdateAnnouncement("0.27.0", null, true);
+  assert.equal(noPriorMarker.announcement?.version, "0.27.0");
+  assert.equal(noPriorMarker.announcement?.releaseUrl, "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.27.0");
+  assert.equal(noPriorMarker.nextHighestObservedVersion, "0.27.0");
 
-  const repeat = planUpdateAnnouncement("0.26.1", noPriorMarker.nextHighestObservedVersion, true);
+  const repeat = planUpdateAnnouncement("0.27.0", noPriorMarker.nextHighestObservedVersion, true);
   assert.equal(repeat.announcement, null);
   assert.equal(repeat.shouldPersist, false);
 
-  const fromEarlierRelease = planUpdateAnnouncement("0.26.1", "0.11.0", true);
-  assert.equal(fromEarlierRelease.announcement?.version, "0.26.1");
-  assert.equal(fromEarlierRelease.nextHighestObservedVersion, "0.26.1");
+  const fromEarlierRelease = planUpdateAnnouncement("0.27.0", "0.11.0", true);
+  assert.equal(fromEarlierRelease.announcement?.version, "0.27.0");
+  assert.equal(fromEarlierRelease.nextHighestObservedVersion, "0.27.0");
 });
 
 test("downgrades never replay an announcement and prerelease precedence stays deterministic", () => {
-  const downgrade = planUpdateAnnouncement("0.26.1", "0.27.0", true);
+  const downgrade = planUpdateAnnouncement("0.27.0", "0.28.0", true);
   assert.equal(downgrade.announcement, null);
-  assert.equal(downgrade.nextHighestObservedVersion, "0.27.0");
+  assert.equal(downgrade.nextHighestObservedVersion, "0.28.0");
   assert.equal(downgrade.shouldPersist, false);
 
-  const prerelease = planUpdateAnnouncement("0.26.1-rc.1", "0.26.0", true);
+  const prerelease = planUpdateAnnouncement("0.27.0-rc.1", "0.26.1", true);
   assert.equal(prerelease.announcement, null, "uncatalogued prereleases are never presented as stable release news");
-  assert.equal(prerelease.nextHighestObservedVersion, "0.26.1-rc.1");
-  const stable = planUpdateAnnouncement("0.26.1", prerelease.nextHighestObservedVersion, true);
-  assert.equal(stable.announcement?.version, "0.26.1");
+  assert.equal(prerelease.nextHighestObservedVersion, "0.27.0-rc.1");
+  const stable = planUpdateAnnouncement("0.27.0", prerelease.nextHighestObservedVersion, true);
+  assert.equal(stable.announcement?.version, "0.27.0");
 
-  const localBuild = planUpdateAnnouncement("0.26.1+local", "0.26.0", true);
+  const localBuild = planUpdateAnnouncement("0.27.0+local", "0.26.1", true);
   assert.equal(localBuild.announcement, null, "a non-release build cannot borrow the stable tag announcement");
 });
 
@@ -97,12 +97,12 @@ test("malformed local version state is bounded and recoverable without trusting 
   for (const malformed of [
     "bad",
     { highestObservedVersion: "0.11.0" },
-    `0.26.1+${"x".repeat(128)}`,
+    `0.27.0+${"x".repeat(128)}`,
   ]) {
-    const recovered = planUpdateAnnouncement("0.26.1", malformed, true);
+    const recovered = planUpdateAnnouncement("0.27.0", malformed, true);
     assert.equal(recovered.malformedStoredVersion, true);
-    assert.equal(recovered.announcement?.version, "0.26.1");
-    assert.equal(recovered.nextHighestObservedVersion, "0.26.1");
+    assert.equal(recovered.announcement?.version, "0.27.0");
+    assert.equal(recovered.nextHighestObservedVersion, "0.27.0");
   }
 });
 
@@ -149,7 +149,7 @@ function announcementPlugin(
     },
   };
   const plugin = new EntVaultCommandCenterPlugin(app as never, {
-    version: options.version ?? "0.26.1",
+    version: options.version ?? "0.27.0",
   } as never) as unknown as AnnouncementPlugin;
   plugin.openUpdateAnnouncement = (announcement) => { opens.push(announcement); };
   return plugin;
@@ -164,7 +164,7 @@ test("plugin lifecycle persists before opening and never repeats within a sessio
   assert.equal(opens.length, 1);
   assert.equal(
     (localStorage.get(SYNC_RECOVERY_LOCAL_STATE_KEY) as { highestPluginVersionSeen?: unknown })?.highestPluginVersionSeen,
-    "0.26.1",
+    "0.27.0",
     "the one-time marker is durable before the modal opens",
   );
 
@@ -173,28 +173,28 @@ test("plugin lifecycle persists before opening and never repeats within a sessio
   assert.equal(opens.length, 1);
 });
 
-test("the 0.26.0 to 0.26.1 lifecycle upgrade persists the new marker and never replays after reload", () => {
+test("the 0.26.1 to 0.27.0 lifecycle upgrade persists the new marker and never replays after reload", () => {
   const localStorage = new Map<string, unknown>();
   const opens: UpdateAnnouncement[] = [];
   // Declared before assert.deepEqual(opens, []) narrows `opens` to never[].
   const recordOpen = (announcement: UpdateAnnouncement): void => { opens.push(announcement); };
-  announcementPlugin(localStorage, opens, { version: "0.26.0" })
+  announcementPlugin(localStorage, opens, { version: "0.26.1" })
     .maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
   assert.deepEqual(opens, [], "an uncatalogued release records its marker without a window");
-  const upgraded = announcementPlugin(localStorage, opens, { version: "0.26.1" });
+  const upgraded = announcementPlugin(localStorage, opens, { version: "0.27.0" });
   upgraded.openUpdateAnnouncement = (announcement) => {
     assert.equal(
       (localStorage.get(SYNC_RECOVERY_LOCAL_STATE_KEY) as { highestPluginVersionSeen?: unknown })?.highestPluginVersionSeen,
-      "0.26.1",
+      "0.27.0",
       "the new version marker is persisted before presentation",
     );
     recordOpen(announcement);
   };
   upgraded.maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
   upgraded.maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
-  announcementPlugin(localStorage, opens, { version: "0.26.1" })
+  announcementPlugin(localStorage, opens, { version: "0.27.0" })
     .maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
-  assert.deepEqual(opens, [UPDATE_ANNOUNCEMENT_0_26_1]);
+  assert.deepEqual(opens, [UPDATE_ANNOUNCEMENT_0_27_0]);
 });
 
 test("two replacement instances with stale local snapshots share one synchronous App-lifetime claim", () => {
@@ -205,7 +205,7 @@ test("two replacement instances with stale local snapshots share one synchronous
   };
   const opened: UpdateAnnouncement[] = [];
   const create = () => {
-    const plugin = new EntVaultCommandCenterPlugin(app as never, { version: "0.26.1" } as never) as unknown as
+    const plugin = new EntVaultCommandCenterPlugin(app as never, { version: "0.27.0" } as never) as unknown as
       AnnouncementPlugin;
     plugin.openUpdateAnnouncement = (announcement) => { opened.push(announcement); };
     return plugin;
@@ -265,7 +265,7 @@ test("plugin lifecycle skips fresh installs and fails closed when its one-time m
   assert.equal(freshOpens.length, 0);
   assert.equal(
     (freshStorage.get(SYNC_RECOVERY_LOCAL_STATE_KEY) as { highestPluginVersionSeen?: unknown })?.highestPluginVersionSeen,
-    "0.26.1",
+    "0.27.0",
   );
 
   const failedStorage = new Map<string, unknown>();
@@ -294,7 +294,7 @@ test("incompatible, unloaded, and privacy-reset lifecycles never open over their
     if (mode === "incompatible") {
       assert.equal(
         (localStorage.get(SYNC_RECOVERY_LOCAL_STATE_KEY) as { highestPluginVersionSeen?: unknown })?.highestPluginVersionSeen,
-        "0.26.1",
+        "0.27.0",
       );
     } else {
       assert.equal(localStorage.size, 0);
@@ -313,13 +313,13 @@ test("manual reopening marks the release, refuses stacked duplicates, and closes
   UpdateAnnouncementModal.prototype.open = function open(): void { opens += 1; };
   UpdateAnnouncementModal.prototype.close = function close(): void { closes += 1; };
   try {
-    plugin.openCurrentUpdateAnnouncement(UPDATE_ANNOUNCEMENT_0_26_1);
-    plugin.openCurrentUpdateAnnouncement(UPDATE_ANNOUNCEMENT_0_26_1);
+    plugin.openCurrentUpdateAnnouncement(UPDATE_ANNOUNCEMENT_0_27_0);
+    plugin.openCurrentUpdateAnnouncement(UPDATE_ANNOUNCEMENT_0_27_0);
     plugin.maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
     assert.equal(opens, 1);
     assert.equal(
       (localStorage.get(SYNC_RECOVERY_LOCAL_STATE_KEY) as { highestPluginVersionSeen?: unknown })?.highestPluginVersionSeen,
-      "0.26.1",
+      "0.27.0",
     );
     plugin.onunload();
     assert.equal(closes, 1);
@@ -331,7 +331,7 @@ test("manual reopening marks the release, refuses stacked duplicates, and closes
 
 test("What’s New finishes before the once-per-session legacy review is offered", () => {
   const localStorage = new Map<string, unknown>();
-  const plugin = announcementPlugin(localStorage, [], { version: "0.26.1" });
+  const plugin = announcementPlugin(localStorage, [], { version: "0.27.0" });
   Reflect.deleteProperty(plugin, "openUpdateAnnouncement");
   plugin.data.indexFolderSources = [availableLegacySource()];
   let legacyOpens = 0;
@@ -368,7 +368,7 @@ test("an App-wide What’s New barrier blocks a replacement instance's legacy re
   let legacyOpens = 0;
   replacement.openLegacyIndexReview = () => { legacyOpens += 1; };
 
-  announcement.openCurrentUpdateAnnouncement(UPDATE_ANNOUNCEMENT_0_26_1);
+  announcement.openCurrentUpdateAnnouncement(UPDATE_ANNOUNCEMENT_0_27_0);
   replacement.maybeShowLegacyIndexReview();
   assert.equal(legacyOpens, 0, "replacement instances share the active update-modal barrier");
 
@@ -407,7 +407,7 @@ test("onLayoutReady owns automatic presentation and unload prevents a late or du
     const plugin = new EntVaultCommandCenterPlugin(app as never, {
       id: "ent-vault-command-center",
       name: "Knowledge Base Command Center",
-      version: "0.26.1",
+      version: "0.27.0",
     } as never) as unknown as OnloadLifecyclePlugin;
     plugin.loadPluginData = async () => ({ compatible: true, sourceWasMissing: false });
     plugin.registerObsidianProtocolHandler = () => {};
@@ -434,7 +434,7 @@ test("onLayoutReady owns automatic presentation and unload prevents a late or du
 
 test("What’s New modal is semantic, owner-document local, touch-sized, and safely links to the exact release", () => {
   const dom = createFakeDom();
-  const modal = new UpdateAnnouncementModal({} as never, UPDATE_ANNOUNCEMENT_0_26_1) as UpdateAnnouncementModal & {
+  const modal = new UpdateAnnouncementModal({} as never, UPDATE_ANNOUNCEMENT_0_27_0) as UpdateAnnouncementModal & {
     modalEl: HTMLElement;
     contentEl: HTMLElement;
     titleEl: HTMLElement;
@@ -447,18 +447,18 @@ test("What’s New modal is semantic, owner-document local, touch-sized, and saf
   modal.close = () => { closes += 1; };
   modal.onOpen();
 
-  assert.equal(modal.titleEl.textContent, "What’s new in Knowledge Base Command Center 0.26.1");
+  assert.equal(modal.titleEl.textContent, "What’s new in Knowledge Base Command Center 0.27.0");
   const descriptionId = modal.modalEl.getAttribute("aria-describedby");
   assert.match(descriptionId ?? "", /^ent-cc-whats-new-intro-\d+$/u);
-  assert.equal(modal.contentEl.querySelector(`[id="${descriptionId}"]`)?.textContent, UPDATE_ANNOUNCEMENT_0_26_1.intro);
+  assert.equal(modal.contentEl.querySelector(`[id="${descriptionId}"]`)?.textContent, UPDATE_ANNOUNCEMENT_0_27_0.intro);
   const region = modal.contentEl.querySelector('[role="region"]');
   assert.ok(region);
   assert.equal(region.ownerDocument, dom.document as unknown as Document);
-  assert.equal(region.getAttribute("aria-label"), "Version 0.26.1 highlights");
-  assert.equal(modal.contentEl.querySelectorAll("li").length, UPDATE_ANNOUNCEMENT_0_26_1.highlights.length);
+  assert.equal(region.getAttribute("aria-label"), "Version 0.27.0 highlights");
+  assert.equal(modal.contentEl.querySelectorAll("li").length, UPDATE_ANNOUNCEMENT_0_27_0.highlights.length);
   const link = modal.contentEl.querySelector<HTMLAnchorElement>("a.ent-cc-whats-new-release-link");
   assert.ok(link);
-  assert.equal(link.getAttribute("href"), UPDATE_ANNOUNCEMENT_0_26_1.releaseUrl);
+  assert.equal(link.getAttribute("href"), UPDATE_ANNOUNCEMENT_0_27_0.releaseUrl);
   assert.equal(link.getAttribute("target"), "_blank");
   assert.equal(link.getAttribute("rel"), "noopener noreferrer");
   assert.match(link.getAttribute("aria-label") ?? "", /opens in your browser/i);

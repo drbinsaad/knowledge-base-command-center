@@ -2,7 +2,23 @@
 
 Complete this checklist on a physical iPhone before tagging a release that changes search, navigation, modals, import/export, Sync handling, or mobile styles. Simulator and automated DOM results may accompany this record but do not replace it.
 
-## 0.26.1 Safety and reliability fixes
+## 0.27.0 Recovery and workflow reliability
+
+Status: **Unverified — not executed on a physical iPhone or iPad.** Browser emulation does not execute these rows. See the [0.27.0 evidence](release-evidence/0.27.0-iphone.md) for candidate-specific execution and authorization; historical decisions do not apply to this version.
+
+1. Review kept copies in portrait/landscape and wide-tablet Split View: discover and explicitly choose supported copies, inspect long names, change base choice, cancel during load, and verify malformed/oversize/foreign copies cannot restore. Restore one base as new; the original base and source file stay unchanged. Open the new base separately. Repeat read-only and stale-review cases.
+2. Re-run Generic setup with an Inbox change and affected synthetic notes. Review the effects, cancel back to the retained draft, apply once and use organization Undo. Change the base or reviewed input before Apply and confirm refusal without partial plugin-data changes.
+3. Create a note with root/Unicode destinations and invalid hidden/empty names. Confirm destination and field feedback, and that rejected names create nothing. Separately verify Inbox/Index/Library placement; a storage folder alone does not imply Index membership.
+4. Attach mixed files with Cursor, end/heading and each storage policy. Switch away from the owning editor before copying; verify correction/retry. Simulate a later insertion failure after copied files exist and confirm persistent paths, no duplicate batch retry and usable Close. Check long paths and the native file picker above the software keyboard.
+5. Test repeated filenames, case/Unicode-equivalent siblings and a destination race without overwriting an existing attachment. Open an existing non-Markdown attachment and confirm the new-tab policy and return behavior. Device-specific handlers are reported separately.
+6. Link/unlink imported entries and choose add-separately. Verify effects preview, retained identities, notes unchanged, stale-review refusal and Undo in the affected bases. Exercise existing Collection create/add/organize routes.
+7. Use touch/Pencil/trackpad moves through harmless refresh and changed-destination cases; compose text in filters; check selection, page and focus in the custom Bases view. Verify covers and attachment expansion with long/mixed-direction labels.
+8. Check native keyboard/software keyboard, VoiceOver, large text, safe areas, RTL, orientation and 44-point controls on physical iPhone/iPad. Use pop-out/windows only where actually supported; browser viewports do not execute this row.
+9. Controlled two-device Sync/restart: organization arrives independently of note files; no-op reload preserves valid drafts; changed shared state invalidates stale reviews/history safely; supported old local histories reset with notice without changing notes or organization. Use synthetic recovery/rename fixtures for interrupted-operation checks.
+10. Upgrade once and verify exactly https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.27.0 in What's new, four highlights, reachable actions and no replay after reload.
+11. Check the three Undo commands: **Undo last organizer batch (all affected bases)**, **Undo last organization change in this base**, and **Quick append: Undo last note append**. Review Index removal and placement reset, then verify the stated effects and applicable Undo.
+
+## Historical 0.26.1 Safety and reliability fixes
 
 Status: **Maintainer-authorized waiver — Unverified — Unexecuted on a physical iPhone or iPad.** The owner directed publication of 0.26.1 after the remaining physical-device and two-device Sync limitations were disclosed; see the exact instruction and context in the [0.26.1 evidence](release-evidence/0.26.1-iphone.md). This is not a physical-device Pass, and no earlier waiver is reused. Automated Chromium/WebKit tests do not execute these rows.
 
