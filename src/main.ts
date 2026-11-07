@@ -6662,6 +6662,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       await this.enqueueAppLogicalOperation(async () => {
         await this.saveQueue;
         if (beforeChange) await beforeChange();
+        // Protection can be set while this change waited behind Sync, saves or
+        // the settings flush. Re-check after the last await: a protected store
+        // must not mutate (and saveExplicitStoreSnapshot would not write it).
+        this.assertDataWritable();
         const backup = cloneJsonValue(this.store);
         let attemptedStore: PluginStore | null = null;
         let pendingRequiredUndoBatchCommit: PendingRequiredUndoBatchCommit | null = null;
