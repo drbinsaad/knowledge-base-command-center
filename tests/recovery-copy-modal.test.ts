@@ -124,6 +124,20 @@ test("discovery bounds the listing and the files it stats", async () => {
   assert.equal(result.candidates[0].mtime, 199, "newest of the stat-ed set first");
 });
 
+test("discovery examines only the first entries of a huge folder", async () => {
+  const filler = Array.from({ length: RECOVERY_DISCOVERY_LIMITS.maxEntriesPerFolder }, (_, index) => `${EXPORTS}/note-${index}.md`);
+  const early = `${EXPORTS}/knowledge-base-command-center-conflict-${stamp(1)}.json`;
+  const late = `${EXPORTS}/knowledge-base-command-center-conflict-${stamp(2)}.json`;
+  const { host } = makeHost({ [early]: { content: "x", mtime: 1 }, [late]: { content: "x", mtime: 2 } }, {
+    [EXPORTS]: [early, ...filler.slice(1), late],
+    [LEGACY]: [],
+    [PLUGIN_DIR]: [],
+  });
+  const result = await discoverRecoveryCopies(host, input);
+  assert.deepEqual(result.candidates.map((candidate) => candidate.path), [early], "entries past the per-folder bound are not examined");
+  assert.equal(result.truncated, true);
+});
+
 test("loading checks the declared size before reading and classifies bad files as not restorable", async () => {
   const good = `${PLUGIN_DIR}/data.json.bak-kept-${stamp(1)}`;
   const bad = `${PLUGIN_DIR}/data.json.bak-kept-${stamp(2)}`;
