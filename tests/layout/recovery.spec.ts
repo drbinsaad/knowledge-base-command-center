@@ -5,10 +5,10 @@ import { build } from "esbuild";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import type { RecoveryBrowserHarness } from "../browser/recovery-harness";
 
-// Real journey through the production Sync & recovery center and the production review
-// window, over an in-memory vault. The persistence hook itself (src/main.ts) is not part of
-// this bundle; the runtime tests cover it. No native Obsidian, device or two-device Sync pass
-// is implied here.
+// Component and layout journey through the production Sync & recovery center and the
+// production review window, over an in-memory vault. Its Apply is a recording stand-in; the
+// real plugin entry and restore path are proven in recovery-real.spec.ts. No native Obsidian,
+// device or two-device Sync pass is implied here.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 let bundle: string;
 let productStyles: string;
