@@ -13,6 +13,14 @@ export class AttachmentLinkInsertionError extends Error {
   }
 }
 
+/** Names tried for one file when another file appears at the chosen path before it is created. */
+export const MAX_ATTACHMENT_CREATE_ATTEMPTS = 5;
+
+/** Conservative comparison key: names equal here may collide on a case-insensitive or normalizing filesystem. */
+export function attachmentCollisionKey(name: string): string {
+  return name.normalize("NFC").toLocaleLowerCase();
+}
+
 export type AttachmentInsertTarget = "marker" | "heading" | "end";
 
 /**

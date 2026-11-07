@@ -1,5 +1,6 @@
 import { MarkdownView, normalizePath, Notice, parseYaml, Platform, Plugin, setIcon, TFile, TFolder, type Menu, type TAbstractFile } from "obsidian";
 import {
+  attachmentCollisionKey,
   attachmentFileName,
   AttachmentLinkInsertionError,
   attachmentPathCandidate,
@@ -7,6 +8,7 @@ import {
   canonicalAttachmentFolder,
   insertAttachmentReferences,
   MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENT_CREATE_ATTEMPTS,
   MAX_ATTACHMENT_FILES,
   noteAttachmentFolder,
 } from "./attachment";
@@ -10637,32 +10639,44 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     let copyFailure: unknown = null;
     for (const file of files) {
       const createdFolders: TFolder[] = [];
-      let destination: string;
-      let bytes: ArrayBuffer;
-      try {
-        this.assertAttachmentEditorCurrent(note, value.insertionMode);
-        destination = await this.availableAttachmentDestination(note, file.name, value.requestedFolder, policy, createdFolders);
-        this.assertAttachmentOperationCurrent(note, policy);
-        this.assertAttachmentEditorCurrent(note, value.insertionMode);
-        bytes = await file.arrayBuffer();
-        this.assertAttachmentOperationCurrent(note, policy);
-        this.assertAttachmentEditorCurrent(note, value.insertionMode);
-      } catch (error) {
-        await this.removeCreatedEmptyFolders(createdFolders);
-        if (created.length === 0) throw error;
-        copyFailure = error;
-        break;
+      let bytes: ArrayBuffer | null = null;
+      let copied: TFile | null = null;
+      let failure: unknown = null;
+      // createBinary is exclusive. Only a positively identified name collision
+      // (the path or a case-equivalent sibling now exists) earns a new name, a
+      // finite number of times; every other failure stops at once.
+      for (let attempt = 0; attempt < MAX_ATTACHMENT_CREATE_ATTEMPTS && copied === null && failure === null; attempt += 1) {
+        let destination: string;
+        try {
+          this.assertAttachmentEditorCurrent(note, value.insertionMode);
+          destination = await this.availableAttachmentDestination(note, file.name, value.requestedFolder, policy, createdFolders);
+          this.assertAttachmentOperationCurrent(note, policy);
+          this.assertAttachmentEditorCurrent(note, value.insertionMode);
+          bytes ??= await file.arrayBuffer();
+          this.assertAttachmentOperationCurrent(note, policy);
+          this.assertAttachmentEditorCurrent(note, value.insertionMode);
+        } catch (error) {
+          failure = error;
+          break;
+        }
+        try {
+          copied = await this.app.vault.createBinary(destination, bytes);
+        } catch (error) {
+          console.error("Knowledge Base Command Center could not copy the selected attachment", error);
+          if (policy.storageMode !== "obsidian" && this.attachmentPathTaken(destination)) continue;
+          failure = new Error(`The attachment could not be copied to ${destination}.`);
+        }
       }
-      try {
-        created.push({ file: await this.app.vault.createBinary(destination, bytes), name: file.name });
-      } catch (error) {
+      if (copied === null && failure === null) {
+        failure = new Error(`No unused name was found for ${attachmentFileName(file.name)} after ${MAX_ATTACHMENT_CREATE_ATTEMPTS} attempts. Nothing was overwritten.`);
+      }
+      if (copied === null) {
         await this.removeCreatedEmptyFolders(createdFolders);
-        console.error("Knowledge Base Command Center could not copy the selected attachment", error);
-        const failure = new Error(`The attachment could not be copied to ${destination}.`);
         if (created.length === 0) throw failure;
         copyFailure = failure;
         break;
       }
+      created.push({ file: copied, name: file.name });
     }
     try {
       this.assertAttachmentOperationCurrent(note, policy);
@@ -10743,9 +10757,19 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     for (let suffix = 0; suffix <= 10_000; suffix += 1) {
       const path = attachmentPathCandidate(folder, originalName, suffix);
       if (isImmutableSourcePath(path)) throw new Error("Attachments cannot be stored inside immutable source-book folders.");
-      if (!this.app.vault.getAbstractFileByPath(path)) return path;
+      if (!this.attachmentPathTaken(path)) return path;
     }
     throw new Error("No collision-free attachment filename could be created in that folder.");
+  }
+
+  /** True when the exact path, or a sibling equal after Unicode and case folding, already exists (file or folder). */
+  private attachmentPathTaken(path: string): boolean {
+    if (this.app.vault.getAbstractFileByPath(path)) return true;
+    const slash = path.lastIndexOf("/");
+    const parent = this.app.vault.getAbstractFileByPath(slash > 0 ? path.slice(0, slash) : "/");
+    if (!(parent instanceof TFolder)) return false;
+    const key = attachmentCollisionKey(path.slice(slash + 1));
+    return parent.children.some((child) => attachmentCollisionKey(child.name) === key);
   }
 
   getPortableJsonFiles(): TFile[] {
