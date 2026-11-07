@@ -79,6 +79,35 @@ for (const [label, code, reason] of negatives) {
   });
 }
 
+const reviewNegatives: Array<[string, (base: Sources) => Sources, RegExp]> = [
+  ["dynamic-name library registration with a forbidden literal id", (base) => replaceIn(base, "main.ts", "        id: commandId,\n        name: `Open Library: ${libraryName}`,", '        id: "ent-vault-command-center-bad",\n        name: `Open Library: ${libraryName}`,'), /concise and unprefixed/],
+  ["real open-workspace name containing {command}", (base) => replaceIn(base, "main.ts", 'name: "Open main page"', 'name: "Open {command}"'), /redundant word command/],
+  ["apostrophe and braces in a literal command name", (base) => withProbe(base, `export const a = (p: any) => p.addCommand({ id: "ok", name: "Don't {use} the command", callback: () => {} });`), /redundant word command/],
+  ["escaped quotes and braces in a literal command name", (base) => withProbe(base, 'export const a = (p: any) => p.addCommand({ id: "ok", name: "Say \\"{hi}\\" command", callback: () => {} });'), /redundant word command/],
+  ["request alias with a brace-containing comment", (base) => withProbe(base, 'import { request as send, /* { rationale } */ Notice } from "obsidian";\nexport const sendLocal = send;'), /Obsidian network APIs/],
+  ["request alias in a multiline import with line comments", (base) => withProbe(base, 'import {\n  Notice, // keep\n  request as send, // network\n} from "obsidian";\nexport const s = send;'), /Obsidian network APIs/],
+];
+
+for (const [label, mutate, reason] of reviewNegatives) {
+  test(`negative (review): ${label}`, async () => {
+    const base = baseline ?? await discoverRuntimeSources(path.join(root, "src"));
+    assert.throws(() => checkRuntimeSources(mutate(base)), reason);
+  });
+}
+
+const reviewPositives: Array<[string, string]> = [
+  ["safe title with braces and quotes", `export const a = (p: any) => p.addCommand({ id: "ok", name: "Don't {use} \\"this\\"", callback: () => {} });`],
+  ["safe Obsidian imports with a brace comment", 'import { Notice, /* { why } */ Modal } from "obsidian";\nexport const k = [Notice, Modal];'],
+  ["commented-out forbidden command", '// addCommand({ id: "x-command", name: "command", callback: 1 })\nexport const z = 1;'],
+];
+
+for (const [label, code] of reviewPositives) {
+  test(`positive (review): ${label}`, async () => {
+    const base = baseline ?? await discoverRuntimeSources(path.join(root, "src"));
+    checkRuntimeSources(withProbe(base, code));
+  });
+}
+
 test("negative: removing the sole clipboard writer fails", async () => {
   const base = baseline ?? await discoverRuntimeSources(path.join(root, "src"));
   assert.throws(() => checkRuntimeSources(replaceIn(base, "view.ts", "clipboard.writeText(text)", "clipboard.copy(text)")), /exactly one clipboard writer/);

@@ -38,32 +38,87 @@ export function checkSafetyPatterns(label, content) {
 
 const COMMAND_CALLBACKS = /\b(?:callback|checkCallback|editorCallback|editorCheckCallback)\b/;
 
-/** Shallow text of the object literal opening at `start` (nested braces blanked), or null. */
-function shallowObject(content, start) {
+/**
+ * Same-length copy of the source in which comments become spaces and the
+ * contents of string and template literals become "_" (quotes stay). Braces and
+ * keywords inside strings or comments therefore cannot change structure.
+ * Template substitutions are masked with their template (audit boundary).
+ */
+export function maskSource(content) {
+  let out = "";
+  let index = 0;
+  while (index < content.length) {
+    const char = content[index];
+    const next = content[index + 1];
+    if (char === "/" && next === "/") {
+      while (index < content.length && content[index] !== "\n") { out += " "; index += 1; }
+    } else if (char === "/" && next === "*") {
+      const end = content.indexOf("*/", index + 2);
+      const stop = end === -1 ? content.length : end + 2;
+      while (index < stop) { out += content[index] === "\n" ? "\n" : " "; index += 1; }
+    } else if (char === "\"" || char === "'" || char === "`") {
+      out += char;
+      index += 1;
+      while (index < content.length && content[index] !== char) {
+        if (content[index] === "\\" && index + 1 < content.length) { out += "__"; index += 2; continue; }
+        if (content[index] === "\n" && char !== "`") break;
+        out += content[index] === "\n" ? "\n" : "_";
+        index += 1;
+      }
+      if (index < content.length && content[index] === char) { out += char; index += 1; }
+    } else {
+      out += char;
+      index += 1;
+    }
+  }
+  return out;
+}
+
+/** Reads the real string literal that starts at the opening quote at `at` in the original source. */
+function readLiteral(content, at) {
+  const quote = content[at];
+  let value = "";
+  for (let index = at + 1; index < content.length && content[index] !== quote; index += 1) {
+    if (content[index] === "\\" && index + 1 < content.length) { index += 1; value += content[index]; continue; }
+    value += content[index];
+  }
+  return value;
+}
+
+/** Top level of the object literal opening at `start` in masked text (nested content blanked, same length), or null. */
+function shallowObject(masked, start) {
   let depth = 0;
   let shallow = "";
-  for (let index = start; index < content.length; index += 1) {
-    const char = content[index];
-    if (char === "{") { depth += 1; if (depth > 1) continue; }
-    else if (char === "}") { depth -= 1; if (depth === 0) return shallow; if (depth > 0) continue; }
-    if (depth === 1) shallow += char;
+  for (let index = start; index < masked.length; index += 1) {
+    const char = masked[index];
+    if (char === "{") depth += 1;
+    else if (char === "}") depth -= 1;
+    shallow += depth === 1 && char !== "{" ? char : " ";
+    if (depth === 0) return shallow;
   }
   return null;
 }
 
 /**
- * Command-shaped object literals: string id and name plus a Command callback
- * member, at the top level of the literal. Unrelated label-only objects are
- * not recognized.
+ * Command-shaped object literals: id and name keys plus a Command callback
+ * member at the top level of the literal. Each field that is a plain string
+ * literal is reported (the other may be dynamic); label-only objects are not
+ * recognized. Strings and comments are lexed, not pattern-matched.
  */
 export function findCommandDefinitions(content) {
+  const masked = maskSource(content);
   const found = [];
-  for (let index = content.indexOf("{"); index !== -1; index = content.indexOf("{", index + 1)) {
-    const shallow = shallowObject(content, index);
-    if (shallow === null) continue;
-    const id = /\bid\s*:\s*["']([^"']*)["']/.exec(shallow);
-    const name = /\bname\s*:\s*["']([^"']*)["']/.exec(shallow);
-    if (id && name && COMMAND_CALLBACKS.test(shallow)) found.push({ id: id[1], name: name[1] });
+  for (let index = masked.indexOf("{"); index !== -1; index = masked.indexOf("{", index + 1)) {
+    const shallow = shallowObject(masked, index);
+    if (shallow === null || !COMMAND_CALLBACKS.test(shallow)) continue;
+    const idMatch = /\bid\s*:\s*/.exec(shallow);
+    const nameMatch = /\bname\s*:\s*/.exec(shallow);
+    if (!idMatch || !nameMatch) continue;
+    const literal = (match) => {
+      const at = index + match.index + match[0].length;
+      return masked[at] === "\"" || masked[at] === "'" ? readLiteral(content, at) : null;
+    };
+    found.push({ id: literal(idMatch), name: literal(nameMatch) });
   }
   return found;
 }
@@ -77,8 +132,8 @@ export function findCommandDefinitions(content) {
 export function checkCommands(sources) {
   for (const [name, content] of sources) {
     for (const command of findCommandDefinitions(content)) {
-      assert.doesNotMatch(command.id, /ent-vault-command-center|command/, `command IDs must be concise and unprefixed (${name}: ${command.id})`);
-      assert.doesNotMatch(command.name, /command/i, `command names must not include the redundant word command (${name}: ${command.name})`);
+      if (command.id !== null) assert.doesNotMatch(command.id, /ent-vault-command-center|command/, `command IDs must be concise and unprefixed (${name}: ${command.id})`);
+      if (command.name !== null) assert.doesNotMatch(command.name, /command/i, `command names must not include the redundant word command (${name}: ${command.name})`);
     }
     for (const match of content.matchAll(/\baddCommand\s*\(\s*([^\s)][^)]{0,40})/g)) {
       const argument = match[1];
@@ -99,7 +154,13 @@ export function checkRuntimeSources(sources) {
   checkSafetyPatterns("runtime source", runtime);
 
   assert.doesNotMatch(runtime, /\b(?:require\s*\(|from\s+["'](?:fs|node:|child_process|electron)|process\.)/, "runtime must not use Node or Electron APIs");
-  const obsidianImports = [...runtime.matchAll(/import\s*(?:type\s+)?\{([^{}]*)\}\s*from\s*["']obsidian["']/g)].map((match) => match[1]);
+  const obsidianImports = [];
+  for (const [, content] of sources) {
+    for (const match of maskSource(content).matchAll(/import\s*(?:type\s+)?\{([^{}]*)\}\s*from\s*(["'])(_*)\2/g)) {
+      const end = match.index + match[0].length;
+      if (content.slice(end - match[3].length - 1, end - 1) === "obsidian") obsidianImports.push(match[1]);
+    }
+  }
   for (const imported of obsidianImports) {
     assert.doesNotMatch(imported, /(?:^|,)\s*(?:request|requestUrl)(?:\s+as\s+[\w$]+)?\s*(?:,|$)/, "runtime must not import Obsidian network APIs");
   }
