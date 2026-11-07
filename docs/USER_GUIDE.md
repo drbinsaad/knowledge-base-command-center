@@ -537,7 +537,7 @@ The artifact scan examines at most 2,000 direct children of the export folder an
 
 ### Review kept copies (release candidate)
 
-The release candidate adds **Review kept copies…** to this center. It lists conflict rescues and kept data backups the plugin has preserved, previews one, and restores one of its knowledge bases as a **new** base. It does not replace or edit an existing base and writes no Markdown. A damaged, unsupported or foreign-vault copy is shown as preserved but not restorable. Steps, limits and what is not carried over are in [Portability and recovery](PORTABILITY_AND_RECOVERY.md#kept-copies-and-conflict-rescues). This is a release-candidate feature, not a statement about an already published version.
+The release candidate adds a **Kept copies** section with **Review kept copies…** to this center. It lists conflict rescues and kept data backups the plugin has preserved, previews one, and restores one of its knowledge bases as a **new** base. It does not replace or edit an existing base and writes no Markdown. A damaged, unsupported or foreign-vault copy is shown as preserved but not restorable. Steps, limits and what is not carried over are in [Portability and recovery](PORTABILITY_AND_RECOVERY.md#kept-copies-and-conflict-rescues). This is a release-candidate feature, not a statement about an already published version.
 
 This is not a Sync-status surface. It makes no network request, calls no private Obsidian Sync API, and cannot tell whether a provider is online, queued, caught up, or safe for a device handoff. It never reads note bodies. Full paths, export filenames, custom configuration names, vault/base identifiers, and full semantic fingerprints are not shown.
 

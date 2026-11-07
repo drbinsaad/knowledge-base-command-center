@@ -145,7 +145,7 @@ Desktop uses the operating system download and file picker.
 
 The plugin itself does not read or write outside the vault. On desktop, the operating-system surfaces place files only where the user chooses.
 
-On desktop, a finished export means the plugin started the download. The plugin cannot see where your browser or operating system put the file, or whether the save finished. Open the file yourself and check it before you rely on it. On iPhone and iPad the file is written inside the vault, so the plugin can confirm the write; it still cannot confirm that Sync has copied it to another device.
+On desktop, the notice says **Export started**: the plugin started the download. The plugin cannot see where your browser or operating system put the file, or whether the save finished. Open the file yourself and check it before you rely on it. On iPhone and iPad the file is written inside the vault, so the plugin can confirm the write; it still cannot confirm that Sync has copied it to another device.
 
 On iPhone and iPad, Export writes JSON into the configured Exports folder inside the vault (<code>Knowledge Base Command Center Exports/</code> by default; Settings → Exports folder) so it can sync or be shared through Files. Import uses an in-vault JSON picker and displays the selected vault path during review.
 
@@ -235,7 +235,7 @@ The automatic rolling backup (`data.json.bak`) is a safety net for a failed save
 
 This feature is in the release candidate and is not described as released. If your installed version does not show it, the copies still exist on disk; only the in-app restore is missing.
 
-Open **Sync & recovery center → Review kept copies…**. The list shows kept data backups and conflict rescues found in the configured Exports folder, the legacy default Exports folder, and the plugin folder. It shows at most 50 files, newest first, and says how many folders were checked. A file name is only a hint: nothing is validated until you choose **Review**. **Choose another file** opens one you pick yourself.
+Open **Sync & recovery center**, find its **Kept copies** section, and choose **Review kept copies…** (it also works in protected read-only mode, because reviewing writes nothing). The list shows kept data backups and conflict rescues found in the configured Exports folder, the legacy default Exports folder, and the plugin folder. It shows at most 50 files, newest first, and says how many folders were checked. A file name is only a hint: nothing is validated until you choose **Review**. **Choose another file** opens one you pick yourself.
 
 Reviewing a copy shows its source type, date, format, whether it came from this vault, and the knowledge bases inside it. Then:
 
