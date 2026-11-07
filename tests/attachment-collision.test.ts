@@ -25,6 +25,7 @@ async function fixture() {
     /** Runs just before the exclusive create of each attempted destination. */
     beforeCreate: (_path: string, _attempt: number): void => {},
     ioFailure: false,
+    ioError: null as Error | null,
   };
   const occupy = (name: string, content: number[] = [7, 7], asFolder = false): TAbstractFile => {
     const path = `Files/${name}`;
@@ -47,7 +48,7 @@ async function fixture() {
       createBinary: async (path: string, data: ArrayBuffer) => {
         state.attempts.push(path);
         state.beforeCreate(path, state.attempts.length);
-        if (state.ioFailure) throw new Error("simulated disk failure");
+        if (state.ioFailure) throw state.ioError ?? new Error("simulated disk failure");
         const name = path.slice(path.lastIndexOf("/") + 1);
         if (folder.children.some((child) => key(child.name) === key(name))) throw new Error("Destination file already exists!");
         const file = new TFile(path);
@@ -145,6 +146,28 @@ test("A12 an unrelated I/O failure is not retried", async () => {
   f.state.ioFailure = true;
   await assert.rejects(f.plugin.attachFilesToNote(f.note, batch(["z.pdf"])), /could not be copied to Files\/z\.pdf/u);
   assert.deepEqual(f.state.attempts, ["Files/z.pdf"]);
+});
+
+test("A12 an I/O failure with a competing case-equivalent path stops at once and keeps the old bytes", async () => {
+  const f = await fixture();
+  f.state.ioFailure = true;
+  f.state.beforeCreate = () => { f.occupy("IO.PDF", [6, 6]); };
+  await assert.rejects(f.plugin.attachFilesToNote(f.note, batch(["io.pdf"])), (error: unknown) => {
+    assert.match((error as Error).message, /^The attachment could not be copied to Files\/io\.pdf\.$/u);
+    return true;
+  });
+  assert.deepEqual(f.state.attempts, ["Files/io.pdf"], "occupancy alone is not proof of a collision");
+  assert.deepEqual(f.bytes.get("Files/IO.PDF"), [6, 6]);
+});
+
+test("A12 an explicit EIO code wins over a message that mentions 'already exists'", async () => {
+  const f = await fixture();
+  f.state.ioFailure = true;
+  f.state.ioError = Object.assign(new Error("EIO: write failed, Files/already exists.pdf"), { code: "EIO" });
+  f.state.beforeCreate = () => { f.occupy("EIO.PDF", [4, 4]); };
+  await assert.rejects(f.plugin.attachFilesToNote(f.note, batch(["eio.pdf"])), /could not be copied to Files\/eio\.pdf/u);
+  assert.deepEqual(f.state.attempts, ["Files/eio.pdf"]);
+  assert.deepEqual(f.bytes.get("Files/EIO.PDF"), [4, 4]);
 });
 
 test("A13 a second-file race exhaustion keeps and links the first file once", async () => {

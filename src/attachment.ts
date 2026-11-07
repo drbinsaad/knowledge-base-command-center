@@ -21,6 +21,15 @@ export function attachmentCollisionKey(name: string): string {
   return name.normalize("NFC").toLocaleLowerCase();
 }
 
+/** True only for an "already exists" create failure; any other I/O error is never a collision. */
+export function isAttachmentExistsError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const { code, message } = error as { code?: unknown; message?: unknown };
+  // An explicit code always wins: a filename in an EIO message may contain "already exists".
+  if (code !== undefined && code !== null && code !== "") return code === "EEXIST";
+  return typeof message === "string" && /\balready exists\b|\bEEXIST\b/iu.test(message);
+}
+
 export type AttachmentInsertTarget = "marker" | "heading" | "end";
 
 /**

@@ -7,6 +7,7 @@ import {
   attachmentReference,
   canonicalAttachmentFolder,
   insertAttachmentReferences,
+  isAttachmentExistsError,
   MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENT_CREATE_ATTEMPTS,
   MAX_ATTACHMENT_FILES,
@@ -10663,7 +10664,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           copied = await this.app.vault.createBinary(destination, bytes);
         } catch (error) {
           console.error("Knowledge Base Command Center could not copy the selected attachment", error);
-          if (policy.storageMode !== "obsidian" && this.attachmentPathTaken(destination)) continue;
+          if (policy.storageMode !== "obsidian" && isAttachmentExistsError(error) && this.attachmentPathTaken(destination)) continue;
           failure = new Error(`The attachment could not be copied to ${destination}.`);
         }
       }
