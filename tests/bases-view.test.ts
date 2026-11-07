@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import test from "node:test";
-import { NullValue, TFile } from "obsidian";
+import { NullValue } from "obsidian";
+import { TFile, createTestFolder, setTestParent } from "./support/obsidian-stub.ts";
 import type {
   BasesEntry,
   BasesEntryGroup,
@@ -98,9 +99,9 @@ function entryFixture(
   values: Partial<Record<BasesPropertyId, string | Value>> = {},
   folderName?: string,
 ): EntryFixture {
-  const file = new TFile(path) as TFile & { parent?: { name: string } };
+  const file = new TFile(path);
   const inferredFolder = path.includes("/") ? path.split("/").at(-2) ?? "" : "";
-  file.parent = { name: folderName ?? inferredFolder };
+  setTestParent(file, createTestFolder(folderName ?? inferredFolder));
   const getValueCalls: BasesPropertyId[] = [];
   return {
     entry: {
@@ -476,12 +477,12 @@ test("an in-flight build follows its Bases container into the destination window
   const secondWindow = new QueuedFakeWindow();
   const secondDocument = new FakeDocument(secondWindow);
   const parent = firstDocument.body.createDiv();
-  let migrationListener: ((viewWindow: Window) => void) | null = null;
+  const migration: { listener: ((viewWindow: Window) => void) | null } = { listener: null };
   let migrationCleanupCalled = false;
   (parent as unknown as {
     onWindowMigrated(listener: (viewWindow: Window) => void): () => void;
   }).onWindowMigrated = (listener) => {
-    migrationListener = listener;
+    migration.listener = listener;
     return () => { migrationCleanupCalled = true; };
   };
   const fixtures = Array.from({ length: 1_000 }, (_, index) => entryFixture(`Notes/Item ${String(index)}.md`, {
@@ -500,8 +501,9 @@ test("an in-flight build follows its Bases container into the destination window
   assert.equal(firstWindow.pendingTimeouts(), 1);
   const staleOldWindowCallback = firstWindow.firstPendingCallback();
   adoptIntoDocument(parent, secondDocument);
-  if (!migrationListener) throw new Error("Expected a window migration listener.");
-  migrationListener(secondWindow);
+  if (!migration.listener) throw new Error("Expected a window migration listener.");
+  // Single documented seam: the fake window stands in for the host Window the view listens for.
+  migration.listener(secondWindow as unknown as Window);
   assert.equal(firstWindow.pendingTimeouts(), 0);
   assert.equal(secondWindow.pendingTimeouts(), 1);
   if (typeof staleOldWindowCallback === "function") staleOldWindowCallback();

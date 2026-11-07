@@ -38,6 +38,7 @@
     "tests/attachment-modal.test.ts",
     "tests/note-organizer-surfaces.test.ts",
     "tests/note-organizer.test.ts",
-    "tests/touch-library-move.test.ts"
+    "tests/touch-library-move.test.ts",
+    "tests/bases-view.test.ts"
   ]
 }
