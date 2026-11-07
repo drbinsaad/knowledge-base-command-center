@@ -160,8 +160,8 @@ interface TouchMoveSource {
   fingerprint: string;
   recordFingerprint: string;
   descendants: Set<string>;
-  /** Hierarchy-relevant projection of every record when the gesture began. */
-  structure: string;
+  /** The record array published when the gesture began (replaced, never edited in place, by the plugin). */
+  structure: readonly VaultRecord[];
   /** A later search generation already proven to leave that projection unchanged. */
   provenGeneration?: number;
 }
@@ -7633,11 +7633,29 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   /** Tree-shaping projection of every record: unrelated metadata (status, priority, mtime) is excluded. */
-  private touchStructureFingerprint(): string {
-    return JSON.stringify(this.plugin.getRecords().map((item) => [
-      item.path, item.title, item.domain, item.folderOrder, item.parentTopic, item.kind, item.role, item.libraryId ?? "",
-      item.portableId ?? "", item.isPlaceholder ?? false, item.curriculumId, item.topicKind, item.aliases,
-    ]));
+  private touchStructureSnapshot(): readonly VaultRecord[] {
+    // The plugin publishes a new array when records change (it never edits one in place), so holding the
+    // reference is a coherent snapshot and costs nothing at gesture start.
+    return this.plugin.getRecords();
+  }
+
+  /** Plain loop, first difference wins; no per-record string building on a large vault. */
+  private touchStructureUnchanged(before: readonly VaultRecord[]): boolean {
+    const after = this.plugin.getRecords();
+    if (after === before) return true;
+    if (after.length !== before.length) return false;
+    for (let index = 0; index < after.length; index += 1) {
+      const a = before[index];
+      const b = after[index];
+      if (a === b) continue;
+      if (a.path !== b.path || a.title !== b.title || a.domain !== b.domain || a.folderOrder !== b.folderOrder
+        || a.parentTopic !== b.parentTopic || a.kind !== b.kind || a.role !== b.role
+        || (a.libraryId ?? "") !== (b.libraryId ?? "") || (a.portableId ?? "") !== (b.portableId ?? "")
+        || (a.isPlaceholder ?? false) !== (b.isPlaceholder ?? false) || a.curriculumId !== b.curriculumId
+        || a.topicKind !== b.topicKind || a.aliases.length !== b.aliases.length) return false;
+      for (let alias = 0; alias < a.aliases.length; alias += 1) if (a.aliases[alias] !== b.aliases[alias]) return false;
+    }
+    return true;
   }
 
   /** Organization only: mutate() updates Undo before invoking its guarded action. */
@@ -7671,7 +7689,7 @@ export class EntVaultCommandCenterView extends ItemView {
   private touchGenerationStillValid(source: TouchMoveSource): boolean {
     const generation = this.currentSearchGeneration();
     if (generation === source.generation || generation === source.provenGeneration) return true;
-    if (this.touchStructureFingerprint() !== source.structure) return false;
+    if (!this.touchStructureUnchanged(source.structure)) return false;
     source.provenGeneration = generation;
     return true;
   }
@@ -7690,7 +7708,7 @@ export class EntVaultCommandCenterView extends ItemView {
         generation: this.currentSearchGeneration(), externalGeneration: this.plugin.getExternalChangeGeneration?.() ?? 0,
         renderToken: this.libraryDragRenderToken, tab: this.plugin.data.activeTab,
         fingerprint: this.touchOrganizationFingerprint(), recordFingerprint: JSON.stringify(current),
-        structure: this.touchStructureFingerprint(),
+        structure: this.touchStructureSnapshot(),
         descendants: origin.kind === "index" ? curriculumDescendantPaths(this.curriculum, record.path) : new Set(),
       };
     });
