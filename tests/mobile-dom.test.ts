@@ -1041,7 +1041,7 @@ test("row CSS reserves intrinsic status width and keeps compact provenance out o
   );
   assert.match(
     styles,
-    /\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-subject-id\.has-membership-provenance,\s*\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow\) \.ent-cc-row-count\s*\{\s*display:\s*none;/s,
+    /\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow, \.is-mobile-split\) \.ent-cc-subject-id\.has-membership-provenance,\s*\.ent-cc-view:is\(\.is-pane-compact, \.is-pane-narrow, \.is-mobile-split\) \.ent-cc-row-count\s*\{\s*display:\s*none;/s,
   );
   assert.match(styles, /--ent-cc-amber:\s*var\(--text-warning, var\(--color-orange, #8a5a00\)\);/);
   assert.match(styles, /\.theme-dark \.ent-cc-view\s*\{\s*--ent-cc-amber:\s*var\(--text-warning, var\(--color-orange, #f0b85a\)\);/s);
