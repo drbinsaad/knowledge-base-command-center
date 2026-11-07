@@ -80,8 +80,13 @@ test("the library form leaf has no runtime import of main, library-modal or libr
   }
 });
 
-test("library-icons' tuple stays identical to main's tuple until main imports it", () => {
-  assert.deepEqual([...libraryIcons.LIBRARY_ICON_IDS], [...LIBRARY_ICON_IDS]);
+test("main re-exports the canonical library-icons tuple (same object, same 20 IDs in order)", () => {
+  assert.equal(LIBRARY_ICON_IDS, libraryIcons.LIBRARY_ICON_IDS);
+  assert.deepEqual([...LIBRARY_ICON_IDS], [
+    "library", "book-open", "book-copy", "folder", "folders", "bookmark", "archive",
+    "clipboard-list", "pill", "dna", "stethoscope", "heart-pulse", "brain", "microscope",
+    "flask-conical", "syringe", "activity", "graduation-cap", "file-text", "notebook-tabs",
+  ]);
   assert.equal(libraryIcons.LIBRARY_ICON_IDS.length, 20);
   assert.equal("LIBRARY_FORM_ICON_IDS" in leaf, false, "the temporary leaf copy is gone");
 });

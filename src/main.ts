@@ -218,6 +218,7 @@ import {
   type KbccReturnRoute,
 } from "./kbcc-return-navigation";
 import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge-base-modal";
+import { LIBRARY_ICON_IDS } from "./library-icons";
 import { ManageLibrariesModal } from "./library-modal";
 import { LibrarySettingsModal } from "./library-settings-modal";
 import { normalizeLibraryDisplayProfile, validateLibraryDisplayProfile, type LibraryDisplayProfile } from "./library-display-profile";
@@ -684,11 +685,7 @@ export interface LibraryDefinitionInput {
 
 export type LibraryRemovalDestination = "unassigned" | "index" | { libraryId: string };
 
-export const LIBRARY_ICON_IDS = [
-  "library", "book-open", "book-copy", "folder", "folders", "bookmark", "archive",
-  "clipboard-list", "pill", "dna", "stethoscope", "heart-pulse", "brain", "microscope",
-  "flask-conical", "syringe", "activity", "graduation-cap", "file-text", "notebook-tabs",
-] as const;
+export { LIBRARY_ICON_IDS } from "./library-icons";
 
 interface KnowledgeBaseSearchVaultSnapshot {
   files: readonly TFile[];
