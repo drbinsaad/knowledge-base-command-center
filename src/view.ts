@@ -6094,6 +6094,24 @@ export class EntVaultCommandCenterView extends ItemView {
       && this.placeholderQueueCache.baseId === baseId
       && this.placeholderQueueCache.candidateGeneration === candidateGeneration
       && this.placeholderQueueCache.candidateSettingsKey === candidateSettingsKey) return this.placeholderQueueCache;
+    // No effective unresolved subject (every subject is bound and none of the
+    // bound notes projects as a placeholder, e.g. after its note was deleted)
+    // means no queue item and no candidate to count, so the expensive
+    // eligible-note enumeration and metadata projection are skipped entirely.
+    // An empty binding count alone would miss deleted-linked placeholders.
+    const subjects = this.plugin.data.portableIndex.subjects;
+    if (boundary.getVaultNoteFiles && !this.hasEffectiveUnresolvedSubject(subjects)) {
+      this.placeholderQueueCache = {
+        records: this.records,
+        baseId,
+        candidateGeneration,
+        candidateSettingsKey,
+        ordered: [],
+        total: 0,
+        withCandidates: 0,
+      };
+      return this.placeholderQueueCache;
+    }
     const files = boundary.getVaultNoteFiles ? boundary.getVaultNoteFiles.call(this.plugin, false) : null;
     const queue = buildPlaceholderResolutionQueue(
       this.plugin.data,
@@ -6113,6 +6131,17 @@ export class EntVaultCommandCenterView extends ItemView {
       withCandidates: queue.withCandidates,
     };
     return this.placeholderQueueCache;
+  }
+
+  /** Mirrors buildPlaceholderResolutionQueue's per-subject skip rule without projecting any note. */
+  private hasEffectiveUnresolvedSubject(subjects: readonly { id: string }[]): boolean {
+    if (subjects.length === 0) return false;
+    const resolved = this.plugin.data.portableIndex.resolvedPathBySubjectId;
+    const projectedPlaceholderIds = new Set<string>();
+    for (const record of this.records) {
+      if (record.isPlaceholder && record.portableId) projectedPlaceholderIds.add(record.portableId);
+    }
+    return subjects.some((subject) => !resolved[subject.id] || projectedPlaceholderIds.has(subject.id));
   }
 
   /** Candidate counts and picker highlighting share this complete eligible-note projection. */

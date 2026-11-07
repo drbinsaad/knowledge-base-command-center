@@ -8,10 +8,8 @@ import { startE05Host } from "./support/e05-host.ts";
 /**
  * E05 follow-up 1: with no unresolved placeholders the Smart Queues / tab badge
  * must not project eligible-note candidates (enumeration + metadata reads).
- * Counters on the synthetic host, never wall-clock time. Red tests carry
- * node:test `todo` until the implementation lands.
+ * Counters on the synthetic host, never wall-clock time.
  */
-const PENDING = { todo: "E05 implementation pending" } as const;
 
 function record(path: string, options: Partial<VaultRecord> = {}): VaultRecord {
   return {
@@ -90,7 +88,7 @@ const otherQueues = (queues: ReturnType<ViewSeam["smartQueues"]>): Array<[string
   queues.filter((queue) => queue.id !== "imported-placeholders").map((queue) => [queue.id, queue.records.map((item) => item.path)])
 );
 
-test("zero unresolved subjects: cold, warm and a generation change project no eligible-note candidates", PENDING, () => {
+test("zero unresolved subjects: cold, warm and a generation change project no eligible-note candidates", () => {
   const fx = fixture(allResolvedSetup);
   const cold = fx.view.smartQueues();
   assert.equal(cold[0]?.id, "imported-placeholders");
@@ -110,7 +108,7 @@ test("zero unresolved subjects: cold, warm and a generation change project no el
   assert.equal(fx.counters.metadataReads, 0);
 });
 
-test("zero subjects at all (default blueprint): no candidate projection either", PENDING, () => {
+test("zero subjects at all (default blueprint): no candidate projection either", () => {
   const fx = fixture(() => [record("Notes/Only.md")]);
   assert.deepEqual(fx.view.smartQueues()[0]?.records, []);
   assert.match(fx.view.smartQueues()[0]?.description ?? "", /^0 unresolved subjects/u);
