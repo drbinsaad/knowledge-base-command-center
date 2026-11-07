@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TFile } from "obsidian";
 import EntVaultCommandCenterPlugin, { LEGACY_LIBRARY_IMAGE_PERMISSION_KEY } from "../src/main";
 import { EntVaultCommandCenterView } from "../src/view";
 import { applyPersonalBackupToData, createDefaultStore, createPersonalBackup, migrateData, parsePersonalBackup, type PluginStore } from "../src/model";
 import { normalizeLibraryDisplayProfile, type LibraryDisplayProfile } from "../src/library-display-profile";
 import { applyPortableExport, createPortableExport, EMPTY_PORTABLE_SELECTION, parsePortableExport } from "../src/portability";
 import { resolveLibraryCover } from "../src/library-cover";
+import { TFile } from "./support/obsidian-stub.ts";
 
 async function fixture(localState = new Map<string, unknown>(), storedData?: unknown) {
   const data = migrateData(null);

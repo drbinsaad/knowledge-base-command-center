@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Notice, TFile } from "obsidian";
 import { AddActionModal, CollectionPickerModal, KnowledgeNoteModal, TextPromptModal, VaultFilePickerModal, type KnowledgeNoteModalOptions } from "../src/modals.ts";
 import { CreatedNoteRecoveryModal } from "../src/created-note-recovery-modal.ts";
 import { migrateData, type VaultRecord } from "../src/model.ts";
 import { EntVaultCommandCenterView } from "../src/view.ts";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
+import { Notice, TFile } from "./support/obsidian-stub.ts";
 
 function harness() {
   const data = migrateData(null);

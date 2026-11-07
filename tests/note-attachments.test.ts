@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Notice, TFile, TFolder, type App, type CachedMetadata } from "obsidian";
+import type { App, CachedMetadata } from "obsidian";
 import { ATTACHMENT_PAGE_SIZE, collectNoteAttachments, renderNoteAttachments } from "../src/note-attachments.ts";
 import { EntVaultCommandCenterView } from "../src/view.ts";
 import { asHtmlElement, createFakeDom, FakeEvent } from "./support/fake-dom.ts";
+import { Notice, TFile, TFolder } from "./support/obsidian-stub.ts";
 import { migrateData, type VaultRecord } from "../src/model.ts";
 
 const references = (paths: string[]) => paths.map((link) => ({ link, original: `[[${link}]]` }));

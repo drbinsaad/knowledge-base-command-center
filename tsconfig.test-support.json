@@ -16,6 +16,13 @@
     "tests/test-support-shape.test.ts",
     "tests/test-support-canary.test.ts",
     "tests/opened-base-guard.test.ts",
-    "tests/library-cover.test.ts"
+    "tests/library-cover.test.ts",
+    "tests/index-source-summary.test.ts",
+    "tests/library-cards-view.test.ts",
+    "tests/library-display-main.test.ts",
+    "tests/library-display-profile.test.ts",
+    "tests/collection-entry.test.ts",
+    "tests/legacy-index-review-modal.test.ts",
+    "tests/note-attachments.test.ts"
   ]
 }

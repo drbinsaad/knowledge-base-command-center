@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TFile } from "obsidian";
 import { EntVaultCommandCenterView } from "../src/view.ts";
 import { libraryTabId, migrateData, parseQuery, type LayoutHeading, type VaultRecord } from "../src/model.ts";
 import { normalizeLibraryDisplayProfile, type LibraryDisplayProfile } from "../src/library-display-profile.ts";
 import type { KnowledgeBaseSearchResultSet, KnowledgeBaseSearchSource } from "../src/search.ts";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
+import { TFile } from "./support/obsidian-stub.ts";
 
 function book(id: string, placeholder = false): VaultRecord {
   return {

@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Notice } from "obsidian";
 import type { LegacyIndexReviewPlan } from "../src/legacy-index-review.ts";
 import { LegacyIndexReviewModal, type LegacyIndexReviewHost } from "../src/legacy-index-review-modal.ts";
 import { migrateData } from "../src/model.ts";
 import { EntCommandCenterSettingsTab } from "../src/settings.ts";
 import { asHtmlElement, createFakeDom, type FakeElement } from "./support/fake-dom.ts";
+import { Notice } from "./support/obsidian-stub.ts";
 
 function reviewPlan(count: number): LegacyIndexReviewPlan {
   return {
@@ -327,6 +327,7 @@ test("Settings exposes a persistent migration warning until the legacy source is
     "heading" in definition && definition.heading === "Index migration review required"
   ));
   assert.ok(warning && "items" in warning);
+  assert.ok(warning.items, "the migration warning group lists its items");
   const warningText = warning.items.flatMap((item) => (
     "desc" in item && typeof item.desc === "string" ? [item.desc] : []
   )).join("\n");
