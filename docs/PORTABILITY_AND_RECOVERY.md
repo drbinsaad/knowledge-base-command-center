@@ -2,7 +2,7 @@
 
 Knowledge Base Command Center separates portable organization from private same-vault restoration. Read this guide before sharing an export, replacing organization, or restoring recovery data.
 
-This guide covers version 0.24.0 Collections and Library-display formats. The release supports local-vault covers only; online loading is excluded and its [earlier proposal](LIBRARY_DISPLAY_AND_PRIVACY.md#deferred-online-cover-proposal) remains deferred and unapproved.
+This guide covers the current release: Collections and Library-display formats. The release supports local-vault covers only; online loading is excluded and its [earlier proposal](LIBRARY_DISPLAY_AND_PRIVACY.md#deferred-online-cover-proposal) remains deferred and unapproved.
 
 ## Choose the right artifact
 

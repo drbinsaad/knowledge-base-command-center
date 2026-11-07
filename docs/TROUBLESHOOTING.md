@@ -97,7 +97,7 @@ There are two intentional cases: an imported subject can be path-free because it
 
 If the same knowledge-base and Library counts arrived on another device, the exact bound Markdown file is present, but its row still says **No linked note**, first update KBCC to 0.19.1 or newer. Version 0.19.0 could retain a startup record snapshot created before Obsidian finished populating the local vault; the stored path and note were intact, but the open view could continue showing a false placeholder. After updating, wait for the green Sync check and reload Obsidian. As a temporary 0.19.0 workaround, wait for Sync to finish and then disable and re-enable KBCC before relinking anything.
 
-If organization or Libraries did not arrive at all, check **Settings → Sync → Vault configuration sync** on every device. Obsidian Sync requires **Active community plugin list** and **Installed community plugin list** to be enabled manually on each device. Confirm the active configuration profile contains <code>plugins/ent-vault-command-center/data.json</code>; a profile such as <code>.obsidian-mobile</code> uses a different configuration directory. See Obsidian's [Sync settings and selective syncing](https://help.obsidian.md/sync/settings). Absolute Mac paths do not need to match because KBCC stores vault-relative paths.
+If organization or Libraries did not arrive at all, check **Settings → Sync → Vault configuration sync** on each device. Obsidian says to manually enable **Active community plugin list** and **Installed community plugin list** to sync community plugins, and that sync settings do not sync across devices, so check each device separately. Confirm the active configuration profile contains <code>plugins/ent-vault-command-center/data.json</code>; a profile such as <code>.obsidian-mobile</code> uses a different configuration directory. See Obsidian's [Sync settings and selective syncing](https://help.obsidian.md/sync/settings). Absolute Mac paths do not need to match because KBCC stores vault-relative paths.
 
 - **Create empty note** creates a new local note where the profile permits.
 - **Create from template** copies a local template.
@@ -183,9 +183,13 @@ Open **Sync & recovery center** to review the locally recorded conflict warning 
 
 The plugin preserved meaningful organization before adopting another authoritative store or entering protected read-only mode.
 
-The file is under the configured Exports folder (<code>Knowledge Base Command Center Exports/</code> by default; Settings → Exports folder) and can contain exact vault-relative paths and complete plugin organization, but not Markdown note bodies. Keep it private. Do not import it casually or attach it to a public issue.
+The file is under the configured Exports folder (<code>Knowledge Base Command Center Exports/</code> by default; Settings → Exports folder) and can contain exact vault-relative paths and complete plugin organization, but not Markdown note bodies. Keep it private and safe. It cannot be imported through the Import center yet, so do not try to import it. Do not attach it to a public issue.
 
-Back up the vault and request support with sanitized version, timing, and Sync details.
+Back up the vault and ask for help restoring it, with sanitized version, timing, and Sync details.
+
+## data.json was missing when Obsidian started
+
+KBCC started with an empty organization. If an earlier same-device backup (<code>data.json.bak</code>) existed and could be read and recognised, KBCC kept a copy of it beside the plugin data as <code>data.json.bak-kept-&lt;timestamp&gt;</code>. A missing, unreadable or malformed backup is not copied. If that copy exists, keep it. If your organization does not arrive through Sync, ask for help restoring it.
 
 ## A save says the automatic backup could not be refreshed
 
