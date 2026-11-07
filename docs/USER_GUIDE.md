@@ -117,10 +117,10 @@ An unchanged external reload keeps the Organizer and its prepared review open. A
 
 Each affected knowledge base receives its ordinary restart-durable per-base Undo entry. Before the primary plugin-store mutation, a multi-base Organizer Apply stages the exact required-Undo snapshot for every affected base as one protected batch. If those aggregate snapshots cannot fit within the shared 4 MiB device-local history budget, the whole Apply is refused without a partial organization change. Split the affected bases across batches; because each Undo entry is an exact whole-base snapshot, selecting fewer notes while targeting the same bases may not reduce this journal size. The newest multi-base Organizer batch also has two session-only commands:
 
-- **Undo last organizer change** reverses all affected bases together; and
+- **Undo last Organizer batch (all affected bases)** reverses all affected bases together; and
 - **Redo last organizer change** reapplies that same batch.
 
-Those coordinated commands remain available only in the plugin session that applied the batch and only while their exact newest-Undo guards still match. After restart—or after another incompatible organization change—use each base's durable **Undo last organization change** action separately. Undo changes KBCC plugin data only and never reverses a Markdown file operation because the Organizer performs none.
+Those coordinated commands remain available only in the plugin session that applied the batch and only while their exact newest-Undo guards still match. After restart—or after another incompatible organization change—use each base's durable **Undo last organization change in this base** action separately. Undo changes KBCC plugin data only and never reverses a Markdown file operation because the Organizer performs none.
 
 ### Active-note indicator
 
@@ -355,7 +355,7 @@ Available focused commands are:
 - Quick entry: Add existing note…
 - Quick append: Add to current note…
 - Quick append: Choose a note…
-- Quick append: Undo last append
+- Quick append: Undo last note append
 
 ### Add a mobile toolbar button
 
@@ -583,7 +583,7 @@ The ENT preset also exposes safety-badge display and optional advanced canonical
 - Organize notes…
 - Organize this note…
 - Where is this note organized?
-- Undo last organizer change
+- Undo last Organizer batch (all affected bases)
 - Redo last organizer change
 - Show imported topics without notes
 - Create or link the next imported topic…
@@ -602,7 +602,7 @@ The ENT preset also exposes safety-badge display and optional advanced canonical
 - Quick entry: Add existing note…
 - Quick append: Add to current note…
 - Quick append: Choose a note…
-- Quick append: Undo last append
+- Quick append: Undo last note append
 - Undo / redo personal organization
 
 The ENT preset adds proposal-promotion and advanced canonical-placement commands where applicable.

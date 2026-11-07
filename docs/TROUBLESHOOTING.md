@@ -87,9 +87,9 @@ The indicator also uses an icon, accessible label, tooltip, and optional count, 
 
 ## Multi-base Organizer Undo disappeared after restart
 
-**Undo last organizer change** and **Redo last organizer change** coordinate the newest exact Organizer batch only during the plugin session that applied it. They also fail closed after a conflicting newer organization change, because the affected bases no longer have the expected newest Undo state.
+**Undo last Organizer batch (all affected bases)** and **Redo last organizer change** coordinate the newest exact Organizer batch only during the plugin session that applied it. They also fail closed after a conflicting newer organization change, because the affected bases no longer have the expected newest Undo state.
 
-Every affected knowledge base still received a durable per-base Undo entry. After restart, switch to each changed base and use **Undo last organization change** separately. Undo changes plugin data only; no Markdown file operation needs to be reversed because the Organizer did not perform one.
+Every affected knowledge base still received a durable per-base Undo entry. After restart, switch to each changed base and use **Undo last organization change in this base** separately. Undo changes plugin data only; no Markdown file operation needs to be reversed because the Organizer did not perform one.
 
 ## A portable subject says “No note”
 

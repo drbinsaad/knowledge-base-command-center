@@ -125,7 +125,7 @@ test("public repository metadata is present", async () => {
     "Organize notes…",
     "Organize this note…",
     "Where is this note organized?",
-    "Undo last organizer change",
+    "Undo last Organizer batch (all affected bases)",
     "Redo last organizer change",
   ]) {
     assert.match(userGuide, new RegExp(`^- ${organizerCommand.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}$`, "mu"),
@@ -286,7 +286,7 @@ test("public repository metadata is present", async () => {
   for (const command of [
     "Quick append: Add to current note…",
     "Quick append: Choose a note…",
-    "Quick append: Undo last append",
+    "Quick append: Undo last note append",
     "Show imported topics without notes",
     "Create or link the next imported topic…",
     "Review folder that adds notes automatically…",
