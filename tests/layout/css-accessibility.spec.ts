@@ -171,7 +171,9 @@ test.describe("C01 wide mobile split targets", () => {
       expect(boxes.padEnd, "text must stop before the Clear target").toBeGreaterThanOrEqual(44);
       if (rtl) expect(Math.abs(boxes.clear.left - boxes.input.left)).toBeLessThanOrEqual(1);
       else expect(Math.abs(boxes.clear.right - boxes.input.right)).toBeLessThanOrEqual(1);
-      // Typing and Clear still work.
+      // Typing and Clear still work. Wait for the debounced search to settle first.
+      await expect(page.locator(".ent-cc-topic-count")).toContainText("result");
+      await expect(page.locator(".ent-cc-search-pending, .ent-cc-search-base-group.is-stale")).toHaveCount(0);
       await clickCentre(page, clear);
       await expect(input).toHaveValue("");
       await expect(input).toBeFocused();
@@ -187,8 +189,13 @@ test.describe("C01 wide mobile split targets", () => {
     await expect(page.locator(".ent-cc-inspector")).toBeVisible();
   });
 
-  test("fine-pointer desktop stays compact", async ({ page }) => {
+});
+
+test.describe("C01 fine-pointer desktop (no touch context)", () => {
+  test.use({ hasTouch: false });
+  test("Search Clear, search input and Details menu keep their 32/36/32 px compact sizes", async ({ page }) => {
     await openView(page, { mobile: false, width: 1440, height: 960, parity: true });
+    expect(await page.evaluate(() => matchMedia("(pointer: fine)").matches), "context must be a fine pointer").toBe(true);
     await page.getByRole("searchbox").fill("Research");
     const size = (selector: string) => page.locator(selector).locator("visible=true").first().evaluate((node) => {
       const r = node.getBoundingClientRect(); return { width: Math.round(r.width), height: Math.round(r.height) };
@@ -199,6 +206,13 @@ test.describe("C01 wide mobile split targets", () => {
     expect((await size("button[aria-label='Command center actions']")).width).toBe(32);
   });
 });
+
+/** Dialog text whose colour C02 changed from faint to muted, and the harness dialog that renders it. */
+const changedDialogText = [
+  { kind: "note", stage: "", selector: ".ent-cc-path-preview-label" },
+  { kind: "sync", stage: "", selector: ".ent-cc-sync-recovery-note" },
+  { kind: "organizer", stage: "review", selector: ".ent-cc-note-organizer-review-path" },
+] as const;
 
 /** Visible elements whose own text renders in the host's faint colour. */
 async function faintTextOffenders(page: Page): Promise<string[]> {
@@ -242,13 +256,29 @@ for (const dark of [false, true]) {
       expect(await faintTextOffenders(page)).toEqual([]);
     });
 
+    for (const { kind, stage, selector } of changedDialogText) {
+      test(`${kind} dialog: ${selector} measured contrast is at least 4.5:1 on its composited background`, async ({ page }) => {
+        await openView(page, { mobile: false, dark, width: 1440, height: 960, count: 80, parity: true });
+        await page.evaluate((value) => (window as unknown as { kbccBrowserHarness: { openModal(kind: string): void } }).kbccBrowserHarness.openModal(value), kind);
+        const dialog = page.getByRole("dialog");
+        await expect(dialog).toBeVisible();
+        if (stage === "review") {
+          await dialog.getByRole("button", { name: "Choose destinations", exact: true }).click();
+          await dialog.getByRole("button", { name: "Prepare review", exact: true }).click();
+          await expect(dialog.getByRole("button", { name: "Apply organization", exact: true })).toBeEnabled();
+        }
+        const matches = dialog.locator(selector).locator("visible=true");
+        expect(await matches.count(), `${selector} must render in the ${kind} dialog`).toBeGreaterThan(0);
+        expect(await contrastOf(page, `[role='dialog'] ${selector}`)).toBeGreaterThanOrEqual(4.5);
+      });
+    }
+
     for (const kind of ["note", "setup", "export", "sync", "organizer", "quick-organizer", "whats-new"] as const) {
-      test(`${kind} dialog text reaches 4.5:1`, async ({ page }) => {
+      test(`${kind} dialog: no visible text is still drawn in the host faint colour`, async ({ page }) => {
         await openView(page, { mobile: false, dark, width: 1440, height: 960, count: 80, parity: true });
         await page.evaluate((value) => (window as unknown as { kbccBrowserHarness: { openModal(kind: string): void } }).kbccBrowserHarness.openModal(value), kind);
         await expect(page.getByRole("dialog")).toBeVisible();
-        const offenders = (await faintTextOffenders(page)).filter((item) => !item.startsWith("div.kbcc-"));
-        expect(offenders).toEqual([]);
+        expect(await faintTextOffenders(page)).toEqual([]);
       });
     }
   });
