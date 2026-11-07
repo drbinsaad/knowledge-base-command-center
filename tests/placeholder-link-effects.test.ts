@@ -76,12 +76,13 @@ test("P7 unlink preview names Direct, both Collection places, pin and Next, and 
   assert.deepEqual(preview.before.collections, ["Exam", "Clinic › Week 2"]);
   assert.equal(preview.before.direct && preview.before.pinned && preview.before.next, true);
   assert.deepEqual(preview.after, preview.before);
-  assert.deepEqual(placementFactsAt(plugin.data, placeholder), { direct: false, hidden: false, pinned: false, next: false, collections: [] });
+  const empty = { direct: false, hidden: false, pinned: false, next: false, collections: [], group: "" };
+  assert.deepEqual(placementFactsAt(plugin.data, placeholder), empty);
 
   await plugin.unlinkPortableSubject("subject");
 
   assert.deepEqual(placementFactsAt(plugin.data, placeholder), preview.after);
-  assert.deepEqual(placementFactsAt(plugin.data, NOTE), { direct: false, hidden: false, pinned: false, next: false, collections: [] });
+  assert.deepEqual(placementFactsAt(plugin.data, NOTE), empty);
   assert.equal(plugin.data.portableIndex.resolvedPathBySubjectId.subject, undefined);
 });
 
@@ -206,6 +207,7 @@ test("P10 link preview matches the service for indexed and non-indexed subjects"
     organize(plugin, placeholder);
     plugin.data.directIndexPaths = [NOTE];
     plugin.data.pinnedPaths = [placeholder, NOTE];
+    plugin.data.collections[0]?.subjects.push(NOTE);
     const before = snapshot(plugin);
     const preview = previewPlaceholderLinkEffects(plugin.data, "link", "subject", NOTE);
     assert.ok(preview);
@@ -232,6 +234,32 @@ test("P10 an existing identity merge is disclosed and the merged result equals t
   assert.deepEqual(placementFactsAt(plugin.data, OTHER), preview.after);
   assert.deepEqual(plugin.data.collections[0]?.subjects, [OTHER]);
   assert.equal(plugin.data.portableIndex.subjects.some((candidate) => candidate.id === "owner"), false);
+});
+
+test("P10 a cross-group merge previews the same group label the service applies, in both cross-group modes", async () => {
+  for (const clinical of [false, true]) {
+    const { plugin } = await scenario({ linked: false, owner: true });
+    plugin.data.settings.workspaceMode = clinical ? "ent-clinical" : "generic";
+    plugin.data.settings.allowClinicalVisualGroupMoves = true;
+    plugin.data.portableIndex.groups.push({ id: "group-voice", title: "Voice", order: 1 });
+    plugin.data.indexGroupByPath[placeholder] = "Airway";
+    plugin.data.indexGroupByPath[OTHER] = "Voice";
+    const preview = previewPlaceholderLinkEffects(plugin.data, "link", "subject", OTHER);
+    assert.ok(preview);
+    assert.equal(preview.toBefore.group, "Voice");
+    assert.equal(preview.after.group, "Airway");
+    assert.match(preview.lines.join(" "), /the group “Airway”/);
+    await plugin.resolvePortableSubject("subject", OTHER, true);
+    assert.deepEqual(placementFactsAt(plugin.data, OTHER), preview.after);
+  }
+  const { plugin } = await scenario({ linked: false, owner: true });
+  plugin.data.settings.workspaceMode = "ent-clinical";
+  plugin.data.settings.allowClinicalVisualGroupMoves = false;
+  plugin.data.indexGroupByPath[OTHER] = "Voice";
+  const preview = previewPlaceholderLinkEffects(plugin.data, "link", "subject", OTHER);
+  assert.equal(preview?.after.group, "", "no group label when cross-group moves are disallowed");
+  await plugin.resolvePortableSubject("subject", OTHER, true);
+  assert.deepEqual(placementFactsAt(plugin.data, OTHER), preview?.after);
 });
 
 test("P11 a changed binding or membership changes the review key, so a stale review cannot apply", async () => {

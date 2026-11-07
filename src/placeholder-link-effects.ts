@@ -15,6 +15,8 @@ export interface PlacementFacts {
   pinned: boolean;
   next: boolean;
   collections: string[];
+  /** The Index group label keyed to this path ("" when none). */
+  group: string;
 }
 
 export interface PlaceholderLinkEffects {
@@ -51,6 +53,7 @@ export function placementFactsAt(data: PluginData, path: string): PlacementFacts
     pinned: data.pinnedPaths.includes(path),
     next: data.nextStudyPaths.includes(path),
     collections: collectionLabels(data, path),
+    group: data.indexGroupByPath[path] ?? "",
   };
 }
 
@@ -76,6 +79,7 @@ function describe(facts: PlacementFacts): string[] {
   const parts: string[] = [];
   if (facts.direct) parts.push("Direct Index membership");
   if (facts.hidden) parts.push("a hidden-from-Index entry");
+  if (facts.group) parts.push(`the group “${facts.group}”`);
   if (facts.pinned) parts.push("a pin");
   if (facts.next) parts.push("a Next list entry");
   if (facts.collections.length > 0) {
@@ -125,6 +129,14 @@ export function previewPlaceholderLinkEffects(
     clone.directIndexPaths = unique([...clone.directIndexPaths, ...clone.manualIndexPaths]);
     clone.manualIndexPaths = [];
     clone.excludedIndexPaths = unique(clone.excludedIndexPaths).filter((path) => !clone.directIndexPaths.includes(path));
+    if (ownerId) {
+      // The survivor takes this subject's group when cross-group moves are allowed, and no group label otherwise.
+      const target = data.indexGroupByPath[from]
+        || data.portableIndex.groups.find((group) => group.id === subject.groupId)?.title
+        || "Ungrouped";
+      if (data.settings.workspaceMode !== "ent-clinical" || data.settings.allowClinicalVisualGroupMoves) clone.indexGroupByPath[to] = target;
+      else delete clone.indexGroupByPath[to];
+    }
     const indexed = subject.indexed || Boolean(owner?.indexed);
     if (indexed) {
       if (!clone.directIndexPaths.includes(to)) clone.directIndexPaths.push(to);
