@@ -160,6 +160,10 @@ interface TouchMoveSource {
   fingerprint: string;
   recordFingerprint: string;
   descendants: Set<string>;
+  /** Hierarchy-relevant projection of every record when the gesture began. */
+  structure: string;
+  /** A later search generation already proven to leave that projection unchanged. */
+  provenGeneration?: number;
 }
 
 interface CreateKnowledgeNoteFormContext {
@@ -780,6 +784,9 @@ export class EntVaultCommandCenterView extends ItemView {
   private activeLibraryDrag: LibraryDragMembership | null = null;
   private touchDrag: TouchDragController<TouchMoveSource, TouchMoveDestination> | null = null;
   private touchTargets = new Map<HTMLElement, { node: TouchDestinationNode; label: string }>();
+  /** A harmless display refresh arrived while a touch gesture or its commit was pending; replayed once afterwards. */
+  private touchRefreshDirty = false;
+  private touchDropsInFlight = 0;
   private setupPromptShown = false;
   private loadedBaseId = "";
   private loadedDataEpoch = 0;
@@ -976,6 +983,13 @@ export class EntVaultCommandCenterView extends ItemView {
     const dataEpoch = this.currentDataEpoch();
     const baseChanged = this.loadedBaseId !== activeBaseId;
     const dataChanged = this.loadedDataEpoch !== dataEpoch;
+    // A refresh that changes neither base nor data identity is only a display update. Replacing the
+    // DOM under a touch gesture (or its pending commit) would cancel a valid move, so replay it once afterwards.
+    if (!baseChanged && !dataChanged && this.touchGestureBusy()) {
+      this.touchRefreshDirty = true;
+      return;
+    }
+    this.touchRefreshDirty = false;
     const focusedSearch = this.contentEl?.querySelector?.('.ent-cc-search-box input[type="search"]') as HTMLInputElement | null | undefined;
     const searchWasFocused = Boolean(focusedSearch && focusedSearch.ownerDocument.activeElement === focusedSearch);
     const searchSelectionStart = focusedSearch?.selectionStart ?? null;
@@ -1028,6 +1042,11 @@ export class EntVaultCommandCenterView extends ItemView {
     this.recordByPath = new Map(this.records.map((record) => [record.path, record]));
     const reconciled = await this.plugin.reconcileRecords(this.records, withinOperation);
     if (this.viewClosed) return;
+    // A gesture may have begun while reconciling.
+    if (!baseChanged && !dataChanged && this.touchGestureBusy()) {
+      this.touchRefreshDirty = true;
+      return;
+    }
     if (reconciled) {
       this.records = this.plugin.getRecords();
       this.recordByPath = new Map(this.records.map((record) => [record.path, record]));
@@ -5468,9 +5487,9 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   /** Replace the persistent view message. It stays through rerenders until replaced or dismissed. */
-  private setViewFeedback(message: string, tone: "status" | "error", source: string, context?: { baseId: string; generation: number; recordPath: string }): void {
+  private setViewFeedback(message: string, tone: "status" | "error", source: string, context?: { baseId: string; generation: number; recordPath?: string }): void {
     if (context && (this.viewClosed || context.generation !== this.feedbackGeneration || context.baseId !== this.plugin.getActiveKnowledgeBaseId()
-      || context.recordPath !== this.plugin.data.selectedPath)) return;
+      || (context.recordPath !== undefined && context.recordPath !== this.plugin.data.selectedPath))) return;
     const doc = this.contentEl?.ownerDocument;
     const active = doc?.activeElement as HTMLElement | null | undefined;
     this.viewFeedbackOrigin = active && this.contentEl.contains(active) && !this.viewFeedbackEl?.contains(active) ? active : this.viewFeedbackOrigin;
@@ -7567,8 +7586,58 @@ export class EntVaultCommandCenterView extends ItemView {
       },
       isCurrent: (source) => this.touchSourceIsCurrent(source),
       resolveTarget: (source, x, y) => this.resolveTouchTarget(source, x, y),
-      onDrop: (source, destination) => this.run(() => this.commitTouchMove(source, destination)),
+      onDrop: (source, destination) => this.runTouchDrop(source, destination),
+      onCancelled: (wasActive) => {
+        if (wasActive) this.setViewFeedback("Move cancelled. Nothing was changed.", "status", "touch-move", this.touchFeedbackContext());
+        this.settleTouchRefresh();
+      },
     });
+  }
+
+  private touchGestureBusy(): boolean {
+    return (this.touchDropsInFlight ?? 0) > 0 || Boolean(this.touchDrag?.hasGesture());
+  }
+
+  private touchFeedbackContext(): { baseId: string; generation: number } {
+    return { baseId: this.plugin.getActiveKnowledgeBaseId(), generation: this.feedbackGeneration };
+  }
+
+  /**
+   * The drop callback owns the whole commit: the gesture is already cleared when it is
+   * called, so a deferred refresh may only run after this promise settles, success or failure.
+   */
+  private runTouchDrop(source: TouchMoveSource, destination: TouchMoveDestination): Promise<void> {
+    const context = this.touchFeedbackContext();
+    const title = this.plugin.getRecord(source.origin.path)?.title ?? "note";
+    this.touchDropsInFlight = (this.touchDropsInFlight ?? 0) + 1;
+    const previous = this.viewFeedback;
+    this.setViewFeedback(`Moving “${title}”…`, "status", "touch-move", context);
+    const requested = this.viewFeedback !== previous ? this.viewFeedback : null;
+    return this.commitTouchMove(source, destination)
+      .then(() => {
+        // An early no-op return reported nothing; do not leave the request message standing.
+        if (requested && this.viewFeedback === requested) this.clearViewFeedback();
+      })
+      .catch((error) => this.setViewFeedback(errorMessage(error), "error", "touch-move", context))
+      .finally(() => {
+        this.touchDropsInFlight -= 1;
+        this.settleTouchRefresh();
+      });
+  }
+
+  /** One follow-up refresh once no gesture and no commit is pending; never for a closed view. */
+  private settleTouchRefresh(): void {
+    if (this.viewClosed || !this.touchRefreshDirty || this.touchGestureBusy()) return;
+    this.touchRefreshDirty = false;
+    this.run(() => this.reload());
+  }
+
+  /** Tree-shaping projection of every record: unrelated metadata (status, priority, mtime) is excluded. */
+  private touchStructureFingerprint(): string {
+    return JSON.stringify(this.plugin.getRecords().map((item) => [
+      item.path, item.title, item.domain, item.folderOrder, item.parentTopic, item.kind, item.role, item.libraryId ?? "",
+      item.portableId ?? "", item.isPlaceholder ?? false, item.curriculumId, item.topicKind, item.aliases,
+    ]));
   }
 
   /** Organization only: mutate() updates Undo before invoking its guarded action. */
@@ -7587,11 +7656,24 @@ export class EntVaultCommandCenterView extends ItemView {
       && this.plugin.data === source.data
       && this.plugin.getActiveKnowledgeBaseId() === source.baseId && this.loadedBaseId === source.baseId
       && this.currentDataEpoch() === source.epoch && this.loadedDataEpoch === source.epoch
-      && this.currentSearchGeneration() === source.generation
+      && this.touchGenerationStillValid(source)
       && (this.plugin.getExternalChangeGeneration?.() ?? 0) === source.externalGeneration
       && this.libraryDragRenderToken === source.renderToken
       && this.plugin.data.activeTab === source.tab
       && (source.origin.kind === "index" ? this.curriculumArrangeMode : this.editMode);
+  }
+
+  /**
+   * The search generation advances for any metadata change. A move stays valid across an advance only
+   * when the hierarchy-relevant projection of every record is unchanged (proven once per generation);
+   * organization data, the source record, base, epoch, tab and render token are still checked separately.
+   */
+  private touchGenerationStillValid(source: TouchMoveSource): boolean {
+    const generation = this.currentSearchGeneration();
+    if (generation === source.generation || generation === source.provenGeneration) return true;
+    if (this.touchStructureFingerprint() !== source.structure) return false;
+    source.provenGeneration = generation;
+    return true;
   }
 
   private renderTouchHandle(row: HTMLElement, record: VaultRecord, origin: TouchOrigin): void {
@@ -7608,6 +7690,7 @@ export class EntVaultCommandCenterView extends ItemView {
         generation: this.currentSearchGeneration(), externalGeneration: this.plugin.getExternalChangeGeneration?.() ?? 0,
         renderToken: this.libraryDragRenderToken, tab: this.plugin.data.activeTab,
         fingerprint: this.touchOrganizationFingerprint(), recordFingerprint: JSON.stringify(current),
+        structure: this.touchStructureFingerprint(),
         descendants: origin.kind === "index" ? curriculumDescendantPaths(this.curriculum, record.path) : new Set(),
       };
     });
@@ -7727,7 +7810,9 @@ export class EntVaultCommandCenterView extends ItemView {
       this.persistCollapseState();
       this.renderTree();
     }
-    new Notice(`Moved “${record.title}”. Use Undo to restore its previous position.`);
+    // Reached only after the guarded, persisted mutation resolved; never before.
+    this.setViewFeedback(`Moved “${record.title}”. Use Undo to restore its previous position.`, "status", "touch-move",
+      { baseId: source.baseId, generation: this.feedbackGeneration });
   }
 
   private writeCurriculumDrag(event: DragEvent, payload: CurriculumDrag): void {
