@@ -31,6 +31,7 @@
 
 ### Compatibility and limits
 
+- The reviewed recovery, history, setup, attachment and interaction changes produce a 1,301,829-byte JavaScript build (344,174 gzip), up 51,836 raw / 14,552 gzip bytes from 0.26.1. Explicit JavaScript limits are now 1,303,000 raw / 345,000 gzip bytes; CSS limits remain unchanged. No runtime dependencies are added.
 - Minimum Obsidian version remains 1.13.0. The plugin ID, command IDs, shared organization format 17 and portable package format 7 are unchanged. No runtime dependencies, network access or analytics are added; covers remain local-vault-only.
 - Older or mismatched device-local Undo history may reset once after updating. Returning through an older version can discard its verification and trigger another reset. Local rename recovery uses an updated journal; an older plugin encountering unfinished newer rename recovery can enter protected recovery mode.
 - Restoring a kept copy creates a new knowledge base; it does not restore missing Markdown notes or attachments. Full retained copies can include multiple bases, private paths and history. **Clear device-local data** does not delete those files.
