@@ -3411,14 +3411,19 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       .filter((path) => path.slice(path.lastIndexOf("/") + 1).startsWith("data.json.bak-kept-"))
       .sort()
       .slice(-50);
+    const rawBytes = new TextEncoder().encode(raw).length;
     for (const path of candidates) {
       let text: string;
       try {
+        // Read a candidate only when its reported size matches; any doubt skips it,
+        // which makes the caller write a new verified copy (the safe direction).
+        const stat = await adapter.stat(path);
+        if (!stat || stat.size !== rawBytes) continue;
         text = await adapter.read(path);
       } catch {
         continue;
       }
-      if (text.length === raw.length && text === raw) return path;
+      if (text === raw) return path;
     }
     return null;
   }

@@ -15950,6 +15950,10 @@ function missingPrimaryWithBackup(options: {
   backup: string | null;
   failKeptWrite?: boolean;
   rejectBackupOnce?: "exists" | "read";
+  /** Makes adapter.stat reject for every path. */
+  failStat?: boolean;
+  /** Overrides the size adapter.stat reports for a path. */
+  statSize?: (path: string, actual: number) => number;
   /** Runs after each adapter write completes its bookkeeping, to model a concurrent change. */
   afterWrite?: (path: string, content: string, files: Map<string, string>) => void;
 }) {
@@ -15958,6 +15962,7 @@ function missingPrimaryWithBackup(options: {
   const files = new Map<string, string>();
   if (options.backup !== null) files.set(`${dir}/data.json.bak`, options.backup);
   const writes: Array<{ path: string; content: string }> = [];
+  const reads: string[] = [];
   const app = {
     vault: {
       ...emptyWritableTestVault(),
@@ -15976,7 +15981,15 @@ function missingPrimaryWithBackup(options: {
           }
           const value = files.get(path);
           if (value === undefined) throw new Error("missing");
+          reads.push(path);
           return value;
+        },
+        stat: async (path: string) => {
+          if (options.failStat) throw new Error("stat unavailable");
+          const value = files.get(path);
+          if (value === undefined) return null;
+          const actual = new TextEncoder().encode(value).length;
+          return { type: "file" as const, ctime: 0, mtime: 0, size: options.statSize ? options.statSize(path, actual) : actual };
         },
         write: async (path: string, content: string) => {
           if (options.failKeptWrite && path.includes("data.json.bak-kept-")) throw new Error("disk full");
@@ -16000,7 +16013,7 @@ function missingPrimaryWithBackup(options: {
   plugin.loadedData = null;
   const primaryWrites: unknown[] = [];
   plugin.saveData = async (value: unknown) => { primaryWrites.push(structuredClone(value)); };
-  return { plugin, files, writes, primaryWrites, dir };
+  return { plugin, files, writes, primaryWrites, dir, reads };
 }
 
 function syntheticBackupText(): string {
@@ -16311,6 +16324,57 @@ test("D01 correction 4: restarting without edits reuses the kept copy and shows 
     assert.equal(first.keptFiles().length, 1, `restart ${restart + 1}: still exactly one kept file`);
     assert.equal(first.keptNotices().length, 0, `restart ${restart + 1}: no new notice`);
   }
+});
+
+test("D01 size check (a): a same-length candidate with different bytes is not reused", async () => {
+  const { older, newer } = d01Stores();
+  const backupText = JSON.stringify(newer);
+  const lookalike = `${backupText.slice(0, -1)} `;
+  assert.equal(lookalike.length, backupText.length);
+  const device = d01Setup(older, backupText);
+  device.files.set(`${device.dir}/data.json.bak-kept-1-lookalike`, lookalike);
+  await device.plugin.loadPluginData(false);
+  assert.equal(device.keptFiles().length, 2);
+  assert.ok(device.keptFiles().some((path) => device.files.get(path) === backupText), "a verified exact copy exists");
+});
+
+test("D01 size check (b): a candidate whose stat size differs is never read", async () => {
+  const { older, newer } = d01Stores();
+  const backupText = JSON.stringify(newer);
+  const candidate = ".obsidian/plugins/knowledge-base-command-center/data.json.bak-kept-1-wrong-size";
+  const device = d01Setup(older, backupText, { statSize: (path, actual) => (path === candidate ? actual + 1 : actual) });
+  device.files.set(candidate, backupText);
+  await device.plugin.loadPluginData(false);
+  assert.equal(device.reads.includes(candidate), false, "the size-mismatched candidate was skipped without a read");
+  assert.equal(device.keptFiles().length, 2);
+});
+
+test("D01 size check (c): a stat failure skips the candidate and still writes exactly one verified new copy", async () => {
+  const { older, newer } = d01Stores();
+  const backupText = JSON.stringify(newer);
+  const device = d01Setup(older, backupText, { failStat: true });
+  const candidate = `${device.dir}/data.json.bak-kept-1-stat-fails`;
+  device.files.set(candidate, backupText);
+  await device.plugin.loadPluginData(false);
+  assert.equal(device.reads.includes(candidate), false);
+  const created = device.keptFiles().filter((path) => path !== candidate);
+  assert.equal(created.length, 1);
+  assert.equal(device.files.get(created[0]), backupText);
+  assert.equal(device.plugin.isDataReadOnly(), false);
+});
+
+test("D01 size check (d): a non-ASCII backup is matched by UTF-8 byte size and its identical copy is reused", async () => {
+  const { older, newer } = d01Stores();
+  newer.bases[0].data.settings.workspaceName = "مرحبا 🙂 قاعدة المعرفة";
+  const backupText = JSON.stringify(newer);
+  assert.notEqual(new TextEncoder().encode(backupText).length, backupText.length);
+  const device = d01Setup(older, backupText);
+  const candidate = `${device.dir}/data.json.bak-kept-1-existing`;
+  device.files.set(candidate, backupText);
+  await device.plugin.loadPluginData(false);
+  assert.deepEqual(device.keptFiles(), [candidate], "no second copy");
+  assert.equal(device.keptNotices().length, 0);
+  assert.equal(device.reads.includes(candidate), true, "equal size led to one exact-byte read");
 });
 
 test("D01 correction 5: normal two-device Sync stays quiet when .bak arrives with or after data.json", async () => {
