@@ -1254,13 +1254,21 @@ test("real Organizer commit persists once, finalizes its bounded batch journal, 
   const app = organizerApp([file]);
   const localValues = new Map<string, unknown>();
   const backupWrites: Array<{ path: string; value: unknown }> = [];
+  const adapterFiles = new Map<string, string>();
   Object.assign(app, {
     loadLocalStorage: (key: string) => structuredClone(localValues.get(key) ?? null),
     saveLocalStorage: (key: string, value: unknown) => { localValues.set(key, structuredClone(value)); },
   });
   Object.assign(app.vault, {
     adapter: {
+      exists: async (path: string) => adapterFiles.has(path),
+      read: async (path: string) => {
+        const text = adapterFiles.get(path);
+        if (text === undefined) throw new Error("missing");
+        return text;
+      },
       write: async (path: string, content: string) => {
+        adapterFiles.set(path, content);
         backupWrites.push({ path, value: JSON.parse(content) as unknown });
       },
     },

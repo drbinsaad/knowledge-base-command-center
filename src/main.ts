@@ -213,7 +213,7 @@ import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge
 import { ManageLibrariesModal } from "./library-modal";
 import { LibrarySettingsModal } from "./library-settings-modal";
 import { normalizeLibraryDisplayProfile, validateLibraryDisplayProfile, type LibraryDisplayProfile } from "./library-display-profile";
-import { mergeKnowledgeBaseStores, type StoreMergeResult } from "./store-merge";
+import { mergeKnowledgeBaseStores, storeBackupIsCoveredBy, type StoreMergeResult } from "./store-merge";
 import {
   applyTaxonomyRepairToData,
   buildTaxonomyHealthFindings,
@@ -703,6 +703,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private semanticConflictRescueFailed = false;
   /** Sticky until restart: data.json may contain a write whose compensation is unproven. */
   private persistenceUncertain = false;
+  /** Exact .bak text this instance wrote, kept aside, or proved covered; a different text is inspected before any overwrite. */
+  private knownBackupText: string | null = null;
   private lastConflictRescueStore = "";
   private lastConflictRescuePath = "";
   private deviceLocalState: DeviceLocalPluginState | null = null;
@@ -2722,6 +2724,15 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     // A missing data.json starts an empty bootstrap whose first save would
     // overwrite the last committed .bak. Keep that backup aside first.
     if (capturedRead === undefined && sourceWasMissing && !restoredFromBackup) await this.keepBackupBesideMissingPrimary();
+    else if (capturedRead === undefined && !sourceWasMissing && !restoredFromBackup) {
+      // A readable primary can be older than, or unrelated to, the .bak beside it.
+      try {
+        await this.keepBackupUnlessCovered(loaded);
+      } catch (error) {
+        console.error("Knowledge Base Command Center could not keep the data.json backup", error);
+        this.markPersistenceUncertain(`The data.json backup could not be inspected or kept (${errorMessage(error)}). Organization stays read-only so that backup is not overwritten; restart Obsidian once storage is available.`);
+      }
+    }
     const sourceVersion = storedDataVersion(loaded);
     const loadedRecord = asUnknownRecord(loaded);
     const recognizedStore = isRecognizedPluginStore(loaded);
@@ -3297,7 +3308,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const path = this.storeBackupPath();
     if (!path) return;
     try {
-      await this.app.vault.adapter.write(path, JSON.stringify(snapshot));
+      // A .bak that arrived since startup (or was never covered) is kept first.
+      await this.keepBackupUnlessCovered(snapshot);
+      const text = JSON.stringify(snapshot);
+      await this.app.vault.adapter.write(path, text);
+      this.knownBackupText = text;
     } catch (error) {
       console.error("Knowledge Base Command Center could not refresh the data.json backup", error);
       throw new Error(prerequisite
@@ -3380,17 +3395,59 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       return;
     }
     try {
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      let keptPath = normalizePath(`${dir}/data.json.bak-kept-${stamp}`);
-      for (let n = 2; await adapter.exists(keptPath); n += 1) {
-        keptPath = normalizePath(`${dir}/data.json.bak-kept-${stamp}-${n}`);
-      }
-      await adapter.write(keptPath, raw);
+      const keptPath = await this.writeKeptBackupCopy(raw);
       new Notice(`data.json is missing, so your last automatic backup was kept as ${keptPath}. Organization starts empty until data.json arrives or you restore from that file.`, 15000);
     } catch (error) {
       console.error("Knowledge Base Command Center could not keep the data.json backup", error);
       this.markPersistenceUncertain(`data.json is missing and its last automatic backup could not be kept (${errorMessage(error)}). Organization stays read-only so that backup is not overwritten; restart Obsidian after data.json is restored or the backup is copied.`);
     }
+  }
+
+  /** Write exact backup text to a new data.json.bak-kept-<time> file; an existing file is never overwritten. */
+  private async writeKeptBackupCopy(raw: string): Promise<string> {
+    const adapter = this.app.vault.adapter;
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    let keptPath = normalizePath(`${this.manifest.dir}/data.json.bak-kept-${stamp}`);
+    for (let n = 2; await adapter.exists(keptPath); n += 1) {
+      if (n > 1000) throw new Error("no unused kept-backup file name was available");
+      keptPath = normalizePath(`${this.manifest.dir}/data.json.bak-kept-${stamp}-${n}`);
+    }
+    await adapter.write(keptPath, raw);
+    this.knownBackupText = raw;
+    return keptPath;
+  }
+
+  /**
+   * Before .bak is replaced: if its text is not already known and is not
+   * provably covered by `authority` (equal semantics or a validated causal
+   * ancestor, same vault), keep its exact bytes in a new file and show one
+   * notice. The backup is never loaded as authority. Throws if the backup
+   * cannot be inspected or copied so the caller can refuse to write.
+   */
+  private async keepBackupUnlessCovered(authority: unknown): Promise<void> {
+    const backupPath = this.storeBackupPath();
+    if (!backupPath || !this.manifest.dir) return;
+    const adapter = this.app.vault.adapter;
+    if (!(await adapter.exists(backupPath))) return;
+    const raw = await adapter.read(backupPath);
+    if (raw === this.knownBackupText) return;
+    if (raw === JSON.stringify(authority)) {
+      this.knownBackupText = raw;
+      return;
+    }
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (isRecognizedPluginStore(parsed) && isRecognizedPluginStore(authority)
+        && storedDataVersion(parsed) <= STORE_VERSION && storedDataVersion(authority) <= STORE_VERSION
+        && storeBackupIsCoveredBy(migrateStore(parsed), migrateStore(authority))) {
+        this.knownBackupText = raw;
+        return;
+      }
+    } catch {
+      // Unparseable, future-schema or malformed: not provably covered.
+    }
+    const keptPath = await this.writeKeptBackupCopy(raw);
+    new Notice(`Your automatic backup differs from data.json and may hold newer changes, so it was kept as ${keptPath}. Nothing was restored automatically. Keep that file and ask for help restoring it.`, 15000);
   }
 
   private async readStoreBackup(): Promise<unknown> {

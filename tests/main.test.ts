@@ -7161,10 +7161,12 @@ test("portfolio allocation rolls back before saveData when its prerequisite back
   const events: string[] = [];
   const app = plugin.app as unknown as {
     vault: ReturnType<typeof emptyWritableTestVault> & {
-      adapter: { write(path: string, content: string): Promise<void> };
+      adapter: { write(path: string, content: string): Promise<void>; exists(path: string): Promise<boolean>; read(path: string): Promise<string> };
     };
   };
   app.vault.adapter = {
+    async exists(): Promise<boolean> { return false; },
+    async read(): Promise<string> { throw new Error("missing"); },
     async write(): Promise<void> {
       events.push("backup");
       throw new Error("portfolio prerequisite backup rejected");
@@ -14032,10 +14034,12 @@ test("a direct save whose prerequisite backup fails rolls back without a false c
   let rejectBackup = true;
   const app = plugin.app as unknown as {
     vault: ReturnType<typeof emptyWritableTestVault> & {
-      adapter: { write(path: string, content: string): Promise<void> };
+      adapter: { write(path: string, content: string): Promise<void>; exists(path: string): Promise<boolean>; read(path: string): Promise<string> };
     };
   };
   app.vault.adapter = {
+    async exists(): Promise<boolean> { return false; },
+    async read(): Promise<string> { throw new Error("missing"); },
     async write(): Promise<void> {
       events.push("backup");
       if (rejectBackup) throw new Error("simulated prerequisite backup failure");
@@ -14071,10 +14075,12 @@ test("a base lifecycle prerequisite-backup failure restores the envelope without
   const events: string[] = [];
   const app = plugin.app as unknown as {
     vault: ReturnType<typeof emptyWritableTestVault> & {
-      adapter: { write(path: string, content: string): Promise<void> };
+      adapter: { write(path: string, content: string): Promise<void>; exists(path: string): Promise<boolean>; read(path: string): Promise<string> };
     };
   };
   app.vault.adapter = {
+    async exists(): Promise<boolean> { return false; },
+    async read(): Promise<string> { throw new Error("missing"); },
     async write(): Promise<void> {
       events.push("backup");
       throw new Error("base prerequisite backup rejected");
@@ -14102,10 +14108,12 @@ test("a vault-rename prerequisite-backup failure restores paths without false co
   const events: string[] = [];
   const app = plugin.app as unknown as {
     vault: ReturnType<typeof emptyWritableTestVault> & {
-      adapter: { write(path: string, content: string): Promise<void> };
+      adapter: { write(path: string, content: string): Promise<void>; exists(path: string): Promise<boolean>; read(path: string): Promise<string> };
     };
   };
   app.vault.adapter = {
+    async exists(): Promise<boolean> { return false; },
+    async read(): Promise<string> { throw new Error("missing"); },
     async write(): Promise<void> {
       events.push("backup");
       throw new Error("rename prerequisite backup rejected");
@@ -14352,7 +14360,7 @@ test("a readable Sync replacement observed after loadData fails wins over the ol
     vault: {
       ...emptyWritableTestVault(),
       adapter: {
-        exists: async () => true,
+        exists: async (path: string) => !path.includes("bak-kept"),
         read: async (path: string) => path.endsWith("data.json.bak")
           ? JSON.stringify(backupStore)
           : JSON.stringify(replacementStore),
@@ -14377,7 +14385,10 @@ test("a readable Sync replacement observed after loadData fails wins over the ol
 
   assert.equal(result.compatible, true);
   assert.equal(plugin.data.settings.workspaceName, "Newer synced primary");
-  assert.deepEqual(adapterWrites, [], "the readable replacement is neither preserved as corrupt nor replaced");
+  // D01: the older same-vault backup is not a proven ancestor of the replacement, so
+  // only a kept copy of it is written; the replacement is neither copied as corrupt nor replaced.
+  assert.equal(adapterWrites.length, 1);
+  assert.match(adapterWrites[0], /data\.json\.bak-kept-/);
   assert.deepEqual(primaryWrites, []);
 });
 
@@ -16046,4 +16057,130 @@ test("T08b: no kept copy is made when data.json exists or when there is no backu
   await none.plugin.mutate("Pin without backup", () => { none.plugin.data.pinnedPaths = ["New.md"]; });
   assert.equal(none.writes.some((write) => write.path.includes("bak-kept")), false);
   assert.equal(none.primaryWrites.length, 1);
+});
+
+function d01Stores() {
+  const data = migrateData(null);
+  data.directIndexPaths = ["A.md"];
+  const older = createDefaultStore(data, 100, "vault-d01");
+  const newer = structuredClone(older);
+  advanceStoreEntry(newer.bases[0], () => { newer.bases[0].data.directIndexPaths = ["A.md", "Only in backup.md"]; });
+  const divergent = structuredClone(older);
+  advanceStoreEntry(divergent.bases[0], () => { divergent.bases[0].data.directIndexPaths = ["A.md", "Other branch.md"]; });
+  const foreignData = migrateData(null);
+  foreignData.directIndexPaths = ["Foreign.md"];
+  const foreign = createDefaultStore(foreignData, 100, "vault-d01-other");
+  return { older, newer, divergent, foreign };
+}
+
+function d01Setup(primary: unknown, backup: string, options: { failKeptWrite?: boolean; rejectBackupOnce?: "exists" | "read" } = {}) {
+  const setup = missingPrimaryWithBackup({ backup, ...options });
+  setup.plugin.loadedData = structuredClone(primary);
+  Notice.messages.length = 0;
+  const keptFiles = () => [...setup.files.keys()].filter((path) => path.startsWith(`${setup.dir}/data.json.bak-kept-`));
+  const keptNotices = () => Notice.messages.filter((message) => message.includes("data.json.bak-kept-"));
+  return { ...setup, keptFiles, keptNotices };
+}
+
+test("D01: a newer same-vault .bak is kept byte-for-byte beside an older primary, with one notice", async () => {
+  const { older, newer } = d01Stores();
+  const backupText = JSON.stringify(newer);
+  const { plugin, files, writes, primaryWrites, dir, keptFiles, keptNotices } = d01Setup(older, backupText);
+
+  await plugin.loadPluginData(false);
+  assert.equal(plugin.isDataReadOnly(), false);
+  assert.equal(keptFiles().length, 1, "kept at startup, before any edit");
+  await plugin.mutate("Pin after stale primary", () => { plugin.data.pinnedPaths = ["New.md"]; });
+
+  const kept = keptFiles();
+  assert.equal(kept.length, 1, "no second copy for the same backup");
+  assert.equal(files.get(kept[0]), backupText);
+  assert.ok(writes.findIndex((write) => write.path === kept[0]) < writes.findIndex((write) => write.path === `${dir}/data.json.bak`));
+  assert.equal(primaryWrites.length, 1);
+  assert.deepEqual((primaryWrites[0] as PluginStore).bases[0].data.directIndexPaths, ["A.md"], "the backup is never promoted to the primary");
+  assert.equal(keptNotices().length, 1);
+  assert.doesNotMatch(keptNotices()[0], /or you restore from that file/);
+});
+
+test("D01: a proven ancestor or semantically equal .bak stays quiet", async () => {
+  const { older, newer } = d01Stores();
+  const cases: Array<[string, unknown, string]> = [
+    ["ancestor backup", newer, JSON.stringify(older)],
+    ["byte-equal backup", older, JSON.stringify(older)],
+    ["equal semantics, different formatting", older, JSON.stringify(older, null, 2)],
+  ];
+  for (const [label, primary, backup] of cases) {
+    const { plugin, writes, primaryWrites, keptFiles, keptNotices } = d01Setup(primary, backup);
+    await plugin.loadPluginData(false);
+    await plugin.mutate("Pin", () => { plugin.data.pinnedPaths = ["New.md"]; });
+    assert.equal(keptFiles().length, 0, label);
+    assert.equal(keptNotices().length, 0, label);
+    assert.equal(writes.some((write) => write.path.includes("bak-kept")), false, label);
+    assert.equal(primaryWrites.length, 1, label);
+  }
+});
+
+test("D01: divergent, foreign-vault, unparseable and future-schema backups are kept; the primary is never replaced", async () => {
+  const { older, divergent, foreign } = d01Stores();
+  const cases: Array<[string, string]> = [
+    ["divergent same-vault", JSON.stringify(divergent)],
+    ["foreign vault", JSON.stringify(foreign)],
+    ["unparseable", "{ not json"],
+    ["future schema", JSON.stringify({ ...older, version: 9999 })],
+  ];
+  for (const [label, backup] of cases) {
+    const { plugin, files, primaryWrites, keptFiles, keptNotices } = d01Setup(older, backup);
+    await plugin.loadPluginData(false);
+    await plugin.mutate("Pin", () => { plugin.data.pinnedPaths = ["New.md"]; });
+    assert.equal(keptFiles().length, 1, label);
+    assert.equal(files.get(keptFiles()[0]), backup, label);
+    assert.equal(keptNotices().length, 1, label);
+    assert.equal(primaryWrites.length, 1, label);
+    assert.deepEqual((primaryWrites[0] as PluginStore).bases[0].data.directIndexPaths, ["A.md"], label);
+  }
+});
+
+for (const failing of ["exists", "read", "copy"] as const) {
+  test(`D01: if the backup cannot be inspected or copied (${failing}), organization is read-only and .bak is untouched`, async () => {
+    const { older, newer } = d01Stores();
+    const backupText = JSON.stringify(newer);
+    const { plugin, files, writes, primaryWrites, dir } = d01Setup(older, backupText, failing === "copy" ? { failKeptWrite: true } : { rejectBackupOnce: failing });
+
+    await plugin.loadPluginData(false);
+    assert.equal(plugin.isDataReadOnly(), true);
+    await assert.rejects(plugin.mutate("Pin", () => { plugin.data.pinnedPaths = ["New.md"]; }));
+    assert.equal(files.get(`${dir}/data.json.bak`), backupText);
+    assert.equal(writes.length, 0);
+    assert.equal(primaryWrites.length, 0);
+  });
+}
+
+test("D01: a rejected primary write still leaves the newer backup preserved", async () => {
+  const { older, newer } = d01Stores();
+  const backupText = JSON.stringify(newer);
+  const { plugin, files, keptFiles } = d01Setup(older, backupText);
+  await plugin.loadPluginData(false);
+  plugin.saveData = async () => { throw new Error("disk full"); };
+  await assert.rejects(plugin.mutate("Pin", () => { plugin.data.pinnedPaths = ["New.md"]; }));
+  assert.equal(keptFiles().length, 1);
+  assert.equal(files.get(keptFiles()[0]), backupText);
+});
+
+test("D01: a different backup that arrives after startup is preserved before it can be overwritten", async () => {
+  const { older, newer, divergent } = d01Stores();
+  const sampleA = JSON.stringify(older);
+  const { plugin, files, dir, keptFiles, keptNotices } = d01Setup(older, sampleA);
+  await plugin.loadPluginData(false);
+  assert.equal(keptFiles().length, 0, "sample A is a proven ancestor/equal copy");
+
+  const arrivedB = JSON.stringify(newer);
+  files.set(`${dir}/data.json.bak`, arrivedB);
+  await plugin.mutate("Pin", () => { plugin.data.pinnedPaths = ["New.md"]; });
+  assert.deepEqual(keptFiles().map((path) => files.get(path)), [arrivedB]);
+  assert.equal(keptNotices().length, 1);
+
+  const arrivedC = JSON.stringify(divergent);
+  files.set(`${dir}/data.json.bak`, arrivedC);
+  await plugin.mutate("Pin again", () => { plugin.data.pinnedPaths = ["New.md", "Second.md"]; });
+  assert.deepEqual(keptFiles().map((path) => files.get(path)).sort(), [arrivedB, arrivedC].sort());
 });

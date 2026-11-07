@@ -387,3 +387,24 @@ export function mergeKnowledgeBaseStores(
       || normalizeForComparison(store) !== normalizeForComparison(incoming),
   };
 }
+
+/**
+ * True only when `backup` is provably covered by `primary`: the same vault, every
+ * backup base present with equal normalized semantics or as a proven causal
+ * ancestor (both endpoint hashes validated, as in mergeMatchingEntry), and every
+ * backup tombstone still present. A scalar revision or timestamp is never proof.
+ */
+export function storeBackupIsCoveredBy(backup: PluginStore, primary: PluginStore): boolean {
+  if (backup.vaultId !== primary.vaultId) return false;
+  for (const id of Object.keys(backup.deletedBaseIds)) {
+    if (!(id in primary.deletedBaseIds)) return false;
+  }
+  return backup.bases.every((older) => {
+    const current = primary.bases.find((entry) => entry.id === older.id);
+    if (!current) return false;
+    if (entryFingerprint(older) === entryFingerprint(current)) return true;
+    const trusted = older.semanticHash === semanticEntryFingerprint(older)
+      && current.semanticHash === semanticEntryFingerprint(current);
+    return trusted && current.semanticLineage.includes(older.semanticHead);
+  });
+}
