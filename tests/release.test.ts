@@ -324,8 +324,13 @@ test("the shared local-path pattern catches runner, temp, home and file URL path
     "/Volumes/Disk/x",
     'path: "C:\\Users\\x"',
     "(D:/work/x)",
+    "file://localhost/work/private-document",
+    "file://private-host/share/document",
+    '"/Users/x"',
+    "C:\\x",
+    "see=/home/runner/x",
   ]) assert.match(leaked, localPathPattern, `${leaked} should be detected as a leaked local path`);
-  for (const fine of ["https://example.com/a/b", "relative/path/x.ts", "a:b"]) {
+  for (const fine of ["https://example.com/a/b", "relative/path/x.ts", "a:b", "https://example.com/home/guide", "relative/home/file"]) {
     assert.doesNotMatch(fine, localPathPattern, `${fine} should not be flagged`);
   }
   const packager = await readFile(path.join(root, "scripts", "package-release.mjs"), "utf8");
