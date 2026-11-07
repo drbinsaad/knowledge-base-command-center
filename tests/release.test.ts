@@ -457,10 +457,11 @@ test("runtime source satisfies blocking Obsidian review rules", async () => {
   const runtimePaths = await discoverRuntimeSources(path.join(root, "src"));
   const runtimeSources = await Promise.all(runtimePaths.map((file) => readFile(file, "utf8")));
   const runtime = runtimeSources.join("\n");
-  assert.doesNotMatch(main, /detachLeavesOfType\(VIEW_TYPE\)/);
-  assert.doesNotMatch(settings, /setName\("Knowledge Base Command Center"\)\.setHeading\(\)/);
+  // The unload, settings-heading and getSettingDefinitions rules are all-source
+  // guards in scripts/runtime-source-guards.mjs (fixtures in runtime-source-guards.test.ts).
+  assert.match(main, /onunload/);
   assert.match(settings, /getSettingDefinitions\(\): SettingDefinitionItem\[\]/);
-  assert.doesNotMatch(settings, /\bdisplay\(\): void/);
+  assert.doesNotMatch(runtime, /\bdisplay\(\): void/);
   assert.doesNotMatch(runtime, /\.flatMap\(/);
   assert.doesNotMatch(runtime, /\.setWarning\(/);
   assert.doesNotMatch(runtime, /\.setDynamicTooltip\(/);
@@ -505,7 +506,8 @@ test("review and release automation is reproducible and least-privilege", async 
   const communityVerifier = await readFile(path.join(root, "scripts", "verify-community.mjs"), "utf8");
   assert.match(communityVerifier, /readFile\(path\.join\(root, "main\.js"\)/);
   assert.match(communityVerifier, /built main\.js must not require external module/);
-  assert.match(communityVerifier, /discoverRuntimeSources\(absolute\)/);
+  assert.match(communityVerifier, /checkRuntimeSources\(sources\)/);
+  assert.match(communityVerifier, /discoverRuntimeSources\(path\.join\(root, "src"\)\)/);
   const [ciWorkflow, releaseWorkflow, securityWorkflow] = await Promise.all(
     ["ci.yml", "release.yml", "security-audit.yml"].map((name) => readFile(path.join(root, ".github", "workflows", name), "utf8")),
   );
