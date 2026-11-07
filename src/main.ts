@@ -808,7 +808,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private noteOrganizerBatchHistory: NoteOrganizerBatchHistoryToken | null = null;
   private recordLinkIndex = new Map<string, VaultRecord>();
   private recordLinkIndexBaseId = "";
+  /** Reverse edges (target to sources), built lazily and then patched per source. */
   private backlinkIndex: Map<string, string[]> | null = null;
+  /** Forward edges (source to targets) used to patch one source without a graph rescan. */
+  private backlinkForward = new Map<string, string[]>();
+  /** Sources whose edges may have changed since their last patch. */
+  private backlinkDirty = new Set<string>();
+  /** The resolvedLinks object the index was built from; a different object forces a rebuild. */
+  private backlinkGraph: object | null = null;
   private refreshShouldInvalidateRecords = false;
   /**
    * Session overlay applied only to persisted path references while the durable
@@ -1131,8 +1138,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       };
       this.registerEvent(this.app.metadataCache.on("changed", (file) => {
         // Backlinks include the whole vault, including notes outside the configured
-        // index. Any metadata-link change can therefore invalidate that cache.
-        this.backlinkIndex = null;
+        // index. Only this source's edges can have changed, and Obsidian may update
+        // resolvedLinks after this event, so the source is re-read lazily and again
+        // by the per-file `resolve` event below.
+        this.markBacklinkSourceDirty(file.path);
         this.invalidateKnowledgeBaseSearchSnapshot();
         if (this.invalidateRecordCachesForPath(file.path, { file })) this.scheduleRefresh(false);
         // Outside notes can change the inspector's external backlinks and
@@ -1144,9 +1153,18 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // Initial vault discovery does not have to emit a normal create/change
       // event for every file. `resolved` is the final metadata-inventory fence
       // and repairs a projection built from any earlier partial inventory.
+      this.registerEvent(this.app.metadataCache.on("resolve", (file) => {
+        // The per-file link resolution can follow `changed`; apply its final edges.
+        if (this.patchBacklinkSource(file.path)
+          && this.app.workspace.getLeavesOfType(VIEW_TYPE).length > 0) this.scheduleRefresh(false);
+      }));
       let initialMetadataResolutionHandled = false;
       this.registerEvent(this.app.metadataCache.on("resolved", () => {
-        if (initialMetadataResolutionHandled) return;
+        if (initialMetadataResolutionHandled) {
+          // Obsidian fires `resolved` again after later modifications.
+          this.backlinkIndex = null;
+          return;
+        }
         initialMetadataResolutionHandled = true;
         refreshVaultProjectionAfterReadinessBoundary();
       }));
@@ -10358,19 +10376,83 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return this.recordLinkIndex.get(lowered) ?? null;
   }
 
-  getBacklinkPaths(path: string): string[] {
-    if (!this.backlinkIndex) {
-      this.backlinkIndex = new Map<string, string[]>();
-      for (const [source, links] of Object.entries(this.app.metadataCache.resolvedLinks)) {
-        for (const destination of Object.keys(links)) {
-          // Append in place; copying the array per backlink is quadratic on hub notes.
-          const sources = this.backlinkIndex.get(destination);
-          if (sources) sources.push(source);
-          else this.backlinkIndex.set(destination, [source]);
-        }
+  private buildBacklinkIndex(): Map<string, string[]> {
+    const graph = this.app.metadataCache.resolvedLinks;
+    const index = new Map<string, string[]>();
+    const forward = new Map<string, string[]>();
+    for (const [source, links] of Object.entries(graph)) {
+      const destinations = Object.keys(links);
+      if (destinations.length > 0) forward.set(source, destinations);
+      for (const destination of destinations) {
+        // Append in place; copying the array per backlink is quadratic on hub notes.
+        const sources = index.get(destination);
+        if (sources) sources.push(source);
+        else index.set(destination, [source]);
       }
     }
-    return this.backlinkIndex.get(path) ?? [];
+    this.backlinkIndex = index;
+    this.backlinkForward = forward;
+    this.backlinkDirty.clear();
+    this.backlinkGraph = graph;
+    return index;
+  }
+
+  /** Remember that one source's edges may have changed; the next lookup re-reads only that source. */
+  private markBacklinkSourceDirty(path: string): void {
+    if (this.backlinkIndex) this.backlinkDirty.add(path);
+  }
+
+  /**
+   * Re-read one source's final edges and patch the reverse index. Returns whether
+   * the visible backlinks changed. A replaced resolvedLinks object invalidates
+   * the whole index instead.
+   */
+  private patchBacklinkSource(source: string): boolean {
+    const index = this.backlinkIndex;
+    if (!index) return false;
+    const graph = this.app.metadataCache.resolvedLinks;
+    if (graph !== this.backlinkGraph) {
+      this.backlinkIndex = null;
+      return true;
+    }
+    const previous = this.backlinkForward.get(source) ?? [];
+    const links = graph[source] as Record<string, number> | undefined;
+    const next = links ? Object.keys(links) : [];
+    const nextSet = new Set(next);
+    const previousSet = new Set(previous);
+    let changed = false;
+    for (const destination of previous) {
+      if (nextSet.has(destination)) continue;
+      changed = true;
+      const sources = index.get(destination);
+      if (!sources) continue;
+      const position = sources.indexOf(source);
+      if (position >= 0) sources.splice(position, 1);
+      if (sources.length === 0) index.delete(destination);
+    }
+    for (const destination of next) {
+      if (previousSet.has(destination)) continue;
+      changed = true;
+      const sources = index.get(destination);
+      if (sources) sources.push(source);
+      else index.set(destination, [source]);
+    }
+    if (next.length > 0) this.backlinkForward.set(source, next);
+    else this.backlinkForward.delete(source);
+    return changed;
+  }
+
+  getBacklinkPaths(path: string): string[] {
+    let index = this.backlinkIndex;
+    if (index && this.backlinkGraph !== this.app.metadataCache.resolvedLinks) index = null;
+    if (!index) index = this.buildBacklinkIndex();
+    if (this.backlinkDirty.size > 0) {
+      const dirty = [...this.backlinkDirty];
+      this.backlinkDirty.clear();
+      for (const source of dirty) this.patchBacklinkSource(source);
+      index = this.backlinkIndex ?? this.buildBacklinkIndex();
+    }
+    return index.get(path) ?? [];
   }
 
   validateGenericNote(value: GenericNoteFormValue): string | null {

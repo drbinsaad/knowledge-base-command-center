@@ -7,10 +7,8 @@ import { startE05Host, type E05Host, type ResolvedLinks } from "./support/e05-ho
 /**
  * E05 follow-up 3: targeted backlink invalidation. Work is counted on the
  * synthetic host (resolvedLinks root enumerations and per-source reads), never
- * timed. Red tests carry node:test `todo` until the implementation lands; the
- * green controls pin behaviour that must not change.
+ * timed.
  */
-const PENDING = { todo: "E05 implementation pending" } as const;
 const TARGET = "Knowledge/Indexed.md";
 const OTHER_TARGET = "Knowledge/Second.md";
 const SOURCE_COUNT = 200;
@@ -44,7 +42,7 @@ test("control: the lazy backlink build enumerates the graph once and answers exa
   assert.equal(host.counters.resolvedRootEnumerations, 1, "a warm index is not rebuilt");
 });
 
-test("an unrelated source with identical destinations does not rescan the whole graph", PENDING, async () => {
+test("an unrelated source with identical destinations does not rescan the whole graph", async () => {
   const host = await backlinkHost();
   const before = sorted(host.plugin.getBacklinkPaths(TARGET));
   host.resetCounters();
@@ -57,7 +55,7 @@ test("an unrelated source with identical destinations does not rescan the whole 
   assert.ok(host.counters.resolvedSourceReads <= 4, `bounded per-source reads, saw ${host.counters.resolvedSourceReads} of ${SOURCE_COUNT}`);
 });
 
-test("a source with no links does not rescan the whole graph", PENDING, async () => {
+test("a source with no links does not rescan the whole graph", async () => {
   const host = await backlinkHost();
   host.plugin.getBacklinkPaths(TARGET);
   host.resetCounters();
@@ -97,7 +95,7 @@ test("control: one changed source adds and removes targets; count above one is o
   assert.ok(host.scheduledRefreshes.length >= 1);
 });
 
-test("changed before the per-file resolve: edges updated later are still seen without another changed event", PENDING, async () => {
+test("changed before the per-file resolve: edges updated later are still seen without another changed event", async () => {
   const host = await backlinkHost();
   assert.deepEqual(sorted(host.plugin.getBacklinkPaths(TARGET)), [sourcePath(0), sourcePath(1)]);
 
@@ -124,13 +122,29 @@ test("control: changed then resolve with no lookup in between is exact", async (
   assert.deepEqual(sorted(host.plugin.getBacklinkPaths(OTHER_TARGET)), [sourcePath(0), sourcePath(1)]);
 });
 
-test("a later global resolved event (graph updated after modifications) refreshes reverse edges", PENDING, async () => {
+test("a later global resolved event (graph updated after modifications) refreshes reverse edges", async () => {
   const host = await backlinkHost();
   host.plugin.getBacklinkPaths(TARGET);
   // The first `resolved` was consumed by startup; Obsidian fires it again after later modifications.
   host.resolvedLinks[sourcePath(3)] = { [TARGET]: 1 };
   host.emitMetadata("resolved");
   assert.deepEqual(sorted(host.plugin.getBacklinkPaths(TARGET)), [sourcePath(0), sourcePath(1), sourcePath(3)]);
+});
+
+test("removing the genuinely last backlink empties the target and a LATE resolve still refreshes the inspector", async () => {
+  const host = await backlinkHost();
+  assert.deepEqual(sorted(host.plugin.getBacklinkPaths(TARGET)), [sourcePath(0), sourcePath(1)]);
+  // Both sources drop TARGET. Obsidian fires changed first, the graph updates, then resolve.
+  host.emitMetadata("changed", host.sources[0]);
+  host.emitMetadata("changed", host.sources[1]);
+  host.scheduledRefreshes.length = 0;
+  delete host.resolvedLinks[sourcePath(0)]?.[TARGET];
+  delete host.resolvedLinks[sourcePath(1)]?.[TARGET];
+  host.emitMetadata("resolve", host.sources[0]);
+  host.emitMetadata("resolve", host.sources[1]);
+  assert.deepEqual(host.plugin.getBacklinkPaths(TARGET), [], "no backlink remains");
+  assert.ok(host.scheduledRefreshes.length >= 1, "the late resolve requests a redraw of the visible inspector");
+  assert.deepEqual(host.plugin.getBacklinkPaths(OTHER_TARGET), [sourcePath(1)], "unaffected targets keep their sources");
 });
 
 test("control: source delete keeps the remaining sources", async () => {
@@ -187,11 +201,16 @@ test("control: target delete then recreation restores its reverse edges exactly"
   assert.ok(target);
   // Deleted: Obsidian keeps the unresolved edge out of resolvedLinks.
   for (const source of [sourcePath(0), sourcePath(1)]) delete (host.resolvedLinks[source] ?? {})[TARGET];
+  host.files.splice(host.files.indexOf(target), 1);
+  assert.equal(host.app.vault.getAbstractFileByPath(TARGET), null, "the vault no longer resolves the deleted target");
   host.emitVault("delete", target);
   assert.deepEqual(host.plugin.getBacklinkPaths(TARGET), []);
-  // Recreated: sources resolve to it again.
+  // Recreated as a new file object: sources resolve to it again.
+  const recreated = new TFile(TARGET);
+  host.files.push(recreated);
+  assert.equal(host.app.vault.getAbstractFileByPath(TARGET), recreated);
   for (const source of [sourcePath(0), sourcePath(1)]) (host.resolvedLinks[source] ?? {})[TARGET] = 1;
-  host.emitVault("create", target);
+  host.emitVault("create", recreated);
   host.emitMetadata("resolve", host.sources[0]);
   host.emitMetadata("resolve", host.sources[1]);
   assert.deepEqual(sorted(host.plugin.getBacklinkPaths(TARGET)), [sourcePath(0), sourcePath(1)]);
