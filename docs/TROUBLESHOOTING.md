@@ -199,7 +199,7 @@ The full message is “Linked reference not found; it may be a note or file”. 
 
 ## Export wording
 
-On desktop, an export says **Export started** and that the plugin cannot confirm the file was saved; check your downloads folder. On mobile the export is written inside the vault, and the notice appears only after the write completed. Each backup or export covers the active knowledge base only.
+On desktop, the single-base Export / import center says **Export started** and that the plugin cannot confirm the file was saved; check your downloads folder. The multi-base portfolio flow still says “Exported …”, but a desktop download cannot be confirmed there either. On mobile the export is written inside the vault, and the notice appears only after the write completed. A single-base backup or export from **Back up, export, or import…** covers the active knowledge base only. A portfolio carries each base you select, and full conflict rescues and raw kept stores can carry sibling bases, so keep them private.
 
 ## A save says the automatic backup could not be refreshed
 

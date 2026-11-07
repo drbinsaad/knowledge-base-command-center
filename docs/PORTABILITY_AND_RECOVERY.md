@@ -6,7 +6,7 @@ Library covers load only from images in your vault. Online loading is not suppor
 
 Two rules apply to everything below:
 
-- **A backup or recovery export covers one knowledge base.** It does not contain sibling or archived bases, notes, or attachments. To protect several bases, export each one (or use a multi-base portfolio for portable organization only), and back up the whole vault separately.
+- **A single-base backup or recovery export covers one knowledge base.** One made from **Back up, export, or import…** (the Export / import center) holds only the base you exported, not sibling or archived bases, notes, or attachments. A multi-base portfolio (**Export or import several knowledge bases…**) carries each base you select, as portable organization only. Full conflict rescues and raw kept stores (`data.json.bak-kept-*`, `data.json`) can carry sibling bases too, so treat them as private. To protect several bases with recovery exports, export each one, and back up the whole vault separately.
 - **Recovery restores plugin organization, never note files.** If a note file was deleted, only a vault backup or Obsidian’s own file recovery brings it back.
 
 ## Choose the right artifact
@@ -145,7 +145,7 @@ Desktop uses the operating system download and file picker.
 
 The plugin itself does not read or write outside the vault. On desktop, the operating-system surfaces place files only where the user chooses.
 
-On desktop, the notice says **Export started**: the plugin started the download. The plugin cannot see where your browser or operating system put the file, or whether the save finished. Open the file yourself and check it before you rely on it. On iPhone and iPad the file is written inside the vault, so the plugin can confirm the write; it still cannot confirm that Sync has copied it to another device.
+On desktop, the single-base Export / import center’s notice says **Export started**: the plugin started the download. (The multi-base portfolio flow still says “Exported …”, but the same limit applies to any desktop download.) The plugin cannot see where your browser or operating system put the file, or whether the save finished. Open the file yourself and check it before you rely on it. On iPhone and iPad the file is written inside the vault, so the plugin can confirm the write; it still cannot confirm that Sync has copied it to another device.
 
 On iPhone and iPad, Export writes JSON into the configured Exports folder inside the vault (<code>Knowledge Base Command Center Exports/</code> by default; Settings → Exports folder) so it can sync or be shared through Files. Import uses an in-vault JSON picker and displays the selected vault path during review.
 
@@ -231,9 +231,9 @@ Both contain plugin organization and exact vault-relative paths, but no note bod
 
 The automatic rolling backup (`data.json.bak`) is a safety net for a failed save. It is not a permanent archive. Permanently deleting a knowledge base does not make an extra backup first, so export that base’s organization before you remove it for good.
 
-### Review kept copies (release candidate)
+### Review kept copies
 
-This feature is in the release candidate and is not described as released. If your installed version does not show it, the copies still exist on disk; only the in-app restore is missing.
+If your installed version does not show this entry, the copies still exist on disk; only the in-app restore is missing.
 
 Open **Sync & recovery center**, find its **Kept copies** section, and choose **Review kept copies…** (it also works in protected read-only mode, because reviewing writes nothing). The list shows kept data backups and conflict rescues found in the configured Exports folder, the legacy default Exports folder, and the plugin folder. It shows at most 50 files, newest first, and says how many folders were checked. A file name is only a hint: nothing is validated until you choose **Review**. **Choose another file** opens one you pick yourself.
 
@@ -255,8 +255,8 @@ What this does and does not do:
 ## Known limits of recovery and testing
 
 - Recovery from kept copies restores as a new base only. Restoring over an existing base uses the separate same-vault recovery import described above.
-- Backups are per base. A vault backup is the only copy of notes and attachments.
-- A desktop export means the download started. The plugin cannot confirm the file was saved.
+- A single-base backup covers that base only; portfolios and full rescues can hold several bases. A vault backup is the only copy of notes and attachments.
+- A desktop export means the download started. The plugin cannot confirm the file was saved, whichever export flow you used.
 - The Sync & recovery center shows local facts about this device. It cannot see Obsidian Sync, the network, or other devices, and a missing warning is not proof that a handoff is safe.
 - Automated tests do not cover a physical iPhone or iPad, and no automation runs two devices through Obsidian Sync. Those checks are recorded separately in the release evidence and are unverified unless a record says they were run.
 

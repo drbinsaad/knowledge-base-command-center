@@ -1,6 +1,6 @@
 # Local data and cleanup
 
-This describes the current release. KBCC separates synced organization from device-only interaction history. Covers load only from existing vault images; online loading is not supported.
+KBCC separates synced organization from device-only interaction history. Covers load only from existing vault images; online loading is not supported.
 
 ## Synced plugin data
 

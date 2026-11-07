@@ -187,7 +187,7 @@ Start with **Check sync and backup status**. It shows local facts about this dev
 - a **Sync conflict rescue**, written into your Exports folder before the plugin adopts a conflicting or newly arrived store; and
 - a **kept data backup**, a copy of the previous `data.json.bak` (named `data.json.bak-kept-…`, in the plugin’s own folder) set aside when overwriting that backup could have lost content.
 
-The release candidate adds **Sync & recovery center → Review kept copies…**. It lists these copies, previews one, and restores one of its knowledge bases as a **new** base. It never replaces or edits an existing base. Until you are on a build that has it, the copies stay on disk and you can restore a same-vault recovery export from the Export / import center. See [Portability and recovery](PORTABILITY_AND_RECOVERY.md#kept-copies-and-conflict-rescues). This feature is part of the unreleased candidate; do not rely on it in an installed version that does not show it.
+**Sync & recovery center → Review kept copies…** lists these copies, previews one, and restores one of its knowledge bases as a **new** base. It never replaces or edits an existing base. If your installed version does not show this entry, the copies stay on disk and you can restore a same-vault recovery export from the Export / import center. See [Portability and recovery](PORTABILITY_AND_RECOVERY.md#kept-copies-and-conflict-rescues).
 
 ## Upgrade and Sync compatibility
 
