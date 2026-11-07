@@ -758,6 +758,8 @@ export class EntVaultCommandCenterView extends ItemView {
   private viewFeedback: { message: string; tone: "status" | "error"; source: string } | null = null;
   private viewFeedbackEl: HTMLElement | null = null;
   private viewFeedbackOrigin: HTMLElement | null = null;
+  /** Bumped on base change and close so a delayed action cannot write into a context it no longer belongs to. */
+  private feedbackGeneration = 0;
   private searchViewportWindow: Window | null = null;
   private searchPointerCleanup: (() => void) | null = null;
   private mobileToolbarCleanup: (() => void) | null = null;
@@ -822,6 +824,7 @@ export class EntVaultCommandCenterView extends ItemView {
     this.globalSearchPendingKey = "";
     this.pendingReturnScroll = null;
     this.viewFeedback = null;
+    this.feedbackGeneration += 1;
     this.viewFeedbackEl = null;
     this.viewFeedbackOrigin = null;
     this.attachmentView = null;
@@ -999,8 +1002,10 @@ export class EntVaultCommandCenterView extends ItemView {
       // A Sync refresh of the same base must not erase what the user is typing.
       // A real base switch intentionally starts from that base's clean route.
       if (baseChanged) {
-        // Feedback about the previous base's files must not describe this one.
+        // Feedback about the previous base's files must not describe this one,
+        // and a delayed completion from that base must not repopulate it.
         this.viewFeedback = null;
+        this.feedbackGeneration += 1;
         this.query = "";
         this.parsedQuery = parseQuery("");
         this.searchScope = "all";
@@ -1054,12 +1059,17 @@ export class EntVaultCommandCenterView extends ItemView {
       if (!this.isCompactInspectorLayout() && this.inspectorEl) this.renderInspector();
       return;
     }
+    // The snapshot above predates the awaits. Whatever the user chose since then
+    // (render() restores that itself) outranks it.
+    const focusAtRender = captureViewFocus(this.contentEl);
+    const focusUnchanged = !focusAtRender || (focusBefore !== null
+      && focusAtRender.key === focusBefore.key && focusAtRender.id === focusBefore.id
+      && focusAtRender.label === focusBefore.label && focusAtRender.tag === focusBefore.tag);
     this.render(!baseChanged);
     if (!baseChanged && this.contentEl?.ownerDocument) {
       this.restoreReturnScrollPosition(listScrollBefore, detailScrollBefore);
-      // The snapshot was taken before the awaits above; focus the user moved
-      // to another surface since then must not be pulled back.
-      if (this.focusBelongsToView()) restoreViewFocus(this.contentEl, focusBefore);
+      // Focus the user moved to another surface meanwhile must not be pulled back either.
+      if (focusUnchanged && this.focusBelongsToView()) restoreViewFocus(this.contentEl, focusBefore);
     }
     if (searchWasFocused && !baseChanged) {
       const replacement = this.contentEl.querySelector<HTMLInputElement>('.ent-cc-search-box input[type="search"]');
@@ -5426,10 +5436,12 @@ export class EntVaultCommandCenterView extends ItemView {
     if (region) parent.append(region);
     else {
       region = parent.createDiv({ cls: "ent-cc-view-feedback" });
+      // Existing, already-styled notice classes keep this unstyled-by-new-CSS: the arrange hint row, plus the warning treatment for errors.
+      const row = region.createDiv({ cls: "ent-cc-arrange-hint ent-cc-view-feedback-row" });
       // Both live regions exist before any message so assistive technology observes the text change.
-      region.createDiv({ cls: "ent-cc-view-feedback-status", attr: { role: "status", "aria-live": "polite", "aria-atomic": "true" } });
-      region.createDiv({ cls: "ent-cc-view-feedback-alert", attr: { role: "alert", "aria-atomic": "true" } });
-      const dismiss = region.createEl("button", {
+      row.createDiv({ cls: "ent-cc-view-feedback-status", attr: { role: "status", "aria-live": "polite", "aria-atomic": "true" } });
+      row.createDiv({ cls: "ent-cc-view-feedback-alert", attr: { role: "alert", "aria-atomic": "true" } });
+      const dismiss = row.createEl("button", {
         cls: "ent-cc-button ent-cc-view-feedback-dismiss", type: "button", text: "Dismiss",
         attr: { "aria-label": "Dismiss message", "data-kbcc-focus": "view-feedback-dismiss" },
       });
@@ -5447,17 +5459,26 @@ export class EntVaultCommandCenterView extends ItemView {
     const alert = region.querySelector<HTMLElement>('[role="alert"]');
     status?.setText(feedback?.tone === "status" ? feedback.message : "");
     alert?.setText(feedback?.tone === "error" ? feedback.message : "");
+    // Only the region holding the message takes the row's free width.
+    status?.toggleClass("ent-cc-legacy-index-warning-text", feedback?.tone === "status");
+    alert?.toggleClass("ent-cc-legacy-index-warning-text", feedback?.tone === "error");
     region.hidden = !feedback;
-    region.toggleClass("is-error", feedback?.tone === "error");
+    region.querySelector<HTMLElement>(".ent-cc-view-feedback-row")?.toggleClass("ent-cc-settings-warning", feedback?.tone === "error");
   }
 
   /** Replace the persistent view message. It stays through rerenders until replaced or dismissed. */
-  private setViewFeedback(message: string, tone: "status" | "error", source: string): void {
+  private setViewFeedback(message: string, tone: "status" | "error", source: string, context?: { baseId: string; generation: number }): void {
+    if (context && (this.viewClosed || context.generation !== this.feedbackGeneration || context.baseId !== this.plugin.getActiveKnowledgeBaseId())) return;
     const doc = this.contentEl?.ownerDocument;
     const active = doc?.activeElement as HTMLElement | null | undefined;
     this.viewFeedbackOrigin = active && this.contentEl.contains(active) && !this.viewFeedbackEl?.contains(active) ? active : this.viewFeedbackOrigin;
     this.viewFeedback = { message, tone, source };
     this.paintViewFeedback();
+  }
+
+  /** Captured when an action starts; its completion is dropped if the base or view lifetime changed. */
+  private feedbackContext(): { baseId: string; generation: number } {
+    return { baseId: this.plugin.getActiveKnowledgeBaseId(), generation: this.feedbackGeneration };
   }
 
   private clearViewFeedback(): void {
@@ -5596,6 +5617,9 @@ export class EntVaultCommandCenterView extends ItemView {
     if (currentDetails) this.noteDetailsOpen = currentDetails.open;
     this.inspectorEl.empty();
     const record = this.recordByPath.get(this.plugin.data.selectedPath);
+    // The selected base/record is the key to volatile attachment state. Reset it here, before any
+    // early return (placeholder, no record), so every route that changes the selection is covered.
+    if (this.attachmentView && this.attachmentView.key !== `${this.plugin.getActiveKnowledgeBaseId()}\u0000${record?.path ?? ""}`) this.attachmentView = null;
     const compact = this.isCompactInspectorLayout();
     const mobileOpen = compact && this.mobileInspectorOpen && Boolean(record);
     this.inspectorEl.toggleClass("is-mobile-open", mobileOpen);
@@ -5786,17 +5810,18 @@ export class EntVaultCommandCenterView extends ItemView {
     const state = this.attachmentView;
     const section = renderNoteAttachments(parent, attachments, (path) => this.run(async () => {
       const name = path.split("/").pop() ?? path;
+      const context = this.feedbackContext();
       // The row can outlive a sync/delete/rename. Never open an unresolved link or create a note.
       const file = this.app.vault.getAbstractFileByPath(path);
       if (!(file instanceof TFile)) {
-        this.setViewFeedback(`${MISSING_REFERENCE_TEXT}: ${name}`, "error", "attachment");
+        this.setViewFeedback(`${MISSING_REFERENCE_TEXT}: ${name}`, "error", "attachment", context);
         return;
       }
       try {
         await this.plugin.openFile(file, this);
-        this.setViewFeedback(`Opened ${name}.`, "status", "attachment");
+        this.setViewFeedback(`Opened ${name}.`, "status", "attachment", context);
       } catch (error) {
-        this.setViewFeedback(`Could not open ${name}: ${errorMessage(error)}`, "error", "attachment");
+        this.setViewFeedback(`Could not open ${name}: ${errorMessage(error)}`, "error", "attachment", context);
       }
     }), { revealed: state.revealed, onReveal: (revealed) => { state.revealed = revealed; } });
     // Focus belonging to the inspector returns to the same path, else a live neighbour or the section; focus held elsewhere is left alone.
@@ -5874,15 +5899,16 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private async copyText(text: string, label: string): Promise<void> {
+    const context = this.feedbackContext();
     try {
       const clipboard = this.contentEl.ownerDocument.defaultView?.navigator.clipboard;
       if (!clipboard) throw new Error("Clipboard unavailable");
       await clipboard.writeText(text);
-      this.setViewFeedback(`${label} copied.`, "status", "copy");
+      this.setViewFeedback(`${label} copied.`, "status", "copy", context);
     } catch {
       this.setViewFeedback(this.plugin.isClinicalMode()
         ? "Clipboard access was unavailable. Open the note and use the command manually."
-        : "Clipboard access was unavailable. Open the note and copy its wikilink or path manually.", "error", "copy");
+        : "Clipboard access was unavailable. Open the note and copy its wikilink or path manually.", "error", "copy", context);
     }
   }
 

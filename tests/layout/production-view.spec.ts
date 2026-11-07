@@ -286,8 +286,9 @@ test("attachment metadata refresh distinguishes waiting, missing, empty and dele
 
 const focusedAttachmentPath = (page: Page): Promise<string | null> => page.evaluate(() => document.activeElement?.getAttribute("data-ent-cc-attachment-path") ?? null);
 
-test("WF07 I1 I2 I3 revealed attachments and focus survive a harmless refresh, are not stolen, and reset for another note", async ({ page }) => {
+for (const direction of ["ltr", "rtl"] as const) test(`WF07 I1 I2 I3 ${direction} revealed attachments and focus survive a harmless refresh, are not stolen, and reset for another note`, async ({ page }) => {
   await openView(page, { scenario: "attachments" });
+  await page.locator("#kbcc-view").evaluate((element, value) => element.setAttribute("dir", value), direction);
   await page.getByRole("button", { name: /^Attachment overview,/u }).click();
   const section = page.locator(".ent-cc-note-attachments");
   const rows = section.locator(".ent-cc-attachment-row");
@@ -328,10 +329,14 @@ test("WF07 I4 a narrow desktop pane is not a modal dialog and lets Tab leave the
   expect(await page.evaluate(() => Boolean(document.activeElement?.closest(".ent-cc-inspector")))).toBe(false);
 });
 
-test.describe("WF07 I4 phone", () => {
+for (const device of [
+  { name: "phone390", width: 390, height: 844 },
+  { name: "narrow tablet 768", width: 768, height: 1024 },
+  { name: "wide tablet 1180", width: 1180, height: 820 },
+]) test.describe(`WF07 I4 ${device.name}`, () => {
   test.use({ hasTouch: true });
   test("an actual mobile compact inspector keeps its dialog trap and Escape", async ({ page }) => {
-    await openView(page, { scenario: "attachments", mobile: true });
+    await openView(page, { scenario: "attachments", mobile: true, width: device.width, height: device.height });
     await page.getByRole("button", { name: /^Attachment overview,/u }).click();
     const inspector = page.locator(".ent-cc-inspector");
     await expect(inspector).toHaveAttribute("role", "dialog");
@@ -363,8 +368,9 @@ test("WF07 I5 Expand and Next-list controls change their names without contradic
   // The synthetic host does not persist Next-list state; the click-and-rerender half is a runtime test (view-state WF07 I5).
 });
 
-test("WF07 I6 a deleted attachment gives persistent live feedback that survives refresh, is replaced, and can be dismissed", async ({ page }) => {
+for (const direction of ["ltr", "rtl"] as const) test(`WF07 I6 ${direction} a deleted attachment gives persistent live feedback that survives refresh, is replaced, and can be dismissed`, async ({ page }) => {
   await openView(page, { scenario: "attachments" });
+  await page.locator("#kbcc-view").evaluate((element, value) => element.setAttribute("dir", value), direction);
   await page.getByRole("button", { name: /^Attachment overview,/u }).click();
   const feedback = page.locator(".ent-cc-view-feedback");
   await expect(feedback).toBeHidden();
@@ -386,6 +392,24 @@ test("WF07 I6 a deleted attachment gives persistent live feedback that survives 
   await page.keyboard.press("Enter");
   await expect(feedback).toBeHidden();
   expect(await page.evaluate(() => document.activeElement === document.body)).toBe(false);
+});
+
+test.describe("WF07 R4 phone", () => {
+  test.use({ hasTouch: true });
+  test("feedback about a very long attachment name wraps inside a 390px phone with Dismiss reachable", async ({ page }) => {
+    await openView(page, { scenario: "attachments", mobile: true, width: 390, height: 844 });
+    await page.getByRole("button", { name: /^Attachment overview,/u }).click();
+    const section = page.locator(".ent-cc-note-attachments");
+    await section.locator(".ent-cc-attachments-more").click();
+    await section.getByRole("button", { name: /^Open attachment: SyntheticUnbroken/u }).click();
+    const feedback = page.locator(".ent-cc-view-feedback");
+    await expect(feedback).toContainText("Opened SyntheticUnbroken");
+    const geometry = await feedback.evaluate((region) => ({ client: region.clientWidth, scroll: region.scrollWidth, viewport: innerWidth,
+      dismissRight: region.querySelector("button")!.getBoundingClientRect().right }));
+    expect(geometry.scroll).toBeLessThanOrEqual(geometry.client);
+    expect(geometry.dismissRight).toBeLessThanOrEqual(geometry.viewport);
+    await expect(feedback.getByRole("button", { name: "Dismiss message", exact: true })).toBeVisible();
+  });
 });
 
 async function workspaceLayoutSnapshot(page: Page): Promise<{ localValues: Record<string, { version: number; inspectorWidth: number; tabletSplit: boolean }>; organizationUnchanged: boolean }> {

@@ -1054,6 +1054,8 @@
   color: var(--ent-cc-accent);
 }
 
+.ent-cc-view-feedback-row>div{overflow-wrap:anywhere}
+
 .ent-cc-curriculum-domain-body.is-drop-target {
   outline: 1px dashed var(--ent-cc-accent);
   outline-offset: -2px;

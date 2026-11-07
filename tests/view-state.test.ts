@@ -65,6 +65,7 @@ test("availability counts never present unresolved outline entries as Markdown n
 
 const WF07_ALPHA = "Notes/Alpha.md";
 const WF07_BETA = "Notes/Beta.md";
+const WF07_PLACEHOLDER = "Placeholders/Gamma.md";
 const wf07Path = (index: number): string => `Files/f${String(index).padStart(2, "0")}.pdf`;
 const wf07Range = (count: number): string[] => Array.from({ length: count }, (_, index) => wf07Path(index + 1));
 
@@ -94,7 +95,7 @@ interface Wf07 {
   content: FakeElement;
   view: EntVaultCommandCenterView;
   harness: { selectRecord(path: string): void; saveWorkspaceLayoutPreference(): void; mobileInspectorOpen: boolean };
-  state: { baseId: string; readOnly: boolean; links: Record<string, string[]>; present: Set<string>; opened: string[]; openFailure: Error | null; storageOk: boolean; organizerOpened: number };
+  state: { baseId: string; readOnly: boolean; links: Record<string, string[]>; present: Set<string>; opened: string[]; openFailure: Error | null; openGate: Promise<void> | null; storageOk: boolean; organizerOpened: number };
   plugin: { data: PluginData; reconcileRecords: () => Promise<boolean> };
   rows(): FakeElement[];
   rowPaths(): string[];
@@ -115,11 +116,11 @@ async function wf07Open(options: { mobile?: boolean; width?: number; count?: num
   data.settings.enableHoverPreview = false;
   data.settings.workspaceName = "WF07 base";
   data.settings.setupComplete = true;
-  const records = [wf07Record(WF07_ALPHA, "Alpha"), wf07Record(WF07_BETA, "Beta")];
+  const records = [wf07Record(WF07_ALPHA, "Alpha"), wf07Record(WF07_BETA, "Beta"), { ...wf07Record(WF07_PLACEHOLDER, "Gamma"), isPlaceholder: true }];
   const count = options.count ?? 45;
   const state: Wf07["state"] = {
     baseId: "base-wf07", readOnly: Boolean(options.readOnly), links: { [WF07_ALPHA]: wf07Range(count), [WF07_BETA]: wf07Range(count) },
-    present: new Set(wf07Range(count)), opened: [], openFailure: null, storageOk: true, organizerOpened: 0,
+    present: new Set(wf07Range(count)), opened: [], openFailure: null, openGate: null, storageOk: true, organizerOpened: 0,
   };
   const fileObjects = new Map<string, TFile>();
   const fileFor = (path: string): TFile => {
@@ -147,7 +148,7 @@ async function wf07Open(options: { mobile?: boolean; width?: number; count?: num
     resolveLink: () => null,
     getLibraries: () => [],
     getLibrary: () => null,
-    openFile: async (file: TFile) => { if (state.openFailure) throw state.openFailure; state.opened.push(file.path); },
+    openFile: async (file: TFile) => { if (state.openGate) await state.openGate; if (state.openFailure) throw state.openFailure; state.opened.push(file.path); },
     openNoteOrganizer: () => { state.organizerOpened += 1; },
     mutate: async (_label: string, change: () => void) => { change(); await view.reload(); },
   };
@@ -403,5 +404,76 @@ test("WF07 I6 copy failure, layout-preference save failure and read-only organiz
     assert.equal(s.state.organizerOpened, 0);
     assert.deepEqual(Notice.messages, []);
     assert.equal(s.content.querySelector(".ent-cc-search-status")?.textContent ?? "", "", "search announcements are not overwritten");
+  } finally { await s.close(); }
+});
+
+test("WF07 R3 selecting a placeholder resets the previous note's expansion, while an unchanged-note refresh keeps it", async () => {
+  const s = await wf07Open();
+  try {
+    s.harness.selectRecord(WF07_ALPHA);
+    s.more()?.dispatch("click");
+    assert.equal(s.rows().length, 40);
+    await s.view.reload();
+    assert.equal(s.rows().length, 40, "control: the same note keeps its count");
+    s.harness.selectRecord(WF07_PLACEHOLDER);
+    assert.equal(s.rows().length, 0);
+    s.harness.selectRecord(WF07_ALPHA);
+    assert.equal(s.rows().length, ATTACHMENT_PAGE_SIZE, "returning from a placeholder starts at 20");
+  } finally { await s.close(); }
+});
+
+test("WF07 R2 a delayed attachment open never writes feedback into a different base or a closed view; same-context completion still does", async () => {
+  for (const outcome of ["success", "failure"] as const) {
+    const s = await wf07Open({ count: 3 });
+    try {
+      s.harness.selectRecord(WF07_ALPHA);
+      let release = (): void => undefined;
+      s.state.openGate = new Promise<void>((resolve) => { release = resolve; });
+      if (outcome === "failure") s.state.openFailure = new Error("Synthetic late failure");
+      s.rows()[0].dispatch("click");
+      s.state.baseId = "base-other";
+      await s.view.reload();
+      release();
+      await wf07Settle();
+      assert.equal(s.feedback()?.hidden, true, `${outcome}: the old base's completion is dropped`);
+      assert.equal(s.feedback()?.textContent.replace(/Dismiss/u, "").trim(), "");
+    } finally { await s.close(); }
+  }
+  const same = await wf07Open({ count: 3 });
+  try {
+    same.harness.selectRecord(WF07_ALPHA);
+    let release = (): void => undefined;
+    same.state.openGate = new Promise<void>((resolve) => { release = resolve; });
+    same.rows()[0].dispatch("click");
+    release();
+    await wf07Settle();
+    assert.match(same.feedback()?.textContent ?? "", /Opened f01\.pdf/u, "control: same-context completion updates the live region");
+  } finally { await same.close(); }
+  const closing = await wf07Open({ count: 3 });
+  closing.harness.selectRecord(WF07_ALPHA);
+  let releaseClosing = (): void => undefined;
+  closing.state.openGate = new Promise<void>((resolve) => { releaseClosing = resolve; });
+  closing.rows()[0].dispatch("click");
+  await closing.close();
+  releaseClosing();
+  await wf07Settle();
+  assert.equal((closing.view as unknown as { viewFeedback: unknown }).viewFeedback, null, "a closed view stays empty");
+});
+
+test("WF07 R1 focus moved to another inspector control during the awaited reload is kept; unchanged focus is still restored", async () => {
+  const s = await wf07Open();
+  try {
+    s.harness.selectRecord(WF07_ALPHA);
+    s.rows()[5].focus();
+    const expand = s.content.querySelector(".ent-cc-inspector-expand");
+    assert.ok(expand);
+    s.plugin.reconcileRecords = async () => { expand.focus(); return false; };
+    await s.view.reload();
+    const active = s.dom.document.activeElement;
+    assert.equal(active?.getAttribute("data-kbcc-focus"), "inspector-expand", "the latest in-view choice wins");
+    s.plugin.reconcileRecords = async () => false;
+    s.rows()[5].focus();
+    await s.view.reload();
+    assert.equal(wf07ActivePath(s.dom), wf07Path(6), "control: focus left on the attachment returns to it");
   } finally { await s.close(); }
 });

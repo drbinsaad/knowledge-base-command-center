@@ -10,6 +10,7 @@
     "tests/layout/library-cover-privacy.spec.ts",
     "tests/layout/library-gallery.spec.ts",
     "tests/layout/note-organizer-layout.spec.ts",
+    "tests/layout/production-view.spec.ts",
     "tests/layout/tab-navigation.spec.ts",
     "tests/layout/touch-drag.spec.ts"
   ]
