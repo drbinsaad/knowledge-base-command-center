@@ -1,6 +1,8 @@
 import {
   childSubheadings,
   clonePersonalOrganization,
+  cloneJsonValue,
+  subjectLibraryId,
   pathIsInIndexFolderSources,
   pathIsInsideFolder,
   portablePlaceholderPath,
@@ -64,6 +66,47 @@ function hasAutomaticSource(data: PluginData, path: string): boolean {
     : pathIsInIndexFolderSources(path, data.indexFolderSources ?? []);
 }
 
+interface Placement { id: string; label: string }
+
+function libraryPlacements(layouts: PluginData["portableIndex"]["libraryLayouts"], ids: string[]): Placement[] {
+  const out: Placement[] = [];
+  const walk = (libraryId: string, node: LayoutSubheading, trail: string[]): void => {
+    const here = [...trail, node.title];
+    for (const id of ids) if (node.subjects.includes(id)) out.push({ id: `${libraryId}/${node.id}/${id}`, label: `${libraryId} › ${here.join(" › ")}` });
+    for (const child of childSubheadings(node)) walk(libraryId, child, here);
+  };
+  for (const [libraryId, layout] of Object.entries(layouts ?? {})) for (const heading of layout) walk(libraryId, heading, []);
+  return out;
+}
+
+/** Mirrors the service's replacePortableSubjectInLibraryLayouts on a cloned layout. */
+function mergeLibraryLayouts(layouts: PluginData["portableIndex"]["libraryLayouts"], ownerId: string, subjectId: string, targetLibraryId: string | null): void {
+  const targetHasSurvivor = targetLibraryId !== null && libraryPlacements({ [targetLibraryId]: layouts[targetLibraryId] ?? [] }, [subjectId]).length > 0;
+  for (const [libraryId, layout] of Object.entries(layouts)) {
+    let placed = false;
+    const replace = (subjects: string[]): string[] => {
+      const next: string[] = [];
+      for (const candidate of subjects) {
+        if (libraryId !== targetLibraryId) {
+          if (candidate !== ownerId && candidate !== subjectId) next.push(candidate);
+          continue;
+        }
+        if (targetHasSurvivor && candidate === ownerId) continue;
+        if (candidate !== ownerId && candidate !== subjectId) { next.push(candidate); continue; }
+        if (placed) continue;
+        placed = true;
+        next.push(subjectId);
+      }
+      return next;
+    };
+    const visit = (node: LayoutSubheading): void => {
+      node.subjects = replace(node.subjects);
+      for (const child of childSubheadings(node)) visit(child);
+    };
+    for (const heading of layout) visit(heading);
+  }
+}
+
 /** Bounded clone: only the fields the service's prefix rewrite and membership step touch. */
 function cloneForPreview(data: PluginData): PluginData {
   return {
@@ -114,6 +157,10 @@ export function previewPlaceholderLinkEffects(
     ? Object.entries(data.portableIndex.resolvedPathBySubjectId).find(([id, path]) => id !== subjectId && path === to)?.[0] ?? ""
     : "";
   const owner = ownerId ? data.portableIndex.subjects.find((candidate) => candidate.id === ownerId) : undefined;
+  let libraryBefore: Placement[] = [];
+  let libraryAfter: Placement[] = [];
+  let movedChildren: Array<{ id: string; title: string }> = [];
+  let detaches = false;
   const clone = cloneForPreview(data);
   rewriteActivePluginDataPathPrefix(clone, from, to);
   if (kind === "link") {
@@ -138,6 +185,14 @@ export function previewPlaceholderLinkEffects(
       else delete clone.indexGroupByPath[to];
     }
     const indexed = subject.indexed || Boolean(owner?.indexed);
+    if (ownerId) {
+      const layouts = cloneJsonValue(data.portableIndex.libraryLayouts ?? {});
+      libraryBefore = libraryPlacements(layouts, [subjectId, ownerId]);
+      mergeLibraryLayouts(layouts, ownerId, subjectId, subjectLibraryId({ ...subject, indexed }));
+      libraryAfter = libraryPlacements(layouts, [subjectId, ownerId]);
+      movedChildren = data.portableIndex.subjects.filter((candidate) => candidate.parentId === ownerId && candidate.id !== subjectId);
+      detaches = subject.parentId === ownerId;
+    }
     if (indexed) {
       if (!clone.directIndexPaths.includes(to)) clone.directIndexPaths.push(to);
       clone.excludedIndexPaths = clone.excludedIndexPaths.filter((path) => path !== to);
@@ -163,15 +218,27 @@ export function previewPlaceholderLinkEffects(
     lines.push(`Moves onto the note: ${list(before)}.`);
     if (describe(toBefore).length > 0) lines.push(`The note already has ${list(toBefore)}; these are combined without duplicates.`);
     lines.push(`After linking, the note has: ${list(after)}.`);
+    // Worded from the projected transition, so the ENT profile (which keeps Direct state) is never misdescribed.
     lines.push(subject.indexed || owner?.indexed
       ? "This subject is indexed, so the note gets Direct Index membership."
-      : "This subject is not indexed, so the note's Direct Index membership is cleared"
-        + (folderSupplies ? " and it is hidden from the Index folder that would otherwise supply it." : "."));
-    if (owner) lines.push(`The note already belongs to the portable identity “${owner.title}”, which is merged into this subject.`);
+      : toBefore.direct === after.direct
+        ? `This subject is not indexed; linking leaves the note's Direct Index membership ${after.direct ? "on" : "off"}${after.hidden ? " and hidden" : ""}.`
+        : `This subject is not indexed, so the note's Direct Index membership is cleared${after.hidden ? " and it is hidden from the Index folder that would otherwise supply it" : ""}.`);
+    if (owner) {
+      lines.push(`The note already belongs to the portable identity “${owner.title}”, which is merged into this subject.`);
+      const names = (items: Placement[]): string => items.length > 0 ? items.map((item) => item.label).join("; ") : "none";
+      lines.push(`Library placements: ${names(libraryBefore)} become ${names(libraryAfter)}.`);
+      if (movedChildren.length > 0 || detaches) {
+        lines.push(`${movedChildren.length > 0 ? `Child subjects move under this subject: ${movedChildren.map((child) => child.title).join("; ")}.` : ""}${detaches ? " This subject is no longer a child of the merged identity." : ""}`.trim());
+      }
+    }
   }
-  lines.push("Library placements follow the subject and do not change. The Markdown note is not changed.");
+  lines.push(owner ? "The Markdown note is not changed." : "Library placements follow the subject and do not change. The Markdown note is not changed.");
   return {
     kind, subjectId, from, to, before, toBefore, after, folderSupplies, mergesOwnerId: ownerId, lines,
-    key: JSON.stringify([kind, subjectId, from, to, ownerId, before, toBefore, after, folderSupplies]),
+    key: JSON.stringify([
+      kind, subjectId, subject.title, from, to, ownerId, before, toBefore, after, folderSupplies,
+      libraryBefore.map((item) => item.id), libraryAfter.map((item) => item.id), movedChildren.map((child) => child.id), detaches,
+    ]),
   };
 }

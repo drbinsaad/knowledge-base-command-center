@@ -262,6 +262,93 @@ test("P10 a cross-group merge previews the same group label the service applies,
   assert.deepEqual(placementFactsAt(plugin.data, OTHER), preview?.after);
 });
 
+test("R3 Direct-state text and facts match the real service for Generic and ENT, indexed and non-indexed", async () => {
+  for (const mode of ["generic", "ent-clinical"] as const) {
+    for (const indexed of [true, false]) {
+      const { plugin } = await scenario({ indexed, linked: false });
+      plugin.data.settings.workspaceMode = mode;
+      plugin.data.directIndexPaths = [NOTE];
+      const preview = previewPlaceholderLinkEffects(plugin.data, "link", "subject", NOTE);
+      assert.ok(preview);
+      await plugin.resolvePortableSubject("subject", NOTE);
+      assert.deepEqual(placementFactsAt(plugin.data, NOTE), preview.after, `${mode} indexed=${indexed}`);
+      const text = preview.lines.join(" ");
+      const expectedDirect = indexed || mode === "ent-clinical";
+      assert.equal(preview.after.direct, expectedDirect);
+      if (!indexed) assert.match(text, expectedDirect ? /leaves the note's Direct Index membership on/ : /Direct Index membership is cleared/);
+      if (!indexed && expectedDirect) assert.doesNotMatch(text, /cleared|hidden/);
+    }
+  }
+});
+
+function libraryMergeScenario() {
+  return scenario({ linked: false, owner: true, indexed: false }).then(({ plugin, files }) => {
+    for (const item of plugin.data.portableIndex.subjects) Object.assign(item, { libraryId: "reading", indexed: false });
+    plugin.data.portableIndex.libraries = [{ id: "reading", name: "Reading", singularName: "Item", icon: "book", order: 0, sourceKind: null, archivedAt: null }];
+    plugin.data.portableIndex.libraryLayouts = { reading: [
+      { id: "old", title: "Old placement", collapsed: false, subjects: ["owner"], subheadings: [] },
+      { id: "preferred", title: "Preferred placement", collapsed: false, subjects: ["subject"], subheadings: [] },
+    ] };
+    plugin.data.portableIndex.subjects.push({ ...subject("kid", "Owner child", false), parentId: "owner", libraryId: "reading" });
+    return { plugin, files };
+  });
+}
+
+test("R2 a merge preview names the Library and child effects the service applies and keys them", async () => {
+  const { plugin } = await libraryMergeScenario();
+  const preview = previewPlaceholderLinkEffects(plugin.data, "link", "subject", OTHER);
+  assert.ok(preview);
+  const text = preview.lines.join(" ");
+  assert.match(text, /reading › Old placement.*reading › Preferred placement.*become reading › Preferred placement/);
+  assert.match(text, /Child subjects move under this subject: Owner child/);
+  assert.doesNotMatch(text, /follow the subject and do not change/);
+  const key = preview.key;
+  const [oldNode, preferredNode] = plugin.data.portableIndex.libraryLayouts.reading ?? [];
+  assert.ok(oldNode && preferredNode);
+  oldNode.subjects = [];
+  preferredNode.subjects = ["subject", "owner"];
+  assert.notEqual(previewPlaceholderLinkEffects(plugin.data, "link", "subject", OTHER)?.key, key, "moved Library occurrence");
+  oldNode.subjects = ["owner"];
+  preferredNode.subjects = ["subject"];
+  assert.equal(previewPlaceholderLinkEffects(plugin.data, "link", "subject", OTHER)?.key, key);
+  plugin.data.portableIndex.subjects.push({ ...subject("kid2", "Late child", false), parentId: "owner", libraryId: "reading" });
+  assert.notEqual(previewPlaceholderLinkEffects(plugin.data, "link", "subject", OTHER)?.key, key, "new child");
+  plugin.data.portableIndex.subjects.pop();
+  await plugin.resolvePortableSubject("subject", OTHER, true);
+  assert.deepEqual(plugin.data.portableIndex.libraryLayouts.reading?.map((node) => node.subjects), [[], ["subject"]]);
+  assert.equal(plugin.data.portableIndex.subjects.find((item) => item.id === "kid")?.parentId, "subject");
+});
+
+test("R1 a renamed file or a renamed subject during the review applies nothing", async () => {
+  const renamedFile = await scenario({ linked: false });
+  let harness = openView(renamedFile.plugin, renamedFile.files);
+  try {
+    harness.review("link");
+    await Promise.resolve();
+    assert.equal(harness.confirms.length, 1);
+    const chosen = renamedFile.files[0];
+    assert.ok(chosen);
+    chosen.path = "Knowledge Base/Airway/Renamed.md";
+    await harness.confirms[0]?.confirm();
+    assert.equal(renamedFile.plugin.data.portableIndex.resolvedPathBySubjectId.subject, undefined);
+    assert.equal(harness.confirms.length, 1, "no stale review is reopened for a different file");
+  } finally { harness.restore(); }
+
+  const renamedSubject = await scenario({ linked: false });
+  harness = openView(renamedSubject.plugin, renamedSubject.files);
+  try {
+    harness.review("link");
+    await Promise.resolve();
+    const subjectNow = renamedSubject.plugin.data.portableIndex.subjects[0];
+    assert.ok(subjectNow);
+    subjectNow.title = "Changed subject";
+    await harness.confirms[0]?.confirm();
+    assert.equal(renamedSubject.plugin.data.portableIndex.resolvedPathBySubjectId.subject, undefined);
+    assert.equal(harness.confirms.length, 2);
+    assert.match(harness.confirms[1]?.message ?? "", /“Changed subject” will be linked/);
+  } finally { harness.restore(); }
+});
+
 test("P11 a changed binding or membership changes the review key, so a stale review cannot apply", async () => {
   const { plugin } = await scenario();
   organize(plugin, NOTE);

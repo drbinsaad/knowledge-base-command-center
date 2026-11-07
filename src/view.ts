@@ -2397,39 +2397,29 @@ export class EntVaultCommandCenterView extends ItemView {
   private async resolvePortableSubjectLink(subjectId: string, subjectTitle: string, file: TFile): Promise<void> {
     const ownsBase = this.createOpenedBaseGuard();
     if (!ownsBase()) return;
-    const existingOwnerId = Object.entries(this.plugin.data.portableIndex.resolvedPathBySubjectId)
-      .find(([candidateId, path]) => candidateId !== subjectId && path === file.path)?.[0] ?? "";
-    if (existingOwnerId) {
-      const existingOwner = this.plugin.getPortableSubject(existingOwnerId);
-      this.reviewPlaceholderEffects(ownsBase, "link", subjectId, file.path, {
-        title: "Merge portable subjects?",
-        intro: `“${file.basename}” is already linked to the imported subject “${existingOwner?.title ?? file.basename}”. Linking it to “${subjectTitle}” will merge that portable identity into this subject and remove the duplicate identity. The Markdown note will not be changed, and Undo remains available.`,
-        label: "Merge and link",
+    // The path and file object the user chose; a rename or replacement afterwards is never applied.
+    const reviewedPath = file.path;
+    this.reviewPlaceholderEffects(ownsBase, "link", subjectId, reviewedPath, () => {
+      const title = this.plugin.getPortableSubject(subjectId)?.title ?? subjectTitle;
+      const ownerId = Object.entries(this.plugin.data.portableIndex.resolvedPathBySubjectId)
+        .find(([candidateId, path]) => candidateId !== subjectId && path === reviewedPath)?.[0] ?? "";
+      const owner = ownerId ? this.plugin.getPortableSubject(ownerId) : null;
+      return {
+        title: ownerId ? "Merge portable subjects?" : "Link note to imported subject?",
+        intro: ownerId
+          ? `“${file.basename}” is already linked to the imported subject “${owner?.title ?? file.basename}”. Linking it to “${title}” will merge that portable identity into this subject and remove the duplicate identity. The Markdown note will not be changed, and Undo remains available.`
+          : `“${title}” will be linked to “${file.basename}”. The Markdown note will not be changed, and Undo remains available.`,
+        label: ownerId ? "Merge and link" : "Link note",
+        current: () => file.path === reviewedPath && this.app.vault.getAbstractFileByPath(reviewedPath) === file,
         apply: async () => {
-          if (this.app.vault.getAbstractFileByPath(file.path) !== file) {
-            new Notice(STALE_CHOICE_NOTICE);
-            return false;
-          }
-          await this.plugin.resolvePortableSubject(subjectId, file.path, true);
-          return true;
+          await (ownerId
+            ? this.plugin.resolvePortableSubject(subjectId, reviewedPath, true)
+            : this.plugin.resolvePortableSubject(subjectId, reviewedPath));
         },
-        done: () => new Notice(`Linked “${subjectTitle}” to “${file.basename}” after merging the duplicate portable identity. The Markdown note was not changed.`),
-      });
-      return;
-    }
-    this.reviewPlaceholderEffects(ownsBase, "link", subjectId, file.path, {
-      title: "Link note to imported subject?",
-      intro: `“${subjectTitle}” will be linked to “${file.basename}”. The Markdown note will not be changed, and Undo remains available.`,
-      label: "Link note",
-      apply: async () => {
-        if (this.app.vault.getAbstractFileByPath(file.path) !== file) {
-          new Notice(STALE_CHOICE_NOTICE);
-          return false;
-        }
-        await this.plugin.resolvePortableSubject(subjectId, file.path);
-        return true;
-      },
-      done: () => new Notice(`Linked “${subjectTitle}” to “${file.basename}”. The Markdown note was not changed.`),
+        done: () => new Notice(ownerId
+          ? `Linked “${title}” to “${file.basename}” after merging the duplicate portable identity. The Markdown note was not changed.`
+          : `Linked “${title}” to “${file.basename}”. The Markdown note was not changed.`),
+      };
     });
   }
 
@@ -2443,21 +2433,28 @@ export class EntVaultCommandCenterView extends ItemView {
     kind: "link" | "unlink",
     subjectId: string,
     linkPath: string,
-    review: { title: string; intro: string; label: string; apply(): Promise<boolean>; done(): void },
+    makeReview: () => { title: string; intro: string; label: string; current(): boolean; apply(): Promise<void>; done(): void },
   ): void {
     const effects = previewPlaceholderLinkEffects(this.plugin.data, kind, subjectId, linkPath);
     if (!effects) {
       new Notice(STALE_CHOICE_NOTICE);
       return;
     }
+    // Built fresh for every review, so a reopened review never reuses stale names or owner text.
+    const review = makeReview();
     new ConfirmModal(this.app, review.title, `${review.intro} ${effects.lines.join(" ")}`, review.label, async () => {
       if (!ownsBase()) return;
-      if (previewPlaceholderLinkEffects(this.plugin.data, kind, subjectId, linkPath)?.key !== effects.key) {
-        new Notice("The organization changed while you were reviewing. Nothing was changed; review the new effects.");
-        this.reviewPlaceholderEffects(ownsBase, kind, subjectId, linkPath, review);
+      if (!review.current()) {
+        new Notice(STALE_CHOICE_NOTICE);
         return;
       }
-      if (!await review.apply() || !ownsBase()) return;
+      if (previewPlaceholderLinkEffects(this.plugin.data, kind, subjectId, linkPath)?.key !== effects.key) {
+        new Notice("The organization changed while you were reviewing. Nothing was changed; review the new effects.");
+        this.reviewPlaceholderEffects(ownsBase, kind, subjectId, linkPath, makeReview);
+        return;
+      }
+      await review.apply();
+      if (!ownsBase()) return;
       review.done();
     }).open();
   }
@@ -2470,15 +2467,17 @@ export class EntVaultCommandCenterView extends ItemView {
       new Notice("This note has no portable subject identity to unlink.");
       return;
     }
-    this.reviewPlaceholderEffects(ownsBase, "unlink", subjectId, "", {
-      title: "Unlink note from imported subject?",
-      intro: `“${record.title}” will return to a No note placeholder with its imported hierarchy. The Markdown note at ${record.path} will not be moved, changed, or deleted. Undo remains available.`,
-      label: "Unlink note",
-      apply: async () => {
-        await this.plugin.unlinkPortableSubject(subjectId);
-        return true;
-      },
-      done: () => new Notice(`Unlinked “${record.title}”. The imported subject is a placeholder again, and the Markdown note was not changed.`),
+    const reviewedPath = this.plugin.data.portableIndex.resolvedPathBySubjectId[subjectId] ?? record.path;
+    this.reviewPlaceholderEffects(ownsBase, "unlink", subjectId, "", () => {
+      const title = this.plugin.getPortableSubject(subjectId)?.title ?? record.title;
+      return {
+        title: "Unlink note from imported subject?",
+        intro: `“${title}” will return to a No note placeholder with its imported hierarchy. The Markdown note at ${reviewedPath} will not be moved, changed, or deleted. Undo remains available.`,
+        label: "Unlink note",
+        current: () => this.plugin.data.portableIndex.resolvedPathBySubjectId[subjectId] === reviewedPath,
+        apply: () => this.plugin.unlinkPortableSubject(subjectId),
+        done: () => new Notice(`Unlinked “${title}”. The imported subject is a placeholder again, and the Markdown note was not changed.`),
+      };
     });
   }
 
