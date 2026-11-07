@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TFile, type App } from "obsidian";
+import type { App } from "obsidian";
 import { libraryPropertyText, ownLibraryProperty, renderLibraryCover, resolveLibraryCover, resolveLibraryCoverFromProperty, type LibraryCoverReason } from "../src/library-cover.ts";
 import { normalizeLibraryDisplayProfile } from "../src/library-display-profile.ts";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
+import { TFile } from "./support/obsidian-stub.ts";
 
 function resolver() {
   const calls: string[][] = [];

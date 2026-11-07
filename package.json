@@ -32,7 +32,8 @@
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "typecheck": "tsc -noEmit -skipLibCheck",
-    "build": "npm run typecheck && node esbuild.config.mjs production",
+    "typecheck:tests-partial": "tsc -p tsconfig.test-support.json",
+    "build": "npm run typecheck &&node esbuild.config.mjs production",
     "lint": "eslint . --max-warnings 0 && node scripts/validate-json.mjs",
     "test": "node scripts/run-runtime-tests.mjs",
     "test:coverage": "node scripts/run-runtime-tests.mjs --coverage",

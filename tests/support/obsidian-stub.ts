@@ -1,3 +1,5 @@
+import type { FileStats, TAbstractFile as HostAbstractFile, TFile as HostFile, TFolder as HostFolder, Vault } from "obsidian";
+
 export function normalizePath(path: string): string {
   // Mirrors real Obsidian: non-breaking spaces become plain spaces, runs of
   // slashes collapse, edges strip, and an empty result becomes "/" before NFC
@@ -11,18 +13,38 @@ export function parseLinktext(linktext: string): { path: string; subpath: string
   return index === -1 ? { path: linktext, subpath: "" } : { path: linktext.slice(0, index), subpath: linktext.slice(index) };
 }
 
+/** Thrown when a test reaches a host capability this fake deliberately does not provide. */
+export class TestHarnessError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TestHarnessError";
+  }
+}
+
+function unsupportedHostCapability(capability: string): never {
+  throw new TestHarnessError(`The Obsidian test fake does not support ${capability}; supply a bounded test adapter instead.`);
+}
+
 export class TAbstractFile {
+  parent: TFolder | null = null;
+
   constructor(public path: string) {}
+
+  /** Derived from the path so it can never disagree with it. */
+  get name(): string { return this.path.split("/").at(-1) ?? this.path; }
+
+  /** Not provided by the fake: a test needing a vault supplies its own adapter. */
+  get vault(): Vault { return unsupportedHostCapability("TAbstractFile.vault"); }
 }
 
 export class TFile extends TAbstractFile {
   extension: string;
   basename: string;
-  stat = { mtime: 0 };
+  stat: FileStats = { ctime: 0, mtime: 0, size: 0 };
 
   constructor(path: string) {
     super(path);
-    const name = path.split("/").at(-1) ?? path;
+    const name = this.name;
     this.extension = name.includes(".") ? name.split(".").at(-1) ?? "" : "";
     this.basename = this.extension ? name.slice(0, -(this.extension.length + 1)) : name;
   }
@@ -32,6 +54,39 @@ export class TFolder extends TAbstractFile {
   constructor(path: string, public children: TAbstractFile[] = []) { super(path); }
   isRoot(): boolean { return this.path === ""; }
 }
+
+export interface TestFileOptions {
+  parent?: TFolder | null;
+  stat?: Partial<FileStats>;
+}
+
+/** Single place that sets parent, name (derived) and stat consistently. */
+export function createTestFile(path: string, options: TestFileOptions = {}): TFile {
+  const file = new TFile(path);
+  file.stat = { ...file.stat, ...options.stat };
+  attachToParent(file, options.parent ?? null);
+  return file;
+}
+
+export function createTestFolder(path: string, options: { parent?: TFolder | null; children?: TAbstractFile[] } = {}): TFolder {
+  const folder = new TFolder(path);
+  for (const child of options.children ?? []) attachToParent(child, folder);
+  attachToParent(folder, options.parent ?? null);
+  return folder;
+}
+
+function attachToParent(child: TAbstractFile, parent: TFolder | null): void {
+  child.parent = parent;
+  if (parent && !parent.children.includes(child)) parent.children.push(child);
+}
+
+// Compile-time contract: the fakes must stay assignable to the real host
+// interfaces. Type-only imports; the real module is never loaded from here.
+type MustBeAssignable<Fake extends Host, Host> = Fake;
+export type FakeFileMatchesHost = MustBeAssignable<TFile, HostFile>;
+export type FakeFolderMatchesHost = MustBeAssignable<TFolder, HostFolder>;
+export type FakeAbstractFileMatchesHost = MustBeAssignable<TAbstractFile, HostAbstractFile>;
+export type FakeStatMatchesHost = MustBeAssignable<TFile["stat"], FileStats>;
 
 export class Notice {
   static messages: string[] = [];

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Notice } from "obsidian";
 import { createOpenedBaseGuard } from "../src/opened-base-guard";
+import { Notice } from "./support/obsidian-stub.ts";
 
 test("semantic surface ownership preserves drafts through a no-op reload while fencing pending work", () => {
   let pending = false;

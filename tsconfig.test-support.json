@@ -1,0 +1,21 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "inlineSourceMap": false,
+    "inlineSources": false,
+    "lib": ["DOM", "ES2022"],
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": [],
+  "files": [
+    "tests/support/obsidian-stub.ts",
+    "tests/support/fake-dom.ts",
+    "tests/test-support-identity.test.ts",
+    "tests/test-support-shape.test.ts",
+    "tests/test-support-canary.test.ts",
+    "tests/opened-base-guard.test.ts",
+    "tests/library-cover.test.ts"
+  ]
+}
