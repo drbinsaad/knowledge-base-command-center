@@ -120,8 +120,51 @@ test("discovery bounds the listing and the files it stats", async () => {
   assert.equal(statCalls, RECOVERY_DISCOVERY_LIMITS.maxStatted);
   assert.equal(result.truncated, true);
   assert.match(result.summary, /Showing 50 candidate files/);
-  assert.match(result.summary, /more exist/);
+  assert.match(result.summary, /more were found than are listed/);
   assert.equal(result.candidates[0].mtime, 199, "newest of the stat-ed set first");
+});
+
+test("a partial scan says so for zero and nonzero results and never claims more exist without evidence", async () => {
+  const bound = RECOVERY_DISCOVERY_LIMITS.maxEntriesPerFolder;
+  const match = `${EXPORTS}/knowledge-base-command-center-conflict-${stamp(1)}.json`;
+  const notes = Array.from({ length: bound }, (_, index) => `${EXPORTS}/note-${index}.md`);
+  // One real candidate plus 2,000 unrelated files: exactly one candidate exists.
+  const oneAmongMany = makeHost({ [match]: { content: "x", mtime: 1 } }, { [EXPORTS]: [match, ...notes], [LEGACY]: [], [PLUGIN_DIR]: [] });
+  const some = await discoverRecoveryCopies(oneAmongMany.host, input);
+  assert.equal(some.candidates.length, 1);
+  assert.doesNotMatch(some.summary, /more exist/);
+  assert.match(some.summary, /partial/);
+  assert.match(some.summary, /may exist/);
+  // 2,000 unrelated files before the only candidate: zero found, but not a complete answer.
+  const hidden = makeHost({ [match]: { content: "x", mtime: 1 } }, { [EXPORTS]: [...notes, match], [LEGACY]: [], [PLUGIN_DIR]: [] });
+  const none = await discoverRecoveryCopies(hidden.host, input);
+  assert.equal(none.candidates.length, 0);
+  assert.match(none.summary, /partial/);
+  assert.match(none.summary, /may exist/);
+  assert.doesNotMatch(none.summary, /No candidate files were found in the 3 folders checked\./);
+  // Ordinary complete zero result is unchanged and not described as partial.
+  const complete = makeHost({}, { [EXPORTS]: [`${EXPORTS}/a.md`], [LEGACY]: [], [PLUGIN_DIR]: [] });
+  const empty = await discoverRecoveryCopies(complete.host, input);
+  assert.match(empty.summary, /No candidate files were found in the 3 folders checked\./);
+  assert.doesNotMatch(empty.summary, /partial|may exist/);
+  assert.equal(empty.truncated, false);
+  // Candidates actually observed beyond the stat bound are reported as known.
+  const files: Record<string, FileInfo> = {};
+  const many: string[] = [];
+  for (let index = 0; index < RECOVERY_DISCOVERY_LIMITS.maxStatted + 5; index += 1) {
+    const path = `${EXPORTS}/knowledge-base-command-center-conflict-2026-11-01T10-00-00-${String(index).padStart(3, "0")}Z.json`;
+    files[path] = { content: "x", mtime: index };
+    many.push(path);
+  }
+  const known = await discoverRecoveryCopies(makeHost(files, { [EXPORTS]: many, [LEGACY]: [], [PLUGIN_DIR]: [] }).host, input);
+  assert.match(known.summary, /more were found than are listed/);
+});
+
+test("one physical folder named twice is counted once", async () => {
+  const { host } = makeHost({}, { [PLUGIN_DIR]: [] });
+  const result = await discoverRecoveryCopies(host, { exportFolders: [PLUGIN_DIR], legacyExportFolder: PLUGIN_DIR, pluginDir: PLUGIN_DIR });
+  assert.equal(result.inspectedFolders, 1);
+  assert.match(result.summary, /in the 1 folder checked/);
 });
 
 test("discovery examines only the first entries of a huge folder", async () => {
@@ -178,6 +221,16 @@ test("apply-time reread compares bytes exactly and treats changed or missing sou
   assert.equal(await recoverySourceUnchanged(host, path, made.intent), true);
   files[path] = { content: text.replace("Synthetic Base", "Synthetic Basf"), mtime: 2 };
   assert.equal(await recoverySourceUnchanged(host, path, made.intent), false);
+  // An invalid or oversized stat fails closed before any read, even when the bytes are unchanged.
+  for (const size of [Number.NaN, -1, Number.POSITIVE_INFINITY, RECOVERY_COPY_LIMITS.maxBytes + 1]) {
+    files[path] = { content: text, mtime: 3, size };
+    const guarded = makeHost(files, {});
+    assert.equal(await recoverySourceUnchanged(guarded.host, path, made.intent), false, String(size));
+    assert.deepEqual(guarded.reads, [], `no read for stat size ${String(size)}`);
+  }
+  files[path] = { content: text, mtime: 4 };
+  assert.equal(await recoverySourceUnchanged(host, path, made.intent), true, "valid control");
+  files[path] = { content: text.replace("Synthetic Base", "Synthetic Basf"), mtime: 2 };
   delete files[path];
   assert.equal(await recoverySourceUnchanged(host, path, made.intent), false);
 });
@@ -201,6 +254,9 @@ interface HarnessOptions {
   applyResult?: RecoveryApplyResult | "throw";
   vaultId?: string | null;
   unreadable?: boolean;
+  loadGate?: Promise<void>;
+  discoverGate?: Promise<void>;
+  applyGate?: Promise<void>;
 }
 
 function candidatesFor(files: Record<string, FileInfo>): RecoveryCandidate[] {
@@ -226,17 +282,19 @@ async function openModal(options: HarnessOptions = {}): Promise<Harness> {
     getExistingNames: () => options.existingNames ?? ["Synthetic Base"],
     getExistingBaseIds: () => ["base-existing"],
     generateIdentity: () => { identityCount += 1; return { baseId: `base-restored-${identityCount}`, semanticHead: "0123456789abcdef" }; },
-    discover: async (): Promise<RecoveryDiscoveryResult> => ({
+    discover: async (): Promise<RecoveryDiscoveryResult> => (await options.discoverGate, {
       candidates, inspectedFolders: 2, unreadableFolders: 0, truncated: false,
       summary: `Found ${candidates.length} candidate files in the 2 folders checked. Other folders and older locations are not searched.`,
     }),
     load: async (candidate) => {
       loads.push(candidate);
+      await options.loadGate;
       if (options.unreadable) return { status: "unreadable" };
       return loadRecoveryCopy(host, candidate.path, { currentVaultId: options.vaultId === undefined ? VAULT : options.vaultId });
     },
     onApply: async (intent) => {
       applied.push(intent);
+      await options.applyGate;
       if (options.applyResult === "throw") throw new Error("write exploded at /private/path");
       return options.applyResult ?? { status: "applied", baseId: intent.newBaseId };
     },
@@ -482,6 +540,112 @@ test("no status or error text contains a private path at any step", async () => 
   for (const text of seen) {
     assert.doesNotMatch(text, /\.obsidian|synthetic-plugin|Private Exports|Legacy Exports|\/Users|[A-Za-z]:\\/);
   }
+});
+
+test("Close works while a copy is loading: it cancels safely and a late result renders nothing", async () => {
+  let release: () => void = () => undefined;
+  const loadGate = new Promise<void>((resolve) => { release = resolve; });
+  const harness = await openModal({ loadGate });
+  button(harness.content, "Review").click();
+  await settle();
+  assert.equal(harness.loads.length, 1);
+  const close = button(harness.content, "Close") as FakeElement & { disabled?: boolean };
+  assert.notEqual(close.disabled, true, "Close stays enabled while loading");
+  close.click();
+  assert.equal(harness.closed(), true);
+  release();
+  await settle();
+  assert.equal(harness.content.textContent, "", "no late render after Close");
+  assert.equal(harness.applied.length, 0);
+  assert.equal(harness.opened.length, 0);
+  // A second Review while one is loading is still ignored.
+  const other = await openModal({ loadGate: new Promise<void>(() => undefined) });
+  button(other.content, "Review").click();
+  button(other.content, "Review").click();
+  await settle();
+  assert.equal(other.loads.length, 1);
+});
+
+test("Close works while discovery is pending and the late result writes nothing", async () => {
+  let release: () => void = () => undefined;
+  const discoverGate = new Promise<void>((resolve) => { release = resolve; });
+  const harness = await openModal({ discoverGate });
+  assert.match(harness.content.textContent, /Looking for kept copies/);
+  const close = button(harness.content, "Close") as FakeElement & { disabled?: boolean };
+  assert.notEqual(close.disabled, true);
+  close.click();
+  assert.equal(harness.closed(), true);
+  release();
+  await settle();
+  assert.equal(harness.content.textContent, "", "no DOM writes after Close");
+  assert.equal(harness.loads.length, 0);
+  assert.equal(harness.applied.length, 0);
+  assert.equal(harness.opened.length, 0);
+});
+
+test("the in-flight restore status never suggests that closing cancels it", async () => {
+  let release: () => void = () => undefined;
+  const applyGate = new Promise<void>((resolve) => { release = resolve; });
+  const harness = await openModal({ applyGate });
+  await toConfirm(harness);
+  button(harness.content, "Restore as new base").click();
+  await settle();
+  const status = liveText(harness.content);
+  assert.match(status, /does not stop a restore that has started/);
+  assert.doesNotMatch(status, /cancel|roll back|undo/i);
+  release();
+  await settle();
+});
+
+test("Close and Cancel are disabled honestly while a restore is in flight, and Apply cannot repeat", async () => {
+  let release: () => void = () => undefined;
+  const applyGate = new Promise<void>((resolve) => { release = resolve; });
+  const harness = await openModal({ applyGate });
+  await toConfirm(harness);
+  button(harness.content, "Restore as new base").click();
+  button(harness.content, "Restore as new base").click();
+  await settle();
+  assert.equal(harness.applied.length, 1);
+  for (const label of ["Cancel", "Back"]) {
+    const control = button(harness.content, label) as FakeElement & { disabled?: boolean };
+    control.click();
+    assert.equal(harness.closed(), false, `${label} does nothing while saving`);
+  }
+  assert.equal((button(harness.content, "Cancel") as FakeElement & { disabled?: boolean }).disabled, true);
+  release();
+  await settle();
+  assert.equal(hasButton(harness.content, "Open restored base"), true);
+});
+
+test("facts use the existing definition-list structure and base rows the title/text wrappers", async () => {
+  const longName = "A very long recovered knowledge base name ".repeat(2).trim();
+  const store = makeStore(VAULT, longName);
+  const harness = await openModal({ files: { [`${PLUGIN_DIR}/data.json.bak-kept-${stamp(1)}`]: { content: JSON.stringify(store), mtime: 1 } }, existingNames: [] });
+  // List row.
+  const listRow = harness.content.querySelector(".ent-cc-base-manager-row");
+  assert.ok(listRow?.querySelector(".ent-cc-base-manager-text .ent-cc-base-manager-title span"));
+  assert.ok(listRow?.querySelector(".ent-cc-base-manager-text .ent-cc-picker-meta"));
+  assert.ok(listRow?.querySelector(".ent-cc-base-manager-actions button"));
+  await toPreview(harness);
+  const facts = harness.content.querySelector("dl.ent-cc-sync-recovery-facts");
+  assert.ok(facts, "preview facts are a dl");
+  const rows = facts.querySelectorAll(".ent-cc-sync-recovery-fact");
+  assert.ok(rows.length >= 4);
+  for (const row of rows) {
+    assert.equal(row.querySelectorAll("dt").length, 1);
+    assert.equal(row.querySelectorAll("dd").length, 1);
+    assert.equal(row.querySelectorAll("span").length, 0, "no bare spans that run labels into values");
+  }
+  assert.equal(facts.querySelector("dt")?.textContent, "Source");
+  const baseRow = harness.content.querySelector(".ent-cc-base-manager-list .ent-cc-base-manager-row");
+  const name = baseRow?.querySelector(".ent-cc-base-manager-text .ent-cc-base-manager-title span");
+  assert.equal(name?.textContent, longName);
+  assert.ok(baseRow?.querySelector(".ent-cc-base-manager-text .ent-cc-picker-meta"));
+  assert.ok(baseRow?.querySelector(".ent-cc-base-manager-actions button"));
+  button(harness.content, "Restore this base").click();
+  button(harness.content, "Continue").click();
+  assert.ok(harness.content.querySelector("dl.ent-cc-sync-recovery-facts dt"), "confirm facts are a dl too");
+  assert.equal(harness.content.querySelectorAll(".ent-cc-sync-recovery-fact span").length, 0);
 });
 
 test("opening the list reads nothing: no candidate is loaded until Review", async () => {

@@ -7,6 +7,7 @@
  */
 import {
   RECOVERY_COPY_LIMITS,
+  checkRecoveryCopyDeclaredSize,
   parseRecoveryCopy,
   recoverySourceMatchesExactly,
   type RecoveryCopyParseResult,
@@ -86,13 +87,23 @@ export function describeRecoveryDiscovery(
   listed: number,
   inspectedFolders: number,
   unreadableFolders: number,
-  truncated: boolean,
+  partial: boolean,
+  moreKnown = false,
 ): string {
   const folders = `${inspectedFolders} ${inspectedFolders === 1 ? "folder" : "folders"} checked`;
   const plural = listed === 1 ? "file" : "files";
-  const found = listed === 0
-    ? `No candidate files were found in the ${folders}.`
-    : `${truncated ? "Showing" : "Found"} ${listed} candidate ${plural} in the ${folders}${truncated ? "; more exist" : ""}.`;
+  let found: string;
+  if (listed === 0) {
+    found = partial
+      ? `No candidate files were found in the part of the ${folders} that was examined. The scan was partial, so candidates may exist that were not examined.`
+      : `No candidate files were found in the ${folders}.`;
+  } else if (moreKnown) {
+    found = `Showing ${listed} candidate ${plural} in the ${folders}; more were found than are listed.`;
+  } else if (partial) {
+    found = `Found ${listed} candidate ${plural} in the part of the ${folders} that was examined. The scan was partial, so more may exist.`;
+  } else {
+    found = `Found ${listed} candidate ${plural} in the ${folders}.`;
+  }
   const notes = [
     "A file name is only a hint: nothing is checked until you open it, and a listed file may not be restorable.",
     "Other folders and older locations are not searched, so this is not a count of every copy that exists.",
@@ -120,9 +131,11 @@ export async function discoverRecoveryCopies(
   const seenFolders = new Set<string>();
   const matches: Array<{ path: string; origin: RecoveryCandidateOrigin }> = [];
   const seenPaths = new Set<string>();
-  let inspectedFolders = 0;
-  let unreadableFolders = 0;
-  let matchesTruncated = false;
+  // Distinct physical folders: one folder scanned under two filename rules counts once.
+  const inspectedSet = new Set<string>();
+  const unreadableSet = new Set<string>();
+  let partialScan = false;
+  let matchesBeyondStat = false;
 
   const scan = async (folder: string, origin: RecoveryCandidateOrigin, isMatch: (name: string) => boolean): Promise<void> => {
     const key = `${origin === "kept-backup" ? "k" : "e"}:${folder}`;
@@ -135,18 +148,20 @@ export async function discoverRecoveryCopies(
       entries = null;
     }
     if (entries === null) {
-      unreadableFolders += 1;
+      if (!inspectedSet.has(folder)) unreadableSet.add(folder);
       return;
     }
-    inspectedFolders += 1;
+    inspectedSet.add(folder);
+    unreadableSet.delete(folder);
     const bounded = entries.slice(0, limits.maxEntriesPerFolder);
-    if (entries.length > bounded.length) matchesTruncated = true;
+    // Unexamined entries are not evidence of more candidates, only of an incomplete scan.
+    if (entries.length > bounded.length) partialScan = true;
     for (const entry of bounded) {
       if (typeof entry !== "string" || !directChild(folder, entry) || seenPaths.has(entry)) continue;
       if (!isMatch(fileName(entry))) continue;
       seenPaths.add(entry);
       if (matches.length >= limits.maxStatted) {
-        matchesTruncated = true;
+        matchesBeyondStat = true; // a real candidate that was observed but not listed
         continue;
       }
       matches.push({ path: entry, origin });
@@ -166,7 +181,10 @@ export async function discoverRecoveryCopies(
     return { ...match, size: info?.size ?? null, mtime: info?.mtime ?? null };
   }));
   statted.sort((left, right) => (right.mtime ?? -1) - (left.mtime ?? -1) || (right.path < left.path ? -1 : right.path > left.path ? 1 : 0));
-  const truncated = matchesTruncated || statted.length > limits.maxListed;
+  const moreKnown = matchesBeyondStat || statted.length > limits.maxListed;
+  const truncated = partialScan || moreKnown;
+  const inspectedFolders = inspectedSet.size;
+  const unreadableFolders = unreadableSet.size;
   const candidates: RecoveryCandidate[] = statted.slice(0, limits.maxListed).map((item, index) => ({
     id: `copy-${index + 1}`,
     path: item.path,
@@ -180,7 +198,7 @@ export async function discoverRecoveryCopies(
     inspectedFolders,
     unreadableFolders,
     truncated,
-    summary: describeRecoveryDiscovery(candidates.length, inspectedFolders, unreadableFolders, truncated),
+    summary: describeRecoveryDiscovery(candidates.length, inspectedFolders, unreadableFolders, truncated, moreKnown),
   };
 }
 
@@ -237,7 +255,7 @@ export async function recoverySourceUnchanged(
 ): Promise<boolean> {
   try {
     const info = await host.stat(path);
-    if (info === null || info.size > RECOVERY_COPY_LIMITS.maxBytes) return false;
+    if (info === null || !checkRecoveryCopyDeclaredSize(info.size).ok) return false;
     return recoverySourceMatchesExactly(intent, await host.read(path));
   } catch {
     return false;

@@ -90,7 +90,11 @@ export class RecoveryCopyModal extends Modal {
   private chosenName = "";
   private restoredBaseId = "";
   private restoredName = "";
+  /** A copy is loading: Review and Restore are guarded, but Close and Cancel keep working. */
   private busy = false;
+  /** Apply has started: closing the window does not stop it, so Close and Cancel are disabled. */
+  private applying = false;
+  private leaveButtons: HTMLButtonElement[] = [];
   private blocked = false;
   private closed = false;
   private pageEl: HTMLElement | null = null;
@@ -160,22 +164,52 @@ export class RecoveryCopyModal extends Modal {
     this.render();
   }
 
-  private button(parent: HTMLElement, text: string, onClick: () => void, options: { cta?: boolean; disabled?: boolean; label?: string } = {}): HTMLButtonElement {
+  private button(
+    parent: HTMLElement,
+    text: string,
+    onClick: () => void,
+    options: { disabled?: boolean; label?: string; rowAction?: boolean; leave?: boolean } = {},
+  ): HTMLButtonElement {
     const button = parent.createEl("button", {
-      cls: "ent-cc-button",
+      cls: options.rowAction ? "ent-cc-button ent-cc-base-manager-action" : "ent-cc-button",
       type: "button",
       text,
       attr: options.label ? { "aria-label": options.label } : undefined,
     });
-    if (options.disabled) {
-      button.disabled = true;
-      button.setAttribute("aria-disabled", "true");
-    }
+    if (options.disabled || (options.leave && this.applying)) this.disable(button);
+    if (options.leave) this.leaveButtons.push(button);
     button.addEventListener("click", () => {
-      if (button.disabled || this.busy) return;
+      if (button.disabled) return;
+      // Close and Cancel stay usable while a copy is loading; only a restore in flight blocks them.
+      if (options.leave ? this.applying : this.busy || this.applying) return;
       onClick();
     });
     return button;
+  }
+
+  private disable(button: HTMLButtonElement): void {
+    button.disabled = true;
+    button.setAttribute("aria-disabled", "true");
+  }
+
+  /** Same row structure as the base manager: title and meta wrap, the action stays beside them. */
+  private row(list: HTMLElement, name: string, meta: string): { actions: HTMLElement } {
+    const row = list.createDiv({ cls: "ent-cc-base-manager-row" });
+    const text = row.createDiv({ cls: "ent-cc-base-manager-text" });
+    const title = text.createDiv({ cls: "ent-cc-base-manager-title" });
+    title.createSpan({ text: name, attr: { title: name } });
+    text.createDiv({ cls: "ent-cc-picker-meta", text: meta });
+    return { actions: row.createDiv({ cls: "ent-cc-base-manager-actions" }) };
+  }
+
+  /** Same definition-list structure as the Sync and recovery center facts. */
+  private factList(parent: HTMLElement, facts: ReadonlyArray<readonly [string, string]>): void {
+    const list = parent.createEl("dl", { cls: "ent-cc-sync-recovery-facts" });
+    for (const [label, value] of facts) {
+      const fact = list.createDiv({ cls: "ent-cc-sync-recovery-fact" });
+      fact.createEl("dt", { text: label });
+      fact.createEl("dd", { text: value, attr: { dir: "auto" } });
+    }
   }
 
   private heading(text: string): HTMLElement {
@@ -188,6 +222,7 @@ export class RecoveryCopyModal extends Modal {
     const page = this.pageEl;
     if (!page || this.closed) return;
     page.empty();
+    this.leaveButtons = [];
     let focus: HTMLElement | null = null;
     if (this.step === "list") focus = this.renderList(page);
     else if (this.step === "preview") focus = this.renderPreview(page);
@@ -208,18 +243,16 @@ export class RecoveryCopyModal extends Modal {
       note.createEl("p", { text: found.summary || "No folder could be checked." });
       const list = page.createDiv({ cls: "ent-cc-base-manager-list" });
       for (const candidate of found.candidates) {
-        const row = list.createDiv({ cls: "ent-cc-base-manager-row" });
-        row.createSpan({ text: candidate.displayName });
         const meta = [originLabel(candidate), candidate.mtime === null ? "date unknown" : dateLabel(new Date(candidate.mtime).toISOString()), sizeLabel(candidate.size)];
-        row.createSpan({ cls: "ent-cc-picker-meta", text: meta.join(" · ") });
-        this.button(row, "Review", () => void this.review(candidate), { label: `Review ${candidate.displayName}` });
+        const { actions } = this.row(list, candidate.displayName, meta.join(" · "));
+        this.button(actions, "Review", () => void this.review(candidate), { label: `Review ${candidate.displayName}`, rowAction: true });
       }
     }
     const actions = page.createDiv({ cls: "ent-cc-sync-recovery-actions" });
     if (this.callbacks.pickExplicit) {
       this.button(actions, "Choose another file", () => void this.pickExplicit());
     }
-    this.button(actions, "Close", () => this.close());
+    this.button(actions, "Close", () => this.close(), { leave: true });
     return heading;
   }
 
@@ -276,31 +309,25 @@ export class RecoveryCopyModal extends Modal {
       });
       const row = actions();
       this.button(row, "Back", () => this.go("list"));
-      this.button(row, "Close", () => this.close());
+      this.button(row, "Close", () => this.close(), { leave: true });
       return heading;
     }
     const parsed = this.parsed;
     if (!parsed) return heading;
     const preview = parsed.preview;
-    const facts = page.createDiv({ cls: "ent-cc-sync-recovery-facts" });
-    const fact = (label: string, value: string): void => {
-      const row = facts.createDiv({ cls: "ent-cc-sync-recovery-fact" });
-      row.createSpan({ text: label });
-      row.createEl("strong", { text: value });
-    };
-    fact("Source", preview.sourceKind === "conflict-rescue" ? "Sync conflict rescue" : "Plugin data backup");
-    fact("Date", preview.date ? dateLabel(preview.date.iso) : "Date not available");
-    fact("Format", preview.supportedSchema ? "Supported" : "Not supported");
-    fact("Vault", preview.identity === "same-vault" ? "This vault" : preview.identity === "foreign-vault" ? "A different vault" : "Could not be verified");
+    this.factList(page, [
+      ["Source", preview.sourceKind === "conflict-rescue" ? "Sync conflict rescue" : "Plugin data backup"],
+      ["Date", preview.date ? dateLabel(preview.date.iso) : "Date not available"],
+      ["Format", preview.supportedSchema ? "Supported" : "Not supported"],
+      ["Vault", preview.identity === "same-vault" ? "This vault" : preview.identity === "foreign-vault" ? "A different vault" : "Could not be verified"],
+    ]);
     page.createEl("p", { text: preview.identityGuidance });
 
     const list = page.createDiv({ cls: "ent-cc-base-manager-list" });
     for (const base of preview.bases) {
-      const row = list.createDiv({ cls: "ent-cc-base-manager-row" });
-      row.createSpan({ text: base.name });
-      row.createSpan({ cls: "ent-cc-picker-meta", text: this.baseSummary(base) });
+      const { actions: baseActions } = this.row(list, base.name, this.baseSummary(base));
       if (preview.restorable) {
-        this.button(row, "Restore this base", () => this.chooseBase(base), { label: `Restore ${base.name}` });
+        this.button(baseActions, "Restore this base", () => this.chooseBase(base), { label: `Restore ${base.name}`, rowAction: true });
       }
     }
     const disclosure = page.createDiv({ cls: "ent-cc-sync-recovery-callout is-warning" });
@@ -308,7 +335,7 @@ export class RecoveryCopyModal extends Modal {
     disclosure.createEl("p", { text: preview.privateContentDisclosure });
     const row = actions();
     this.button(row, "Back", () => this.go("list"));
-    this.button(row, "Close", () => this.close());
+    this.button(row, "Close", () => this.close(), { leave: true });
     return heading;
   }
 
@@ -349,7 +376,7 @@ export class RecoveryCopyModal extends Modal {
       this.go("confirm");
     }, { disabled: check() !== "" });
     this.button(actions, "Back", () => this.go("preview"));
-    this.button(actions, "Cancel", () => this.close());
+    this.button(actions, "Cancel", () => this.close(), { leave: true });
     const sync = (): void => {
       const text = check();
       problem.setText(text);
@@ -364,15 +391,11 @@ export class RecoveryCopyModal extends Modal {
   private renderConfirm(page: HTMLElement): HTMLElement {
     const heading = this.heading("Restore as a new base");
     const base = this.parsed?.preview.bases.find((candidate) => candidate.baseId === this.baseId);
-    const facts = page.createDiv({ cls: "ent-cc-sync-recovery-facts" });
-    const fact = (label: string, value: string): void => {
-      const row = facts.createDiv({ cls: "ent-cc-sync-recovery-fact" });
-      row.createSpan({ text: label });
-      row.createEl("strong", { text: value });
-    };
-    fact("New base name", this.chosenName);
-    fact("Preset", presetLabel(base?.preset ?? "generic"));
-    fact("Restored from", base?.name ?? "");
+    this.factList(page, [
+      ["New base name", this.chosenName],
+      ["Preset", presetLabel(base?.preset ?? "generic")],
+      ["Restored from", base?.name ?? ""],
+    ]);
     page.createEl("p", { text: "Your current knowledge bases and the active base stay as they are. No notes, folders or attachments are changed or moved." });
     page.createEl("p", { text: "Not carried over:" });
     const omitted = page.createEl("ul");
@@ -386,7 +409,7 @@ export class RecoveryCopyModal extends Modal {
     const actions = page.createDiv({ cls: "ent-cc-sync-recovery-actions" });
     this.button(actions, "Restore as new base", () => void this.apply(), { disabled: readOnly || this.blocked });
     this.button(actions, "Back", () => this.go("name"));
-    this.button(actions, "Cancel", () => this.close());
+    this.button(actions, "Cancel", () => this.close(), { leave: true });
     return heading;
   }
 
@@ -406,7 +429,9 @@ export class RecoveryCopyModal extends Modal {
       return;
     }
     this.busy = true;
-    this.setStatus("Restoring…");
+    this.applying = true;
+    for (const leave of this.leaveButtons) this.disable(leave);
+    this.setStatus("Restoring… Closing this window does not stop a restore that has started.");
     let result: RecoveryApplyResult;
     try {
       result = await this.callbacks.onApply(intentResult.intent);
@@ -414,6 +439,7 @@ export class RecoveryCopyModal extends Modal {
       result = { status: "uncertain", message: "The restore may not have finished." };
     }
     this.busy = false;
+    this.applying = false;
     if (this.closed) return;
     if (result.status === "applied") {
       this.restoredBaseId = result.baseId;
@@ -442,7 +468,7 @@ export class RecoveryCopyModal extends Modal {
     this.button(actions, "Open restored base", () => {
       void Promise.resolve(this.callbacks.onOpenRestored(this.restoredBaseId));
     });
-    this.button(actions, "Close", () => this.close());
+    this.button(actions, "Close", () => this.close(), { leave: true });
     return heading;
   }
 }
