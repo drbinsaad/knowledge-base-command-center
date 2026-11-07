@@ -1,4 +1,4 @@
-import { ItemView, Menu, Notice, Platform, setIcon, TFile, WorkspaceLeaf, normalizePath } from "obsidian";
+import { ItemView, Menu, Notice, Platform, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
 import { captureViewFocus, restoreViewFocus, readableStatus, relativeUpdatedTime, recordAvailabilitySummary } from "./view-state";
 import { DEFAULT_INSPECTOR_WIDTH, loadWorkspaceLayoutPreference, saveWorkspaceLayoutPreference, WorkspaceResizeController, type WorkspaceLayoutPreference } from "./workspace-layout";
@@ -7,7 +7,6 @@ import type { CatalogPlacementTarget } from "./main";
 import { IndexManagerModal, type ManagerTab } from "./index-manager";
 import { ExportImportCenterModal } from "./portability-modal";
 import { PortfolioTransferModal } from "./portfolio-modal";
-import { MAX_PORTABLE_PACKAGE_BYTES } from "./portability";
 import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge-base-modal";
 import { LibraryEditorModal, ManageLibrariesModal } from "./library-modal";
 import { resolveLibraryIconId } from "./library-icons";
@@ -28,13 +27,10 @@ import { MembershipExplanationModal } from "./membership-explanation-modal";
 import { CreatedNoteRecoveryModal } from "./created-note-recovery-modal";
 import { localeInvariantTaxonomyKey } from "./taxonomy-health";
 import {
-  assertPersonalBackupMatchesVault,
-  applyPersonalBackupToData,
   buildCurriculumTree,
   canonicalPath,
   childSubheadings,
   curriculumChildPaths,
-  createPersonalBackup,
   curriculumDescendantPaths,
   CurriculumDomainTree,
   curriculumSiblingPaths,
@@ -63,7 +59,6 @@ import {
   moveCurriculumVisual,
   pathIsInIndexFolderSources,
   pathIsInsideFolder,
-  parsePersonalBackup,
   recordBelongsToIndex,
   resolveExpectedParentPath,
   roleLabel,
@@ -98,11 +93,9 @@ import {
   collectionTargets,
   ConfirmModal,
   createOpenedBaseGuard,
-  deliverJsonExport,
   IndexGroupModal,
   KnowledgeNoteModal,
   type NoteDestinationSeed,
-  requestJsonImport,
   RecordPickerModal,
   TextPromptModal,
   TopicEditorModal,
@@ -7341,132 +7334,6 @@ export class EntVaultCommandCenterView extends ItemView {
         })));
     }
     menu.showAtMouseEvent(event);
-  }
-
-  private async exportOrganizationBackup(): Promise<void> {
-    const ownsBase = this.createOpenedBaseGuard();
-    try {
-      if (!ownsBase()) return;
-      const now = new Date();
-      const backup = createPersonalBackup(
-        this.plugin.data,
-        now.toISOString(),
-        this.plugin.getVaultId(),
-        this.plugin.getActiveKnowledgeBaseId(),
-        this.plugin.data.settings.workspaceName,
-      );
-      const workspaceName = this.plugin.data.settings.workspaceName;
-      const slug = workspaceName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "knowledge-command-center";
-      const delivery = await deliverJsonExport(this.plugin, "backup", `${slug}-backup`, backup, {
-        contentEl: this.contentEl,
-        date: now,
-      });
-      if (delivery.medium === "vault") {
-        if (!ownsBase()) return;
-        this.plugin.recordRecoveryExport(now.getTime());
-        new Notice("Backup saved in the export folder inside the vault. Source notes were not included.");
-        return;
-      }
-      this.plugin.recordRecoveryExport(now.getTime());
-      new Notice("Organization backup exported. Source notes were not included.");
-    } catch (error) {
-      if (ownsBase()) new Notice(errorMessage(error));
-    }
-  }
-
-  private importOrganizationBackup(): void {
-    const ownsBase = this.createOpenedBaseGuard();
-    requestJsonImport(this.app, this.plugin, {
-      title: "Choose an organization backup JSON",
-      maxBytes: MAX_PORTABLE_PACKAGE_BYTES,
-      oversizeMessage: "The selected JSON is larger than the 10 MB import limit.",
-      emptyVaultMessage: "No JSON files were found in the vault. Copy a backup JSON into the vault, then try again.",
-      guard: ownsBase,
-      run: (task) => {
-        void task().catch((error: unknown) => {
-          if (ownsBase()) new Notice(errorMessage(error));
-        });
-      },
-      onValue: (value) => { this.confirmOrganizationImport(value, ownsBase); },
-    });
-  }
-
-  private confirmOrganizationImport(input: unknown, ownsBase = this.createOpenedBaseGuard()): void {
-    if (!ownsBase()) return;
-    void Promise.resolve(input).then((value) => {
-      if (!ownsBase()) return;
-      const backup = parsePersonalBackup(value);
-      const recoveryCheck = assertPersonalBackupMatchesVault(
-        backup,
-        this.plugin.getVaultId(),
-        (path) => this.app.vault.getAbstractFileByPath(normalizePath(path)) !== null,
-        this.plugin.getActiveKnowledgeBaseId(),
-        this.plugin.data.settings.workspaceName,
-        this.plugin.data.settings.workspaceMode,
-        true,
-      );
-      const verification = recoveryCheck.identity === "verified"
-        ? recoveryCheck.baseIdentity === "verified"
-          ? "Vault, knowledge-base, and preset identities verified."
-          : recoveryCheck.baseIdentity === "cross-base-override"
-            ? `Vault and preset verified; source “${backup.sourceBaseName}” and destination “${this.plugin.data.settings.workspaceName}” are different knowledge bases.`
-            : "Vault identity verified; this v1–v6 backup has no knowledge-base identity or preset."
-        : recoveryCheck.referencedPathCount > 0
-          ? `Legacy identity unverified; ${recoveryCheck.existingPathCount} of ${recoveryCheck.referencedPathCount} unique referenced paths were found, meeting the required at-least-half threshold of ${recoveryCheck.requiredPathCount} (50%).`
-          : "Legacy identity unverified; this backup contains no note paths to preflight.";
-      const allowBaseOverride = recoveryCheck.baseIdentity !== "verified";
-      const openFinalConfirmation = (): void => {
-        if (!ownsBase()) return;
-        new ConfirmModal(
-          this.app,
-          "Restore organization backup?",
-          `${verification} Replace current personal collections, index membership and visual groups, pins, next list, saved views, and snapshots with the private backup from ${backup.exportedAt || "an unknown date"}? Source notes will not be changed.`,
-          "Import backup",
-          async () => {
-            if (!ownsBase()) return;
-            // Re-check immediately before mutation so no alternate path can
-            // bypass the vault/base/preset boundary or the explicit override.
-            assertPersonalBackupMatchesVault(
-              backup,
-              this.plugin.getVaultId(),
-              (path) => this.app.vault.getAbstractFileByPath(normalizePath(path)) !== null,
-              this.plugin.getActiveKnowledgeBaseId(),
-              this.plugin.data.settings.workspaceName,
-              this.plugin.data.settings.workspaceMode,
-              allowBaseOverride,
-            );
-            await this.plugin.mutate("Import organization backup", () => {
-              applyPersonalBackupToData(this.plugin.data, backup);
-            }, {
-              includeSettings: true,
-              includePortableIndex: true,
-              includeLayoutSnapshots: true,
-              requireUndo: true,
-              normalizeAfterRestore: true,
-            });
-            if (!ownsBase()) return;
-            new Notice("Organization backup imported. Undo is available.");
-          },
-        ).open();
-      };
-      if (!allowBaseOverride) {
-        openFinalConfirmation();
-        return;
-      }
-      new ConfirmModal(
-        this.app,
-        recoveryCheck.baseIdentity === "cross-base-override"
-          ? "Restore into a different knowledge base?"
-          : "Restore from an unverified source base?",
-        recoveryCheck.baseIdentity === "cross-base-override"
-          ? `This recovery belongs to “${backup.sourceBaseName}” (${backup.sourceBaseId}). You are explicitly choosing “${this.plugin.data.settings.workspaceName}” (${this.plugin.getActiveKnowledgeBaseId()}) as the destination. The ${backup.sourceWorkspaceMode === "ent-clinical" ? "ENT clinical" : "Generic"} preset matches.`
-          : `This v1–v6 recovery does not identify its source knowledge base or preset. You are explicitly choosing “${this.plugin.data.settings.workspaceName}” as the destination despite that uncertainty.`,
-        "Continue to restore",
-        () => openFinalConfirmation(),
-      ).open();
-    }).catch((error) => {
-      if (ownsBase()) new Notice(errorMessage(error));
-    });
   }
 
   private saveCurrentSearch(): void {

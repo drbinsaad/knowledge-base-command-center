@@ -831,7 +831,6 @@ test("export filenames stamp the local calendar day instead of the UTC day", () 
   for (const file of [
     "../src/portfolio-modal.ts",
     "../src/portability-modal.ts",
-    "../src/view.ts",
   ]) {
     const source = readFileSync(new URL(file, import.meta.url), "utf8");
     assert.match(source, /deliverJsonExport\(/u, file);

@@ -27,7 +27,6 @@ import {
   BUILTIN_LIBRARY_DEFINITIONS,
   buildCurriculumTree,
   createDefaultStore,
-  createPersonalBackup,
   DEFAULT_EXPORTS_FOLDER,
   emptyCurriculumTree,
   libraryTabId,
@@ -4621,124 +4620,6 @@ test("portability center requires the separate cross-base override before mutate
   assert.deepEqual(plugin.data, before);
 });
 
-test("direct organization recovery refuses to apply when safe Undo cannot be guaranteed", async () => {
-  const data = migrateData(null);
-  data.settings.workspaceName = "ENT";
-  const backup = createPersonalBackup(
-    data,
-    "2026-08-08T00:00:00.000Z",
-    "vault-shared",
-    "base-ent",
-    "ENT",
-  );
-  let mutateOptions: { requireUndo?: boolean; includeSettings?: boolean } | null = null;
-  const plugin = {
-    data,
-    getVaultId: () => "vault-shared",
-    getActiveKnowledgeBaseId: () => "base-ent",
-    async mutate(
-      _label: string,
-      _action: () => void,
-      options: { requireUndo?: boolean; includeSettings?: boolean },
-    ): Promise<void> {
-      mutateOptions = options;
-      if (options.requireUndo) throw new Error("simulated Undo budget refusal");
-    },
-  };
-  const view = Object.create(EntVaultCommandCenterView.prototype) as {
-    app: { vault: { getAbstractFileByPath(path: string): null } };
-    plugin: typeof plugin;
-    confirmOrganizationImport(input: Promise<unknown>, ownsBase: () => boolean): void;
-  };
-  view.app = { vault: { getAbstractFileByPath: () => null } };
-  view.plugin = plugin;
-  const opened: Array<{ onConfirm(): void | Promise<void> }> = [];
-  const hadOwnOpen = Object.prototype.hasOwnProperty.call(ConfirmModal.prototype, "open");
-  const originalOpen = Object.getOwnPropertyDescriptor(ConfirmModal.prototype, "open");
-  ConfirmModal.prototype.open = function captureConfirm(): void {
-    opened.push(this);
-  };
-  try {
-    view.confirmOrganizationImport(Promise.resolve(backup), () => true);
-    await Promise.resolve();
-    await Promise.resolve();
-    assert.equal(opened.length, 1, "an exact-base recovery proceeds directly to the final confirmation");
-    await assert.rejects(Promise.resolve(opened[0]?.onConfirm()), /Undo budget refusal/i);
-    assert.equal(mutateOptions?.requireUndo, true);
-    assert.equal(mutateOptions?.includeSettings, true, "recovery v12 must capture the prior Library display settings");
-  } finally {
-    if (hadOwnOpen && originalOpen) Object.defineProperty(ConfirmModal.prototype, "open", originalOpen);
-    else Reflect.deleteProperty(ConfirmModal.prototype, "open");
-  }
-});
-
-test("standalone v10 recovery preserves linked sources and repairs portable membership in saved snapshots", async () => {
-  const source = migrateData(null);
-  source.settings.workspaceMode = "generic";
-  source.settings.workspaceName = "Research";
-  source.portableIndex.groups = [{ id: "top-group", title: "Top", order: 0 }];
-  source.portableIndex.subjects = [{ id: "top", title: "Top", groupId: "top-group", parentId: null, order: 0, indexed: true, configuredId: "", recordKind: "topic" }];
-  source.portableIndex.resolvedPathBySubjectId = { top: "Outside/Top.md" };
-  source.directIndexPaths = [];
-  const snapshotData = migrateData(null);
-  snapshotData.settings.workspaceMode = "generic";
-  snapshotData.settings.primaryFolder = "Saved Root";
-  snapshotData.portableIndex.groups = [{ id: "saved-group", title: "Saved", order: 0 }];
-  snapshotData.portableIndex.subjects = [{ id: "saved", title: "Saved", groupId: "saved-group", parentId: null, order: 0, indexed: true, configuredId: "", recordKind: "topic" }];
-  snapshotData.portableIndex.resolvedPathBySubjectId = { saved: "Outside/Saved.md" };
-  source.layoutSnapshots = [snapshotPersonal(snapshotData, "Saved", true, true)];
-  const raw = structuredClone(createPersonalBackup(
-    source,
-    "2026-08-08T00:00:00.000Z",
-    "vault-shared",
-    "base-research",
-    "Research",
-  )) as unknown as Record<string, unknown>;
-  raw.version = 10;
-  delete raw.indexFolderSourcesIncluded;
-  delete raw.indexFolderSources;
-  raw.directIndexPaths = [];
-  const rawSnapshot = (raw.layoutSnapshots as Array<Record<string, unknown>>)[0];
-  delete rawSnapshot.indexFolderSources;
-  rawSnapshot.directIndexPaths = [];
-
-  const data = migrateData(null);
-  data.settings.workspaceMode = "generic";
-  data.settings.workspaceName = "Research";
-  data.indexFolderSources = [{ id: "destination", path: "Destination", origin: "user" }];
-  const plugin = {
-    data,
-    getVaultId: () => "vault-shared",
-    getActiveKnowledgeBaseId: () => "base-research",
-    async mutate(_label: string, action: () => void): Promise<void> { action(); },
-  };
-  const view = Object.create(EntVaultCommandCenterView.prototype) as {
-    app: { vault: { getAbstractFileByPath(path: string): null } };
-    plugin: typeof plugin;
-    confirmOrganizationImport(input: Promise<unknown>, ownsBase: () => boolean): void;
-  };
-  view.app = { vault: { getAbstractFileByPath: () => null } };
-  view.plugin = plugin;
-  const opened: Array<{ onConfirm(): void | Promise<void> }> = [];
-  const originalOpen = Object.getOwnPropertyDescriptor(ConfirmModal.prototype, "open");
-  ConfirmModal.prototype.open = function captureConfirm(): void { opened.push(this); };
-  try {
-    view.confirmOrganizationImport(Promise.resolve(raw), () => true);
-    await Promise.resolve();
-    await Promise.resolve();
-    assert.equal(opened.length, 1);
-    await opened[0]?.onConfirm();
-  } finally {
-    if (originalOpen) Object.defineProperty(ConfirmModal.prototype, "open", originalOpen);
-    else Reflect.deleteProperty(ConfirmModal.prototype, "open");
-  }
-
-  assert.deepEqual(data.indexFolderSources.map((sourceEntry) => sourceEntry.path), ["Destination"]);
-  assert.deepEqual(data.directIndexPaths, ["Outside/Top.md"]);
-  assert.deepEqual(data.layoutSnapshots[0]?.indexFolderSources.map((sourceEntry) => sourceEntry.path), ["Saved Root"]);
-  assert.deepEqual(data.layoutSnapshots[0]?.directIndexPaths, ["Outside/Saved.md"]);
-});
-
 test("template fallback stays transactional and does not mutate the selected import package", async () => {
   const data = migrateData(null);
   data.settings.defaultNewNoteMode = "template";
@@ -7489,51 +7370,58 @@ test("index manager keystrokes filter one cached vault snapshot instead of resca
   }
 });
 
-test("oversized JSON is refused before it is read at the backup import site", async () => {
+test("oversized JSON is refused before it is read at the portability import site", async () => {
   const dom = createFakeDom();
   const oversized = { size: 10 * 1024 * 1024 + 1, text: async (): Promise<string> => "{}" };
 
   Notice.messages.length = 0;
-  let backupValues = 0;
-  const view = Object.create(EntVaultCommandCenterView.prototype) as {
+  let parsedValues = 0;
+  const center = Object.create(ExportImportCenterModal.prototype) as {
     app: unknown;
     plugin: unknown;
-    loadedBaseId: string;
-    loadedDataEpoch: number;
-    importOrganizationBackup(): void;
-    confirmOrganizationImport(value: unknown, ownsBase?: () => boolean): void;
+    busyAction: null;
+    chooseImportFile(): void;
+    render(): void;
+    setImportValue(value: unknown, sourceLabel: string): void;
   };
-  view.app = {};
-  view.plugin = { getActiveKnowledgeBaseId: () => "base-a", getDataEpoch: () => 1 };
-  view.loadedBaseId = "base-a";
-  view.loadedDataEpoch = 1;
-  view.confirmOrganizationImport = () => { backupValues += 1; };
+  center.app = {};
+  center.plugin = {};
+  center.busyAction = null;
+  center.render = () => undefined;
+  center.setImportValue = () => { parsedValues += 1; };
+  const originalConsoleError = console.error;
+  console.error = () => undefined;
 
-  await withCreateEl(dom.document, async (created) => {
-    view.importOrganizationBackup();
-    const input = created.find((element) => element.tagName === "input");
-    assert.ok(input);
-    (input as unknown as { files: unknown[] }).files = [oversized];
-    input.dispatch("change");
-    await settleMicrotasks();
-  });
+  try {
+    await withCreateEl(dom.document, async (created) => {
+      center.chooseImportFile();
+      const input = created.find((element) => element.tagName === "input");
+      assert.ok(input);
+      (input as unknown as { files: unknown[] }).files = [oversized];
+      input.dispatch("change");
+      await settleMicrotasks();
+    });
 
-  assert.equal(backupValues, 0, "the backup import never parsed the oversized file");
-  assert.equal(Notice.messages.filter((message) => message.includes("larger than the 10 MB import limit")).length, 1);
+    assert.equal(parsedValues, 0, "the import never parsed the oversized file");
+    assert.equal(Notice.messages.filter((message) => message.includes("larger than the 10 MB import limit")).length, 1);
 
-  // A file inside the cap still reaches the parser, so the guard is a cap and
-  // not a blanket refusal.
-  Notice.messages.length = 0;
-  await withCreateEl(dom.document, async (created) => {
-    view.importOrganizationBackup();
-    const input = created.find((element) => element.tagName === "input");
-    assert.ok(input);
-    (input as unknown as { files: unknown[] }).files = [{ size: 12, text: async (): Promise<string> => '{"kind":"x"}' }];
-    input.dispatch("change");
-    await settleMicrotasks();
-  });
-  assert.equal(backupValues, 1);
-  assert.deepEqual(Notice.messages, []);
+    // A file inside the cap still reaches the parser, so the guard is a cap and
+    // not a blanket refusal. Parsing a non-export object is refused by the real
+    // parser, which proves the value was read and forwarded.
+    Notice.messages.length = 0;
+    await withCreateEl(dom.document, async (created) => {
+      center.chooseImportFile();
+      const input = created.find((element) => element.tagName === "input");
+      assert.ok(input);
+      (input as unknown as { files: unknown[] }).files = [{ size: 12, text: async (): Promise<string> => '{"kind":"x"}' }];
+      input.dispatch("change");
+      await settleMicrotasks();
+    });
+    assert.equal(Notice.messages.filter((message) => message.includes("larger than the 10 MB import limit")).length, 0);
+    assert.equal(Notice.messages.length, 1, "the in-cap file reached the export parser, which refused its content");
+  } finally {
+    console.error = originalConsoleError;
+  }
 });
 
 test("the shared stale-base guard blocks every later action and notices exactly once", () => {

@@ -8,24 +8,8 @@ import {
   compareSemanticVersions,
   isSemanticVersion,
   planUpdateAnnouncement,
-  UPDATE_ANNOUNCEMENT_0_12_0,
-  UPDATE_ANNOUNCEMENT_0_16_0,
-  UPDATE_ANNOUNCEMENT_0_16_1,
-  UPDATE_ANNOUNCEMENT_0_17_0,
-  UPDATE_ANNOUNCEMENT_0_18_0,
-  UPDATE_ANNOUNCEMENT_0_19_0,
-  UPDATE_ANNOUNCEMENT_0_19_1,
-  UPDATE_ANNOUNCEMENT_0_20_0,
-  UPDATE_ANNOUNCEMENT_0_20_1,
-  UPDATE_ANNOUNCEMENT_0_21_0,
-  UPDATE_ANNOUNCEMENT_0_22_0,
-  UPDATE_ANNOUNCEMENT_0_23_0,
-  UPDATE_ANNOUNCEMENT_0_23_1,
-  UPDATE_ANNOUNCEMENT_0_24_0,
-  UPDATE_ANNOUNCEMENT_0_25_0,
-  UPDATE_ANNOUNCEMENT_0_25_1,
-  UPDATE_ANNOUNCEMENT_0_26_0,
   UPDATE_ANNOUNCEMENT_0_26_1,
+  updateAnnouncementForVersion,
   type UpdateAnnouncement,
 } from "../src/update-announcement.ts";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
@@ -44,66 +28,13 @@ test("0.26.1 announces the safety fixes once with exact release identity", () =>
   assert.equal(planUpdateAnnouncement("0.26.1-rc.1", "0.26.0", true).announcement, null);
 });
 
-test("0.26.0 announces workspace controls and attachments once with exact release identity", () => {
-  const result = planUpdateAnnouncement("0.26.0", "0.25.1", true);
-  assert.equal(result.announcement, UPDATE_ANNOUNCEMENT_0_26_0);
-  assert.equal(result.nextHighestObservedVersion, "0.26.0");
-  assert.equal(result.shouldPersist, true);
-  assert.equal(UPDATE_ANNOUNCEMENT_0_26_0.releaseUrl, "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.26.0");
-  assert.match(UPDATE_ANNOUNCEMENT_0_26_0.intro, /Physical iPhone\/iPad testing remains unverified/u);
-  const highlights = UPDATE_ANNOUNCEMENT_0_26_0.highlights.join("\n");
-  for (const term of ["Details", "Filters", "Attachments", "Resize", "local to this device", "full-width", "unchanged"]) assert.ok(highlights.includes(term));
-  assert.equal(planUpdateAnnouncement("0.26.0", "0.26.0", true).announcement, null);
-  assert.equal(planUpdateAnnouncement("0.26.0", null, false).announcement, null);
-  assert.equal(planUpdateAnnouncement("0.25.1", "0.26.0", true).announcement, null);
-  assert.equal(planUpdateAnnouncement("0.26.0-rc.1", "0.25.1", true).announcement, null);
-});
-
-test("0.25.1 announces readable record details once with exact release identity and honest device limits", () => {
-  const result = planUpdateAnnouncement("0.25.1", "0.25.0", true);
-  assert.equal(result.announcement, UPDATE_ANNOUNCEMENT_0_25_1);
-  assert.equal(result.nextHighestObservedVersion, "0.25.1");
-  assert.equal(result.shouldPersist, true);
-  assert.equal(UPDATE_ANNOUNCEMENT_0_25_1.releaseUrl, "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.25.1");
-  assert.match(UPDATE_ANNOUNCEMENT_0_25_1.intro, /Long titles and backlinks now wrap/u);
-  assert.match(UPDATE_ANNOUNCEMENT_0_25_1.intro, /Physical iPhone\/iPad testing remains unverified/u);
-  assert.match(UPDATE_ANNOUNCEMENT_0_25_1.highlights.join("\n"), /mobile header stays fixed/u);
-  assert.equal(planUpdateAnnouncement("0.25.1", "0.25.1", true).announcement, null);
-  assert.equal(planUpdateAnnouncement("0.25.1", null, false).announcement, null);
-  assert.equal(planUpdateAnnouncement("0.25.0", "0.25.1", true).announcement, null);
-  assert.equal(planUpdateAnnouncement("0.25.1-rc.1", "0.25.0", true).announcement, null);
-});
-
-test("0.25.0 announces attachments and plain language with exact release identity and honest device limits", () => {
-  const result = planUpdateAnnouncement("0.25.0", "0.24.0", true);
-  assert.equal(result.announcement, UPDATE_ANNOUNCEMENT_0_25_0);
-  assert.equal(result.nextHighestObservedVersion, "0.25.0");
-  assert.equal(UPDATE_ANNOUNCEMENT_0_25_0.releaseUrl, "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.25.0");
-  assert.match(UPDATE_ANNOUNCEMENT_0_25_0.intro, /Physical iPhone\/iPad testing remains unverified/u);
-  const highlights = UPDATE_ANNOUNCEMENT_0_25_0.highlights.join("\n");
-  for (const claim of [/up to 20 files of any type/u, /Run setup again…/u, /hotkeys keep working/u, /Arrange and Undo/u, /Data formats are unchanged from 0\.24\.0/u]) assert.match(highlights, claim);
-  assert.equal(planUpdateAnnouncement("0.25.0", "0.25.0", true).announcement, null, "shown once");
-});
-
-test("0.24.0 announces Collections with exact release identity and honest device limits", () => {
-  const result = planUpdateAnnouncement("0.24.0", "0.23.1", true);
-  assert.equal(result.announcement, UPDATE_ANNOUNCEMENT_0_24_0);
-  assert.equal(result.nextHighestObservedVersion, "0.24.0");
-  assert.equal(result.shouldPersist, true);
-  assert.equal(UPDATE_ANNOUNCEMENT_0_24_0.releaseUrl, "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.24.0");
-  assert.match(UPDATE_ANNOUNCEMENT_0_24_0.intro, /Physical iPhone\/iPad and two-device Sync testing remain unverified/u);
-  const highlights = UPDATE_ANNOUNCEMENT_0_24_0.highlights.join("\n");
-  for (const claim of [/New collection and Add notes/u, /searchable checkboxes/u, /Cancel creates nothing/u, /Undo restores structure and membership together/u, /preserve primary placement/u, /Done — no changes needed/u, /without creating it again/u, /Local-vault covers only/u]) assert.match(highlights, claim);
-});
-
-test("0.24.0 announcement is one-time and does not replay for a fresh install or downgrade", () => {
-  const repeat = planUpdateAnnouncement("0.24.0", "0.24.0", true);
-  assert.equal(repeat.announcement, null);
-  assert.equal(repeat.shouldPersist, false);
-  assert.equal(planUpdateAnnouncement("0.24.0", null, false).announcement, null);
-  assert.equal(planUpdateAnnouncement("0.23.1", "0.24.0", true).announcement, null);
-  assert.equal(planUpdateAnnouncement("0.24.0-rc.1", "0.23.1", true).announcement, null);
-  assert.equal(planUpdateAnnouncement("0.24.0+local", "0.23.1", true).announcement, null);
+test("the catalogue holds only the current release, which is the only entry the plugin can look up", () => {
+  assert.equal(updateAnnouncementForVersion("0.26.1"), UPDATE_ANNOUNCEMENT_0_26_1);
+  assert.equal(UPDATE_ANNOUNCEMENT_0_26_1.version, "0.26.1");
+  for (const other of ["0.26.0", "0.25.1", "0.12.0", "0.26.2", "0.26.1-rc.1", "0.26.1+local", "development"]) {
+    assert.equal(updateAnnouncementForVersion(other), null, other);
+  }
+  assert.equal(planUpdateAnnouncement("0.26.0", "0.25.1", true).announcement, null, "an uncatalogued release is never announced");
 });
 
 test("semantic version comparison handles large identifiers, prereleases, builds, and invalid values", () => {
@@ -121,312 +52,57 @@ test("semantic version comparison handles large identifiers, prereleases, builds
 });
 
 test("fresh installs establish a baseline without showing an update window", () => {
-  const first = planUpdateAnnouncement("0.12.0", null, false);
+  const first = planUpdateAnnouncement("0.26.1", null, false);
   assert.equal(first.announcement, null);
   assert.equal(first.shouldPersist, true);
-  assert.equal(first.nextHighestObservedVersion, "0.12.0");
+  assert.equal(first.nextHighestObservedVersion, "0.26.1");
 
-  const later = planUpdateAnnouncement("0.12.0", first.nextHighestObservedVersion, true);
+  const later = planUpdateAnnouncement("0.26.1", first.nextHighestObservedVersion, true);
   assert.equal(later.announcement, null);
   assert.equal(later.shouldPersist, false);
 });
 
-test("existing installs see each catalogued upgrade once and receive the exact release URL", () => {
-  const noPriorMarker = planUpdateAnnouncement("0.12.0", null, true);
-  assert.equal(noPriorMarker.announcement?.version, "0.12.0");
-  assert.equal(noPriorMarker.announcement?.releaseUrl, "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.12.0");
-  assert.equal(noPriorMarker.nextHighestObservedVersion, "0.12.0");
+test("existing installs see the catalogued upgrade once and receive the exact release URL", () => {
+  const noPriorMarker = planUpdateAnnouncement("0.26.1", null, true);
+  assert.equal(noPriorMarker.announcement?.version, "0.26.1");
+  assert.equal(noPriorMarker.announcement?.releaseUrl, "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.26.1");
+  assert.equal(noPriorMarker.nextHighestObservedVersion, "0.26.1");
 
-  const repeat = planUpdateAnnouncement("0.12.0", noPriorMarker.nextHighestObservedVersion, true);
+  const repeat = planUpdateAnnouncement("0.26.1", noPriorMarker.nextHighestObservedVersion, true);
   assert.equal(repeat.announcement, null);
   assert.equal(repeat.shouldPersist, false);
 
-  const fromEarlierRelease = planUpdateAnnouncement("0.12.0", "0.11.0", true);
-  assert.equal(fromEarlierRelease.announcement?.version, "0.12.0");
-  assert.equal(fromEarlierRelease.nextHighestObservedVersion, "0.12.0");
-});
-
-test("0.16.0 has curated explicit-membership and safety news", () => {
-  const upgrade = planUpdateAnnouncement("0.16.0", "0.15.0", true);
-  assert.equal(upgrade.announcement, UPDATE_ANNOUNCEMENT_0_16_0);
-  assert.equal(UPDATE_ANNOUNCEMENT_0_16_0.highlights.length, 5);
-  assert.match(UPDATE_ANNOUNCEMENT_0_16_0.highlights.join("\n"), /default new-note folder/u);
-  assert.match(UPDATE_ANNOUNCEMENT_0_16_0.highlights.join("\n"), /direct membership/u);
-  assert.match(UPDATE_ANNOUNCEMENT_0_16_0.highlights.join("\n"), /linked folder is a named, removable Index source/u);
-  assert.match(UPDATE_ANNOUNCEMENT_0_16_0.highlights.join("\n"), /rechecks the exact preview/u);
-  assert.equal(
-    UPDATE_ANNOUNCEMENT_0_16_0.releaseUrl,
-    "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.16.0",
-  );
-});
-
-test("0.16.1 has curated legacy-folder review news", () => {
-  const upgrade = planUpdateAnnouncement("0.16.1", "0.16.0", true);
-  assert.equal(upgrade.announcement, UPDATE_ANNOUNCEMENT_0_16_1);
-  assert.equal(UPDATE_ANNOUNCEMENT_0_16_1.highlights.length, 5);
-  const highlights = UPDATE_ANNOUNCEMENT_0_16_1.highlights.join("\n");
-  assert.match(highlights, /legacy linked folder/u);
-  assert.match(highlights, /durable direct members/u);
-  assert.match(highlights, /Obsidian Sync is finished/u);
-  assert.match(highlights, /Direct, Linked folder, Imported placeholder, or Protected source/u);
-  assert.equal(
-    UPDATE_ANNOUNCEMENT_0_16_1.releaseUrl,
-    "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.16.1",
-  );
-});
-
-test("0.17.0 has curated membership explanation and placeholder-resolution news", () => {
-  const upgrade = planUpdateAnnouncement("0.17.0", "0.16.1", true);
-  assert.equal(upgrade.announcement, UPDATE_ANNOUNCEMENT_0_17_0);
-  assert.equal(UPDATE_ANNOUNCEMENT_0_17_0.highlights.length, 5);
-  const highlights = UPDATE_ANNOUNCEMENT_0_17_0.highlights.join("\n");
-  assert.match(highlights, /Why this appears/u);
-  assert.match(highlights, /never link automatically/u);
-  assert.match(highlights, /large placeholder imports require an extra confirmation/u);
-  assert.match(highlights, /undo the import/u);
-  assert.equal(
-    UPDATE_ANNOUNCEMENT_0_17_0.releaseUrl,
-    "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.17.0",
-  );
-});
-
-test("0.18.0 has curated Global Note Organizer and safety news", () => {
-  const upgrade = planUpdateAnnouncement("0.18.0", "0.17.0", true);
-  assert.equal(upgrade.announcement, UPDATE_ANNOUNCEMENT_0_18_0);
-  assert.equal(UPDATE_ANNOUNCEMENT_0_18_0.highlights.length, 5);
-  const highlights = UPDATE_ANNOUNCEMENT_0_18_0.highlights.join("\n");
-  assert.match(highlights, /Notes → Destinations → Review/u);
-  assert.match(highlights, /untargeted bases stay unchanged/u);
-  assert.match(highlights, /color-independent organization indicator/u);
-  assert.match(highlights, /durable Undo/u);
-  assert.match(highlights, /never creates, moves, renames, deletes, or rewrites Markdown/u);
-  assert.equal(
-    UPDATE_ANNOUNCEMENT_0_18_0.releaseUrl,
-    "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.18.0",
-  );
-});
-
-test("0.19.0 has curated in-place creation and return-navigation news", () => {
-  const upgrade = planUpdateAnnouncement("0.19.0", "0.18.0", true);
-  assert.equal(upgrade.announcement, UPDATE_ANNOUNCEMENT_0_19_0);
-  assert.equal(UPDATE_ANNOUNCEMENT_0_19_0.highlights.length, 5);
-  const highlights = UPDATE_ANNOUNCEMENT_0_19_0.highlights.join("\n");
-  assert.match(highlights, /Create note here/u);
-  assert.match(highlights, /before file creation/u);
-  assert.match(highlights, /beside the organization indicator/u);
-  assert.match(highlights, /survive Obsidian restarts/u);
-  assert.match(highlights, /device-local/u);
-  assert.equal(
-    UPDATE_ANNOUNCEMENT_0_19_0.releaseUrl,
-    "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.19.0",
-  );
-});
-
-test("0.19.1 has curated cross-Mac startup reconciliation news", () => {
-  const upgrade = planUpdateAnnouncement("0.19.1", "0.19.0", true);
-  assert.equal(upgrade.announcement, UPDATE_ANNOUNCEMENT_0_19_1);
-  assert.equal(UPDATE_ANNOUNCEMENT_0_19_1.highlights.length, 4);
-  const highlights = UPDATE_ANNOUNCEMENT_0_19_1.highlights.join("\n");
-  assert.match(highlights, /workspace layout becomes ready/u);
-  assert.match(highlights, /initial metadata scan finishes/u);
-  assert.match(highlights, /false No linked note placeholders/u);
-  assert.match(highlights, /does not change synced KBCC organization/u);
-  assert.match(highlights, /enabled on each device/u);
-  assert.equal(
-    UPDATE_ANNOUNCEMENT_0_19_1.releaseUrl,
-    "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.19.1",
-  );
-});
-
-test("0.20.0 has curated workspace and safety news without replaying it", () => {
-  const upgrade = planUpdateAnnouncement("0.20.0", "0.19.1", true);
-  assert.equal(upgrade.announcement, UPDATE_ANNOUNCEMENT_0_20_0);
-  assert.equal(upgrade.nextHighestObservedVersion, "0.20.0");
-  assert.equal(UPDATE_ANNOUNCEMENT_0_20_0.highlights.length, 5);
-  const highlights = UPDATE_ANNOUNCEMENT_0_20_0.highlights.join("\n");
-  for (const claim of [
-    /explicit search scope/u,
-    /keyboard focus survive same-page refreshes/u,
-    /Settings and import-completion buttons keep readable labels/u,
-    /compact mobile Settings spacing/u,
-    /Unseen offline edits are preserved in conflict rescue/u,
-    /YAML frontmatter/u,
-    /cold-search preparation is chunked and cancellable/u,
-  ]) assert.match(highlights, claim);
-  assert.equal(
-    UPDATE_ANNOUNCEMENT_0_20_0.releaseUrl,
-    "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.20.0",
-  );
-  const repeat = planUpdateAnnouncement("0.20.0", upgrade.nextHighestObservedVersion, true);
-  assert.equal(repeat.announcement, null);
-  assert.equal(repeat.shouldPersist, false);
-  assert.equal(planUpdateAnnouncement("0.20.0", null, false).announcement, null, "fresh installs establish a baseline without an upgrade notice");
+  const fromEarlierRelease = planUpdateAnnouncement("0.26.1", "0.11.0", true);
+  assert.equal(fromEarlierRelease.announcement?.version, "0.26.1");
+  assert.equal(fromEarlierRelease.nextHighestObservedVersion, "0.26.1");
 });
 
 test("downgrades never replay an announcement and prerelease precedence stays deterministic", () => {
-  const downgrade = planUpdateAnnouncement("0.12.0", "0.13.0", true);
+  const downgrade = planUpdateAnnouncement("0.26.1", "0.27.0", true);
   assert.equal(downgrade.announcement, null);
-  assert.equal(downgrade.nextHighestObservedVersion, "0.13.0");
+  assert.equal(downgrade.nextHighestObservedVersion, "0.27.0");
   assert.equal(downgrade.shouldPersist, false);
 
-  const prerelease = planUpdateAnnouncement("0.12.0-rc.1", "0.11.0", true);
+  const prerelease = planUpdateAnnouncement("0.26.1-rc.1", "0.26.0", true);
   assert.equal(prerelease.announcement, null, "uncatalogued prereleases are never presented as stable release news");
-  assert.equal(prerelease.nextHighestObservedVersion, "0.12.0-rc.1");
-  const stable = planUpdateAnnouncement("0.12.0", prerelease.nextHighestObservedVersion, true);
-  assert.equal(stable.announcement?.version, "0.12.0");
+  assert.equal(prerelease.nextHighestObservedVersion, "0.26.1-rc.1");
+  const stable = planUpdateAnnouncement("0.26.1", prerelease.nextHighestObservedVersion, true);
+  assert.equal(stable.announcement?.version, "0.26.1");
 
-  const localBuild = planUpdateAnnouncement("0.12.0+local", "0.11.0", true);
+  const localBuild = planUpdateAnnouncement("0.26.1+local", "0.26.0", true);
   assert.equal(localBuild.announcement, null, "a non-release build cannot borrow the stable tag announcement");
-});
-
-test("0.20.1 has curated mobile browsing news without replaying it", () => {
-  const upgrade = planUpdateAnnouncement("0.20.1", "0.20.0", true);
-  assert.equal(upgrade.announcement, UPDATE_ANNOUNCEMENT_0_20_1);
-  assert.equal(upgrade.nextHighestObservedVersion, "0.20.1");
-  assert.equal(UPDATE_ANNOUNCEMENT_0_20_1.highlights.length, 4);
-  const highlights = UPDATE_ANNOUNCEMENT_0_20_1.highlights.join("\n");
-  assert.match(highlights, /compact header/u);
-  assert.match(highlights, /Tabs and Search\/Filters stay visible while browsing/u);
-  assert.match(highlights, /bounded, scrollable panel/u);
-  assert.match(highlights, /Back.*keyboard focus.*Clear works after returning/u);
-  assert.match(highlights, /Desktop layouts.*notes.*stored organization.*unchanged/u);
-  assert.equal(UPDATE_ANNOUNCEMENT_0_20_1.releaseUrl, "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.20.1");
-  const repeat = planUpdateAnnouncement("0.20.1", upgrade.nextHighestObservedVersion, true);
-  assert.equal(repeat.announcement, null);
-  assert.equal(repeat.shouldPersist, false);
-  assert.equal(planUpdateAnnouncement("0.20.1", null, false).announcement, null);
-});
-
-test("0.21.0 has curated iPad and direct note-placement news with an exact stable release URL", () => {
-  const upgrade = planUpdateAnnouncement("0.21.0", "0.20.1", true);
-  assert.equal(upgrade.announcement, UPDATE_ANNOUNCEMENT_0_21_0);
-  assert.equal(upgrade.nextHighestObservedVersion, "0.21.0");
-  assert.equal(upgrade.shouldPersist, true);
-  assert.equal(UPDATE_ANNOUNCEMENT_0_21_0.version, "0.21.0");
-  assert.equal(UPDATE_ANNOUNCEMENT_0_21_0.title, "What’s new in Knowledge Base Command Center 0.21.0");
-  assert.equal(UPDATE_ANNOUNCEMENT_0_21_0.highlights.length, 5);
-  const highlights = UPDATE_ANNOUNCEMENT_0_21_0.highlights.join("\n");
-  for (const claim of [
-    /iPad.*single-column workspace at every width.*landscape and Split View/u,
-    /Tabs and Search\/Filters stay pinned/u,
-    /editor’s KBCC indicator.*current-note command.*Choose location → Review → Save organization/u,
-    /Existing Index or Library placement is prefilled/u,
-    /Index heading.*Under heading or note.*full breadcrumb.*placeholder parents/u,
-    /Search larger parent lists without losing your selection/u,
-    /More options: Collections and other bases/u,
-    /selected leaf, never its dependent subtree/u,
-    /Protected ENT constraints.*exact review, Undo, and stale-state guards/u,
-    /never moves or rewrites Markdown/u,
-  ]) assert.match(highlights, claim);
-  assert.equal(UPDATE_ANNOUNCEMENT_0_21_0.releaseUrl, "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.21.0");
-});
-
-test("0.21.0 is one-time upgrade news, not a fresh-install, downgrade or local-build announcement", () => {
-  const upgrade = planUpdateAnnouncement("0.21.0", "0.20.1", true);
-  const repeat = planUpdateAnnouncement("0.21.0", upgrade.nextHighestObservedVersion, true);
-  assert.equal(repeat.announcement, null);
-  assert.equal(repeat.shouldPersist, false);
-  const fresh = planUpdateAnnouncement("0.21.0", null, false);
-  assert.equal(fresh.announcement, null);
-  assert.equal(fresh.nextHighestObservedVersion, "0.21.0");
-  const downgrade = planUpdateAnnouncement("0.20.1", "0.21.0", true);
-  assert.equal(downgrade.announcement, null);
-  assert.equal(downgrade.nextHighestObservedVersion, "0.21.0");
-  assert.equal(downgrade.shouldPersist, false);
-  assert.equal(planUpdateAnnouncement("0.21.0-rc.1", "0.20.1", true).announcement, null);
-  assert.equal(planUpdateAnnouncement("0.21.0+local", "0.20.1", true).announcement, null);
-});
-
-test("0.22.0 has curated touch-arrangement news with an exact stable release URL", () => {
-  const upgrade = planUpdateAnnouncement("0.22.0", "0.21.0", true);
-  assert.equal(upgrade.announcement, UPDATE_ANNOUNCEMENT_0_22_0);
-  assert.equal(upgrade.nextHighestObservedVersion, "0.22.0");
-  assert.equal(upgrade.shouldPersist, true);
-  assert.equal(UPDATE_ANNOUNCEMENT_0_22_0.version, "0.22.0");
-  assert.equal(UPDATE_ANNOUNCEMENT_0_22_0.title, "What’s new in Knowledge Base Command Center 0.22.0");
-  assert.equal(UPDATE_ANNOUNCEMENT_0_22_0.highlights.length, 5);
-  assert.match(UPDATE_ANNOUNCEMENT_0_22_0.intro, /Physical-device verification remains pending/u);
-  const highlights = UPDATE_ANNOUNCEMENT_0_22_0.highlights.join("\n");
-  for (const claim of [
-    /Details → Arrange.*Index or a Library.*Details → Edit in Collections/u,
-    /44px grip.*finger, pen, or mobile trackpad/u,
-    /Highlighted destinations.*nest Index subjects.*reorder records.*deep subheadings/u,
-    /Index moves carry the subject’s subtree.*Collection moves leave its other memberships untouched/u,
-    /Swipe outside grips to scroll normally.*auto-scroll/u,
-    /Grips opt out of Obsidian’s sidebar-swipe gesture.*ordinary row scrolling/u,
-    /Details → Undo and Redo/u,
-    /Stale organization, invalid cycles, rotation, backgrounding.*stop the drag safely/u,
-    /Markdown files stay unchanged/u,
-    /Desktop dragging and labelled row-menu alternatives remain available/u,
-  ]) assert.match(highlights, claim);
-  assert.equal(UPDATE_ANNOUNCEMENT_0_22_0.releaseUrl, "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.22.0");
-});
-
-test("0.22.0 is one-time upgrade news, not a fresh-install, downgrade or local-build announcement", () => {
-  const upgrade = planUpdateAnnouncement("0.22.0", "0.21.0", true);
-  const repeat = planUpdateAnnouncement("0.22.0", upgrade.nextHighestObservedVersion, true);
-  assert.equal(repeat.announcement, null);
-  assert.equal(repeat.shouldPersist, false);
-  const fresh = planUpdateAnnouncement("0.22.0", null, false);
-  assert.equal(fresh.announcement, null);
-  assert.equal(fresh.nextHighestObservedVersion, "0.22.0");
-  const downgrade = planUpdateAnnouncement("0.21.0", "0.22.0", true);
-  assert.equal(downgrade.announcement, null);
-  assert.equal(downgrade.nextHighestObservedVersion, "0.22.0");
-  assert.equal(downgrade.shouldPersist, false);
-  assert.equal(planUpdateAnnouncement("0.22.0-rc.1", "0.21.0", true).announcement, null);
-  assert.equal(planUpdateAnnouncement("0.22.0+local", "0.21.0", true).announcement, null);
-});
-
-test("0.23.0 announces local-only Cards and exact compatibility limits once per upgrade", () => {
-  const upgrade = planUpdateAnnouncement("0.23.0", "0.22.0", true);
-  assert.equal(upgrade.announcement, UPDATE_ANNOUNCEMENT_0_23_0);
-  assert.equal(upgrade.nextHighestObservedVersion, "0.23.0");
-  assert.equal(upgrade.shouldPersist, true);
-  assert.equal(UPDATE_ANNOUNCEMENT_0_23_0.highlights.length, 5);
-  assert.match(UPDATE_ANNOUNCEMENT_0_23_0.intro, /Physical iPhone\/iPad testing remains unverified/u);
-  const highlights = UPDATE_ANNOUNCEMENT_0_23_0.highlights.join("\n");
-  for (const claim of [/List or Cards/u, /All sections/u, /Online image URLs are not loaded/u,
-    /no external-image opt-in/u, /permission left by a private test build is inert/u,
-    /format-16 organization/u, /update every syncing device before editing/u]) assert.match(highlights, claim);
-  assert.equal(UPDATE_ANNOUNCEMENT_0_23_0.releaseUrl, "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.23.0");
-  const repeat = planUpdateAnnouncement("0.23.0", upgrade.nextHighestObservedVersion, true);
-  assert.equal(repeat.announcement, null);
-  assert.equal(repeat.shouldPersist, false);
-  assert.equal(planUpdateAnnouncement("0.23.0", null, false).announcement, null);
-  assert.equal(planUpdateAnnouncement("0.22.0", "0.23.0", true).announcement, null);
-  assert.equal(planUpdateAnnouncement("0.23.0-rc.1", "0.22.0", true).announcement, null);
-  assert.equal(planUpdateAnnouncement("0.23.0+local", "0.22.0", true).announcement, null);
-});
-
-test("0.23.1 announces cover setup and explicit saving once without claiming physical-device validation", () => {
-  const upgrade = planUpdateAnnouncement("0.23.1", "0.23.0", true);
-  assert.equal(upgrade.announcement, UPDATE_ANNOUNCEMENT_0_23_1);
-  assert.equal(upgrade.nextHighestObservedVersion, "0.23.1");
-  assert.equal(upgrade.shouldPersist, true);
-  assert.match(UPDATE_ANNOUNCEMENT_0_23_1.intro, /Physical iPhone\/iPad testing remains unverified/u);
-  const highlights = UPDATE_ANNOUNCEMENT_0_23_1.highlights.join("\n");
-  for (const claim of [/Save display/u, /closing without saving discards/u, /Exact names take priority/u,
-    /without exposing private property values/u, /Online URLs are not loaded/u,
-    /No data formats, dependencies or note contents change/u]) assert.match(highlights, claim);
-  assert.equal(UPDATE_ANNOUNCEMENT_0_23_1.releaseUrl, "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.23.1");
-  assert.equal(planUpdateAnnouncement("0.23.1", upgrade.nextHighestObservedVersion, true).announcement, null);
-  assert.equal(planUpdateAnnouncement("0.23.1", null, false).announcement, null);
-  assert.equal(planUpdateAnnouncement("0.23.0", "0.23.1", true).announcement, null);
-  assert.equal(planUpdateAnnouncement("0.23.1-rc.1", "0.23.0", true).announcement, null);
-  assert.equal(planUpdateAnnouncement("0.23.1+local", "0.23.0", true).announcement, null);
 });
 
 test("malformed local version state is bounded and recoverable without trusting partial values", () => {
   for (const malformed of [
     "bad",
     { highestObservedVersion: "0.11.0" },
-    `0.12.0+${"x".repeat(128)}`,
+    `0.26.1+${"x".repeat(128)}`,
   ]) {
-    const recovered = planUpdateAnnouncement("0.12.0", malformed, true);
+    const recovered = planUpdateAnnouncement("0.26.1", malformed, true);
     assert.equal(recovered.malformedStoredVersion, true);
-    assert.equal(recovered.announcement?.version, "0.12.0");
-    assert.equal(recovered.nextHighestObservedVersion, "0.12.0");
+    assert.equal(recovered.announcement?.version, "0.26.1");
+    assert.equal(recovered.nextHighestObservedVersion, "0.26.1");
   }
 });
 
@@ -463,7 +139,7 @@ function announcementPlugin(
     },
   };
   const plugin = new EntVaultCommandCenterPlugin(app as never, {
-    version: options.version ?? "0.12.0",
+    version: options.version ?? "0.26.1",
   } as never) as EntVaultCommandCenterPlugin & AnnouncementInternal;
   plugin.openUpdateAnnouncement = (announcement) => { opens.push(announcement); };
   return plugin;
@@ -478,7 +154,7 @@ test("plugin lifecycle persists before opening and never repeats within a sessio
   assert.equal(opens.length, 1);
   assert.equal(
     (localStorage.get(SYNC_RECOVERY_LOCAL_STATE_KEY) as { highestPluginVersionSeen?: unknown })?.highestPluginVersionSeen,
-    "0.12.0",
+    "0.26.1",
     "the one-time marker is durable before the modal opens",
   );
 
@@ -487,48 +163,26 @@ test("plugin lifecycle persists before opening and never repeats within a sessio
   assert.equal(opens.length, 1);
 });
 
-test("the 0.20.1 to 0.21.0 lifecycle upgrade persists the new marker and never replays after reload", () => {
+test("the 0.26.0 to 0.26.1 lifecycle upgrade persists the new marker and never replays after reload", () => {
   const localStorage = new Map<string, unknown>();
   const opens: UpdateAnnouncement[] = [];
-  announcementPlugin(localStorage, opens, { version: "0.20.1" })
+  announcementPlugin(localStorage, opens, { version: "0.26.0" })
     .maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
-  opens.length = 0;
-  const upgraded = announcementPlugin(localStorage, opens, { version: "0.21.0" });
+  assert.deepEqual(opens, [], "an uncatalogued release records its marker without a window");
+  const upgraded = announcementPlugin(localStorage, opens, { version: "0.26.1" });
   upgraded.openUpdateAnnouncement = (announcement) => {
     assert.equal(
       (localStorage.get(SYNC_RECOVERY_LOCAL_STATE_KEY) as { highestPluginVersionSeen?: unknown })?.highestPluginVersionSeen,
-      "0.21.0",
+      "0.26.1",
       "the new version marker is persisted before presentation",
     );
     opens.push(announcement);
   };
   upgraded.maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
   upgraded.maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
-  announcementPlugin(localStorage, opens, { version: "0.21.0" })
+  announcementPlugin(localStorage, opens, { version: "0.26.1" })
     .maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
-  assert.deepEqual(opens, [UPDATE_ANNOUNCEMENT_0_21_0]);
-});
-
-test("the 0.21.0 to 0.22.0 lifecycle upgrade persists the new marker and never replays after reload", () => {
-  const localStorage = new Map<string, unknown>();
-  const opens: UpdateAnnouncement[] = [];
-  announcementPlugin(localStorage, opens, { version: "0.21.0" })
-    .maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
-  opens.length = 0;
-  const upgraded = announcementPlugin(localStorage, opens, { version: "0.22.0" });
-  upgraded.openUpdateAnnouncement = (announcement) => {
-    assert.equal(
-      (localStorage.get(SYNC_RECOVERY_LOCAL_STATE_KEY) as { highestPluginVersionSeen?: unknown })?.highestPluginVersionSeen,
-      "0.22.0",
-      "the new version marker is persisted before presentation",
-    );
-    opens.push(announcement);
-  };
-  upgraded.maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
-  upgraded.maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
-  announcementPlugin(localStorage, opens, { version: "0.22.0" })
-    .maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
-  assert.deepEqual(opens, [UPDATE_ANNOUNCEMENT_0_22_0]);
+  assert.deepEqual(opens, [UPDATE_ANNOUNCEMENT_0_26_1]);
 });
 
 test("two replacement instances with stale local snapshots share one synchronous App-lifetime claim", () => {
@@ -539,7 +193,7 @@ test("two replacement instances with stale local snapshots share one synchronous
   };
   const opened: UpdateAnnouncement[] = [];
   const create = () => {
-    const plugin = new EntVaultCommandCenterPlugin(app as never, { version: "0.12.0" } as never) as
+    const plugin = new EntVaultCommandCenterPlugin(app as never, { version: "0.26.1" } as never) as
       EntVaultCommandCenterPlugin & AnnouncementInternal;
     plugin.openUpdateAnnouncement = (announcement) => { opened.push(announcement); };
     return plugin;
@@ -599,7 +253,7 @@ test("plugin lifecycle skips fresh installs and fails closed when its one-time m
   assert.equal(freshOpens.length, 0);
   assert.equal(
     (freshStorage.get(SYNC_RECOVERY_LOCAL_STATE_KEY) as { highestPluginVersionSeen?: unknown })?.highestPluginVersionSeen,
-    "0.12.0",
+    "0.26.1",
   );
 
   const failedStorage = new Map<string, unknown>();
@@ -628,7 +282,7 @@ test("incompatible, unloaded, and privacy-reset lifecycles never open over their
     if (mode === "incompatible") {
       assert.equal(
         (localStorage.get(SYNC_RECOVERY_LOCAL_STATE_KEY) as { highestPluginVersionSeen?: unknown })?.highestPluginVersionSeen,
-        "0.12.0",
+        "0.26.1",
       );
     } else {
       assert.equal(localStorage.size, 0);
@@ -647,13 +301,13 @@ test("manual reopening marks the release, refuses stacked duplicates, and closes
   UpdateAnnouncementModal.prototype.open = function open(): void { opens += 1; };
   UpdateAnnouncementModal.prototype.close = function close(): void { closes += 1; };
   try {
-    plugin.openCurrentUpdateAnnouncement(UPDATE_ANNOUNCEMENT_0_12_0);
-    plugin.openCurrentUpdateAnnouncement(UPDATE_ANNOUNCEMENT_0_12_0);
+    plugin.openCurrentUpdateAnnouncement(UPDATE_ANNOUNCEMENT_0_26_1);
+    plugin.openCurrentUpdateAnnouncement(UPDATE_ANNOUNCEMENT_0_26_1);
     plugin.maybeShowUpdateAnnouncement({ compatible: true, sourceWasMissing: false });
     assert.equal(opens, 1);
     assert.equal(
       (localStorage.get(SYNC_RECOVERY_LOCAL_STATE_KEY) as { highestPluginVersionSeen?: unknown })?.highestPluginVersionSeen,
-      "0.12.0",
+      "0.26.1",
     );
     plugin.onunload();
     assert.equal(closes, 1);
@@ -665,7 +319,7 @@ test("manual reopening marks the release, refuses stacked duplicates, and closes
 
 test("What’s New finishes before the once-per-session legacy review is offered", () => {
   const localStorage = new Map<string, unknown>();
-  const plugin = announcementPlugin(localStorage, [], { version: "0.16.1" });
+  const plugin = announcementPlugin(localStorage, [], { version: "0.26.1" });
   Reflect.deleteProperty(plugin, "openUpdateAnnouncement");
   plugin.data.indexFolderSources = [availableLegacySource()];
   let legacyOpens = 0;
@@ -702,7 +356,7 @@ test("an App-wide What’s New barrier blocks a replacement instance's legacy re
   let legacyOpens = 0;
   replacement.openLegacyIndexReview = () => { legacyOpens += 1; };
 
-  announcement.openCurrentUpdateAnnouncement(UPDATE_ANNOUNCEMENT_0_16_0);
+  announcement.openCurrentUpdateAnnouncement(UPDATE_ANNOUNCEMENT_0_26_1);
   replacement.maybeShowLegacyIndexReview();
   assert.equal(legacyOpens, 0, "replacement instances share the active update-modal barrier");
 
@@ -741,7 +395,7 @@ test("onLayoutReady owns automatic presentation and unload prevents a late or du
     const plugin = new EntVaultCommandCenterPlugin(app as never, {
       id: "ent-vault-command-center",
       name: "Knowledge Base Command Center",
-      version: "0.12.0",
+      version: "0.26.1",
     } as never) as EntVaultCommandCenterPlugin & AnnouncementInternal & {
       loadPluginData(): Promise<{ compatible: boolean; sourceWasMissing: boolean }>;
       registerObsidianProtocolHandler(): void;
@@ -771,7 +425,7 @@ test("onLayoutReady owns automatic presentation and unload prevents a late or du
 
 test("What’s New modal is semantic, owner-document local, touch-sized, and safely links to the exact release", () => {
   const dom = createFakeDom();
-  const modal = new UpdateAnnouncementModal({}, UPDATE_ANNOUNCEMENT_0_12_0) as UpdateAnnouncementModal & {
+  const modal = new UpdateAnnouncementModal({}, UPDATE_ANNOUNCEMENT_0_26_1) as UpdateAnnouncementModal & {
     modalEl: HTMLElement;
     contentEl: HTMLElement;
     titleEl: HTMLElement;
@@ -784,18 +438,18 @@ test("What’s New modal is semantic, owner-document local, touch-sized, and saf
   modal.close = () => { closes += 1; };
   modal.onOpen();
 
-  assert.equal(modal.titleEl.textContent, "What’s new in Knowledge Base Command Center 0.12.0");
+  assert.equal(modal.titleEl.textContent, "What’s new in Knowledge Base Command Center 0.26.1");
   const descriptionId = modal.modalEl.getAttribute("aria-describedby");
   assert.match(descriptionId ?? "", /^ent-cc-whats-new-intro-\d+$/u);
-  assert.equal(modal.contentEl.querySelector(`[id="${descriptionId}"]`)?.textContent, UPDATE_ANNOUNCEMENT_0_12_0.intro);
+  assert.equal(modal.contentEl.querySelector(`[id="${descriptionId}"]`)?.textContent, UPDATE_ANNOUNCEMENT_0_26_1.intro);
   const region = modal.contentEl.querySelector('[role="region"]');
   assert.ok(region);
   assert.equal(region.ownerDocument, dom.document as unknown as Document);
-  assert.equal(region.getAttribute("aria-label"), "Version 0.12.0 highlights");
-  assert.equal(modal.contentEl.querySelectorAll("li").length, UPDATE_ANNOUNCEMENT_0_12_0.highlights.length);
+  assert.equal(region.getAttribute("aria-label"), "Version 0.26.1 highlights");
+  assert.equal(modal.contentEl.querySelectorAll("li").length, UPDATE_ANNOUNCEMENT_0_26_1.highlights.length);
   const link = modal.contentEl.querySelector<HTMLAnchorElement>("a.ent-cc-whats-new-release-link");
   assert.ok(link);
-  assert.equal(link.getAttribute("href"), UPDATE_ANNOUNCEMENT_0_12_0.releaseUrl);
+  assert.equal(link.getAttribute("href"), UPDATE_ANNOUNCEMENT_0_26_1.releaseUrl);
   assert.equal(link.getAttribute("target"), "_blank");
   assert.equal(link.getAttribute("rel"), "noopener noreferrer");
   assert.match(link.getAttribute("aria-label") ?? "", /opens in your browser/i);
