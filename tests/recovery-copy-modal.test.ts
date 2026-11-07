@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { RecoveryCopyModal, type RecoveryApplyResult, type RecoveryCopyModalCallbacks } from "../src/recovery-copy-modal.ts";
+import { RecoveryCopyModal, type RecoveryApplyResult, type RecoveryCopyModalCallbacks, type RecoveryDestination } from "../src/recovery-copy-modal.ts";
 import {
   RECOVERY_DISCOVERY_LIMITS,
   discoverRecoveryCopies,
@@ -242,6 +242,7 @@ interface Harness {
   content: FakeElement;
   document: ReturnType<typeof createFakeDom>["document"];
   applied: RecoveryRestoreIntent[];
+  destinations: RecoveryDestination[];
   opened: string[];
   loads: RecoveryCandidate[];
   closed(): boolean;
@@ -257,6 +258,7 @@ interface HarnessOptions {
   loadGate?: Promise<void>;
   discoverGate?: Promise<void>;
   applyGate?: Promise<void>;
+  destinationEpoch?: { value: number };
 }
 
 function candidatesFor(files: Record<string, FileInfo>): RecoveryCandidate[] {
@@ -273,6 +275,8 @@ async function openModal(options: HarnessOptions = {}): Promise<Harness> {
   const { host } = makeHost(files, {});
   const candidates = candidatesFor(files);
   const applied: RecoveryRestoreIntent[] = [];
+  const destinations: RecoveryDestination[] = [];
+  const destinationEpoch = options.destinationEpoch ?? { value: 1 };
   const opened: string[] = [];
   const loads: RecoveryCandidate[] = [];
   let identityCount = 0;
@@ -292,8 +296,10 @@ async function openModal(options: HarnessOptions = {}): Promise<Harness> {
       if (options.unreadable) return { status: "unreadable" };
       return loadRecoveryCopy(host, candidate.path, { currentVaultId: options.vaultId === undefined ? VAULT : options.vaultId });
     },
-    onApply: async (intent) => {
+    getDestination: () => ({ epoch: destinationEpoch.value, vaultId: VAULT, activeBaseId: "base-default" }),
+    onApply: async (intent, destination) => {
       applied.push(intent);
+      destinations.push(destination);
       await options.applyGate;
       if (options.applyResult === "throw") throw new Error("write exploded at /private/path");
       return options.applyResult ?? { status: "applied", baseId: intent.newBaseId };
@@ -310,7 +316,7 @@ async function openModal(options: HarnessOptions = {}): Promise<Harness> {
   modal.close = () => { closed = true; modal.onClose(); };
   modal.onOpen();
   await settle();
-  return { modal, content, document: dom.document, applied, opened, loads, closed: () => closed };
+  return { modal, content, document: dom.document, applied, destinations, opened, loads, closed: () => closed };
 }
 
 async function settle(): Promise<void> {
@@ -646,6 +652,17 @@ test("facts use the existing definition-list structure and base rows the title/t
   button(harness.content, "Continue").click();
   assert.ok(harness.content.querySelector("dl.ent-cc-sync-recovery-facts dt"), "confirm facts are a dl too");
   assert.equal(harness.content.querySelectorAll(".ent-cc-sync-recovery-fact span").length, 0);
+});
+
+test("Apply passes the destination captured at preview time, not the one at Apply", async () => {
+  const destinationEpoch = { value: 7 };
+  const harness = await openModal({ destinationEpoch });
+  await toConfirm(harness);
+  destinationEpoch.value = 8; // the data changed after the preview
+  button(harness.content, "Restore as new base").click();
+  await settle();
+  assert.equal(harness.destinations.length, 1);
+  assert.equal(harness.destinations[0].epoch, 7);
 });
 
 test("opening the list reads nothing: no candidate is loaded until Review", async () => {

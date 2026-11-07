@@ -296,7 +296,7 @@ import {
 } from "./sync-recovery";
 import { ClearDeviceLocalDataModal, SyncRecoveryCenterModal } from "./sync-recovery-modal";
 import type { RecoveryRestoreIntent } from "./recovery-copy";
-import { RecoveryCopyModal, type RecoveryApplyResult } from "./recovery-copy-modal";
+import { RecoveryCopyModal, type RecoveryApplyResult, type RecoveryDestination } from "./recovery-copy-modal";
 import { discoverRecoveryCopies, loadRecoveryCopy, recoverySourceUnchanged, type RecoveryCandidate, type RecoveryHost } from "./recovery-discovery";
 import {
   planUpdateAnnouncement,
@@ -6852,7 +6852,17 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
    * and all Markdown are untouched. The final outcome is always shown here,
    * so it is surfaced even when the review window was closed.
    */
-  async restoreKeptCopy(intent: RecoveryRestoreIntent, sourceMatches: () => Promise<boolean>): Promise<RecoveryApplyResult> {
+  /** The destination a review window is about to show: data epoch, vault identity and active base. */
+  getRecoveryDestination(): RecoveryDestination {
+    return { epoch: this.dataEpoch, vaultId: this.store.vaultId, activeBaseId: this.store.activeBaseId };
+  }
+
+  async restoreKeptCopy(
+    intent: RecoveryRestoreIntent,
+    sourceMatches: () => Promise<boolean>,
+    /** Captured at preview time by the review window; defaults to now for direct callers. */
+    destination: RecoveryDestination = this.getRecoveryDestination(),
+  ): Promise<RecoveryApplyResult> {
     const outcome = (result: RecoveryApplyResult): RecoveryApplyResult => {
       new Notice(result.status === "applied"
         ? `Restored “${intent.name}” as a new knowledge base. Your active base did not change.`
@@ -6861,9 +6871,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       return result;
     };
     const failed = (message: string): RecoveryApplyResult => outcome({ status: "failed", message });
-    const epoch = this.dataEpoch;
-    const vaultId = this.store.vaultId;
-    const stale = (): boolean => this.dataEpoch !== epoch || this.store.vaultId !== vaultId || intent.sourceVaultId !== vaultId;
+    const stale = (): boolean => this.dataEpoch !== destination.epoch || this.store.vaultId !== destination.vaultId
+      || this.store.activeBaseId !== destination.activeBaseId || intent.sourceVaultId !== destination.vaultId;
+    if (stale()) return failed("Knowledge-base data changed since this copy was reviewed. Reopen the review.");
     try { this.assertDataWritable(); } catch { return failed("Knowledge bases are read-only, so the copy was not restored."); }
     let refusal = "";
     let changeRan = false;
@@ -6919,7 +6929,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         pluginDir: this.manifest.dir ?? "",
       }),
       load: (candidate) => { selected = candidate; return loadRecoveryCopy(host, candidate.path, { currentVaultId: vaultId() }); },
-      onApply: (intent) => this.restoreKeptCopy(intent, () => selected ? recoverySourceUnchanged(host, selected.path, intent) : Promise.resolve(false)),
+      getDestination: () => this.getRecoveryDestination(),
+      onApply: (intent, destination) => this.restoreKeptCopy(intent, () => selected ? recoverySourceUnchanged(host, selected.path, intent) : Promise.resolve(false), destination),
       onOpenRestored: (baseId) => this.openRestoredKeptBase(baseId),
     }).open();
   }

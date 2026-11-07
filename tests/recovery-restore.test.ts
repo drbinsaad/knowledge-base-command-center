@@ -335,6 +335,50 @@ test("controls: two concurrent restores of one intent apply once, and D06 histor
   assert.equal(g.plugin.getKnowledgeBases(true)[1].data.undoStack.length, 0);
 });
 
+test("the restore is bound to the destination reviewed at preview time", async () => {
+  const reviewed = async (f: Fixture) => f.plugin.getRecoveryDestination();
+  // Control: an unchanged destination applies.
+  const ok = await fixture();
+  const okToken = await reviewed(ok);
+  assert.equal((await ok.plugin.restoreKeptCopy(intentFor(sourceStore("Recovered")), yes, okToken)).status, "applied");
+
+  // Data changed between preview and Apply, before the queue: refused without rereading.
+  const epoch = await fixture();
+  const epochToken = await reviewed(epoch);
+  (epoch.plugin as unknown as { dataEpoch: number }).dataEpoch += 1;
+  let reread = 0;
+  Notice.messages.length = 0;
+  const changed = await epoch.plugin.restoreKeptCopy(intentFor(sourceStore("Recovered")), async () => { reread += 1; return true; }, epochToken);
+  assert.equal(changed.status, "failed");
+  assert.equal(reread, 0);
+  assert.equal(epoch.writes(), 0);
+  assert.match(Notice.messages.join("\n"), /Reopen the review\. Nothing was changed/);
+
+  // A different vault identity.
+  const vault = await fixture();
+  const vaultToken = { ...(await reviewed(vault)), vaultId: "vault-reviewed-elsewhere" };
+  assert.equal((await vault.plugin.restoreKeptCopy(intentFor(sourceStore("Recovered")), yes, vaultToken)).status, "failed");
+  assert.equal(vault.writes(), 0);
+
+  // The active base was switched after the preview.
+  const base = await fixture();
+  const baseToken = { ...(await reviewed(base)), activeBaseId: "base-reviewed-earlier" };
+  assert.equal((await base.plugin.restoreKeptCopy(intentFor(sourceStore("Recovered")), yes, baseToken)).status, "failed");
+  assert.equal(base.writes(), 0);
+
+  // The destination changes while the restore waits in the real queue.
+  const queued = await fixture();
+  const queuedToken = await reviewed(queued);
+  const block = await blockQueue(queued.plugin);
+  const waiting = queued.plugin.restoreKeptCopy(intentFor(sourceStore("Recovered")), yes, queuedToken);
+  await tick();
+  (queued.plugin as unknown as { dataEpoch: number }).dataEpoch += 1;
+  await block.release();
+  assert.equal((await waiting).status, "failed");
+  assert.equal(queued.writes(), 0);
+  assert.equal(queued.plugin.getKnowledgeBases(true).length, 1);
+});
+
 test("opening the restored base is a separate action and the restore never switches", async () => {
   const f = await fixture();
   await f.plugin.restoreKeptCopy(intentFor(sourceStore("Recovered")), yes);

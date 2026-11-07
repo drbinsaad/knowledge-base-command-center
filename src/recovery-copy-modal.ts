@@ -21,6 +21,13 @@ import {
 } from "./recovery-copy";
 import type { RecoveryCandidate, RecoveryCopyLoadResult, RecoveryDiscoveryResult } from "./recovery-discovery";
 
+/** What the review window showed: data epoch, vault identity and active base at preview time. */
+export interface RecoveryDestination {
+  epoch: number;
+  vaultId: string;
+  activeBaseId: string;
+}
+
 export type RecoveryApplyResult =
   | { status: "applied"; baseId: string }
   /** Nothing was written. The message must not contain a path. */
@@ -44,7 +51,10 @@ export interface RecoveryCopyModalCallbacks {
   /** Optional: let the user pick a retained file outside the inspected folders. */
   pickExplicit?(): Promise<RecoveryCandidate | null>;
   /** The only mutation hook. Fired by the Apply click only. */
-  onApply(intent: RecoveryRestoreIntent): Promise<RecoveryApplyResult>;
+  /** The destination as it is right now; the window captures it when a copy is previewed. */
+  getDestination(): RecoveryDestination;
+  /** `destination` is the preview-time value, so the host can refuse if the data changed since. */
+  onApply(intent: RecoveryRestoreIntent, destination: RecoveryDestination): Promise<RecoveryApplyResult>;
   /** Fired only by a click on "Open restored base" after a successful apply. */
   onOpenRestored(baseId: string): void | Promise<void>;
 }
@@ -85,6 +95,7 @@ export class RecoveryCopyModal extends Modal {
   private discovery: RecoveryDiscoveryResult | null = null;
   private selected: RecoveryCandidate | null = null;
   private parsed: RecoveryCopyParsed | null = null;
+  private destination: RecoveryDestination | null = null;
   private notRestorable: RecoveryCopyRejected | "unreadable" | null = null;
   private baseId = "";
   private chosenName = "";
@@ -272,6 +283,7 @@ export class RecoveryCopyModal extends Modal {
     this.busy = true;
     this.selected = candidate;
     this.parsed = null;
+    this.destination = null;
     this.notRestorable = null;
     this.setError("");
     this.setStatus(`Reading ${candidate.displayName}…`);
@@ -288,6 +300,7 @@ export class RecoveryCopyModal extends Modal {
       this.setStatus("This file could not be read. It is left untouched.");
     } else if (loaded.result.ok) {
       this.parsed = loaded.result;
+      this.destination = this.callbacks.getDestination();
       this.setStatus(`Previewing ${candidate.displayName}.`);
     } else {
       this.notRestorable = loaded.result;
@@ -434,7 +447,7 @@ export class RecoveryCopyModal extends Modal {
     this.setStatus("Restoring… Closing this window does not stop a restore that has started.");
     let result: RecoveryApplyResult;
     try {
-      result = await this.callbacks.onApply(intentResult.intent);
+      result = await this.callbacks.onApply(intentResult.intent, this.destination ?? this.callbacks.getDestination());
     } catch {
       result = { status: "uncertain", message: "The restore may not have finished." };
     }
