@@ -804,6 +804,7 @@ export class EntVaultCommandCenterView extends ItemView {
     this.bindWindowMigration();
     this.measureAndApplyPaneLayout(false);
     await this.reload();
+    if (this.viewClosed) return;
     this.bindPaneLayout();
     this.bindSearchViewportLayout();
     if (!this.plugin.data.settings.setupComplete && !this.setupPromptShown) {
@@ -1014,7 +1015,9 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     this.records = this.plugin.getRecords();
     this.recordByPath = new Map(this.records.map((record) => [record.path, record]));
-    if (await this.plugin.reconcileRecords(this.records, withinOperation)) {
+    const reconciled = await this.plugin.reconcileRecords(this.records, withinOperation);
+    if (this.viewClosed) return;
+    if (reconciled) {
       this.records = this.plugin.getRecords();
       this.recordByPath = new Map(this.records.map((record) => [record.path, record]));
     }
@@ -1024,7 +1027,7 @@ export class EntVaultCommandCenterView extends ItemView {
       this.plugin.data.activeTab = "curriculum";
       if (this.searchScope === "library") this.searchScope = "current";
       await this.plugin.saveViewState(withinOperation);
-      if (!this.guardLoadedBase()) return;
+      if (this.viewClosed || !this.guardLoadedBase()) return;
     }
     this.curriculum = buildCurriculumTree(
       this.records,
@@ -4024,6 +4027,7 @@ export class EntVaultCommandCenterView extends ItemView {
   };
 
   private bindSearchViewportLayout(): void {
+    if (this.viewClosed) return;
     const viewWindow = this.contentEl.ownerDocument.defaultView;
     if (!viewWindow || this.searchViewportWindow === viewWindow) return;
     this.unbindSearchViewportLayout();
