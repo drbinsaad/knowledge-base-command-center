@@ -4,7 +4,7 @@ Complete this checklist on a physical iPhone before tagging a release that chang
 
 ## 0.27.0 Recovery and workflow reliability
 
-Status: **Unverified — not executed on a physical iPhone or iPad.** Browser emulation does not execute these rows. See the [0.27.0 evidence](release-evidence/0.27.0-iphone.md) for candidate-specific execution and authorization; historical decisions do not apply to this version.
+Status: **Maintainer-authorized waiver for 0.27.0 only — Unverified — not executed on a physical iPhone or iPad.** The maintainer directly instructed **“Publish”** after the candidate-specific testing limits and documented size increase were disclosed. Native desktop workflows, physical-device checks and controlled two-device Sync remain unverified, not passed. Browser emulation does not execute these rows. See the [0.27.0 evidence](release-evidence/0.27.0-iphone.md) for the exact decision; no earlier authorization is reused.
 
 1. Review kept copies in portrait/landscape and wide-tablet Split View: discover and explicitly choose supported copies, inspect long names, change base choice, cancel during load, and verify malformed/oversize/foreign copies cannot restore. Restore one base as new; the original base and source file stay unchanged. Open the new base separately. Repeat read-only and stale-review cases.
 2. Re-run Generic setup with an Inbox change and affected synthetic notes. Review the effects, cancel back to the retained draft, apply once and use organization Undo. Change the base or reviewed input before Apply and confirm refusal without partial plugin-data changes.
