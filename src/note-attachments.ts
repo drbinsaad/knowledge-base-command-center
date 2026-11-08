@@ -2,6 +2,10 @@ import { parseLinktext, setIcon, TFile, type App, type CachedMetadata } from "ob
 
 const MAX_REFERENCE_LENGTH = 2048;
 export const ATTACHMENT_PAGE_SIZE = 20;
+/** Attribute holding a row's exact vault path; compare its value, never interpolate it into a selector. */
+export const ATTACHMENT_PATH_ATTRIBUTE = "data-ent-cc-attachment-path";
+/** A missing reference is not evidence of a sync problem; it may be an ordinary note or file name. */
+export const MISSING_REFERENCE_TEXT = "Linked reference not found; it may be a note or file";
 
 export interface NoteAttachment {
   path: string;
@@ -83,8 +87,39 @@ export function collectNoteAttachments(app: Pick<App, "metadataCache" | "vault">
   return { state: "ready", items };
 }
 
+/** Volatile renderer state the owning view may hoist across a rerender. */
+export interface NoteAttachmentRenderOptions {
+  /** Previously revealed count; rounded up to whole pages and clamped to the current list. */
+  revealed?: number;
+  /** Called with the new revealed count after the user reveals another page. */
+  onReveal?: (revealed: number) => void;
+}
+
+/** The exact path and position of the attachment row holding focus inside `root`, if any. */
+export function focusedAttachmentRow(root: HTMLElement): { path: string; index: number } | null {
+  const active = root.ownerDocument.activeElement;
+  if (!active || !root.contains(active)) return null;
+  const path = active.getAttribute(ATTACHMENT_PATH_ATTRIBUTE);
+  if (path === null) return null;
+  const rows = Array.from(root.querySelectorAll<HTMLElement>(".ent-cc-attachment-row"));
+  return { path, index: Math.max(0, rows.indexOf(active as HTMLElement)) };
+}
+
+/**
+ * Focus the row with this exact path, else the nearest remaining row, else the
+ * section itself. Never returns focus to a detached element.
+ */
+export function focusAttachmentNear(section: HTMLElement, path: string, index: number): void {
+  const rows = Array.from(section.querySelectorAll<HTMLElement>(".ent-cc-attachment-row"));
+  const target = rows.find((row) => row.getAttribute(ATTACHMENT_PATH_ATTRIBUTE) === path)
+    ?? rows[Math.min(Math.max(index, 0), rows.length - 1)]
+    ?? section;
+  if (target.tagName !== "BUTTON") target.setAttribute("tabindex", "-1");
+  target.focus({ preventScroll: true });
+}
+
 /** Lists links, never attachment payloads or previews. More reveals a bounded page at a time. */
-export function renderNoteAttachments(parent: HTMLElement, result: NoteAttachments, onOpen: (path: string) => void): void {
+export function renderNoteAttachments(parent: HTMLElement, result: NoteAttachments, onOpen: (path: string) => void, options: NoteAttachmentRenderOptions = {}): HTMLElement {
   const section = parent.createDiv({ cls: "ent-cc-inspector-section ent-cc-note-attachments" });
   section.createEl("h4", { text: result.items.length ? `Attachments (${result.items.length})` : "Attachments" });
   if (result.state !== "ready" || result.items.length === 0) {
@@ -92,7 +127,7 @@ export function renderNoteAttachments(parent: HTMLElement, result: NoteAttachmen
       ? "Waiting for Obsidian to read this note’s links."
       : result.state === "note-unavailable" ? "The note is not available on this device."
         : "No linked files in this note yet." });
-    return;
+    return section;
   }
   const list = section.createDiv({ cls: "ent-cc-attachment-list", attr: { role: "list", "aria-label": "Note attachments" } });
   const nameCounts = new Map<string, number>();
@@ -104,16 +139,32 @@ export function renderNoteAttachments(parent: HTMLElement, result: NoteAttachmen
     let firstNew: HTMLElement | null = null;
     for (const item of result.items.slice(shown, end)) {
       const entry = list.createDiv({ attr: { role: "listitem" } });
+      const duplicate = (nameCounts.get(item.name) ?? 0) > 1;
+      // The exact path is an attribute value for later focus restoration; callers compare values, never build selectors from it.
+      const identity = { [ATTACHMENT_PATH_ATTRIBUTE]: item.path };
       const row = item.available
-        ? entry.createEl("button", { cls: "ent-cc-attachment-row ent-cc-attachment-link", type: "button", attr: { title: item.path, "aria-label": `Open attachment: ${item.name}` } })
-        : entry.createDiv({ cls: "ent-cc-attachment-row is-missing" });
+        ? entry.createEl("button", { cls: "ent-cc-attachment-row ent-cc-attachment-link", type: "button", attr: { ...identity, title: item.path, "aria-label": duplicate ? `Open attachment: ${item.name}, path ${item.path}` : `Open attachment: ${item.name}` } })
+        : entry.createDiv({ cls: "ent-cc-attachment-row is-missing", attr: identity });
       if (!firstNew) firstNew = row;
       setIcon(row.createSpan({ attr: { "aria-hidden": "true" } }), item.available ? "paperclip" : "file-question");
       const copy = row.createSpan({ cls: "ent-cc-attachment-copy" });
       copy.createSpan({ cls: "ent-cc-attachment-name", text: item.name, attr: { dir: "auto" } });
-      copy.createSpan({ cls: "ent-cc-attachment-meta", text: item.available
-        ? `${item.extension ? item.extension.toUpperCase() : "File"}${(nameCounts.get(item.name) ?? 0) > 1 ? ` · ${item.path}` : ""}`
-        : "Not available on this device", attr: { dir: "auto" } });
+      if (item.available) {
+        // Extension and path are separate so an Arabic or long path cannot reorder the type label.
+        const meta = copy.createSpan({ cls: "ent-cc-attachment-meta" });
+        meta.createSpan({ cls: "ent-cc-attachment-extension", text: item.extension ? item.extension.toUpperCase() : "File" });
+        if (duplicate) {
+          meta.createSpan({ text: " · ", attr: { "aria-hidden": "true" } });
+          meta.createSpan({ cls: "ent-cc-attachment-path", text: item.path, attr: { dir: "auto" } });
+        }
+      } else {
+        const meta = copy.createSpan({ cls: "ent-cc-attachment-meta" });
+        meta.createSpan({ text: MISSING_REFERENCE_TEXT, attr: { dir: "auto" } });
+        if (duplicate) {
+          meta.createSpan({ text: " · ", attr: { "aria-hidden": "true" } });
+          meta.createSpan({ cls: "ent-cc-attachment-path", text: item.path, attr: { dir: "auto" } });
+        }
+      }
       if (item.available) row.addEventListener("click", () => onOpen(item.path));
     }
     shown = end;
@@ -124,6 +175,12 @@ export function renderNoteAttachments(parent: HTMLElement, result: NoteAttachmen
       firstNew.focus();
     }
   };
-  more.addEventListener("click", () => appendPage(true));
-  appendPage();
+  more.addEventListener("click", () => {
+    appendPage(true);
+    options.onReveal?.(shown);
+  });
+  const requested = Math.max(1, Math.ceil((options.revealed ?? ATTACHMENT_PAGE_SIZE) / ATTACHMENT_PAGE_SIZE)) * ATTACHMENT_PAGE_SIZE;
+  const target = Math.min(requested, result.items.length);
+  do appendPage(); while (shown < target);
+  return section;
 }

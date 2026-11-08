@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { Menu, Notice, Platform, TFile } from "obsidian";
+import { Menu, Notice, Platform, TFile } from "./support/obsidian-stub.ts";
 import {
   libraryTabId,
   migrateData,
@@ -158,6 +158,10 @@ function installCustomLibrary(data: PluginData): LibraryDefinition {
   return library;
 }
 
+// Standalone private seam: the view's private `plugin` is replaced by a test fake.
+// Omit projects the public surface (an intersection with the class would collapse to never).
+type ViewSeam<Seam> = Omit<EntVaultCommandCenterView, keyof Seam> & Seam;
+
 function installWindow(window: FakeWindow): () => void {
   const previous = Object.getOwnPropertyDescriptor(globalThis, "window");
   Object.defineProperty(globalThis, "window", { configurable: true, value: window, writable: true });
@@ -213,7 +217,7 @@ function createView(window: FakeWindow, inputSources: SearchSource[] = []): EntV
   };
   const ViewConstructor = EntVaultCommandCenterView as unknown as new (
     leaf: { app: typeof app },
-    plugin: typeof plugin,
+    viewPlugin: typeof plugin,
   ) => EntVaultCommandCenterView;
   const restoreWindow = installWindow(window);
   try {
@@ -369,9 +373,9 @@ test("wide tablet compact controls preserve compatibility warnings and read-only
   platform.isMobile = true;
   try {
     const dom = createFakeDom();
-    const view = createView(dom.window) as unknown as EntVaultCommandCenterView & {
+    const view = createView(dom.window) as unknown as ViewSeam<{
       plugin: { dataCompatibilityWarning: string; isDataReadOnly(): boolean };
-    };
+    }>;
     view.plugin.dataCompatibilityWarning = "Synthetic newer-data warning";
     view.plugin.isDataReadOnly = () => true;
     const content = dom.document.body.createDiv({ cls: "view-content" });
@@ -470,7 +474,9 @@ test("stacked-pane transitions preserve active list and detail scroll owners in 
   harness.selectRecord(selected.path);
   assert.equal(harness.mobileInspectorOpen, true);
   assert.ok(content.querySelector(".ent-cc-shell.is-inspector-route"));
-  assert.equal(content.querySelector(".ent-cc-inspector")?.getAttribute("role"), "dialog");
+  // WF-07: this fixture is a narrow DESKTOP pane (Platform.isMobile is false), so it is not a dialog.
+  assert.equal(content.querySelector(".ent-cc-inspector")?.getAttribute("role"), "complementary");
+  assert.equal(content.querySelector(".ent-cc-inspector")?.getAttribute("aria-modal"), null);
   const compactInspectorBody = content.querySelector(".ent-cc-inspector-body");
   assert.ok(compactInspectorBody);
   compactInspectorBody.scrollTop = 73;
@@ -526,12 +532,12 @@ test("moving a command-center leaf to a pop-out rebinds the pane observer", asyn
   const view = createView(firstDom.window, [source]);
   const content = firstDom.document.body.createDiv({ cls: "view-content" });
   content.setBoundingClientRect({ width: 1200 });
-  let migrationListener: ((viewWindow: Window) => void) | null = null;
+  const migration: { listener: ((viewWindow: Window) => void) | null } = { listener: null };
   let migrationListenerRemoved = false;
   (content as unknown as {
     onWindowMigrated(listener: (viewWindow: Window) => void): () => void;
   }).onWindowMigrated = (listener) => {
-    migrationListener = listener;
+    migration.listener = listener;
     return () => { migrationListenerRemoved = true; };
   };
   const harness = view as unknown as {
@@ -542,11 +548,12 @@ test("moving a command-center leaf to a pop-out rebinds the pane observer", asyn
   harness.contentEl = asHtmlElement(content);
   await view.onOpen();
   assert.equal(firstObservers.length, 1);
-  assert.ok(migrationListener, "the view must subscribe to Obsidian's deterministic migration hook");
+  assert.ok(migration.listener, "the view must subscribe to Obsidian's deterministic migration hook");
 
   (content as unknown as { ownerDocument: typeof secondDom.document }).ownerDocument = secondDom.document;
   content.setBoundingClientRect({ width: 820 });
-  migrationListener(secondDom.window);
+  // Single documented seam: the fake window stands in for the host Window.
+  migration.listener(secondDom.window as unknown as Window);
 
   assert.equal(firstObservers[0]?.disconnected, true);
   assert.equal(secondObservers.length, 1);
@@ -609,13 +616,13 @@ test("read-only organization disables write-only controls before activation", as
   Notice.messages.length = 0;
   const source = searchSource("base-read-only", "Protected base", [record("Knowledge Base/Airway.md", "Airway")]);
   source.data.settings.setupComplete = true;
-  const view = createView(dom.window, [source]) as unknown as EntVaultCommandCenterView & {
+  const view = createView(dom.window, [source]) as unknown as ViewSeam<{
     plugin: {
       isDataReadOnly(): boolean;
       openNoteOrganizer(): void;
       openNoteOrganizerDrop(dataTransfer: DataTransfer | null): void;
     };
-  };
+  }>;
   let organizerOpenCount = 0;
   let organizerDropCount = 0;
   view.plugin.isDataReadOnly = () => true;
@@ -661,15 +668,17 @@ test("read-only organization disables write-only controls before activation", as
   assert.equal(drop?.defaultPrevented, true);
   assert.equal(drop?.propagationStopped, true);
   assert.equal(organizerDropCount, 0, "read-only drops must not reach the organizer");
-  assert.deepEqual(Notice.messages, ["Organizing notes is unavailable while organization data is read-only."]);
+  // WF-07: the rejection now lives on the persistent view surface instead of a transient Notice.
+  assert.deepEqual(Notice.messages, []);
+  assert.equal(content.querySelector('.ent-cc-view-feedback [role="alert"]')?.textContent, "Organizing notes is unavailable while organization data is read-only.");
 });
 
 test("the dedicated Organizer drop target intercepts safe and rejected payloads without bubbling", async () => {
   const dom = createFakeDom();
   installResizeObserver(dom.window);
-  const view = createView(dom.window) as unknown as EntVaultCommandCenterView & {
+  const view = createView(dom.window) as unknown as ViewSeam<{
     plugin: { openNoteOrganizerDrop(dataTransfer: DataTransfer | null): void };
-  };
+  }>;
   const received: Array<DataTransfer | null> = [];
   view.plugin.openNoteOrganizerDrop = (dataTransfer) => { received.push(dataTransfer); };
   const content = dom.document.body.createDiv({ cls: "view-content" });
@@ -973,11 +982,12 @@ test("mobile renders and reveals an active custom-library tab without exposing a
   const bar = parent.querySelector(".ent-cc-tabs");
   assert.ok(bar);
   bar.setBoundingClientRect({ left: 0, right: 200, width: 200 });
-  bar.scrollLeft = 0;
+  // The fake element has no scrollLeft; production writes it on the element.
+  const scrollingBar = Object.assign(bar, { scrollLeft: 0 });
   active.setBoundingClientRect({ left: 400, right: 500, width: 100 });
   parent.scrollTop = 123;
   view.revealActiveTab(asHtmlElement(bar));
-  assert.equal(bar.scrollLeft, 350);
+  assert.equal(scrollingBar.scrollLeft, 350);
   assert.equal(parent.scrollTop, 123);
   assert.equal((active as unknown as { scrollIntoViewCalls: number }).scrollIntoViewCalls, 0);
   assert.equal(bar.getAttribute("aria-label"), null);
@@ -1483,7 +1493,8 @@ test("the production copy action writes to the clipboard only after its button i
   await Promise.resolve();
 
   assert.deepEqual(writes, ["Knowledge Base/Topic.md"]);
-  assert.equal(Notice.messages.includes("Copy path copied."), true);
+  // WF-07: the copy result is persistent view feedback, not a transient Notice.
+  assert.equal((view as unknown as { viewFeedback: { message: string } | null }).viewFeedback?.message, "Copy path copied.");
 });
 
 test("a depth-three nested subheading keeps 44px menu-driven controls on mobile", () => {

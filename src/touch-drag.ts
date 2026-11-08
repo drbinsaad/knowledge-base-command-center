@@ -12,7 +12,13 @@ export interface TouchDragOptions<Source, Destination> {
   getScrollBounds?: (container: HTMLElement) => { top: number; bottom: number } | null;
   isCurrent: (source: Source) => boolean;
   resolveTarget: (source: Source, x: number, y: number) => TouchDragTarget<Destination> | null;
-  onDrop: (source: Source, destination: Destination) => void;
+  /** The owner settles the move (including its persistence) itself; the controller only hands it over. */
+  onDrop: (source: Source, destination: Destination) => unknown;
+  /**
+   * A gesture ended without a move: Escape, rotation, lost capture, stale source or no valid target.
+   * Not called for a handed-over drop, nor once the controller is destroyed.
+   */
+  onCancelled?: (wasActive: boolean) => void;
 }
 
 interface Gesture<Source, Destination> {
@@ -98,14 +104,21 @@ export class TouchDragController<Source, Destination> {
     });
   }
 
+  /** A pointer is down on a handle, whether or not it has started dragging. */
+  hasGesture(): boolean {
+    return this.gesture !== null;
+  }
+
   cancel(): void {
     const gesture = this.clearGesture();
     if (gesture?.active) this.status.textContent = "Move cancelled.";
+    if (gesture && !this.destroyed) this.options.onCancelled?.(gesture.active);
   }
 
   destroy(): void {
-    this.cancel();
+    // A replaced controller must never call back into the view that replaced it.
     this.destroyed = true;
+    this.cancel();
     for (const cleanup of this.handles.values()) cleanup();
     this.handles.clear();
     this.status.remove();
@@ -224,6 +237,7 @@ export class TouchDragController<Source, Destination> {
     if (!target || !target.element.isConnected || !this.options.root.contains(target.element)
       || !this.options.isCurrent(gesture.source)) {
       this.status.textContent = "Move cancelled.";
+      this.options.onCancelled?.(true);
       return;
     }
     this.status.textContent = `Move requested for ${gesture.label}.`;

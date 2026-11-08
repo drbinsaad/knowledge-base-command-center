@@ -5,7 +5,7 @@ import {
   MAX_LIBRARY_VISIBLE_PROPERTIES,
   type LibraryDisplayProfile,
 } from "./library-display-profile";
-import { DeleteArchivedLibraryModal, LibraryEditorModal } from "./library-modal";
+import { DeleteArchivedLibraryModal, LibraryEditorModal } from "./library-form-modals";
 import { LibraryNoteProfileEditorModal } from "./library-profile-modal";
 import { errorMessage, type LibraryDefinition } from "./model";
 import { calculateModalViewportLayout, ConfirmModal } from "./modals";

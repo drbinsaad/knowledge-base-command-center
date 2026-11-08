@@ -2,7 +2,12 @@
 
 Knowledge Base Command Center separates portable organization from private same-vault restoration. Read this guide before sharing an export, replacing organization, or restoring recovery data.
 
-This guide covers the current release: Collections and Library-display formats. The release supports local-vault covers only; online loading is excluded and its [earlier proposal](LIBRARY_DISPLAY_AND_PRIVACY.md#deferred-online-cover-proposal) remains deferred and unapproved.
+Library covers load only from images in your vault. Online loading is not supported, and its [earlier proposal](LIBRARY_DISPLAY_AND_PRIVACY.md#deferred-online-cover-proposal) remains deferred and unapproved.
+
+Two rules apply to everything below:
+
+- **A single-base backup or recovery export covers one knowledge base.** One made from **Back up, export, or import…** (the Export / import center) holds only the base you exported, not sibling or archived bases, notes, or attachments. A multi-base portfolio (**Export or import several knowledge bases…**) carries each base you select, as portable organization only. Full conflict rescues and raw kept stores (`data.json.bak-kept-*`, `data.json`) can carry sibling bases too, so treat them as private. To protect several bases with recovery exports, export each one, and back up the whole vault separately.
+- **Recovery restores plugin organization, never note files.** If a note file was deleted, only a vault backup or Obsidian’s own file recovery brings it back.
 
 ## Choose the right artifact
 
@@ -17,7 +22,7 @@ No plugin export contains Markdown note bodies or attachments.
 
 ## Export components
 
-Open **Export / import center…** from the Command palette, Index Manager, or Command Center menu for a single-base package. Open **Multi-base portfolio transfer…** from the Command palette or Command Center menu for a portfolio.
+For a single-base package, run **Back up, export, or import…** from the Command palette, or choose **Export / import center…** from the Command Center menu or Index Manager. For a portfolio, run **Export or import several knowledge bases…** from the Command palette, or choose **Multi-base portfolio transfer…** from the Command Center menu.
 
 The single-base center operates on the active knowledge base. A portfolio can include several available bases without switching between them. Archived bases must still be restored temporarily before either kind of export.
 
@@ -37,7 +42,7 @@ Archived Libraries are not offered as portable sections. Confirmed private recov
 
 Library display profiles contain only layout choices and property names: no cover URL, property value, image bytes, or permission to contact a server. To transfer them, select **Workspace settings**. Workspace format 3 includes dependency descriptors for every active Library with a display profile, even when that Library's catalog is unselected. Descriptors preserve stable identity without replacing an unselected destination Library's name, archive decision, or headings. Profiles for archived or missing Libraries are omitted from Workspace export. Importing a Library catalog alone leaves destination display settings unchanged. Older Workspace formats 1–2 preserve destination display preferences; format 3 applies the selected Workspace profiles.
 
-Version 0.25.0 does not support online-image loading. Display profiles, synced notes, imports, recovery and Undo cannot enable it. The obsolete permission key from private test builds is App-local, inert, and excluded from all transfer formats.
+Online-image loading is not supported. Display profiles, synced notes, imports, recovery and Undo cannot enable it. The obsolete permission key from private test builds is App-local, inert, and excluded from all transfer formats.
 
 Collections and study state carry only the portable identities they reference. They do not silently select or replace a complete Index or complete Library.
 
@@ -103,9 +108,9 @@ Creating or linking preserves the portable identity and its Index/Library placem
 
 ## Portable format compatibility
 
-Version 0.24.0 writes portable format version 7 with saved-view component format 2, preserving collection scopes. Workspace format 3 is unchanged. Releases 0.23.0 and 0.23.1 wrote portable format version 6 with Workspace format 3, adding Library display profiles and their stable-ID dependencies. Releases 0.13.0 through 0.22.0 wrote portable version 5. That format added nested Collection and Library subheadings—up to five levels in one branch, counting the top heading as level 1—to version 4’s stable Library definitions and selective Library IDs.
+Current builds write portable format version 7 with saved-view component format 2, preserving collection scopes (first written by 0.24.0). Workspace format 3 is unchanged. Releases 0.23.0 and 0.23.1 wrote portable format version 6 with Workspace format 3, adding Library display profiles and their stable-ID dependencies. Releases 0.13.0 through 0.22.0 wrote portable version 5. That format added nested Collection and Library subheadings—up to five levels in one branch, counting the top heading as level 1—to version 4’s stable Library definitions and selective Library IDs.
 
-Version 0.24.0 reads portable versions 1–7, saved-view component versions 1–2, and Workspace versions 1–3, so older flat packages still import. Legacy Procedures, Medications, and Syndromes catalogs migrate to reserved stable Library IDs. Non-topic identities in version 1 files are treated conservatively as Collection or study dependencies rather than authoritative complete Libraries. Imported content nested deeper than five levels keeps its records by merging them into the nearest allowed level.
+Current builds read portable versions 1–7, saved-view component versions 1–2, and Workspace versions 1–3, so older flat packages still import. Legacy Procedures, Medications, and Syndromes catalogs migrate to reserved stable Library IDs. Non-topic identities in version 1 files are treated conservatively as Collection or study dependencies rather than authoritative complete Libraries. Imported content nested deeper than five levels keeps its records by merging them into the nearest allowed level.
 
 Older plugin builds reject unsupported portable version 7, saved-view component version 2, or recovery version 13 rather than silently dropping a collection scope. An older build that encounters a synced version-17 store with version-17 knowledge-base data preserves it read-only instead of rewriting it. Update every importing and syncing device to 0.24.0 or a newer compatible release before applying a new export or editing organization. Published 0.23.1 cannot edit the newer store. Existing version-15 direct-note and linked-folder provenance remains required and is preserved through version 16 and version 17; these upgrades do not reenroll storage folders.
 
@@ -139,6 +144,8 @@ Older standalone workspace exports and organization backups remain readable thro
 Desktop uses the operating system download and file picker.
 
 The plugin itself does not read or write outside the vault. On desktop, the operating-system surfaces place files only where the user chooses.
+
+On desktop, the single-base Export / import center’s notice says **Export started**: the plugin started the download. (The multi-base portfolio flow still says “Exported …”, but the same limit applies to any desktop download.) The plugin cannot see where your browser or operating system put the file, or whether the save finished. Open the file yourself and check it before you rely on it. On iPhone and iPad the file is written inside the vault, so the plugin can confirm the write; it still cannot confirm that Sync has copied it to another device.
 
 On iPhone and iPad, Export writes JSON into the configured Exports folder inside the vault (<code>Knowledge Base Command Center Exports/</code> by default; Settings → Exports folder) so it can sync or be shared through Files. Import uses an in-vault JSON picker and displays the selected vault path during review.
 
@@ -210,6 +217,48 @@ Before a primary plugin-data write, the adjacent <code>data.json.bak</code> is r
 9. If the result is wrong, use Undo before further organization, then restore the backup from step 2 if needed.
 
 Do not use a different-base or legacy-identity override unless the displayed uncertainty is intentional and understood. Cross-preset recovery is always rejected.
+
+## Kept copies and conflict rescues
+
+The plugin keeps copies of plugin data when it would otherwise risk losing organization. It does not delete them. There are two kinds:
+
+| Kind | Where it is | When it is made |
+| --- | --- | --- |
+| **Sync conflict rescue** (`knowledge-base-command-center-conflict-*.json`) | Your configured Exports folder | Before the plugin adopts a store that conflicts with local work, or arrives after meaningful local work on a new device. |
+| **Kept data backup** (`data.json.bak-kept-*`) | The plugin’s own folder, next to `data.json` | When replacing the rolling `data.json.bak` could have lost content that no other copy holds. |
+
+Both contain plugin organization and exact vault-relative paths, but no note bodies. Keep them private. A full private rescue can also include per-base view and Undo history, and **Clear device-local data…** does not remove existing rescues.
+
+The automatic rolling backup (`data.json.bak`) is a safety net for a failed save. It is not a permanent archive. Permanently deleting a knowledge base does not make an extra backup first, so export that base’s organization before you remove it for good.
+
+### Review kept copies
+
+If your installed version does not show this entry, the copies still exist on disk; only the in-app restore is missing.
+
+Open **Sync & recovery center**, find its **Kept copies** section, and choose **Review kept copies…** (it also works in protected read-only mode, because reviewing writes nothing). The list shows kept data backups and conflict rescues found in the configured Exports folder, the legacy default Exports folder, and the plugin folder. It shows at most 50 files, newest first, and says how many folders were checked. A file name is only a hint: nothing is validated until you choose **Review**. **Choose another file** opens one you pick yourself.
+
+Reviewing a copy shows its source type, date, format, whether it came from this vault, and the knowledge bases inside it. Then:
+
+1. Choose **Restore this base** next to one knowledge base.
+2. Give the restored base a name. It becomes a **new** knowledge base with a new identity.
+3. Read what is not carried over, then choose **Restore as new base**. The plugin checks again that the file has not changed since the preview.
+
+What this does and does not do:
+
+- It restores one selected base per run, as a new base. It never replaces, merges into, or edits an existing base, and it does not switch your active base. Choose **Open restored base** afterwards if you want to look at it.
+- The restored base starts with empty Undo and Redo, its default tab, and a new identity. Old migration backup payloads and the original base’s causal history and archived state stay in the source copy only.
+- It writes plugin data only. No Markdown note is created, moved, or changed, so a restored base may show **No note** or missing links until the notes are present.
+- A copy that is unreadable, newer than this build understands, from a different vault, or otherwise unsafe is shown as **Preserved, not restorable**. It is left untouched and is not counted as a valid recovery.
+- Restoring needs room for another base (at most 50 available and archived bases).
+- The list covers only the folders named above. It is not a count of every copy that exists anywhere.
+
+## Known limits of recovery and testing
+
+- Recovery from kept copies restores as a new base only. Restoring over an existing base uses the separate same-vault recovery import described above.
+- A single-base backup covers that base only; portfolios and full rescues can hold several bases. A vault backup is the only copy of notes and attachments.
+- A desktop export means the download started. The plugin cannot confirm the file was saved, whichever export flow you used.
+- The Sync & recovery center shows local facts about this device. It cannot see Obsidian Sync, the network, or other devices, and a missing warning is not proof that a handoff is safe.
+- Automated tests do not cover a physical iPhone or iPad, and no automation runs two devices through Obsidian Sync. Those checks are recorded separately in the release evidence and are unverified unless a record says they were run.
 
 ## Sync model and conflict handling
 

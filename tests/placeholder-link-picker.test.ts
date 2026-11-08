@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TFile } from "obsidian";
+import { TFile } from "./support/obsidian-stub.ts";
 import { VaultFilePickerModal } from "../src/modals";
 import { cloneJsonValue, DEFAULT_DATA, portablePlaceholderPath, type VaultRecord } from "../src/model";
 import { EntVaultCommandCenterView } from "../src/view";

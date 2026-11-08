@@ -477,3 +477,29 @@ test("destroy removes all handle listeners and status, and cannot restart a gest
   h.drop();
   assert.equal(h.drops.length, 0);
 });
+
+test("WF09 D4 the controller reports a pending or active gesture and every cancellation exactly once, but never a drop or a destroy", () => {
+  const ended: boolean[] = [];
+  const h = harness({ onCancelled: (wasActive) => { ended.push(wasActive); } });
+  assert.equal(h.controller.hasGesture(), false);
+  h.start();
+  assert.equal(h.controller.hasGesture(), true, "a pending (not yet dragging) gesture counts");
+  dispatch(h.document, "keydown", { key: "Escape" });
+  assert.equal(h.controller.hasGesture(), false);
+  assert.deepEqual(ended, [false]);
+  h.start();
+  h.move();
+  assert.equal(h.controller.hasGesture(), true);
+  dispatch(h.window, "resize");
+  assert.deepEqual(ended, [false, true], "rotation or resize cancels an active gesture");
+  h.start();
+  h.move();
+  h.drop();
+  assert.equal(h.controller.hasGesture(), false);
+  assert.equal(h.drops.length, 1);
+  assert.deepEqual(ended, [false, true], "a completed drop is settled by its callback, not reported as cancelled");
+  h.start();
+  h.move();
+  h.controller.destroy();
+  assert.deepEqual(ended, [false, true], "destroying the controller never reports back into a replaced view");
+});

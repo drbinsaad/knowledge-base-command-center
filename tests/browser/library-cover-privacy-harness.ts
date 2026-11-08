@@ -1,4 +1,11 @@
-import { TFile, type App } from "obsidian";
+import type { App } from "obsidian";
+import * as obsidianHost from "obsidian";
+import { TFile, TestHarnessError } from "./obsidian-browser";
+
+// Same constructor as the "obsidian" alias used by production code.
+if (!Object.is(obsidianHost.TFile, TFile)) {
+  throw new TestHarnessError("Browser harness TFile differs from the obsidian alias TFile");
+}
 import { renderLibraryCover, resolveLibraryCover } from "../../src/library-cover";
 import { normalizeLibraryDisplayProfile } from "../../src/library-display-profile";
 

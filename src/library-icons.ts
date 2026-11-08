@@ -2,6 +2,17 @@ import { getIconIds } from "obsidian";
 
 const FALLBACK_LIBRARY_ICON = "library";
 
+/**
+ * Icon choices offered when creating or editing a Library. This is a creation
+ * whitelist only; display resolution (resolveLibraryIconId) still preserves
+ * unknown stored IDs. Order and IDs are part of the saved-data contract.
+ */
+export const LIBRARY_ICON_IDS = [
+  "library", "book-open", "book-copy", "folder", "folders", "bookmark", "archive",
+  "clipboard-list", "pill", "dna", "stethoscope", "heart-pulse", "brain", "microscope",
+  "flask-conical", "syringe", "activity", "graduation-cap", "file-text", "notebook-tabs",
+] as const;
+
 let cachedRegistrySize = -1;
 let cachedRegistry = new Set<string>();
 

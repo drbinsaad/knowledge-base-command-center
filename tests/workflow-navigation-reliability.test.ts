@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Menu, Notice, Setting } from "obsidian";
+import { Menu, Notice, Setting } from "./support/obsidian-stub.ts";
 import Plugin from "../src/main.ts";
 import { ConfirmModal } from "../src/modals.ts";
 import { buildCurriculumTree, cleanSearchViewFilters, createDefaultStore, createKnowledgeBaseEntry, migrateData, parseQuery, type LayoutHeading, type LayoutSubheading, type VaultRecord } from "../src/model.ts";
@@ -60,7 +60,7 @@ test("collection scope persists through saved-view and return-route normalizatio
   const data = migrateData(null);
   data.savedViews = [{ id: "reading-view", name: "Reading", tab: "collections", query: "example", ...filters }];
   assert.deepEqual(migrateData(data).savedViews, data.savedViews);
-  const bundle = createPortableExport(data, [], { ...EMPTY_PORTABLE_SELECTION, savedViews: true }, { name: "Filtered views" });
+  const bundle = createPortableExport(data, [], { ...EMPTY_PORTABLE_SELECTION, savedViews: true }, "Filtered views");
   assert.deepEqual(parsePortableExport(bundle).components.savedViews?.views, data.savedViews);
   const route = parseKbccReturnRoute({ notePath: "Notes/A.md", baseId: "base-a", capturedAt: 1, view: {
     ...filters, activeTab: "collections", selectedPath: "Notes/A.md", query: "", detailVisible: false,
@@ -112,7 +112,7 @@ test("portable collection filters import only with an unchanged, selected collec
   source.collections = [{ id: "reading", title: "Reading", collapsed: false, subjects: [], subheadings: [] }];
   source.savedViews = [{ id: "reading-view", name: "Reading search", tab: "collections", query: "", scope: "collection", collectionId: "reading" }];
   const selection = { ...EMPTY_PORTABLE_SELECTION, collections: true, savedViews: true };
-  const bundle = parsePortableExport(createPortableExport(source, [], selection, { name: "Reading collection" }));
+  const bundle = parsePortableExport(createPortableExport(source, [], selection, "Reading collection"));
   const unchanged = migrateData(null);
   assert.equal(applyPortableExport(unchanged, bundle, selection, "merge").importedViews, 1);
   assert.equal(unchanged.savedViews[0].collectionId, "reading");

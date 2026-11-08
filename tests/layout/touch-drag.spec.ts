@@ -297,6 +297,56 @@ test("refresh during a live touch drag invalidates its source and never commits 
   await expect(page.locator(".is-dragging, .is-drop-inside, .is-drop-before, .is-drop-after")).toHaveCount(0);
 });
 
+test("WF09 D1 an unrelated refresh during a live touch drag is deferred and the valid move commits once", async ({ page }) => {
+  await open(page);
+  await mode(page);
+  const before = await state(page);
+  const drag = await begin(page, "Alpha");
+  const target = row(page, "Beta");
+  await drag.move(await point(target));
+  await expect(target).toHaveClass(/is-drop-inside/u);
+  // Advances the harness search generation and reloads the view without changing data identity.
+  for (let turn = 0; turn < 2; turn += 1) {
+    await page.evaluate(() => (window as unknown as { kbccBrowserHarness: { refresh(replace: boolean): Promise<void> } }).kbccBrowserHarness.refresh(false));
+  }
+  await expect(target).toHaveClass(/is-drop-inside/u);
+  await drag.end();
+  await expect.poll(async () => (await state(page)).parents["Research/Alpha.md"]).toBe("Research/Beta.md");
+  const after = await state(page);
+  expect(after.mutations).toHaveLength(1);
+  expect(after.fingerprint).not.toBe(before.fingerprint);
+  await expect(page.locator(".is-dragging, .is-drop-inside, .is-drop-before, .is-drop-after")).toHaveCount(0);
+  await expect(page.locator(".ent-cc-view-feedback")).toContainText("Moved “Alpha”");
+});
+
+test("WF09 R1 a keyboard tab change while a drag is held settles the deferred refresh exactly once and moves nothing", async ({ page }) => {
+  await open(page);
+  await mode(page);
+  // The active tab holds keyboard focus before the handle drag starts; the handle's pointerdown does not move it.
+  const activeTab = page.getByRole("tab", { selected: true });
+  await activeTab.focus();
+  await page.evaluate(() => {
+    const host = document.querySelector("#kbcc-view")!;
+    const counter = { shells: 0 };
+    (window as unknown as { wf09Renders: typeof counter }).wf09Renders = counter;
+    new MutationObserver((records) => {
+      for (const record of records) record.addedNodes.forEach((node) => { if (node.nodeType === 1 && (node as Element).classList.contains("ent-cc-shell")) counter.shells += 1; });
+    }).observe(host, { childList: true });
+  });
+  const shells = (): Promise<number> => page.evaluate(() => (window as unknown as { wf09Renders: { shells: number } }).wf09Renders.shells);
+  const drag = await begin(page, "Alpha", "mouse");
+  await drag.move(await point(row(page, "Beta")));
+  await page.evaluate(() => (window as unknown as { kbccBrowserHarness: { refresh(replace: boolean): Promise<void> } }).kbccBrowserHarness.refresh(false));
+  expect(await shells(), "the unrelated refresh is deferred under the held drag").toBe(0);
+  await page.keyboard.press("ArrowRight");
+  await drag.end();
+  await expect.poll(shells).toBe(2);
+  await page.waitForTimeout(200);
+  expect(await shells(), "one tab render plus exactly one settled refresh").toBe(2);
+  expect((await state(page)).mutations).toEqual([]);
+  await expect(page.locator(".is-dragging, .is-drop-inside, .is-drop-before, .is-drop-after")).toHaveCount(0);
+});
+
 test("Escape cancels trackpad drag and releasing outside the tree is a no-op", async ({ page }) => {
   await open(page);
   await mode(page);

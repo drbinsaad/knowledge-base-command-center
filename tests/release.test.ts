@@ -125,7 +125,7 @@ test("public repository metadata is present", async () => {
     "Organize notes…",
     "Organize this note…",
     "Where is this note organized?",
-    "Undo last organizer change",
+    "Undo last organizer batch (all affected bases)",
     "Redo last organizer change",
   ]) {
     assert.match(userGuide, new RegExp(`^- ${organizerCommand.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}$`, "mu"),
@@ -286,7 +286,7 @@ test("public repository metadata is present", async () => {
   for (const command of [
     "Quick append: Add to current note…",
     "Quick append: Choose a note…",
-    "Quick append: Undo last append",
+    "Quick append: Undo last note append",
     "Show imported topics without notes",
     "Create or link the next imported topic…",
     "Review folder that adds notes automatically…",
@@ -358,6 +358,7 @@ test("mobile flows keep primary actions visible and empty states actionable", as
   const modals = await readFile(path.join(root, "src/modals.ts"), "utf8");
   const followUpModal = await readFile(path.join(root, "src/follow-up-modal.ts"), "utf8");
   const libraryModal = await readFile(path.join(root, "src/library-modal.ts"), "utf8");
+  const libraryFormModals = await readFile(path.join(root, "src/library-form-modals.ts"), "utf8");
   const styles = await readFile(path.join(root, "styles.css"), "utf8");
   assert.match(view, /Add existing \$\{settings\.itemPlural\}/);
   assert.match(view, /ent-cc-history-action/);
@@ -374,8 +375,8 @@ test("mobile flows keep primary actions visible and empty states actionable", as
   assert.match(modals, /visualViewport/);
   assert.match(modals, /calculateModalViewportLayout/);
   assert.match(libraryModal, /Manage libraries/);
-  assert.match(libraryModal, /Archive this library before permanently deleting it|Delete library/);
-  assert.match(libraryModal, /setDestructive\(\)/);
+  assert.match(libraryFormModals, /Archive this library before permanently deleting it|Delete library/);
+  assert.match(libraryFormModals, /setDestructive\(\)/);
   assert.match(styles, /ent-cc-library-manager-action/);
   assert.match(styles, /ent-cc-knowledge-note-content/);
   assert.match(styles, /--ent-cc-modal-visual-height/);
@@ -457,10 +458,11 @@ test("runtime source satisfies blocking Obsidian review rules", async () => {
   const runtimePaths = await discoverRuntimeSources(path.join(root, "src"));
   const runtimeSources = await Promise.all(runtimePaths.map((file) => readFile(file, "utf8")));
   const runtime = runtimeSources.join("\n");
-  assert.doesNotMatch(main, /detachLeavesOfType\(VIEW_TYPE\)/);
-  assert.doesNotMatch(settings, /setName\("Knowledge Base Command Center"\)\.setHeading\(\)/);
+  // The unload, settings-heading and getSettingDefinitions rules are all-source
+  // guards in scripts/runtime-source-guards.mjs (fixtures in runtime-source-guards.test.ts).
+  assert.match(main, /onunload/);
   assert.match(settings, /getSettingDefinitions\(\): SettingDefinitionItem\[\]/);
-  assert.doesNotMatch(settings, /\bdisplay\(\): void/);
+  assert.doesNotMatch(runtime, /\bdisplay\(\): void/);
   assert.doesNotMatch(runtime, /\.flatMap\(/);
   assert.doesNotMatch(runtime, /\.setWarning\(/);
   assert.doesNotMatch(runtime, /\.setDynamicTooltip\(/);
@@ -505,7 +507,8 @@ test("review and release automation is reproducible and least-privilege", async 
   const communityVerifier = await readFile(path.join(root, "scripts", "verify-community.mjs"), "utf8");
   assert.match(communityVerifier, /readFile\(path\.join\(root, "main\.js"\)/);
   assert.match(communityVerifier, /built main\.js must not require external module/);
-  assert.match(communityVerifier, /discoverRuntimeSources\(absolute\)/);
+  assert.match(communityVerifier, /checkRuntimeSources\(sources\)/);
+  assert.match(communityVerifier, /discoverRuntimeSources\(path\.join\(root, "src"\)\)/);
   const [ciWorkflow, releaseWorkflow, securityWorkflow] = await Promise.all(
     ["ci.yml", "release.yml", "security-audit.yml"].map((name) => readFile(path.join(root, ".github", "workflows", name), "utf8")),
   );

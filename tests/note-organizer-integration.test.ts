@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { MarkdownView, Notice, TFile, TFolder } from "obsidian";
+import { MarkdownView, Notice, TFile, TFolder } from "./support/obsidian-stub.ts";
 import EntVaultCommandCenterPlugin, {
   DEVICE_LOCAL_STATE_KEY,
   KBCC_RETURN_NAVIGATION_STATE_KEY,
@@ -37,6 +37,12 @@ import type {
 } from "../src/note-organizer-surfaces";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom";
 import { createOpenedBaseGuard } from "../src/opened-base-guard";
+
+// Standalone private seams: member types are derived from the production class so a rename or
+// signature change fails to compile. Omit projects the public surface; intersecting the class
+// itself with redeclared privates would collapse to never.
+type P = EntVaultCommandCenterPlugin;
+type PluginSeam<Seam> = Omit<EntVaultCommandCenterPlugin, keyof Seam> & Seam;
 
 interface OrganizerPluginHarness {
   loadedData: unknown;
@@ -99,8 +105,9 @@ function organizerApp(files: readonly TFile[]) {
     workspace: { getLeavesOfType: () => [] },
     metadataCache: { getFileCache: () => ({ frontmatter: {} }), resolvedLinks: {} },
     fileManager: {},
-    loadLocalStorage: () => null,
-    saveLocalStorage: () => {},
+    // Overridable by tests that record device-local state.
+    loadLocalStorage: (_key: string): unknown => null,
+    saveLocalStorage: (_key: string, _value: unknown): void => {},
   };
 }
 
@@ -571,14 +578,14 @@ test("editor indicator distinguishes organized and neutral notes without relying
     loadLocalStorage: () => null,
     saveLocalStorage: () => {},
   };
-  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & {
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as unknown as PluginSeam<{
     loadedData: unknown;
-    syncNoteOrganizerIndicators(): void;
-    invalidateRecordCache(): void;
-    openNoteOrganizerMembership(path: string): void;
-    rememberKbccReturnDestination(route: KbccReturnRoute): void;
-    returnToKbcc(path: string): Promise<void>;
-  };
+    syncNoteOrganizerIndicators: P["syncNoteOrganizerIndicators"];
+    invalidateRecordCache: P["invalidateRecordCache"];
+    openNoteOrganizerMembership: P["openNoteOrganizerMembership"];
+    rememberKbccReturnDestination: P["rememberKbccReturnDestination"];
+    returnToKbcc: P["returnToKbcc"];
+  }>;
   plugin.loadedData = createDefaultStore(data, 1, "vault-note-indicator");
   await (plugin as unknown as { loadPluginData(): Promise<void> }).loadPluginData();
   let opened = "";
@@ -696,7 +703,7 @@ test("editor indicator refreshes coalesce and each visible path is summarized on
 
   let coalescedSyncs = 0;
   internal.syncNoteOrganizerIndicators = () => { coalescedSyncs += 1; };
-  const globalWithWindow = globalThis as typeof globalThis & { window?: unknown };
+  const globalWithWindow = globalThis as unknown as { window?: unknown };
   const hadWindow = Object.hasOwn(globalWithWindow, "window");
   const previousWindow = globalWithWindow.window;
   const timerWindow = {
@@ -745,10 +752,10 @@ test("note opening persists an exact return route before same-tab replacement an
     loadLocalStorage: (key: string) => structuredClone(localValues.get(key) ?? null),
     saveLocalStorage: (key: string, value: unknown) => { localValues.set(key, structuredClone(value)); },
   };
-  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & {
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as unknown as PluginSeam<{
     loadedData: unknown;
-    loadPluginData(): Promise<void>;
-  };
+    loadPluginData: P["loadPluginData"];
+  }>;
   plugin.loadedData = store;
   await plugin.loadPluginData();
   const captured = {
@@ -776,15 +783,16 @@ test("note opening persists an exact return route before same-tab replacement an
 
   let restored: unknown = null;
   let homeOpens = 0;
-  const restarted = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & {
+  const restarted = new EntVaultCommandCenterPlugin(app as never, {} as never) as unknown as PluginSeam<{
     loadedData: unknown;
-    loadPluginData(): Promise<void>;
+    loadPluginData: P["loadPluginData"];
+    // The test supplies a minimal fake view, so this member keeps its own narrow contract.
     activateView(): Promise<{
       restoreReturnViewState(state: unknown): Promise<boolean>;
       openHomePage(): Promise<void>;
     }>;
-    returnToKbcc(path: string): Promise<void>;
-  };
+    returnToKbcc: P["returnToKbcc"];
+  }>;
   restarted.loadedData = structuredClone(store);
   await restarted.loadPluginData();
   restarted.activateView = async () => ({
@@ -836,12 +844,12 @@ test("a provisional missing-data vault cannot replace established return history
     loadLocalStorage: (key: string) => structuredClone(localValues.get(key) ?? null),
     saveLocalStorage: (key: string, value: unknown) => { localValues.set(key, structuredClone(value)); },
   };
-  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & {
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as unknown as PluginSeam<{
     loadedData: unknown;
-    store: ReturnType<typeof createDefaultStore>;
-    loadPluginData(): Promise<void>;
-    rememberKbccReturnDestination(route: KbccReturnRoute): void;
-  };
+    store: P["store"];
+    loadPluginData: P["loadPluginData"];
+    rememberKbccReturnDestination: P["rememberKbccReturnDestination"];
+  }>;
   plugin.loadedData = null;
   await plugin.loadPluginData();
   assert.match(plugin.store.vaultId, /^vault-fresh-/u);
@@ -888,10 +896,10 @@ test("return capture is best-effort, never intercepts Base files, and never bloc
       localValues.set(key, structuredClone(value));
     },
   };
-  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & {
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as unknown as PluginSeam<{
     loadedData: unknown;
-    loadPluginData(): Promise<void>;
-  };
+    loadPluginData: P["loadPluginData"];
+  }>;
   plugin.loadedData = createDefaultStore(data, 1, "vault-return-best-effort");
   await plugin.loadPluginData();
   let captures = 0;
@@ -934,14 +942,14 @@ test("delete and Unicode rename maintenance keeps path-bound return history exac
     loadLocalStorage: (key: string) => structuredClone(localValues.get(key) ?? null),
     saveLocalStorage: (key: string, value: unknown) => { localValues.set(key, structuredClone(value)); },
   };
-  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & {
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as unknown as PluginSeam<{
     loadedData: unknown;
-    loadPluginData(): Promise<void>;
-    rememberKbccReturnDestination(route: KbccReturnRoute): void;
-    kbccReturnRoute(path: string): KbccReturnRoute | null;
-    pruneKbccReturnNavigationPaths(path: string, folder: boolean): void;
-    rewriteKbccReturnNavigationPaths(oldPath: string, newPath: string): void;
-  };
+    loadPluginData: P["loadPluginData"];
+    rememberKbccReturnDestination: P["rememberKbccReturnDestination"];
+    kbccReturnRoute: P["kbccReturnRoute"];
+    pruneKbccReturnNavigationPaths: P["pruneKbccReturnNavigationPaths"];
+    rewriteKbccReturnNavigationPaths: P["rewriteKbccReturnNavigationPaths"];
+  }>;
   plugin.loadedData = createDefaultStore(data, 1, "vault-return-path-maintenance");
   await plugin.loadPluginData();
   const remember = (notePath: string, selectedPath = notePath, capturedAt = Date.now()): void => {
@@ -992,12 +1000,12 @@ test("long folder renames keep return history bounded and discard only routes wh
     loadLocalStorage: (key: string) => structuredClone(localValues.get(key) ?? null),
     saveLocalStorage: (key: string, value: unknown) => { localValues.set(key, structuredClone(value)); },
   };
-  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & {
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as unknown as PluginSeam<{
     loadedData: unknown;
-    loadPluginData(): Promise<void>;
-    rememberKbccReturnDestination(route: KbccReturnRoute): void;
-    rewriteKbccReturnNavigationPaths(oldPath: string, newPath: string): void;
-  };
+    loadPluginData: P["loadPluginData"];
+    rememberKbccReturnDestination: P["rememberKbccReturnDestination"];
+    rewriteKbccReturnNavigationPaths: P["rewriteKbccReturnNavigationPaths"];
+  }>;
   plugin.loadedData = createDefaultStore(data, 1, "vault-return-long-rename");
   await plugin.loadPluginData();
   const largeQuery = "q".repeat(9_000);
@@ -1060,15 +1068,16 @@ test("deleted bases and archived or deleted Library tabs expose Home, while a ra
   }];
   const store = createDefaultStore(data, 1, "vault-return-stale-destination");
   const app = organizerApp([]);
-  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & {
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as unknown as PluginSeam<{
     loadedData: unknown;
-    loadPluginData(): Promise<void>;
-    store: typeof store;
-    rememberKbccReturnDestination(route: KbccReturnRoute): void;
-    kbccReturnRoute(path: string): KbccReturnRoute | null;
+    loadPluginData: P["loadPluginData"];
+    store: P["store"];
+    rememberKbccReturnDestination: P["rememberKbccReturnDestination"];
+    kbccReturnRoute: P["kbccReturnRoute"];
+    // The test supplies a minimal fake view, so this member keeps its own narrow contract.
     activateView(): Promise<{ restoreReturnViewState(): Promise<boolean>; openHomePage(): Promise<void> }>;
-    returnToKbcc(path: string): Promise<void>;
-  };
+    returnToKbcc: P["returnToKbcc"];
+  }>;
   plugin.loadedData = store;
   await plugin.loadPluginData();
   plugin.rememberKbccReturnDestination({
@@ -1084,10 +1093,10 @@ test("deleted bases and archived or deleted Library tabs expose Home, while a ra
   library.archivedAt = 2;
   assert.equal(plugin.kbccReturnRoute(notePath), null, "an archived Library route is advertised as Home");
   library.archivedAt = null;
-  plugin.store.bases[0]!.data.portableIndex.libraries = [];
+  plugin.store.bases[0].data.portableIndex.libraries = [];
   assert.equal(plugin.kbccReturnRoute(notePath), null, "a deleted Library route is advertised as Home");
-  plugin.store.bases[0]!.data.portableIndex.libraries = [library];
-  plugin.store.bases[0]!.archivedAt = 3;
+  plugin.store.bases[0].data.portableIndex.libraries = [library];
+  plugin.store.bases[0].archivedAt = 3;
   assert.equal(plugin.kbccReturnRoute(notePath), null, "an archived base route is advertised as Home");
   plugin.store.bases.splice(0, 1);
   assert.equal(plugin.kbccReturnRoute(notePath), null, "a deleted base route is advertised as Home");
@@ -1254,13 +1263,21 @@ test("real Organizer commit persists once, finalizes its bounded batch journal, 
   const app = organizerApp([file]);
   const localValues = new Map<string, unknown>();
   const backupWrites: Array<{ path: string; value: unknown }> = [];
+  const adapterFiles = new Map<string, string>();
   Object.assign(app, {
     loadLocalStorage: (key: string) => structuredClone(localValues.get(key) ?? null),
     saveLocalStorage: (key: string, value: unknown) => { localValues.set(key, structuredClone(value)); },
   });
   Object.assign(app.vault, {
     adapter: {
+      exists: async (path: string) => adapterFiles.has(path),
+      read: async (path: string) => {
+        const text = adapterFiles.get(path);
+        if (text === undefined) throw new Error("missing");
+        return text;
+      },
       write: async (path: string, content: string) => {
+        adapterFiles.set(path, content);
         backupWrites.push({ path, value: JSON.parse(content) as unknown });
       },
     },
@@ -1427,8 +1444,10 @@ test("Organizer required-Undo failures consistently identify the Organizer opera
   assert.doesNotMatch(finalizationNotice, /portfolio/iu);
   assert.throws(() => harness.assertDataWritable(), /Note Organizer Undo finalization is pending/iu);
   const recovery = plugin.getSyncRecoveryCenterSnapshot();
+  assert.ok(recovery.readOnlyReason, "the recovery snapshot explains the read-only state");
   assert.match(recovery.readOnlyReason, /committed Note Organizer change.*undo finalization/iu);
   assert.doesNotMatch(recovery.readOnlyReason, /portfolio/iu);
+  assert.ok(result.message, "the apply result carries a message");
   assert.match(result.message, /device-local Undo finalization is pending.*Restart Obsidian/iu);
   assert.match(result.message, /Session batch Undo is unavailable/iu);
   assert.doesNotMatch(result.message, /Use the note organizer Undo command/iu);
@@ -1564,15 +1583,21 @@ test("official single, multi, and folder context menus pass one-time Markdown sn
   const folder = new TFolder("Folder", [first, second, image]);
   const callbacks = new Map<string, (...args: never[]) => void>();
   const app = organizerApp([first, second, restricted]);
+  // The vault resolves the selected folder, as Obsidian does; the deferred
+  // menu action verifies each selected entry's frozen path and identity.
+  const resolveFile = app.vault.getAbstractFileByPath;
+  Object.assign(app.vault, {
+    getAbstractFileByPath: (path: string): TFile | TFolder | null => (path === folder.path ? folder : resolveFile(path)),
+  });
   Object.assign(app.workspace, {
     on: (event: string, callback: (...args: never[]) => void) => {
       callbacks.set(event, callback);
       return {};
     },
   });
-  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & {
-    registerNoteOrganizerContextMenus(): void;
-  };
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as unknown as PluginSeam<{
+    registerNoteOrganizerContextMenus: P["registerNoteOrganizerContextMenus"];
+  }>;
   const opened: Array<{ paths: readonly string[]; source: string }> = [];
   plugin.openNoteOrganizer = (paths = [], source = "command") => { opened.push({ paths, source }); };
   plugin.registerNoteOrganizerContextMenus();
@@ -1850,9 +1875,9 @@ test("the App-wide organizer claim blocks replacement instances and unload relea
 
 test("membership indicator styles distinguish success, neutral, and broken states accessibly", () => {
   const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
-  assert.match(css, /\.ent-cc-note-membership-organized-current[\s\S]*?var\(--color-green\)/u);
-  assert.match(css, /\.ent-cc-note-membership-not-organized[\s\S]*?var\(--text-faint\)/u);
-  assert.match(css, /\.ent-cc-note-membership-broken[\s\S]*?var\(--text-error\)/u);
+  assert.match(css, /\.ent-cc-note-membership-organized-current[^{}]*\{[^}]*color:\s*var\(--color-green\)/u);
+  assert.match(css, /\.ent-cc-note-membership-not-organized\s*\{[^}]*color:\s*var\(--text-muted\)/u);
+  assert.match(css, /\.ent-cc-note-membership-broken\s*\{[^}]*color:\s*var\(--text-error\)/u);
   assert.match(css, /data-kbcc-count[\s\S]*?font-size:\s*0\.5625rem/u);
   assert.match(css, /@media \(max-width: 760px\), \(any-pointer: coarse\)\s*\{\s*\.ent-cc-note-membership-indicator,\s*\.ent-cc-return-to-kbcc\s*\{\s*min-width:\s*44px;\s*min-height:\s*44px;/u);
   assert.doesNotMatch(css, /\.ent-cc-note-organizer-actions[\s\S]{0,220}flex-direction:\s*column-reverse/u);

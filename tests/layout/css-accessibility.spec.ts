@@ -1,0 +1,411 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { build } from "esbuild";
+import { expect, test, type Page } from "@playwright/test";
+
+/**
+ * V3 CSS tickets C01-C04. Every assertion measures rendered boxes, computed
+ * colours or computed outlines. The "host parity" body class opts into the
+ * Obsidian 1.15.0 host rules recorded in tests/browser/host.css; the product
+ * must supply its own focus indicator and contrast under those rules.
+ * Synthetic host and browser emulation only: not a real Obsidian/device pass.
+ */
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+let rendererBundle: string;
+let productStyles: string;
+let hostStyles: string;
+const failures = new WeakMap<Page, string[]>();
+
+test.beforeAll(async () => {
+  const [bundle, styles, host] = await Promise.all([
+    build({
+      entryPoints: [path.join(root, "tests/browser/view-harness.ts")],
+      bundle: true, write: false, format: "iife", platform: "browser", target: "es2022",
+      alias: { obsidian: path.join(root, "tests/browser/obsidian-browser.ts") },
+    }),
+    readFile(path.join(root, "styles.css"), "utf8"),
+    readFile(path.join(root, "tests/browser/host.css"), "utf8"),
+  ]);
+  rendererBundle = bundle.outputFiles[0]?.text ?? "";
+  expect(rendererBundle).toContain("EntVaultCommandCenterView");
+  productStyles = styles;
+  hostStyles = host;
+});
+
+interface OpenOptions { mobile?: boolean; dark?: boolean; count?: number; width?: number; height?: number; scenario?: string; parity?: boolean; rtl?: boolean }
+
+async function openView(page: Page, options: OpenOptions = {}): Promise<void> {
+  const errors: string[] = [];
+  failures.set(page, errors);
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => { if (message.type() === "error" || message.type() === "warning") errors.push(message.text()); });
+  await page.setViewportSize({ width: options.width ?? (options.mobile ? 390 : 1440), height: options.height ?? (options.mobile ? 844 : 960) });
+  await page.goto(`about:blank#mobile=${Boolean(options.mobile)}&count=${options.count ?? 8}&scenario=${options.scenario ?? ""}`);
+  const classes = [options.dark ? "theme-dark" : "theme-light", options.mobile ? "is-mobile" : "", options.parity ? "kbcc-host-parity" : "", options.rtl ? "mod-rtl" : ""].filter(Boolean).join(" ");
+  await page.setContent(`<!doctype html><html lang="${options.rtl ? "ar" : "en"}" dir="${options.rtl ? "rtl" : "ltr"}"><head><meta charset="utf-8"><title>KBCC production renderer · synthetic vault</title></head><body class="${classes}"><main id="kbcc-view" class="view-content"></main></body></html>`);
+  await page.addStyleTag({ content: hostStyles });
+  await page.addStyleTag({ content: productStyles });
+  await page.addScriptTag({ content: rendererBundle });
+  await expect.poll(() => page.evaluate(() => Boolean((window as unknown as { kbccBrowserHarness?: { ready: boolean } }).kbccBrowserHarness?.ready))).toBe(true);
+  await expect(page.locator(".ent-cc-shell")).toBeVisible();
+  await page.evaluate(() => new Promise<void>((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve()))));
+}
+
+test.afterEach(async ({ page }) => {
+  expect(failures.get(page) ?? [], "production renderer must not emit runtime or console errors").toEqual([]);
+  await page.evaluate(() => (window as unknown as { kbccBrowserHarness?: { close(): Promise<void> } }).kbccBrowserHarness?.close());
+});
+
+async function enterSplit(page: Page): Promise<void> {
+  await page.locator(".ent-cc-workspace-options > summary").tap();
+  await page.getByRole("button", { name: "Split view on wide screens", exact: true }).tap();
+  await expect(page.locator("#kbcc-view")).toHaveAttribute("data-pane-layout", "wide");
+  await page.getByRole("button", { name: /^Relationship overview,/u }).tap();
+  await expect(page.locator(".ent-cc-view")).toHaveClass(/is-mobile-split/u);
+}
+
+/** Lowest contrast of every rendered match, text against composited solid ancestor backgrounds. */
+async function contrastOf(page: Page, selector: string): Promise<number> {
+  const target = page.locator(selector).locator("visible=true");
+  await expect(target.first(), `${selector} must be rendered`).toBeVisible();
+  const ratios = await target.evaluateAll((elements) => elements.map((element) => {
+    const canvas = document.body.createEl("canvas");
+    canvas.remove();
+    canvas.width = 1; canvas.height = 1;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) throw new Error("Canvas is unavailable for color contrast check");
+    context.fillStyle = "white"; context.fillRect(0, 0, 1, 1);
+    const ancestors: Element[] = [];
+    for (let current: Element | null = element; current; current = current.parentElement) ancestors.unshift(current);
+    for (const ancestor of ancestors) {
+      const style = getComputedStyle(ancestor);
+      if (style.backgroundImage !== "none" || Number(style.opacity) !== 1) throw new Error("Contrast helper requires solid backgrounds without group opacity");
+      context.fillStyle = style.backgroundColor; context.fillRect(0, 0, 1, 1);
+    }
+    const background = context.getImageData(0, 0, 1, 1).data;
+    context.fillStyle = getComputedStyle(element).color; context.fillRect(0, 0, 1, 1);
+    const foreground = context.getImageData(0, 0, 1, 1).data;
+    const luminance = (channels: Uint8ClampedArray): number => {
+      const values = Array.from(channels).slice(0, 3).map((channel) => {
+        const value = channel / 255;
+        return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+      });
+      return values[0] * 0.2126 + values[1] * 0.7152 + values[2] * 0.0722;
+    };
+    const a = luminance(foreground); const b = luminance(background);
+    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+  }));
+  return Math.min(...ratios);
+}
+
+test.describe("C01 wide mobile split targets", () => {
+  test.use({ hasTouch: true });
+  for (const rtl of [false, true]) {
+    test(`Search Clear, search input, Details menu, filters and study actions are >=44px without overlap${rtl ? " (RTL)" : ""}`, async ({ page }) => {
+      await openView(page, { mobile: true, width: 1180, height: 820, scenario: "related-overflow", parity: true, rtl });
+      await enterSplit(page);
+      const input = page.getByRole("searchbox");
+      await input.fill("Research");
+      const clear = page.locator(".ent-cc-search-clear");
+      await expect(clear).toBeVisible();
+      if (!(await page.locator(".ent-cc-workspace-options").evaluate((node) => (node as HTMLDetailsElement).open))) await page.locator(".ent-cc-workspace-options > summary").tap();
+      await expect.poll(() => page.locator(".ent-cc-workspace-options").evaluate((node) => (node as HTMLDetailsElement).open)).toBe(true);
+      const measured = async (selector: string) => page.locator(selector).locator("visible=true").evaluateAll((nodes) => nodes.map((node) => {
+        const r = node.getBoundingClientRect();
+        return { width: Math.round(r.width * 10) / 10, height: Math.round(r.height * 10) / 10 };
+      }));
+      const small: string[] = [];
+      for (const [name, selector, axes] of [
+        ["search clear", ".ent-cc-search-clear", ["width", "height"]],
+        ["search input", ".ent-cc-search-box input", ["height"]],
+        ["Details menu", "button[aria-label='Command center actions']", ["width", "height"]],
+        ["layout control", ".ent-cc-workspace-options-actions .ent-cc-icon-button", ["width", "height"]],
+        ["Details summary", ".ent-cc-workspace-options > summary", ["height"]],
+        ["Filters summary", ".ent-cc-mobile-filters > summary", ["height"]],
+        ["study action", ".ent-cc-study-action", ["height"]],
+      ] as const) {
+        const sizes = await measured(selector);
+        if (sizes.length === 0) { small.push(`${name}: not rendered`); continue; }
+        for (const axis of axes) {
+          const min = Math.min(...sizes.map((size) => size[axis]));
+          if (min < 44) small.push(`${name} ${axis} ${min}`);
+        }
+      }
+      expect(small).toEqual([]);
+      const overlaps = await page.evaluate(() => {
+        const rects = Array.from(document.querySelectorAll<HTMLElement>(".ent-cc-workspace-options-actions > *, .ent-cc-workspace-options-actions .ent-cc-icon-button"))
+          .filter((node, index, all) => all.indexOf(node) === index)
+          .map((node) => ({ name: node.getAttribute("aria-label") ?? node.textContent ?? "", r: node.getBoundingClientRect() }))
+          .filter((item) => item.r.width > 0 && item.r.height > 0);
+        const found: string[] = [];
+        for (let i = 0; i < rects.length; i += 1) for (let j = i + 1; j < rects.length; j += 1) {
+          const a = rects[i].r; const b = rects[j].r;
+          const inside = a.left < b.right - 0.5 && b.left < a.right - 0.5 && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5;
+          if (inside && !rects[i].name.includes(rects[j].name) && !rects[j].name.includes(rects[i].name)) found.push(`${rects[i].name} / ${rects[j].name}`);
+        }
+        return found;
+      });
+      expect(overlaps).toEqual([]);
+      // Filter controls inside the panel.
+      await page.locator(".ent-cc-workspace-options > summary").tap();
+      await page.locator(".ent-cc-mobile-filters > summary").tap();
+      await expect.poll(() => page.locator(".ent-cc-mobile-filters").evaluate((node) => (node as HTMLDetailsElement).open)).toBe(true);
+      const filterSmall: string[] = [];
+      for (const [name, selector] of [["scope select", ".ent-cc-search-scope"], ["availability select", ".ent-cc-search-availability"], ["linked first", ".ent-cc-linked-first"]] as const) {
+        const sizes = await measured(selector);
+        if (sizes.length === 0) { filterSmall.push(`${name}: not rendered`); continue; }
+        const min = Math.min(...sizes.map((size) => size.height));
+        if (min < 44) filterSmall.push(`${name} height ${min}`);
+      }
+      expect(filterSmall).toEqual([]);
+      // No overlap between the input's text area and Clear; Clear sits inside the input at the inline end.
+      const boxes = await page.evaluate(() => {
+        const rect = (selector: string) => { const r = document.querySelector(selector)!.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom }; };
+        const inputEl = document.querySelector<HTMLInputElement>(".ent-cc-search-box input")!;
+        const style = getComputedStyle(inputEl);
+        return { clear: rect(".ent-cc-search-clear"), input: rect(".ent-cc-search-box input"), icon: rect(".ent-cc-search-icon"), padStart: parseFloat(style.paddingInlineStart), padEnd: parseFloat(style.paddingInlineEnd) };
+      });
+      expect(boxes.clear.top).toBeGreaterThanOrEqual(boxes.input.top - 0.5);
+      expect(boxes.clear.bottom).toBeLessThanOrEqual(boxes.input.bottom + 0.5);
+      expect(boxes.padEnd, "text must stop before the Clear target").toBeGreaterThanOrEqual(44);
+      if (rtl) expect(Math.abs(boxes.clear.left - boxes.input.left)).toBeLessThanOrEqual(1);
+      else expect(Math.abs(boxes.clear.right - boxes.input.right)).toBeLessThanOrEqual(1);
+      // Typing and Clear still work. Wait for the debounced search to settle first.
+      await expect(page.locator(".ent-cc-topic-count")).toContainText("result");
+      await expect(page.locator(".ent-cc-search-pending, .ent-cc-search-base-group.is-stale")).toHaveCount(0);
+      await clickCentre(page, clear);
+      await expect(input).toHaveValue("");
+      await expect(input).toBeFocused();
+    });
+  }
+
+  test("record selection and rotation keep working in split view", async ({ page }) => {
+    await openView(page, { mobile: true, width: 1180, height: 820, scenario: "related-overflow", parity: true });
+    await enterSplit(page);
+    await page.setViewportSize({ width: 820, height: 1180 });
+    await page.setViewportSize({ width: 1180, height: 820 });
+    await expect(page.locator(".ent-cc-view")).toHaveClass(/is-mobile-split/u);
+    await expect(page.locator(".ent-cc-inspector")).toBeVisible();
+  });
+
+});
+
+test.describe("C01 fine-pointer desktop (no touch context)", () => {
+  test.use({ hasTouch: false });
+  test("Search Clear, search input and Details menu keep their 32/36/32 px compact sizes", async ({ page }) => {
+    await openView(page, { mobile: false, width: 1440, height: 960, parity: true });
+    expect(await page.evaluate(() => matchMedia("(pointer: fine)").matches), "context must be a fine pointer").toBe(true);
+    await page.getByRole("searchbox").fill("Research");
+    const size = (selector: string) => page.locator(selector).locator("visible=true").first().evaluate((node) => {
+      const r = node.getBoundingClientRect(); return { width: Math.round(r.width), height: Math.round(r.height) };
+    });
+    expect(await size(".ent-cc-search-clear")).toEqual({ width: 32, height: 32 });
+    expect((await size(".ent-cc-search-box input")).height).toBe(36);
+    await page.locator(".ent-cc-workspace-options > summary").click();
+    expect((await size("button[aria-label='Command center actions']")).width).toBe(32);
+  });
+});
+
+/** Dialog text whose colour C02 changed from faint to muted, and the harness dialog that renders it. */
+const changedDialogText = [
+  { kind: "note", stage: "", selector: ".ent-cc-path-preview-label" },
+  { kind: "sync", stage: "", selector: ".ent-cc-sync-recovery-note" },
+  { kind: "organizer", stage: "review", selector: ".ent-cc-note-organizer-review-path" },
+] as const;
+
+/** Visible elements whose own text renders in the host's faint colour. */
+async function faintTextOffenders(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    // The host fixture defines --text-faint as a #rrggbb value.
+    const hex = getComputedStyle(document.body).getPropertyValue("--text-faint").trim().replace("#", "");
+    if (!/^[0-9a-f]{6}$/iu.test(hex)) throw new Error(`Unexpected --text-faint value: ${hex}`);
+    const faint = `rgb(${parseInt(hex.slice(0, 2), 16)}, ${parseInt(hex.slice(2, 4), 16)}, ${parseInt(hex.slice(4, 6), 16)})`;
+    const found: string[] = [];
+    for (const element of Array.from(document.querySelectorAll<HTMLElement>("body *"))) {
+      const ownText = Array.from(element.childNodes).some((node) => node.nodeType === 3 && (node.textContent ?? "").trim().length > 0);
+      if (!ownText) continue;
+      const rect = element.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0 || getComputedStyle(element).visibility === "hidden") continue;
+      if (getComputedStyle(element).color === faint) found.push(`${element.tagName.toLowerCase()}.${Array.from(element.classList).join(".")}: ${(element.textContent ?? "").trim().slice(0, 30)}`);
+    }
+    return found;
+  });
+}
+
+for (const dark of [false, true]) {
+  test.describe(`C02 informational text contrast (${dark ? "dark" : "light"}, host-parity faint colour)`, () => {
+    test("inspector headings, related labels, empty state, footer and tab counts reach 4.5:1", async ({ page }) => {
+      await openView(page, { mobile: false, dark, width: 1440, height: 960, scenario: "related-overflow", parity: true });
+      await page.getByRole("button", { name: /^Relationship overview,/u }).click();
+      await expect(page.locator(".ent-cc-related-label").first()).toBeVisible();
+      const low: string[] = [];
+      for (const selector of [".ent-cc-inspector-header h2", ".ent-cc-related-label", ".ent-cc-footer", ".ent-cc-tab-count"]) {
+        const ratio = await contrastOf(page, selector);
+        if (ratio < 4.5) low.push(`${selector} ${ratio.toFixed(2)}`);
+      }
+      expect(low).toEqual([]);
+      expect(await faintTextOffenders(page)).toEqual([]);
+    });
+
+    test("empty related section label reaches 4.5:1", async ({ page }) => {
+      await openView(page, { mobile: false, dark, width: 1440, height: 960, count: 80, parity: true });
+      await page.getByRole("button", { name: /^Research note 000,/u }).click();
+      await expect(page.locator(".ent-cc-related-empty").first()).toBeVisible();
+      expect(await contrastOf(page, ".ent-cc-related-empty")).toBeGreaterThanOrEqual(4.5);
+      expect(await faintTextOffenders(page)).toEqual([]);
+    });
+
+    for (const { kind, stage, selector } of changedDialogText) {
+      test(`${kind} dialog: ${selector} measured contrast is at least 4.5:1 on its composited background`, async ({ page }) => {
+        await openView(page, { mobile: false, dark, width: 1440, height: 960, count: 80, parity: true });
+        await page.evaluate((value) => (window as unknown as { kbccBrowserHarness: { openModal(kind: string): void } }).kbccBrowserHarness.openModal(value), kind);
+        const dialog = page.getByRole("dialog");
+        await expect(dialog).toBeVisible();
+        if (stage === "review") {
+          await dialog.getByRole("button", { name: "Choose destinations", exact: true }).click();
+          await dialog.getByRole("button", { name: "Prepare review", exact: true }).click();
+          await expect(dialog.getByRole("button", { name: "Apply organization", exact: true })).toBeEnabled();
+        }
+        const matches = dialog.locator(selector).locator("visible=true");
+        expect(await matches.count(), `${selector} must render in the ${kind} dialog`).toBeGreaterThan(0);
+        expect(await contrastOf(page, `[role='dialog'] ${selector}`)).toBeGreaterThanOrEqual(4.5);
+      });
+    }
+
+    for (const kind of ["note", "setup", "export", "sync", "organizer", "quick-organizer", "whats-new"] as const) {
+      test(`${kind} dialog: no visible text is still drawn in the host faint colour`, async ({ page }) => {
+        await openView(page, { mobile: false, dark, width: 1440, height: 960, count: 80, parity: true });
+        await page.evaluate((value) => (window as unknown as { kbccBrowserHarness: { openModal(kind: string): void } }).kbccBrowserHarness.openModal(value), kind);
+        await expect(page.getByRole("dialog")).toBeVisible();
+        expect(await faintTextOffenders(page)).toEqual([]);
+      });
+    }
+  });
+}
+
+for (const dark of [false, true]) {
+  test(`C03 keyboard focus is visible on menu, expansion, related records and Details controls (${dark ? "dark" : "light"}, host-parity)`, async ({ page }) => {
+    await openView(page, { mobile: false, dark, width: 1440, height: 960, scenario: "related-overflow", parity: true });
+    await page.getByRole("button", { name: /^Relationship overview,/u }).click();
+    await expect(page.locator(".ent-cc-related-record").first()).toBeVisible();
+    await page.locator(".ent-cc-workspace-options > summary").click();
+    // The Note details disclosure is part of the inspector; open it so its summary is a rendered target.
+    const targets: Array<[string, string]> = [
+      ["row menu", ".ent-cc-row-more"],
+      ["expansion", ".ent-cc-disclosure"],
+      ["row title", "button.ent-cc-row-title"],
+      ["subject title", "button.ent-cc-subject-title"],
+      ["related record", ".ent-cc-related-record"],
+      ["Details summary", ".ent-cc-workspace-options > summary"],
+      ["Details menu", "button[aria-label='Command center actions']"],
+      ["Note details summary", ".ent-cc-note-details > summary"],
+      ["tree panel", ".ent-cc-tree-panel"],
+    ];
+    const missing: string[] = [];
+    await page.keyboard.press("Shift");
+    for (const [name, selector] of targets) {
+      const target = page.locator(selector).locator("visible=true").first();
+      if ((await target.count()) === 0) { missing.push(`${name}: not rendered`); continue; }
+      // Arrive by keyboard (Shift+Tab away, Tab back) so :focus-visible applies in every engine.
+      await target.focus();
+      // Safari/WebKit skips buttons on plain Tab (Option+Tab reaches them), so use it there.
+      const tab = test.info().project.name === "webkit" ? "Alt+Tab" : "Tab";
+      await page.keyboard.press(`Shift+${tab}`);
+      await page.keyboard.press(tab);
+      const indicator = await target.evaluate((element) => {
+        const style = getComputedStyle(element);
+        const canvas = document.body.createEl("canvas");
+        canvas.remove();
+        canvas.width = 1; canvas.height = 1;
+        const context = canvas.getContext("2d", { willReadFrequently: true })!;
+        const pixel = (cssColor: string, base?: Uint8ClampedArray): Uint8ClampedArray => {
+          context.clearRect(0, 0, 1, 1);
+          if (base) { context.fillStyle = `rgb(${base[0]} ${base[1]} ${base[2]})`; context.fillRect(0, 0, 1, 1); }
+          context.fillStyle = cssColor; context.fillRect(0, 0, 1, 1);
+          return context.getImageData(0, 0, 1, 1).data;
+        };
+        let background = pixel("white");
+        const ancestors: Element[] = [];
+        for (let current: Element | null = element.parentElement; current; current = current.parentElement) ancestors.unshift(current);
+        for (const ancestor of ancestors) background = pixel(getComputedStyle(ancestor).backgroundColor, background);
+        // Own background sits under an inset outline too.
+        background = pixel(style.backgroundColor, background);
+        const outline = pixel(style.outlineColor, background);
+        const luminance = (c: Uint8ClampedArray): number => {
+          const v = [c[0], c[1], c[2]].map((n) => { const s = n / 255; return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; });
+          return v[0] * 0.2126 + v[1] * 0.7152 + v[2] * 0.0722;
+        };
+        const a = luminance(outline); const b = luminance(background);
+        return { matches: element.matches(":focus-visible"), style: style.outlineStyle, width: parseFloat(style.outlineWidth), ratio: (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05) };
+      });
+      if (!indicator.matches) missing.push(`${name}: not :focus-visible`);
+      else if (indicator.style === "none" || indicator.width < 2) missing.push(`${name}: outline ${indicator.style} ${indicator.width}px`);
+      else if (indicator.ratio < 3) missing.push(`${name}: outline contrast ${indicator.ratio.toFixed(2)}`);
+    }
+    expect(missing).toEqual([]);
+  });
+}
+
+test.describe("C04 organizer tree focus in forced-colors mode", () => {
+  const focusState = (page: Page) => page.evaluate(() => {
+    const active = document.activeElement as HTMLElement | null;
+    const style = active ? getComputedStyle(active) : null;
+    return {
+      role: active?.getAttribute("role") ?? "",
+      path: active?.getAttribute("data-organizer-node-path") ?? "",
+      outlineStyle: style?.outlineStyle ?? "",
+      outlineWidth: parseFloat(style?.outlineWidth ?? "0"),
+      outlineColor: style?.outlineColor ?? "",
+      boxShadow: style?.boxShadow ?? "",
+      selected: Array.from(document.querySelectorAll("[role='treeitem'][aria-checked='true'], [role='treeitem'][aria-checked='mixed']")).map((node) => node.getAttribute("data-organizer-node-path")),
+    };
+  });
+
+  test("outline follows Arrow and page-edge navigation, stays visible and leaves selection alone", async ({ page }) => {
+    await openView(page, { mobile: false, width: 1280, height: 900, count: 700, parity: true });
+    await page.emulateMedia({ forcedColors: "active" });
+    await expect.poll(() => page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
+    await page.evaluate(() => (window as unknown as { kbccBrowserHarness: { openModal(kind: string): void } }).kbccBrowserHarness.openModal("organizer"));
+    const tree = page.locator("[role='treeitem']");
+    await expect(tree.first()).toBeVisible();
+    await tree.first().focus();
+    const initial = await focusState(page);
+    const visited: string[] = [];
+    const problems: string[] = [];
+    const record = async (label: string) => {
+      const state = await focusState(page);
+      visited.push(state.path);
+      if (state.role !== "treeitem") problems.push(`${label}: focus left the tree (${state.role})`);
+      else if (state.outlineStyle === "none" || state.outlineWidth < 2) problems.push(`${label}: outline ${state.outlineStyle} ${state.outlineWidth}px`);
+      expect(state.selected, `${label}: navigation must not change selection`).toEqual(initial.selected);
+    };
+    await record("start");
+    for (const key of ["ArrowDown", "ArrowDown", "ArrowUp", "End", "ArrowUp", "Home"]) {
+      await page.keyboard.press(key);
+      await expect.poll(() => focusState(page).then((state) => state.role)).toBe("treeitem");
+      await record(key);
+    }
+    expect(new Set(visited).size, "navigation must actually move through several rows").toBeGreaterThan(2);
+    expect(problems).toEqual([]);
+  });
+
+  test("standard appearance keeps the inset focus shadow and no outline", async ({ page }) => {
+    await openView(page, { mobile: false, width: 1280, height: 900, count: 700, parity: true });
+    await page.evaluate(() => (window as unknown as { kbccBrowserHarness: { openModal(kind: string): void } }).kbccBrowserHarness.openModal("organizer"));
+    await page.locator("[role='treeitem']").first().focus();
+    const state = await focusState(page);
+    expect(state.outlineStyle).toBe("none");
+    expect(state.boxShadow).not.toBe("none");
+  });
+});
+
+async function clickCentre(page: Page, target: ReturnType<Page["locator"]>): Promise<void> {
+  const rect = await target.boundingBox();
+  if (!rect) throw new Error("Target has no bounds");
+  expect(await target.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    return element.contains(document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2));
+  }), "target must be unobscured").toBe(true);
+  await page.mouse.click(rect.x + rect.width / 2, rect.y + rect.height / 2);
+}

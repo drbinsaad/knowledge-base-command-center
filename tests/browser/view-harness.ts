@@ -1,15 +1,26 @@
-import { Platform, Setting, TFile, type Modal, type SettingDefinitionItem } from "obsidian";
+import { Platform, Setting, type Modal, type SettingDefinitionItem, type SettingGroup } from "obsidian";
+import * as obsidianHost from "obsidian";
+import { TFile, TestHarnessError } from "./obsidian-browser";
+
+// The harness imports TFile from the esbuild override module directly; the
+// production code imports it through the "obsidian" alias. They must be one
+// constructor or instanceof checks in production would silently fail.
+if (!Object.is(obsidianHost.TFile, TFile)) {
+  throw new TestHarnessError("Browser harness TFile differs from the obsidian alias TFile");
+}
 import type EntVaultCommandCenterPlugin from "../../src/main";
 import { EntVaultCommandCenterView } from "../../src/view";
 import { buildCurriculumTree, canonicalJsonString, childSubheadings, clonePersonalOrganization, createDefaultStore, createKnowledgeBaseEntry, migrateData, parseQuery, portablePlaceholderPath, restoreSnapshot, semanticEntryFingerprint, snapshotPersonal, type LayoutHeading, type LayoutSubheading, type VaultRecord } from "../../src/model";
 import { BoundedKnowledgeBaseSearchCollector } from "../../src/search";
-import { KnowledgeNoteModal, WorkspaceSetupModal } from "../../src/modals";
+import { KnowledgeNoteModal, StringPickerModal, VaultFilePickerModal, WorkspaceSetupModal } from "../../src/modals";
 import { ExportImportCenterModal } from "../../src/portability-modal";
+import { AttachmentImportModal } from "../../src/attachment-modal";
+import { AttachmentLinkInsertionError } from "../../src/attachment";
 import { SyncRecoveryCenterModal } from "../../src/sync-recovery-modal";
 import { NoteOrganizerModal, type NoteOrganizerHost } from "../../src/note-organizer-modal";
 import { EntCommandCenterSettingsTab } from "../../src/settings";
 import { UpdateAnnouncementModal } from "../../src/update-announcement-modal";
-import { UPDATE_ANNOUNCEMENT_0_22_0 } from "../../src/update-announcement";
+import { UPDATE_ANNOUNCEMENT_0_27_0 } from "../../src/update-announcement";
 import { applyNoteOrganizerPlan, createNoteOrganizerPlan, type NoteOrganizerDirective, type NoteOrganizerFileFact, type NoteOrganizerPrimaryState } from "../../src/note-organizer";
 import { organizerIndexPlacement, organizerIndexTrail } from "../../src/note-organizer-index";
 import { applyLibraryVisualMove, type LibraryVisualMoveRequest } from "../../src/library-visual-move";
@@ -44,6 +55,10 @@ const touchDrag = parameters.get("scenario") === "touch-drag";
 const libraryGallery = parameters.get("scenario") === "library-gallery";
 const relatedOverflow = parameters.get("scenario") === "related-overflow";
 const attachmentScenario = parameters.get("scenario") === "attachments";
+const placeholderLinkScenario = parameters.get("scenario") === "placeholder-link";
+// Honest recording fakes for WF-10: they only note what the production view asked for.
+const placeholderLinkCalls = { placed: [] as Array<{ path: string; group: string }>, linked: [] as Array<{ subjectId: string; path: string; merge: boolean }> };
+const placeholderLinkNotes = ["Inbox/Laryngomalacia.md", "Inbox/Standalone.md"];
 const attachmentNotePath = "Reading/Attachment overview.md";
 const attachmentPaths = [
   "Attachments/Diagram.png", "Attachments/Review.pdf", "Attachments/Minutes.docx",
@@ -94,6 +109,12 @@ if (mobileSpace) {
   data.pinnedPaths = records.slice(0, 2).map((item) => item.path);
 }
 data.directIndexPaths = records.filter((item) => !item.libraryId && !item.portableId).map((item) => item.path);
+if (placeholderLinkScenario) {
+  // One unresolved imported subject whose title matches the unindexed note "Laryngomalacia".
+  data.portableIndex.groups = [{ id: "airway", title: "Airway", order: 0 }];
+  data.portableIndex.subjects = [{ id: "subject-larynx", title: "Laryngomalacia", groupId: "airway", parentId: null, order: 0, indexed: true, configuredId: "", recordKind: "topic" }];
+  data.portableIndex.resolvedPathBySubjectId = {};
+}
 data.collections = [{ id: "favorites", title: "Reading this week", collapsed: false, subjects: records.slice(0, 4).map((item) => item.path), subheadings: [] }];
 if (touchDrag) {
   records.splice(0, records.length,
@@ -213,6 +234,7 @@ const sources = [
 let epoch = 0;
 let generation = 0;
 const touchDragActions = { mutations: [] as string[], undo: 0, redo: 0 };
+const setupActions = { commits: [] as Array<{ inbox: string; reviewed: unknown }> };
 const hostSwipeTouches: Array<{ ignored: boolean; handle: boolean; trusted: boolean }> = [];
 function organizationFingerprint(): string {
   return canonicalJsonString({ ...clonePersonalOrganization(data), portableIndex: data.portableIndex });
@@ -225,6 +247,8 @@ const completedImportActions = { undo: 0, placeholderQueue: 0, closed: [] as boo
 const files = records.filter((item) => touchDrag || libraryGallery ? !item.isPlaceholder : !item.portableId).map((item) => new TFile(item.path));
 files.push(...externalBacklinkPaths.map((path) => new TFile(path)));
 if (attachmentScenario) files.push(...[...attachmentPaths, "Attachments/Cover.jpg"].map((path) => new TFile(path)));
+const placeholderLinkFiles = placeholderLinkNotes.map((path) => new TFile(path));
+if (placeholderLinkScenario) files.push(...placeholderLinkFiles);
 const openedRelatedPaths: string[] = [];
 const coverFile = new TFile("Covers/Example.png");
 const deviceLocalValues = new Map<string, unknown>();
@@ -283,7 +307,15 @@ const plugin = {
   getRecord: (path: string) => currentRecords().find((item) => item.path === path),
   getVaultId: () => "browser-synthetic-vault",
   librarySubjectCount: (id: string) => records.filter((item) => item.libraryId === id).length,
-  getIndexCandidateFiles: () => files,
+  getIndexCandidateFiles: () => placeholderLinkScenario ? placeholderLinkFiles : files,
+  suggestedIndexGroup: () => "Airway",
+  getIndexGroups: () => ["Airway"],
+  assignRecordToCatalog: async (path: string, _kind: string, options: { headingTitle: string }) => {
+    placeholderLinkCalls.placed.push({ path, group: options.headingTitle });
+  },
+  resolvePortableSubject: async (subjectId: string, path: string, merge = false) => {
+    placeholderLinkCalls.linked.push({ subjectId, path, merge });
+  },
   getVaultNoteFiles: () => files,
   getTemplateFiles: () => [],
   validateGenericNote: (value: { title: string }) => value.title.trim() ? null : "Enter a title.",
@@ -309,6 +341,20 @@ const plugin = {
   resolveLink: (link: string) => relatedOverflow ? records.find((item) => item.path === link) ?? null : null,
   openFile: async (file: TFile) => { openedRelatedPaths.push(file.path); },
   isDataReadOnly: () => false, isClinicalMode: () => false,
+  // Synthetic stand-ins for the setup journey. The real queued required-Undo
+  // transaction is proven in the runtime tests; this host only records what the
+  // production wizard asks it to commit and restores a real snapshot on Undo.
+  assertDataWritable: () => undefined,
+  refreshViews: async () => { await view.reload(); },
+  countOrphanedByProposalFolderChange: () => 2,
+  commitSetupSettings: async (value: Record<string, unknown>, reviewed: unknown, ownsBase: () => boolean) => {
+    if (!ownsBase()) throw new Error("Setup was not saved.");
+    const before = snapshotPersonal(data, "Finish setup", true);
+    Object.assign(data.settings, value, { setupComplete: true });
+    data.undoStack.push(before);
+    data.redoStack = [];
+    setupActions.commits.push({ inbox: String(value.proposalFolder), reviewed });
+  },
   canVisuallyMoveAcrossGroups: () => touchDrag, countMemberships: () => 0,
   initializeLibraryCatalog: async () => undefined,
   moveLibraryRecordVisually: async (
@@ -569,16 +615,25 @@ const settingsActions = { reviews: [] as string[], unlinked: [] as string[], kep
 // Obsidian owns the outer Settings search/group layout. This narrow host uses
 // the actual public definitions and invokes their production render callbacks;
 // it never duplicates KBCC setting names, buttons, guards, or event handlers.
+// Production render callbacks use only the Setting; the group argument is a
+// loud placeholder so any future use fails visibly instead of silently.
+const unsupportedSettingGroup = new Proxy({}, {
+  get(): never {
+    throw new TestHarnessError("SettingGroup is not supported by the browser harness");
+  },
+}) as SettingGroup;
+
 function renderSettingDefinitions(parent: HTMLElement, definitions: SettingDefinitionItem[]): void {
   for (const definition of definitions) {
     if ("type" in definition && definition.type === "group") {
       const group = parent.createEl("section");
       group.createEl("h2", { text: definition.heading });
-      renderSettingDefinitions(group, definition.items);
+      renderSettingDefinitions(group, definition.items ?? []);
     } else if ("name" in definition) {
       const row = new Setting(parent).setName(definition.name);
       if (definition.desc) row.setDesc(definition.desc);
-      if ("render" in definition) definition.render(row);
+      const render = "render" in definition ? definition.render : undefined;
+      if (render) render(row, unsupportedSettingGroup);
       else if ("control" in definition || "action" in definition) throw new Error("Unsupported Settings host control");
     } else {
       throw new Error("Unsupported Settings host definition");
@@ -586,8 +641,53 @@ function renderSettingDefinitions(parent: HTMLElement, definitions: SettingDefin
   }
 }
 
+if (placeholderLinkScenario) {
+  // The synthetic FuzzySuggestModal host draws no suggestion list. Draw a plain listbox of the picker's own
+  // items; choosing one closes the modal and then calls the production onChooseItem, as the real host does.
+  for (const picker of [VaultFilePickerModal, StringPickerModal] as const) {
+    const hostOpen: (this: Modal) => void = Reflect.get(picker.prototype, "open");
+    picker.prototype.open = function openWithSuggestions(this: Modal & { getItems(): unknown[]; getItemText(item: never): string; onChooseItem(item: never): void }): void {
+      hostOpen.call(this);
+      const list = this.contentEl.createDiv({ attr: { role: "listbox", "aria-label": "Choices" } });
+      for (const item of this.getItems()) {
+        const option = list.createEl("button", { text: this.getItemText(item as never), attr: { role: "option", type: "button" } });
+        option.addEventListener("click", () => { this.close(); this.onChooseItem(item as never); });
+      }
+    };
+  }
+}
+
+// WF-03: the REAL AttachmentImportModal runs against a recording stand-in for the
+// service. The stand-in only records what the modal submitted and applies the
+// documented outcomes (stale editor refused before any copy; copied-but-not-linked
+// error carrying the copied paths). It never touches a vault.
+const attachmentImport = { editorOwned: true, insertFails: false, submissions: 0, copies: [] as string[] };
+
 const harness = {
   ready: false,
+  openAttachmentImport(options: { insertFails?: boolean } = {}) {
+    openedModal?.close();
+    Object.assign(attachmentImport, { editorOwned: true, insertFails: Boolean(options.insertFails), submissions: 0, copies: [] });
+    openedModal = new AttachmentImportModal(app as never, "Reading/Attachment overview.md", {
+      expectedBaseId: store.activeBaseId, expectedDataEpoch: 0, storageMode: "fixed-folder",
+      configuredFolder: "Files", marker: "<!-- kbcc:attachments -->", heading: "Attachments",
+    }, [], "cursor", true, async (value) => {
+      attachmentImport.submissions += 1;
+      if (value.insertionMode === "cursor" && !attachmentImport.editorOwned) {
+        throw new Error("Open this note in the Markdown editor to insert at the cursor, or choose marker, heading, or end of note.");
+      }
+      const paths = value.files.map((file) => `Files/${file.name}`);
+      attachmentImport.copies.push(...paths);
+      if (attachmentImport.insertFails) {
+        throw new AttachmentLinkInsertionError(`The files were copied to ${paths.join(", ")}, but their Markdown links could not be inserted. Add the links manually.`, paths);
+      }
+    });
+    openedModal.open();
+  },
+  loseAttachmentEditor() { attachmentImport.editorOwned = false; },
+  attachmentImportSnapshot() { return { submissions: attachmentImport.submissions, copies: [...attachmentImport.copies] }; },
+  startAddExisting() { view.startAddExistingToIndex(); },
+  placeholderLinkSnapshot() { return structuredClone(placeholderLinkCalls); },
   workspaceLayoutSnapshot() {
     return { localValues: Object.fromEntries(deviceLocalValues), organizationUnchanged: organizationFingerprint() === initialOrganization };
   },
@@ -679,6 +779,18 @@ const harness = {
     Object.assign(tab, { containerEl: container, update: render });
     render();
   },
+  /** Opens the real production wizard route (view.openSetupWizard), not a directly constructed modal. */
+  openSetupWizard() { view.openSetupWizard(); },
+  async undoSetup() {
+    const previous = data.undoStack.pop();
+    if (!previous) return;
+    data.redoStack.push(snapshotPersonal(data, previous.label, true));
+    restoreSnapshot(data, previous);
+    await view.reload();
+  },
+  setupSnapshot() {
+    return { commits: setupActions.commits.map((commit) => ({ ...commit })), inbox: data.settings.proposalFolder, workspaceName: data.settings.workspaceName, setupComplete: data.settings.setupComplete, undoCount: data.undoStack.length };
+  },
   invalidateSettings() { settingsEpoch += 1; },
   releaseSettingsSave() { releaseSettingsSave?.(); releaseSettingsSave = null; },
   settingsSnapshot() { return settingsActions; },
@@ -700,7 +812,7 @@ const harness = {
     } else if (kind === "sync") {
       openedModal = new SyncRecoveryCenterModal(plugin as unknown as EntVaultCommandCenterPlugin);
     } else if (kind === "whats-new") {
-      openedModal = new UpdateAnnouncementModal(app as never, UPDATE_ANNOUNCEMENT_0_22_0);
+      openedModal = new UpdateAnnouncementModal(app as never, UPDATE_ANNOUNCEMENT_0_27_0);
     } else if (kind === "quick-organizer") {
       organizer = new NoteOrganizerModal(quickOrganizerHost, { singleNote: true, source: "file-menu", preselectedPaths: [quickNotePath] });
       openedModal = organizer;
@@ -713,11 +825,11 @@ const harness = {
   async refreshOrganizer() { await organizer?.refreshAfterExternalChange(); },
   touchDragSnapshot() {
     const tree = buildCurriculumTree(currentRecords(), data.curriculumVisual, false);
-    const placements = (headings: LayoutHeading[]): Record<string, string[]> => {
+    const placements = (headings: readonly LayoutHeading[]): Record<string, string[]> => {
       const result: Record<string, string[]> = {};
-      const visit = (nodes: LayoutHeading[]): void => nodes.forEach((node) => {
+      const visit = (nodes: readonly (LayoutHeading | LayoutSubheading)[]): void => nodes.forEach((node) => {
         result[node.id] = [...node.subjects];
-        visit(node.subheadings);
+        visit(childSubheadings(node));
       });
       visit(headings);
       return result;

@@ -3,6 +3,7 @@ import type EntVaultCommandCenterPlugin from "./main";
 import { errorMessage } from "./model";
 import { createOpenedBaseGuard } from "./modals";
 import type { TaxonomyHealthFinding } from "./taxonomy-health";
+import { guardComposition } from "./composition-guard";
 
 const PAGE_SIZE = 200;
 
@@ -66,6 +67,9 @@ export class TaxonomyHealthModal extends Modal {
   private visibleLimit = PAGE_SIZE;
   private ownsBase: (() => boolean) | null = null;
   private findings: TaxonomyHealthFinding[] = [];
+  private searchEl: HTMLInputElement | null = null;
+  private summaryEl: HTMLElement | null = null;
+  private resultEls: HTMLElement[] = [];
 
   constructor(private readonly plugin: EntVaultCommandCenterPlugin) {
     super(plugin.app);
@@ -104,15 +108,17 @@ export class TaxonomyHealthModal extends Modal {
 
   private render(): void {
     if (!this.guardOpenedBase()) return;
+    // The filter input and toolbar stay mounted across Recheck, Show more and
+    // filtering: replacing the input would drop an IME composition, the caret
+    // and keyboard focus. Only the summary and the list region are rebuilt.
+    if (this.searchEl && this.summaryEl && this.contentEl.contains(this.searchEl)) {
+      this.renderResults();
+      return;
+    }
     this.contentEl.empty();
-    const warnings = this.findings.filter((finding) => finding.severity === "warning").length;
-    const repairable = this.findings.filter((finding) => Boolean(finding.repair)).length;
     const intro = this.contentEl.createDiv({ cls: "ent-cc-taxonomy-intro" });
     intro.createEl("p", { text: "Inspect names, hierarchy, configured paths, portable identities, and empty structures. Nothing is changed automatically." });
-    const summary = intro.createDiv({ cls: "ent-cc-taxonomy-summary", attr: { role: "status", "aria-live": "polite" } });
-    summary.createSpan({ text: `${this.findings.length} findings` });
-    summary.createSpan({ text: `${warnings} warnings` });
-    summary.createSpan({ text: `${repairable} previewable repairs` });
+    this.summaryEl = intro.createDiv({ cls: "ent-cc-taxonomy-summary", attr: { role: "status", "aria-live": "polite" } });
     intro.createDiv({
       cls: "ent-cc-taxonomy-load-note",
       text: "Historical load-repair and dropped-entry counts are not persisted by this data format, so no unverifiable count is shown. Current data is analyzed in full below.",
@@ -125,22 +131,46 @@ export class TaxonomyHealthModal extends Modal {
       attr: { "aria-label": "Filter taxonomy health findings" },
     });
     search.value = this.query;
-    search.addEventListener("input", () => {
-      // Re-rendering replaces the input, so the real caret has to be carried
-      // over; restoring it to the end would break every mid-string edit.
+    this.searchEl = search;
+    const applyQuery = (): void => {
+      if (search.value === this.query) return;
+      // The input node is kept, so the caret and focus are untouched; the
+      // explicit restore only guards engines that move them on a value change.
       const selectionStart = search.selectionStart ?? search.value.length;
       const selectionEnd = search.selectionEnd ?? selectionStart;
       this.query = search.value;
       this.visibleLimit = PAGE_SIZE;
       this.render();
-      const next = this.contentEl.querySelector<HTMLInputElement>('.ent-cc-taxonomy-toolbar input[type="search"]');
-      next?.focus();
-      next?.setSelectionRange(selectionStart, selectionEnd);
+      search.setSelectionRange(selectionStart, selectionEnd);
+    };
+    const composition = guardComposition(search, applyQuery);
+    search.addEventListener("input", (event) => {
+      // Mid-composition the value is provisional; wait for compositionend.
+      if (composition.isComposing(event)) return;
+      applyQuery();
     });
     const refresh = toolbar.createEl("button", { cls: "ent-cc-button", type: "button" });
     setIcon(refresh.createSpan(), "refresh-cw");
     refresh.createSpan({ text: "Recheck" });
     refresh.addEventListener("click", () => this.refreshFindings());
+    this.renderResults();
+  }
+
+  /** Rebuilds the counts and everything below the toolbar; the toolbar itself stays. */
+  private renderResults(): void {
+    const summary = this.summaryEl;
+    const search = this.searchEl;
+    if (!summary || !search) return;
+    const doc = this.contentEl.ownerDocument;
+    this.resultEls ??= [];
+    const hadFocusBelow = this.resultEls.some((el) => doc.activeElement !== null && el.contains(doc.activeElement));
+    for (const el of this.resultEls.splice(0)) el.remove();
+    const warnings = this.findings.filter((finding) => finding.severity === "warning").length;
+    const repairable = this.findings.filter((finding) => Boolean(finding.repair)).length;
+    summary.empty();
+    summary.createSpan({ text: `${this.findings.length} findings` });
+    summary.createSpan({ text: `${warnings} warnings` });
+    summary.createSpan({ text: `${repairable} previewable repairs` });
 
     const normalizedQuery = this.query.normalize("NFKC").trim().toLowerCase();
     const filtered = normalizedQuery
@@ -151,8 +181,9 @@ export class TaxonomyHealthModal extends Modal {
     if (filtered.length === 0) {
       list.createDiv({ cls: "ent-cc-empty", text: this.findings.length === 0 ? "No taxonomy health findings detected." : "No findings match this filter." });
     }
+    let more: HTMLElement | null = null;
     if (filtered.length > this.visibleLimit) {
-      const more = this.contentEl.createEl("button", { cls: "ent-cc-button ent-cc-taxonomy-more", type: "button", text: `Show ${Math.min(PAGE_SIZE, filtered.length - this.visibleLimit)} more` });
+      more = this.contentEl.createEl("button", { cls: "ent-cc-button ent-cc-taxonomy-more", type: "button", text: `Show ${Math.min(PAGE_SIZE, filtered.length - this.visibleLimit)} more` });
       more.addEventListener("click", () => {
         this.visibleLimit += PAGE_SIZE;
         this.render();
@@ -161,6 +192,10 @@ export class TaxonomyHealthModal extends Modal {
     const footer = this.contentEl.createDiv({ cls: "ent-cc-taxonomy-footer" });
     const close = footer.createEl("button", { cls: "ent-cc-button", type: "button", text: "Close" });
     close.addEventListener("click", () => this.close());
+    this.resultEls = more ? [list, more, footer] : [list, footer];
+    // A control that was focused inside the rebuilt region (Show more) is gone:
+    // hand focus to the next Show more, or the filter, instead of dropping it.
+    if (hadFocusBelow && !(doc.activeElement && this.contentEl.contains(doc.activeElement))) (more ?? search).focus();
   }
 
   private renderFinding(parent: HTMLElement, finding: TaxonomyHealthFinding): void {

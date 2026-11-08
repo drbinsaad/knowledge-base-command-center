@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TFile } from "obsidian";
+import { TFile } from "./support/obsidian-stub.ts";
 import EntVaultCommandCenterPlugin from "../src/main";
 import { applyLibraryVisualMove, ensureLibraryCatalogGroup, type LibraryVisualMoveRequest } from "../src/library-visual-move";
 import { createDefaultStore, migrateData, portablePlaceholderPath, snapshotPersonal, type PluginData } from "../src/model";

@@ -329,7 +329,8 @@
   cursor: progress;
 }
 
-.ent-cc-portability-file-label {
+.ent-cc-portability-file-label,
+.ent-cc-attachment-status {
   overflow-wrap: anywhere;
 }
 
@@ -775,7 +776,7 @@
 
 .ent-cc-inspector-header h2 {
   margin: 0;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: 10px;
   font-weight: 750;
   letter-spacing: 0.11em;
@@ -1054,6 +1055,8 @@
   color: var(--ent-cc-accent);
 }
 
+.ent-cc-view-feedback-row>div{overflow-wrap:anywhere}
+
 .ent-cc-curriculum-domain-body.is-drop-target {
   outline: 1px dashed var(--ent-cc-accent);
   outline-offset: -2px;
@@ -1096,7 +1099,7 @@
   display: inline-grid;
   align-items: center;
   justify-items: center;
-  color: var(--text-faint);
+  color: var(--text-muted);
 }
 
 .ent-cc-disclosure,
@@ -1220,7 +1223,7 @@
   padding: 8px 12px;
   border: 1px dashed var(--ent-cc-border);
   border-radius: 6px;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: 10px;
 }
 
@@ -1257,7 +1260,7 @@
 .ent-cc-inspector-path {
   margin-bottom: 22px;
   overflow-wrap: anywhere;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-family: var(--font-monospace);
   font-size: 10px;
   line-height: 1.5;
@@ -1349,7 +1352,7 @@
 
 .ent-cc-modified {
   margin-top: 13px;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: 0.75rem;
   text-align: end;
 }
@@ -1367,13 +1370,13 @@
   width: 28px;
   height: 28px;
   margin-bottom: 12px;
-  color: var(--text-faint);
+  color: var(--text-muted);
 }
 
 .ent-cc-footer {
   padding: 7px 24px max(7px, env(safe-area-inset-bottom));
   border-top: 1px solid var(--ent-cc-border);
-  color: var(--text-faint);
+  color: var(--text-muted);
   background: var(--background-primary);
   font-size: 0.75rem;
   letter-spacing: 0.035em;
@@ -1519,7 +1522,7 @@
   min-width: 18px;
   padding: 1px 5px;
   border-radius: 999px;
-  color: var(--text-faint);
+  color: var(--text-muted);
   background: var(--background-modifier-hover);
   font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
@@ -1527,7 +1530,7 @@
 }
 
 .ent-cc-tab.is-active .ent-cc-tab-count {
-  color: var(--ent-cc-accent);
+  color: color-mix(in srgb, var(--ent-cc-accent) 45%, var(--text-normal));
   background: var(--ent-cc-accent-soft);
 }
 
@@ -1563,7 +1566,7 @@
 
 .ent-cc-filter-hint {
   margin-inline-start: auto;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: 0.75rem;
   white-space: nowrap;
 }
@@ -1644,7 +1647,7 @@
 .ent-cc-queue-description {
   margin-block: 1px 5px;
   margin-inline: 78px 24px;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: 0.75rem;
   line-height: 1.45;
 }
@@ -1771,7 +1774,7 @@
 
 .ent-cc-related-label {
   margin-bottom: 4px;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: 0.6875rem;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -1828,7 +1831,7 @@
 
 .ent-cc-related-empty {
   padding: 9px 0;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: 0.75rem;
 }
 
@@ -1860,7 +1863,7 @@
   min-height: 24px;
   padding: 0 18px 8px;
   overflow-wrap: anywhere;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: 0.75rem;
 }
 
@@ -1896,7 +1899,7 @@
 .ent-cc-bases-view .ent-cc-base-count {
   flex: 0 0 auto;
   margin-inline-start: auto;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: 0.75rem;
   white-space: nowrap;
 }
@@ -1943,14 +1946,14 @@
 }
 
 .ent-cc-bases-view .ent-cc-base-record-id {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-family: var(--font-monospace);
   font-size: 0.75rem;
   text-align: end;
 }
 
 .ent-cc-bases-view .ent-cc-base-record-meta {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: 10px;
   text-align: end;
 }
@@ -2429,7 +2432,7 @@
 
 .ent-cc-path-preview-label {
   margin-bottom: 5px;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: 0.75rem;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -2573,7 +2576,7 @@
 
 .ent-cc-lock-badge {
   display: inline-grid;
-  color: var(--text-faint);
+  color: var(--text-muted);
   place-items: center;
 }
 
@@ -2672,7 +2675,7 @@
   padding: 1px 6px;
   border-radius: 999px;
   background: var(--background-modifier-hover);
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: 0.75rem;
 }
 
@@ -2871,7 +2874,7 @@
 
 .ent-cc-taxonomy-load-note {
   margin-top: 8px;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: 0.75rem;
 }
 
@@ -2998,8 +3001,14 @@
 .ent-cc-subject-row:focus-visible,
 .ent-cc-tab:focus-visible,
 .ent-cc-button:focus-visible,
-.ent-cc-icon-button:focus-visible {
-  outline: 2px solid var(--interactive-accent);
+.ent-cc-icon-button:focus-visible,
+.ent-cc-drag-handle:focus-visible,
+.ent-cc-row-title:focus-visible,
+.ent-cc-subject-title:focus-visible,
+.ent-cc-related-record:focus-visible,
+.ent-cc-note-details > summary:focus-visible,
+.ent-cc-tree-panel:focus-visible {
+  outline: 2px solid var(--text-accent, var(--interactive-accent));
   outline-offset: -2px;
 }
 
@@ -3789,7 +3798,7 @@
 
 .ent-cc-library-form-count {
   margin-inline-start: auto;
-  color: var(--text-faint);
+  color: var(--text-muted);
   white-space: nowrap;
 }
 
@@ -4075,7 +4084,7 @@
   gap: 12px;
   min-height: 20px;
   margin: -5px 0 2px;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: 10px;
 }
 
@@ -4528,13 +4537,13 @@
   max-width: none;
 }
 
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-search-box input {
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) .ent-cc-search-box input {
   height: 44px;
   padding-inline-end: 50px;
   font-size: 16px;
 }
 
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-search-clear {
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) .ent-cc-search-clear {
   top: 0;
   inset-inline-end: 0;
   width: 44px;
@@ -4542,7 +4551,7 @@
   height: 44px;
 }
 
-.ent-cc-view:is(.is-pane-compact, .is-pane-narrow) .ent-cc-search-icon {
+.ent-cc-view:is(.is-pane-compact, .is-pane-narrow, .is-mobile-split) .ent-cc-search-icon {
   top: 14px;
 }
 
@@ -4954,7 +4963,7 @@
 
 .ent-cc-sync-recovery-note {
   margin: 10px 0 0;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: 0.78rem;
   line-height: 1.45;
 }
@@ -5249,7 +5258,7 @@
 .ent-cc-legacy-review-candidate-path {
   overflow: hidden;
   margin-top: 2px;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: 0.75rem;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -5556,6 +5565,11 @@
   box-shadow: inset 0 0 0 2px var(--interactive-accent);
 }
 
+/* Forced colors drops box-shadow. */
+@media (forced-colors: active) {
+  .ent-cc-note-organizer-tree-item:focus { outline: 2px solid Highlight; outline-offset: -2px; }
+}
+
 .ent-cc-note-organizer-tree-toggle,
 .ent-cc-note-organizer-tree-spacer,
 .ent-cc-note-organizer-remove {
@@ -5622,7 +5636,7 @@
 .ent-cc-note-organizer-review-path {
   overflow: hidden;
   margin-top: 2px;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: 0.72rem;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -6234,7 +6248,7 @@
 }
 
 .ent-cc-note-membership-not-organized {
-  color: var(--text-faint);
+  color: var(--text-muted);
 }
 
 .ent-cc-note-membership-broken {
@@ -7361,6 +7375,7 @@
 }
 .ent-cc-view.is-mobile-split .ent-cc-inspector-layout-actions .ent-cc-icon-button,
 .ent-cc-view.is-mobile-split .ent-cc-history-action,
+.ent-cc-view.is-mobile-split .ent-cc-workspace-options-actions .ent-cc-icon-button,
 .ent-cc-view.is-mobile-split .ent-cc-inspector-actions .ent-cc-icon-button {
   width: 44px;
   min-width: 44px;
@@ -7368,7 +7383,9 @@
 }
 .ent-cc-view.is-mobile-split .ent-cc-header-actions .ent-cc-button,
 .ent-cc-view.is-mobile-split .ent-cc-inspector-actions .ent-cc-button,
-.ent-cc-view.is-mobile-split .ent-cc-related-record { min-height: 44px; }
+.ent-cc-view.is-mobile-split .ent-cc-related-record,
+.ent-cc-view.is-mobile-split .ent-cc-linked-first { min-height: 44px; }
+.ent-cc-view.is-mobile-split .ent-cc-search-option select { height: 44px; /* WebKit ignores min-height */ }
 .ent-cc-view.is-mobile-split .ent-cc-workspace-separator::after {
   content: "";
   position: absolute;

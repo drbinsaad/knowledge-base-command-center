@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { Notice, Setting } from "obsidian";
+import { Notice, Setting } from "./support/obsidian-stub.ts";
 import { migrateData, portablePlaceholderPath, type VaultRecord } from "../src/model.ts";
 import EntVaultCommandCenterPlugin from "../src/main.ts";
 import { IndexManagerModal } from "../src/index-manager.ts";
@@ -17,6 +17,14 @@ import {
   type TaxonomyHealthFinding,
 } from "../src/taxonomy-health.ts";
 import { asHtmlElement, createFakeDom, FakeElement } from "./support/fake-dom.ts";
+
+/** Chainable stand-in for the Setting button component; optional members are only those a test exercises. */
+interface SettingButtonFake {
+  setButtonText(): SettingButtonFake;
+  onClick(): SettingButtonFake;
+  setCta?(): SettingButtonFake;
+  setDisabled?(): SettingButtonFake;
+}
 
 function record(path: string, title: string, overrides: Partial<VaultRecord> = {}): VaultRecord {
   return {
@@ -378,6 +386,266 @@ test("the taxonomy filter keeps the caret where the user is typing", () => {
   assert.deepEqual(restores, [[5, 5]], "the caret must not jump to the end of the filter");
 });
 
+interface CaretInput extends FakeElement {
+  selectionStart: number | null;
+  selectionEnd: number | null;
+}
+
+function openTaxonomyModalWith(count: number): { modal: TaxonomyHealthModal & { contentEl: HTMLElement }; dom: ReturnType<typeof createFakeDom> } {
+  const findings: TaxonomyHealthFinding[] = Array.from({ length: count }, (_, index) => ({
+    id: `f${index}`,
+    kind: "duplicate-name",
+    severity: "warning",
+    title: index < 3 ? `Beta finding ${index}` : `Alpha finding ${index}`,
+    detail: "Detail",
+    scope: "Index",
+  }));
+  const plugin = {
+    app: {},
+    getActiveKnowledgeBaseId: () => "base",
+    getDataEpoch: () => 1,
+    getTaxonomyHealthFindings: () => findings,
+    isDataReadOnly: () => false,
+  };
+  const dom = createFakeDom();
+  const modal = new TaxonomyHealthModal(plugin as never) as TaxonomyHealthModal & {
+    modalEl: HTMLElement;
+    contentEl: HTMLElement;
+    titleEl: HTMLElement;
+  };
+  modal.modalEl = asHtmlElement(dom.document.body.createDiv());
+  modal.contentEl = asHtmlElement(dom.document.body.createDiv());
+  modal.titleEl = asHtmlElement(dom.document.body.createEl("h2"));
+  modal.onOpen();
+  return { modal, dom };
+}
+
+const taxonomySearch = (modal: { contentEl: HTMLElement }): CaretInput =>
+  modal.contentEl.querySelector('.ent-cc-taxonomy-toolbar input[type="search"]') as unknown as CaretInput;
+const taxonomyRows = (modal: { contentEl: HTMLElement }): number =>
+  modal.contentEl.querySelectorAll(".ent-cc-taxonomy-finding").length;
+
+test("taxonomy filter keeps the composing input mounted and applies the final query once", () => {
+  const { modal } = openTaxonomyModalWith(10);
+  withCaretSupport(() => {
+    const search = taxonomySearch(modal);
+    const list = modal.contentEl.querySelector(".ent-cc-taxonomy-list");
+    assert.equal(taxonomyRows(modal), 10);
+
+    search.dispatch("compositionstart");
+    search.value = "b";
+    search.dispatch("input");
+    // A pause while the candidate window is open must not re-render anything.
+    search.value = "be";
+    search.dispatch("input");
+    assert.equal(taxonomySearch(modal), search, "the composing input node must survive");
+    assert.equal(modal.contentEl.querySelector(".ent-cc-taxonomy-list"), list, "the query must not be applied mid-composition");
+    assert.equal(taxonomyRows(modal), 10);
+
+    search.value = "beta";
+    search.dispatch("compositionend");
+    assert.equal(taxonomySearch(modal), search);
+    assert.equal(taxonomyRows(modal), 3, "the committed query filters the list");
+    const applied = modal.contentEl.querySelector(".ent-cc-taxonomy-list");
+
+    // Some engines fire a trailing input after compositionend; same value, no second pass.
+    search.dispatch("input");
+    assert.equal(modal.contentEl.querySelector(".ent-cc-taxonomy-list"), applied, "the final query is applied exactly once");
+  });
+});
+
+test("taxonomy filter without IME still filters on each input", () => {
+  const { modal } = openTaxonomyModalWith(10);
+  withCaretSupport(() => {
+    const search = taxonomySearch(modal);
+    search.value = "beta";
+    search.dispatch("input");
+    assert.equal(taxonomyRows(modal), 3);
+    search.value = "alpha";
+    search.dispatch("input");
+    assert.equal(taxonomyRows(modal), 7);
+  });
+});
+
+test("taxonomy Recheck and Show more keep the filter input, its caret and keyboard focus", () => {
+  const { modal, dom } = openTaxonomyModalWith(230);
+  withCaretSupport(() => {
+    const search = taxonomySearch(modal);
+    search.value = "finding";
+    search.dispatch("input");
+    search.selectionStart = 2;
+    search.selectionEnd = 5;
+    search.focus();
+
+    const recheck = modal.contentEl.querySelectorAll(".ent-cc-taxonomy-toolbar button")[0] as unknown as FakeElement;
+    assert.match(recheck.textContent, /Recheck/u);
+    recheck.focus();
+    recheck.click();
+    assert.equal(taxonomySearch(modal), search, "Recheck must not replace the filter input");
+    assert.equal(search.selectionStart, 2);
+    assert.equal(search.selectionEnd, 5);
+    assert.ok(dom.document.activeElement && modal.contentEl.contains(asHtmlElement(dom.document.activeElement)), "focus stays inside the dialog after Recheck");
+    assert.equal(dom.document.activeElement, recheck);
+
+    const more = modal.contentEl.querySelector(".ent-cc-taxonomy-more") as unknown as FakeElement;
+    assert.ok(more);
+    more.focus();
+    more.click();
+    assert.equal(taxonomySearch(modal), search, "Show more must not replace the filter input");
+    assert.equal(taxonomyRows(modal), 230);
+    assert.ok(dom.document.activeElement && modal.contentEl.contains(asHtmlElement(dom.document.activeElement)), "keyboard focus must not be dropped by Show more");
+  });
+});
+
+test("index manager search holds the composing input and applies the final query once", () => {
+  const notes = [
+    { path: "A.md", title: "Alpha", meta: "A.md" },
+    { path: "B.md", title: "Beta", meta: "B.md" },
+  ];
+  const plugin = {
+    data: { settings: { groupLabel: "Group", indexLabel: "Index", itemSingular: "note", itemPlural: "notes" }, manualIndexPaths: [], excludedIndexPaths: [] },
+    isClinicalMode: () => false,
+    canVisuallyMoveAcrossGroups: () => true,
+  };
+  const dom = createFakeDom();
+  const manager = Object.create(IndexManagerModal.prototype) as {
+    app: unknown;
+    plugin: typeof plugin;
+    contentEl: HTMLElement;
+    tab: string;
+    query: string;
+    selected: Set<string>;
+    managerOpen: boolean;
+    searchTimer: number | null;
+    pendingTimers: Set<number>;
+    selectionButtons: unknown[];
+    guardOpenedBase(): boolean;
+    renderSnapshot(): void;
+    renderNoteManager(notes: Array<{ path: string; title: string; meta: string }>, availableCount: () => number): void;
+  };
+  manager.app = { vault: { getAbstractFileByPath: () => null } };
+  manager.plugin = plugin;
+  manager.contentEl = asHtmlElement(dom.document.body.createDiv());
+  manager.tab = "indexed";
+  manager.query = "";
+  manager.selected = new Set(["A.md"]);
+  manager.managerOpen = true;
+  manager.searchTimer = null;
+  manager.pendingTimers = new Set();
+  manager.selectionButtons = [];
+  manager.guardOpenedBase = () => true;
+  let snapshots = 0;
+  manager.renderSnapshot = () => {
+    snapshots += 1;
+    manager.contentEl.empty();
+    manager.renderNoteManager(notes, () => 0);
+  };
+
+  // Production schedules on contentEl.ownerDocument.defaultView, so the
+  // controllable, cancellable queue must live on that window (not on a global).
+  interface Timer { id: number; delay: number; callback: () => void; cancelled: boolean }
+  const timers: Timer[] = [];
+  const ownerWindow = dom.window as unknown as {
+    setTimeout?: (callback: () => void, delay?: number) => number;
+    clearTimeout?: (id: number) => void;
+  };
+  ownerWindow.setTimeout = (callback, delay = 0) => {
+    const timer: Timer = { id: timers.length + 1, delay, callback, cancelled: false };
+    timers.push(timer);
+    return timer.id;
+  };
+  ownerWindow.clearTimeout = (id) => {
+    const timer = timers.find((candidate) => candidate.id === id);
+    if (timer) timer.cancelled = true;
+  };
+  const live = (delay: number): Timer[] => timers.filter((timer) => !timer.cancelled && timer.delay === delay);
+  const fire = (delay: number): void => {
+    for (const timer of live(delay)) {
+      timer.cancelled = true;
+      timer.callback();
+    }
+  };
+  const searchBox = (): CaretInput => manager.contentEl.querySelector('.ent-cc-manager-toolbar input[type="search"]') as unknown as CaretInput;
+  const reset = (): void => {
+    timers.length = 0;
+    snapshots = 0;
+    manager.query = "";
+    manager.selected = new Set(["A.md"]);
+    manager.managerOpen = true;
+    manager.searchTimer = null;
+    manager.pendingTimers.clear();
+    manager.contentEl.empty();
+    manager.renderNoteManager(notes, () => 0);
+  };
+  const closeManager = (): void => (manager as unknown as { onClose(): void }).onClose();
+  try {
+    withCaretSupport((restores) => {
+      // 1. A keystroke is queued, then composition starts before it fires.
+      reset();
+      const search = searchBox();
+      search.focus();
+      search.value = "b";
+      search.dispatch("input");
+      assert.equal(live(150).length, 1, "the plain keystroke queued one debounce");
+      search.dispatch("compositionstart");
+      search.value = "be";
+      search.dispatch("input");
+      fire(150);
+      assert.equal(searchBox() === search, true, "the composing input must not be replaced when the old debounce fires");
+      assert.equal(snapshots, 0, "nothing is applied mid-composition");
+
+      search.value = "beta";
+      search.selectionStart = 1;
+      search.selectionEnd = 3;
+      search.dispatch("compositionend");
+      search.dispatch("input"); // trailing input some engines send after compositionend
+      assert.equal(live(150).length, 1, "compositionend plus trailing input queue a single application");
+      fire(150);
+      fire(0);
+      assert.equal(snapshots, 1, "the final query is applied exactly once");
+      assert.equal(manager.query, "beta");
+      assert.equal(manager.selected.size, 0, "selection safety: a new query drops hidden notes");
+      assert.equal(dom.document.activeElement === searchBox(), true, "keyboard focus survives the refresh");
+      assert.equal(restores.at(-1)?.join(","), "1,3", "the mid-string selection is restored, not collapsed");
+
+      // Control: plain typing without IME still filters after the debounce.
+      const next = searchBox();
+      next.value = "alpha";
+      next.dispatch("input");
+      fire(150);
+      fire(0);
+      assert.equal(snapshots, 2);
+      assert.equal(manager.query, "alpha");
+
+      // 2. Closing before the pending query fires: even a captured late callback must not render.
+      reset();
+      searchBox().value = "x";
+      searchBox().dispatch("input");
+      const late = live(150)[0];
+      assert.equal(late === undefined, false);
+      closeManager();
+      assert.equal(live(150).length, 0, "close cancels the pending query");
+      late.callback();
+      assert.equal(snapshots, 0, "a late query callback must not render a closed dialog");
+
+      // 3. Closing after the render but before its zero-delay focus callback.
+      reset();
+      searchBox().value = "y";
+      searchBox().dispatch("input");
+      fire(150);
+      assert.equal(snapshots, 1);
+      const lateFocus = live(0)[0];
+      assert.equal(lateFocus === undefined, false);
+      closeManager();
+      lateFocus.callback();
+      assert.equal(dom.document.activeElement === searchBox(), false, "close prevents the focus restore");
+    });
+  } finally {
+    Reflect.deleteProperty(ownerWindow, "setTimeout");
+    Reflect.deleteProperty(ownerWindow, "clearTimeout");
+  }
+});
+
 test("knowledge-base manager actions refuse to act on rows a synced replacement invalidated", () => {
   Notice.messages.length = 0;
   let dataEpoch = 1;
@@ -494,7 +762,7 @@ test("index manager bulk selection matches the notes the filter shows", () => {
   try {
     withCaretSupport(() => {
       manager.renderNoteManager(notes, () => 0);
-      const toggle = manager.contentEl.querySelector(".ent-cc-manager-toolbar button");
+      const toggle = manager.contentEl.querySelector<HTMLButtonElement>(".ent-cc-manager-toolbar button");
       assert.ok(toggle);
       assert.match(toggle.textContent, /Select matches/u, "a selection holding hidden notes is not a full selection");
       toggle.click();
@@ -554,9 +822,9 @@ test("index manager tabs expose linked panels and support arrow, Home, and End k
   const settingPrototype = Setting.prototype as unknown as Record<string, unknown>;
   const priorAddButton = Object.getOwnPropertyDescriptor(Setting.prototype, "addButton");
   const priorSettingEl = Object.getOwnPropertyDescriptor(Setting.prototype, "settingEl");
-  const settingButton = {
-    setButtonText: (): typeof settingButton => settingButton,
-    onClick: (): typeof settingButton => settingButton,
+  const settingButton: SettingButtonFake = {
+    setButtonText: (): SettingButtonFake => settingButton,
+    onClick: (): SettingButtonFake => settingButton,
   };
   settingPrototype.addButton = function addButton(this: unknown, callback: (value: typeof settingButton) => void): unknown {
     callback(settingButton);
@@ -646,7 +914,7 @@ test("Index Manager bounds large heading and diagnostic DOM until Show more is r
   const groupsPanel = asHtmlElement(dom.document.body.createDiv());
   manager.renderGroups(groups, groupsPanel);
   assert.equal(groupsPanel.querySelectorAll(".ent-cc-manager-group").length, 300);
-  const groupsMore = groupsPanel.querySelectorAll("button").find((button) => button.textContent === "Show 300 more");
+  const groupsMore = Array.from(groupsPanel.querySelectorAll("button")).find((button) => button.textContent === "Show 300 more");
   assert.ok(groupsMore);
   groupsMore.click();
   assert.equal(manager.visibleRowLimits.groups, 600);
@@ -660,7 +928,7 @@ test("Index Manager bounds large heading and diagnostic DOM until Show more is r
   const diagnosticsPanel = asHtmlElement(dom.document.body.createDiv());
   manager.renderDiagnostics(diagnostics, diagnosticsPanel);
   assert.equal(diagnosticsPanel.querySelectorAll(".ent-cc-manager-diagnostic").length, 300);
-  const diagnosticsMore = diagnosticsPanel.querySelectorAll("button").find((button) => button.textContent === "Show 300 more");
+  const diagnosticsMore = Array.from(diagnosticsPanel.querySelectorAll("button")).find((button) => button.textContent === "Show 300 more");
   assert.ok(diagnosticsMore);
   diagnosticsMore.click();
   assert.equal(manager.visibleRowLimits.diagnostics, 600);
@@ -732,11 +1000,11 @@ test("in-modal mutations drop the cached diagnostics so the next Diagnostics vie
   manager.diagnosticsCache = null;
 
   const settingPrototype = Setting.prototype as unknown as Record<string, unknown>;
-  const settingButton = {
-    setButtonText: (): typeof settingButton => settingButton,
-    onClick: (): typeof settingButton => settingButton,
-    setCta: (): typeof settingButton => settingButton,
-    setDisabled: (): typeof settingButton => settingButton,
+  const settingButton: SettingButtonFake = {
+    setButtonText: (): SettingButtonFake => settingButton,
+    onClick: (): SettingButtonFake => settingButton,
+    setCta: (): SettingButtonFake => settingButton,
+    setDisabled: (): SettingButtonFake => settingButton,
   };
   settingPrototype.addButton = function addButton(this: unknown, callback: (value: typeof settingButton) => void): unknown {
     callback(settingButton);
@@ -754,7 +1022,7 @@ test("in-modal mutations drop the cached diagnostics so the next Diagnostics vie
     assert.equal(manager.contentEl.querySelectorAll(".ent-cc-manager-diagnostic").length, 1);
     assert.equal(manager.contentEl.querySelector('[data-manager-tab="diagnostics"]')?.textContent, "Diagnostics1");
 
-    const indexedTab = manager.contentEl.querySelector('[data-manager-tab="indexed"]');
+    const indexedTab = manager.contentEl.querySelector<HTMLElement>('[data-manager-tab="indexed"]');
     assert.ok(indexedTab);
     indexedTab.click();
     assert.equal(computes, 1, "no other tab pays for a diagnostics recompute");
@@ -764,7 +1032,7 @@ test("in-modal mutations drop the cached diagnostics so the next Diagnostics vie
     assert.equal(confirms.length, 1);
     await confirms[0]?.onConfirm();
     assert.equal(computes, 1, "the mutation itself does not recompute either");
-    const staleBadge = manager.contentEl.querySelector('[data-manager-tab="diagnostics"]');
+    const staleBadge = manager.contentEl.querySelector<HTMLElement>('[data-manager-tab="diagnostics"]');
     assert.equal(staleBadge?.textContent, "Diagnostics—", "the badge no longer advertises the pre-mutation count");
 
     staleBadge?.click();
@@ -849,11 +1117,11 @@ test("Repair safe issues confirms before pruning missing-note registrations and 
   manager.diagnosticsCache = null;
 
   const settingPrototype = Setting.prototype as unknown as Record<string, unknown>;
-  const settingButton = {
-    setButtonText: (): typeof settingButton => settingButton,
-    onClick: (): typeof settingButton => settingButton,
-    setCta: (): typeof settingButton => settingButton,
-    setDisabled: (): typeof settingButton => settingButton,
+  const settingButton: SettingButtonFake = {
+    setButtonText: (): SettingButtonFake => settingButton,
+    onClick: (): SettingButtonFake => settingButton,
+    setCta: (): SettingButtonFake => settingButton,
+    setDisabled: (): SettingButtonFake => settingButton,
   };
   settingPrototype.addButton = function addButton(this: unknown, callback: (value: typeof settingButton) => void): unknown {
     callback(settingButton);

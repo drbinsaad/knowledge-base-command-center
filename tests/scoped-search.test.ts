@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setTimeout as scheduleTask, clearTimeout as cancelTask } from "node:timers";
-import { TFile } from "obsidian";
+import { TFile } from "./support/obsidian-stub.ts";
 import Plugin from "../src/main.ts";
 import { createDefaultStore, createKnowledgeBaseEntry, migrateData, type VaultRecord, cleanSearchViewFilters } from "../src/model.ts";
 import { createPortableExport, parsePortableExport, EMPTY_PORTABLE_SELECTION } from "../src/portability.ts";
@@ -25,7 +25,7 @@ function searchPlugin() {
   const data = migrateData(null);
   data.settings.workspaceMode = "generic";
   data.settings.setupComplete = true;
-  data.indexFolderSources = [{ id: "root", path: "Notes", origin: "explicit" }];
+  data.indexFolderSources = [{ id: "root", path: "Notes", origin: "user" }];
   const store = createDefaultStore(data, 1, "search-scope-test");
   store.bases.push(createKnowledgeBaseEntry(structuredClone(data), "second", 2));
   const first = store.bases[0];

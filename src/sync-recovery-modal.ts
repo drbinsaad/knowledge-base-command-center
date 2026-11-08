@@ -5,6 +5,8 @@ import { formatLocalAge, type SyncRecoveryCenterSnapshot } from "./sync-recovery
 import { ExportImportCenterModal } from "./portability-modal";
 
 /** Hoisted: sentence-case lint would lowercase Obsidian's official setting names. */
+/** Hoisted for the same reason: official names (Undo, Clear device-local data) must keep their capitals. */
+const KEPT_COPIES_INTRO = "Review a kept rescue copy or data backup and restore one of its knowledge bases as a new base. Full rescues are private: they can hold exact paths and per-base view and Undo history, and Clear device-local data does not remove them.";
 const CHECK_SYNC_EACH_DEVICE = "Check this on each device (sync settings are per device): Settings → Sync → Vault configuration sync → Active community plugin list and Installed community plugin list.";
 
 export class SyncRecoveryCenterModal extends Modal {
@@ -101,7 +103,7 @@ export class SyncRecoveryCenterModal extends Modal {
     nextSteps.createEl("p", { text: `Last recovery export: ${formatLocalAge(snapshot.newestRecoveryExportAt, now)}.` });
     nextSteps.createEl("p", { text: snapshot.readOnly
       ? "Preserve plugin data and recovery files before troubleshooting. This screen cannot confirm whether another device has finished syncing."
-      : "Keep a private organization backup before major changes. Back up Markdown notes and attachments separately using your vault backup tools." });
+      : "Keep a private organization backup before major changes. Each backup covers the active knowledge base only. Back up Markdown notes and attachments separately using your vault backup tools." });
     if (!snapshot.readOnly) {
       this.actionButton(nextSteps, "download", "Back up organization…", () => {
         this.close();
@@ -110,6 +112,13 @@ export class SyncRecoveryCenterModal extends Modal {
     }
     if (snapshot.readOnly) this.renderProtection(scroll, snapshot);
     this.renderRecovery(scroll, snapshot, now);
+    // Always available, including in protected read-only mode: reviewing never writes.
+    const review = this.section(scroll, "Kept copies", "archive-restore");
+    review.createEl("p", { text: KEPT_COPIES_INTRO });
+    this.actionButton(review, "archive-restore", "Review kept copies…", () => {
+      this.close();
+      this.plugin.openRecoveryCopyReview();
+    });
     const diagnostics = scroll.createEl("details", { cls: "ent-cc-sync-recovery-diagnostics" });
     diagnostics.open = this.diagnosticsOpen;
     diagnostics.addEventListener("toggle", () => { this.diagnosticsOpen = diagnostics.open; });
@@ -206,7 +215,7 @@ export class SyncRecoveryCenterModal extends Modal {
     }
     section.createEl("p", {
       cls: "ent-cc-sync-recovery-note",
-      text: "Counts inspect the configured export folders for all knowledge bases and the legacy default folder, using only documented filenames and modification times. The combined scan is capped at 2,000 direct entries; capped counts are lower bounds. Full paths, JSON contents, and note bodies are not displayed or read.",
+      text: "Counts inspect the configured export folders for all knowledge bases and the legacy default folder, using only documented filenames and modification times. The combined scan is capped at 2,000 direct entries; capped counts are lower bounds. Full paths and note bodies are not displayed or read. A copy's contents are read only after you choose one in the kept-copies list.",
     });
   }
 

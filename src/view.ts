@@ -1,19 +1,18 @@
-import { ItemView, Menu, Notice, Platform, setIcon, TFile, WorkspaceLeaf, normalizePath } from "obsidian";
+import { ItemView, Menu, Notice, Platform, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 import type EntVaultCommandCenterPlugin from "./main";
 import { captureViewFocus, restoreViewFocus, readableStatus, relativeUpdatedTime, recordAvailabilitySummary } from "./view-state";
 import { DEFAULT_INSPECTOR_WIDTH, loadWorkspaceLayoutPreference, saveWorkspaceLayoutPreference, WorkspaceResizeController, type WorkspaceLayoutPreference } from "./workspace-layout";
 import { cleanSearchViewFilters, type SearchViewFilters } from "./model";
 import type { CatalogPlacementTarget } from "./main";
-import { IndexManagerModal, type ManagerTab } from "./index-manager";
+import { IndexManagerModal, REMOVAL_PLACEMENT_AND_UNDO_NOTE, type ManagerTab } from "./index-manager";
 import { ExportImportCenterModal } from "./portability-modal";
 import { PortfolioTransferModal } from "./portfolio-modal";
-import { MAX_PORTABLE_PACKAGE_BYTES } from "./portability";
 import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge-base-modal";
 import { LibraryEditorModal, ManageLibrariesModal } from "./library-modal";
 import { resolveLibraryIconId } from "./library-icons";
 import { DEFAULT_LIBRARY_DISPLAY_PROFILE, type LibraryDisplayProfile } from "./library-display-profile";
 import { libraryPropertyText, ownLibraryProperty, renderLibraryCover, resolveLibraryCoverFromProperty } from "./library-cover";
-import { collectNoteAttachments, renderNoteAttachments } from "./note-attachments";
+import { ATTACHMENT_PAGE_SIZE, collectNoteAttachments, focusAttachmentNear, focusedAttachmentRow, MISSING_REFERENCE_TEXT, renderNoteAttachments } from "./note-attachments";
 import { TouchDragController, type TouchDragTarget } from "./touch-drag";
 import {
   MAX_KBCC_RETURN_BROWSE_LIMIT,
@@ -27,14 +26,13 @@ import {
 import { MembershipExplanationModal } from "./membership-explanation-modal";
 import { CreatedNoteRecoveryModal } from "./created-note-recovery-modal";
 import { localeInvariantTaxonomyKey } from "./taxonomy-health";
+import { previewPlaceholderLinkEffects } from "./placeholder-link-effects";
+import { placeholderChoiceLabels, projectPlaceholderCandidates, unresolvedChoiceSubjects } from "./placeholder-link-choice";
 import {
-  assertPersonalBackupMatchesVault,
-  applyPersonalBackupToData,
   buildCurriculumTree,
   canonicalPath,
   childSubheadings,
   curriculumChildPaths,
-  createPersonalBackup,
   curriculumDescendantPaths,
   CurriculumDomainTree,
   curriculumSiblingPaths,
@@ -63,7 +61,6 @@ import {
   moveCurriculumVisual,
   pathIsInIndexFolderSources,
   pathIsInsideFolder,
-  parsePersonalBackup,
   recordBelongsToIndex,
   resolveExpectedParentPath,
   roleLabel,
@@ -77,8 +74,6 @@ import {
   PluginData,
   TemplateTokenContext,
   unknownQueryTokens,
-  validateWritableFolderPath,
-  validateTemplateFilePath,
   VaultRecord,
   visualPlacementPathSet,
 } from "./model";
@@ -98,18 +93,18 @@ import {
   collectionTargets,
   ConfirmModal,
   createOpenedBaseGuard,
-  deliverJsonExport,
   IndexGroupModal,
   KnowledgeNoteModal,
   type NoteDestinationSeed,
-  requestJsonImport,
   RecordPickerModal,
+  StringPickerModal,
   TextPromptModal,
   TopicEditorModal,
   VaultFilePickerModal,
   WorkspaceSetupModal,
 } from "./modals";
 
+const STALE_CHOICE_NOTICE = "That choice is out of date. Nothing was changed.";
 export const VIEW_TYPE = "ent-vault-command-center-view";
 export const MAX_RENDERED_SEARCH_RESULTS = DEFAULT_CROSS_BASE_SEARCH_LIMIT;
 export const MAX_RENDERED_BROWSE_RECORDS = 300;
@@ -167,6 +162,10 @@ interface TouchMoveSource {
   fingerprint: string;
   recordFingerprint: string;
   descendants: Set<string>;
+  /** The record array published when the gesture began (replaced, never edited in place, by the plugin). */
+  structure: readonly VaultRecord[];
+  /** A later search generation already proven to leave that projection unchanged. */
+  provenGeneration?: number;
 }
 
 interface CreateKnowledgeNoteFormContext {
@@ -233,6 +232,11 @@ export function canRelinkPortableRecord(
   record: Pick<VaultRecord, "portableId" | "portableRelinkable" | "isPlaceholder">,
 ): boolean {
   return Boolean(record.portableId && record.portableRelinkable && !record.isPlaceholder);
+}
+
+/** Confirmation text for "Reset all visual arrangement". Wording only; the reset behaviour is unchanged. */
+export function resetAllVisualArrangementMessage(clinical: boolean): string {
+  return `All visual nesting and custom order will return to the ${clinical ? "canonical note metadata" : "configured parent metadata and folder grouping"}, so the remaining siblings go back to their default order. Source notes will not be changed. Undo restores the earlier organization while it is still available.`;
 }
 
 function libraryLabel(library: Pick<LibraryDefinition, "name" | "singularName">, plural = false): string {
@@ -759,6 +763,14 @@ export class EntVaultCommandCenterView extends ItemView {
   private browseStructuresRendered = 0;
   private browseStructuresOmitted = 0;
   private viewClosed = false;
+  /** Volatile attachment-list state for the selected note; keyed by base and note, never persisted. */
+  private attachmentView: { key: string; revealed: number; focusedPath: string | null; focusedIndex: number } | null = null;
+  /** One view-owned feedback region that outlives rerenders until replaced or dismissed. */
+  private viewFeedback: { message: string; tone: "status" | "error"; source: string } | null = null;
+  private viewFeedbackEl: HTMLElement | null = null;
+  private viewFeedbackOrigin: HTMLElement | null = null;
+  /** Bumped on base change and close so a delayed action cannot write into a context it no longer belongs to. */
+  private feedbackGeneration = 0;
   private searchViewportWindow: Window | null = null;
   private searchPointerCleanup: (() => void) | null = null;
   private mobileToolbarCleanup: (() => void) | null = null;
@@ -779,6 +791,9 @@ export class EntVaultCommandCenterView extends ItemView {
   private activeLibraryDrag: LibraryDragMembership | null = null;
   private touchDrag: TouchDragController<TouchMoveSource, TouchMoveDestination> | null = null;
   private touchTargets = new Map<HTMLElement, { node: TouchDestinationNode; label: string }>();
+  /** A harmless display refresh arrived while a touch gesture or its commit was pending; replayed once afterwards. */
+  private touchRefreshDirty = false;
+  private touchDropsInFlight = 0;
   private setupPromptShown = false;
   private loadedBaseId = "";
   private loadedDataEpoch = 0;
@@ -822,6 +837,11 @@ export class EntVaultCommandCenterView extends ItemView {
     this.globalSearchRequestGeneration += 1;
     this.globalSearchPendingKey = "";
     this.pendingReturnScroll = null;
+    this.viewFeedback = null;
+    this.feedbackGeneration += 1;
+    this.viewFeedbackEl = null;
+    this.viewFeedbackOrigin = null;
+    this.attachmentView = null;
     this.unbindWindowMigration();
     this.unbindPaneLayout();
     this.unbindSearchViewportLayout();
@@ -961,6 +981,7 @@ export class EntVaultCommandCenterView extends ItemView {
 
   async reload(withinOperation = false): Promise<void> {
     const focusBefore = captureViewFocus(this.contentEl);
+    this.captureAttachmentFocus();
     const listScrollBefore = this.paneLayout === "wide" ? this.treeEl?.scrollTop ?? 0 : this.workspaceEl?.scrollTop ?? 0;
     const detailScrollBefore = this.paneLayout === "wide" ? this.inspectorEl?.scrollTop ?? 0
       : this.inspectorEl?.querySelector<HTMLElement>(".ent-cc-inspector-body")?.scrollTop ?? 0;
@@ -969,6 +990,13 @@ export class EntVaultCommandCenterView extends ItemView {
     const dataEpoch = this.currentDataEpoch();
     const baseChanged = this.loadedBaseId !== activeBaseId;
     const dataChanged = this.loadedDataEpoch !== dataEpoch;
+    // A refresh that changes neither base nor data identity is only a display update. Replacing the
+    // DOM under a touch gesture (or its pending commit) would cancel a valid move, so replay it once afterwards.
+    if (!baseChanged && !dataChanged && this.touchGestureBusy()) {
+      this.touchRefreshDirty = true;
+      return;
+    }
+    this.touchRefreshDirty = false;
     const focusedSearch = this.contentEl?.querySelector?.('.ent-cc-search-box input[type="search"]') as HTMLInputElement | null | undefined;
     const searchWasFocused = Boolean(focusedSearch && focusedSearch.ownerDocument.activeElement === focusedSearch);
     const searchSelectionStart = focusedSearch?.selectionStart ?? null;
@@ -995,6 +1023,10 @@ export class EntVaultCommandCenterView extends ItemView {
       // A Sync refresh of the same base must not erase what the user is typing.
       // A real base switch intentionally starts from that base's clean route.
       if (baseChanged) {
+        // Feedback about the previous base's files must not describe this one,
+        // and a delayed completion from that base must not repopulate it.
+        this.viewFeedback = null;
+        this.feedbackGeneration += 1;
         this.query = "";
         this.parsedQuery = parseQuery("");
         this.searchScope = "all";
@@ -1017,6 +1049,11 @@ export class EntVaultCommandCenterView extends ItemView {
     this.recordByPath = new Map(this.records.map((record) => [record.path, record]));
     const reconciled = await this.plugin.reconcileRecords(this.records, withinOperation);
     if (this.viewClosed) return;
+    // A gesture may have begun while reconciling.
+    if (!baseChanged && !dataChanged && this.touchGestureBusy()) {
+      this.touchRefreshDirty = true;
+      return;
+    }
     if (reconciled) {
       this.records = this.plugin.getRecords();
       this.recordByPath = new Map(this.records.map((record) => [record.path, record]));
@@ -1048,12 +1085,20 @@ export class EntVaultCommandCenterView extends ItemView {
       if (!this.isCompactInspectorLayout() && this.inspectorEl) this.renderInspector();
       return;
     }
+    // The snapshot above predates the awaits. Whatever the user chose since then
+    // (render() restores that itself) outranks it.
+    const focusAtRender = captureViewFocus(this.contentEl);
+    const focusUnchanged = !focusAtRender || (focusBefore !== null
+      && focusAtRender.key === focusBefore.key && focusAtRender.id === focusBefore.id
+      && focusAtRender.label === focusBefore.label && focusAtRender.tag === focusBefore.tag);
     this.render(!baseChanged);
     if (!baseChanged && this.contentEl?.ownerDocument) {
       this.restoreReturnScrollPosition(listScrollBefore, detailScrollBefore);
-      restoreViewFocus(this.contentEl, focusBefore);
+      // Focus the user moved to another surface meanwhile must not be pulled back either.
+      if (focusUnchanged && this.focusBelongsToView()) restoreViewFocus(this.contentEl, focusBefore);
     }
-    if (searchWasFocused && !baseChanged) {
+    // Same rule as above: only a user who is still where the snapshot was taken gets the search box back.
+    if (searchWasFocused && !baseChanged && focusUnchanged && this.focusBelongsToView()) {
       const replacement = this.contentEl.querySelector<HTMLInputElement>('.ent-cc-search-box input[type="search"]');
       replacement?.focus({ preventScroll: true });
       if (replacement && searchSelectionStart !== null && searchSelectionEnd !== null
@@ -1948,7 +1993,7 @@ export class EntVaultCommandCenterView extends ItemView {
       return;
     }
     const ownsBase = this.createOpenedBaseGuard();
-    new IndexGroupModal(this.app, {
+    this.offerPlaceholderLinkChoice(file, ownsBase, () => new IndexGroupModal(this.app, {
       title: `Place “${file.basename}” in ${this.plugin.data.settings.indexLabel}`,
       groupLabel: this.plugin.data.settings.groupLabel,
       initialValue: this.plugin.suggestedIndexGroup(file),
@@ -1960,7 +2005,45 @@ export class EntVaultCommandCenterView extends ItemView {
         if (!ownsBase()) return;
         new Notice(`Added “${file.basename}” under ${group}. The Markdown note was not changed.`);
       },
-    }).open();
+    }).open());
+  }
+
+  /**
+   * Before an existing note is placed in the Index, offer every same-base unresolved subject whose exact
+   * normalized title or configured ID matches it. The user links one explicitly or adds the note separately;
+   * closing the choice cancels. The linking itself stays in the guarded resolvePortableSubject service.
+   */
+  private offerPlaceholderLinkChoice(file: TFile, ownsBase: () => boolean, addSeparately: () => void): void {
+    const data = this.plugin.data;
+    const index = data.portableIndex;
+    const unresolved = unresolvedChoiceSubjects(index, data.settings.indexLabel, (id) => this.plugin.getLibrary(id)?.name);
+    const note = unresolved.length > 0 && !this.plugin.isDataReadOnly() ? this.placeholderMatchNotes([file])[0] : undefined;
+    const candidates = note ? projectPlaceholderCandidates(note, unresolved) : [];
+    if (candidates.length === 0) {
+      addSeparately();
+      return;
+    }
+    const separately = `Add “${file.basename}” separately, without linking`;
+    const labels = placeholderChoiceLabels(candidates);
+    new StringPickerModal(this.app, [separately, ...labels], `“${file.basename}” matches an imported subject`,
+      "Link a subject, or add separately", async (choice) => {
+        if (choice === separately) {
+          if (ownsBase()) addSeparately();
+          return;
+        }
+        const candidate = candidates[labels.indexOf(choice)];
+        // A stale choice (base, file, subject or binding changed) changes nothing. Read the live data:
+        // a Sync reload may have replaced the object captured when the picker opened.
+        const current = this.app.vault.getAbstractFileByPath(file.path);
+        const subject = candidate && this.plugin.getPortableSubject(candidate.id);
+        // The exact chosen file object, not merely a file at the same path.
+        if (!ownsBase() || !subject || current !== file || subject.title !== candidate.title
+          || this.plugin.data.portableIndex.resolvedPathBySubjectId[subject.id]) {
+          new Notice(STALE_CHOICE_NOTICE);
+          return;
+        }
+        await this.resolvePortableSubjectLink(subject.id, subject.title, file);
+      }).open();
   }
 
   public openAddActions(): void {
@@ -2317,27 +2400,66 @@ export class EntVaultCommandCenterView extends ItemView {
   private async resolvePortableSubjectLink(subjectId: string, subjectTitle: string, file: TFile): Promise<void> {
     const ownsBase = this.createOpenedBaseGuard();
     if (!ownsBase()) return;
-    const existingOwnerId = Object.entries(this.plugin.data.portableIndex.resolvedPathBySubjectId)
-      .find(([candidateId, path]) => candidateId !== subjectId && path === file.path)?.[0] ?? "";
-    if (existingOwnerId) {
-      const existingOwner = this.plugin.getPortableSubject(existingOwnerId);
-      new ConfirmModal(
-        this.app,
-        "Merge portable subjects?",
-        `“${file.basename}” is already linked to the imported subject “${existingOwner?.title ?? file.basename}”. Linking it to “${subjectTitle}” will merge that portable identity into this subject and remove the duplicate identity. The Markdown note will not be changed, and Undo remains available.`,
-        "Merge and link",
-        async () => {
-          if (!ownsBase()) return;
-          await this.plugin.resolvePortableSubject(subjectId, file.path, true);
-          if (!ownsBase()) return;
-          new Notice(`Linked “${subjectTitle}” to “${file.basename}” after merging the duplicate portable identity. The Markdown note was not changed.`);
+    // The path and file object the user chose; a rename or replacement afterwards is never applied.
+    const reviewedPath = file.path;
+    this.reviewPlaceholderEffects(ownsBase, "link", subjectId, reviewedPath, () => {
+      const title = this.plugin.getPortableSubject(subjectId)?.title ?? subjectTitle;
+      const ownerId = Object.entries(this.plugin.data.portableIndex.resolvedPathBySubjectId)
+        .find(([candidateId, path]) => candidateId !== subjectId && path === reviewedPath)?.[0] ?? "";
+      const owner = ownerId ? this.plugin.getPortableSubject(ownerId) : null;
+      return {
+        title: ownerId ? "Merge portable subjects?" : "Link note to imported subject?",
+        intro: ownerId
+          ? `“${file.basename}” is already linked to the imported subject “${owner?.title ?? file.basename}”. Linking it to “${title}” will merge that portable identity into this subject and remove the duplicate identity. The Markdown note will not be changed, and Undo remains available.`
+          : `“${title}” will be linked to “${file.basename}”. The Markdown note will not be changed, and Undo remains available.`,
+        label: ownerId ? "Merge and link" : "Link note",
+        current: () => file.path === reviewedPath && this.app.vault.getAbstractFileByPath(reviewedPath) === file,
+        apply: async () => {
+          await (ownerId
+            ? this.plugin.resolvePortableSubject(subjectId, reviewedPath, true)
+            : this.plugin.resolvePortableSubject(subjectId, reviewedPath));
         },
-      ).open();
+        done: () => new Notice(ownerId
+          ? `Linked “${title}” to “${file.basename}” after merging the duplicate portable identity. The Markdown note was not changed.`
+          : `Linked “${title}” to “${file.basename}”. The Markdown note was not changed.`),
+      };
+    });
+  }
+
+  /**
+   * Shows the exact organization effects of a link/unlink on a bounded clone,
+   * then re-derives them at confirm. A changed binding or placement means the
+   * reviewed text is stale: nothing is written and a fresh review opens.
+   */
+  private reviewPlaceholderEffects(
+    ownsBase: () => boolean,
+    kind: "link" | "unlink",
+    subjectId: string,
+    linkPath: string,
+    makeReview: () => { title: string; intro: string; label: string; current(): boolean; apply(): Promise<void>; done(): void },
+  ): void {
+    const effects = previewPlaceholderLinkEffects(this.plugin.data, kind, subjectId, linkPath);
+    if (!effects) {
+      new Notice(STALE_CHOICE_NOTICE);
       return;
     }
-    await this.plugin.resolvePortableSubject(subjectId, file.path);
-    if (!ownsBase()) return;
-    new Notice(`Linked “${subjectTitle}” to “${file.basename}”. The Markdown note was not changed.`);
+    // Built fresh for every review, so a reopened review never reuses stale names or owner text.
+    const review = makeReview();
+    new ConfirmModal(this.app, review.title, `${review.intro} ${effects.lines.join(" ")}`, review.label, async () => {
+      if (!ownsBase()) return;
+      if (!review.current()) {
+        new Notice(STALE_CHOICE_NOTICE);
+        return;
+      }
+      if (previewPlaceholderLinkEffects(this.plugin.data, kind, subjectId, linkPath)?.key !== effects.key) {
+        new Notice("The organization changed while you were reviewing. Nothing was changed; review the new effects.");
+        this.reviewPlaceholderEffects(ownsBase, kind, subjectId, linkPath, makeReview);
+        return;
+      }
+      await review.apply();
+      if (!ownsBase()) return;
+      review.done();
+    }).open();
   }
 
   private confirmPortableSubjectUnlink(record: VaultRecord): void {
@@ -2348,18 +2470,18 @@ export class EntVaultCommandCenterView extends ItemView {
       new Notice("This note has no portable subject identity to unlink.");
       return;
     }
-    new ConfirmModal(
-      this.app,
-      "Unlink note from imported subject?",
-      `“${record.title}” will return to a No note placeholder with its imported hierarchy and personal organization. The Markdown note at ${record.path} will not be moved, changed, or deleted. Undo remains available.`,
-      "Unlink note",
-      async () => {
-        if (!ownsBase()) return;
-        await this.plugin.unlinkPortableSubject(subjectId);
-        if (!ownsBase()) return;
-        new Notice(`Unlinked “${record.title}”. The imported subject is a placeholder again, and the Markdown note was not changed.`);
-      },
-    ).open();
+    const reviewedPath = this.plugin.data.portableIndex.resolvedPathBySubjectId[subjectId] ?? record.path;
+    this.reviewPlaceholderEffects(ownsBase, "unlink", subjectId, "", () => {
+      const title = this.plugin.getPortableSubject(subjectId)?.title ?? record.title;
+      return {
+        title: "Unlink note from imported subject?",
+        intro: `“${title}” will return to a No note placeholder with its imported hierarchy. The Markdown note at ${reviewedPath} will not be moved, changed, or deleted. Undo remains available.`,
+        label: "Unlink note",
+        current: () => this.plugin.data.portableIndex.resolvedPathBySubjectId[subjectId] === reviewedPath,
+        apply: () => this.plugin.unlinkPortableSubject(subjectId),
+        done: () => new Notice(`Unlinked “${title}”. The imported subject is a placeholder again, and the Markdown note was not changed.`),
+      };
+    });
   }
 
   private openPlaceholderActions(record: VaultRecord): void {
@@ -2601,29 +2723,20 @@ export class EntVaultCommandCenterView extends ItemView {
       return;
     }
     const ownsBase = this.createOpenedBaseGuard();
-    new WorkspaceSetupModal(this.app, this.plugin.data.settings, async (value) => {
-      if (!ownsBase()) throw new Error("Setup was not saved. Wait for sync to finish; if the knowledge base changed, reopen setup.");
-      this.plugin.assertDataWritable();
-      // A settled no-op Sync reload preserves this form's ownership while
-      // replacing PluginData. Apply its draft to the current settings object.
-      const settings = this.plugin.data.settings;
-      if (settings.workspaceMode !== "generic") throw new Error("Setup is only for generic knowledge bases.");
-      for (const folder of [value.primaryFolder, value.defaultNoteFolder, value.templatesFolder, value.proposalFolder, value.exportsFolder]) {
-        const error = validateWritableFolderPath(folder, this.app.vault.configDir);
-        if (error) throw new Error(error);
-      }
-      if (value.defaultNewNoteMode === "template") {
-        const templatePathError = validateTemplateFilePath(value.defaultTemplatePath, value.templatesFolder, this.app.vault.configDir);
-        if (templatePathError) throw new Error(templatePathError);
-        const template = this.app.vault.getAbstractFileByPath(value.defaultTemplatePath);
-        if (!(template instanceof TFile)) throw new Error("The selected default template could not be found.");
-      }
-      Object.assign(settings, value, { setupComplete: true });
-      await this.plugin.savePluginData();
+    new WorkspaceSetupModal(this.app, this.plugin.data.settings, async (value, reviewed) => {
+      // Ownership, writability, Generic mode, path/template validation and the
+      // reviewed Inbox effects are all rechecked inside the one required-Undo
+      // settings transaction, immediately before it writes.
+      await this.plugin.commitSetupSettings(value, reviewed, ownsBase);
       if (!ownsBase()) return;
       await this.plugin.refreshViews();
       if (!ownsBase()) return;
+      const settings = this.plugin.data.settings;
       new Notice(`${settings.workspaceName} is ready. Next, choose Add → Add existing note to Index to bring in your notes. No existing note was modified.`, 10000);
+    }, {
+      // Live reads: a settled no-op Sync reload replaces the settings object.
+      currentInboxFolder: () => this.plugin.data.settings.proposalFolder,
+      countInboxOnlyAffected: (nextFolder) => this.plugin.countOrphanedByProposalFolderChange(nextFolder),
     }).open();
   }
 
@@ -2653,7 +2766,7 @@ export class EntVaultCommandCenterView extends ItemView {
     }
     new VaultFilePickerModal(this.app, files, `Add existing note to ${settings.indexLabel}`, async (file) => {
       if (!ownsBase()) return;
-      new IndexGroupModal(this.app, {
+      this.offerPlaceholderLinkChoice(file, ownsBase, () => new IndexGroupModal(this.app, {
         title: `Place “${file.basename}” in ${settings.indexLabel}`,
         groupLabel: settings.groupLabel,
         initialValue: this.plugin.suggestedIndexGroup(file),
@@ -2665,7 +2778,7 @@ export class EntVaultCommandCenterView extends ItemView {
           if (!ownsBase()) return;
           new Notice(`Added to ${settings.indexLabel} under ${group}. The note stayed at ${file.path}.`);
         },
-      }).open();
+      }).open());
     }).open();
   }
 
@@ -2958,6 +3071,7 @@ export class EntVaultCommandCenterView extends ItemView {
     this.clearSearchPointerInteraction();
     this.unbindMobileToolbarLayout();
     const focusedControl = this.mobileInspectorNeedsFocus ? null : captureViewFocus(this.contentEl);
+    this.captureAttachmentFocus();
     // Native details toggle events are queued; read the live state before
     // replacement so an immediate keyboard action cannot close the panel.
     const currentOptions = this.contentEl.querySelector<HTMLDetailsElement>(".ent-cc-workspace-options");
@@ -3005,10 +3119,12 @@ export class EntVaultCommandCenterView extends ItemView {
       this.createInspector(shell);
       this.renderInspector();
       restoreViewFocus(this.contentEl, focusedControl);
+      this.scheduleTouchRefreshSettle();
       return;
     }
 
     shell.toggleClass("is-mobile-browse", mobileBrowse);
+    this.mountViewFeedback(shell);
     const header = shell.createDiv({ cls: "ent-cc-header" });
     const titleBlock = header.createDiv({ cls: "ent-cc-title-block" });
     const kickerRow = titleBlock.createDiv({ cls: "ent-cc-title-kicker-row" });
@@ -3092,7 +3208,7 @@ export class EntVaultCommandCenterView extends ItemView {
     disableWhenReadOnly(organize, readOnly, "Organize notes");
     organize.addEventListener("click", () => {
       if (readOnly) {
-        new Notice(organizerReadOnlyNotice, 8000);
+        this.setViewFeedback(organizerReadOnlyNotice, "error", "organizer");
         return;
       }
       this.plugin.openNoteOrganizer();
@@ -3121,7 +3237,7 @@ export class EntVaultCommandCenterView extends ItemView {
       event.stopPropagation();
       organize.removeClass("is-drop-target");
       if (readOnly) {
-        new Notice(organizerReadOnlyNotice, 8000);
+        this.setViewFeedback(organizerReadOnlyNotice, "error", "organizer");
         return;
       }
       this.plugin.openNoteOrganizerDrop(event.dataTransfer);
@@ -3208,7 +3324,7 @@ export class EntVaultCommandCenterView extends ItemView {
     const density = actions.createEl("button", {
       cls: "ent-cc-button ent-cc-density-toggle", type: "button",
       text: this.viewDensity === "compact" ? "Comfortable" : "Compact",
-      attr: { "aria-label": this.viewDensity === "compact" ? "Use comfortable view density" : "Use compact view density", "aria-pressed": String(this.viewDensity === "compact"), "data-kbcc-focus": "density" },
+      attr: { "aria-label": this.viewDensity === "compact" ? "Use comfortable view density" : "Use compact view density", "data-kbcc-focus": "density" },
     });
     density.addEventListener("click", () => {
       this.viewDensity = this.viewDensity === "compact" ? "comfortable" : "compact";
@@ -3268,6 +3384,7 @@ export class EntVaultCommandCenterView extends ItemView {
       : "Personal organization and visual hierarchy stay in plugin data. Index actions never move or rewrite source notes." });
     restoreViewFocus(this.contentEl, focusedControl);
     this.bindMobileToolbarLayout();
+    this.scheduleTouchRefreshSettle();
   }
 
   private renderLegacyIndexSourceWarning(parent: HTMLElement): void {
@@ -5377,9 +5494,109 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private saveWorkspaceLayoutPreference(): void {
-    if (saveWorkspaceLayoutPreference(this.app, this.getWorkspaceLayoutPreference()) || this.layoutStorageWarningShown) return;
+    if (saveWorkspaceLayoutPreference(this.app, this.getWorkspaceLayoutPreference())) {
+      this.layoutStorageWarningShown = false;
+      if (this.viewFeedback?.source === "layout") this.clearViewFeedback();
+      return;
+    }
+    if (this.layoutStorageWarningShown) return;
     this.layoutStorageWarningShown = true;
-    new Notice("The layout changed for this session, but this device could not remember it.");
+    this.setViewFeedback("The layout changed for this session, but this device could not remember it.", "error", "layout");
+  }
+
+  /** Narrow geometry alone is not modality: only an actual mobile compact inspector behaves as a dialog. */
+  private isModalInspectorLayout(): boolean {
+    return Platform.isMobile && this.isCompactInspectorLayout();
+  }
+
+  /** Focus that stayed in this view, or sits on nothing, may be restored; focus on another surface is never taken. */
+  private focusBelongsToView(): boolean {
+    const doc = this.contentEl.ownerDocument;
+    const active = doc.activeElement;
+    return !active || active === doc.body || this.contentEl.contains(active) || !doc.body.contains(active);
+  }
+
+  private captureAttachmentFocus(): void {
+    const state = this.attachmentView;
+    const inspector = this.inspectorEl;
+    if (!state || !inspector) return;
+    const active = inspector.ownerDocument.activeElement;
+    if (!active || !inspector.contains(active)) return;
+    const focused = focusedAttachmentRow(inspector);
+    state.focusedPath = focused?.path ?? null;
+    state.focusedIndex = focused?.index ?? 0;
+  }
+
+  /** Creates the feedback region once; it is re-attached, not rebuilt, so a refresh does not re-announce it. */
+  private mountViewFeedback(parent: HTMLElement): void {
+    let region = this.viewFeedbackEl;
+    if (region) parent.append(region);
+    else {
+      region = parent.createDiv({ cls: "ent-cc-view-feedback" });
+      // Existing, already-styled notice classes keep this unstyled-by-new-CSS: the arrange hint row, plus the warning treatment for errors.
+      const row = region.createDiv({ cls: "ent-cc-arrange-hint ent-cc-view-feedback-row" });
+      // Both live regions exist before any message so assistive technology observes the text change.
+      row.createDiv({ cls: "ent-cc-view-feedback-status", attr: { role: "status", "aria-live": "polite", "aria-atomic": "true" } });
+      row.createDiv({ cls: "ent-cc-view-feedback-alert", attr: { role: "alert", "aria-atomic": "true" } });
+      const dismiss = row.createEl("button", {
+        cls: "ent-cc-button ent-cc-view-feedback-dismiss", type: "button", text: "Dismiss",
+        attr: { "aria-label": "Dismiss message", "data-kbcc-focus": "view-feedback-dismiss" },
+      });
+      dismiss.addEventListener("click", () => this.dismissViewFeedback());
+      this.viewFeedbackEl = region;
+    }
+    this.paintViewFeedback();
+  }
+
+  private paintViewFeedback(): void {
+    const region = this.viewFeedbackEl;
+    if (!region) return;
+    const feedback = this.viewFeedback;
+    const status = region.querySelector<HTMLElement>('[role="status"]');
+    const alert = region.querySelector<HTMLElement>('[role="alert"]');
+    status?.setText(feedback?.tone === "status" ? feedback.message : "");
+    alert?.setText(feedback?.tone === "error" ? feedback.message : "");
+    // Only the region holding the message takes the row's free width.
+    status?.toggleClass("ent-cc-legacy-index-warning-text", feedback?.tone === "status");
+    alert?.toggleClass("ent-cc-legacy-index-warning-text", feedback?.tone === "error");
+    region.hidden = !feedback;
+    region.querySelector<HTMLElement>(".ent-cc-view-feedback-row")?.toggleClass("ent-cc-settings-warning", feedback?.tone === "error");
+  }
+
+  /** Replace the persistent view message. It stays through rerenders until replaced or dismissed. */
+  private setViewFeedback(message: string, tone: "status" | "error", source: string, context?: { baseId: string; generation: number; recordPath?: string }): void {
+    if (context && (this.viewClosed || context.generation !== this.feedbackGeneration || context.baseId !== this.plugin.getActiveKnowledgeBaseId()
+      || (context.recordPath !== undefined && context.recordPath !== this.plugin.data.selectedPath))) return;
+    const doc = this.contentEl?.ownerDocument;
+    const active = doc?.activeElement as HTMLElement | null | undefined;
+    this.viewFeedbackOrigin = active && this.contentEl.contains(active) && !this.viewFeedbackEl?.contains(active) ? active : this.viewFeedbackOrigin;
+    this.viewFeedback = { message, tone, source };
+    this.paintViewFeedback();
+  }
+
+  /** Captured when an action starts; its completion is dropped if the base or view lifetime changed. */
+  private feedbackContext(): { baseId: string; generation: number; recordPath: string } {
+    return { baseId: this.plugin.getActiveKnowledgeBaseId(), generation: this.feedbackGeneration, recordPath: this.plugin.data.selectedPath };
+  }
+
+  private clearViewFeedback(): void {
+    this.viewFeedback = null;
+    this.paintViewFeedback();
+  }
+
+  private dismissViewFeedback(): void {
+    const region = this.viewFeedbackEl;
+    const doc = this.contentEl.ownerDocument;
+    const hadFocus = Boolean(region && doc.activeElement && region.contains(doc.activeElement));
+    this.clearViewFeedback();
+    if (!hadFocus) return;
+    // The dismiss button is now hidden. Return to where the user was, else a stable landmark.
+    const origin = this.viewFeedbackOrigin;
+    const fallback = this.isCompactInspectorLayout() && this.mobileInspectorOpen
+      ? this.inspectorEl?.querySelector<HTMLElement>(".ent-cc-inspector-close")
+      : this.treeEl;
+    const target = origin && this.contentEl.contains(origin) && doc.body.contains(origin) ? origin : fallback;
+    target?.focus({ preventScroll: true });
   }
 
   /** Hook in More/Details: tablets retain full-width browsing unless requested. */
@@ -5413,7 +5630,6 @@ export class EntVaultCommandCenterView extends ItemView {
       const label = expanded ? "Back to split view" : "Expand note details";
       button.setAttribute("aria-label", label);
       button.setAttribute("title", label);
-      button.setAttribute("aria-pressed", String(expanded));
       setIcon(button, expanded ? "minimize-2" : "maximize-2");
       button.focus({ preventScroll: true });
     }
@@ -5475,7 +5691,8 @@ export class EntVaultCommandCenterView extends ItemView {
       this.closeMobileInspector();
       return;
     }
-    if (event.key !== "Tab") return;
+    // A narrow desktop pane is an ordinary in-pane region: Tab may leave it.
+    if (event.key !== "Tab" || !this.isModalInspectorLayout()) return;
     const focusable = Array.from(this.inspectorEl.querySelectorAll<HTMLElement>(
       'button:not([disabled]), summary, a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
     )).filter((element) => element.offsetParent !== null);
@@ -5498,11 +5715,15 @@ export class EntVaultCommandCenterView extends ItemView {
     if (currentDetails) this.noteDetailsOpen = currentDetails.open;
     this.inspectorEl.empty();
     const record = this.recordByPath.get(this.plugin.data.selectedPath);
+    // The selected base/record is the key to volatile attachment state. Reset it here, before any
+    // early return (placeholder, no record), so every route that changes the selection is covered.
+    if (this.attachmentView && this.attachmentView.key !== `${this.plugin.getActiveKnowledgeBaseId()}\u0000${record?.path ?? ""}`) this.attachmentView = null;
     const compact = this.isCompactInspectorLayout();
     const mobileOpen = compact && this.mobileInspectorOpen && Boolean(record);
     this.inspectorEl.toggleClass("is-mobile-open", mobileOpen);
-    this.inspectorEl.setAttribute("role", compact ? "dialog" : "complementary");
-    if (compact) {
+    const modal = this.isModalInspectorLayout();
+    this.inspectorEl.setAttribute("role", modal ? "dialog" : "complementary");
+    if (modal) {
       this.inspectorEl.setAttribute("aria-modal", "true");
     } else {
       this.inspectorEl.removeAttribute("aria-modal");
@@ -5521,11 +5742,13 @@ export class EntVaultCommandCenterView extends ItemView {
     setIcon(close.createSpan(), "arrow-left");
     close.createSpan({ text: backLabel });
     close.addEventListener("click", () => this.closeMobileInspector());
+    // Inside the dialog in a modal route (outside content is hidden from assistive technology); otherwise the shell hosts it.
+    if (mobileOpen) this.mountViewFeedback(this.inspectorEl);
     if (!compact) {
       const controls = header.createDiv({ cls: "ent-cc-inspector-layout-actions" });
       const expandLabel = this.inspectorExpanded ? "Back to split view" : "Expand note details";
       const expand = iconButton(controls, this.inspectorExpanded ? "minimize-2" : "maximize-2", expandLabel, "ent-cc-inspector-expand");
-      expand.setAttribute("aria-pressed", String(this.inspectorExpanded));
+      expand.setAttribute("data-kbcc-focus", "inspector-expand");
       expand.addEventListener("click", () => this.setInspectorExpanded(!this.inspectorExpanded));
       const widthMenu = iconButton(controls, "sliders-horizontal", "Panel width options");
       widthMenu.setAttribute("aria-haspopup", "menu");
@@ -5679,15 +5902,30 @@ export class EntVaultCommandCenterView extends ItemView {
   private renderInspectorAttachments(parent: HTMLElement, record: VaultRecord): void {
     const property = record.libraryId ? this.libraryDisplayProfile(record.libraryId).imageProperty : undefined;
     const attachments = collectNoteAttachments(this.app, record.path, property);
-    renderNoteAttachments(parent, attachments, (path) => this.run(async () => {
+    // Volatile expansion/focus state is keyed by base and note; any other note or base starts clean.
+    const key = `${this.plugin.getActiveKnowledgeBaseId()}\u0000${record.path}`;
+    if (this.attachmentView?.key !== key) this.attachmentView = { key, revealed: ATTACHMENT_PAGE_SIZE, focusedPath: null, focusedIndex: 0 };
+    const state = this.attachmentView;
+    const section = renderNoteAttachments(parent, attachments, (path) => this.run(async () => {
+      const name = path.split("/").pop() ?? path;
+      const context = this.feedbackContext();
       // The row can outlive a sync/delete/rename. Never open an unresolved link or create a note.
       const file = this.app.vault.getAbstractFileByPath(path);
       if (!(file instanceof TFile)) {
-        new Notice("This attachment is not available on this device. Check that it has finished syncing.", 7000);
+        this.setViewFeedback(`${MISSING_REFERENCE_TEXT}: ${name}`, "error", "attachment", context);
         return;
       }
-      await this.plugin.openFile(file, this);
-    }));
+      try {
+        await this.plugin.openFile(file, this);
+        this.setViewFeedback(`Opened ${name}.`, "status", "attachment", context);
+      } catch (error) {
+        this.setViewFeedback(`Could not open ${name}: ${errorMessage(error)}`, "error", "attachment", context);
+      }
+    }), { revealed: state.revealed, onReveal: (revealed) => { state.revealed = revealed; } });
+    // Focus belonging to the inspector returns to the same path, else a live neighbour or the section; focus held elsewhere is left alone.
+    const focusedPath = state.focusedPath;
+    state.focusedPath = null;
+    if (focusedPath !== null && this.focusBelongsToView()) focusAttachmentNear(section, focusedPath, state.focusedIndex);
   }
 
   /**
@@ -5732,7 +5970,8 @@ export class EntVaultCommandCenterView extends ItemView {
     const next = section.createEl("button", {
       cls: `ent-cc-study-action ${isNext ? "is-active" : ""}`,
       type: "button",
-      attr: { "aria-pressed": String(isNext) },
+      // The action name changes with the state; a pressed state would contradict it.
+      attr: { "data-kbcc-focus": "study-next" },
     });
     setIcon(next.createSpan(), isNext ? "check" : "list-plus");
     next.createSpan({ text: isNext
@@ -5758,15 +5997,16 @@ export class EntVaultCommandCenterView extends ItemView {
   }
 
   private async copyText(text: string, label: string): Promise<void> {
+    const context = this.feedbackContext();
     try {
       const clipboard = this.contentEl.ownerDocument.defaultView?.navigator.clipboard;
       if (!clipboard) throw new Error("Clipboard unavailable");
       await clipboard.writeText(text);
-      new Notice(`${label} copied.`);
+      this.setViewFeedback(`${label} copied.`, "status", "copy", context);
     } catch {
-      new Notice(this.plugin.isClinicalMode()
+      this.setViewFeedback(this.plugin.isClinicalMode()
         ? "Clipboard access was unavailable. Open the note and use the command manually."
-        : "Clipboard access was unavailable. Open the note and copy its wikilink or path manually.");
+        : "Clipboard access was unavailable. Open the note and copy its wikilink or path manually.", "error", "copy", context);
     }
   }
 
@@ -5854,6 +6094,24 @@ export class EntVaultCommandCenterView extends ItemView {
       && this.placeholderQueueCache.baseId === baseId
       && this.placeholderQueueCache.candidateGeneration === candidateGeneration
       && this.placeholderQueueCache.candidateSettingsKey === candidateSettingsKey) return this.placeholderQueueCache;
+    // No effective unresolved subject (every subject is bound and none of the
+    // bound notes projects as a placeholder, e.g. after its note was deleted)
+    // means no queue item and no candidate to count, so the expensive
+    // eligible-note enumeration and metadata projection are skipped entirely.
+    // An empty binding count alone would miss deleted-linked placeholders.
+    const subjects = this.plugin.data.portableIndex.subjects;
+    if (boundary.getVaultNoteFiles && !this.hasEffectiveUnresolvedSubject(subjects)) {
+      this.placeholderQueueCache = {
+        records: this.records,
+        baseId,
+        candidateGeneration,
+        candidateSettingsKey,
+        ordered: [],
+        total: 0,
+        withCandidates: 0,
+      };
+      return this.placeholderQueueCache;
+    }
     const files = boundary.getVaultNoteFiles ? boundary.getVaultNoteFiles.call(this.plugin, false) : null;
     const queue = buildPlaceholderResolutionQueue(
       this.plugin.data,
@@ -5873,6 +6131,17 @@ export class EntVaultCommandCenterView extends ItemView {
       withCandidates: queue.withCandidates,
     };
     return this.placeholderQueueCache;
+  }
+
+  /** Mirrors buildPlaceholderResolutionQueue's per-subject skip rule without projecting any note. */
+  private hasEffectiveUnresolvedSubject(subjects: readonly { id: string }[]): boolean {
+    if (subjects.length === 0) return false;
+    const resolved = this.plugin.data.portableIndex.resolvedPathBySubjectId;
+    const projectedPlaceholderIds = new Set<string>();
+    for (const record of this.records) {
+      if (record.isPlaceholder && record.portableId) projectedPlaceholderIds.add(record.portableId);
+    }
+    return subjects.some((subject) => !resolved[subject.id] || projectedPlaceholderIds.has(subject.id));
   }
 
   /** Candidate counts and picker highlighting share this complete eligible-note projection. */
@@ -6802,7 +7071,7 @@ export class EntVaultCommandCenterView extends ItemView {
       resetCurriculumVisualPath(this.plugin.data.curriculumVisual, record.path);
       if (this.plugin.canVisuallyMoveAcrossGroups()) delete this.plugin.data.indexGroupByPath[record.path];
     }, { requireUndo: true })
-      .then(() => new Notice(`${this.plugin.isClinicalMode() ? "Canonical" : "Configured"} parent and sibling order restored. Source notes were not changed.`)));
+      .then(() => new Notice(`${this.plugin.isClinicalMode() ? "Canonical" : "Configured"} parent restored, and the notes beside it can return to their default order. Source notes were not changed. Undo restores the earlier organization while it is still available.`)));
   }
 
   private openIndexGroupPicker(record: VaultRecord): void {
@@ -6866,7 +7135,7 @@ export class EntVaultCommandCenterView extends ItemView {
     new ConfirmModal(
       this.app,
       `${action}?`,
-      `“${record.title}” will leave ${settings.indexLabel} in “${settings.workspaceName}”. Its Markdown file, path, metadata, and memberships in other knowledge bases will not change. You can restore it from Manage → Available or Hidden.`,
+      `“${record.title}” will leave ${settings.indexLabel} in “${settings.workspaceName}”. Its Markdown file, path, metadata, and memberships in other knowledge bases will not change. You can restore it from Manage → Available or Hidden. ${REMOVAL_PLACEMENT_AND_UNDO_NOTE}`,
       "Remove from base",
       async () => {
         if (!ownsBase()) return;
@@ -7255,7 +7524,7 @@ export class EntVaultCommandCenterView extends ItemView {
       menu.addSeparator();
       menu.addItem((item) => item.setTitle(`Reset all visual ${this.plugin.data.settings.indexLabel.toLowerCase()} arrangement`).setIcon("rotate-ccw").onClick(() => {
         if (!ownsBase()) return;
-        new ConfirmModal(this.app, `Reset visual ${this.plugin.data.settings.indexLabel.toLowerCase()} arrangement?`, `All visual nesting and custom order will return to the ${this.plugin.isClinicalMode() ? "canonical note metadata" : "configured parent metadata and folder grouping"}. Source notes will not be changed, and Undo remains available.`, "Reset arrangement", async () => {
+        new ConfirmModal(this.app, `Reset visual ${this.plugin.data.settings.indexLabel.toLowerCase()} arrangement?`, resetAllVisualArrangementMessage(this.plugin.isClinicalMode()), "Reset arrangement", async () => {
           if (!ownsBase()) return;
           await this.plugin.mutate(`Reset all visual ${this.plugin.data.settings.indexLabel.toLowerCase()} arrangement`, () => {
             this.plugin.data.curriculumVisual = { parentByPath: {}, orderByContainer: {} };
@@ -7343,132 +7612,6 @@ export class EntVaultCommandCenterView extends ItemView {
     menu.showAtMouseEvent(event);
   }
 
-  private async exportOrganizationBackup(): Promise<void> {
-    const ownsBase = this.createOpenedBaseGuard();
-    try {
-      if (!ownsBase()) return;
-      const now = new Date();
-      const backup = createPersonalBackup(
-        this.plugin.data,
-        now.toISOString(),
-        this.plugin.getVaultId(),
-        this.plugin.getActiveKnowledgeBaseId(),
-        this.plugin.data.settings.workspaceName,
-      );
-      const workspaceName = this.plugin.data.settings.workspaceName;
-      const slug = workspaceName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "knowledge-command-center";
-      const delivery = await deliverJsonExport(this.plugin, "backup", `${slug}-backup`, backup, {
-        contentEl: this.contentEl,
-        date: now,
-      });
-      if (delivery.medium === "vault") {
-        if (!ownsBase()) return;
-        this.plugin.recordRecoveryExport(now.getTime());
-        new Notice("Backup saved in the export folder inside the vault. Source notes were not included.");
-        return;
-      }
-      this.plugin.recordRecoveryExport(now.getTime());
-      new Notice("Organization backup exported. Source notes were not included.");
-    } catch (error) {
-      if (ownsBase()) new Notice(errorMessage(error));
-    }
-  }
-
-  private importOrganizationBackup(): void {
-    const ownsBase = this.createOpenedBaseGuard();
-    requestJsonImport(this.app, this.plugin, {
-      title: "Choose an organization backup JSON",
-      maxBytes: MAX_PORTABLE_PACKAGE_BYTES,
-      oversizeMessage: "The selected JSON is larger than the 10 MB import limit.",
-      emptyVaultMessage: "No JSON files were found in the vault. Copy a backup JSON into the vault, then try again.",
-      guard: ownsBase,
-      run: (task) => {
-        void task().catch((error: unknown) => {
-          if (ownsBase()) new Notice(errorMessage(error));
-        });
-      },
-      onValue: (value) => { this.confirmOrganizationImport(value, ownsBase); },
-    });
-  }
-
-  private confirmOrganizationImport(input: unknown, ownsBase = this.createOpenedBaseGuard()): void {
-    if (!ownsBase()) return;
-    void Promise.resolve(input).then((value) => {
-      if (!ownsBase()) return;
-      const backup = parsePersonalBackup(value);
-      const recoveryCheck = assertPersonalBackupMatchesVault(
-        backup,
-        this.plugin.getVaultId(),
-        (path) => this.app.vault.getAbstractFileByPath(normalizePath(path)) !== null,
-        this.plugin.getActiveKnowledgeBaseId(),
-        this.plugin.data.settings.workspaceName,
-        this.plugin.data.settings.workspaceMode,
-        true,
-      );
-      const verification = recoveryCheck.identity === "verified"
-        ? recoveryCheck.baseIdentity === "verified"
-          ? "Vault, knowledge-base, and preset identities verified."
-          : recoveryCheck.baseIdentity === "cross-base-override"
-            ? `Vault and preset verified; source “${backup.sourceBaseName}” and destination “${this.plugin.data.settings.workspaceName}” are different knowledge bases.`
-            : "Vault identity verified; this v1–v6 backup has no knowledge-base identity or preset."
-        : recoveryCheck.referencedPathCount > 0
-          ? `Legacy identity unverified; ${recoveryCheck.existingPathCount} of ${recoveryCheck.referencedPathCount} unique referenced paths were found, meeting the required at-least-half threshold of ${recoveryCheck.requiredPathCount} (50%).`
-          : "Legacy identity unverified; this backup contains no note paths to preflight.";
-      const allowBaseOverride = recoveryCheck.baseIdentity !== "verified";
-      const openFinalConfirmation = (): void => {
-        if (!ownsBase()) return;
-        new ConfirmModal(
-          this.app,
-          "Restore organization backup?",
-          `${verification} Replace current personal collections, index membership and visual groups, pins, next list, saved views, and snapshots with the private backup from ${backup.exportedAt || "an unknown date"}? Source notes will not be changed.`,
-          "Import backup",
-          async () => {
-            if (!ownsBase()) return;
-            // Re-check immediately before mutation so no alternate path can
-            // bypass the vault/base/preset boundary or the explicit override.
-            assertPersonalBackupMatchesVault(
-              backup,
-              this.plugin.getVaultId(),
-              (path) => this.app.vault.getAbstractFileByPath(normalizePath(path)) !== null,
-              this.plugin.getActiveKnowledgeBaseId(),
-              this.plugin.data.settings.workspaceName,
-              this.plugin.data.settings.workspaceMode,
-              allowBaseOverride,
-            );
-            await this.plugin.mutate("Import organization backup", () => {
-              applyPersonalBackupToData(this.plugin.data, backup);
-            }, {
-              includeSettings: true,
-              includePortableIndex: true,
-              includeLayoutSnapshots: true,
-              requireUndo: true,
-              normalizeAfterRestore: true,
-            });
-            if (!ownsBase()) return;
-            new Notice("Organization backup imported. Undo is available.");
-          },
-        ).open();
-      };
-      if (!allowBaseOverride) {
-        openFinalConfirmation();
-        return;
-      }
-      new ConfirmModal(
-        this.app,
-        recoveryCheck.baseIdentity === "cross-base-override"
-          ? "Restore into a different knowledge base?"
-          : "Restore from an unverified source base?",
-        recoveryCheck.baseIdentity === "cross-base-override"
-          ? `This recovery belongs to “${backup.sourceBaseName}” (${backup.sourceBaseId}). You are explicitly choosing “${this.plugin.data.settings.workspaceName}” (${this.plugin.getActiveKnowledgeBaseId()}) as the destination. The ${backup.sourceWorkspaceMode === "ent-clinical" ? "ENT clinical" : "Generic"} preset matches.`
-          : `This v1–v6 recovery does not identify its source knowledge base or preset. You are explicitly choosing “${this.plugin.data.settings.workspaceName}” as the destination despite that uncertainty.`,
-        "Continue to restore",
-        () => openFinalConfirmation(),
-      ).open();
-    }).catch((error) => {
-      if (ownsBase()) new Notice(errorMessage(error));
-    });
-  }
-
   private saveCurrentSearch(): void {
     const ownsBase = this.createOpenedBaseGuard();
     new TextPromptModal(this.app, {
@@ -7549,8 +7692,86 @@ export class EntVaultCommandCenterView extends ItemView {
       },
       isCurrent: (source) => this.touchSourceIsCurrent(source),
       resolveTarget: (source, x, y) => this.resolveTouchTarget(source, x, y),
-      onDrop: (source, destination) => this.run(() => this.commitTouchMove(source, destination)),
+      onDrop: (source, destination) => this.runTouchDrop(source, destination),
+      onCancelled: (wasActive) => {
+        if (wasActive) this.setViewFeedback("Move cancelled. Nothing was changed.", "status", "touch-move", this.touchFeedbackContext());
+        this.settleTouchRefresh();
+      },
     });
+  }
+
+  private touchGestureBusy(): boolean {
+    return (this.touchDropsInFlight ?? 0) > 0 || Boolean(this.touchDrag?.hasGesture());
+  }
+
+  private touchFeedbackContext(): { baseId: string; generation: number } {
+    return { baseId: this.plugin.getActiveKnowledgeBaseId(), generation: this.feedbackGeneration };
+  }
+
+  /**
+   * The drop callback owns the whole commit: the gesture is already cleared when it is
+   * called, so a deferred refresh may only run after this promise settles, success or failure.
+   */
+  private runTouchDrop(source: TouchMoveSource, destination: TouchMoveDestination): Promise<void> {
+    const context = this.touchFeedbackContext();
+    const title = this.plugin.getRecord(source.origin.path)?.title ?? "note";
+    this.touchDropsInFlight = (this.touchDropsInFlight ?? 0) + 1;
+    const previous = this.viewFeedback;
+    this.setViewFeedback(`Moving “${title}”…`, "status", "touch-move", context);
+    const requested = this.viewFeedback !== previous ? this.viewFeedback : null;
+    return this.commitTouchMove(source, destination)
+      .then(() => {
+        // An early no-op return reported nothing; do not leave the request message standing.
+        if (requested && this.viewFeedback === requested) this.clearViewFeedback();
+      })
+      .catch((error) => this.setViewFeedback(errorMessage(error), "error", "touch-move", context))
+      .finally(() => {
+        this.touchDropsInFlight -= 1;
+        this.settleTouchRefresh();
+      });
+  }
+
+  /**
+   * A route or tab render replaces the touch controller and silently abandons any held gesture, so the
+   * owner settles the deferred refresh after that render has finished. Deliberately not called from
+   * destroyTouchDrag, which must never re-enter rendering.
+   */
+  private scheduleTouchRefreshSettle(): void {
+    if (!this.touchRefreshDirty || this.viewClosed) return;
+    this.timerWindow.setTimeout(() => this.settleTouchRefresh(), 0);
+  }
+
+  /** One follow-up refresh once no gesture and no commit is pending; never for a closed view. */
+  private settleTouchRefresh(): void {
+    if (this.viewClosed || !this.touchRefreshDirty || this.touchGestureBusy()) return;
+    this.touchRefreshDirty = false;
+    this.run(() => this.reload());
+  }
+
+  /** Tree-shaping projection of every record: unrelated metadata (status, priority, mtime) is excluded. */
+  private touchStructureSnapshot(): readonly VaultRecord[] {
+    // The plugin publishes a new array when records change (it never edits one in place), so holding the
+    // reference is a coherent snapshot and costs nothing at gesture start.
+    return this.plugin.getRecords();
+  }
+
+  /** Plain loop, first difference wins; no per-record string building on a large vault. */
+  private touchStructureUnchanged(before: readonly VaultRecord[]): boolean {
+    const after = this.plugin.getRecords();
+    if (after === before) return true;
+    if (after.length !== before.length) return false;
+    for (let index = 0; index < after.length; index += 1) {
+      const a = before[index];
+      const b = after[index];
+      if (a === b) continue;
+      if (a.path !== b.path || a.title !== b.title || a.domain !== b.domain || a.folderOrder !== b.folderOrder
+        || a.parentTopic !== b.parentTopic || a.kind !== b.kind || a.role !== b.role
+        || (a.libraryId ?? "") !== (b.libraryId ?? "") || (a.portableId ?? "") !== (b.portableId ?? "")
+        || (a.isPlaceholder ?? false) !== (b.isPlaceholder ?? false) || a.curriculumId !== b.curriculumId
+        || a.topicKind !== b.topicKind || a.aliases.length !== b.aliases.length) return false;
+      for (let alias = 0; alias < a.aliases.length; alias += 1) if (a.aliases[alias] !== b.aliases[alias]) return false;
+    }
+    return true;
   }
 
   /** Organization only: mutate() updates Undo before invoking its guarded action. */
@@ -7569,11 +7790,24 @@ export class EntVaultCommandCenterView extends ItemView {
       && this.plugin.data === source.data
       && this.plugin.getActiveKnowledgeBaseId() === source.baseId && this.loadedBaseId === source.baseId
       && this.currentDataEpoch() === source.epoch && this.loadedDataEpoch === source.epoch
-      && this.currentSearchGeneration() === source.generation
+      && this.touchGenerationStillValid(source)
       && (this.plugin.getExternalChangeGeneration?.() ?? 0) === source.externalGeneration
       && this.libraryDragRenderToken === source.renderToken
       && this.plugin.data.activeTab === source.tab
       && (source.origin.kind === "index" ? this.curriculumArrangeMode : this.editMode);
+  }
+
+  /**
+   * The search generation advances for any metadata change. A move stays valid across an advance only
+   * when the hierarchy-relevant projection of every record is unchanged (proven once per generation);
+   * organization data, the source record, base, epoch, tab and render token are still checked separately.
+   */
+  private touchGenerationStillValid(source: TouchMoveSource): boolean {
+    const generation = this.currentSearchGeneration();
+    if (generation === source.generation || generation === source.provenGeneration) return true;
+    if (!this.touchStructureUnchanged(source.structure)) return false;
+    source.provenGeneration = generation;
+    return true;
   }
 
   private renderTouchHandle(row: HTMLElement, record: VaultRecord, origin: TouchOrigin): void {
@@ -7590,6 +7824,7 @@ export class EntVaultCommandCenterView extends ItemView {
         generation: this.currentSearchGeneration(), externalGeneration: this.plugin.getExternalChangeGeneration?.() ?? 0,
         renderToken: this.libraryDragRenderToken, tab: this.plugin.data.activeTab,
         fingerprint: this.touchOrganizationFingerprint(), recordFingerprint: JSON.stringify(current),
+        structure: this.touchStructureSnapshot(),
         descendants: origin.kind === "index" ? curriculumDescendantPaths(this.curriculum, record.path) : new Set(),
       };
     });
@@ -7709,7 +7944,9 @@ export class EntVaultCommandCenterView extends ItemView {
       this.persistCollapseState();
       this.renderTree();
     }
-    new Notice(`Moved “${record.title}”. Use Undo to restore its previous position.`);
+    // Reached only after the guarded, persisted mutation resolved; never before.
+    this.setViewFeedback(`Moved “${record.title}”. Use Undo to restore its previous position.`, "status", "touch-move",
+      { baseId: source.baseId, generation: this.feedbackGeneration });
   }
 
   private writeCurriculumDrag(event: DragEvent, payload: CurriculumDrag): void {

@@ -12,6 +12,7 @@ import {
   resetCurriculumVisualPath,
   VaultRecord,
 } from "./model";
+import { guardComposition } from "./composition-guard";
 import { linkedSourceLabel } from "./membership-explanation";
 import {
   clearGuardedTimer,
@@ -28,6 +29,12 @@ import { registerPortableGroup, removePortableGroup, renameOrMergePortableGroup 
 import { ExportImportCenterModal } from "./portability-modal";
 import { TaxonomyHealthModal } from "./taxonomy-health-modal";
 import { SyncRecoveryCenterModal } from "./sync-recovery-modal";
+
+/**
+ * Shared truth for removal dialogs: removing a note from a knowledge base also
+ * clears its visual placement and manual order (model behaviour, unchanged).
+ */
+export const REMOVAL_PLACEMENT_AND_UNDO_NOTE = "Any custom visual placement and manual sibling order is discarded, and the notes beside it can return to their default order. Adding it back later does not restore the earlier placement or order. Undo restores the earlier organization while it is still available.";
 
 export type ManagerTab = "indexed" | "available" | "hidden" | "sources" | "groups" | "diagnostics";
 
@@ -436,8 +443,9 @@ export class IndexManagerModal extends Modal {
     const toolbar = parent.createDiv({ cls: "ent-cc-manager-toolbar" });
     const search = toolbar.createEl("input", { type: "search", placeholder: "Search note title or path…", attr: { "aria-label": "Search index manager notes" } });
     search.value = this.query;
-    search.addEventListener("input", () => {
-      const cursor = search.selectionStart ?? search.value.length;
+    const applyQuery = (): void => {
+      const start = search.selectionStart ?? search.value.length;
+      const end = search.selectionEnd ?? start;
       if (search.value !== this.query) {
         // A new query shows a different set of rows; keeping hidden notes
         // selected would let a bulk action reach notes the user cannot see.
@@ -448,15 +456,24 @@ export class IndexManagerModal extends Modal {
       if (this.searchTimer !== null) this.clearTimer(this.searchTimer);
       this.searchTimer = this.setGuardedTimer(() => {
         this.searchTimer = null;
+        // A composition may have opened after this keystroke was queued; the
+        // render would replace the composing input. compositionend re-applies.
+        if (composition.isComposing()) return;
         // Filtering the memoized snapshot: a keystroke must never trigger the
         // full vault scan that building the candidate list requires.
         this.renderSnapshot();
         this.setGuardedTimer(() => {
           const next = this.contentEl.querySelector<HTMLInputElement>('.ent-cc-manager-toolbar input[type="search"]');
           next?.focus();
-          next?.setSelectionRange(cursor, cursor);
+          next?.setSelectionRange(start, end);
         }, 0);
       }, 150);
+    };
+    const composition = guardComposition(search, applyQuery);
+    search.addEventListener("input", (event) => {
+      // Mid-composition the value is provisional; wait for compositionend.
+      if (composition.isComposing(event)) return;
+      applyQuery();
     });
     const filtered = this.filterNotes(notes);
     // One predicate owns both the label and the action: a selection that also
@@ -601,7 +618,7 @@ export class IndexManagerModal extends Modal {
     if (!this.guardOpenedBase()) return;
     const paths = [...this.selected];
     if (paths.length === 0) return;
-    new ConfirmModal(this.app, "Remove selected notes from index?", `${paths.length} membership${paths.length === 1 ? "" : "s"} will be removed. Markdown notes and collection memberships remain untouched.`, "Remove from index", async () => {
+    new ConfirmModal(this.app, "Remove selected notes from index?", `${paths.length} membership${paths.length === 1 ? "" : "s"} will be removed. Markdown notes and collection memberships remain untouched. ${REMOVAL_PLACEMENT_AND_UNDO_NOTE}`, "Remove from index", async () => {
       if (!this.guardOpenedBase()) return;
       await this.plugin.removeRecordsFromIndex(paths, `Remove ${paths.length} notes from this knowledge base`);
       if (!this.guardOpenedBase()) return;
@@ -828,8 +845,8 @@ export class IndexManagerModal extends Modal {
     const count = paths.length;
     const noun = count === 1 ? this.plugin.data.settings.itemSingular : this.plugin.data.settings.itemPlural;
     const message = count === 0
-      ? `“${group}” will be removed from this knowledge base. No Markdown note, property, or folder will be changed.`
-      : `“${group}” and its ${count} indexed ${noun} will be removed from this knowledge base. The subjects can be restored from Available or Hidden. Markdown notes, properties, folders, and collection memberships will remain untouched.`;
+      ? `“${group}” will be removed from this knowledge base. No Markdown note, property, or folder will be changed. ${REMOVAL_PLACEMENT_AND_UNDO_NOTE}`
+      : `“${group}” and its ${count} indexed ${noun} will be removed from this knowledge base. The subjects can be restored from Available or Hidden. Markdown notes, properties, folders, and collection memberships will remain untouched. ${REMOVAL_PLACEMENT_AND_UNDO_NOTE}`;
     new ConfirmModal(this.app, `Remove “${group}” from this knowledge base?`, message, "Remove group", async () => {
       if (!this.guardOpenedBase()) return;
       const sourceGroups = this.sourceGroupsForDisplayGroup(group, members);

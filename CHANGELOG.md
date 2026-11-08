@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.27.0
+
+### Recovery and organization
+
+- Open **Sync & recovery center → Review kept copies…** to inspect a retained rescue or data backup and restore one knowledge base as a new base. Existing bases and the retained copy stay unchanged; opening the restored base is a separate choice.
+- Strengthened backup preservation, conflict-copy verification and interrupted rename recovery. Restores refuse changed source copies or stale reviews before applying a change.
+- Undo/Redo now checks that its history matches the organization on this device. Older or mismatched history may reset after updating; notes and organization stay unchanged. New organization changes also have more reliable history recovery across restart.
+- Adding an existing note offers a clear choice when it matches an imported entry. Link and unlink reviews explain their organization effects before confirmation.
+
+### Setup, notes and attachments
+
+- Changing an existing base's Inbox during setup previews the effect on Inbox membership before confirmation. Cancel keeps the setup draft; Apply rechecks the reviewed state and saves the setup as one undoable organization change. Folder descriptions distinguish note storage from Index membership.
+- New-note names that would be hidden or empty are rejected before a file is created, with feedback beside the name.
+- Attachment dialogs show their destination and only offer cursor insertion when the intended note owns the editor. Recoverable errors keep the draft open. If files were copied but their links could not be inserted, their paths remain visible and the dialog prevents copying the same batch again.
+- Attachment names are checked for case and Unicode-equivalent collisions. Numbered names and bounded exclusive-create retries avoid overwriting existing files; unrelated storage failures are not retried as name collisions.
+- Existing non-Markdown attachments opened from the Command Center use a new tab. Obsidian and the device determine which file types they can display.
+
+### Everyday interaction
+
+- Folder organization menus defer note enumeration until the action is chosen and reject selections renamed, removed or replaced in the meantime. Backlinks update the changed sources without rebuilding the whole graph during ordinary link resolution, with a refreshed view when a full rebuild is needed.
+- Edits unrelated to Generic search results no longer restart the search. Related note changes and clinical proposal discovery still invalidate results; an empty unresolved-placeholder queue avoids building unused note candidates.
+
+- Index removal and placement-reset messages explain when custom placement and sibling order are discarded, and that adding a note back does not recreate that arrangement. Undo commands distinguish an Organizer batch across affected bases, organization in the current base, and the latest Quick append.
+
+- Attachment lists distinguish files with the same name and describe unresolved references without assuming a Sync failure. Expanded attachment details and relevant focus survive harmless refreshes.
+- Touch rearrangement tolerates unrelated display refreshes while retaining stale-destination checks. Text composition in filters is more stable, and the Obsidian Bases view better preserves its page and focus.
+- Clearer keyboard focus, text contrast, touch controls and accessible cover status improve everyday navigation.
+- Development checks now typecheck runtime and browser tests and guard the emitted runtime import graph. Library icons use one shared definition without changing their choices or order.
+
+### Compatibility and limits
+
+- The reviewed recovery, history, setup, attachment and interaction changes produce a 1,301,829-byte JavaScript build (344,174 gzip), up 51,836 raw / 14,552 gzip bytes from 0.26.1. Explicit JavaScript limits are now 1,303,000 raw / 345,000 gzip bytes; CSS limits remain unchanged. No runtime dependencies are added.
+- Minimum Obsidian version remains 1.13.0. The plugin ID, command IDs, shared organization format 17 and portable package format 7 are unchanged. No runtime dependencies, network access or analytics are added; covers remain local-vault-only.
+- Older or mismatched device-local Undo history may reset once after updating. Returning through an older version can discard its verification and trigger another reset. Local rename recovery uses an updated journal; an older plugin encountering unfinished newer rename recovery can enter protected recovery mode.
+- Restoring a kept copy creates a new knowledge base; it does not restore missing Markdown notes or attachments. Full retained copies can include multiple bases, private paths and history. **Clear device-local data** does not delete those files.
+- Automated browser checks are separate from native Obsidian, physical iPhone/iPad, VoiceOver and controlled two-device Sync checks. See the [0.27.0 release evidence](https://github.com/drbinsaad/knowledge-base-command-center/blob/0.27.0/docs/release-evidence/0.27.0-iphone.md) for the exact executed scope and remaining limitations.
+
 ## 0.26.1
 
 ### Safer organization data

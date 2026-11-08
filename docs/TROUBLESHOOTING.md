@@ -49,7 +49,7 @@ Protected ENT records can move only to destinations compatible with their source
 
 ## I cannot rename or remove ENT or a Library
 
-In 0.23.0, open **Library settings… → General**, or **Manage libraries → Settings…**. Rename also changes the singular label and icon. Archive hides the tab while retaining its organization. A custom Library can be deleted permanently only after archiving and choosing where its subjects should go. Built-in Procedures, Medications, and Syndromes retain protected source classifications, so they support rename and archive but not permanent deletion.
+Open **Library settings… → General**, or **Manage libraries → Settings…**. Rename also changes the singular label and icon. Archive hides the tab while retaining its organization. A custom Library can be deleted permanently only after archiving and choosing where its subjects should go. Built-in Procedures, Medications, and Syndromes retain protected source classifications, so they support rename and archive but not permanent deletion.
 
 If ENT is the knowledge-base name, use **Manage knowledge bases… → Rename** instead. The clinical preset itself remains fixed. A stale settings form must be reopened after a base switch or Sync change; a read-only compatibility warning must be resolved before editing.
 
@@ -57,7 +57,7 @@ If ENT is the knowledge-base name, use **Manage knowledge bases… → Rename** 
 
 Open **Library settings… → Display**, select Cards, and choose the property containing the cover, usually `cover`. The local image must exist in this vault; a note property such as `cover: "[[Covers/My book.jpg]]"` works. SVGs and arbitrary file/HTML links are not supported as local covers. Increase **Card size**, choose Portrait proportions, and use **Show whole image** to avoid cropping. A **No note** placeholder has no frontmatter image until deliberately linked.
 
-Online cover URLs are not supported in 0.25.0. They show an unavailable-cover placeholder without a request, and there is no permission switch to enable them. Save an image you may use into the vault and change the note property to its vault link. A previously allowed value from a private test build is inert; Sync, imports and recovery cannot enable online images. See [Library display and privacy](LIBRARY_DISPLAY_AND_PRIVACY.md).
+Online cover URLs are not supported. They show an unavailable-cover placeholder without a request, and there is no permission switch to enable them. Save an image you may use into the vault and change the note property to its vault link. A previously allowed value from a private test build is inert; Sync, imports and recovery cannot enable online images. See [Library display and privacy](LIBRARY_DISPLAY_AND_PRIVACY.md).
 
 ## The Organizer shows a README or every note in a folder
 
@@ -87,9 +87,9 @@ The indicator also uses an icon, accessible label, tooltip, and optional count, 
 
 ## Multi-base Organizer Undo disappeared after restart
 
-**Undo last organizer change** and **Redo last organizer change** coordinate the newest exact Organizer batch only during the plugin session that applied it. They also fail closed after a conflicting newer organization change, because the affected bases no longer have the expected newest Undo state.
+**Undo last organizer batch (all affected bases)** and **Redo last organizer change** coordinate the newest exact Organizer batch only during the plugin session that applied it. They also fail closed after a conflicting newer organization change, because the affected bases no longer have the expected newest Undo state.
 
-Every affected knowledge base still received a durable per-base Undo entry. After restart, switch to each changed base and use **Undo last organization change** separately. Undo changes plugin data only; no Markdown file operation needs to be reversed because the Organizer did not perform one.
+Every affected knowledge base still received a durable per-base Undo entry. After restart, switch to each changed base and use **Undo last organization change in this base** separately. Undo changes plugin data only; no Markdown file operation needs to be reversed because the Organizer did not perform one.
 
 ## A portable subject says “No note”
 
@@ -134,7 +134,7 @@ Browse views also page record rows and structural sections in groups of 300. Use
 
 ## Mobile JSON import
 
-Place the JSON file anywhere inside the vault, then open **Export / import center… → Import** and select it through the in-vault picker.
+Place the JSON file anywhere inside the vault, then run **Back up, export, or import…** from the Command palette (or choose **Export / import center…** from the Command Center menu), open **Import**, and select the file through the in-vault picker. For several bases in one file, use **Export or import several knowledge bases…**.
 
 The file must be 10 MB or smaller and pass bounded-list and aggregate-reference validation. Same-vault recovery starts unselected and needs a separate exact-path confirmation.
 
@@ -183,13 +183,23 @@ Open **Sync & recovery center** to review the locally recorded conflict warning 
 
 The plugin preserved meaningful organization before adopting another authoritative store or entering protected read-only mode.
 
-The file is under the configured Exports folder (<code>Knowledge Base Command Center Exports/</code> by default; Settings → Exports folder) and can contain exact vault-relative paths and complete plugin organization, but not Markdown note bodies. Keep it private and safe. It cannot be imported through the Import center yet, so do not try to import it. Do not attach it to a public issue.
+The file is under the configured Exports folder (<code>Knowledge Base Command Center Exports/</code> by default; Settings → Exports folder) and can contain exact vault-relative paths and complete plugin organization, but not Markdown note bodies. Keep it private and safe. A full rescue can also carry per-base view and Undo history, and **Clear device-local data** does not remove it. Do not attach it to a public issue.
 
-Back up the vault and ask for help restoring it, with sanitized version, timing, and Sync details.
+To use it, open **Sync & recovery center** and choose **Review kept copies…**. It lists the configured and legacy Exports folders and the plugin folder, shows what a copy contains (source, date when trustworthy, base names, preset, counts, whether it is from this vault), and restores one base as a **new** base. Your active base and existing bases are not changed, Undo and Redo start empty, and nothing in your notes moves. A copy from a different vault, a newer plugin version, or a damaged file is kept untouched and cannot be restored. A listed file is only a name hint until you open it, and the counts cover only the folders checked. **Choose another file** reviews a kept JSON file stored elsewhere in the vault. Do not use the Import center for a conflict rescue.
 
 ## data.json was missing when Obsidian started
 
-KBCC started with an empty organization. If an earlier same-device backup (<code>data.json.bak</code>) existed and could be read and recognised, KBCC kept a copy of it beside the plugin data as <code>data.json.bak-kept-&lt;timestamp&gt;</code>. A missing, unreadable or malformed backup is not copied. If that copy exists, keep it. If your organization does not arrive through Sync, ask for help restoring it.
+KBCC started with an empty organization. If an earlier same-device backup (<code>data.json.bak</code>) existed and could be read and recognised, KBCC kept a copy of it beside the plugin data as <code>data.json.bak-kept-&lt;timestamp&gt;</code>. A missing, unreadable or malformed backup is not copied. If that copy exists, keep it; it is private. If your organization does not arrive through Sync, open **Sync & recovery center**, choose **Review kept copies…**, and restore a base from it as a new base. Nothing is restored automatically.
+
+The same applies to the notice that says your automatic backup differs from <code>data.json</code> and was kept: review that copy with **Review kept copies…**.
+
+## An attachment row says “Linked reference not found”
+
+The full message is “Linked reference not found; it may be a note or file”. The plugin could not match that link to a file in the vault on this device. That is all it means. It does not prove that Sync failed or that the file was deleted. The file may not have arrived on this device yet, the link may be misspelled, or it may point at a note rather than an attachment. Check the link in the note, let Sync finish if you use it, and compare the same note on another device. Showing the row never creates a note or file.
+
+## Export wording
+
+On desktop, the single-base Export / import center says **Export started** and that the plugin cannot confirm the file was saved; check your downloads folder. The multi-base portfolio flow still says “Exported …”, but a desktop download cannot be confirmed there either. On mobile the export is written inside the vault, and the notice appears only after the write completed. A single-base backup or export from **Back up, export, or import…** covers the active knowledge base only. A portfolio carries each base you select, and full conflict rescues and raw kept stores can carry sibling bases, so keep them private.
 
 ## A save says the automatic backup could not be refreshed
 
@@ -224,7 +234,7 @@ Removing the folder removes <code>data.json</code> and the synced settings and o
 
 Before uninstalling, export current private recovery for every available base, temporarily restore any archived base that needs recovery, and back up the complete vault including <code>.obsidian</code>.
 
-The fifth App-local key is an inert legacy external-image permission value from private test builds. The clear action attempts to remove it, but failure cannot enable online covers in 0.24.0, including after restart. Cleanup cannot recall requests previously sent by a private build. See [Local data](LOCAL_DATA.md).
+The fifth App-local key is an inert legacy external-image permission value from private test builds. The clear action attempts to remove it, but failure cannot enable online covers, including after restart. Cleanup cannot recall requests previously sent by a private build. See [Local data](LOCAL_DATA.md).
 
 ## Ask for help
 

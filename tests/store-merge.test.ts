@@ -868,7 +868,18 @@ test("a missing semantic head cannot retain forged ancestry to suppress conflict
   const local = structuredClone(ancestor);
   advanceEntry(local.bases[0], () => { local.bases[0].data.pinnedPaths = ["Local.md"]; });
 
-  const rawIncoming = structuredClone(ancestor) as unknown as { bases: Array<Record<string, unknown>> };
+  // Raw stored-entry contract: this payload is deliberately edited to the older no-head shape before migrateStore.
+  interface RawStoredBase {
+    createdAt: number;
+    archivedAt: number | null;
+    semanticRevision: number;
+    semanticHash: string;
+    semanticLineage: string[];
+    semanticHead?: string;
+    data: unknown;
+    [key: string]: unknown;
+  }
+  const rawIncoming = structuredClone(ancestor) as unknown as { bases: RawStoredBase[] };
   const incomingData = rawIncoming.bases[0].data as KnowledgeBaseEntry["data"];
   incomingData.nextStudyPaths = ["Incoming.md"];
   rawIncoming.bases[0].semanticRevision = local.bases[0].semanticRevision + 20;

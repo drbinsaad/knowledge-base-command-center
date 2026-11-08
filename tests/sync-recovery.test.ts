@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { Notice, TFile, TFolder } from "obsidian";
+import { Notice, TFile, TFolder } from "./support/obsidian-stub.ts";
 import EntVaultCommandCenterPlugin from "../src/main.ts";
 import { createDefaultStore, createKnowledgeBaseEntry, migrateData, type PluginStore } from "../src/model.ts";
 import { ClearDeviceLocalDataModal, SyncRecoveryCenterModal } from "../src/sync-recovery-modal.ts";
@@ -40,7 +40,7 @@ function pluginHarness(
   exportFiles: Array<TFile | TFolder> = [],
   syncRecoveryState: unknown = null,
 ): {
-  plugin: EntVaultCommandCenterPlugin;
+  plugin: EntVaultCommandCenterPlugin & { loadedData: unknown; savedData: unknown[] };
   localStorage: Map<string, unknown>;
   noteBodyReads: () => number;
 } {
@@ -64,7 +64,11 @@ function pluginHarness(
     loadLocalStorage: (key: string) => structuredClone(localStorage.get(key) ?? null),
     saveLocalStorage: (key: string, value: unknown) => { localStorage.set(key, structuredClone(value)); },
   };
-  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never);
+  // loadedData / savedData come from the support Plugin fake, not the production class.
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & {
+    loadedData: unknown;
+    savedData: unknown[];
+  };
   plugin.loadedData = structuredClone(store);
   return { plugin, localStorage, noteBodyReads: () => reads };
 }
@@ -361,11 +365,12 @@ test("modal renders read-only local facts in its owner document with accessible 
   assert.match(modal.contentEl.textContent ?? "", /Protected read-only/);
   assert.doesNotMatch(modal.contentEl.textContent ?? "", new RegExp(sensitive.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
 
-  const recheck = actions.querySelector('button[type="button"]');
+  const recheck = actions.querySelector<HTMLButtonElement>('button[type="button"]');
   assert.ok(recheck);
   recheck.click();
   assert.equal(ownerWindowTimers, 2, "Recheck announcement and focus restoration use the modal owner window");
-  assert.equal(dom.document.activeElement?.textContent, "Recheck local facts");
+  const focusedText = (): string | undefined => dom.document.activeElement?.textContent;
+  assert.equal(focusedText(), "Recheck local facts");
   const announcement = modal.contentEl.querySelector(".ent-cc-sync-recovery-recheck-status");
   assert.equal(announcement?.getAttribute("role"), "status");
   assert.equal(announcement?.getAttribute("aria-live"), "polite");

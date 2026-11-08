@@ -1,12 +1,15 @@
 import { MarkdownView, normalizePath, Notice, parseYaml, Platform, Plugin, setIcon, TFile, TFolder, type Menu, type TAbstractFile } from "obsidian";
 import {
+  attachmentCollisionKey,
   attachmentFileName,
   AttachmentLinkInsertionError,
   attachmentPathCandidate,
   attachmentReference,
   canonicalAttachmentFolder,
   insertAttachmentReferences,
+  isAttachmentExistsError,
   MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENT_CREATE_ATTEMPTS,
   MAX_ATTACHMENT_FILES,
   noteAttachmentFolder,
 } from "./attachment";
@@ -46,8 +49,12 @@ import {
   curriculumContainerKey,
   createDefaultStore,
   createDeletedBaseCausality,
-  createDeviceLocalPluginState,
+  createDeviceHistoryBinding,
   createDeviceLocalPluginStateWithReport,
+  DeviceHistoryBinding,
+  DeviceLocalFutureVersionError,
+  DeviceLocalKnowledgeBaseState,
+  deviceHistoryBindingMatchesEntry,
   deviceHistoryStackFingerprint,
   deterministicSemanticHead,
   createKnowledgeBaseEntry,
@@ -64,6 +71,7 @@ import {
   fingerprintText,
   isImmutableSourcePath,
   isFreshVaultId,
+  provisionalMigratedVaultFingerprint,
   isLibraryKind,
   isPortablePlaceholderPath,
   isLegacyDeterministicMigratedVaultId,
@@ -123,7 +131,7 @@ import {
   rewritePluginDataFolderRename,
   rewritePluginDataPathPrefix,
   rewritePluginDataTemplatePathRename,
-  sanitizeFileName,
+  newNoteBasenameError,
   semanticEntryFingerprint,
   semanticPluginDataProjection,
   nextSemanticHead,
@@ -179,7 +187,7 @@ import {
   type FollowUpUndoMetadata,
 } from "./follow-up";
 import { QuickAppendModal } from "./follow-up-modal";
-import { createOpenedBaseGuard, VaultFilePickerModal } from "./modals";
+import { createOpenedBaseGuard, SetupReviewOutdatedError, VaultFilePickerModal, type SetupInboxEffects, type WorkspaceSetupValue } from "./modals";
 import {
   ATTACHMENT_PROTOCOL_ACTIONS,
   createQuickEntryCommands,
@@ -209,11 +217,12 @@ import {
   type KbccReturnNavigationState,
   type KbccReturnRoute,
 } from "./kbcc-return-navigation";
-import { CreateKnowledgeBaseModal, ManageKnowledgeBasesModal } from "./knowledge-base-modal";
+import { CreateKnowledgeBaseModal, deriveNewBaseFolders, ManageKnowledgeBasesModal } from "./knowledge-base-modal";
+import { LIBRARY_ICON_IDS } from "./library-icons";
 import { ManageLibrariesModal } from "./library-modal";
 import { LibrarySettingsModal } from "./library-settings-modal";
 import { normalizeLibraryDisplayProfile, validateLibraryDisplayProfile, type LibraryDisplayProfile } from "./library-display-profile";
-import { mergeKnowledgeBaseStores, type StoreMergeResult } from "./store-merge";
+import { mergeKnowledgeBaseStores, storeBackupIsCoveredBy, type StoreMergeResult } from "./store-merge";
 import {
   applyTaxonomyRepairToData,
   buildTaxonomyHealthFindings,
@@ -290,6 +299,9 @@ import {
   type SyncRecoveryLocalState,
 } from "./sync-recovery";
 import { ClearDeviceLocalDataModal, SyncRecoveryCenterModal } from "./sync-recovery-modal";
+import type { RecoveryRestoreIntent } from "./recovery-copy";
+import { RecoveryCopyModal, pickRecoveryFile, type RecoveryApplyResult, type RecoveryDestination } from "./recovery-copy-modal";
+import { discoverRecoveryCopies, loadRecoveryCopy, recoverySourceUnchanged, type RecoveryCandidate, type RecoveryHost } from "./recovery-discovery";
 import {
   planUpdateAnnouncement,
   updateAnnouncementForVersion,
@@ -297,11 +309,18 @@ import {
 } from "./update-announcement";
 import { UpdateAnnouncementModal } from "./update-announcement-modal";
 import {
-  createVaultRenameJournal,
+  boundVaultIdOf,
+  createVaultRenameJournalForScope,
   parseVaultRenameJournal,
+  vaultRenameAppendFits,
   type PendingVaultRename,
+  type VaultRenameBlockedReason,
   type VaultRenameJournal,
+  type VaultRenameScope,
 } from "./vault-rename-journal";
+
+/** A rename repair that must wait (identity, authority or path doubt): evidence stays, nothing retries. */
+class VaultRenameReplayWaiting extends Error {}
 
 /** Bound stable inactive projections by records, not an arbitrary base count. */
 const MAX_INACTIVE_SEARCH_CACHED_RECORDS = 50_000;
@@ -309,7 +328,11 @@ const MAX_NOTE_ORGANIZER_MEMBERSHIP_CACHE_ENTRIES = 32;
 const NOTE_ORGANIZER_INDICATOR_DEBOUNCE_MS = 100;
 export const DEVICE_LOCAL_STATE_KEY = "ent-vault-command-center.device-state.v1";
 export const SYNC_RECOVERY_LOCAL_STATE_KEY = "ent-vault-command-center.sync-recovery-state.v1";
-export const VAULT_RENAME_JOURNAL_KEY = "ent-vault-command-center.vault-rename-journal.v1";
+/** Hoisted: sentence-case lint would lowercase these official names. The route is the real entry in the Sync & recovery center. */
+export const REVIEW_KEPT_COPIES_ROUTE = "To review it, open Sync & recovery center and choose “Review kept copies…”. Keep the file; it is private and can hold exact paths.";
+export const VAULT_RENAME_OVERFLOW_NOTICE = "Many notes were renamed while organization was still loading, more than this plugin can safely track. Automatic link repair for those renames is paused. Your notes were not changed. Before restarting Obsidian, run “Back up, export, or import…” and export “Same-vault recovery”.";
+export const VAULT_RENAME_AMBIGUOUS_NOTICE = "A note was renamed while organization was still loading, and this plugin cannot tell for certain which note the old link meant (another note may now have its old name, or the renamed item is missing or is a different kind of item). To avoid linking the wrong note, it did not repair that rename. Your notes were not changed. Check that note's place in your organization.";
+export const VAULT_RENAME_JOURNAL_KEY ="ent-vault-command-center.vault-rename-journal.v1";
 export const KBCC_RETURN_NAVIGATION_STATE_KEY = "ent-vault-command-center.return-navigation.v1";
 /** Inert key from an unreleased experiment; only explicit local-data cleanup may touch it. */
 export const LEGACY_LIBRARY_IMAGE_PERMISSION_KEY = "ent-vault-command-center.library-images.v1";
@@ -662,11 +685,7 @@ export interface LibraryDefinitionInput {
 
 export type LibraryRemovalDestination = "unassigned" | "index" | { libraryId: string };
 
-export const LIBRARY_ICON_IDS = [
-  "library", "book-open", "book-copy", "folder", "folders", "bookmark", "archive",
-  "clipboard-list", "pill", "dna", "stethoscope", "heart-pulse", "brain", "microscope",
-  "flask-conical", "syringe", "activity", "graduation-cap", "file-text", "notebook-tabs",
-] as const;
+export { LIBRARY_ICON_IDS } from "./library-icons";
 
 interface KnowledgeBaseSearchVaultSnapshot {
   files: readonly TFile[];
@@ -703,10 +722,25 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private semanticConflictRescueFailed = false;
   /** Sticky until restart: data.json may contain a write whose compensation is unproven. */
   private persistenceUncertain = false;
+  /** Exact .bak text this instance last wrote and the Sync generation it was written under; never proof that a kept copy exists. */
+  private ownBackupWrite: { text: string; generation: number } | null = null;
   private lastConflictRescueStore = "";
+  private lastConflictRescueContent = "";
   private lastConflictRescuePath = "";
   private deviceLocalState: DeviceLocalPluginState | null = null;
   private deviceLocalStateLoaded = false;
+  /**
+   * True when the stored device-local value was written by a newer envelope or
+   * binding version. The raw value stays untouched, history runs empty, and no
+   * device-local write may replace it until the explicit Clear command.
+   */
+  private deviceLocalFutureVersionRetained = false;
+  /**
+   * Semantic fingerprint each base's live Undo/Redo pair was last verified or
+   * built against. Set by the verified attach and by the local-state builder;
+   * applyHistory compares the live payload with it before touching any stack.
+   */
+  private historyBindingByBase = new Map<string, string>();
   /** Exact causal identity reserved by a required-Undo preflight for the next semantic write. */
   private preparedRequiredUndoCommit: PendingRequiredUndoCommit | null = null;
   /** Exact causal identity reserved by an Undo/Redo transition preflight. */
@@ -731,6 +765,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   /** Window that created the pending refresh timer; timer IDs are per-window. */
   private refreshTimerWindow: Window | null = null;
   private searchGeneration = 0;
+  /** Candidate-projection token; search restarts and note-candidate freshness are separate duties. */
+  private vaultNoteGeneration = 0;
   private knowledgeBaseSearchVaultSnapshot: KnowledgeBaseSearchVaultSnapshot | null = null;
   private recordsCacheByBase = new Map<string, VaultRecord[]>();
   /** Stable search-only projections are bounded by retained records across bases. */
@@ -772,7 +808,16 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private noteOrganizerBatchHistory: NoteOrganizerBatchHistoryToken | null = null;
   private recordLinkIndex = new Map<string, VaultRecord>();
   private recordLinkIndexBaseId = "";
+  /** Reverse edges (target to sources), built lazily and then patched per source. */
   private backlinkIndex: Map<string, string[]> | null = null;
+  /** Forward edges (source to targets) used to patch one source without a graph rescan. */
+  private backlinkForward = new Map<string, string[]>();
+  /** Sources whose edges may have changed since their last patch. */
+  private backlinkDirty = new Set<string>();
+  /** The resolvedLinks object the index was built from; a different object forces a rebuild. */
+  private backlinkGraph: object | null = null;
+  /** Per-file resolves applied since the last global `resolved` (an "accounted" cycle). */
+  private backlinkResolvesSinceResolved = 0;
   private refreshShouldInvalidateRecords = false;
   /**
    * Session overlay applied only to persisted path references while the durable
@@ -784,6 +829,16 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   /** Parsed journal may belong to an established identity still arriving through Sync. */
   private retainedVaultRenameJournal: VaultRenameJournal | null = null;
   private vaultRenameJournalLoaded = false;
+  /** A missing-primary start (or a persisted bootstrap journal) is still waiting for final authority. */
+  private renameBootstrapEpisode = false;
+  /** Vault identity of the device profile present at startup: a constraint on rename binding. */
+  private retainedProfileVaultId: string | null = null;
+  /** Identity of the compatible primary loaded from disk at startup (persisted, not merely arrived). */
+  private startupPersistedVaultId: string | null = null;
+  /** Foreign/read-only/blocked state hit the bound: further events are refused, not stored. */
+  private vaultRenameSessionOverflow = false;
+  /** Entries restored from a journal rather than observed against the current capture. */
+  private readonly journalOriginRenames = new WeakSet<PendingVaultRename>();
   /** Number of pending-prefix entries known to be present in localStorage. */
   private journaledVaultRenameCount = 0;
   /** Malformed recovery authority is never discarded or silently reopened writable. */
@@ -849,7 +904,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     });
     this.addCommand({
       id: "undo-last-note-organizer-batch",
-      name: "Undo last organizer change",
+      name: "Undo last organizer batch (all affected bases)",
       icon: "undo-2",
       checkCallback: (checking) => {
         if (!this.canUndoNoteOrganizerBatch()) return false;
@@ -970,7 +1025,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
     this.addCommand({
       id: "undo-last-quick-append",
-      name: "Quick append: Undo last append",
+      name: "Quick append: Undo last note append",
       icon: "undo-2",
       checkCallback: (checking) => {
         if (!this.canUndoLastFollowUpAppend()) return false;
@@ -1030,7 +1085,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     });
     this.addCommand({
       id: "undo-personal-organization",
-      name: "Undo last organization change",
+      name: "Undo last organization change in this base",
       checkCallback: (checking) => {
         if (this.data.undoStack.length === 0) return false;
         if (!checking) this.run(() => this.undo());
@@ -1085,12 +1140,22 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       };
       this.registerEvent(this.app.metadataCache.on("changed", (file) => {
         // Backlinks include the whole vault, including notes outside the configured
-        // index. Any metadata-link change can therefore invalidate that cache.
-        this.backlinkIndex = null;
-        this.invalidateKnowledgeBaseSearchSnapshot();
-        if (this.invalidateRecordCachesForPath(file.path, { file })) this.scheduleRefresh(false);
-        // Outside notes can change the inspector's external backlinks and
-        // cancel an in-flight search through the generation invalidation above.
+        // index. Only this source's edges can have changed, and Obsidian may update
+        // resolvedLinks after this event, so the source is re-read lazily and again
+        // by the per-file `resolve` event below.
+        this.markBacklinkSourceDirty(file.path);
+        // A title or ID edit changes placeholder candidates without adding a file,
+        // so the candidate token advances for every metadata change.
+        this.vaultNoteGeneration += 1;
+        const relevantToABase = this.invalidateRecordCachesForPath(file.path, { file });
+        // Global search restarts only when the edit can change a result. A clinical
+        // base discovers topic proposals anywhere, so irrelevance cannot be proved there.
+        if (relevantToABase || this.getKnowledgeBases().some((entry) => entry.data.settings.workspaceMode === "ent-clinical")) {
+          this.invalidateKnowledgeBaseSearchSnapshot();
+        }
+        if (relevantToABase) this.scheduleRefresh(false);
+        // Outside notes can still change the inspector's external backlinks and
+        // placeholder candidates, so the open view refreshes.
         else if (this.app.workspace.getLeavesOfType(VIEW_TYPE).length > 0) {
           this.scheduleRefresh(false);
         }
@@ -1098,10 +1163,38 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // Initial vault discovery does not have to emit a normal create/change
       // event for every file. `resolved` is the final metadata-inventory fence
       // and repairs a projection built from any earlier partial inventory.
+      this.registerEvent(this.app.metadataCache.on("resolve", (file) => {
+        // The per-file link resolution can follow `changed`; apply its final edges.
+        this.backlinkResolvesSinceResolved += 1;
+        if (this.patchBacklinkSource(file.path)
+          && this.app.workspace.getLeavesOfType(VIEW_TYPE).length > 0) this.scheduleRefresh(false);
+      }));
       let initialMetadataResolutionHandled = false;
       this.registerEvent(this.app.metadataCache.on("resolved", () => {
-        if (initialMetadataResolutionHandled) return;
+        if (initialMetadataResolutionHandled) {
+          // Obsidian fires `resolved` again after later modifications. When the
+          // per-file resolves of this cycle were already applied, keep the targeted
+          // cache and settle any remaining dirty sources; otherwise this is a coarse
+          // fallback and the visible backlinks must consume a rebuilt graph.
+          const hadIndex = this.backlinkIndex !== null;
+          const accounted = hadIndex
+            && (this.backlinkResolvesSinceResolved > 0 || this.backlinkDirty.size > 0)
+            && this.backlinkGraph === this.app.metadataCache.resolvedLinks;
+          this.backlinkResolvesSinceResolved = 0;
+          if (accounted) {
+            // `changed` and `resolve` already scheduled the redraw for these sources.
+            for (const source of [...this.backlinkDirty]) {
+              this.backlinkDirty.delete(source);
+              this.patchBacklinkSource(source);
+            }
+            return;
+          }
+          this.backlinkIndex = null;
+          if (hadIndex && this.app.workspace.getLeavesOfType(VIEW_TYPE).length > 0) this.scheduleRefresh(false);
+          return;
+        }
         initialMetadataResolutionHandled = true;
+        this.backlinkResolvesSinceResolved = 0;
         refreshVaultProjectionAfterReadinessBoundary();
       }));
       this.registerEvent(this.app.vault.on("create", (file) => {
@@ -1333,7 +1426,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     };
   }
 
-  private prepareRequiredUndoCommit(entry: KnowledgeBaseEntry, snapshot: PersonalSnapshot): PendingRequiredUndoCommit | null {
+  private prepareRequiredUndoCommit(
+    entry: KnowledgeBaseEntry,
+    snapshot: PersonalSnapshot,
+  ): PendingRequiredUndoCommit | null {
     const plan = this.planEntrySemanticRevision(entry);
     if (!plan) return null;
     if (!Number.isSafeInteger(snapshot.at) || snapshot.at <= 0) {
@@ -1565,19 +1661,112 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return snapshot;
   }
 
-  private applyDeviceLocalState(store: PluginStore, state = this.deviceLocalState): void {
+  /**
+   * Build the bounded device-local profile from `this.store` and remember which
+   * semantic state each base's history is bound to. The memory is what the
+   * Undo/Redo gate compares against; it is recorded before any write attempt.
+   */
+  private buildDeviceLocalState(
+    pendingRequiredUndoCommit?: PendingRequiredUndoCommit,
+    pendingHistoryTransitionCommit?: PendingHistoryTransitionCommit,
+    pendingRequiredUndoBatchCommit?: PendingRequiredUndoBatchCommit,
+    historyBindings?: ReadonlyMap<string, DeviceHistoryBinding | null>,
+  ): ReturnType<typeof createDeviceLocalPluginStateWithReport> {
+    const built = createDeviceLocalPluginStateWithReport(
+      this.store,
+      pendingRequiredUndoCommit,
+      pendingHistoryTransitionCommit,
+      pendingRequiredUndoBatchCommit,
+      historyBindings ? { historyBindings } : {},
+    );
+    this.rememberHistoryBindings(built.state);
+    return built;
+  }
+
+  private rememberHistoryBindings(state: DeviceLocalPluginState): void {
+    for (const base of state.bases) {
+      if (base.historyBinding) this.historyBindingByBase.set(base.baseId, base.historyBinding.fingerprint);
+      else this.historyBindingByBase.delete(base.baseId);
+    }
+  }
+
+  /**
+   * The binding of a base's current history, captured before an action changes
+   * anything. Present only when the live pair is known to be bound to the live
+   * payload; otherwise the prior is unverified and journals record none.
+   */
+  private priorHistoryBindingFor(entry: KnowledgeBaseEntry): DeviceHistoryBinding | undefined {
+    if (entry.data.undoStack.length === 0 && entry.data.redoStack.length === 0) return undefined;
+    const recorded = this.historyBindingByBase.get(entry.id);
+    if (recorded === undefined || this.historyBindingIsStale(entry)) return undefined;
+    return { v: 1, fingerprint: recorded };
+  }
+
+  /**
+   * Second gate: history whose recorded binding no longer names the payload it
+   * would act on is not executable. The comparison uses the load-normalized
+   * fingerprint of the live payload or, failing that, of the last committed one.
+   * Bases with no recorded binding (history created in a session that never
+   * persisted it) are not blocked.
+   */
+  private historyBindingIsStale(entry: KnowledgeBaseEntry): boolean {
+    if (entry.data.undoStack.length === 0 && entry.data.redoStack.length === 0) return false;
+    const recorded = this.historyBindingByBase.get(entry.id);
+    if (recorded === undefined) return false;
+    if (createDeviceHistoryBinding(entry).fingerprint === recorded) return false;
+    // The view layer may normalize the live payload in memory after the last
+    // persisted save; the last committed payload is the other legitimate
+    // witness. A stale pair matches neither.
+    const committed = this.committedStoreSnapshot?.bases.find((candidate) => candidate.id === entry.id);
+    return !committed || createDeviceHistoryBinding(committed).fingerprint !== recorded;
+  }
+
+  private historyResetNotice(names: readonly string[]): void {
+    const shown = names.slice(0, 5).map((name) => `“${name}”`);
+    const rest = names.length - shown.length;
+    new Notice(
+      `Undo history was reset for ${shown.join(", ")}${rest > 0 ? ` and ${rest} more` : ""}. It could not be matched to the organization now on this device (for example after an update or a change from another device). Your notes and organization are unchanged.`,
+      12000,
+    );
+  }
+
+  /**
+   * Attach the device-local view to a store. Unless `verifyHistory` is false,
+   * every base's nonempty Undo/Redo pair must be bound to the semantic state
+   * loaded for that base (recomputed, never an advertised hash); a missing or
+   * mismatched binding resets only that base's history. Navigation and
+   * collapse state, other bases and empty stacks are untouched.
+   */
+  private applyDeviceLocalState(
+    store: PluginStore,
+    state = this.deviceLocalState,
+    options: { verifyHistory?: boolean } = {},
+  ): void {
+    const verifyHistory = options.verifyHistory !== false;
     for (const entry of store.bases) resetPluginViewState(entry.data);
+    const resetBaseIds: string[] = [];
     if (state?.vaultId === store.vaultId) {
       for (const local of state.bases) {
         const entry = store.bases.find((candidate) => candidate.id === local.baseId);
         if (entry) {
-          const view = state.historyIndexFolderSourcesIncluded
+          let view = state.historyIndexFolderSourcesIncluded
             ? local.view
             : migrateLegacyDeviceViewFolderSources(
               local.view,
               entry.data.indexFolderSources,
               entry.data.settings.workspaceMode,
             );
+          if (verifyHistory) {
+            if (local.view.undoStack.length === 0 && local.view.redoStack.length === 0) {
+              this.historyBindingByBase.delete(entry.id);
+            } else if (deviceHistoryBindingMatchesEntry(local.historyBinding, entry)) {
+              this.historyBindingByBase.set(entry.id, local.historyBinding?.fingerprint ?? "");
+            } else {
+              view = { ...view, undoStack: [], redoStack: [] };
+              this.historyBindingByBase.delete(entry.id);
+              resetBaseIds.push(entry.id);
+            }
+          }
           applyPluginViewState(entry.data, view, true);
         }
       }
@@ -1586,6 +1775,54 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const active = store.bases.find((entry) => entry.id === requested && entry.archivedAt === null)
       ?? store.bases.find((entry) => entry.archivedAt === null);
     if (active) store.activeBaseId = active.id;
+    if (resetBaseIds.length > 0 && state) this.recordHistoryReset(store, state, resetBaseIds);
+  }
+
+  /**
+   * The accepted merged store is authoritative. A base whose live history was
+   * recorded but whose merged stacks are empty lost its history to a remote
+   * winner with different semantics; report that once, now, and not before.
+   */
+  private noticeHistoryClearedByMerge(store: PluginStore): void {
+    const names: string[] = [];
+    for (const entry of store.bases) {
+      if (!this.historyBindingByBase.has(entry.id)) continue;
+      if (entry.data.undoStack.length > 0 || entry.data.redoStack.length > 0) continue;
+      this.historyBindingByBase.delete(entry.id);
+      names.push(privacySafeBaseName(entry.data.settings.workspaceName));
+    }
+    if (names.length > 0) this.historyResetNotice(names);
+  }
+
+  private recordHistoryReset(store: PluginStore, state: DeviceLocalPluginState, baseIds: readonly string[]): void {
+    this.historyResetNotice(baseIds.map((id) => {
+      const entry = store.bases.find((candidate) => candidate.id === id);
+      return privacySafeBaseName(entry?.data.settings.workspaceName ?? "");
+    }));
+    // Persist the reset so a restart is stable and the base is reported once.
+    // Never touch a profile that still carries a journal: its stacks are the
+    // journal's proof. Only localStorage is written, never data.json.
+    if (state !== this.deviceLocalState
+      || state.pendingRequiredUndoCommit
+      || state.pendingRequiredUndoBatchCommit
+      || state.pendingHistoryTransitionCommit) return;
+    const reset = cloneJsonValue(state);
+    // A pre-v3 profile never carried the linked-folder marker. Its histories
+    // are all unbound, so every one is emptied and the marker can be true.
+    const legacyProfile = !reset.historyIndexFolderSourcesIncluded;
+    reset.historyIndexFolderSourcesIncluded = true;
+    for (const base of reset.bases) {
+      if (!legacyProfile && !baseIds.includes(base.baseId)) continue;
+      base.view.undoStack = [];
+      base.view.redoStack = [];
+      delete base.historyBinding;
+    }
+    this.deviceLocalState = reset;
+    try {
+      this.storeDeviceLocalState(reset);
+    } catch (error) {
+      console.error("Knowledge Base Command Center could not save its reset Undo history", error);
+    }
   }
 
   private storeDeviceLocalState(
@@ -1595,6 +1832,15 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   ): void {
     if (this.deviceLocalPersistenceSuppressed) {
       if (requireStorage) throw new Error("Device-local storage is unavailable while local persistence is suppressed.");
+      return;
+    }
+    // A value written by a newer build is kept byte-for-byte: no ordinary
+    // route, history or journal write may replace it. Only the explicit Clear
+    // command (which suppresses further writes) discards it.
+    if (this.deviceLocalFutureVersionRetained) {
+      if (requireStorage) {
+        throw new Error("Undo data on this device was saved by a newer version of this plugin and is kept untouched. Update the plugin, or run Clear device-local data, before making changes that need Undo.");
+      }
       return;
     }
     // Defense in depth for direct local-state writers (legacy migration,
@@ -1643,8 +1889,18 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // vault-ID match; erasing it here would destroy the established vault's
       // route/history during that transient startup window.
       this.deviceLocalState = parsed;
+      // Only a profile that passed the supported-profile parser constrains
+      // rename binding; a cleared or malformed one yields no identity.
+      if (parsed && this.retainedProfileVaultId === null) this.retainedProfileVaultId = parsed.vaultId;
     } catch (error) {
       this.deviceLocalState = null;
+      if (error instanceof DeviceLocalFutureVersionError) {
+        // Newer content is not corruption. Leave the raw value untouched,
+        // run with empty history, and block writes that would replace it.
+        this.deviceLocalFutureVersionRetained = true;
+        new Notice("This device holds navigation and undo data saved by a newer version of this plugin. It was left untouched, and undo history is unavailable until you update the plugin or clear device-local data. Your notes and organization are unchanged.", 12000);
+        return;
+      }
       try {
         if (typeof this.app.saveLocalStorage === "function") this.app.saveLocalStorage(DEVICE_LOCAL_STATE_KEY, null);
       } catch (clearError) {
@@ -1664,6 +1920,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.retainedVaultRenameJournal = loaded === null || loaded === undefined
         ? null
         : parseVaultRenameJournal(loaded);
+      // A persisted bootstrap journal proves a missing-primary episode is
+      // still open, whatever fallback identity this start generated.
+      if (this.retainedVaultRenameJournal?.scope.kind === "bootstrap") this.renameBootstrapEpisode = true;
     } catch (error) {
       // Unlike disposable UI state, this value may be the only surviving map
       // from physically renamed notes to stale synced membership paths. Keep
@@ -1678,10 +1937,25 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   /** Activate a retained journal only after the synced store proves the exact vault identity. */
   private activateVaultRenameJournalForCurrentStore(): boolean {
+    // A bootstrap journal waits for an accepted established identity; it binds
+    // durably first and only then becomes an ordinary exact-ID journal.
+    if (this.retainedVaultRenameJournal?.scope.kind === "bootstrap") this.bindBootstrapVaultRenameJournal();
+    // The episode ends only once a final, accepted, established identity is in
+    // place and no bootstrap journal still waits for it.
+    if (this.renameBootstrapEpisode
+      && this.retainedVaultRenameJournal?.scope.kind !== "bootstrap"
+      && this.storeIsFinalEstablishedAuthority()) {
+      this.renameBootstrapEpisode = false;
+    }
     const journal = this.retainedVaultRenameJournal;
-    if (!journal || journal.vaultId !== this.store.vaultId) return this.pendingVaultRenames.length > 0;
+    if (!journal || boundVaultIdOf(journal) !== this.store.vaultId) return this.vaultRenameReplayAllowed() && this.pendingVaultRenames.length > 0;
+    // A retained profile for a different identity is a constraint: preserve
+    // both pieces of evidence instead of replaying either.
+    const profile = this.knownEstablishedVaultId();
+    if (profile !== null && profile !== this.store.vaultId) return false;
     if (this.pendingVaultRenames.length === 0) {
       this.pendingVaultRenames = journal.renames.map((entry) => ({ ...entry }));
+      for (const entry of this.pendingVaultRenames) this.journalOriginRenames.add(entry);
       this.journaledVaultRenameCount = this.pendingVaultRenames.length;
       // Search and active-note summaries must project the restored overlay in
       // the same turn in which it becomes visible.
@@ -1689,15 +1963,54 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     } else if (this.journaledVaultRenameCount === 0) {
       // A physical rename can arrive while a previously retained established
       // identity is still being delivered by Sync. Its session-only entries
-      // happened after the durable journal, so append them to that exact order.
-      this.pendingVaultRenames = [
-        ...journal.renames.map((entry) => ({ ...entry })),
-        ...this.pendingVaultRenames,
-      ];
+      // happened after the durable journal, so append them to that exact order,
+      // keeping the aggregate within the journal bounds.
+      const scope = { kind: "bound", vaultId: this.store.vaultId } as const;
+      const restored = journal.renames.map((entry) => ({ ...entry }));
+      for (const entry of restored) this.journalOriginRenames.add(entry);
+      const merged: PendingVaultRename[] = [...restored];
+      let overflowed = false;
+      for (const sessionEntry of this.pendingVaultRenames) {
+        if (!vaultRenameAppendFits(scope, merged, sessionEntry)) { overflowed = true; break; }
+        merged.push(sessionEntry);
+      }
+      this.pendingVaultRenames = merged;
       this.journaledVaultRenameCount = journal.renames.length;
+      if (overflowed && journal.blocked === null) this.blockVaultRenameJournal("overflow", scope, restored);
       this.invalidateRecordCache();
     }
-    return this.pendingVaultRenames.length > 0;
+    return this.vaultRenameReplayAllowed() && this.pendingVaultRenames.length > 0;
+  }
+
+  /** The current store is an accepted, established identity: not a provisional fresh or migrated one. */
+  private storeIsFinalEstablishedAuthority(): boolean {
+    const id = this.store.vaultId;
+    const provisionalMigrated = provisionalMigratedVaultFingerprint(id) !== null || isLegacyDeterministicMigratedVaultId(id);
+    return !isFreshVaultId(id)
+      && (!provisionalMigrated || id === this.startupPersistedVaultId)
+      && !this.isDataReadOnly()
+      && !this.deviceLocalPersistenceSuppressed;
+  }
+
+  /**
+   * Whether replay may run now: the retained journal (if any) is bound to
+   * exactly this identity and not blocked, and no bootstrap episode or
+   * session-level overflow is still open. A false result retains all evidence.
+   */
+  private vaultRenameReplayAllowed(): boolean {
+    if (this.vaultRenameSessionOverflow) return false;
+    const journal = this.retainedVaultRenameJournal;
+    if (!journal) return !this.renameBootstrapEpisode;
+    if (boundVaultIdOf(journal) !== this.store.vaultId || journal.blocked !== null) return false;
+    const profile = this.knownEstablishedVaultId();
+    return profile === null || profile === this.store.vaultId;
+  }
+
+  /** Only entries that belong to this identity may influence projections. */
+  private applicableVaultRenames(): readonly PendingVaultRename[] {
+    const journal = this.retainedVaultRenameJournal;
+    if (journal && boundVaultIdOf(journal) !== this.store.vaultId) return [];
+    return this.pendingVaultRenames;
   }
 
   private writeVaultRenameJournal(renames: readonly PendingVaultRename[]): void {
@@ -1705,23 +2018,160 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       throw new Error("Device-local persistence is suppressed for this session.");
     }
     if (this.vaultRenameJournalWarning) throw new Error(this.vaultRenameJournalWarning);
-    if (this.retainedVaultRenameJournal && this.retainedVaultRenameJournal.vaultId !== this.store.vaultId) {
+    const retained = this.retainedVaultRenameJournal;
+    if (retained && boundVaultIdOf(retained) !== this.store.vaultId) {
       throw new Error("A vault-rename journal for a different vault identity is already retained.");
     }
     if (typeof this.app.saveLocalStorage !== "function") {
       throw new Error("Obsidian's device-local storage API is unavailable.");
     }
-    if (renames.length === 0) {
+    // A blocked marker is never cleared by draining a recorded prefix.
+    const blocked = retained?.blocked ?? null;
+    if (renames.length === 0 && blocked === null) {
       this.app.saveLocalStorage(VAULT_RENAME_JOURNAL_KEY, null);
       this.retainedVaultRenameJournal = null;
       return;
     }
-    const journal = createVaultRenameJournal(this.store.vaultId, renames);
+    const journal = createVaultRenameJournalForScope({ kind: "bound", vaultId: this.store.vaultId }, renames, blocked);
     // App.saveLocalStorage is synchronous. The physical rename is never sent
     // to the async repair queue until this call has returned successfully (or
     // the user has been explicitly warned that restart safety is unavailable).
     this.app.saveLocalStorage(VAULT_RENAME_JOURNAL_KEY, journal);
     this.retainedVaultRenameJournal = journal;
+  }
+
+  /** Persist a whole journal. The in-memory copy is kept even when the write fails. */
+  private persistVaultRenameJournalObject(journal: VaultRenameJournal): boolean {
+    this.retainedVaultRenameJournal = journal;
+    try {
+      if (this.deviceLocalPersistenceSuppressed) throw new Error("Device-local persistence is suppressed for this session.");
+      if (typeof this.app.saveLocalStorage !== "function") throw new Error("Obsidian's device-local storage API is unavailable.");
+      this.app.saveLocalStorage(VAULT_RENAME_JOURNAL_KEY, journal);
+      return true;
+    } catch (error) {
+      console.error("Knowledge Base Command Center could not persist a vault-rename repair journal", error);
+      this.noticeVaultRenameJournalWriteFailure();
+      return false;
+    }
+  }
+
+  private noticeVaultRenameBlocked(reason: VaultRenameBlockedReason): void {
+    new Notice(reason === "overflow" ? VAULT_RENAME_OVERFLOW_NOTICE : VAULT_RENAME_AMBIGUOUS_NOTICE, 15000);
+  }
+
+  /** Mark the retained journal blocked, keeping its recorded prefix and scope. */
+  private blockVaultRenameJournal(reason: VaultRenameBlockedReason, scope: VaultRenameScope, renames: readonly PendingVaultRename[]): void {
+    this.persistVaultRenameJournalObject(createVaultRenameJournalForScope(scope, renames, reason));
+    this.noticeVaultRenameBlocked(reason);
+  }
+
+  /** An established identity this device already knows, if any (a constraint, never permission). */
+  private knownEstablishedVaultId(): string | null {
+    // The profile identity seen at startup, before any adoption can replace it.
+    const known = this.retainedProfileVaultId ?? this.deviceLocalState?.vaultId ?? "";
+    return known && !isFreshVaultId(known) ? known : null;
+  }
+
+  /**
+   * While primary authority is missing (the store is still a provisional fresh
+   * identity) a physical rename is journaled and nothing else: no repair runs
+   * against the empty fallback and the event is never consumed by a no-op.
+   */
+  private recordWaitingVaultRename(entry: PendingVaultRename): boolean {
+    const retained = this.retainedVaultRenameJournal;
+    // An outstanding bootstrap journal keeps capturing durably until a binding
+    // actually succeeds, whatever the current store's identity looks like.
+    const bootstrapOutstanding = retained?.scope.kind === "bootstrap";
+    if (!bootstrapOutstanding && (!this.renameBootstrapEpisode || this.storeIsFinalEstablishedAuthority())) return false;
+    if (this.vaultRenameJournalWarning) return true;
+    if (retained?.blocked) return true;
+    const scope: VaultRenameScope = retained?.scope ?? {
+      kind: "bootstrap",
+      bootstrapId: makeId("bootstrap"),
+      expectedVaultId: this.knownEstablishedVaultId(),
+    };
+    const renames = retained?.renames ?? [];
+    if (!vaultRenameAppendFits(scope, renames, entry)) {
+      this.blockVaultRenameJournal("overflow", scope, renames);
+      return true;
+    }
+    this.persistVaultRenameJournalObject(createVaultRenameJournalForScope(scope, [...renames, entry]));
+    return true;
+  }
+
+  /**
+   * True when replaying these never-causally-anchored events could relink the
+   * wrong file: a source name is occupied again, the composed terminal path is
+   * missing, or the chain is a cycle. Nothing is guessed from titles.
+   */
+  private vaultRenameReplayIsAmbiguous(renames: readonly PendingVaultRename[]): boolean {
+    return renames.some((_, index) => this.vaultRenameEntryIsAmbiguous(renames, index));
+  }
+
+  /** One entry of the check above: the composed terminal must exist as the right kind of item. */
+  private vaultRenameEntryIsAmbiguous(renames: readonly PendingVaultRename[], index: number): boolean {
+    const rename = renames[index];
+    if (!rename) return false;
+    const lookup = (path: string): TAbstractFile | null => this.app.vault.getAbstractFileByPath(path);
+    let terminal = rename.newPath;
+    let reoccupiedByLater = false;
+    for (const later of renames.slice(index + 1)) {
+      terminal = replacePathPrefix(terminal, later.oldPath, later.newPath);
+      if (later.newPath === rename.oldPath || later.newPath.startsWith(`${rename.oldPath}/`)) reoccupiedByLater = true;
+    }
+    if (terminal === rename.oldPath) return true;
+    const target = lookup(terminal);
+    // A missing terminal, or a file where a folder was renamed (or the reverse), is never accepted.
+    if (!target || (target instanceof TFolder) !== rename.folderRename) return true;
+    return lookup(rename.oldPath) !== null && !reoccupiedByLater;
+  }
+
+  /**
+   * Revalidate a journal-origin entry at the guarded repair boundary. Entries
+   * observed live against the current capture keep the ordinary path.
+   */
+  private vaultRenameHeadNeedsHold(head: PendingVaultRename): boolean {
+    if (!this.vaultRenameReplayAllowed()) return true;
+    if (!this.journalOriginRenames.has(head)) return false;
+    const index = this.pendingVaultRenames.indexOf(head);
+    if (index < 0 || !this.vaultRenameEntryIsAmbiguous(this.pendingVaultRenames, index)) return false;
+    const journal = this.retainedVaultRenameJournal;
+    const scope: VaultRenameScope = journal?.scope ?? { kind: "bound", vaultId: this.store.vaultId };
+    this.blockVaultRenameJournal("ambiguous-path", scope, this.pendingVaultRenames);
+    return true;
+  }
+
+  /**
+   * Bind a bootstrap journal to the accepted established identity: durable
+   * first, then repair. Returns whether it is now bound to the current store.
+   */
+  private bindBootstrapVaultRenameJournal(): boolean {
+    const journal = this.retainedVaultRenameJournal;
+    if (!journal || journal.scope.kind !== "bootstrap" || journal.blocked !== null) return false;
+    const vaultId = this.store.vaultId;
+    // A provisional identity, a read-only state or suppressed persistence is
+    // never authority to bind or rewrite anything.
+    if (!this.storeIsFinalEstablishedAuthority()) return false;
+    const expected = journal.scope.expectedVaultId;
+    if (expected !== null && expected !== vaultId) return false;
+    const profile = this.knownEstablishedVaultId();
+    if (profile !== null && profile !== vaultId) return false;
+    if (this.vaultRenameReplayIsAmbiguous(journal.renames)) {
+      this.blockVaultRenameJournal("ambiguous-path", journal.scope, journal.renames);
+      return false;
+    }
+    const bound = createVaultRenameJournalForScope({ kind: "bound", vaultId }, journal.renames);
+    try {
+      if (typeof this.app.saveLocalStorage !== "function") throw new Error("Obsidian's device-local storage API is unavailable.");
+      this.app.saveLocalStorage(VAULT_RENAME_JOURNAL_KEY, bound);
+    } catch (error) {
+      // Keep bootstrap scope and defer repair; a crash now cannot claim completion.
+      console.error("Knowledge Base Command Center could not bind its vault-rename repair journal", error);
+      this.noticeVaultRenameJournalWriteFailure();
+      return false;
+    }
+    this.retainedVaultRenameJournal = bound;
+    return true;
   }
 
   private noticeVaultRenameJournalWriteFailure(): void {
@@ -1745,7 +2195,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       return;
     }
     try {
-      this.deviceLocalState = createDeviceLocalPluginState(this.store);
+      this.deviceLocalState = this.buildDeviceLocalState().state;
       this.deviceLocalStateLoaded = true;
     } catch (error) {
       console.error("Knowledge Base Command Center could not capture device-local state", error);
@@ -1765,7 +2215,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // missing-data fallback replace a retained established-vault profile.
       return;
     }
-    const state = createDeviceLocalPluginState(this.store);
+    const state = this.buildDeviceLocalState().state;
     this.storeDeviceLocalState(state);
   }
 
@@ -1800,6 +2250,53 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       && entry.semanticHash === pending.candidateSemanticHash;
   }
 
+  /** The prior binding recorded for a journaled base, if the envelope extension survived. */
+  private journaledPriorBinding(state: DeviceLocalPluginState, baseId: string): DeviceHistoryBinding | undefined {
+    return state.pendingPriorHistoryBinding?.bindings[baseId];
+  }
+
+  /**
+   * True only when the envelope recorded a prior binding and the staged base
+   * still carries that same one. This is a consistency check between two
+   * values written together before the action, not a recomputation: the
+   * pre-action payload cannot be rebuilt from a loaded candidate.
+   */
+  private priorHistoryBindingIsProven(
+    local: DeviceLocalKnowledgeBaseState,
+    prior: DeviceHistoryBinding | undefined,
+  ): boolean {
+    return Boolean(prior && local.historyBinding && local.historyBinding.fingerprint === prior.fingerprint);
+  }
+
+  /**
+   * Exact candidate loaded: keep the newly proven required-Undo step. Entries
+   * beneath it survive only with a proven prior binding; an unverified older
+   * tail is reset rather than blessed by this one proof.
+   */
+  private promoteExactCandidateHistory(
+    local: DeviceLocalKnowledgeBaseState,
+    prior: DeviceHistoryBinding | undefined,
+    candidateFingerprint: string,
+  ): void {
+    if (!this.priorHistoryBindingIsProven(local, prior)) {
+      local.view.undoStack = local.view.undoStack.slice(-1);
+    }
+    local.historyBinding = { v: 1, fingerprint: candidateFingerprint };
+  }
+
+  /**
+   * Parent or noncandidate loaded: the prior history returns with the binding
+   * it had before the action (none for a legacy journal). The ordinary
+   * per-base comparison against the loaded payload then decides its fate.
+   */
+  private restorePriorHistoryBinding(
+    local: DeviceLocalKnowledgeBaseState,
+    prior: DeviceHistoryBinding | undefined,
+  ): void {
+    if (prior) local.historyBinding = { ...prior };
+    else delete local.historyBinding;
+  }
+
   /**
    * Resolve a pre-commit local journal only against an accepted store identity.
    * A matching causal head promotes Undo and clears pre-transaction Redo; any
@@ -1817,10 +2314,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (!local) throw new Error("The pending required Undo journal refers to an unavailable knowledge base.");
     if (this.committedAuthorityMatchesPendingUndo(store, pending)) {
       local.view.redoStack = [];
+      this.promoteExactCandidateHistory(local, this.journaledPriorBinding(state, pending.baseId), pending.candidateSemanticHash);
     } else {
       local.view.undoStack = local.view.undoStack.slice(0, -1);
+      this.restorePriorHistoryBinding(local, this.journaledPriorBinding(state, pending.baseId));
     }
     delete resolved.pendingRequiredUndoCommit;
+    delete resolved.pendingPriorHistoryBinding;
     // Apply the resolved state in memory even if the cleanup write fails. The
     // durable marker remains safe and will be resolved again on next startup.
     this.deviceLocalState = resolved;
@@ -1867,8 +2367,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       }
       if (this.committedAuthorityMatchesPendingUndo(store, entry)) {
         local.view.redoStack = [];
+        this.promoteExactCandidateHistory(local, this.journaledPriorBinding(state, entry.baseId), entry.candidateSemanticHash);
       } else if (entry.baseExistedBefore) {
         local.view.undoStack = local.view.undoStack.slice(0, -1);
+        this.restorePriorHistoryBinding(local, this.journaledPriorBinding(state, entry.baseId));
       } else {
         // A staged local profile for a new destination must never attach to a
         // missing, rejected, or different same-ID semantic authority.
@@ -1876,6 +2378,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       }
     }
     delete resolved.pendingRequiredUndoBatchCommit;
+    delete resolved.pendingPriorHistoryBinding;
     if (!resolved.bases.some((base) => base.baseId === resolved.activeBaseId)) {
       resolved.activeBaseId = resolved.bases.some((base) => base.baseId === store.activeBaseId)
         ? store.activeBaseId
@@ -1903,13 +2406,29 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const local = resolved.bases.find((base) => base.baseId === pending.baseId);
     if (!local) throw new Error("The pending history transition refers to an unavailable knowledge base.");
     if (this.committedAuthorityMatchesPendingUndo(store, pending)) {
+      const olderIsBound = this.priorHistoryBindingIsProven(local, this.journaledPriorBinding(state, pending.baseId));
       const post = projectPendingHistoryTransition(
         local.view.undoStack,
         local.view.redoStack,
         pending,
       );
-      local.view.undoStack = post.undoStack;
-      local.view.redoStack = post.redoStack;
+      // The inverse snapshot is the one step this journal proves exactly.
+      // Entries beneath it come from the prior stacks and are kept only when
+      // their prior binding is present and was the staged one.
+      let undoStack = post.undoStack;
+      let redoStack = post.redoStack;
+      if (!olderIsBound) {
+        if (pending.direction === "undo") {
+          undoStack = [];
+          redoStack = post.redoStack.slice(-1);
+        } else {
+          redoStack = [];
+          undoStack = post.undoStack.slice(-1);
+        }
+      }
+      local.view.undoStack = undoStack;
+      local.view.redoStack = redoStack;
+      local.historyBinding = { v: 1, fingerprint: pending.candidateSemanticHash };
     } else {
       // The local base already carries the exact pre-transition stacks. A
       // rejected, compensated, or newer synced head must never receive the
@@ -1919,8 +2438,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         local.view.redoStack,
         pending,
       );
+      this.restorePriorHistoryBinding(local, this.journaledPriorBinding(state, pending.baseId));
     }
     delete resolved.pendingHistoryTransitionCommit;
+    delete resolved.pendingPriorHistoryBinding;
     this.deviceLocalState = resolved;
     this.deviceLocalStateLoaded = true;
     try {
@@ -1944,6 +2465,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     snapshot: PersonalSnapshot,
     pending: PendingRequiredUndoCommit | null,
     previousRedoStack: PersonalSnapshot[],
+    priorHistoryBinding: DeviceHistoryBinding | undefined,
   ): boolean {
     const entry = this.store.bases.find((candidate) => candidate.id === baseId);
     if (!entry) throw new Error("The knowledge base requiring Undo is unavailable.");
@@ -1951,7 +2473,16 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (pending) entry.data.redoStack = previousRedoStack;
     let built: ReturnType<typeof createDeviceLocalPluginStateWithReport>;
     try {
-      built = createDeviceLocalPluginStateWithReport(this.store, pending ?? undefined);
+      // While the journal is staged, the older stacks are still bound to the
+      // pre-action state (the live payload is already the candidate), so the
+      // profile carries the prior binding the journal recorded, never a
+      // fingerprint inferred from the candidate.
+      built = this.buildDeviceLocalState(
+        pending ?? undefined,
+        undefined,
+        undefined,
+        pending ? new Map([[baseId, priorHistoryBinding ?? null]]) : undefined,
+      );
     } catch (error) {
       if (pending && /could not be bounded safely/i.test(errorMessage(error))) {
         throw new Error("This change cannot keep its required Undo snapshot within the 4 MiB device-local limit. Export a same-vault recovery backup, then reduce the operation size.");
@@ -1999,7 +2530,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       return;
     }
     try {
-      const built = createDeviceLocalPluginStateWithReport(this.store);
+      const built = this.buildDeviceLocalState();
       if (!this.localStateRetainsPendingUndo(built.state, pending)) {
         throw new Error("The committed change's required Undo snapshot was not retained.");
       }
@@ -2028,7 +2559,16 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
     let built: ReturnType<typeof createDeviceLocalPluginStateWithReport>;
     try {
-      built = createDeviceLocalPluginStateWithReport(this.store, undefined, undefined, pending);
+      built = this.buildDeviceLocalState(
+        undefined,
+        undefined,
+        pending,
+        // Captured from the pre-operation clone, never from the mutated candidate.
+        new Map(pending.entries.map((entry) => {
+          const before = beforeById.get(entry.baseId);
+          return [entry.baseId, (before ? this.priorHistoryBindingFor(before) : undefined) ?? null];
+        })),
+      );
     } catch (error) {
       if (/could not be bounded safely/i.test(errorMessage(error))) {
         if (operationLabel === "portfolio import") {
@@ -2101,12 +2641,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         && current.vaultId === this.store.vaultId
         && !current.pendingRequiredUndoBatchCommit
         && pending.entries.every((entry) => this.localStateRetainsPendingUndoBatchEntry(current, entry))) {
-        this.applyDeviceLocalState(this.store, current);
+        this.applyDeviceLocalState(this.store, current, { verifyHistory: false });
         this.useActiveData(this.requireActiveBase().data);
         this.invalidateRecordCache();
         return { finalized: true, historyTruncated: false, viewStateTruncated: false };
       }
-      const built = createDeviceLocalPluginStateWithReport(this.store, undefined, undefined, pending);
+      const built = this.buildDeviceLocalState(undefined, undefined, pending);
       if (!pending.entries.every((entry) => this.localStateRetainsPendingUndoBatchEntry(built.state, entry))) {
         throw new Error(`One or more committed ${operationLabel} Undo snapshots were not retained.`);
       }
@@ -2121,7 +2661,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // caller lowers the write barrier. Otherwise an immediate ordinary view
       // save could rebuild from pressure that the protected finalizer removed
       // and discard a non-active mapped base's required Undo.
-      this.applyDeviceLocalState(this.store, markerFree);
+      this.applyDeviceLocalState(this.store, markerFree, { verifyHistory: false });
       this.useActiveData(this.requireActiveBase().data);
       this.invalidateRecordCache();
       return {
@@ -2174,6 +2714,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     pending: PendingHistoryTransitionCommit,
     priorUndoStack: PersonalSnapshot[],
     priorRedoStack: PersonalSnapshot[],
+    priorHistoryBinding: DeviceHistoryBinding | undefined,
   ): boolean {
     const entry = this.store.bases.find((candidate) => candidate.id === baseId);
     if (!entry) throw new Error("The knowledge base using history is unavailable.");
@@ -2183,7 +2724,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     entry.data.undoStack = priorUndoStack;
     entry.data.redoStack = priorRedoStack;
     try {
-      built = createDeviceLocalPluginStateWithReport(this.store, undefined, pending);
+      built = this.buildDeviceLocalState(
+        undefined,
+        pending,
+        undefined,
+        new Map([[baseId, priorHistoryBinding ?? null]]),
+      );
     } catch (error) {
       if (/could not be bounded safely/i.test(errorMessage(error))) {
         throw new Error(`This ${pending.direction} cannot keep its exact crash-safe history transition within the 4 MiB device-local limit. Export a same-vault recovery backup, then reduce local history size.`);
@@ -2227,7 +2773,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       && !current.pendingHistoryTransitionCommit
       && this.localStateMatchesHistoryTransitionPost(current, pending)) return;
     try {
-      const built = createDeviceLocalPluginStateWithReport(this.store);
+      const built = this.buildDeviceLocalState();
       if (!this.localStateMatchesHistoryTransitionPost(built.state, pending)) {
         throw new Error("The committed history transition was not retained exactly.");
       }
@@ -2357,6 +2903,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const activeHasDeviceProfile = this.deviceLocalState?.bases.some((entry) => entry.baseId === active.id) ?? false;
     const deviceLocalStateProfile = !localStateApiAvailable
       ? "Device-local profile API unavailable"
+      : this.deviceLocalFutureVersionRetained
+        ? "Newer-version profile kept untouched on this device"
       : activeHasDeviceProfile
         ? "Active-base view profile stored on this device"
         : this.deviceLocalState?.bases.length
@@ -2441,9 +2989,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.useActiveData(this.requireActiveBase().data);
     this.deviceLocalState = null;
     this.deviceLocalStateLoaded = true;
+    this.deviceLocalFutureVersionRetained = false;
+    this.historyBindingByBase.clear();
     this.pendingVaultRenames = [];
     this.retainedVaultRenameJournal = null;
     this.journaledVaultRenameCount = 0;
+    this.renameBootstrapEpisode = false;
+    this.retainedProfileVaultId = null;
+    this.vaultRenameSessionOverflow = false;
     this.vaultRenameJournalLoaded = true;
     if (this.dataCompatibilityWarning === this.vaultRenameJournalWarning) this.dataCompatibilityWarning = "";
     this.vaultRenameJournalWarning = "";
@@ -2719,9 +3272,22 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const sourceWasMissing = loaded === null
       || loaded === undefined
       || (typeof loaded === "object" && !Array.isArray(loaded) && Object.keys(loaded).length === 0);
+    // A real missing-primary start opens a rename-bootstrap episode that ends
+    // only when a final established identity is accepted (never inferred from
+    // the shape of a vault ID).
+    if (capturedRead === undefined && sourceWasMissing && !restoredFromBackup) this.renameBootstrapEpisode = true;
     // A missing data.json starts an empty bootstrap whose first save would
     // overwrite the last committed .bak. Keep that backup aside first.
     if (capturedRead === undefined && sourceWasMissing && !restoredFromBackup) await this.keepBackupBesideMissingPrimary();
+    else if (capturedRead === undefined && !sourceWasMissing && !restoredFromBackup) {
+      // A readable primary can be older than, or unrelated to, the .bak beside it.
+      try {
+        await this.keepBackupUnlessCovered(loaded);
+      } catch (error) {
+        console.error("Knowledge Base Command Center could not keep the data.json backup", error);
+        this.markPersistenceUncertain(`The data.json backup could not be inspected or kept (${errorMessage(error)}). Organization stays read-only so that backup is not overwritten; restart Obsidian once storage is available.`);
+      }
+    }
     const sourceVersion = storedDataVersion(loaded);
     const loadedRecord = asUnknownRecord(loaded);
     const recognizedStore = isRecognizedPluginStore(loaded);
@@ -2807,7 +3373,16 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         pendingLegacyViewTruncated = built.viewStateTruncated;
       }
       if (!legacyDeviceStateMigrationBlocked) {
-        this.applyDeviceLocalState(this.store, pendingLegacyDeviceState ?? this.deviceLocalState);
+        // A captured (external) payload is not yet authoritative: its binding
+        // check, reset, notice and local save wait for the accepted merged
+        // store (see the adoption path), so a losing arrival never resets or
+        // saves empty history.
+        this.applyDeviceLocalState(this.store, pendingLegacyDeviceState ?? this.deviceLocalState, {
+          // With no committed local store (a missing-primary bootstrap) the
+          // arriving store is the first authority this profile can attach to,
+          // so it is verified as it attaches.
+          verifyHistory: capturedRead === undefined || !this.committedStoreSnapshot,
+        });
       }
       this.useActiveData(this.requireActiveBase().data);
       if (capturedRead === undefined) {
@@ -2980,6 +3555,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     // rotates it in memory. External Sync can therefore reconcile it with a
     // concurrently rotated pristine copy instead of misclassifying it as flat
     // identity-less data.
+    // The identity of a compatible primary loaded from disk at startup is a
+    // persisted identity (a vault-migrated-… ID is written back and kept, see
+    // model.ts migrateStore), so it is authoritative for rename binding. A
+    // provisional ID that merely arrives through Sync in this session is not.
+    if (capturedRead === undefined && !sourceWasMissing) this.startupPersistedVaultId = this.store.vaultId;
     return {
       recognizedStore,
       hasVaultId: recognizedStore && Boolean(this.store.vaultId),
@@ -3297,7 +3877,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const path = this.storeBackupPath();
     if (!path) return;
     try {
-      await this.app.vault.adapter.write(path, JSON.stringify(snapshot));
+      // A .bak that arrived since startup (or was never covered) is kept first.
+      await this.keepBackupUnlessCovered(snapshot);
+      const text = JSON.stringify(snapshot);
+      await this.app.vault.adapter.write(path, text);
+      this.ownBackupWrite = { text, generation: this.externalChangeGeneration };
     } catch (error) {
       console.error("Knowledge Base Command Center could not refresh the data.json backup", error);
       throw new Error(prerequisite
@@ -3380,16 +3964,106 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       return;
     }
     try {
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      let keptPath = normalizePath(`${dir}/data.json.bak-kept-${stamp}`);
-      for (let n = 2; await adapter.exists(keptPath); n += 1) {
-        keptPath = normalizePath(`${dir}/data.json.bak-kept-${stamp}-${n}`);
-      }
-      await adapter.write(keptPath, raw);
-      new Notice(`data.json is missing, so your last automatic backup was kept as ${keptPath}. Organization starts empty until data.json arrives or you restore from that file.`, 15000);
+      const kept = await this.keepExactBackupCopy(raw);
+      if (kept.created) new Notice(`data.json is missing, so your last automatic backup was kept as ${kept.path}. Organization starts empty until data.json arrives. ${REVIEW_KEPT_COPIES_ROUTE}`, 15000);
     } catch (error) {
       console.error("Knowledge Base Command Center could not keep the data.json backup", error);
       this.markPersistenceUncertain(`data.json is missing and its last automatic backup could not be kept (${errorMessage(error)}). Organization stays read-only so that backup is not overwritten; restart Obsidian after data.json is restored or the backup is copied.`);
+    }
+  }
+
+  /** An existing data.json.bak-kept-* file (newest 50 names) whose bytes equal `raw`, or null. */
+  private async findKeptBackupCopy(raw: string): Promise<string | null> {
+    const adapter = this.app.vault.adapter;
+    const listed = await adapter.list(normalizePath(`${this.manifest.dir}`));
+    const candidates = listed.files
+      .filter((path) => path.slice(path.lastIndexOf("/") + 1).startsWith("data.json.bak-kept-"))
+      .sort()
+      .slice(-50);
+    const rawBytes = new TextEncoder().encode(raw).length;
+    for (const path of candidates) {
+      let text: string;
+      try {
+        // Read a candidate only when its reported size matches; any doubt skips it,
+        // which makes the caller write a new verified copy (the safe direction).
+        const stat = await adapter.stat(path);
+        if (!stat || stat.size !== rawBytes) continue;
+        text = await adapter.read(path);
+      } catch {
+        continue;
+      }
+      if (text === raw) return path;
+    }
+    return null;
+  }
+
+  /**
+   * Make sure the exact `raw` backup text exists in a kept file: reuse a verified
+   * identical one, else write a new one (never overwriting) and verify it by
+   * reading it back. Throws if preservation cannot be established.
+   */
+  private async keepExactBackupCopy(raw: string): Promise<{ path: string; created: boolean }> {
+    const existing = await this.findKeptBackupCopy(raw);
+    if (existing) return { path: existing, created: false };
+    const adapter = this.app.vault.adapter;
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    let keptPath = normalizePath(`${this.manifest.dir}/data.json.bak-kept-${stamp}`);
+    for (let n = 2; await adapter.exists(keptPath); n += 1) {
+      if (n > 1000) throw new Error("no unused kept-backup file name was available");
+      keptPath = normalizePath(`${this.manifest.dir}/data.json.bak-kept-${stamp}-${n}`);
+    }
+    await adapter.write(keptPath, raw);
+    if (await adapter.read(keptPath) !== raw) throw new Error("the kept copy could not be verified");
+    return { path: keptPath, created: true };
+  }
+
+  /** True when `raw` (the current .bak text) is safe to overwrite without a kept copy. */
+  private backupIsCoveredBy(raw: string, authority: unknown): boolean {
+    // Bytes this instance wrote itself, under the Sync generation still in force.
+    // This never stands in for a kept copy existing.
+    const own = this.ownBackupWrite;
+    if (own && own.generation === this.externalChangeGeneration && own.text === raw) return true;
+    if (raw === JSON.stringify(authority)) return true;
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!isRecognizedPluginStore(parsed) || !isRecognizedPluginStore(authority)) return false;
+      const backupVersion = storedDataVersion(parsed);
+      const authorityVersion = storedDataVersion(authority);
+      if (backupVersion > STORE_VERSION || authorityVersion > STORE_VERSION) return false;
+      return storeBackupIsCoveredBy(migrateStore(parsed), migrateStore(authority), backupVersion >= 14 && authorityVersion >= 14);
+    } catch {
+      return false;
+    }
+  }
+
+  private async readBackupSample(path: string): Promise<string | null> {
+    const adapter = this.app.vault.adapter;
+    if (!(await adapter.exists(path))) return null;
+    return adapter.read(path);
+  }
+
+  /**
+   * Before .bak is replaced: unless its text is provably covered by `authority`
+   * (equal semantics or a validated causal ancestor with matching deletion
+   * authority), make sure its exact bytes exist in a kept file and show one
+   * notice for a new copy. .bak is re-read after every preservation; a changed
+   * sample is preserved too, at most twice more, then this throws so the caller
+   * writes nothing. The backup is never loaded as authority.
+   */
+  private async keepBackupUnlessCovered(authority: unknown): Promise<void> {
+    const backupPath = this.storeBackupPath();
+    if (!backupPath || !this.manifest.dir) return;
+    let current = await this.readBackupSample(backupPath);
+    for (let round = 0; ; round += 1) {
+      if (current === null || this.backupIsCoveredBy(current, authority)) return;
+      const kept = await this.keepExactBackupCopy(current);
+      if (kept.created) {
+        new Notice(`Your automatic backup differs from data.json and may hold newer changes, so it was kept as ${kept.path}. Nothing was restored automatically. ${REVIEW_KEPT_COPIES_ROUTE}`, 15000);
+      }
+      const recheck = await this.readBackupSample(backupPath);
+      if (recheck === null || recheck === current) return;
+      if (round >= 2) throw new Error("data.json.bak kept changing while it was being preserved");
+      current = recheck;
     }
   }
 
@@ -4013,6 +4687,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // above, including the ones that omit the term from their own expression.
       const needsWriteback = adopted.needsWriteback || loaded.sourceVersion !== STORE_VERSION;
       this.store = adopted.workingStore;
+      this.noticeHistoryClearedByMerge(this.store);
       if (this.reconcilePendingRequiredUndoCommit(this.store)
         || this.reconcilePendingRequiredUndoBatchCommit(this.store)
         || this.reconcilePendingHistoryTransitionCommit(this.store)) {
@@ -4023,7 +4698,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         // route/history to the final semantic winner and durably bind it before
         // the v14 write can neutralize the legacy fields in data.json.
         this.applyDeviceLocalState(adopted.workingStore, loaded.legacyDeviceState);
-        this.storeDeviceLocalState(createDeviceLocalPluginState(adopted.workingStore), true);
+        this.storeDeviceLocalState(this.buildDeviceLocalState().state, true);
         this.noticeLegacyDeviceStateTruncation(
           loaded.legacyDeviceStateHistoryTruncated === true,
           loaded.legacyDeviceStateViewTruncated === true,
@@ -4032,7 +4707,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       this.useActiveData(this.requireActiveBase().data);
       this.dataCompatibilityWarning = this.vaultRenameJournalWarning;
       this.retainedExternalSettingsPayload = null;
-      if (this.activateVaultRenameJournalForCurrentStore()) this.schedulePendingVaultRenameRepairs();
+      // Rename journals activate only from the worker's final settled outcome
+      // (below), never from an intermediate capture's provisional adoption.
       return publishOutcome({
         capture,
         workingStore: adopted.workingStore,
@@ -4209,7 +4885,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         // Sync-driven active-base change feed back into subsequent merges.
         const preferredActiveId = this.store.activeBaseId;
         let workingStore = cloneJsonValue(initialCommittedStore ?? this.store);
-        this.applyDeviceLocalState(workingStore);
+        this.applyDeviceLocalState(workingStore, undefined, { verifyHistory: false });
         let baselineTrust: ExternalReloadBaselineTrust = initialCommittedStore
           ? isFreshVaultId(initialCommittedStore.vaultId) ? "fresh" : "identified"
           : "none";
@@ -4230,7 +4906,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           // A transaction that was active when the callback arrived may have
           // committed or rolled back its local history while we waited.
           this.captureLiveDeviceLocalState();
-          this.applyDeviceLocalState(workingStore);
+          this.applyDeviceLocalState(workingStore, undefined, { verifyHistory: false });
           // A local write can be rejected only after the adapter has already
           // replaced data.json. Its transaction restores memory and records
           // that attempted causal head. Make the restored state a descendant
@@ -4285,6 +4961,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
             reloadOutcome = latestOutcome.compatible && !latestOutcome.blockingWarning && !this.persistenceUncertain
               ? "applied"
               : "blocked";
+            // Final accepted authority: the batch is merged and written back and
+            // no later capture is waiting. Only now may a rename journal bind.
+            if (reloadOutcome === "applied" && !this.externalReloadPending && this.externalReloadCaptures.length === 0
+              && this.activateVaultRenameJournalForCurrentStore()) {
+              this.schedulePendingVaultRenameRepairs();
+            }
           }
           try {
             // The batch's merge and writeback are complete: the refresh is
@@ -4370,11 +5052,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
   getSearchGeneration(): number { return this.searchGeneration; }
   /**
-   * O(1) invalidation token for eligible Markdown-note projections. The shared
-   * search generation already advances for Markdown create/delete/rename,
-   * metadata changes, base changes, and settings-driven record invalidation.
+   * O(1) invalidation token for eligible Markdown-note projections. It advances
+   * for every Markdown create/delete/rename and metadata change (including an
+   * outside note's title or ID edit, which changes placeholder candidates
+   * without adding a file), base changes, and record-cache invalidation. It is
+   * independent of the global-search generation, which advances less often.
    */
-  getVaultNoteGeneration(): number { return this.searchGeneration; }
+  getVaultNoteGeneration(): number { return this.vaultNoteGeneration; }
   getVaultId(): string { return this.store.vaultId; }
 
   private noteOrganizerPathIsRestricted(path: string): boolean {
@@ -4452,21 +5136,77 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
   }
 
+  /**
+   * A selection containing a folder is expanded only when the user chooses the
+   * action, so merely opening the menu never enumerates the vault. The label
+   * states no note count because none exists yet; the one-time snapshot is taken
+   * at the click, with the same caps, restricted-path filter and explanations.
+   */
+  private addDeferredNoteOrganizerMenuItem(
+    menu: Menu,
+    selection: readonly TAbstractFile[],
+    source: Extract<NoteOrganizerSource, "file-menu" | "files-menu">,
+  ): void {
+    const viable = selection.some((entry) => (entry instanceof TFolder
+      ? !this.noteOrganizerPathIsRestricted(entry.path)
+      : this.noteOrganizerFileIsSelectable(entry)));
+    if (!viable) return;
+    // Freeze every selected entry's menu-time path together with its object.
+    const frozen = selection.map((entry) => ({ entry, path: entry.path }));
+    const items = frozen.map(({ entry, path }): NoteOrganizerSelectedVaultItem => ({
+      path,
+      kind: entry instanceof TFolder ? "folder" : "file",
+    }));
+    menu.addSeparator();
+    menu.addItem((item) => item
+      .setTitle("Organize current Markdown notes in the command center…")
+      .setIcon("network")
+      .onClick(() => {
+        // Any selected entry that was renamed, deleted or replaced since the menu
+        // opened rejects the whole action: it must neither organize a different
+        // target nor silently shrink to the remaining entries.
+        const moved = frozen.some(({ entry, path }) => (
+          entry.path !== path || this.app.vault.getAbstractFileByPath(path) !== entry
+        ));
+        if (moved) {
+          new Notice("The selection changed since the menu opened. Nothing was opened; choose it again.");
+          return;
+        }
+        const snapshot = this.noteOrganizerSelection(items);
+        if (!snapshot.complete) {
+          new Notice(snapshot.blockedReason === "selection-limit"
+            ? `Folder contains more than ${MAX_NOTE_ORGANIZER_NOTES.toLocaleString()} reviewable notes`
+            : "Folder is too large to snapshot safely");
+          return;
+        }
+        if (snapshot.paths.length === 0) {
+          new Notice("No reviewable Markdown notes were found in the selection. Nothing was opened.");
+          return;
+        }
+        this.openNoteOrganizer(snapshot.paths, source);
+      }));
+  }
+
   private registerNoteOrganizerContextMenus(): void {
     const workspace = this.app.workspace;
     if (typeof workspace.on !== "function") return;
     this.registerEvent(workspace.on("file-menu", (menu, file) => {
-      const item: NoteOrganizerSelectedVaultItem = {
-        path: file.path,
-        kind: file instanceof TFolder ? "folder" : "file",
-      };
-      this.addNoteOrganizerContextMenuItems(menu, this.noteOrganizerSelection([item]), "file-menu");
+      if (file instanceof TFolder) {
+        this.addDeferredNoteOrganizerMenuItem(menu, [file], "file-menu");
+        return;
+      }
+      this.addNoteOrganizerContextMenuItems(
+        menu,
+        this.noteOrganizerSelection([{ path: file.path, kind: "file" }]),
+        "file-menu",
+      );
     }));
     this.registerEvent(workspace.on("files-menu", (menu, files) => {
-      const selected = files.map((file): NoteOrganizerSelectedVaultItem => ({
-        path: file.path,
-        kind: file instanceof TFolder ? "folder" : "file",
-      }));
+      if (files.some((file) => file instanceof TFolder)) {
+        this.addDeferredNoteOrganizerMenuItem(menu, files, "files-menu");
+        return;
+      }
+      const selected = files.map((file): NoteOrganizerSelectedVaultItem => ({ path: file.path, kind: "file" }));
       this.addNoteOrganizerContextMenuItems(menu, this.noteOrganizerSelection(selected), "files-menu");
     }));
     this.registerEvent(workspace.on("editor-menu", (menu, _editor, info) => {
@@ -5999,6 +6739,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     persistSyncedStore = true,
     requiredUndoBatchBaseIds: readonly string[] = [],
     requiredUndoBatchOperationLabel: RequiredUndoBatchOperationLabel = "multi-base change",
+    /** Optional async check that runs inside the logical operation, after the save queue, before the backup clone and change(). */
+    beforeChange?: () => Promise<void>,
   ): Promise<void> {
     this.assertDataWritable();
     if (this.baseOperationBusy) throw new Error("Another knowledge-base change is still being saved.");
@@ -6026,6 +6768,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (this.externalReloadBusy) throw new Error("Finish reloading synced knowledge-base data before switching bases.");
       await this.enqueueAppLogicalOperation(async () => {
         await this.saveQueue;
+        if (beforeChange) await beforeChange();
+        // Protection can be set while this change waited behind Sync, saves or
+        // the settings flush. Re-check after the last await: a protected store
+        // must not mutate (and saveExplicitStoreSnapshot would not write it).
+        this.assertDataWritable();
         const backup = cloneJsonValue(this.store);
         let attemptedStore: PluginStore | null = null;
         let pendingRequiredUndoBatchCommit: PendingRequiredUndoBatchCommit | null = null;
@@ -6163,12 +6910,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       next.settings.setupComplete = true;
       next.settings.workspaceName = cleanName;
       if (mode === "generic" && defaultNoteFolder.trim()) {
-        const folder = defaultNoteFolder.trim().replace(/^\/+|\/+$/g, "");
-        const error = validateWritableFolderPath(folder, this.app.vault.configDir);
-        if (error) throw new Error(error);
-        next.settings.primaryFolder = folder;
-        next.settings.defaultNoteFolder = folder;
-        next.settings.proposalFolder = `${folder}/Inbox`;
+        // The same derivation and path rules the New knowledge base form previews.
+        const derived = deriveNewBaseFolders(defaultNoteFolder, this.app.vault.configDir);
+        if (derived.error) throw new Error(derived.error);
+        next.settings.primaryFolder = derived.folder;
+        next.settings.defaultNoteFolder = derived.folder;
+        next.settings.proposalFolder = derived.inbox;
       }
       created = this.createUniqueKnowledgeBaseEntry(next);
       this.store.bases.push(created);
@@ -6210,6 +6957,113 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     });
     if (!duplicate) throw new Error("The knowledge base could not be duplicated.");
     return duplicate;
+  }
+
+  /**
+   * Restore a previewed kept copy as a NEW base. `sourceMatches` rereads the
+   * copy and compares it byte for byte. The active base, every existing base
+   * and all Markdown are untouched. The final outcome is always shown here,
+   * so it is surfaced even when the review window was closed.
+   */
+  /** The destination a review window is about to show: data epoch, vault identity and active base. */
+  getRecoveryDestination(): RecoveryDestination {
+    return { surface: this.getBaseSurfaceVersion(), vaultId: this.store.vaultId, activeBaseId: this.store.activeBaseId };
+  }
+
+  async restoreKeptCopy(
+    intent: RecoveryRestoreIntent,
+    sourceMatches: () => Promise<boolean>,
+    /** Captured at preview time by the review window; defaults to now for direct callers. */
+    destination: RecoveryDestination = this.getRecoveryDestination(),
+  ): Promise<RecoveryApplyResult> {
+    const outcome = (result: RecoveryApplyResult): RecoveryApplyResult => {
+      new Notice(result.status === "applied"
+        ? `Restored “${intent.name}” as a new knowledge base. Your active base did not change.`
+        : result.status === "failed" ? `${result.message} Nothing was changed.`
+          : `${result.message} Check Manage knowledge bases before trying again.`, 12000);
+      return result;
+    };
+    const failed = (message: string): RecoveryApplyResult => outcome({ status: "failed", message });
+    const stale = (): boolean => this.getBaseSurfaceVersion() !== destination.surface || this.store.vaultId !== destination.vaultId
+      || this.store.activeBaseId !== destination.activeBaseId || intent.sourceVaultId !== destination.vaultId;
+    if (stale()) return failed("Knowledge-base data changed since this copy was reviewed. Reopen the review.");
+    try { this.assertDataWritable(); } catch { return failed("Knowledge bases are read-only, so the copy was not restored."); }
+    let refusal = "";
+    let changeRan = false;
+    try {
+      await this.commitBaseStoreChange(() => {
+        changeRan = true;
+        // Synchronous and immediately before the mutation: nothing can interleave after these checks.
+        if (this.isDataReadOnly()) refusal = "Knowledge bases became read-only, so the copy was not restored.";
+        else if (stale()) refusal = "Knowledge-base data changed before the copy could be added. Reopen the review.";
+        else if (this.store.bases.length >= MAX_KNOWLEDGE_BASES) refusal = `This installation already contains the maximum of ${MAX_KNOWLEDGE_BASES} knowledge bases, including archived bases.`;
+        else if (this.knowledgeBaseNameExists(intent.name)) refusal = "A knowledge base with that name now exists. Reopen the review.";
+        else if (this.store.bases.some((entry) => entry.id === intent.newBaseId) || intent.newBaseId in this.store.deletedBaseIds) refusal = "The new base identity is no longer available. Reopen the review.";
+        if (refusal) throw new Error(refusal);
+        this.store.bases.push(cloneJsonValue(intent.entry));
+      }, true, [], "multi-base change", async () => {
+        // Inside the logical operation, after the save queue: the bounded exact-bytes revalidation.
+        let same = false;
+        try { same = await sourceMatches(); } catch { same = false; }
+        if (!same) { refusal = "The kept copy changed or is no longer available. Reopen the review."; throw new Error(refusal); }
+      });
+    } catch {
+      if (refusal) return failed(refusal);
+      if (!changeRan) {
+        return failed(this.isDataReadOnly() ? "Knowledge bases became read-only, so the copy was not restored." : "Another knowledge-base change is still saving. Try again in a moment.");
+      }
+      // The change ran and the commit rejected it: it has compensated and rolled memory back.
+      return this.persistenceUncertain
+        ? outcome({ status: "uncertain", message: "The restore may not have finished saving." })
+        : failed("The restored base could not be saved.");
+    }
+    return outcome({ status: "applied", baseId: intent.newBaseId });
+  }
+
+  /** "Review kept copies": discovery over the export folders and plugin directory, then the review window. */
+  openRecoveryCopyReview(): void {
+    const adapter = this.app.vault.adapter;
+    const host: RecoveryHost = {
+      list: async (folder) => { try { return (await adapter.list(folder)).files; } catch { return null; } },
+      stat: async (path) => { const info = await adapter.stat(path); return info?.type === "file" ? { size: info.size, mtime: info.mtime } : null; },
+      read: async (path) => new Uint8Array(await adapter.readBinary(path)),
+    };
+    let selected: RecoveryCandidate | null = null;
+    const vaultId = (): string => this.store.vaultId;
+    new RecoveryCopyModal(this.app, {
+      isReadOnly: () => this.isDataReadOnly(),
+      getCurrentVaultId: vaultId,
+      getExistingNames: () => this.store.bases.filter((entry) => entry.archivedAt === null).map((entry) => entry.data.settings.workspaceName),
+      getExistingBaseIds: () => [...this.store.bases.map((entry) => entry.id), ...Object.keys(this.store.deletedBaseIds)],
+      generateIdentity: () => ({ baseId: makeId("base"), semanticHead: fingerprintText(`${makeId("head")}:${Math.random()}`) }),
+      discover: async () => {
+        // Never substitute the vault root: use manifest.dir, else the official config folder plus the plugin id if it exists, else skip.
+        let pluginDir = this.manifest.dir ?? "";
+        if (!pluginDir && this.manifest.id) {
+          const derived = normalizePath(`${this.app.vault.configDir}/plugins/${this.manifest.id}`);
+          if (await adapter.exists(derived).catch(() => false)) pluginDir = derived;
+        }
+        return discoverRecoveryCopies(host, {
+          exportFolders: [...new Set(this.store.bases.map((entry) => normalizePath(entry.data.settings.exportsFolder || SYNC_RECOVERY_EXPORT_FOLDER)))],
+          legacyExportFolder: SYNC_RECOVERY_EXPORT_FOLDER,
+          pluginDir,
+        });
+      },
+      load: (candidate) => { selected = candidate; return loadRecoveryCopy(host, candidate.path, { currentVaultId: vaultId() }); },
+      pickExplicit: () => pickRecoveryFile(this.app, this.app.vault.getFiles()),
+      getDestination: () => this.getRecoveryDestination(),
+      onApply: (intent, destination) => this.restoreKeptCopy(intent, () => selected ? recoverySourceUnchanged(host, selected.path, intent) : Promise.resolve(false), destination),
+      onOpenRestored: (baseId) => this.openRestoredKeptBase(baseId),
+    }).open();
+  }
+
+  /** Separate from the restore: switches to the restored base only on request. */
+  async openRestoredKeptBase(baseId: string): Promise<void> {
+    try {
+      await this.switchKnowledgeBase(baseId);
+    } catch {
+      new Notice("The restored base could not be opened. Choose it in the knowledge-base list.", 8000);
+    }
   }
 
   async archiveKnowledgeBase(id: string): Promise<void> {
@@ -6335,6 +7189,59 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (cleaned) this.data.settings.libraryDisplayProfiles[libraryId] = normalizeLibraryDisplayProfile(cleaned);
       else delete this.data.settings.libraryDisplayProfiles[libraryId];
     }, { includeSettings: true, requireUndo: true });
+  }
+
+  /**
+   * Finishes the generic setup wizard as ONE required-Undo settings
+   * transaction (the same mutate route as every other settings-bearing
+   * organization change). Everything the user reviewed is rechecked inside the
+   * queued action, immediately before the write; any mismatch throws and
+   * mutate restores the prior data, so nothing is half-applied. Never moves,
+   * creates or edits a Markdown note or folder.
+   */
+  async commitSetupSettings(
+    value: WorkspaceSetupValue,
+    reviewed: SetupInboxEffects | null,
+    ownsBase: () => boolean,
+  ): Promise<void> {
+    const cleanFolder = (folder: string): string => folder.trim().replace(/^\/+|\/+$/gu, "");
+    const verify = (): typeof this.data.settings => {
+      if (!ownsBase()) throw new Error("Setup was not saved. Wait for sync to finish; if the knowledge base changed, reopen setup.");
+      this.assertDataWritable();
+      // A settled no-op Sync reload replaces PluginData; always use the live settings.
+      const settings = this.data.settings;
+      if (settings.workspaceMode !== "generic") throw new Error("Setup is only for generic knowledge bases.");
+      for (const folder of [value.primaryFolder, value.defaultNoteFolder, value.templatesFolder, value.proposalFolder, value.exportsFolder]) {
+        const error = validateWritableFolderPath(folder, this.app.vault.configDir);
+        if (error) throw new Error(error);
+      }
+      if (value.defaultNewNoteMode === "template") {
+        const templatePathError = validateTemplateFilePath(value.defaultTemplatePath, value.templatesFolder, this.app.vault.configDir);
+        if (templatePathError) throw new Error(templatePathError);
+        if (!(this.app.vault.getAbstractFileByPath(value.defaultTemplatePath) instanceof TFile)) throw new Error("The selected default template could not be found.");
+      }
+      const currentInbox = cleanFolder(settings.proposalFolder);
+      const nextInbox = cleanFolder(value.proposalFolder);
+      if (reviewed) {
+        if (reviewed.previousFolder !== currentInbox
+          || reviewed.nextFolder !== nextInbox
+          || reviewed.affectedCount !== this.countOrphanedByProposalFolderChange(nextInbox)) {
+          throw new SetupReviewOutdatedError();
+        }
+      } else if (nextInbox !== currentInbox) {
+        throw new SetupReviewOutdatedError("The Inbox folder changed while setup was open. Review the change before applying it.");
+      }
+      return settings;
+    };
+    // Checked once before the transaction so a refused review rolls nothing
+    // back (a rollback replaces the active data and would close the wizard's
+    // ownership), and again inside the queued action, right before the write.
+    verify();
+    // The preflight is the same check run synchronously inside the queued
+    // operation, before mutate snapshots or can roll back anything.
+    await this.mutate("Finish setup", () => {
+      Object.assign(verify(), value, { setupComplete: true });
+    }, { includeSettings: true, requireUndo: true, preflight: () => { verify(); } });
   }
 
   openLibrarySettings(libraryId: string): void {
@@ -6946,7 +7853,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       for (const subject of sourceSubjects) {
         const path = portableSubjectPath(this.data, subject.id);
         subject.indexed = destination === "index";
-        subject.libraryId = targetLibraryId;
+        if (subject.indexed) delete subject.libraryId;
+        else subject.libraryId = targetLibraryId;
         subject.parentId = null;
         if (targetGroupId) subject.groupId = targetGroupId;
         if (destination === "index") {
@@ -6978,6 +7886,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   private invalidateKnowledgeBaseSearchSnapshot(): void {
     this.searchGeneration += 1;
+    this.vaultNoteGeneration += 1;
     this.knowledgeBaseSearchVaultSnapshot = null;
   }
 
@@ -7236,7 +8145,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   private projectPendingRenamePath(path: string): string {
     let projected = path;
-    for (const rename of this.pendingVaultRenames) {
+    for (const rename of this.applicableVaultRenames()) {
       projected = replacePathPrefix(projected, rename.oldPath, rename.newPath);
     }
     return projected;
@@ -7247,7 +8156,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     for (const [path, value] of Object.entries(source)) projected[path] = value;
     // Match rewritePluginDataPathPrefix exactly: a renamed source key replaces
     // any stale destination key, irrespective of object insertion order.
-    for (const rename of this.pendingVaultRenames) {
+    for (const rename of this.applicableVaultRenames()) {
       for (const [path, value] of Object.entries(projected)) {
         const next = replacePathPrefix(path, rename.oldPath, rename.newPath);
         if (next === path) continue;
@@ -7914,7 +8823,6 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         indexed: true,
         configuredId: "",
         recordKind: "topic",
-        libraryId: null,
       });
       this.setDirectIndexMembershipState(path, true);
       const parentPath = parent?.path ?? null;
@@ -8273,7 +9181,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           indexed: !currentLibrary,
           configuredId,
           recordKind: semanticKind,
-          libraryId: currentLibrary?.id ?? null,
+          ...(currentLibrary ? { libraryId: currentLibrary.id } : {}),
         };
         this.data.portableIndex.subjects.push(subject);
         if (file instanceof TFile) this.data.portableIndex.resolvedPathBySubjectId[subject.id] = file.path;
@@ -8282,7 +9190,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       if (!currentLibrary) {
         this.removePortableSubjectFromLibraryLayouts(subject.id);
         subject.indexed = true;
-        subject.libraryId = null;
+        delete subject.libraryId;
         subject.parentId = null;
         subject.groupId = this.ensureTopicPortableGroup(topicGroupTitle);
         this.setDirectIndexMembershipState(path, true);
@@ -8476,7 +9384,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           const subject = subjectById.get(portableId);
           if (subject) {
             this.removePortableSubjectFromLibraryLayouts(subject.id);
-            subject.libraryId = null;
+            delete subject.libraryId;
             subject.indexed = true;
             if (cleanTargetGroup) subject.groupId = this.ensureTopicPortableGroup(cleanTargetGroup);
           }
@@ -9163,6 +10071,12 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       includeActiveTab?: boolean;
       requireUndo?: boolean;
       normalizeAfterRestore?: boolean;
+      /**
+       * Synchronous check run inside the queued operation before the snapshot,
+       * the undo-stack change and the rollback try. A throw here mutates and
+       * rolls back nothing, so it does not advance base ownership.
+       */
+      preflight?: () => void;
     } = {},
   ): Promise<void> {
     this.assertDataWritable();
@@ -9173,6 +10087,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.dataTransactionBusy = true;
     try {
       await this.enqueueAppLogicalOperation(async () => {
+      options.preflight?.();
       const transactionMetadata = {
         updatedAt: this.requireActiveBase().updatedAt,
         semanticRevision: this.requireActiveBase().semanticRevision,
@@ -9180,6 +10095,10 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         semanticHash: this.requireActiveBase().semanticHash,
         semanticLineage: [...this.requireActiveBase().semanticLineage],
       };
+      // Captured before the action runs, never inferred from mutated data.
+      const priorHistoryBinding = options.requireUndo
+        ? this.priorHistoryBindingFor(this.requireActiveBase())
+        : undefined;
       const transactionBackup = options.requireUndo ? cloneJsonValue(this.data) : null;
       const previousUndoStack = [...this.data.undoStack];
       const previousRedoStack = [...this.data.redoStack];
@@ -9225,6 +10144,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
             snapshot,
             pendingRequiredUndoCommit,
             previousRedoStack,
+            priorHistoryBinding,
           );
         }
         storeSaveAttempted = true;
@@ -9309,10 +10229,22 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (this.externalReloadBusy) throw new Error("Finish reloading synced knowledge-base data before using history.");
     const source = direction === "undo" ? this.data.undoStack : this.data.redoStack;
     if (source.length === 0) return;
+    // Second gate: before popping, reserving an inverse or writing anything,
+    // re-check that this pair is still bound to the payload it will act on.
+    const gatedEntry = this.requireActiveBase();
+    if (this.historyBindingIsStale(gatedEntry)) {
+      gatedEntry.data.undoStack = [];
+      gatedEntry.data.redoStack = [];
+      this.historyBindingByBase.delete(gatedEntry.id);
+      this.persistDeviceLocalStateSafely();
+      this.historyResetNotice([privacySafeBaseName(gatedEntry.data.settings.workspaceName)]);
+      return;
+    }
 
     this.dataTransactionBusy = true;
     try {
       await this.enqueueAppLogicalOperation(async () => {
+      const priorHistoryBinding = this.priorHistoryBindingFor(this.requireActiveBase());
       const priorUndoStack = [...this.data.undoStack];
       const priorRedoStack = [...this.data.redoStack];
       const sourceStack = direction === "undo" ? priorUndoStack : priorRedoStack;
@@ -9375,6 +10307,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
             pendingHistoryTransitionCommit,
             priorUndoStack,
             priorRedoStack,
+            priorHistoryBinding,
           );
         }
         if (pendingHistoryTransitionCommit) {
@@ -9386,7 +10319,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           // differs only in device-local view/history). Persist that completed
           // history transition directly: there is no synced payload to commit
           // and therefore no primary-write crash window to journal.
-          const built = createDeviceLocalPluginStateWithReport(this.store);
+          const built = this.buildDeviceLocalState();
           if (built.historyTruncated) {
             const localByBaseId = new Map(built.state.bases.map((base) => [base.baseId, base.view]));
             for (const candidate of this.store.bases) {
@@ -9473,24 +10406,89 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     return this.recordLinkIndex.get(lowered) ?? null;
   }
 
-  getBacklinkPaths(path: string): string[] {
-    if (!this.backlinkIndex) {
-      this.backlinkIndex = new Map<string, string[]>();
-      for (const [source, links] of Object.entries(this.app.metadataCache.resolvedLinks)) {
-        for (const destination of Object.keys(links)) {
-          // Append in place; copying the array per backlink is quadratic on hub notes.
-          const sources = this.backlinkIndex.get(destination);
-          if (sources) sources.push(source);
-          else this.backlinkIndex.set(destination, [source]);
-        }
+  private buildBacklinkIndex(): Map<string, string[]> {
+    const graph = this.app.metadataCache.resolvedLinks;
+    const index = new Map<string, string[]>();
+    const forward = new Map<string, string[]>();
+    for (const [source, links] of Object.entries(graph)) {
+      const destinations = Object.keys(links);
+      if (destinations.length > 0) forward.set(source, destinations);
+      for (const destination of destinations) {
+        // Append in place; copying the array per backlink is quadratic on hub notes.
+        const sources = index.get(destination);
+        if (sources) sources.push(source);
+        else index.set(destination, [source]);
       }
     }
-    return this.backlinkIndex.get(path) ?? [];
+    this.backlinkIndex = index;
+    this.backlinkForward = forward;
+    this.backlinkDirty.clear();
+    this.backlinkGraph = graph;
+    return index;
+  }
+
+  /** Remember that one source's edges may have changed; the next lookup re-reads only that source. */
+  private markBacklinkSourceDirty(path: string): void {
+    if (this.backlinkIndex) this.backlinkDirty.add(path);
+  }
+
+  /**
+   * Re-read one source's final edges and patch the reverse index. Returns whether
+   * the visible backlinks changed. A replaced resolvedLinks object invalidates
+   * the whole index instead.
+   */
+  private patchBacklinkSource(source: string): boolean {
+    const index = this.backlinkIndex;
+    if (!index) return false;
+    const graph = this.app.metadataCache.resolvedLinks;
+    if (graph !== this.backlinkGraph) {
+      this.backlinkIndex = null;
+      return true;
+    }
+    const previous = this.backlinkForward.get(source) ?? [];
+    const links = graph[source] as Record<string, number> | undefined;
+    const next = links ? Object.keys(links) : [];
+    const nextSet = new Set(next);
+    const previousSet = new Set(previous);
+    let changed = false;
+    for (const destination of previous) {
+      if (nextSet.has(destination)) continue;
+      changed = true;
+      const sources = index.get(destination);
+      if (!sources) continue;
+      const position = sources.indexOf(source);
+      if (position >= 0) sources.splice(position, 1);
+      if (sources.length === 0) index.delete(destination);
+    }
+    for (const destination of next) {
+      if (previousSet.has(destination)) continue;
+      changed = true;
+      const sources = index.get(destination);
+      if (sources) sources.push(source);
+      else index.set(destination, [source]);
+    }
+    if (next.length > 0) this.backlinkForward.set(source, next);
+    else this.backlinkForward.delete(source);
+    return changed;
+  }
+
+  getBacklinkPaths(path: string): string[] {
+    let index = this.backlinkIndex;
+    if (index && this.backlinkGraph !== this.app.metadataCache.resolvedLinks) index = null;
+    if (!index) index = this.buildBacklinkIndex();
+    if (this.backlinkDirty.size > 0) {
+      const dirty = [...this.backlinkDirty];
+      this.backlinkDirty.clear();
+      for (const source of dirty) this.patchBacklinkSource(source);
+      index = this.backlinkIndex ?? this.buildBacklinkIndex();
+    }
+    return index.get(path) ?? [];
   }
 
   validateGenericNote(value: GenericNoteFormValue): string | null {
     if (!value.title.trim()) return "Enter a note title.";
-    if (!sanitizeFileName(value.title)) return "The note title must contain at least one valid filename character.";
+    const basenameError = newNoteBasenameError(value.title);
+    if (basenameError) return basenameError;
     if (!genericNotePath(value.folder, value.title)) return "Choose a valid note title and destination.";
     const folderError = validateWritableFolderPath(value.folder, this.app.vault.configDir);
     if (folderError) return folderError;
@@ -9753,8 +10751,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     // Opened from the Command Center, the note has no active editor cursor, so
     // a cursor default would always be refused; start at the end of the note.
     const configuredMode = this.data.settings.attachmentInsertionMode;
-    const insertionMode = configuredMode === "cursor"
-      && this.app.workspace.getActiveViewOfType(MarkdownView)?.file !== note ? "end" : configuredMode;
+    const cursorAvailable = this.app.workspace.getActiveViewOfType(MarkdownView)?.file === note;
+    const insertionMode = configuredMode === "cursor" && !cursorAvailable ? "end" : configuredMode;
     new AttachmentImportModal(
       this.app,
       note.path,
@@ -9767,6 +10765,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
           .sort((left, right) => left.localeCompare(right))
         : [],
       insertionMode,
+      cursorAvailable,
       async (value) => {
         this.assertAttachmentOperationCurrent(note, policy);
         await this.attachFilesToNote(note, value, policy);
@@ -9811,6 +10810,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       throw new Error("The selected note changed or was replaced. Reopen it before attaching the file.");
     }
     if (isImmutableSourcePath(note.path)) throw new Error("Immutable source-book notes cannot receive plugin attachments.");
+  }
+
+  /** Cursor insertion is valid only while the note still owns the active editor. */
+  private assertAttachmentEditorCurrent(note: TFile, mode: AttachmentBatchValue["insertionMode"]): void {
+    if (mode === "cursor" && this.app.workspace.getActiveViewOfType(MarkdownView)?.file !== note) {
+      throw new Error("Open this note in the Markdown editor to insert at the cursor, or choose marker, heading, or end of note.");
+    }
   }
 
   async attachFileToNote(
@@ -9863,29 +10869,44 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     let copyFailure: unknown = null;
     for (const file of files) {
       const createdFolders: TFolder[] = [];
-      let destination: string;
-      let bytes: ArrayBuffer;
-      try {
-        destination = await this.availableAttachmentDestination(note, file.name, value.requestedFolder, policy, createdFolders);
-        this.assertAttachmentOperationCurrent(note, policy);
-        bytes = await file.arrayBuffer();
-        this.assertAttachmentOperationCurrent(note, policy);
-      } catch (error) {
-        await this.removeCreatedEmptyFolders(createdFolders);
-        if (created.length === 0) throw error;
-        copyFailure = error;
-        break;
+      let bytes: ArrayBuffer | null = null;
+      let copied: TFile | null = null;
+      let failure: unknown = null;
+      // createBinary is exclusive. Only a positively identified name collision
+      // (the path or a case-equivalent sibling now exists) earns a new name, a
+      // finite number of times; every other failure stops at once.
+      for (let attempt = 0; attempt < MAX_ATTACHMENT_CREATE_ATTEMPTS && copied === null && failure === null; attempt += 1) {
+        let destination: string;
+        try {
+          this.assertAttachmentEditorCurrent(note, value.insertionMode);
+          destination = await this.availableAttachmentDestination(note, file.name, value.requestedFolder, policy, createdFolders);
+          this.assertAttachmentOperationCurrent(note, policy);
+          this.assertAttachmentEditorCurrent(note, value.insertionMode);
+          bytes ??= await file.arrayBuffer();
+          this.assertAttachmentOperationCurrent(note, policy);
+          this.assertAttachmentEditorCurrent(note, value.insertionMode);
+        } catch (error) {
+          failure = error;
+          break;
+        }
+        try {
+          copied = await this.app.vault.createBinary(destination, bytes);
+        } catch (error) {
+          console.error("Knowledge Base Command Center could not copy the selected attachment", error);
+          if (policy.storageMode !== "obsidian" && isAttachmentExistsError(error) && this.attachmentPathTaken(destination)) continue;
+          failure = new Error(`The attachment could not be copied to ${destination}.`);
+        }
       }
-      try {
-        created.push({ file: await this.app.vault.createBinary(destination, bytes), name: file.name });
-      } catch (error) {
+      if (copied === null && failure === null) {
+        failure = new Error(`No unused name was found for ${attachmentFileName(file.name)} after ${MAX_ATTACHMENT_CREATE_ATTEMPTS} attempts. Nothing was overwritten.`);
+      }
+      if (copied === null) {
         await this.removeCreatedEmptyFolders(createdFolders);
-        console.error("Knowledge Base Command Center could not copy the selected attachment", error);
-        const failure = new Error(`The attachment could not be copied to ${destination}.`);
         if (created.length === 0) throw failure;
         copyFailure = failure;
         break;
       }
+      created.push({ file: copied, name: file.name });
     }
     try {
       this.assertAttachmentOperationCurrent(note, policy);
@@ -9922,7 +10943,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       const because = reason ? ` (${reason})` : "";
       throw new AttachmentLinkInsertionError(paths.length === 1
         ? `The file was copied to ${paths[0] ?? ""}, but its Markdown link could not be inserted${because}. Add the link manually.`
-        : `The files were copied to ${paths.join(", ")}, but their Markdown links could not be inserted${because}. Add the links manually.`);
+        : `The files were copied to ${paths.join(", ")}, but their Markdown links could not be inserted${because}. Add the links manually.`, paths);
     }
     if (copyFailure !== null) {
       new Notice(
@@ -9966,9 +10987,19 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     for (let suffix = 0; suffix <= 10_000; suffix += 1) {
       const path = attachmentPathCandidate(folder, originalName, suffix);
       if (isImmutableSourcePath(path)) throw new Error("Attachments cannot be stored inside immutable source-book folders.");
-      if (!this.app.vault.getAbstractFileByPath(path)) return path;
+      if (!this.attachmentPathTaken(path)) return path;
     }
     throw new Error("No collision-free attachment filename could be created in that folder.");
+  }
+
+  /** True when the exact path, or a sibling equal after Unicode and case folding, already exists (file or folder). */
+  private attachmentPathTaken(path: string): boolean {
+    if (this.app.vault.getAbstractFileByPath(path)) return true;
+    const slash = path.lastIndexOf("/");
+    const parent = this.app.vault.getAbstractFileByPath(slash > 0 ? path.slice(0, slash) : "/");
+    if (!(parent instanceof TFolder)) return false;
+    const key = attachmentCollisionKey(path.slice(slash + 1));
+    return parent.children.some((child) => attachmentCollisionKey(child.name) === key);
   }
 
   getPortableJsonFiles(): TFile[] {
@@ -9985,10 +11016,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private async writeConflictRescueStore(store: PluginStore, reason: string): Promise<string> {
     try {
       const serializedStore = JSON.stringify(store);
-      if (serializedStore === this.lastConflictRescueStore && this.lastConflictRescuePath) {
+      // A cached path is a claim, not proof: reuse it only when the saved file
+      // still exists holding exactly the bytes that were written.
+      if (serializedStore === this.lastConflictRescueStore && this.lastConflictRescuePath
+        && await this.conflictRescueFileHolds(this.lastConflictRescuePath, this.lastConflictRescueContent, true)) {
         return this.lastConflictRescuePath;
       }
-      const file = await this.writePortableJson("conflict", {
+      const written = await this.writePortableJsonText("conflict", {
         kind: "knowledge-base-command-center-conflict-rescue",
         version: 1,
         exportedAt: new Date().toISOString(),
@@ -9996,16 +11030,46 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         privacy: "Contains plugin organization and exact vault-relative paths; note contents are not included.",
         store,
       });
+      // The new file is never trusted until it reads back byte-for-byte.
+      if (!await this.conflictRescueFileHolds(written.file.path, written.content, false)) {
+        throw new Error("the conflict rescue could not be verified");
+      }
       this.lastConflictRescueStore = serializedStore;
-      this.lastConflictRescuePath = file.path;
-      return file.path;
+      this.lastConflictRescuePath = written.file.path;
+      this.lastConflictRescueContent = written.content;
+      return written.file.path;
     } catch {
       console.error("Knowledge Base Command Center could not write a Sync conflict rescue.");
       return "";
     }
   }
 
+  /**
+   * True when `path` holds exactly `content`. With `checkSize`, the reported
+   * size must equal the UTF-8 byte length before the file is read; any error or
+   * doubt is "no", which makes the caller write a new verified file.
+   */
+  private async conflictRescueFileHolds(path: string, content: string, checkSize: boolean): Promise<boolean> {
+    try {
+      const adapter = this.app.vault.adapter;
+      if (checkSize) {
+        const stat = await adapter.stat(path);
+        if (!stat || stat.size !== new TextEncoder().encode(content).length) return false;
+      }
+      return await adapter.read(path) === content;
+    } catch {
+      return false;
+    }
+  }
+
   async writePortableJson(kind: "backup" | "workspace" | "portable" | "portfolio" | "conflict", value: unknown): Promise<TFile> {
+    return (await this.writePortableJsonText(kind, value)).file;
+  }
+
+  private async writePortableJsonText(
+    kind: "backup" | "workspace" | "portable" | "portfolio" | "conflict",
+    value: unknown,
+  ): Promise<{ file: TFile; content: string }> {
     // Per-base setting; cleanSettings guarantees it non-empty, and the
     // classifier never reads it, so relocating it cannot orphan notes.
     const configuredFolder = this.data.settings.exportsFolder.trim().replace(/^\/+|\/+$/gu, "")
@@ -10025,7 +11089,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     const createdFolders: TFolder[] = [];
     try {
       await this.ensureFolder(folder, createdFolders);
-      return await this.app.vault.create(path, content);
+      return { file: await this.app.vault.create(path, content), content };
     } catch (error) {
       await this.removeCreatedEmptyFolders(createdFolders);
       throw error;
@@ -10046,6 +11110,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   validateProposal(value: TopicFormValue, currentPath = ""): string | null {
     if (!value.title) return "Enter a topic title.";
+    const basenameError = newNoteBasenameError(value.title);
+    if (basenameError) return basenameError;
     const folder = normalizePath(this.data.settings.proposalFolder);
     const folderError = this.isClinicalMode()
       ? validateProposalFolderPath(folder, this.app.vault.configDir)
@@ -10501,7 +11567,31 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   private handleVaultRenameEvent(file: TAbstractFile, oldPath: string): void {
     if (!(file instanceof TFile) && !(file instanceof TFolder)) return;
     this.rewriteKbccReturnNavigationPaths(oldPath, file.path);
-    this.pendingVaultRenames.push({ oldPath, newPath: file.path, folderRename: file instanceof TFolder });
+    const event: PendingVaultRename = { oldPath, newPath: file.path, folderRename: file instanceof TFolder };
+    if (this.recordWaitingVaultRename(event)) {
+      this.invalidateRecordCache();
+      return;
+    }
+    // Every state obeys the same bound. A blocked journal's complete prefix is
+    // frozen, and a foreign or read-only session refuses (rather than stores)
+    // the event that would pass the bound, keeping the foreign raw evidence.
+    const retained = this.retainedVaultRenameJournal;
+    const ownsJournal = !retained || boundVaultIdOf(retained) === this.store.vaultId;
+    if (this.vaultRenameSessionOverflow || (ownsJournal && retained?.blocked)) {
+      this.invalidateRecordCache();
+      return;
+    }
+    if (!vaultRenameAppendFits({ kind: "bound", vaultId: this.store.vaultId }, this.pendingVaultRenames, event)) {
+      if (ownsJournal) {
+        this.blockVaultRenameJournal("overflow", { kind: "bound", vaultId: this.store.vaultId }, this.pendingVaultRenames);
+      } else {
+        this.vaultRenameSessionOverflow = true;
+        this.noticeVaultRenameBlocked("overflow");
+      }
+      this.invalidateRecordCache();
+      return;
+    }
+    this.pendingVaultRenames.push(event);
     try {
       this.writeVaultRenameJournal(this.pendingVaultRenames);
       this.journaledVaultRenameCount = this.pendingVaultRenames.length;
@@ -10521,7 +11611,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
   }
 
   private schedulePendingVaultRenameRepairs(): void {
-    if (this.pendingVaultRenames.length === 0) return;
+    if (this.pendingVaultRenames.length === 0 || !this.vaultRenameReplayAllowed()) return;
     const repair = this.vaultRenameRepairQueue.then(async () => {
       // Process physical renames in event order. If one durable repair fails,
       // later overlays and their journal remain composed instead of being
@@ -10529,7 +11619,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       while (this.pendingVaultRenames.length > 0) {
         const pending = this.pendingVaultRenames[0];
         if (!pending) break;
-        await this.handleRename(pending.oldPath, pending.newPath, pending.folderRename);
+        // Waiting is a result, not an error: evidence stays, nothing spins.
+        if (this.vaultRenameHeadNeedsHold(pending)) break;
+        try {
+          await this.handleRename(pending.oldPath, pending.newPath, pending.folderRename);
+        } catch (error) {
+          if (error instanceof VaultRenameReplayWaiting) break;
+          throw error;
+        }
         if (this.journaledVaultRenameCount > 0) {
           const remaining = this.pendingVaultRenames.slice(1);
           try {
@@ -10592,6 +11689,13 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       || this.externalReloadBusy || this.externalReloadPromise !== null) return false;
 
     this.assertDataWritable();
+    // Recheck identity, authority and path applicability inside the guarded
+    // operation, before anything is rewritten or dequeued.
+    const head = this.pendingVaultRenames[0];
+    if (head && head.oldPath === oldPath && head.newPath === newPath && head.folderRename === folderRename
+      && this.vaultRenameHeadNeedsHold(head)) {
+      throw new VaultRenameReplayWaiting();
+    }
     const storeBackup = cloneJsonValue(this.store);
     const attemptExternalGeneration = this.externalChangeGeneration;
     this.baseOperationBusy = true;
@@ -10759,7 +11863,11 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       }
     }
     const behavior = this.data.settings.openNoteBehavior;
-    const leaf = behavior === "same-tab"
+    // A deliberate non-Markdown open from KBCC keeps the command center in
+    // place: request a new tab and leave actual handling to the host.
+    const leaf = origin && file.extension.toLowerCase() !== "md"
+      ? this.app.workspace.getLeaf("tab")
+      : behavior === "same-tab"
       ? this.app.workspace.getLeaf(false)
       : behavior === "split"
         ? this.app.workspace.getLeaf("split", "vertical")

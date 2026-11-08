@@ -349,7 +349,7 @@ test("explicit parent cannot bypass protected clinical eligibility or source gro
 test("explicit linked-folder placement discloses durable enrollment and never changes folder authority", () => {
   const base = entry("base-a", "Alpha");
   const path = "Vault/Leaf.md";
-  base.data.indexFolderSources = [{ id: "folder", path: "Vault", recursive: true, origin: "user" }];
+  base.data.indexFolderSources = [{ id: "folder", path: "Vault", origin: "user" }];
   const store = storeWith([base]);
   const facts = [fact("base-a", path, { suggestedIndexGroup: "Topics", indexPlacement: indexPlacement(null) })];
   const plan = createNoteOrganizerPlan(store, facts, [{ baseId: "base-a", path, primary: { mode: "index", groupTitle: "Topics", parentPath: null } }]);

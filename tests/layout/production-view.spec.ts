@@ -26,7 +26,7 @@ test.beforeAll(async () => {
   hostStyles = host;
 });
 
-async function openView(page: Page, options: { mobile?: boolean; dark?: boolean; count?: number; phoneChrome?: boolean; width?: number; height?: number; largeText?: boolean; scenario?: "related-overflow" | "attachments" } = {}): Promise<void> {
+async function openView(page: Page, options: { mobile?: boolean; dark?: boolean; count?: number; phoneChrome?: boolean; width?: number; height?: number; largeText?: boolean; scenario?: "related-overflow" | "attachments" | "placeholder-link" } = {}): Promise<void> {
   const errors: string[] = [];
   failures.set(page, errors);
   page.on("pageerror", (error) => errors.push(error.message));
@@ -224,11 +224,14 @@ for (const device of [
       for (const name of ["Diagram.png", "Minutes.docx", "Results.xlsx", "Slides.pptx", "Recording.mp3", "Walkthrough.mp4", "Archive.zip", "Bundle.custom", "README", "Cover.jpg"]) {
         await expect(section.getByRole("button", { name: `Open attachment: ${name}`, exact: true })).toHaveCount(1);
       }
-      const duplicates = section.getByRole("button", { name: "Open attachment: shared.pdf", exact: true });
-      await expect(duplicates).toHaveCount(2);
-      await expect(duplicates.first()).toContainText("Attachments/One/shared.pdf");
-      await expect(duplicates.last()).toContainText("Attachments/Two/shared.pdf");
-      await expect(section.locator(".is-missing")).toHaveText("Not-synced.pdfNot available on this device");
+      await expect(section.getByRole("button", { name: "Open attachment: shared.pdf", exact: true })).toHaveCount(0);
+      const first = section.getByRole("button", { name: "Open attachment: shared.pdf, path Attachments/One/shared.pdf", exact: true });
+      const second = section.getByRole("button", { name: "Open attachment: shared.pdf, path Attachments/Two/shared.pdf", exact: true });
+      await expect(first).toHaveCount(1);
+      await expect(second).toHaveCount(1);
+      await expect(first).toContainText("Attachments/One/shared.pdf");
+      await expect(second).toContainText("Attachments/Two/shared.pdf");
+      await expect(section.locator(".is-missing")).toHaveText("Not-synced.pdfLinked reference not found; it may be a note or file");
       await expect(section.locator(".is-missing button")).toHaveCount(0);
       await expect(section.locator("img, iframe, audio, video, object, embed")).toHaveCount(0);
       await expect(section).not.toContainText("remote.pdf");
@@ -279,6 +282,187 @@ test("attachment metadata refresh distinguishes waiting, missing, empty and dele
   await expect(section.locator(".is-missing")).toContainText("Review.pdf");
   await page.getByRole("button", { name: /^Plain note,/u }).click();
   await expect(section).toContainText("No linked files in this note yet.");
+});
+
+const focusedAttachmentPath = (page: Page): Promise<string | null> => page.evaluate(() => document.activeElement?.getAttribute("data-ent-cc-attachment-path") ?? null);
+
+for (const direction of ["ltr", "rtl"] as const) test(`WF07 I1 I2 I3 ${direction} revealed attachments and focus survive a harmless refresh, are not stolen, and reset for another note`, async ({ page }) => {
+  await openView(page, { scenario: "attachments" });
+  await page.locator("#kbcc-view").evaluate((element, value) => element.setAttribute("dir", value), direction);
+  await page.getByRole("button", { name: /^Attachment overview,/u }).click();
+  const section = page.locator(".ent-cc-note-attachments");
+  const rows = section.locator(".ent-cc-attachment-row");
+  await expect(rows).toHaveCount(20);
+  await section.locator(".ent-cc-attachments-more").click();
+  await expect(rows).toHaveCount(28);
+  const target = rows.nth(24);
+  const path = await target.getAttribute("data-ent-cc-attachment-path");
+  expect(path).toBeTruthy();
+  await target.focus();
+  await refresh(page);
+  await expect(rows).toHaveCount(28);
+  expect(await focusedAttachmentPath(page)).toBe(path);
+  await page.evaluate(() => {
+    const outside = document.body.createEl("input");
+    outside.id = "wf07-outside";
+    outside.focus();
+  });
+  await refresh(page);
+  await expect(page.locator("#wf07-outside")).toBeFocused();
+  await expect(rows).toHaveCount(28);
+  await page.getByRole("button", { name: /^Plain note,/u }).click();
+  await page.getByRole("button", { name: /^Attachment overview,/u }).click();
+  await expect(rows).toHaveCount(20);
+});
+
+test("WF07 I4 a narrow desktop pane is not a modal dialog and lets Tab leave the inspector", async ({ page }) => {
+  await openView(page, { scenario: "attachments", width: 600, height: 900 });
+  await page.getByRole("button", { name: /^Attachment overview,/u }).click();
+  const inspector = page.locator(".ent-cc-inspector");
+  await expect(inspector).toHaveAttribute("role", "complementary");
+  await expect(inspector).not.toHaveAttribute("aria-modal", /.*/u);
+  await page.evaluate(() => {
+    const items = Array.from(document.querySelectorAll<HTMLElement>(".ent-cc-inspector button, .ent-cc-inspector summary")).filter((element) => element.offsetParent !== null);
+    items[items.length - 1].focus();
+  });
+  await page.keyboard.press("Tab");
+  expect(await page.evaluate(() => Boolean(document.activeElement?.closest(".ent-cc-inspector")))).toBe(false);
+});
+
+for (const device of [
+  { name: "phone390", width: 390, height: 844 },
+  { name: "narrow tablet 768", width: 768, height: 1024 },
+  { name: "wide tablet 1180", width: 1180, height: 820 },
+]) test.describe(`WF07 I4 ${device.name}`, () => {
+  test.use({ hasTouch: true });
+  test("an actual mobile compact inspector keeps its dialog trap and Escape", async ({ page }) => {
+    await openView(page, { scenario: "attachments", mobile: true, width: device.width, height: device.height });
+    await page.getByRole("button", { name: /^Attachment overview,/u }).click();
+    const inspector = page.locator(".ent-cc-inspector");
+    await expect(inspector).toHaveAttribute("role", "dialog");
+    await expect(inspector).toHaveAttribute("aria-modal", "true");
+    await page.evaluate(() => {
+      const items = Array.from(document.querySelectorAll<HTMLElement>(".ent-cc-inspector button, .ent-cc-inspector summary")).filter((element) => element.offsetParent !== null);
+      items[items.length - 1].focus();
+    });
+    await page.keyboard.press("Tab");
+    await expect(page.locator(".ent-cc-inspector-close")).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(inspector).toHaveCount(0);
+  });
+});
+
+test("WF07 I5 Expand and Next-list controls change their names without contradictory pressed state", async ({ page }) => {
+  await openView(page, { scenario: "attachments" });
+  await page.getByRole("button", { name: /^Attachment overview,/u }).click();
+  const expand = page.getByRole("button", { name: "Expand note details", exact: true });
+  await expect(expand).not.toHaveAttribute("aria-pressed", /.*/u);
+  await expand.click();
+  const back = page.getByRole("button", { name: "Back to split view", exact: true });
+  await expect(back).toBeFocused();
+  await expect(back).not.toHaveAttribute("aria-pressed", /.*/u);
+  await back.click();
+  await expect(page.getByRole("button", { name: "Expand note details", exact: true })).toBeFocused();
+  const add = page.getByRole("button", { name: "Add to Next list", exact: true });
+  await expect(add).not.toHaveAttribute("aria-pressed", /.*/u);
+  // The synthetic host does not persist Next-list state; the click-and-rerender half is a runtime test (view-state WF07 I5).
+});
+
+for (const direction of ["ltr", "rtl"] as const) test(`WF07 I6 ${direction} a deleted attachment gives persistent live feedback that survives refresh, is replaced, and can be dismissed`, async ({ page }) => {
+  await openView(page, { scenario: "attachments" });
+  await page.locator("#kbcc-view").evaluate((element, value) => element.setAttribute("dir", value), direction);
+  await page.getByRole("button", { name: /^Attachment overview,/u }).click();
+  const feedback = page.locator(".ent-cc-view-feedback");
+  await expect(feedback).toBeHidden();
+  await expect(page.locator('.ent-cc-view-feedback [role="status"]')).toHaveCount(1);
+  await expect(page.locator('.ent-cc-view-feedback [role="alert"]')).toHaveCount(1);
+  const pdf = page.locator(".ent-cc-note-attachments").getByRole("button", { name: "Open attachment: Review.pdf", exact: true });
+  await page.evaluate(() => (window as unknown as { kbccBrowserHarness: { removeAttachment(path: string): void } }).kbccBrowserHarness.removeAttachment("Attachments/Review.pdf"));
+  await pdf.click();
+  await expect(feedback).toBeVisible();
+  await expect(feedback).toContainText("Linked reference not found; it may be a note or file: Review.pdf");
+  await expect(feedback).not.toContainText(/syncing|this device/u);
+  await refresh(page);
+  await expect(feedback).toContainText("Review.pdf");
+  await page.locator(".ent-cc-note-attachments").getByRole("button", { name: "Open attachment: Diagram.png", exact: true }).click();
+  await expect(feedback).toContainText("Opened Diagram.png.");
+  await expect(feedback).not.toContainText("Linked reference not found");
+  const dismiss = feedback.getByRole("button", { name: "Dismiss message", exact: true });
+  await dismiss.focus();
+  await page.keyboard.press("Enter");
+  await expect(feedback).toBeHidden();
+  expect(await page.evaluate(() => document.activeElement === document.body)).toBe(false);
+});
+
+interface PlaceholderLinkCalls { placed: Array<{ path: string; group: string }>; linked: Array<{ subjectId: string; path: string; merge: boolean }> }
+const linkCalls = (page: Page): Promise<PlaceholderLinkCalls> => page.evaluate(() => (window as unknown as { kbccBrowserHarness: { placeholderLinkSnapshot(): PlaceholderLinkCalls } }).kbccBrowserHarness.placeholderLinkSnapshot());
+async function startAddExisting(page: Page, note: string): Promise<void> {
+  await page.evaluate(() => (window as unknown as { kbccBrowserHarness: { startAddExisting(): void } }).kbccBrowserHarness.startAddExisting());
+  await page.getByRole("option", { name: new RegExp(note, "u") }).click();
+}
+
+test.describe("WF10 placeholder choice", () => {
+  test("P1 a matching note offers an explicit choice and linking happens only when chosen", async ({ page }) => {
+    await openView(page, { scenario: "placeholder-link", count: 8 });
+    await startAddExisting(page, "Laryngomalacia");
+    await expect(page.getByRole("dialog")).toContainText("matches an imported subject");
+    const link = page.getByRole("option", { name: /Link to “Laryngomalacia”.*Airway.*title match/u });
+    await expect(link).toHaveCount(1);
+    await expect(page.getByRole("option", { name: /separately, without linking/u })).toHaveCount(1);
+    expect(await linkCalls(page)).toEqual({ placed: [], linked: [] });
+    await link.click();
+    // WF11 F04: the effects are reviewed before any write; Cancel leaves no link.
+    const review = page.getByRole("dialog", { name: "Link note to imported subject?", exact: true });
+    await expect(review).toContainText("Direct Index membership");
+    await expect(review).toContainText("The Markdown note is not changed");
+    expect(await linkCalls(page)).toEqual({ placed: [], linked: [] });
+    await review.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    expect((await linkCalls(page)).linked).toEqual([]);
+    await startAddExisting(page, "Laryngomalacia");
+    await page.getByRole("option", { name: /Link to “Laryngomalacia”/u }).click();
+    await page.getByRole("dialog", { name: "Link note to imported subject?", exact: true }).getByRole("button", { name: "Link note", exact: true }).click();
+    await expect.poll(async () => (await linkCalls(page)).linked).toEqual([{ subjectId: "subject-larynx", path: "Inbox/Laryngomalacia.md", merge: false }]);
+    expect((await linkCalls(page)).placed).toEqual([]);
+  });
+
+  test("P3 add separately keeps the group picker, cancel writes nothing, and no match skips the choice", async ({ page }) => {
+    await openView(page, { scenario: "placeholder-link", count: 8 });
+    await startAddExisting(page, "Laryngomalacia");
+    await page.getByRole("option", { name: /separately, without linking/u }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toContainText("Place “Laryngomalacia”");
+    await dialog.getByRole("button", { name: /^Add to /u }).click();
+    await expect.poll(async () => (await linkCalls(page)).placed).toEqual([{ path: "Inbox/Laryngomalacia.md", group: "Airway" }]);
+    expect((await linkCalls(page)).linked).toEqual([]);
+
+    await startAddExisting(page, "Laryngomalacia");
+    await page.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    expect(await linkCalls(page)).toEqual({ placed: [{ path: "Inbox/Laryngomalacia.md", group: "Airway" }], linked: [] });
+
+    await startAddExisting(page, "Standalone");
+    await expect(page.getByRole("dialog")).toContainText("Place “Standalone”");
+    await expect(page.getByRole("dialog")).not.toContainText("matches an imported subject");
+  });
+});
+
+test.describe("WF07 R4 phone", () => {
+  test.use({ hasTouch: true });
+  test("feedback about a very long attachment name wraps inside a 390px phone with Dismiss reachable", async ({ page }) => {
+    await openView(page, { scenario: "attachments", mobile: true, width: 390, height: 844 });
+    await page.getByRole("button", { name: /^Attachment overview,/u }).click();
+    const section = page.locator(".ent-cc-note-attachments");
+    await section.locator(".ent-cc-attachments-more").click();
+    await section.getByRole("button", { name: /^Open attachment: SyntheticUnbroken/u }).click();
+    const feedback = page.locator(".ent-cc-view-feedback");
+    await expect(feedback).toContainText("Opened SyntheticUnbroken");
+    const geometry = await feedback.evaluate((region) => ({ client: region.clientWidth, scroll: region.scrollWidth, viewport: innerWidth,
+      dismissRight: region.querySelector("button")!.getBoundingClientRect().right }));
+    expect(geometry.scroll).toBeLessThanOrEqual(geometry.client);
+    expect(geometry.dismissRight).toBeLessThanOrEqual(geometry.viewport);
+    await expect(feedback.getByRole("button", { name: "Dismiss message", exact: true })).toBeVisible();
+  });
 });
 
 async function workspaceLayoutSnapshot(page: Page): Promise<{ localValues: Record<string, { version: number; inspectorWidth: number; tabletSplit: boolean }>; organizationUnchanged: boolean }> {
@@ -759,6 +943,63 @@ for (const device of [
       await dialog.getByRole("button", { name: "Save organization", exact: true }).click();
       await expect(dialog).toHaveCount(0);
       expect(await quickOrganizerSnapshot(page)).toMatchObject({ applied: 2, undoCount: 2, collections: [], collectionNames: saved.collectionNames, parent: original.parent, group: original.group });
+    });
+
+    // In-memory browser host: this proves UI operability only. Real commit, Undo,
+    // Redo and restart persistence are in tests/collections-journey-reload.test.ts.
+    test("WF13 in-memory host: long labels and empty Collection state stay operable through both cancel points and save", async ({ page }) => {
+      const longTitle = "Long Collection title that wraps across many phone lines without hiding its controls ".repeat(1).trim();
+      const longChild = "Long subheading title that must also wrap and stay selectable on a narrow phone";
+      await openView(page, { ...device, count: 8 });
+      await page.evaluate(() => (window as unknown as { kbccBrowserHarness: { clearQuickCollections(): void } }).kbccBrowserHarness.clearQuickCollections());
+      await openModal(page, "quick-organizer");
+      const dialog = page.getByRole("dialog", { name: "Organize this note", exact: true });
+      await expect(dialog.getByText("No collections yet. Create one below.", { exact: true })).toBeVisible();
+      const name = dialog.getByRole("textbox", { name: "New collection or subheading name", exact: true });
+      const create = dialog.getByRole("button", { name: "Create and select", exact: true });
+      const createUnder = dialog.getByRole("combobox", { name: "Create under", exact: true });
+      const review = dialog.getByRole("button", { name: "Review placement", exact: true });
+      await name.fill(longTitle);
+      await create.click();
+      await createUnder.selectOption({ label: longTitle });
+      await name.fill(longChild);
+      await create.click();
+      const nested = dialog.getByRole("checkbox", { name: `${longTitle} / ${longChild}`, exact: true });
+      await expect(nested).toBeChecked();
+      await nested.scrollIntoViewIfNeeded();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth), "long labels cause no page overflow").toBeLessThanOrEqual(1);
+
+      // Cancel before review: nothing exists after discarding.
+      await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+      await dialog.getByRole("button", { name: "Discard and close", exact: true }).click();
+      await expect(dialog).toHaveCount(0);
+      expect(await quickOrganizerSnapshot(page)).toMatchObject({ unchanged: true, collectionNames: [], applied: 0, undoCount: 0 });
+
+      // Cancel after preview.
+      await openModal(page, "quick-organizer");
+      await expect(dialog.getByText("No collections yet. Create one below.", { exact: true })).toBeVisible();
+      await name.fill(longTitle);
+      await create.click();
+      await review.scrollIntoViewIfNeeded();
+      await review.click();
+      await expect(dialog.getByText(`Collections: ${longTitle}`, { exact: true })).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
+      await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+      await dialog.getByRole("button", { name: "Discard and close", exact: true }).click();
+      await expect(dialog).toHaveCount(0);
+      expect(await quickOrganizerSnapshot(page)).toMatchObject({ unchanged: true, collectionNames: [], applied: 0, undoCount: 0 });
+
+      // Save the long path, then reopen and see it checked.
+      await openModal(page, "quick-organizer");
+      await name.fill(longTitle);
+      await create.click();
+      await review.scrollIntoViewIfNeeded();
+      await review.click();
+      await dialog.getByRole("button", { name: "Save organization", exact: true }).click();
+      await expect(dialog).toHaveCount(0);
+      expect(await quickOrganizerSnapshot(page)).toMatchObject({ applied: 1, undoCount: 1, collections: [longTitle], collectionNames: [longTitle] });
+      await openModal(page, "quick-organizer");
+      await expect(dialog.getByRole("checkbox", { name: longTitle, exact: true })).toBeChecked();
     });
   });
 }
@@ -1308,7 +1549,10 @@ for (const scenario of [
     const longName = "Long knowledge base name — Research evidence and reference notes for the whole project";
     // Supply only the native option's text fixture, not alternate product DOM or
     // CSS. The production Settings renderer owns the select, row and controls.
-    await select.evaluate((element, text) => { element.selectedOptions[0].textContent = text; }, longName);
+    await select.evaluate((element, text) => {
+      if (!(element instanceof HTMLSelectElement)) throw new Error("The Active knowledge base combobox must be a native select.");
+      element.selectedOptions[0].textContent = text;
+    }, longName);
     await expect(select.locator("option:checked")).toHaveText(longName);
     await row.scrollIntoViewIfNeeded();
     const manage = row.getByRole("button", { name: "Manage…", exact: true });
@@ -1361,22 +1605,21 @@ for (const scenario of [
 
 for (const mobile of [false, true]) {
   const viewport = mobile ? "mobile" : "desktop";
-  test(`production 0.22.0 update announcement ${viewport}: readable news and reachable actions`, async ({ page }, testInfo) => {
+  test(`production 0.27.0 update announcement ${viewport}: readable news and reachable actions`, async ({ page }, testInfo) => {
     await openView(page, { mobile, count: 8 });
     await openModal(page, "whats-new");
-    const dialog = page.getByRole("dialog", { name: "What’s new in Knowledge Base Command Center 0.22.0", exact: true });
-    await expect(dialog).toHaveAccessibleDescription("Dedicated drag grips bring touch arrangement to iPad and iPhone. Physical-device verification remains pending; the row menus are still available as an alternative.");
-    const body = dialog.getByRole("region", { name: "Version 0.22.0 highlights", exact: true });
-    await expect(body.getByRole("listitem")).toHaveCount(5);
-    await expect(body).toContainText("Details → Arrange");
-    await expect(body).toContainText("44px grip");
-    await expect(body).toContainText("deep subheadings");
-    await expect(body).toContainText("Details → Undo and Redo");
-    await expect(body).toContainText("Markdown files stay unchanged");
-    const link = dialog.getByRole("link", { name: "Read the complete 0.22.0 release notes on GitHub (opens in your browser)", exact: true });
+    const dialog = page.getByRole("dialog", { name: "What’s new in Knowledge Base Command Center 0.27.0", exact: true });
+    await expect(dialog).toHaveAccessibleDescription("Safer recovery, clearer note setup, and more reliable everyday organization.");
+    const body = dialog.getByRole("region", { name: "Version 0.27.0 highlights", exact: true });
+    await expect(body.getByRole("listitem")).toHaveCount(4);
+    await expect(body).toContainText("kept backups");
+    await expect(body).toContainText("Inbox changes");
+    await expect(body).toContainText("copied-file recovery");
+    await expect(body).toContainText("Older history may reset");
+    const link = dialog.getByRole("link", { name: "Read the complete 0.27.0 release notes on GitHub (opens in your browser)", exact: true });
     const continueButton = dialog.getByRole("button", { name: "Continue", exact: true });
     await expect(link).toHaveText("Read complete release notes");
-    await expect(link).toHaveAttribute("href", "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.22.0");
+    await expect(link).toHaveAttribute("href", "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.27.0");
     await expect(link).toHaveAttribute("target", "_blank");
     await expect(link).toHaveAttribute("rel", "noopener noreferrer");
     for (const action of [link, continueButton]) {
@@ -1384,11 +1627,11 @@ for (const mobile of [false, true]) {
       expect(await action.evaluate((element) => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
     }
     expect(await dialog.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
-    await captureEvidence(page, `whats-new-0.22.0-${viewport}`);
+    await captureEvidence(page, `whats-new-0.27.0-${viewport}`);
     await body.getByRole("listitem").last().scrollIntoViewIfNeeded();
     await expect(body.getByRole("listitem").last()).toBeInViewport({ ratio: 1 });
     await expect(continueButton).toBeInViewport();
-    await captureEvidence(page, `whats-new-0.22.0-${viewport}-last-highlight`);
+    await captureEvidence(page, `whats-new-0.27.0-${viewport}-last-highlight`);
     await link.focus();
     await page.keyboard.press(testInfo.project.name === "webkit" ? "Alt+Tab" : "Tab");
     await expect(continueButton).toBeFocused();
@@ -1757,7 +2000,8 @@ test("workspace options expose a keyboard-operable density choice that survives 
   await expect(page.locator(".ent-cc-view")).toHaveClass(/is-density-compact/u);
   const density = page.getByRole("button", { name: "Use comfortable view density" });
   await expect(density).toBeFocused();
-  await expect(density).toHaveAttribute("aria-pressed", "true");
+  // WF-07: the control's name carries the action; a pressed state would contradict it.
+  await expect(density).not.toHaveAttribute("aria-pressed", /.*/u);
   expect(await row.evaluate((element) => element.getBoundingClientRect().height)).toBeLessThan(comfortableHeight);
   await refresh(page);
   await expect(density).toBeFocused();
@@ -2048,3 +2292,124 @@ for (const mobile of [false, true]) {
     });
   }
 }
+
+type AttachmentHarness = {
+  openAttachmentImport(options?: { insertFails?: boolean }): void;
+  loseAttachmentEditor(): void;
+  attachmentImportSnapshot(): { submissions: number; copies: string[] };
+};
+
+for (const [label, width, height, mobile] of [["phone 390", 390, 844, true], ["tablet 820", 820, 1180, true]] as const) {
+  test(`WF-03 real attachment modal ${label}: stale editor, corrected End retry and terminal copied-path recovery`, async ({ page }) => {
+    await openView(page, { mobile, width, height, count: 8 });
+    const harness = (): Promise<{ submissions: number; copies: string[] }> =>
+      page.evaluate(() => (window as unknown as { kbccBrowserHarness: AttachmentHarness }).kbccBrowserHarness.attachmentImportSnapshot());
+    const open = (insertFails: boolean): Promise<void> =>
+      page.evaluate((fails) => (window as unknown as { kbccBrowserHarness: AttachmentHarness }).kbccBrowserHarness.openAttachmentImport({ insertFails: fails }), insertFails);
+    const longName = `${"a".repeat(216)}.pdf`;
+    const noOverflow = async (targets: Locator[]): Promise<void> => {
+      for (const target of targets) {
+        expect(await target.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(0);
+      }
+    };
+
+    // 1. Stale editor: Cursor was offered, the editor is lost, Attach shows an inline alert and keeps the draft.
+    await open(false);
+    const dialog = page.getByRole("dialog", { name: "Attach files to note", exact: true });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByLabel("Insert link", { exact: true }).locator("option")).toHaveText([
+      "At the current cursor", "At the configured marker", "Under the configured heading", "At the end of the note",
+    ]);
+    await expect(dialog.getByLabel("Show in note", { exact: true })).toBeVisible();
+    await dialog.locator("input[type=file]").setInputFiles([
+      { name: "one.pdf", mimeType: "application/pdf", buffer: Buffer.from("one") },
+      { name: "two.pdf", mimeType: "application/pdf", buffer: Buffer.from("two") },
+    ]);
+    await page.evaluate(() => (window as unknown as { kbccBrowserHarness: AttachmentHarness }).kbccBrowserHarness.loseAttachmentEditor());
+    await dialog.getByRole("button", { name: "Attach 2 files", exact: true }).click();
+    const alert = dialog.getByRole("alert");
+    await expect(alert).toContainText("Open this note in the Markdown editor");
+    await expect(dialog.locator(".ent-cc-attachment-selection li")).toHaveCount(2);
+    expect((await harness()).copies).toEqual([]);
+    await noOverflow([dialog]);
+
+    // 2. Corrected End retry copies each file exactly once and closes.
+    await dialog.getByLabel("Insert link", { exact: true }).selectOption("end");
+    await expect(alert).toHaveText("");
+    await dialog.getByRole("button", { name: "Attach 2 files", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    expect(await harness()).toEqual({ submissions: 2, copies: ["Files/one.pdf", "Files/two.pdf"] });
+
+    // 3. Copied-but-not-linked: terminal summary with a 220-character unbroken basename.
+    await open(true);
+    const terminal = page.getByRole("dialog", { name: "Attach files to note", exact: true });
+    await terminal.getByLabel("Insert link", { exact: true }).selectOption("end");
+    await terminal.locator("input[type=file]").setInputFiles({ name: longName, mimeType: "application/pdf", buffer: Buffer.from("x") });
+    const attach = terminal.getByRole("button", { name: "Attach file", exact: true });
+    await attach.click();
+    const summary = terminal.getByRole("alert");
+    await expect(summary).toContainText("Files copied; links were not inserted");
+    await expect(summary.locator("li")).toHaveText([`Files/${longName}`]);
+    await expect(attach).toBeDisabled();
+    await attach.click({ force: true });
+    expect(await harness()).toEqual({ submissions: 1, copies: [`Files/${longName}`] });
+    await noOverflow([terminal, summary, summary.locator("li").first()]);
+    await captureEvidence(page, `attachment-terminal-${width}`);
+    await terminal.getByRole("button", { name: "Close", exact: true }).last().click();
+    await expect(terminal).toBeHidden();
+  });
+}
+
+interface SetupJourneySnapshot {
+  commits: Array<{ inbox: string; reviewed: { previousFolder: string; nextFolder: string; affectedCount: number } | null }>;
+  inbox: string;
+  workspaceName: string;
+  setupComplete: boolean;
+  undoCount: number;
+}
+type SetupJourneyHarness = { openSetupWizard(): void; undoSetup(): Promise<void>; setupSnapshot(): SetupJourneySnapshot };
+const setupJourney = (page: Page): Promise<SetupJourneySnapshot> => page.evaluate(() => (window as unknown as { kbccBrowserHarness: SetupJourneyHarness }).kbccBrowserHarness.setupSnapshot());
+
+// UI-only: the production wizard and view route run for real, but the harness
+// stubs the commit. The persistence claim (one required-Undo transaction, exact
+// Undo/Redo) is proven by tests/setup-workflow.test.ts over the real plugin, not here.
+test.describe("WF01 setup Inbox review (UI-only; stubbed commit)", () => {
+  test("open setup, change the Inbox, review, Cancel keeps the draft, confirm once, then Undo", async ({ page }) => {
+    await openView(page, { count: 8 });
+    const before = await setupJourney(page);
+    await page.evaluate(() => (window as unknown as { kbccBrowserHarness: SetupJourneyHarness }).kbccBrowserHarness.openSetupWizard());
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText("Already using this knowledge base on another device? Let Sync finish before setting it up here.");
+    await dialog.getByRole("textbox", { name: "Name this knowledge base", exact: true }).fill("Unsaved draft name");
+    await dialog.locator(".ent-cc-setup-advanced summary").click();
+    await dialog.getByRole("textbox", { name: "Inbox folder", exact: true }).fill("Triage Inbox");
+    await dialog.getByRole("button", { name: "Finish setup", exact: true }).click();
+
+    // Review: old, new and the Inbox-only count; nothing is written yet.
+    await expect(dialog).toContainText(`Current Inbox folder: ${before.inbox}`);
+    await expect(dialog).toContainText("New Inbox folder: Triage Inbox");
+    await expect(dialog).toContainText("2 Inbox-only notes");
+    expect((await setupJourney(page)).commits).toEqual([]);
+
+    // Cancel in the review returns to the editable wizard with the draft intact.
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("textbox", { name: "Name this knowledge base", exact: true })).toHaveValue("Unsaved draft name");
+    await expect(dialog.getByRole("textbox", { name: "Inbox folder", exact: true })).toHaveValue("Triage Inbox");
+    expect(await setupJourney(page)).toEqual(before);
+
+    // Review again and confirm: exactly one commit carrying the reviewed effects.
+    await dialog.getByRole("button", { name: "Finish setup", exact: true }).click();
+    await dialog.getByRole("button", { name: "Apply Inbox change and finish setup", exact: true }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    const after = await setupJourney(page);
+    expect(after.commits).toEqual([{ inbox: "Triage Inbox", reviewed: { previousFolder: before.inbox, nextFolder: "Triage Inbox", affectedCount: 2 } }]);
+    expect(after).toMatchObject({ inbox: "Triage Inbox", workspaceName: "Unsaved draft name", setupComplete: true, undoCount: before.undoCount + 1 });
+
+    // Undo restores the earlier settings exactly.
+    await page.evaluate(() => (window as unknown as { kbccBrowserHarness: SetupJourneyHarness }).kbccBrowserHarness.undoSetup());
+    expect(await setupJourney(page)).toMatchObject({ inbox: before.inbox, workspaceName: before.workspaceName, setupComplete: before.setupComplete, undoCount: before.undoCount });
+    expect(failures.get(page) ?? []).toEqual([]);
+  });
+});

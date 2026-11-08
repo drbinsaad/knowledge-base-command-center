@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TFolder } from "obsidian";
 import { IndexManagerModal } from "../src/index-manager";
 import { cloneJsonValue, DEFAULT_DATA, type VaultRecord } from "../src/model";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom";
+import { TFolder } from "./support/obsidian-stub.ts";
 
 function record(path: string, options: Partial<VaultRecord> = {}): VaultRecord {
   return {

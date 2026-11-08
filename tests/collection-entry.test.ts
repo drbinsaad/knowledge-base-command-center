@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Notice, TFile } from "obsidian";
 import { AddActionModal, CollectionPickerModal, KnowledgeNoteModal, TextPromptModal, VaultFilePickerModal, type KnowledgeNoteModalOptions } from "../src/modals.ts";
 import { CreatedNoteRecoveryModal } from "../src/created-note-recovery-modal.ts";
 import { migrateData, type VaultRecord } from "../src/model.ts";
 import { EntVaultCommandCenterView } from "../src/view.ts";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
+import { Notice, TFile } from "./support/obsidian-stub.ts";
 
 function harness() {
   const data = migrateData(null);
@@ -77,6 +77,38 @@ test("Add always offers collection creation, and a populated picker can create a
     assert.deepEqual(data.collections[0].subjects, []);
     assert.deepEqual(data.collections.at(-1)?.subjects, [file.path]);
     assert.equal(data.collections.at(-1)?.title, "Reading");
+  } finally {
+    [AddActionModal, CollectionPickerModal, TextPromptModal].forEach((ctor, index) => {
+      const original = originals[index];
+      if (original) Object.defineProperty(ctor.prototype, "open", original);
+      else Reflect.deleteProperty(ctor.prototype, "open");
+    });
+  }
+});
+
+test("WF13 canceling the Collection name prompt or the picker leaves no Collection or membership behind", async () => {
+  const { view, data, file } = harness();
+  const internals = view as unknown as {
+    openAddActions(): void;
+    openCollectionPicker(path: string, source?: { headingId: string }, move?: boolean): void;
+  };
+  const captured: { actions?: AddActionModal; picker?: CollectionPickerModal; prompt?: TextPromptModal } = {};
+  const originals = [AddActionModal, CollectionPickerModal, TextPromptModal].map((ctor) => Object.getOwnPropertyDescriptor(ctor.prototype, "open"));
+  AddActionModal.prototype.open = function () { captured.actions = this; };
+  CollectionPickerModal.prototype.open = function () { captured.picker = this; };
+  TextPromptModal.prototype.open = function () { captured.prompt = this; };
+  const before = JSON.stringify(data.collections);
+  try {
+    internals.openAddActions();
+    captured.actions?.onChooseItem(captured.actions.getItems().find((action) => action.id === "new-collection")!);
+    assert.ok(captured.prompt, "the name prompt opened");
+    captured.prompt.close();
+    internals.openCollectionPicker(file.path);
+    assert.ok(captured.picker, "the picker opened");
+    (captured.picker as unknown as { onCreate(): void }).onCreate();
+    captured.picker.close();
+    assert.equal(JSON.stringify(data.collections), before, "no Collection, heading or membership was written");
+    assert.equal(data.collections.some((heading) => heading.subjects.includes(file.path)), false);
   } finally {
     [AddActionModal, CollectionPickerModal, TextPromptModal].forEach((ctor, index) => {
       const original = originals[index];

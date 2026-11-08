@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import test from "node:test";
-import { NullValue, TFile } from "obsidian";
+import { NullValue } from "obsidian";
+import { TFile, createTestFolder, setTestParent } from "./support/obsidian-stub.ts";
 import type {
   BasesEntry,
   BasesEntryGroup,
@@ -98,9 +99,9 @@ function entryFixture(
   values: Partial<Record<BasesPropertyId, string | Value>> = {},
   folderName?: string,
 ): EntryFixture {
-  const file = new TFile(path) as TFile & { parent?: { name: string } };
+  const file = new TFile(path);
   const inferredFolder = path.includes("/") ? path.split("/").at(-2) ?? "" : "";
-  file.parent = { name: folderName ?? inferredFolder };
+  setTestParent(file, createTestFolder(folderName ?? inferredFolder));
   const getValueCalls: BasesPropertyId[] = [];
   return {
     entry: {
@@ -476,12 +477,12 @@ test("an in-flight build follows its Bases container into the destination window
   const secondWindow = new QueuedFakeWindow();
   const secondDocument = new FakeDocument(secondWindow);
   const parent = firstDocument.body.createDiv();
-  let migrationListener: ((viewWindow: Window) => void) | null = null;
+  const migration: { listener: ((viewWindow: Window) => void) | null } = { listener: null };
   let migrationCleanupCalled = false;
   (parent as unknown as {
     onWindowMigrated(listener: (viewWindow: Window) => void): () => void;
   }).onWindowMigrated = (listener) => {
-    migrationListener = listener;
+    migration.listener = listener;
     return () => { migrationCleanupCalled = true; };
   };
   const fixtures = Array.from({ length: 1_000 }, (_, index) => entryFixture(`Notes/Item ${String(index)}.md`, {
@@ -500,8 +501,9 @@ test("an in-flight build follows its Bases container into the destination window
   assert.equal(firstWindow.pendingTimeouts(), 1);
   const staleOldWindowCallback = firstWindow.firstPendingCallback();
   adoptIntoDocument(parent, secondDocument);
-  if (!migrationListener) throw new Error("Expected a window migration listener.");
-  migrationListener(secondWindow);
+  if (!migration.listener) throw new Error("Expected a window migration listener.");
+  // Single documented seam: the fake window stands in for the host Window the view listens for.
+  migration.listener(secondWindow as unknown as Window);
   assert.equal(firstWindow.pendingTimeouts(), 0);
   assert.equal(secondWindow.pendingTimeouts(), 1);
   if (typeof staleOldWindowCallback === "function") staleOldWindowCallback();
@@ -580,4 +582,128 @@ test("10,000 native groups stay linear and keep the initial DOM bounded", () => 
     harness.container.querySelector('[role="status"]')?.textContent,
     "Showing 9901–10000 of 10000 entries.",
   );
+});
+
+function pagedFixtures(count: number): BasesEntry[] {
+  return Array.from({ length: count }, (_, index) => entryFixture(`Notes/Item ${String(index)}.md`, {
+    "note.domain": "Notes",
+    "note.title": `Item ${String(index)}`,
+  }).entry);
+}
+
+function openSecondPage(count = 300): { entries: BasesEntry[]; harness: ViewHarness } {
+  const entries = pagedFixtures(count);
+  const harness = createViewHarness(entries, [group(entries)], { pageSize: 100 });
+  harness.view.onDataUpdated();
+  harness.window.flushTimeouts();
+  harness.container.querySelectorAll("button.ent-cc-button").find((button) => button.textContent === "Next")?.click();
+  harness.window.flushTimeouts();
+  return { entries, harness };
+}
+
+function statusText(harness: ViewHarness): string | null {
+  return harness.container.querySelector('[role="status"]')?.textContent ?? null;
+}
+
+function rowByLabel(harness: ViewHarness, label: string): FakeElement | undefined {
+  return harness.container.querySelectorAll("button.ent-cc-base-record")
+    .find((button) => button.getAttribute("aria-label") === label);
+}
+
+test("a Bases data update keeps the current page and still allows paging back", () => {
+  const { entries, harness } = openSecondPage();
+  assert.equal(statusText(harness), "Showing 101–200 of 300 entries.");
+  setViewData(harness.view, entries, [group(entries)]);
+  harness.view.onDataUpdated();
+  harness.window.flushTimeouts();
+  assert.equal(statusText(harness), "Showing 101–200 of 300 entries.");
+  // Paging with Next moved focus onto the page's first row; the update keeps it there.
+  assert.equal(harness.document.activeElement?.getAttribute("aria-label"), "Open Item 100");
+  harness.container.querySelectorAll("button.ent-cc-button").find((button) => button.textContent === "Previous")?.click();
+  harness.window.flushTimeouts();
+  assert.equal(statusText(harness), "Showing 1–100 of 300 entries.");
+});
+
+test("a Bases data update restores focus to the same row when focus was inside the view", () => {
+  const { entries, harness } = openSecondPage();
+  rowByLabel(harness, "Open Item 150")?.focus();
+  setViewData(harness.view, entries, [group(entries)]);
+  harness.view.onDataUpdated();
+  harness.window.flushTimeouts();
+  assert.equal(statusText(harness), "Showing 101–200 of 300 entries.");
+  const focused = harness.document.activeElement;
+  assert.ok(focused);
+  assert.equal(focused.getAttribute("aria-label"), "Open Item 150");
+});
+
+test("a Bases data update never takes focus from outside the view", () => {
+  const { entries, harness } = openSecondPage();
+  const outside = harness.document.body.createEl("button", { text: "Elsewhere" });
+  outside.focus();
+  setViewData(harness.view, entries, [group(entries)]);
+  harness.view.onDataUpdated();
+  harness.window.flushTimeouts();
+  assert.equal(statusText(harness), "Showing 101–200 of 300 entries.");
+  assert.ok(harness.document.activeElement === outside, "focus must stay on the outside control");
+});
+
+test("focus moved outside while a rebuild is pending is not taken back", () => {
+  const { entries, harness } = openSecondPage();
+  rowByLabel(harness, "Open Item 150")?.focus();
+  setViewData(harness.view, entries, [group(entries)]);
+  harness.view.onDataUpdated();
+  const outside = harness.document.body.createEl("button", { text: "Elsewhere" });
+  outside.focus();
+  harness.window.flushTimeouts();
+  assert.equal(statusText(harness), "Showing 101–200 of 300 entries.");
+  assert.ok(harness.document.activeElement === outside, "focus must stay on the outside control");
+});
+
+test("back-to-back data updates keep the pending focus restore", () => {
+  const { entries, harness } = openSecondPage();
+  rowByLabel(harness, "Open Item 150")?.focus();
+  setViewData(harness.view, entries, [group(entries)]);
+  harness.view.onDataUpdated();
+  harness.view.onDataUpdated();
+  harness.window.flushTimeouts();
+  assert.equal(statusText(harness), "Showing 101–200 of 300 entries.");
+  assert.equal(harness.document.activeElement?.getAttribute("aria-label"), "Open Item 150");
+});
+
+test("a deleted focused row keeps the page and moves focus to the first row of that page", () => {
+  const { entries, harness } = openSecondPage();
+  rowByLabel(harness, "Open Item 150")?.focus();
+  const remaining = entries.filter((entry) => entry.file.path !== "Notes/Item 150.md");
+  setViewData(harness.view, remaining, [group(remaining)]);
+  harness.view.onDataUpdated();
+  harness.window.flushTimeouts();
+  assert.equal(statusText(harness), "Showing 101–200 of 299 entries.");
+  assert.equal(harness.document.activeElement?.getAttribute("aria-label"), "Open Item 100");
+});
+
+test("a deleted anchor row falls back to the nearest valid page", () => {
+  const { entries, harness } = openSecondPage();
+  const shrunk = entries.slice(0, 100).concat(entries.slice(101, 120));
+  setViewData(harness.view, shrunk, [group(shrunk)]);
+  harness.view.onDataUpdated();
+  harness.window.flushTimeouts();
+  assert.equal(statusText(harness), "Showing 101–119 of 119 entries.");
+
+  const tiny = entries.slice(0, 40);
+  setViewData(harness.view, tiny, [group(tiny)]);
+  harness.view.onDataUpdated();
+  harness.window.flushTimeouts();
+  assert.equal(statusText(harness), "Showing 1–40 of 40 entries.");
+});
+
+test("regrouping lands on the page that now holds the anchor row and never throws", () => {
+  const { entries, harness } = openSecondPage();
+  const regrouped = [group(entries.slice(250), "Late"), group(entries.slice(0, 250), "Early")];
+  setViewData(harness.view, entries, regrouped);
+  assert.doesNotThrow(() => {
+    harness.view.onDataUpdated();
+    harness.window.flushTimeouts();
+  });
+  assert.equal(statusText(harness), "Showing 101–200 of 300 entries.");
+  assert.ok(rowByLabel(harness, "Open Item 100"));
 });

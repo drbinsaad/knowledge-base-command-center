@@ -19,7 +19,12 @@ const budgets = [
   // The tested build is 1,249,993 raw / 329,622 gzip. The maintainer directed
   // publication after the 122-byte gzip overrun and this bounded adjustment
   // were disclosed; keep 1,007 raw / 378 gzip bytes of headroom.
-  { file: "main.js", raw: 1_251_000, gzip: 330_000 },
+  // 0.27.0 adds kept-copy preview/restore, bound recovery/history checks and
+  // the reviewed setup, attachment, interaction and measured-work fixes.
+  // Final Node 22 build: 1,301,829 raw / 344,174 gzip, an increase of
+  // 51,836 raw / 14,552 gzip over 0.26.1, with no added runtime dependencies.
+  // Preserve the reviewed guards; allow 1,171 raw / 826 gzip bytes headroom.
+  { file: "main.js", raw: 1_303_000, gzip: 345_000 },
   // Touch-sized membership choices/actions and tablet wrapping add ~1.6 kB raw.
   // Compact disclosures, attachment rows and resizing add ~6 kB raw / 1 kB
   // gzip over 0.25.1 (162,088 / 22,375), including safe touch/focus states.

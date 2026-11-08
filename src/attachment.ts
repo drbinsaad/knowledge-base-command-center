@@ -7,7 +7,28 @@ export const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
 export const MAX_ATTACHMENT_FILES = 20;
 
 /** The files were copied but their links were not inserted; retrying would copy them again. */
-export class AttachmentLinkInsertionError extends Error {}
+export class AttachmentLinkInsertionError extends Error {
+  constructor(message: string, readonly copiedPaths: readonly string[] = []) {
+    super(message);
+  }
+}
+
+/** Names tried for one file when another file appears at the chosen path before it is created. */
+export const MAX_ATTACHMENT_CREATE_ATTEMPTS = 5;
+
+/** Conservative comparison key: names equal here may collide on a case-insensitive or normalizing filesystem. */
+export function attachmentCollisionKey(name: string): string {
+  return name.normalize("NFC").toLocaleLowerCase();
+}
+
+/** True only for an "already exists" create failure; any other I/O error is never a collision. */
+export function isAttachmentExistsError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const { code, message } = error as { code?: unknown; message?: unknown };
+  // An explicit code always wins: a filename in an EIO message may contain "already exists".
+  if (code !== undefined && code !== null && code !== "") return code === "EEXIST";
+  return typeof message === "string" && /\balready exists\b|\bEEXIST\b/iu.test(message);
+}
 
 export type AttachmentInsertTarget = "marker" | "heading" | "end";
 

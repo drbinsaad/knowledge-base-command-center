@@ -25,7 +25,7 @@ import {
   type PluginData,
   objectFromEntries,
 } from "./model";
-import { ConfirmModal, createOpenedBaseGuard, StringPickerModal, TextPromptModal, VaultFilePickerModal } from "./modals";
+import { ConfirmModal, createOpenedBaseGuard, DEFAULT_NOTE_FOLDER_DESCRIPTION, StringPickerModal, TextPromptModal, VaultFilePickerModal } from "./modals";
 
 interface SettingsHost extends Plugin {
   data: PluginData;
@@ -59,6 +59,8 @@ interface SettingsHost extends Plugin {
 }
 
 type DirectSettingsDataField = "activeTab" | "indexGroupOrder";
+
+const FIXED_ATTACHMENT_FOLDER_DESCRIPTION = "Used only when Attachment storage is set to a fixed vault folder.";
 
 function renderSetting(
   name: string,
@@ -947,7 +949,7 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
             settings.primaryFolder,
             (value) => { settings.primaryFolder = value; },
           )] : []),
-          folderSetting("Default new-note folder", "Initial storage destination in Create note. Saving a note there does not add it to the Index.", settings.defaultNoteFolder, (value) => { settings.defaultNoteFolder = value; }),
+          folderSetting("Default new-note folder", DEFAULT_NOTE_FOLDER_DESCRIPTION, settings.defaultNoteFolder, (value) => { settings.defaultNoteFolder = value; }),
           folderSetting("Templates folder", "Markdown templates offered by the per-note template picker. Leave empty to allow any Markdown file.", settings.templatesFolder, (value) => { settings.templatesFolder = value; }),
           renderSetting("Default starting content", "Every new note can override this choice.", (row) => {
             row.addDropdown((dropdown) => dropdown
@@ -1002,9 +1004,10 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
                 if (ownsConfiguredBase()) this.update();
               }));
           }, ["attachments", "files", "upload", "folder"]),
-          renderSetting("Fixed attachment folder", "Used only when Attachment storage is set to a fixed vault folder.", (row) => {
+          renderSetting("Fixed attachment folder", FIXED_ATTACHMENT_FOLDER_DESCRIPTION, (row) => {
             const disabled = readOnly || settings.attachmentStorageMode !== "fixed-folder";
             row.addText((text) => {
+              let showingError = false;
               text.setPlaceholder("Attachments")
                 .setValue(settings.attachmentFolder)
                 .setDisabled(disabled)
@@ -1013,6 +1016,14 @@ export class EntCommandCenterSettingsTab extends PluginSettingTab {
                   const clean = value.trim().replace(/^\/+|\/+$/g, "");
                   const error = validateWritableFolderPath(clean, this.host.app.vault.configDir);
                   text.inputEl.toggleClass("is-error", Boolean(error));
+                  // A red border alone does not say why. Show the reason and
+                  // what stays in effect; restore the normal text once valid.
+                  if (error || showingError) {
+                    row.setDesc(error
+                      ? `${error} Attachments still use “${settings.attachmentFolder || "no folder yet"}” until you enter a valid folder.`
+                      : FIXED_ATTACHMENT_FOLDER_DESCRIPTION);
+                    showingError = Boolean(error);
+                  }
                   if (error) return;
                   settings.attachmentFolder = clean;
                   this.scheduleTextSave(false);

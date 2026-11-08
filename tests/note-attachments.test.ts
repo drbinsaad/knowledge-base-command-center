@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Notice, TFile, TFolder, type App, type CachedMetadata } from "obsidian";
+import type { App, CachedMetadata } from "obsidian";
 import { ATTACHMENT_PAGE_SIZE, collectNoteAttachments, renderNoteAttachments } from "../src/note-attachments.ts";
 import { EntVaultCommandCenterView } from "../src/view.ts";
 import { asHtmlElement, createFakeDom, FakeEvent } from "./support/fake-dom.ts";
+import { Platform, TFile, TFolder } from "./support/obsidian-stub.ts";
 import { migrateData, type VaultRecord } from "../src/model.ts";
 
 const references = (paths: string[]) => paths.map((link) => ({ link, original: `[[${link}]]` }));
@@ -110,7 +111,7 @@ test("missing files are explicit and cannot become an accidental new note", () =
   const opened: string[] = [];
   renderNoteAttachments(asHtmlElement(dom.document.body), result, (path) => opened.push(path));
   assert.equal(dom.document.body.querySelectorAll(".ent-cc-attachment-link").length, 0);
-  assert.match(dom.document.body.textContent, /Not available on this device/u);
+  assert.match(dom.document.body.textContent, /Linked reference not found; it may be a note or file/u);
   assert.deepEqual(opened, []);
 });
 
@@ -160,13 +161,111 @@ test("rendering exposes bounded pages, names as plain text and unambiguous dupli
   assert.equal(dom.document.body.querySelectorAll("a").length, 0);
 });
 
+const PATH_IDENTITY = "data-ent-cc-attachment-path";
+const NEUTRAL_MISSING = "Linked reference not found; it may be a note or file";
+function renderRows(paths: string[], present: string[] = paths) {
+  const h = harness({ links: references(paths) as CachedMetadata["links"] }, present);
+  const dom = createFakeDom();
+  const opened: string[] = [];
+  renderNoteAttachments(asHtmlElement(dom.document.body), collectNoteAttachments(h.app, h.source.path), (path) => opened.push(path));
+  return { h, dom, opened, rows: dom.document.body.querySelectorAll(".ent-cc-attachment-row") };
+}
+
+test("WF06 L1 duplicate basenames get distinct accessible path labels and exact open callbacks", () => {
+  const r = renderRows(["Folder A/shared.pdf", "Folder B/shared.pdf", "Folder A/unique.pdf"]);
+  const buttons = r.dom.document.body.querySelectorAll(".ent-cc-attachment-link");
+  const labels = buttons.map((button) => button.getAttribute("aria-label"));
+  assert.equal(new Set(labels).size, 3, `labels must be distinct: ${JSON.stringify(labels)}`);
+  assert.match(labels[0] ?? "", /Folder A/u);
+  assert.match(labels[1] ?? "", /Folder B/u);
+  for (const button of buttons) button.dispatch("click");
+  assert.deepEqual(r.opened, ["Folder A/shared.pdf", "Folder B/shared.pdf", "Folder A/unique.pdf"]);
+  assert.deepEqual(buttons.map((button) => button.getAttribute(PATH_IDENTITY)), r.opened);
+});
+
+test("WF06 L2 a unique file keeps a concise label and no path text", () => {
+  const r = renderRows(["Folder A/unique.pdf", "Folder B/other.pdf"]);
+  const button = r.dom.document.body.querySelector(".ent-cc-attachment-link");
+  assert.equal(button?.getAttribute("aria-label"), "Open attachment: unique.pdf");
+  assert.doesNotMatch(r.rows[0].textContent, /Folder A/u);
+  assert.equal(button?.getAttribute(PATH_IDENTITY), "Folder A/unique.pdf");
+});
+
+test("WF06 L3 long and Arabic duplicate paths keep an isolated path, separate from the extension, in LTR and RTL", () => {
+  const long = `Files/${"طويل-".repeat(20)}/تقرير.pdf`;
+  const paths = [long, "Files/مجلد آخر/تقرير.pdf", 'Files/quote"d/تقرير.pdf'];
+  for (const direction of ["ltr", "rtl"]) {
+    const r = renderRows(paths);
+    r.dom.document.body.setAttribute("dir", direction);
+    const buttons = r.dom.document.body.querySelectorAll(".ent-cc-attachment-link");
+    assert.equal(new Set(buttons.map((button) => button.getAttribute("aria-label"))).size, 3);
+    const pathNodes = r.dom.document.body.querySelectorAll(".ent-cc-attachment-path");
+    assert.deepEqual(pathNodes.map((node) => node.textContent), paths);
+    assert.ok(pathNodes.every((node) => node.getAttribute("dir") === "auto"), "path presentation direction is isolated");
+    const extensions = r.dom.document.body.querySelectorAll(".ent-cc-attachment-extension");
+    assert.deepEqual(extensions.map((node) => node.textContent), ["PDF", "PDF", "PDF"]);
+    // Exact path identity is compared as an attribute value, never as a selector.
+    const quoted = buttons.find((button) => button.getAttribute(PATH_IDENTITY) === paths[2]);
+    assert.ok(quoted);
+    quoted.dispatch("click");
+    assert.deepEqual(r.opened, [paths[2]]);
+  }
+});
+
+test("WF06 L4 unresolved dotted references use neutral wording; resolved any-file support is unchanged", () => {
+  const r = renderRows(["Node.js", "Ward round 2024.01.15", "Missing.pdf", "script.js", "thing.custom", "LICENSE"], ["script.js", "thing.custom", "LICENSE"]);
+  const missing = r.dom.document.body.querySelectorAll(".is-missing");
+  assert.equal(missing.length, 3);
+  for (const row of missing) {
+    assert.match(row.textContent, new RegExp(NEUTRAL_MISSING, "u"));
+    assert.doesNotMatch(row.textContent, /device|sync/iu);
+    assert.equal(row.querySelectorAll("button").length, 0);
+  }
+  assert.deepEqual(missing.map((row) => row.getAttribute(PATH_IDENTITY)), ["Node.js", "Ward round 2024.01.15", "Missing.pdf"]);
+  assert.deepEqual(r.dom.document.body.querySelectorAll(".ent-cc-attachment-link").map((button) => button.getAttribute(PATH_IDENTITY)), ["script.js", "thing.custom", "LICENSE"]);
+  assert.deepEqual(r.opened, []);
+});
+
+test("WF06 L1b root file and a folder literally named 'vault root' stay distinguishable", () => {
+  const r = renderRows(["shared.pdf", "vault root/shared.pdf"]);
+  const buttons = r.dom.document.body.querySelectorAll(".ent-cc-attachment-link");
+  const labels = buttons.map((button) => button.getAttribute("aria-label"));
+  assert.equal(new Set(labels).size, 2, JSON.stringify(labels));
+  assert.deepEqual(labels, ["Open attachment: shared.pdf, path shared.pdf", "Open attachment: shared.pdf, path vault root/shared.pdf"]);
+  for (const button of buttons) button.dispatch("click");
+  assert.deepEqual(r.opened, ["shared.pdf", "vault root/shared.pdf"]);
+});
+
+test("WF06 L1c missing duplicate rows show their exact path as visible text", () => {
+  const r = renderRows(["A/gone.pdf", "B/gone.pdf", "A/here.pdf", "B/here.pdf"], ["A/here.pdf", "B/here.pdf"]);
+  const missing = r.dom.document.body.querySelectorAll(".is-missing");
+  assert.equal(missing.length, 2);
+  assert.deepEqual(missing.map((row) => row.querySelector(".ent-cc-attachment-path")?.textContent), ["A/gone.pdf", "B/gone.pdf"]);
+  assert.ok(missing.every((row) => row.querySelector(".ent-cc-attachment-path")?.getAttribute("dir") === "auto"));
+  assert.ok(missing.every((row) => row.textContent.includes(NEUTRAL_MISSING)));
+});
+
+test("WF06 L5 URLs stay excluded and listing makes no network or open call", () => {
+  const originalFetch = globalThis.fetch;
+  let network = 0;
+  globalThis.fetch = () => { network += 1; return Promise.reject(new Error("no network")); };
+  try {
+    const r = renderRows(["https://example.invalid/x.pdf", "HTTP://example.invalid/y.pdf", "mailto:a@example.invalid", "Files/ok.pdf"], ["Files/ok.pdf"]);
+    assert.equal(r.rows.length, 1);
+    assert.equal(r.h.calls.length, 1);
+    assert.deepEqual(r.opened, []);
+    assert.equal(network, 0);
+    assert.equal(r.dom.document.body.querySelectorAll("a, img, iframe").length, 0);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test("attachment activation rechecks the file and delegates to the existing opener", async () => {
   const h = harness({ links: references(["Files/Paper.pdf"]) as CachedMetadata["links"] }, ["Files/Paper.pdf"]);
   const dom = createFakeDom();
   const view = Object.create(EntVaultCommandCenterView.prototype) as unknown as { renderInspectorAttachments(parent: HTMLElement, record: VaultRecord): void };
   const opened: TFile[] = [];
   const operations: Promise<unknown>[] = [];
-  Object.assign(view, { app: h.app, plugin: { openFile: async (file: TFile, origin: unknown) => { assert.equal(origin, view); opened.push(file); } }, run: (action: () => Promise<unknown>) => { operations.push(action()); } });
+  Object.assign(view, { app: h.app, plugin: { data: { selectedPath: h.source.path }, getActiveKnowledgeBaseId: () => "base-test", openFile: async (file: TFile, origin: unknown) => { assert.equal(origin, view); opened.push(file); } }, run: (action: () => Promise<unknown>) => { operations.push(action()); } });
   view.renderInspectorAttachments(asHtmlElement(dom.document.body), { path: h.source.path } as VaultRecord);
   const button = dom.document.body.querySelector(".ent-cc-attachment-link");
   button?.dispatch("click");
@@ -176,7 +275,10 @@ test("attachment activation rechecks the file and delegates to the existing open
   button?.dispatch("click");
   await Promise.all(operations);
   assert.equal(opened.length, 1);
-  assert.match((Notice as unknown as { messages: string[] }).messages.at(-1) ?? "", /not available on this device/u);
+  // WF-07: neutral wording on the persistent view surface, not a sync claim in a transient Notice.
+  const feedback = (view as unknown as { viewFeedback: { message: string; tone: string } | null }).viewFeedback;
+  assert.match(feedback?.message ?? "", /Linked reference not found; it may be a note or file: Paper\.pdf/u);
+  assert.equal(feedback?.tone, "error");
   (h.app.vault.getAbstractFileByPath as unknown) = () => new TFolder("Files/Paper.pdf");
   button?.dispatch("click");
   await Promise.all(operations);
@@ -227,6 +329,14 @@ function bareNoteInspector() {
 }
 
 test("compact vault-note focus trap includes the final Note details summary without related links", () => {
+  // WF-07: only an actual mobile compact inspector is a trapped dialog.
+  const platform = Platform as { isMobile: boolean };
+  const previousMobile = platform.isMobile;
+  platform.isMobile = true;
+  try { assertCompactVaultNoteTrap(); } finally { platform.isMobile = previousMobile; }
+});
+
+function assertCompactVaultNoteTrap(): void {
   const h = bareNoteInspector();
   const summary = h.inspector.querySelector(".ent-cc-note-details summary");
   const back = h.inspector.querySelector(".ent-cc-inspector-close");
@@ -250,7 +360,7 @@ test("compact vault-note focus trap includes the final Note details summary with
   assert.equal(h.dom.document.activeElement, back);
   h.view.handleMobileInspectorKeydown(new FakeEvent("keydown", { key: "Tab", shiftKey: true }) as unknown as KeyboardEvent);
   assert.equal(h.dom.document.activeElement, summary, "reverse wrapping reaches the real final control");
-});
+}
 
 test("inspector refresh samples live Note details state and ignores a detached queued toggle", () => {
   const h = bareNoteInspector();

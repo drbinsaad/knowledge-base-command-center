@@ -50,6 +50,8 @@ offered.
 
 Visual arrangement stays in plugin data. It does not change note paths or frontmatter.
 
+**Reset placement** on one record also clears the custom order of the other records in the same group, so all of them return to the default order. This is deliberate: a record cannot be put back in its true default position while its siblings keep a hand-made order. Use **Undo** straight afterwards if you did not want the siblings reset.
+
 ### Index membership
 
 Use **Add → Add existing note to Index** or the current-note action in a Generic base to persist direct membership for that exact note. Direct membership does not depend on the note's current folder. A folder supplies dynamic membership only through an explicit linked-folder rule; notes merely stored in the default new-note, Inbox, template, attachment, export, or Library creation folder do not join the Index for that reason. When an Inbox note is also supplied directly or by a linked rule, that explicit Index choice takes precedence over storage and the note appears in the Index, unless it has a deliberate Library classification.
@@ -115,10 +117,10 @@ An unchanged external reload keeps the Organizer and its prepared review open. A
 
 Each affected knowledge base receives its ordinary restart-durable per-base Undo entry. Before the primary plugin-store mutation, a multi-base Organizer Apply stages the exact required-Undo snapshot for every affected base as one protected batch. If those aggregate snapshots cannot fit within the shared 4 MiB device-local history budget, the whole Apply is refused without a partial organization change. Split the affected bases across batches; because each Undo entry is an exact whole-base snapshot, selecting fewer notes while targeting the same bases may not reduce this journal size. The newest multi-base Organizer batch also has two session-only commands:
 
-- **Undo last organizer change** reverses all affected bases together; and
+- **Undo last organizer batch (all affected bases)** reverses all affected bases together; and
 - **Redo last organizer change** reapplies that same batch.
 
-Those coordinated commands remain available only in the plugin session that applied the batch and only while their exact newest-Undo guards still match. After restart—or after another incompatible organization change—use each base's durable **Undo last organization change** action separately. Undo changes KBCC plugin data only and never reverses a Markdown file operation because the Organizer performs none.
+Those coordinated commands remain available only in the plugin session that applied the batch and only while their exact newest-Undo guards still match. After restart—or after another incompatible organization change—use each base's durable **Undo last organization change in this base** action separately. Undo changes KBCC plugin data only and never reverses a Markdown file operation because the Organizer performs none.
 
 ### Active-note indicator
 
@@ -182,7 +184,7 @@ Each knowledge base can retain at most 50 active and archived Libraries.
 
 ### Library settings and book covers
 
-Introduced in version 0.23.0, **Library settings…** is available in the Library toolbar and **Manage libraries → Settings…**. Open **General** for Rename, singular label, icon, Archive, Restore, or deletion of an archived custom Library. Built-in Libraries explain why permanent deletion is unavailable. To rename the enclosing knowledge base, such as ENT, use **Manage knowledge bases… → Rename**; changing its display name does not change the fixed clinical preset.
+**Library settings…** is available in the Library toolbar and **Manage libraries → Settings…**. Open **General** for Rename, singular label, icon, Archive, Restore, or deletion of an archived custom Library. Built-in Libraries explain why permanent deletion is unavailable. To rename the enclosing knowledge base, such as ENT, use **Manage knowledge bases… → Rename**; changing its display name does not change the fixed clinical preset.
 
 In **Display**, select **Cards**, choose an **Image property**, and set card size, image proportions, and fit. **Show whole image** keeps the full book cover visible. Enter up to six comma-separated **Visible properties**, such as `author, reading_status, year`; leaving this empty shows titles only. **Save display** applies only this Library's preferences and creates Undo. **Reset display** restores List, `cover`, medium size, portrait proportions, whole-image fit, and `author, reading_status`. Existing headings, subheadings, record order, search, and row actions remain available; arrangement uses the list presentation.
 
@@ -196,13 +198,13 @@ reading_status: "Reading"
 
 Choose `cover` as the image property. KBCC reads the cached properties and displays the existing image; choosing Cards does not rewrite a note. Local raster covers work offline. Missing, blocked, or unavailable covers display a compact explanation instead of an empty image area. Card titles wrap to show the full title. Cover values and visible property values are not copied into display-profile exports.
 
-Version 0.23.1 keeps **Save display** in a fixed footer while the form scrolls. Editing a field does not save automatically: **Unsaved changes** becomes **Display saved** only after a successful save. The saved property name should still be present when you reopen the dialog. Drafts survive switching settings sections and failed saves, but closing the dialog without saving discards them.
+**Save display** stays in a fixed footer while the form scrolls. Editing a field does not save automatically: **Unsaved changes** becomes **Display saved** only after a successful save. The saved property name should still be present when you reopen the dialog. Drafts survive switching settings sections and failed saves, but closing the dialog without saving discards them.
 
 Cover lookup first checks the exact property name. If it is absent, one unique capitalization variant such as `Cover` also works. If both `Cover` and `COVER` exist and the setting is `cover`, choose the exact desired name; KBCC will not guess. Empty exact properties are not replaced by another case variant. The image value can be text or a list containing exactly one text link. Simple local Markdown links such as `[Cover](Covers/My%20book.jpg)` also work; links to websites remain blocked.
 
-The card now distinguishes a missing property, an empty property, a note or image not available on this device, an unsupported image/link, and an image that could not load. Open the linked image directly in Obsidian when checking availability; never post private note contents or recovery codes in diagnostic screenshots.
+The card distinguishes a missing property, an empty property, a note or image not available on this device, an unsupported image/link, and an image that could not load. Open the linked image directly in Obsidian when checking availability; never post private note contents or recovery codes in diagnostic screenshots.
 
-Online covers are not supported in 0.25.0: HTTP/HTTPS and other note-supplied URL schemes are not loaded, and there is no Allow external images action. Put the image in your vault and set the cover property to its local link. Display settings, Sync, imports, recovery, Undo and legacy private-test permission values cannot enable remote loading. The [Library display and privacy guide](LIBRARY_DISPLAY_AND_PRIVACY.md) explains local cover setup and the deferred online proposal. The [0.24.0 device record](release-evidence/0.24.0-iphone.md) explicitly leaves physical-device and controlled two-device Sync checks unverified.
+Online covers are not supported: HTTP/HTTPS and other note-supplied URL schemes are not loaded, and there is no Allow external images action. Put the image in your vault and set the cover property to its local link. Display settings, Sync, imports, recovery, Undo and legacy private-test permission values cannot enable remote loading. The [Library display and privacy guide](LIBRARY_DISPLAY_AND_PRIVACY.md) explains local cover setup and the deferred online proposal. Physical-device and two-device Sync checks are recorded per release in `docs/release-evidence/`; treat anything a record does not show as run as unverified.
 
 ### Organize a Library
 
@@ -353,7 +355,7 @@ Available focused commands are:
 - Quick entry: Add existing note…
 - Quick append: Add to current note…
 - Quick append: Choose a note…
-- Quick append: Undo last append
+- Quick append: Undo last note append
 
 ### Add a mobile toolbar button
 
@@ -500,7 +502,7 @@ The desktop header stays compact while you scroll the independent index and deta
 
 **Attachments** lists files linked or embedded in the selected note, including recognized internal property links and the Library's configured local cover reference. It works with attachments already present, not just files imported by this plugin. Repeated links to one file appear once; same-name files in different folders show their paths. Long lists offer **Show more attachments**.
 
-Select a listed file to open it through Obsidian. All resolved non-Markdown file types can be listed, but actual opening/preview support depends on Obsidian and the device. Missing references are labelled **Not available on this device** and never create new notes. An unavailable metadata cache shows a waiting message instead of claiming there are no attachments. This list neither renders attachment contents nor follows web URLs; it changes no note, property or attachment.
+Select a listed file to open it through Obsidian. All resolved non-Markdown file types can be listed, but actual opening/preview support depends on Obsidian and the device. Missing references are labelled **Not available on this device** and never create new notes. An unavailable metadata cache shows a waiting message instead of claiming there are no attachments. This list neither renders attachment contents nor follows web URLs; it changes no note, property or attachment. Listing a file never runs it. Opening one hands it to Obsidian, which may pass it to another app on your device; the plugin adds no extra confirmation of its own, so open only files you trust. The **Hover previews** setting for record titles uses Obsidian’s own Page Preview behavior, including any modifier key it asks for; the plugin sets no key of its own, and touch devices have no hover.
 
 ## Saved views, snapshots, and history
 
@@ -533,18 +535,21 @@ Run **Check sync and backup status** from the Command palette, or open **Manage 
 
 The artifact scan examines at most 2,000 direct children of the export folder and reads only paths and modification times. A capped count is labelled as a lower bound, and the age is labelled as the newest inspected rescue. The plugin does not open JSON packages to guess whether an arbitrary portable package contains recovery.
 
+### Review kept copies
+
+The **Kept copies** section has a **Review kept copies…** button. It lists conflict rescues and kept data backups the plugin has preserved, previews one, and restores one of its knowledge bases as a **new** base. It does not replace or edit an existing base and writes no Markdown. A damaged, unsupported or foreign-vault copy is shown as preserved but not restorable. Steps, limits and what is not carried over are in [Portability and recovery](PORTABILITY_AND_RECOVERY.md#kept-copies-and-conflict-rescues).
 This is not a Sync-status surface. It makes no network request, calls no private Obsidian Sync API, and cannot tell whether a provider is online, queued, caught up, or safe for a device handoff. It never reads note bodies. Full paths, export filenames, custom configuration names, vault/base identifiers, and full semantic fingerprints are not shown.
 
 Choose **Clear device-local data…** in this center, or run the command of the same name, when preparing to uninstall or intentionally resetting this device. A confirmation explains that it clears this plugin's App-local route, disclosure, Undo/Redo, local diagnostic facts, update-announcement history, any bounded pending rename-recovery journal, and note-bound return destinations. The rename journal may temporarily contain the vault identity and old/new vault-relative paths after an interrupted organization repair. The separate bounded return-navigation history can contain the vault identity, up to 24 opened-note paths, their originating base and tab, a selected-record path, literal search text entered in KBCC, compact-detail state, and scroll positions. KBCC does not read or copy note bodies into return history, but user-entered search text can itself be sensitive; neither local value syncs. The clear action removes all five plugin-owned App-local values; it does not write synced <code>data.json</code> or change Markdown, attachments, or recovery exports. Tracking remains suppressed until Obsidian restarts, so disable or uninstall in the same session; restart only when you want local tracking to resume.
 
-A legacy external Library-image permission key is the fifth App-local value covered by the local-data reset above. It may remain from a private test build but remains inert in 0.24.0, even if cleanup fails or Obsidian restarts. There is no online-image enable control in this release. See [Local data](LOCAL_DATA.md).
+A legacy external Library-image permission key is the fifth App-local value covered by the local-data reset above. It may remain from a private test build but is inert, even if cleanup fails or Obsidian restarts. There is no online-image enable control in this release. See [Local data](LOCAL_DATA.md).
 
 ## Settings
 
 Generic-base settings deliberately separate three concepts:
 
 - **Index membership** — direct-note behavior and explicit linked-folder rules that can make a note appear;
-- **Note storage and creation** — Inbox, default creation folder, templates, and creation defaults that control location or content but never enroll a note by themselves; and
+- **Note storage and creation** — Inbox, default creation folder, templates, attachment storage, and creation defaults that control where a file is saved or what it starts with but never enroll a note by themselves (see [Folder roles](GETTING_STARTED.md#folder-roles-where-a-file-is-saved-is-not-where-it-is-organized)); and
 - **Portable blueprint and link progress** — imported subject identities, unresolved-link progress, and related blueprint behavior.
 
 Other configurable settings include:
@@ -578,7 +583,7 @@ The ENT preset also exposes safety-badge display and optional advanced canonical
 - Organize notes…
 - Organize this note…
 - Where is this note organized?
-- Undo last organizer change
+- Undo last organizer batch (all affected bases)
 - Redo last organizer change
 - Show imported topics without notes
 - Create or link the next imported topic…
@@ -597,7 +602,7 @@ The ENT preset also exposes safety-badge display and optional advanced canonical
 - Quick entry: Add existing note…
 - Quick append: Add to current note…
 - Quick append: Choose a note…
-- Quick append: Undo last append
+- Quick append: Undo last note append
 - Undo / redo personal organization
 
 The ENT preset adds proposal-promotion and advanced canonical-placement commands where applicable.

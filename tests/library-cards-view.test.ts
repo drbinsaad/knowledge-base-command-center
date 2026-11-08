@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TFile } from "obsidian";
 import { EntVaultCommandCenterView } from "../src/view.ts";
 import { libraryTabId, migrateData, parseQuery, type LayoutHeading, type VaultRecord } from "../src/model.ts";
 import { normalizeLibraryDisplayProfile, type LibraryDisplayProfile } from "../src/library-display-profile.ts";
 import type { KnowledgeBaseSearchResultSet, KnowledgeBaseSearchSource } from "../src/search.ts";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom.ts";
+import { TFile } from "./support/obsidian-stub.ts";
 
 function book(id: string, placeholder = false): VaultRecord {
   return {
@@ -166,6 +166,17 @@ test("Cards distinguish unavailable properties and refresh from the latest cache
   assert.match(h.dom.document.body.textContent, /Cover property is empty/);
 });
 
+test("WF08 C2 view: the card cover button name carries the action and the missing-property status", () => {
+  const records = [book("Alpha")];
+  const h = harness(records);
+  h.setFrontmatter({ unrelated: "x" });
+  h.view.renderLibrary(asHtmlElement(h.dom.document.body), records);
+  const cover = h.dom.document.body.querySelector(".ent-cc-library-cover-button");
+  assert.match(cover?.getAttribute("aria-label") ?? "", /^Select Alpha\b.*Add a cover property/);
+  cover?.click();
+  assert.equal(h.events.at(-1), "select:Books/Alpha.md");
+});
+
 test("Cards distinguish a missing note and pending metadata from a missing cover property", () => {
   const records = [book("Alpha")];
   const h = harness(records);
@@ -210,7 +221,7 @@ test("cover taps and keyboard actions match the title and preserve separate card
   assert.equal(h.events.at(-1), "menu:Books/Alpha.md");
   const placeholder = h.dom.document.body.querySelector(".ent-cc-placeholder-row .ent-cc-library-cover-button");
   assert.ok(placeholder);
-  assert.equal(placeholder.getAttribute("aria-label"), "Create or link Placeholder");
+  assert.equal(placeholder.getAttribute("aria-label"), "Create or link Placeholder. Link a note first");
   placeholder.click();
   assert.equal(h.events.at(-1), "resolve:kbcc-placeholder:Placeholder");
 });
