@@ -558,8 +558,15 @@ export class IndexManagerModal extends Modal {
     if (file instanceof TFile) {
       const open = row.createEl("button", { cls: "ent-cc-icon-button", attr: { "aria-label": `Open ${note.title}`, title: `Open ${note.title}`, type: "button" } });
       setIcon(open, "external-link");
-      open.addEventListener("click", (event) => { event.preventDefault(); this.run(() => this.plugin.openFile(file)); });
+      open.addEventListener("click", (event) => { event.preventDefault(); this.openNote(file); });
     }
+  }
+
+  private openNote(file: TFile): void {
+    this.run(async () => {
+      await this.plugin.openFile(file);
+      this.close();
+    });
   }
 
   private chooseGroupForSelection(mode: "add" | "restore" | "move"): void {
@@ -888,7 +895,7 @@ export class IndexManagerModal extends Modal {
     toolbar.createEl("p", { text: diagnostics.length === 0 ? "No index-organization problems detected." : `${diagnostics.length} issue${diagnostics.length === 1 ? "" : "s"} detected. Safe repair removes only stale or duplicate plugin references; configured parent properties are never rewritten.` });
     this.actionButton(toolbar, "scan-search", "Open taxonomy health…", () => {
       if (!this.guardOpenedBase()) return;
-      new TaxonomyHealthModal(this.plugin).open();
+      new TaxonomyHealthModal(this.plugin, () => this.close()).open();
     });
     this.actionButton(toolbar, "shield-check", "Sync & Recovery Center…", () => {
       if (this.guardOpenedBase()) new SyncRecoveryCenterModal(this.plugin).open();
@@ -937,7 +944,7 @@ export class IndexManagerModal extends Modal {
       text.createDiv({ cls: "ent-cc-manager-note-title", text: diagnostic.title });
       text.createDiv({ cls: "ent-cc-picker-meta", text: `${diagnostic.detail}${diagnostic.path ? ` · ${diagnostic.path}` : ""}` });
       const file = diagnostic.path ? this.app.vault.getAbstractFileByPath(diagnostic.path) : null;
-      if (file instanceof TFile) this.iconAction(row, "external-link", `Open ${file.basename}`, () => this.run(() => this.plugin.openFile(file)));
+      if (file instanceof TFile) this.iconAction(row, "external-link", `Open ${file.basename}`, () => this.openNote(file));
     }
     this.renderShowMore(list, "diagnostics", visibleDiagnostics.length, diagnostics.length);
     if (diagnostics.length === 0) list.createDiv({ cls: "ent-cc-empty", text: "Index organization is healthy." });

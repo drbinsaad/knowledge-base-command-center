@@ -621,6 +621,39 @@ test.describe("tablet split opt-in", () => {
     expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
   });
 
+  test("resize grip opts out of host swipe without disabling normal content swipes", async ({ page }) => {
+    await openView(page, { mobile: true, width: 1180, height: 820, count: 8 });
+    await page.locator(".ent-cc-workspace-options > summary").tap();
+    await page.getByRole("button", { name: "Split view on wide screens", exact: true }).tap();
+    await page.locator(".ent-cc-workspace-options > summary").tap();
+    await page.getByRole("button", { name: /^Research note 000,/u }).tap();
+    const separator = page.getByRole("separator", { name: "Resize note details", exact: true });
+    await expect(separator).toBeVisible();
+    // Obsidian's mobile host independently observes bubbling touchstart and
+    // skips ancestors with data-ignore-swipe. Pointer prevention does not
+    // suppress that recognizer. This models the contract, not native iOS.
+    await page.evaluate(() => {
+      const touches: Array<{ ignored: boolean; trusted: boolean }> = [];
+      Object.assign(window, { resizeHostTouches: touches });
+      document.body.addEventListener("touchstart", (event) => {
+        let ignored = false;
+        for (let node = event.target as Node | null; node; node = node.parentNode) {
+          if (node.nodeType === Node.ELEMENT_NODE && (node as HTMLElement).dataset?.ignoreSwipe) { ignored = true; break; }
+        }
+        touches.push({ ignored, trusted: event.isTrusted });
+      }, { passive: false });
+    });
+    await separator.tap();
+    const touches = () => page.evaluate(() => (window as unknown as { resizeHostTouches: Array<{ ignored: boolean; trusted: boolean }> }).resizeHostTouches);
+    await expect.poll(touches).toEqual([{ ignored: true, trusted: true }]);
+    await page.getByRole("button", { name: /^Research note 000,/u }).tap();
+    await expect.poll(touches).toEqual([{ ignored: true, trusted: true }, { ignored: false, trusted: true }]);
+    await separator.focus();
+    await page.keyboard.press("ArrowLeft");
+    await expect(separator).toHaveAttribute("aria-valuenow", "396");
+    expect((await workspaceLayoutSnapshot(page)).organizationUnchanged).toBe(true);
+  });
+
   test("split view keeps 44 px touch targets (browser emulation, not iPad hardware)", async ({ page }) => {
     await openView(page, { mobile: true, width: 1180, height: 820, count: 8, scenario: "related-overflow" });
     await page.locator(".ent-cc-workspace-options > summary").tap();
@@ -1605,21 +1638,21 @@ for (const scenario of [
 
 for (const mobile of [false, true]) {
   const viewport = mobile ? "mobile" : "desktop";
-  test(`production 0.27.0 update announcement ${viewport}: readable news and reachable actions`, async ({ page }, testInfo) => {
+  test(`production 0.27.1 update announcement ${viewport}: readable news and reachable actions`, async ({ page }, testInfo) => {
     await openView(page, { mobile, count: 8 });
     await openModal(page, "whats-new");
-    const dialog = page.getByRole("dialog", { name: "What’s new in Knowledge Base Command Center 0.27.0", exact: true });
-    await expect(dialog).toHaveAccessibleDescription("Safer recovery, clearer note setup, and more reliable everyday organization.");
-    const body = dialog.getByRole("region", { name: "Version 0.27.0 highlights", exact: true });
+    const dialog = page.getByRole("dialog", { name: "What’s new in Knowledge Base Command Center 0.27.1", exact: true });
+    await expect(dialog).toHaveAccessibleDescription("More reliable note opening, attachment recovery, and Sync safeguards.");
+    const body = dialog.getByRole("region", { name: "Version 0.27.1 highlights", exact: true });
     await expect(body.getByRole("listitem")).toHaveCount(4);
-    await expect(body).toContainText("kept backups");
-    await expect(body).toContainText("Inbox changes");
-    await expect(body).toContainText("copied-file recovery");
-    await expect(body).toContainText("Older history may reset");
-    const link = dialog.getByRole("link", { name: "Read the complete 0.27.0 release notes on GitHub (opens in your browser)", exact: true });
+    await expect(body).toContainText("foreground");
+    await expect(body).toContainText("failed opens remain retryable");
+    await expect(body).toContainText("saved notes stay discoverable");
+    await expect(body).toContainText("local Undo history");
+    const link = dialog.getByRole("link", { name: "Read the complete 0.27.1 release notes on GitHub (opens in your browser)", exact: true });
     const continueButton = dialog.getByRole("button", { name: "Continue", exact: true });
     await expect(link).toHaveText("Read complete release notes");
-    await expect(link).toHaveAttribute("href", "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.27.0");
+    await expect(link).toHaveAttribute("href", "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.27.1");
     await expect(link).toHaveAttribute("target", "_blank");
     await expect(link).toHaveAttribute("rel", "noopener noreferrer");
     for (const action of [link, continueButton]) {
@@ -1627,11 +1660,11 @@ for (const mobile of [false, true]) {
       expect(await action.evaluate((element) => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
     }
     expect(await dialog.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
-    await captureEvidence(page, `whats-new-0.27.0-${viewport}`);
+    await captureEvidence(page, `whats-new-0.27.1-${viewport}`);
     await body.getByRole("listitem").last().scrollIntoViewIfNeeded();
     await expect(body.getByRole("listitem").last()).toBeInViewport({ ratio: 1 });
     await expect(continueButton).toBeInViewport();
-    await captureEvidence(page, `whats-new-0.27.0-${viewport}-last-highlight`);
+    await captureEvidence(page, `whats-new-0.27.1-${viewport}-last-highlight`);
     await link.focus();
     await page.keyboard.press(testInfo.project.name === "webkit" ? "Alt+Tab" : "Tab");
     await expect(continueButton).toBeFocused();
@@ -2294,10 +2327,37 @@ for (const mobile of [false, true]) {
 }
 
 type AttachmentHarness = {
-  openAttachmentImport(options?: { insertFails?: boolean }): void;
+  openAttachmentImport(options?: { insertFails?: boolean; pending?: boolean }): void;
+  settleAttachment(): void;
   loseAttachmentEditor(): void;
   attachmentImportSnapshot(): { submissions: number; copies: string[] };
 };
+
+for (const insertFails of [false, true]) {
+  test(`pending mobile attachment dismissal preserves ${insertFails ? "recovery" : "successful completion"}`, async ({ page }) => {
+    await openView(page, { mobile: true, count: 8 });
+    await page.evaluate((fails) => (window as unknown as { kbccBrowserHarness: AttachmentHarness }).kbccBrowserHarness.openAttachmentImport({ insertFails: fails, pending: true }), insertFails);
+    const dialog = page.getByRole("dialog", { name: "Attach files to note", exact: true });
+    await dialog.locator("input[type=file]").setInputFiles({ name: "sample.pdf", mimeType: "application/pdf", buffer: Buffer.from("synthetic") });
+    await dialog.getByRole("button", { name: "Attach file", exact: true }).click();
+    await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeDisabled();
+    await dialog.locator(".modal-close-button").click();
+    await expect(dialog).toBeVisible();
+    await dialog.getByLabel("Show in note", { exact: true }).focus();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeVisible();
+    await page.setViewportSize({ width: 890, height: 626 });
+    await expect(dialog).toBeVisible();
+    await page.evaluate(() => (window as unknown as { kbccBrowserHarness: AttachmentHarness }).kbccBrowserHarness.settleAttachment());
+    if (insertFails) {
+      await expect(dialog.getByRole("alert")).toContainText("Files/sample.pdf");
+      await expect(dialog.getByRole("button", { name: "Attach file", exact: true })).toBeDisabled();
+      await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
+    }
+    await expect(dialog).toBeHidden();
+    expect(await page.evaluate(() => (window as unknown as { kbccBrowserHarness: AttachmentHarness }).kbccBrowserHarness.attachmentImportSnapshot())).toEqual({ submissions: 1, copies: ["Files/sample.pdf"] });
+  });
+}
 
 for (const [label, width, height, mobile] of [["phone 390", 390, 844, true], ["tablet 820", 820, 1180, true]] as const) {
   test(`WF-03 real attachment modal ${label}: stale editor, corrected End retry and terminal copied-path recovery`, async ({ page }) => {

@@ -2,7 +2,22 @@
 
 Complete this checklist on a physical iPhone before tagging a release that changes search, navigation, modals, import/export, Sync handling, or mobile styles. Simulator and automated DOM results may accompany this record but do not replace it.
 
-## 0.27.0 Recovery and workflow reliability
+## 0.27.1 Note opening and recovery
+
+Status: **Maintainer-authorized waiver for 0.27.1 only — Unverified — not executed on a physical iPhone or iPad.** On 26 November 2026 the maintainer replied **“Publish”** to the explicit 0.27.1 release question covering physical iPhone/iPad, VoiceOver, native touch/keyboard and controlled two-device Sync limitations. Desktop Obsidian and mobile-emulation checks supplement, but do not execute, these physical rows. See the [0.27.1 evidence](release-evidence/0.27.1-iphone.md). No earlier waiver is reused.
+
+1. With Obsidian's focus-new-tab preference off, open an indexed note from details using all three plugin opening preferences. Verify foreground, intended tab/split destination and Return restoring selection, search and scroll; repeat after restart.
+2. Open notes through Index Manager, nested Taxonomy Health and saved-note recovery. Success uncovers the intended note; a failed open keeps the dialog retryable.
+3. Use the native file picker and all attachment placements. During copying, attempt Escape, close, Cancel and backdrop dismissal. After insertion failure, verify persistent copied paths, no duplicate batch submission and reachable Close above the software keyboard.
+4. Exercise proposal/canonical creation failures before and after the file write. After a successful write, recovery must identify the saved file instead of offering duplicate creation.
+5. On wide-tablet split view, resize using touch/Pencil/trackpad without starting workspace navigation. Ordinary scrolling/swipes and keyboard resizing remain usable.
+6. Verify Sync refresh alongside local edits and future-data read-only protection across two devices, including delayed delivery and restart. Preserve synthetic Undo history and recovery journals.
+7. Verify VoiceOver, native keyboard, large text, safe areas, RTL, orientation and touch target usability on physical iPhone/iPad.
+8. Upgrade from 0.27.0 and verify four highlights, reachable actions, no replay after reload and exactly https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.27.1 in What's new.
+
+All physical rows remain **Unexecuted**. This is not a physical-device Pass.
+
+## Historical 0.27.0 Recovery and workflow reliability
 
 Status: **Maintainer-authorized waiver for 0.27.0 only — Unverified — not executed on a physical iPhone or iPad.** The maintainer directly instructed **“Publish”** after the candidate-specific testing limits and documented size increase were disclosed. Native desktop workflows, physical-device checks and controlled two-device Sync remain unverified, not passed. Browser emulation does not execute these rows. See the [0.27.0 evidence](release-evidence/0.27.0-iphone.md) for the exact decision; no earlier authorization is reused.
 

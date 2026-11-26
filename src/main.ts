@@ -2180,6 +2180,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   private captureLiveDeviceLocalState(): void {
     if (this.deviceLocalPersistenceSuppressed) return;
+    // Inspection-only data must not replace the retained profile, even when
+    // the Recovery Center has read that profile for read-only diagnostics.
+    if (!this.deviceLocalStateLoaded || this.dataCompatibilityWarning) return;
     // A committed multi-base operation can remain protected only by its durable batch
     // journal when the marker-free finalizer is rejected. Generic view-state
     // capture must not replace that sole recovery authority in memory; doing
@@ -3338,11 +3341,21 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     let pendingLegacyViewTruncated = false;
     try {
       this.store = migrateStore(loaded);
+      if (recognizedStore && sourceVersion > STORE_VERSION) {
+        // A readable future envelope is not authority for this build to reset
+        // device-local history or finalize its pending recovery journals.
+        this.useActiveData(this.requireActiveBase().data);
+        this.dataCompatibilityWarning = `Plugin data version ${sourceVersion} is newer than this build (v${STORE_VERSION}). All knowledge bases are read-only to prevent data loss.`;
+        new Notice(this.dataCompatibilityWarning, 10000);
+        return { recognizedStore, hasVaultId: hadFinalVaultId, identityNeedsWriteback: false, structuralRepairNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing, sourceVersion, compatible: false };
+      }
       structuralRepairNeedsWriteback = recognizedStore
         && sourceVersion === STORE_VERSION
         && pluginStoreNeedsNormalization(loaded, this.store);
+      // The first supported authority can arrive through Sync after startup
+      // refused a future envelope. Only now may its retained profile be read.
+      this.loadDeviceLocalState();
       if (capturedRead === undefined) {
-        this.loadDeviceLocalState();
         this.reconcilePendingRequiredUndoCommit(this.store);
         this.reconcilePendingRequiredUndoBatchCommit(this.store);
         this.reconcilePendingHistoryTransitionCommit(this.store);
@@ -3409,11 +3422,6 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         sourceVersion,
         compatible: false,
       };
-    }
-    if (recognizedStore && sourceVersion > STORE_VERSION) {
-      this.dataCompatibilityWarning = `Plugin data version ${sourceVersion} is newer than this build (v${STORE_VERSION}). All knowledge bases are read-only to prevent data loss.`;
-      new Notice(this.dataCompatibilityWarning, 10000);
-      return { recognizedStore, hasVaultId: hadFinalVaultId, identityNeedsWriteback: false, structuralRepairNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing, sourceVersion, compatible: false };
     }
     if (corruptStorePreservationFailed) {
       this.dataCompatibilityWarning = "The automatic backup is open read-only because the unreadable data.json could not be preserved. Copy data.json and data.json.bak manually, then repair or restore before enabling writes.";
@@ -3581,8 +3589,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     // a new busy direct save behind that worker would deadlock: the worker
     // waits for the save, while the save cannot start until the worker exits.
     // Reject the late edit synchronously through the normal rollback guard,
-    // without advertising an operation that can never begin.
-    if (this.externalReloadBusy) return this.savePluginDataOperation();
+    // without advertising an operation that can never begin. The promise owns
+    // the queue even while presentation temporarily lowers the busy flag.
+    if (this.isExternalReloadInProgress()) return this.savePluginDataOperation();
     this.directSaveBusyCount += 1;
     const operation = this.enqueueAppLogicalOperation(() => this.savePluginDataOperation());
     this.directSaveTransactionQueue = operation.then(() => undefined, () => undefined);
@@ -3594,7 +3603,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
   }
 
-  private async savePluginDataOperation(): Promise<void> {
+  private async savePluginDataOperation(withinExternalReload = false): Promise<void> {
     if (this.unloaded) throw new Error("This plugin instance was unloaded before the change could be saved.");
     if (this.persistenceUncertain) throw new Error(this.dataCompatibilityWarning);
     if (this.dataCompatibilityWarning) return;
@@ -3628,7 +3637,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       }
       throw new Error(`${requiredUndoBatchUndoLabel(this.stagedRequiredUndoBatchOperationLabel)} Undo finalization is pending. Restart Obsidian so the protected local journal can be reconciled before changing knowledge-base data.`);
     }
-    if (this.externalReloadBusy) {
+    if (this.externalReloadBusy || (!withinExternalReload && this.externalReloadPromise !== null)) {
       // An opaque PluginData snapshot cannot be safely merged with a synced
       // update to the same base: even a selection-only save could resurrect
       // stale collections or settings. Let the external file win atomically
@@ -3749,7 +3758,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     // not register another busy operation behind it, so both transactions can
     // make progress. Any unexpected worker rejection still propagates to the
     // settings safety fallback.
-    if (this.externalReloadBusy && this.externalReloadPromise) {
+    if (this.externalReloadPromise) {
       await this.externalReloadPromise;
       return;
     }
@@ -6383,7 +6392,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     requests: ReadonlyArray<{ baseId: string; selection: PortableExportSelection; completeLibrarySet?: boolean }>,
     exportedAt = new Date().toISOString(),
   ): Promise<PortfolioExportV1> {
-    if (this.externalReloadBusy) throw new Error("Finish reloading synced knowledge-base data before exporting a portfolio.");
+    if (this.isExternalReloadInProgress()) throw new Error("Finish reloading synced knowledge-base data before exporting a portfolio.");
     const selected = requests.map((request) => {
       const entry = this.store.bases.find((candidate) => candidate.id === request.baseId && candidate.archivedAt === null);
       if (!entry) throw new Error("A selected knowledge base is unavailable or archived.");
@@ -6745,7 +6754,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     this.assertDataWritable();
     if (this.baseOperationBusy) throw new Error("Another knowledge-base change is still being saved.");
     if (this.dataTransactionBusy) throw new Error("Finish the current organization change before switching knowledge bases.");
-    if (this.externalReloadBusy) throw new Error("Finish reloading synced knowledge-base data before switching bases.");
+    if (this.isExternalReloadInProgress()) throw new Error("Finish reloading synced knowledge-base data before switching bases.");
     // A debounced text control has already mutated the active PluginData object.
     // Commit or causally compensate that draft before a lifecycle transaction
     // snapshots/rebinds the store, otherwise switching bases could publish the
@@ -6758,14 +6767,14 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     // began while the settings write was settling.
     if (this.baseOperationBusy) throw new Error("Another knowledge-base change is still being saved.");
     if (this.dataTransactionBusy) throw new Error("Finish the current organization change before switching knowledge bases.");
-    if (this.externalReloadBusy) throw new Error("Finish reloading synced knowledge-base data before switching bases.");
+    if (this.isExternalReloadInProgress()) throw new Error("Finish reloading synced knowledge-base data before switching bases.");
     this.baseOperationBusy = true;
     try {
       // The whole logical transaction—not merely its first adapter write—is
       // shared across replacement plugin instances. Direct/settings saves that
       // were already requested finish before a base switch can rebind `data`.
       await this.directSaveTransactionQueue;
-      if (this.externalReloadBusy) throw new Error("Finish reloading synced knowledge-base data before switching bases.");
+      if (this.isExternalReloadInProgress()) throw new Error("Finish reloading synced knowledge-base data before switching bases.");
       await this.enqueueAppLogicalOperation(async () => {
         await this.saveQueue;
         if (beforeChange) await beforeChange();
@@ -10052,8 +10061,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       // Inside a base switch or organization transaction the logical barrier
       // is already held by the caller; queueing a public save behind it would
       // wait on the very operation this refresh belongs to. Run the save
-      // inline instead, exactly as mutate() persists its own transaction.
-      if (withinOperation) await this.savePluginDataOperation();
+      // inline instead, exactly as mutate() persists its own transaction. Only
+      // this owned cleanup may save while reload presentation holds the queue.
+      if (withinOperation) await this.savePluginDataOperation(true);
       else await this.savePluginData();
     } else if (selectionChanged) {
       await this.saveViewState(withinOperation);
@@ -10083,7 +10093,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (this.baseOperationBusy) throw new Error("Finish switching knowledge bases before changing its organization.");
     if (this.dataTransactionBusy) throw new Error("Another organization change is still being saved.");
     if (this.directSaveBusyCount > 0) throw new Error("Finish saving the current knowledge-base change before starting another organization transaction.");
-    if (this.externalReloadBusy) throw new Error("Finish reloading synced knowledge-base data before changing its organization.");
+    if (this.isExternalReloadInProgress()) throw new Error("Finish reloading synced knowledge-base data before changing its organization.");
     this.dataTransactionBusy = true;
     try {
       await this.enqueueAppLogicalOperation(async () => {
@@ -10226,7 +10236,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     if (this.baseOperationBusy) throw new Error("Finish the current knowledge-base change before using history.");
     if (this.dataTransactionBusy) throw new Error("Another organization change is still being saved.");
     if (this.directSaveBusyCount > 0) throw new Error("Finish saving the current knowledge-base change before using history.");
-    if (this.externalReloadBusy) throw new Error("Finish reloading synced knowledge-base data before using history.");
+    if (this.isExternalReloadInProgress()) throw new Error("Finish reloading synced knowledge-base data before using history.");
     const source = direction === "undo" ? this.data.undoStack : this.data.redoStack;
     if (source.length === 0) return;
     // Second gate: before popping, reserving an inverse or writing anything,
@@ -11872,6 +11882,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       : behavior === "split"
         ? this.app.workspace.getLeaf("split", "vertical")
         : this.app.workspace.getLeaf("tab");
-    await leaf.openFile(file);
+    // This is an explicit Open action. A new tab may otherwise inherit the
+    // host's background-tab preference and leave the user on note details.
+    await leaf.openFile(file, { active: true });
   }
 }

@@ -20,7 +20,7 @@ import { SyncRecoveryCenterModal } from "../../src/sync-recovery-modal";
 import { NoteOrganizerModal, type NoteOrganizerHost } from "../../src/note-organizer-modal";
 import { EntCommandCenterSettingsTab } from "../../src/settings";
 import { UpdateAnnouncementModal } from "../../src/update-announcement-modal";
-import { UPDATE_ANNOUNCEMENT_0_27_0 } from "../../src/update-announcement";
+import { UPDATE_ANNOUNCEMENT_0_27_1 } from "../../src/update-announcement";
 import { applyNoteOrganizerPlan, createNoteOrganizerPlan, type NoteOrganizerDirective, type NoteOrganizerFileFact, type NoteOrganizerPrimaryState } from "../../src/note-organizer";
 import { organizerIndexPlacement, organizerIndexTrail } from "../../src/note-organizer-index";
 import { applyLibraryVisualMove, type LibraryVisualMoveRequest } from "../../src/library-visual-move";
@@ -662,10 +662,11 @@ if (placeholderLinkScenario) {
 // documented outcomes (stale editor refused before any copy; copied-but-not-linked
 // error carrying the copied paths). It never touches a vault.
 const attachmentImport = { editorOwned: true, insertFails: false, submissions: 0, copies: [] as string[] };
+let releaseAttachment: (() => void) | null = null;
 
 const harness = {
   ready: false,
-  openAttachmentImport(options: { insertFails?: boolean } = {}) {
+  openAttachmentImport(options: { insertFails?: boolean; pending?: boolean } = {}) {
     openedModal?.close();
     Object.assign(attachmentImport, { editorOwned: true, insertFails: Boolean(options.insertFails), submissions: 0, copies: [] });
     openedModal = new AttachmentImportModal(app as never, "Reading/Attachment overview.md", {
@@ -673,6 +674,7 @@ const harness = {
       configuredFolder: "Files", marker: "<!-- kbcc:attachments -->", heading: "Attachments",
     }, [], "cursor", true, async (value) => {
       attachmentImport.submissions += 1;
+      if (options.pending) await new Promise<void>((resolve) => { releaseAttachment = resolve; });
       if (value.insertionMode === "cursor" && !attachmentImport.editorOwned) {
         throw new Error("Open this note in the Markdown editor to insert at the cursor, or choose marker, heading, or end of note.");
       }
@@ -685,6 +687,7 @@ const harness = {
     openedModal.open();
   },
   loseAttachmentEditor() { attachmentImport.editorOwned = false; },
+  settleAttachment() { const release = releaseAttachment; releaseAttachment = null; release?.(); },
   attachmentImportSnapshot() { return { submissions: attachmentImport.submissions, copies: [...attachmentImport.copies] }; },
   startAddExisting() { view.startAddExistingToIndex(); },
   placeholderLinkSnapshot() { return structuredClone(placeholderLinkCalls); },
@@ -812,7 +815,7 @@ const harness = {
     } else if (kind === "sync") {
       openedModal = new SyncRecoveryCenterModal(plugin as unknown as EntVaultCommandCenterPlugin);
     } else if (kind === "whats-new") {
-      openedModal = new UpdateAnnouncementModal(app as never, UPDATE_ANNOUNCEMENT_0_27_0);
+      openedModal = new UpdateAnnouncementModal(app as never, UPDATE_ANNOUNCEMENT_0_27_1);
     } else if (kind === "quick-organizer") {
       organizer = new NoteOrganizerModal(quickOrganizerHost, { singleNote: true, source: "file-menu", preselectedPaths: [quickNotePath] });
       openedModal = organizer;
@@ -870,3 +873,6 @@ const harness = {
 };
 Object.assign(window, { kbccBrowserHarness: harness });
 void view.onOpen().then(() => { harness.ready = true; });
+
+// Shared synthetic scene for tests that substitute a real plugin service.
+export { app, plugin, view, store, deviceLocalValues, content };

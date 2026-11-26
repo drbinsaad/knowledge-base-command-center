@@ -16560,3 +16560,183 @@ test("D01 correction 6: an older-format backup that differs from the primary is 
   assert.equal(keptFiles().length, 1);
   assert.equal(files.get(keptFiles()[0]), backupText);
 });
+
+interface Ip07ReloadSeam {
+  store: PluginStore;
+  baseOperationBusy: boolean;
+  dataTransactionBusy: boolean;
+  directSaveBusyCount: number;
+  announceOperationsIdle(): void;
+  recordRejectedSemanticAttempts(store: PluginStore): void;
+}
+
+/** Hold the real worker's presentation await; both captures still use production merge/queue code. */
+async function ip07HeldReload(history: "undo" | "redo" | null = null) {
+  const initial = createDefaultStore(migrateData(null), 100, "vault-ip07-reload");
+  const other = createKnowledgeBaseEntry(migrateData(null), "base-other", 100);
+  other.data.settings.workspaceName = "Other base";
+  initial.bases.push(other);
+  const plugin = pluginWith(initial);
+  await plugin.loadPluginData(false);
+  if (history) {
+    await plugin.mutate("Prime history", () => { plugin.data.pinnedPaths = ["Synthetic/Topic.md"]; });
+    if (history === "redo") await plugin.undo();
+  }
+  const seam = plugin as unknown as Ip07ReloadSeam;
+  const incoming = structuredClone(seam.store);
+  const remote = incoming.bases.find(base => base.id === "base-other");
+  assert.ok(remote);
+  advanceStoreEntry(remote, () => { remote.data.settings.workspaceSubtitle = "First remote edit"; });
+  plugin.loadedData = incoming;
+  plugin.savedData.length = 0;
+  const entered = deferred();
+  const release = deferred();
+  let refreshes = 0;
+  plugin.refreshViews = async () => {
+    refreshes += 1;
+    if (refreshes === 1) { entered.resolve(); await release.promise; }
+  };
+  const reload = plugin.onExternalSettingsChange();
+  await bounded(entered.promise, "IP07 presentation entered");
+  assert.equal(plugin.isExternalReloadInProgress(), true);
+  const nextCapture = () => {
+    const next = structuredClone(incoming);
+    const nextRemote = next.bases.find(base => base.id === "base-other");
+    assert.ok(nextRemote);
+    advanceStoreEntry(nextRemote, () => { nextRemote.data.settings.workspaceSubtitle = "Second remote edit"; });
+    plugin.loadedData = next;
+    return plugin.onExternalSettingsChange();
+  };
+  const cleanup = async (operations: Promise<unknown>[]) => {
+    release.resolve();
+    // Only test teardown breaks a reproduced pre-fix cycle, so failed red runs
+    // cannot leave pending work/timers. Production success never uses this path.
+    seam.baseOperationBusy = false;
+    seam.dataTransactionBusy = false;
+    seam.directSaveBusyCount = 0;
+    seam.announceOperationsIdle();
+    await bounded(Promise.allSettled(operations), "IP07 fixture teardown");
+  };
+  return { plugin, seam, reload, release, nextCapture, cleanup, refreshes: () => refreshes };
+}
+
+for (const action of ["setting", "mutate", "base switch", "undo", "redo", "portfolio"] as const) {
+  test(`IP07 ${action}: a second Sync capture settles despite an edit during presentation`, async () => {
+    const fixture = await ip07HeldReload(action === "undo" || action === "redo" ? action : null);
+    const { plugin } = fixture;
+    const priorName = plugin.data.settings.workspaceName;
+    const priorHistory = structuredClone([plugin.data.undoStack, plugin.data.redoStack]);
+    let actionRan = false;
+    let attempt: Promise<unknown>;
+    if (action === "setting") {
+      const settings = settingsTabForPlugin(plugin);
+      plugin.data.settings.workspaceName = "Uncommitted local draft";
+      attempt = settings.save(false);
+    } else if (action === "mutate") {
+      attempt = plugin.mutate("Overlapping local edit", () => { actionRan = true; plugin.data.pinnedPaths = ["Synthetic/Uncommitted.md"]; });
+    } else if (action === "base switch") {
+      attempt = plugin.switchKnowledgeBase("base-other");
+    } else if (action === "undo") {
+      assert.ok(plugin.data.undoStack.length > 0);
+      attempt = plugin.undo();
+    } else if (action === "redo") {
+      assert.ok(plugin.data.redoStack.length > 0);
+      attempt = plugin.redo();
+    } else {
+      // Allocating stable subject IDs is a write even though this is an export.
+      plugin.data.pinnedPaths = ["Synthetic/Portfolio.md"];
+      attempt = plugin.createPortfolioExport([{ baseId: plugin.getActiveKnowledgeBaseId(), selection: { ...EMPTY_PORTABLE_SELECTION, study: true } }]);
+    }
+    const result = attempt.then(value => ({ value, error: null }), (error: unknown) => ({ value: undefined, error }));
+    await new Promise<void>(resolve => setImmediate(resolve));
+    const next = fixture.nextCapture();
+    fixture.release.resolve();
+    const operations = [fixture.reload, next, result];
+    try {
+      await bounded(Promise.all(operations), `IP07 ${action} and both Sync captures`);
+      const outcome = await result;
+      if (action === "setting") assert.equal(outcome.value, false, "settings save must report rejection");
+      else assert.match(String(outcome.error), /reload/i);
+      assert.equal(plugin.isExternalReloadInProgress(), false);
+      assert.equal(plugin.isDataReadOnly(), false);
+      assert.equal(plugin.getActiveKnowledgeBaseId(), "base-default");
+      assert.equal(plugin.data.settings.workspaceName, priorName, "the direct draft must not leak into the accepted store");
+      assert.equal(actionRan, false);
+      assert.deepEqual([plugin.data.undoStack, plugin.data.redoStack], priorHistory);
+      assert.equal(plugin.getKnowledgeBases().find(base => base.id === "base-other")?.data.settings.workspaceSubtitle, "Second remote edit");
+      assert.ok(fixture.refreshes() >= 2);
+      assert.equal(plugin.savedData.length, 0, "the refused local operation must not publish a semantic edit");
+      await bounded(plugin.mutate("After Sync", () => { plugin.data.nextStudyPaths = ["Synthetic/Later.md"]; }), "IP07 later edit");
+      assert.deepEqual(plugin.data.nextStudyPaths, ["Synthetic/Later.md"]);
+    } finally {
+      await fixture.cleanup(operations);
+    }
+  });
+}
+
+test("IP07 compensating save waits for the reload without claiming a busy slot behind it", async () => {
+  const fixture = await ip07HeldReload();
+  const attempted = structuredClone(fixture.seam.store);
+  const entry = attempted.bases[0];
+  assert.ok(entry);
+  advanceStoreEntry(entry, () => { entry.data.settings.workspaceSubtitle = "Rejected attempt"; });
+  fixture.seam.recordRejectedSemanticAttempts(attempted);
+  const compensation = fixture.plugin.saveCompensatingRollback();
+  const next = fixture.nextCapture();
+  fixture.release.resolve();
+  const operations = [fixture.reload, next, compensation];
+  try {
+    await bounded(Promise.all(operations), "IP07 compensation and both captures");
+    assert.equal(fixture.plugin.isExternalReloadInProgress(), false);
+    assert.equal(fixture.plugin.isDataReadOnly(), false);
+    assert.notEqual(fixture.plugin.data.settings.workspaceSubtitle, "Rejected attempt");
+  } finally {
+    await fixture.cleanup(operations);
+  }
+});
+
+test("IP07 worker-owned normalization survives a refused settings save during its adapter await", async () => {
+  const initial = createDefaultStore(migrateData(null), 100, "vault-ip07-normalization");
+  const plugin = pluginWith(initial);
+  await plugin.loadPluginData(false);
+  const incoming = structuredClone(initial);
+  const entry = incoming.bases[0];
+  assert.ok(entry);
+  advanceStoreEntry(entry, () => { entry.data.pinnedPaths = ["Synthetic/A.md", "Synthetic/A.md"]; });
+  plugin.loadedData = incoming;
+  const entered = deferred();
+  const release = deferred();
+  let saves = 0;
+  plugin.saveData = async (value: unknown) => {
+    saves += 1;
+    if (saves === 1) { entered.resolve(); await release.promise; }
+    plugin.savedData.push(structuredClone(value));
+  };
+  const view = Object.create(EntVaultCommandCenterView.prototype) as EntVaultCommandCenterView;
+  view.reload = async (withinOperation = false) => {
+    await plugin.reconcileRecords(plugin.getRecords(), withinOperation);
+    await plugin.saveViewState(withinOperation);
+  };
+  plugin.app.workspace.getLeavesOfType = type => type === VIEW_TYPE ? [{ view } as never] : [];
+  const reload = plugin.onExternalSettingsChange();
+  await bounded(entered.promise, "IP07 normalization save entered");
+  const settings = settingsTabForPlugin(plugin);
+  const expectedName = plugin.data.settings.workspaceName;
+  plugin.data.settings.workspaceName = "Must not leak";
+  const attempt = settings.save(false);
+  try {
+    assert.equal(await bounded(attempt, "IP07 overlapping settings refusal"), false);
+  } finally {
+    release.resolve();
+    const seam = plugin as unknown as Ip07ReloadSeam;
+    seam.directSaveBusyCount = 0;
+    seam.announceOperationsIdle();
+    await bounded(Promise.allSettled([reload, attempt]), "IP07 normalization teardown");
+  }
+  assert.deepEqual(plugin.data.pinnedPaths, ["Synthetic/A.md"]);
+  assert.equal(plugin.data.settings.workspaceName, expectedName);
+  assert.equal(plugin.isDataReadOnly(), false);
+  assert.equal(plugin.isExternalReloadInProgress(), false);
+  const saved = plugin.savedData.at(-1) as PluginStore;
+  assert.deepEqual(semanticPluginDataProjection(plugin.data), semanticPluginDataProjection(saved.bases[0].data));
+});

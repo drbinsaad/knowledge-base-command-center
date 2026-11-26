@@ -71,7 +71,10 @@ export class TaxonomyHealthModal extends Modal {
   private summaryEl: HTMLElement | null = null;
   private resultEls: HTMLElement[] = [];
 
-  constructor(private readonly plugin: EntVaultCommandCenterPlugin) {
+  constructor(
+    private readonly plugin: EntVaultCommandCenterPlugin,
+    private readonly onNoteOpened?: () => void,
+  ) {
     super(plugin.app);
   }
 
@@ -216,7 +219,16 @@ export class TaxonomyHealthModal extends Modal {
         const open = actions.createEl("button", { cls: "ent-cc-button", type: "button" });
         setIcon(open.createSpan(), "external-link");
         open.createSpan({ text: "Open note" });
-        open.addEventListener("click", () => void this.plugin.openFile(file));
+        open.addEventListener("click", () => {
+          if (!this.guardOpenedBase()) return;
+          void this.plugin.openFile(file).then(() => {
+            this.close();
+            this.onNoteOpened?.();
+          }).catch((error: unknown) => {
+            if (!this.guardOpenedBase()) return;
+            new Notice(errorMessage(error, "The note could not be opened."), 8000);
+          });
+        });
       }
     }
     if (finding.repair) {

@@ -13,6 +13,7 @@ async function fixture(behavior: "same-tab" | "split" | "new-tab", openFailure?:
   const localValues = new Map<string, unknown>();
   const leafRequests: LeafArgs[] = [];
   const opened: string[] = [];
+  let foregroundPath: string | null = null;
   const app = {
     vault: { configDir: ".obsidian", getMarkdownFiles: () => [], getAbstractFileByPath: () => null },
     workspace: {
@@ -20,9 +21,12 @@ async function fixture(behavior: "same-tab" | "split" | "new-tab", openFailure?:
       getLeaf: (...args: unknown[]) => {
         leafRequests.push(args);
         return {
-          openFile: async (file: TFile) => {
+          openFile: async (file: TFile, state?: { active?: boolean }) => {
             if (openFailure) throw openFailure;
             opened.push(file.path);
+            // Obsidian can create tabs in the background. When active is
+            // omitted, openFile preserves whether this leaf was active.
+            if (state?.active ?? args[0] !== "tab") foregroundPath = file.path;
           },
         };
       },
@@ -42,7 +46,7 @@ async function fixture(behavior: "same-tab" | "split" | "new-tab", openFailure?:
       return { activeTab: "collections", selectedPath: "Notes/a.md", query: "q", detailVisible: true, browseRowLimit: 900, browseStructureLimit: 600, listScrollTop: 5, detailScrollTop: 6 };
     },
   };
-  return { plugin, leafRequests, opened, localValues, sourceView: sourceView as never, captures: () => captures };
+  return { plugin, leafRequests, opened, localValues, sourceView: sourceView as never, captures: () => captures, foregroundPath: () => foregroundPath };
 }
 
 test("O1 non-Markdown files opened from KBCC request a new tab for every open preference", async () => {
@@ -85,4 +89,26 @@ test("O4 an open failure rejects to the caller after requesting the new tab, wit
   await assert.rejects(f.plugin.openFile(new TFile("Files/Paper.pdf"), f.sourceView), /simulated host open failure/u);
   assert.deepEqual(f.leafRequests, [["tab"]]);
   assert.deepEqual(f.opened, []);
+  assert.equal(f.foregroundPath(), null);
+});
+
+test("O5 deliberate note opens show the note even when new tabs open in the background", async () => {
+  for (const behavior of ["same-tab", "split", "new-tab"] as const) {
+    const f = await fixture(behavior);
+    await f.plugin.openFile(new TFile("Notes/Topic.md"), f.sourceView);
+    assert.equal(f.foregroundPath(), "Notes/Topic.md", behavior);
+    assert.deepEqual(f.opened, ["Notes/Topic.md"]);
+    const durable = f.localValues.get(KBCC_RETURN_NAVIGATION_STATE_KEY) as { routes?: Array<{ notePath?: string }> };
+    assert.equal(durable.routes?.[0]?.notePath, "Notes/Topic.md");
+  }
+});
+
+test("O6 supported attachment opens show their new tab while retaining the command center", async () => {
+  for (const path of ["Files/Review.pdf", "Files/Diagram.png", "Files/Audio.mp3"]) {
+    const f = await fixture("same-tab");
+    await f.plugin.openFile(new TFile(path), f.sourceView);
+    assert.deepEqual(f.leafRequests, [["tab"]]);
+    assert.equal(f.foregroundPath(), path);
+    assert.equal(f.captures(), 0);
+  }
 });

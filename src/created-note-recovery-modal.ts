@@ -16,7 +16,7 @@ export class CreatedNoteRecoveryModal extends Modal {
     this.contentEl.createEl("p", { text: this.reason, attr: { role: "status" } });
     const actions = this.contentEl.createDiv({ cls: "ent-cc-collection-actions" });
     const open = actions.createEl("button", { text: "Open saved note", type: "button" });
-    open.addEventListener("click", () => { void this.openNote().catch((error: unknown) => new Notice(errorMessage(error))); });
+    open.addEventListener("click", () => { void this.openNote().then(() => this.close()).catch((error: unknown) => new Notice(errorMessage(error))); });
     const organize = actions.createEl("button", { text: "Organize saved note", type: "button", cls: "mod-cta" });
     organize.addEventListener("click", () => {
       try { this.organize(); this.close(); }

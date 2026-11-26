@@ -20,21 +20,21 @@ interface ParsedSemanticVersion {
   prerelease: string[] | null;
 }
 
-export const UPDATE_ANNOUNCEMENT_0_27_0: UpdateAnnouncement = {
-  version: "0.27.0",
-  title: "What’s new in Knowledge Base Command Center 0.27.0",
-  intro: "Safer recovery, clearer note setup, and more reliable everyday organization.",
+export const UPDATE_ANNOUNCEMENT_0_27_1: UpdateAnnouncement = {
+  version: "0.27.1",
+  title: "What’s new in Knowledge Base Command Center 0.27.1",
+  intro: "More reliable note opening, attachment recovery, and Sync safeguards.",
   highlights: [
-    "Review kept backups and restore a knowledge base as a new base, without replacing existing bases.",
-    "Review Inbox changes during setup and see clearer choices when linking an existing note to an imported entry.",
-    "Attachments show their destination and keep copied-file recovery details visible when links cannot be inserted.",
-    "Undo history is checked against current organization. Older history may reset after updating; your notes and organization are unchanged.",
+    "Open note brings your selection to the foreground, even when new tabs normally open in the background.",
+    "Management and recovery dialogs close after a successful open; failed opens remain retryable.",
+    "Attachment copying keeps recovery visible, and saved notes stay discoverable if organization fails.",
+    "Sync refresh and newer-data safeguards better protect queued edits and local Undo history.",
   ],
-  releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.27.0",
+  releaseUrl: "https://github.com/drbinsaad/knowledge-base-command-center/releases/tag/0.27.1",
 };
 
 const ANNOUNCEMENTS = new Map<string, UpdateAnnouncement>([
-  [UPDATE_ANNOUNCEMENT_0_27_0.version, UPDATE_ANNOUNCEMENT_0_27_0],
+  [UPDATE_ANNOUNCEMENT_0_27_1.version, UPDATE_ANNOUNCEMENT_0_27_1],
 ]);
 
 function parseSemanticVersion(value: string): ParsedSemanticVersion | null {
