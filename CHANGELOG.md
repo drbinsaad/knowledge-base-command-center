@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.27.1
+
+### Note opening and recovery
+
+- Explicit **Open note** actions bring the selected note to the foreground, even when Obsidian normally opens new tabs in the background. The shared opener retains the configured current-tab, new-tab or split preference.
+- Index Manager, nested Taxonomy Health and saved-note recovery dialogs close after successful opening. Failed opens show feedback and keep their action available to retry.
+- Attachment dialogs stay open while files are being copied. If link insertion fails afterward, copied-file locations stay visible and the same batch cannot be submitted again.
+- A note saved before filing or refresh fails is presented through saved-note recovery, avoiding an invitation to create the file again. Failures before the file is written remain retryable.
+- The workspace resize handle opts out of Obsidian's mobile workspace swipe handling; ordinary content gestures remain available.
+
+### Sync and compatibility
+
+- Sync refresh retains edit-admission ownership through its complete refresh interval, avoiding a queue deadlock between reloading data and newly admitted local changes.
+- Newer or unsupported data is checked before device-local Undo/history side effects. A later supported reload can recover retained history without downgrading unknown data.
+- Minimum Obsidian remains 1.13.0. Plugin and command IDs, data formats, dependencies, CSS and size budgets are unchanged. No runtime network access or online-cover loading is added.
+- Automated gates and synthetic native-desktop workflows are separate from physical-device evidence. Physical iPhone/iPad, native touch/keyboard, VoiceOver and controlled two-device Sync remain **unverified** under a fresh maintainer-authorized waiver. See the [0.27.1 evidence](https://github.com/drbinsaad/knowledge-base-command-center/blob/0.27.1/docs/release-evidence/0.27.1-iphone.md) for the exact scope.
+
 ## 0.27.0
 
 ### Recovery and organization

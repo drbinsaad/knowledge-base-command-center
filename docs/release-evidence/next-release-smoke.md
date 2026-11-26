@@ -1,6 +1,21 @@
-# 0.26.1 device and Sync smoke record
+# 0.27.1 device and Sync smoke record
 
-Active candidate: 0.26.1 Safety and reliability fixes. Physical iPhone/iPad and controlled two-device Sync are **Unverified — Unexecuted**, under the [candidate-specific maintainer-authorized waiver](0.26.1-iphone.md). The evidence records the exact fresh instruction and its context. No earlier waiver is reused. This is not a physical-device Pass.
+Active candidate: 0.27.1 Note opening and recovery. Physical iPhone/iPad, native touch/keyboard, VoiceOver and controlled two-device Sync are **Unverified — Unexecuted**, under the [fresh maintainer-authorized waiver](0.27.1-iphone.md). This is not a physical-device Pass. No historical approval is reused.
+
+| Flow | Pass criteria | Physical result |
+| --- | --- | --- |
+| Foreground and Return | Open the intended note under all three preferences; restore the saved page and position after return/restart. | Unexecuted |
+| Dialog navigation | Successful opens close covering dialogs; failures remain retryable. | Unexecuted |
+| Attachments and creation | Copying cannot conceal recovery; saved files remain discoverable after later filing/insertion failure. | Unexecuted |
+| Panel and native input | Resize without host swipe; keyboard, VoiceOver, safe areas and orientation retain usable controls. | Unexecuted |
+| Two-device Sync | Refresh/local edits settle safely; unsupported data remains read-only without discarding local history. | Unexecuted |
+| Update news | 0.27.0 upgrade displays 0.27.1 highlights once with its exact release link. | Unexecuted |
+
+Eleven synthetic desktop Obsidian/mobile-emulation workflows passed on the pre-version candidate. Their exact limits are recorded in the release evidence; they do not execute these physical rows.
+
+## Historical 0.26.1 device and Sync smoke record
+
+Historical candidate: 0.26.1 Safety and reliability fixes. Physical iPhone/iPad and controlled two-device Sync are **Unverified — Unexecuted**, under the [candidate-specific maintainer-authorized waiver](0.26.1-iphone.md). The evidence records the exact fresh instruction and its context. No earlier waiver is reused. This is not a physical-device Pass.
 
 | Flow | Pass criteria | Result |
 | --- | --- | --- |
