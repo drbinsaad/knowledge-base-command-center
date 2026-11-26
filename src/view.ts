@@ -2871,31 +2871,38 @@ export class EntVaultCommandCenterView extends ItemView {
       onSubmit: async (value) => {
         if (!ownsBase()) return;
         const file = await this.plugin.createProposal(value);
-        if (!ownsBase()) return;
-        if (onCreated) {
-          await onCreated(file);
-          if (!ownsBase()) return;
-          // Route to the newly created Inbox proposal. Its portable subject
-          // also remains projected in the index until promotion.
-          this.plugin.data.activeTab = "inbox";
-          this.plugin.data.selectedPath = file.path;
-          this.mobileInspectorOpen = false;
-          this.mobileInspectorNeedsFocus = false;
-          await this.plugin.saveViewState();
-          if (!ownsBase()) return;
-          await this.reload();
-          if (!ownsBase()) return;
-          new Notice("Unverified topic proposal created and linked to the imported subject.");
-        } else {
-          this.plugin.data.activeTab = "inbox";
-          this.plugin.data.selectedPath = file.path;
-          await this.plugin.saveViewState();
-          if (!ownsBase()) return;
-          await this.reload();
-          if (!ownsBase()) return;
-          new Notice("Topic proposal created as unverified in the inbox.");
+        const checkBase = (): void => {
+          if (!ownsBase()) throw new Error("The active knowledge base changed; verify the saved note's placement.");
+        };
+        try {
+          checkBase();
+          if (onCreated) {
+            await onCreated(file);
+            checkBase();
+            // Route to the newly created Inbox proposal. Its portable subject
+            // also remains projected in the index until promotion.
+            this.plugin.data.activeTab = "inbox";
+            this.plugin.data.selectedPath = file.path;
+            this.mobileInspectorOpen = false;
+            this.mobileInspectorNeedsFocus = false;
+            await this.plugin.saveViewState();
+            checkBase();
+            await this.reload();
+            checkBase();
+            new Notice("Unverified topic proposal created and linked to the imported subject.");
+          } else {
+            this.plugin.data.activeTab = "inbox";
+            this.plugin.data.selectedPath = file.path;
+            await this.plugin.saveViewState();
+            checkBase();
+            await this.reload();
+            checkBase();
+            new Notice("Topic proposal created as unverified in the inbox.");
+          }
+          if (value.addToCollection) this.openCollectionPicker(file.path);
+        } catch (error) {
+          await this.showCreatedNoteRecovery(file, error, ownsBase);
         }
-        if (value.addToCollection) this.openCollectionPicker(file.path);
       },
     }).open();
   }
@@ -2925,15 +2932,22 @@ export class EntVaultCommandCenterView extends ItemView {
       onSubmit: async (value) => {
         if (!ownsBase()) return;
         const file = await this.plugin.createCanonical(value);
-        if (!ownsBase()) return;
-        this.plugin.data.activeTab = "curriculum";
-        this.plugin.data.selectedPath = file.path;
-        await this.plugin.saveViewState();
-        if (!ownsBase()) return;
-        await this.reload();
-        if (!ownsBase()) return;
-        new Notice("Canonical scaffold created with review_status: unverified.");
-        if (value.addToCollection) this.openCollectionPicker(file.path);
+        const checkBase = (): void => {
+          if (!ownsBase()) throw new Error("The active knowledge base changed; verify the saved note's placement.");
+        };
+        try {
+          checkBase();
+          this.plugin.data.activeTab = "curriculum";
+          this.plugin.data.selectedPath = file.path;
+          await this.plugin.saveViewState();
+          checkBase();
+          await this.reload();
+          checkBase();
+          new Notice("Canonical scaffold created with review_status: unverified.");
+          if (value.addToCollection) this.openCollectionPicker(file.path);
+        } catch (error) {
+          await this.showCreatedNoteRecovery(file, error, ownsBase);
+        }
       },
     }).open();
   }
