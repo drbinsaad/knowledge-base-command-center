@@ -205,6 +205,14 @@ export class AttachmentImportModal extends Modal {
     this.updateSubmit();
   }
 
+  override close(): void {
+    if (this.submitting) {
+      new Notice("Wait for the files to finish attaching.");
+      return;
+    }
+    super.close();
+  }
+
   onClose(): void {
     this.contentEl.empty();
     this.selectedFiles = [];
@@ -278,6 +286,7 @@ export class AttachmentImportModal extends Modal {
   }
 
   private updateSubmit(): void {
+    if (this.cancelButton) this.cancelButton.disabled = this.submitting;
     const count = this.selectedFiles.length;
     if (!this.submitButton) return;
     this.submitButton.setText(count > 1 ? `Attach ${count} files` : "Attach file");
@@ -303,6 +312,7 @@ export class AttachmentImportModal extends Modal {
         insertionMode: this.insertionMode,
         display: this.display,
       });
+      this.submitting = false;
       this.close();
     } catch (error) {
       new Notice(errorMessage(error, "The attachment could not be added."), 9000);

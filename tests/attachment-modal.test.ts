@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import type { App } from "obsidian";
-import { Notice } from "./support/obsidian-stub.ts";
+import { Modal, Notice } from "./support/obsidian-stub.ts";
 import { AttachmentLinkInsertionError, MAX_ATTACHMENT_BYTES } from "../src/attachment";
 import { AttachmentImportModal, attachmentDestinationSummary, type AttachmentBatchValue } from "../src/attachment-modal";
 import { asHtmlElement, createFakeDom } from "./support/fake-dom";
@@ -13,7 +13,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function modalHarness(onSubmit: (value: AttachmentBatchValue) => Promise<void>) {
+function modalHarness(onSubmit: (value: AttachmentBatchValue) => Promise<void>, context?: TestContext) {
   const dom = createFakeDom();
   const modal = new AttachmentImportModal({} as App, "Topic.md", {
     expectedBaseId: "synthetic-base",
@@ -29,6 +29,7 @@ function modalHarness(onSubmit: (value: AttachmentBatchValue) => Promise<void>) 
     requestedFolder: string;
     destinationSelected: boolean;
     submitButton: HTMLButtonElement | null;
+    cancelButton: HTMLButtonElement | null;
     updateSubmit(): void;
     submit(): Promise<void>;
   };
@@ -41,13 +42,96 @@ function modalHarness(onSubmit: (value: AttachmentBatchValue) => Promise<void>) 
     removeAttribute(name: string): void { if (name === "disabled") this.disabled = false; },
   };
   internal.submitButton = button as unknown as HTMLButtonElement;
+  const cancelButton = { disabled: false, label: "Cancel", setText(value: string): void { this.label = value; } };
+  internal.cancelButton = cancelButton as unknown as HTMLButtonElement;
   internal.selectedFiles = [new File(["one"], "one.pdf"), new File(["two"], "two.pdf")];
   internal.destinationSelected = true;
   let closes = 0;
-  modal.close = () => { closes += 1; modal.onClose(); };
+  if (context) {
+    // Keep the production close override intact. The host removes the modal
+    // only after that method delegates to its parent.
+    context.mock.method(Modal.prototype, "close", function closeModal(this: AttachmentImportModal): void {
+      closes += 1;
+      this.onClose();
+      this.contentEl.remove();
+    });
+  } else modal.close = () => { closes += 1; modal.onClose(); };
   internal.updateSubmit();
-  return { internal, button, dom, closeCount: () => closes };
+  return { modal, internal, button, cancelButton, dom, closeCount: () => closes };
 }
+
+test("a pending attachment keeps its dialog open until the successful operation finishes", async (context) => {
+  const pending = deferred();
+  let submissions = 0;
+  const { modal, internal, cancelButton, dom, closeCount } = modalHarness(async () => {
+    submissions += 1;
+    await pending.promise;
+  }, context);
+  const first = internal.submit();
+  try {
+    // Cancel's handler and the host's X, Escape and backdrop all call close().
+    modal.close();
+    assert.equal(closeCount(), 0, "dismissal must not detach an in-flight operation");
+    assert.equal(Notice.messages.at(-1), "Wait for the files to finish attaching.");
+    assert.equal(cancelButton.disabled, true, "Cancel cannot promise to stop a copy already in progress");
+    assert.equal(dom.document.body.contains(modal.contentEl), true);
+    await internal.submit();
+    assert.equal(submissions, 1);
+  } finally {
+    pending.resolve();
+    await first;
+  }
+  assert.equal(closeCount(), 1, "successful completion still closes exactly once");
+  assert.equal(dom.document.body.contains(modal.contentEl), false);
+});
+
+test("an attempted close during upload preserves copied-file recovery and permits closing after settlement", async (context) => {
+  const pending = deferred();
+  let submissions = 0;
+  const { modal, internal, button, cancelButton, dom, closeCount } = modalHarness(async () => {
+    submissions += 1;
+    await pending.promise;
+  }, context);
+  const first = internal.submit();
+  try {
+    modal.close();
+    assert.equal(closeCount(), 0);
+  } finally {
+    pending.reject(new AttachmentLinkInsertionError("Synthetic copied files need links.", ["Files/one.pdf", "Files/two.pdf"]));
+    await first;
+  }
+  const alert = dom.document.body.querySelector("[role=alert]");
+  assert.match(alert?.textContent ?? "", /Files copied; links were not inserted/u);
+  assert.match(alert?.textContent ?? "", /Files\/one\.pdf/u);
+  assert.match(alert?.textContent ?? "", /Files\/two\.pdf/u);
+  assert.equal(cancelButton.disabled, false);
+  assert.equal(cancelButton.label, "Close");
+  assert.equal(button.disabled, true);
+  await internal.submit();
+  assert.equal(submissions, 1, "the copied batch cannot be submitted again");
+  modal.close();
+  assert.equal(closeCount(), 1, "the settled recovery summary is dismissible");
+  assert.equal(dom.document.body.contains(modal.contentEl), false);
+});
+
+test("a pending attachment failure before copying leaves its draft retryable and dismissible", async (context) => {
+  const pending = deferred();
+  const { modal, internal, button, cancelButton, dom, closeCount } = modalHarness(async () => pending.promise, context);
+  const first = internal.submit();
+  try {
+    modal.close();
+    assert.equal(closeCount(), 0);
+  } finally {
+    pending.reject(new Error("Synthetic failure before copying."));
+    await first;
+  }
+  assert.match(dom.document.body.querySelector("[role=alert]")?.textContent ?? "", /Synthetic failure before copying/u);
+  assert.equal(internal.selectedFiles.length, 2);
+  assert.equal(button.disabled, false);
+  assert.equal(cancelButton.disabled, false);
+  modal.close();
+  assert.equal(closeCount(), 1);
+});
 
 test("changing files or destination during attachment upload cannot submit another copy", async () => {
   const pending = deferred();
