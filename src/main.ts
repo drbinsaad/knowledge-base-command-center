@@ -2180,6 +2180,9 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
 
   private captureLiveDeviceLocalState(): void {
     if (this.deviceLocalPersistenceSuppressed) return;
+    // Inspection-only data must not replace the retained profile, even when
+    // the Recovery Center has read that profile for read-only diagnostics.
+    if (!this.deviceLocalStateLoaded || this.dataCompatibilityWarning) return;
     // A committed multi-base operation can remain protected only by its durable batch
     // journal when the marker-free finalizer is rejected. Generic view-state
     // capture must not replace that sole recovery authority in memory; doing
@@ -3338,11 +3341,21 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     let pendingLegacyViewTruncated = false;
     try {
       this.store = migrateStore(loaded);
+      if (recognizedStore && sourceVersion > STORE_VERSION) {
+        // A readable future envelope is not authority for this build to reset
+        // device-local history or finalize its pending recovery journals.
+        this.useActiveData(this.requireActiveBase().data);
+        this.dataCompatibilityWarning = `Plugin data version ${sourceVersion} is newer than this build (v${STORE_VERSION}). All knowledge bases are read-only to prevent data loss.`;
+        new Notice(this.dataCompatibilityWarning, 10000);
+        return { recognizedStore, hasVaultId: hadFinalVaultId, identityNeedsWriteback: false, structuralRepairNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing, sourceVersion, compatible: false };
+      }
       structuralRepairNeedsWriteback = recognizedStore
         && sourceVersion === STORE_VERSION
         && pluginStoreNeedsNormalization(loaded, this.store);
+      // The first supported authority can arrive through Sync after startup
+      // refused a future envelope. Only now may its retained profile be read.
+      this.loadDeviceLocalState();
       if (capturedRead === undefined) {
-        this.loadDeviceLocalState();
         this.reconcilePendingRequiredUndoCommit(this.store);
         this.reconcilePendingRequiredUndoBatchCommit(this.store);
         this.reconcilePendingHistoryTransitionCommit(this.store);
@@ -3409,11 +3422,6 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
         sourceVersion,
         compatible: false,
       };
-    }
-    if (recognizedStore && sourceVersion > STORE_VERSION) {
-      this.dataCompatibilityWarning = `Plugin data version ${sourceVersion} is newer than this build (v${STORE_VERSION}). All knowledge bases are read-only to prevent data loss.`;
-      new Notice(this.dataCompatibilityWarning, 10000);
-      return { recognizedStore, hasVaultId: hadFinalVaultId, identityNeedsWriteback: false, structuralRepairNeedsWriteback: false, remediationNeedsWriteback: false, sourceWasMissing, sourceVersion, compatible: false };
     }
     if (corruptStorePreservationFailed) {
       this.dataCompatibilityWarning = "The automatic backup is open read-only because the unreadable data.json could not be preserved. Copy data.json and data.json.bak manually, then repair or restore before enabling writes.";
