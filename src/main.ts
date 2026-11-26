@@ -3603,7 +3603,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
     }
   }
 
-  private async savePluginDataOperation(allowExternalRefresh = false): Promise<void> {
+  private async savePluginDataOperation(withinExternalReload = false): Promise<void> {
     if (this.unloaded) throw new Error("This plugin instance was unloaded before the change could be saved.");
     if (this.persistenceUncertain) throw new Error(this.dataCompatibilityWarning);
     if (this.dataCompatibilityWarning) return;
@@ -3637,7 +3637,7 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       }
       throw new Error(`${requiredUndoBatchUndoLabel(this.stagedRequiredUndoBatchOperationLabel)} Undo finalization is pending. Restart Obsidian so the protected local journal can be reconciled before changing knowledge-base data.`);
     }
-    if (this.externalReloadBusy || (!allowExternalRefresh && this.externalReloadPromise !== null)) {
+    if (this.externalReloadBusy || (!withinExternalReload && this.externalReloadPromise !== null)) {
       // An opaque PluginData snapshot cannot be safely merged with a synced
       // update to the same base: even a selection-only save could resurrect
       // stale collections or settings. Let the external file win atomically
