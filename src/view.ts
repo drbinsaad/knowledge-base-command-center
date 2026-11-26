@@ -3363,7 +3363,7 @@ export class EntVaultCommandCenterView extends ItemView {
     this.renderTree();
     if (!compact) {
       workspace.addClass("is-adjustable-workspace");
-      const separator = workspace.createDiv({ cls: "ent-cc-workspace-separator", attr: { "data-kbcc-focus": "workspace-separator", "aria-controls": `ent-cc-inspector-${this.viewInstanceId}` } });
+      const separator = workspace.createDiv({ cls: "ent-cc-workspace-separator", attr: { "data-kbcc-focus": "workspace-separator", "data-ignore-swipe": "true", "aria-controls": `ent-cc-inspector-${this.viewInstanceId}` } });
       this.createInspector(workspace);
       this.renderInspector();
       workspace.toggleClass("is-inspector-collapsed", !this.inspectorSelectedByUser);

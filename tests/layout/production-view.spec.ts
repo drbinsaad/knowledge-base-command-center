@@ -621,6 +621,39 @@ test.describe("tablet split opt-in", () => {
     expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
   });
 
+  test("resize grip opts out of host swipe without disabling normal content swipes", async ({ page }) => {
+    await openView(page, { mobile: true, width: 1180, height: 820, count: 8 });
+    await page.locator(".ent-cc-workspace-options > summary").tap();
+    await page.getByRole("button", { name: "Split view on wide screens", exact: true }).tap();
+    await page.locator(".ent-cc-workspace-options > summary").tap();
+    await page.getByRole("button", { name: /^Research note 000,/u }).tap();
+    const separator = page.getByRole("separator", { name: "Resize note details", exact: true });
+    await expect(separator).toBeVisible();
+    // Obsidian's mobile host independently observes bubbling touchstart and
+    // skips ancestors with data-ignore-swipe. Pointer prevention does not
+    // suppress that recognizer. This models the contract, not native iOS.
+    await page.evaluate(() => {
+      const touches: Array<{ ignored: boolean; trusted: boolean }> = [];
+      Object.assign(window, { resizeHostTouches: touches });
+      document.body.addEventListener("touchstart", (event) => {
+        let ignored = false;
+        for (let node = event.target as Node | null; node; node = node.parentNode) {
+          if (node.nodeType === Node.ELEMENT_NODE && (node as HTMLElement).dataset?.ignoreSwipe) { ignored = true; break; }
+        }
+        touches.push({ ignored, trusted: event.isTrusted });
+      }, { passive: false });
+    });
+    await separator.tap();
+    const touches = () => page.evaluate(() => (window as unknown as { resizeHostTouches: Array<{ ignored: boolean; trusted: boolean }> }).resizeHostTouches);
+    await expect.poll(touches).toEqual([{ ignored: true, trusted: true }]);
+    await page.getByRole("button", { name: /^Research note 000,/u }).tap();
+    await expect.poll(touches).toEqual([{ ignored: true, trusted: true }, { ignored: false, trusted: true }]);
+    await separator.focus();
+    await page.keyboard.press("ArrowLeft");
+    await expect(separator).toHaveAttribute("aria-valuenow", "396");
+    expect((await workspaceLayoutSnapshot(page)).organizationUnchanged).toBe(true);
+  });
+
   test("split view keeps 44 px touch targets (browser emulation, not iPad hardware)", async ({ page }) => {
     await openView(page, { mobile: true, width: 1180, height: 820, count: 8, scenario: "related-overflow" });
     await page.locator(".ent-cc-workspace-options > summary").tap();
