@@ -11872,6 +11872,8 @@ export default class EntVaultCommandCenterPlugin extends Plugin {
       : behavior === "split"
         ? this.app.workspace.getLeaf("split", "vertical")
         : this.app.workspace.getLeaf("tab");
-    await leaf.openFile(file);
+    // This is an explicit Open action. A new tab may otherwise inherit the
+    // host's background-tab preference and leave the user on note details.
+    await leaf.openFile(file, { active: true });
   }
 }

@@ -2294,10 +2294,37 @@ for (const mobile of [false, true]) {
 }
 
 type AttachmentHarness = {
-  openAttachmentImport(options?: { insertFails?: boolean }): void;
+  openAttachmentImport(options?: { insertFails?: boolean; pending?: boolean }): void;
+  settleAttachment(): void;
   loseAttachmentEditor(): void;
   attachmentImportSnapshot(): { submissions: number; copies: string[] };
 };
+
+for (const insertFails of [false, true]) {
+  test(`pending mobile attachment dismissal preserves ${insertFails ? "recovery" : "successful completion"}`, async ({ page }) => {
+    await openView(page, { mobile: true, count: 8 });
+    await page.evaluate((fails) => (window as unknown as { kbccBrowserHarness: AttachmentHarness }).kbccBrowserHarness.openAttachmentImport({ insertFails: fails, pending: true }), insertFails);
+    const dialog = page.getByRole("dialog", { name: "Attach files to note", exact: true });
+    await dialog.locator("input[type=file]").setInputFiles({ name: "sample.pdf", mimeType: "application/pdf", buffer: Buffer.from("synthetic") });
+    await dialog.getByRole("button", { name: "Attach file", exact: true }).click();
+    await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeDisabled();
+    await dialog.locator(".modal-close-button").click();
+    await expect(dialog).toBeVisible();
+    await dialog.getByLabel("Show in note", { exact: true }).focus();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeVisible();
+    await page.setViewportSize({ width: 890, height: 626 });
+    await expect(dialog).toBeVisible();
+    await page.evaluate(() => (window as unknown as { kbccBrowserHarness: AttachmentHarness }).kbccBrowserHarness.settleAttachment());
+    if (insertFails) {
+      await expect(dialog.getByRole("alert")).toContainText("Files/sample.pdf");
+      await expect(dialog.getByRole("button", { name: "Attach file", exact: true })).toBeDisabled();
+      await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
+    }
+    await expect(dialog).toBeHidden();
+    expect(await page.evaluate(() => (window as unknown as { kbccBrowserHarness: AttachmentHarness }).kbccBrowserHarness.attachmentImportSnapshot())).toEqual({ submissions: 1, copies: ["Files/sample.pdf"] });
+  });
+}
 
 for (const [label, width, height, mobile] of [["phone 390", 390, 844, true], ["tablet 820", 820, 1180, true]] as const) {
   test(`WF-03 real attachment modal ${label}: stale editor, corrected End retry and terminal copied-path recovery`, async ({ page }) => {
