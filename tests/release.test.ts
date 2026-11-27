@@ -516,6 +516,18 @@ test("review and release automation is reproducible and least-privilege", async 
   const actionReferences = [...workflow.matchAll(/^[ \t]*uses:[ \t]*([^\s#]+)/gm)].map((match) => match[1]);
   assert.ok(actionReferences.length > 0, "workflows must contain pinned actions");
   for (const reference of actionReferences) assert.match(reference, /^[^@\s]+@[0-9a-f]{40}$/, `action must use a full commit SHA: ${reference}`);
+  const pins = {
+    setupNode: "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0",
+    upload: "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2",
+    download: "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2",
+  };
+  const countOf = (text: string, needle: string) => text.split(needle).length - 1;
+  for (const [text, setup, upload, download] of [[ciWorkflow, 1, 1, 0], [releaseWorkflow, 1, 2, 1], [securityWorkflow, 1, 0, 0]] as const) {
+    assert.equal(countOf(text, pins.setupNode), setup);
+    assert.equal(countOf(text, pins.upload), upload);
+    assert.equal(countOf(text, pins.download), download);
+  }
+  assert.doesNotMatch(workflow, /setup-node@820762786026740c76f36085b0efc47a31fe5020|upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a|download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c|# v7\.0\.0|# v8\.0\.1/);
   assert.equal((ciWorkflow.match(/^permissions:/gm) ?? []).length, 1);
   assert.equal((ciWorkflow.match(/^[ \t]+permissions:/gm) ?? []).length, 0);
   assert.match(ciWorkflow, /^permissions:\n {2}contents: read\n\nconcurrency:/m);
