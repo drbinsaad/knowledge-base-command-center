@@ -53,11 +53,11 @@
     "release:bundle": "npm run check && node scripts/package-release.mjs"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.4",
+    "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.62.1",
     "@types/node": "^26.2.0",
     "esbuild": "^0.28.2",
-    "eslint": "^9.39.4",
+    "eslint": "^10.16.0",
     "eslint-plugin-obsidianmd": "^0.4.0",
     "globals": "^17.6.0",
     "jiti": "^2.6.1",
