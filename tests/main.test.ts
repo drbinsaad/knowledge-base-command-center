@@ -10441,9 +10441,7 @@ test("a linked generic syndrome keeps its library role and portable group throug
     {
       workspace: false,
       index: false,
-      procedures: false,
-      medications: false,
-      syndromes: true,
+      libraryIds: ["syndrome"],
       collections: false,
       study: false,
       savedViews: false,

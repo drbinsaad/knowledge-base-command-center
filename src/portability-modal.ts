@@ -40,6 +40,7 @@ import {
   PortableImportMode,
   type PortableLibraryDefinition,
   selectionAvailableForExport,
+  selectionWithLibraryIds,
   serializePortableExport,
   summarizePortableExport,
   synchronizePortableRegistry,
@@ -204,18 +205,6 @@ function selectionUsesSubjectCatalog(selection: PortableExportSelection): boolea
     || normalized.libraryIds.length > 0
     || normalized.collections
     || normalized.study;
-}
-
-function selectionWithLibraryIds(selection: PortableExportSelection, libraryIds: string[]): PortableExportSelection {
-  return normalizePortableSelection({
-    ...selection,
-    libraryIds,
-    // Clear the compatibility flags before normalizing so deselecting a
-    // built-in library cannot be undone by its legacy boolean alias.
-    procedures: false,
-    medications: false,
-    syndromes: false,
-  });
 }
 
 export class ExportImportCenterModal extends Modal {

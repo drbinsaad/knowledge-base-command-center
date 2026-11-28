@@ -6,6 +6,7 @@ import {
   EMPTY_PORTABLE_SELECTION,
   normalizePortableSelection,
   portableSelectionHasAny,
+  selectionWithLibraryIds,
   type PortableExportSelection,
 } from "./portability";
 import {
@@ -537,13 +538,7 @@ export class PortfolioTransferModal extends Modal {
               const ids = new Set(normalizePortableSelection(current).libraryIds);
               if (enabled) ids.add(libraryId);
               else ids.delete(libraryId);
-              this.selectionBySource.set(sourceBaseId, cloneSelection({
-                ...current,
-                libraryIds: [...ids],
-                procedures: false,
-                medications: false,
-                syndromes: false,
-              }));
+              this.selectionBySource.set(sourceBaseId, cloneSelection(selectionWithLibraryIds(current, [...ids])));
               this.invalidatePlan();
             }));
       }
