@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";
 import test from "node:test";
+import EntVaultCommandCenterPlugin from "../src/main.ts";
 import {
   createDefaultStore,
   createKnowledgeBaseEntry,
@@ -196,4 +197,82 @@ test("5,000 exact Collection memberships do not rescan a 30,000-note Collection 
   assert.ok(elapsed < organizerElapsedBudgetMs,
     `5,000 exact memberships against 30,000 Collection subjects took ${elapsed.toFixed(1)} ms; budget is ${organizerElapsedBudgetMs} ms`);
   context.diagnostic(`5,000 × 30,000 exact Collection membership review: ${elapsed.toFixed(1)} ms.`);
+});
+
+const libraryDeletionBudgetMs = Number(process.env.KBCC_LIBRARY_DELETION_BUDGET_MS ?? 2_500);
+if (!Number.isFinite(libraryDeletionBudgetMs) || libraryDeletionBudgetMs <= 0) {
+  throw new Error("KBCC_LIBRARY_DELETION_BUDGET_MS must be a positive number.");
+}
+
+test("a 50,000-subject library deletion refusal stays within its explicit budget", {
+  timeout: libraryDeletionBudgetMs + 10_000,
+}, async (context) => {
+  const subjectCount = 50_000;
+  const libraryId = "library-bulk-delete";
+  const groupId = "bulk";
+  const data = migrateData(null);
+  data.settings.workspaceMode = "generic";
+  data.portableIndex.libraries.push({
+    id: libraryId,
+    name: "Bulk archive",
+    singularName: "Item",
+    icon: "archive",
+    order: data.portableIndex.libraries.length,
+    sourceKind: null,
+    archivedAt: 1,
+  });
+  data.portableIndex.groups.push({ id: groupId, title: "Bulk", order: data.portableIndex.groups.length });
+  data.portableIndex.subjects = Array.from({ length: subjectCount }, (_, index) => ({
+    id: `s${index}`,
+    title: `S${index}`,
+    groupId,
+    parentId: null,
+    order: index,
+    indexed: false,
+    configuredId: "",
+    recordKind: "note" as const,
+    libraryId,
+  }));
+  data.portableIndex.libraryLayouts[libraryId] = [{
+    id: "all",
+    title: "All",
+    collapsed: false,
+    subjects: data.portableIndex.subjects.map((subject) => subject.id),
+    subheadings: [],
+  }];
+
+  let deviceState: unknown = null;
+  const app = {
+    vault: {
+      configDir: ".obsidian",
+      getMarkdownFiles: () => [],
+      getAbstractFileByPath: () => null,
+    },
+    workspace: { getLeavesOfType: () => [] },
+    metadataCache: { getFileCache: () => null },
+    fileManager: {},
+    loadLocalStorage: () => structuredClone(deviceState),
+    saveLocalStorage: (_key: string, value: unknown) => { deviceState = structuredClone(value); },
+  };
+  const plugin = new EntVaultCommandCenterPlugin(app as never, {} as never) as EntVaultCommandCenterPlugin & {
+    loadedData: unknown;
+    savedData: unknown[];
+  };
+  plugin.loadedData = data;
+  await plugin.loadPluginData();
+  plugin.savedData.length = 0;
+  const before = structuredClone(plugin.data);
+
+  const startedAt = performance.now();
+  await assert.rejects(
+    plugin.deleteLibrary(libraryId, "unassigned"),
+    /required Undo snapshot.*4 MiB device-local limit/i,
+  );
+  const elapsed = performance.now() - startedAt;
+
+  assert.deepEqual(plugin.data, before, "the oversized deletion is rolled back before data.json is attempted");
+  assert.equal(plugin.savedData.length, 0);
+  assert.ok(elapsed < libraryDeletionBudgetMs,
+    `preflighting ${subjectCount} layout memberships took ${elapsed.toFixed(1)} ms; budget is ${libraryDeletionBudgetMs} ms`);
+  context.diagnostic(`50,000-subject library deletion refusal: ${elapsed.toFixed(1)} ms.`);
 });
