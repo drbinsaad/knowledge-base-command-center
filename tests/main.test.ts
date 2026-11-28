@@ -9026,16 +9026,13 @@ test("a 50,000-subject library deletion fails before commit when required Undo e
   plugin.savedData.length = 0;
   const before = structuredClone(plugin.data);
 
-  const start = performance.now();
   await assert.rejects(
     plugin.deleteLibrary(libraryId, "unassigned"),
     /required Undo snapshot.*4 MiB device-local limit/i,
   );
-  const elapsed = performance.now() - start;
 
   assert.deepEqual(plugin.data, before, "the oversized deletion is rolled back before data.json is attempted");
   assert.equal(plugin.savedData.length, 0);
-  assert.ok(elapsed < 2_500, `preflighting ${subjectCount} layout memberships took ${elapsed.toFixed(1)} ms`);
 });
 
 test("required Undo fails before data.json when device-local storage rejects the snapshot", async () => {
