@@ -197,8 +197,24 @@ function record(overrides: Partial<VaultRecord> = {}): VaultRecord {
   };
 }
 
-function portableSelection(overrides: Partial<PortableExportSelection>): PortableExportSelection {
-  return normalizePortableSelection({ ...EMPTY_PORTABLE_SELECTION, ...overrides });
+/** Test shorthand: one flag per built-in library, turned into libraryIds. Old-input coverage lives in portable-legacy-selection.test.ts. */
+type PortableSelectionShorthand = Partial<Pick<
+  PortableExportSelection,
+  "workspace" | "index" | "libraryIds" | "collections" | "study" | "savedViews" | "recovery"
+>> & { procedures?: boolean; medications?: boolean; syndromes?: boolean };
+
+function portableSelection(overrides: PortableSelectionShorthand): PortableExportSelection {
+  const { procedures, medications, syndromes, ...rest } = overrides;
+  const shorthandIds = [
+    ...(procedures ? [BUILTIN_LIBRARY_IDS.procedure] : []),
+    ...(medications ? [BUILTIN_LIBRARY_IDS.medication] : []),
+    ...(syndromes ? [BUILTIN_LIBRARY_IDS.syndrome] : []),
+  ];
+  return normalizePortableSelection({
+    ...EMPTY_PORTABLE_SELECTION,
+    ...rest,
+    libraryIds: [...(rest.libraryIds ?? []), ...shorthandIds],
+  });
 }
 
 function portableFixture(): PortableExportV1 {

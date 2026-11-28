@@ -111,13 +111,25 @@ export interface PortableExportSelection {
 
 type NormalizedPortableExportSelection = Omit<PortableExportSelection, "libraryIds"> & { libraryIds: string[] };
 
+const ALL_BUILTIN_LIBRARY_IDS = LIBRARY_KINDS.map((kind) => BUILTIN_LIBRARY_IDS[kind]);
+
+/**
+ * The only place that writes the deprecated pre-v4 per-library flags (`procedures`,
+ * `medications`, `syndromes`). They mirror `libraryIds` for the built-in libraries and
+ * stay in written selections (portfolio manifests) so those files keep the same bytes.
+ * `normalizePortableSelection` is the only place that reads them from callers' input.
+ */
+function legacyLibraryFlags(libraryIds: readonly string[]): Record<string, boolean> {
+  const flags: Record<string, boolean> = {};
+  for (const kind of LIBRARY_KINDS) flags[`${kind}s`] = libraryIds.includes(BUILTIN_LIBRARY_IDS[kind]);
+  return flags;
+}
+
 export const COMPLETE_PORTABLE_SELECTION: PortableExportSelection = {
   workspace: true,
   index: true,
-  libraryIds: [...LIBRARY_KINDS.map((kind) => BUILTIN_LIBRARY_IDS[kind])],
-  procedures: true,
-  medications: true,
-  syndromes: true,
+  libraryIds: [...ALL_BUILTIN_LIBRARY_IDS],
+  ...legacyLibraryFlags(ALL_BUILTIN_LIBRARY_IDS),
   collections: true,
   study: true,
   savedViews: true,
@@ -128,9 +140,7 @@ export const EMPTY_PORTABLE_SELECTION: PortableExportSelection = {
   workspace: false,
   index: false,
   libraryIds: [],
-  procedures: false,
-  medications: false,
-  syndromes: false,
+  ...legacyLibraryFlags([]),
   collections: false,
   study: false,
   savedViews: false,
@@ -361,25 +371,27 @@ export function normalizePortableSelection(selection: PortableExportSelection): 
     if (!isValidLibraryId(id)) throw new Error("The selected library has an invalid stable ID.");
     return id;
   }));
-  const selected = new Set(libraryIds);
   return {
     ...EMPTY_PORTABLE_SELECTION,
     ...selection,
     libraryIds,
-    procedures: selected.has(BUILTIN_LIBRARY_IDS.procedure),
-    medications: selected.has(BUILTIN_LIBRARY_IDS.medication),
-    syndromes: selected.has(BUILTIN_LIBRARY_IDS.syndrome),
+    ...legacyLibraryFlags(libraryIds),
   };
 }
 
+/**
+ * Replaces the selected libraries. Any pre-v4 flag on the input is cleared first, so a
+ * library that is taken out cannot be put back by its old boolean alias.
+ */
+export function selectionWithLibraryIds(
+  selection: PortableExportSelection,
+  libraryIds: readonly string[],
+): NormalizedPortableExportSelection {
+  return normalizePortableSelection({ ...selection, libraryIds: [...libraryIds], ...legacyLibraryFlags([]) });
+}
+
 export function completePortableSelection(libraryIds: readonly string[]): NormalizedPortableExportSelection {
-  return normalizePortableSelection({
-    ...COMPLETE_PORTABLE_SELECTION,
-    libraryIds: [...libraryIds],
-    procedures: false,
-    medications: false,
-    syndromes: false,
-  });
+  return selectionWithLibraryIds(COMPLETE_PORTABLE_SELECTION, libraryIds);
 }
 
 function selectionNeedsSubjectCatalog(selection: NormalizedPortableExportSelection): boolean {
@@ -1740,9 +1752,6 @@ export function selectionAvailableForExport(value: PortableExportV1): PortableEx
     // subjects in it are dependencies of Collections or Study state.
     index: Boolean(index) && (sections ? sections.index : index?.includeIndex !== false),
     libraryIds: sections?.libraryIds ?? [],
-    procedures: false,
-    medications: false,
-    syndromes: false,
     collections: Boolean(value.components.collections),
     study: Boolean(value.components.study),
     savedViews: Boolean(value.components.savedViews),
